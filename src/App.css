@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+:root {
+  --color-bg: #0f0f0f;
+  --color-surface: #1a1a1a;
+  --color-border: #2a2a2a;
+  --color-text: #e0e0e0;
+  --color-text-muted: #888;
+  --color-accent: #3b82f6;
+  --color-running: #22c55e;
+  --color-error: #ef4444;
+  --color-idle: #888;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  font-family: "Segoe UI", Inter, system-ui, sans-serif;
+  font-size: 14px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  overflow: hidden;
+  height: 100vh;
+}
+
+/* Status indicators */
+.status-running { color: var(--color-running); }
+.status-error { color: var(--color-error); }
+.status-idle { color: var(--color-idle); }
+.status-archived { color: var(--color-text-muted); }
+
+/* Terminal styling */
+.xterm { padding: 8px; }
