@@ -2,35 +2,36 @@
 
 ## 1. Concept & Vision
 
-**What we are building:** A Windows-native AI agent orchestration hub that brings Conductor's multi-agent visibility and workflow management to a mixed Windows Native + WSL development environment.
+**What we are building:** A desktop AI agent orchestration hub for running multiple agents across multiple projects concurrently — with auto-resume, git-aware worktrees, and a terminal-native UX.
 
-**Core purpose:** Enable developers to create, monitor, and coordinate multiple AI coding agents across isolated workspaces — with full visibility into what each agent is doing, real-time progress tracking, and a structured path from task → implementation → review → merge.
+**Core purpose:** Enable developers to run, monitor, and coordinate multiple AI coding agents (Claude Code, Gemini, Open Code) across any number of projects and sessions simultaneously. The app is the ephemeral UI layer — agents are durable CLI processes that survive app restarts.
 
-**Why it matters:** When running agents in parallel (e.g., attack a backlog of refactoring tickets), you lose visibility. Conductor solves this on Mac. Your Windows setup needs the same — but with the added complexity of agents running in fundamentally different environments (Windows native CLIs, WSL Linux toolchains, mixed project types).
+**Why it matters:** Running agents in parallel on a complex project means juggling terminals and losing visibility. Conductor Clone gives you a dashboard where every agent session is visible, resumable, and inspectable — with diff review and file change tracking.
 
 **What makes it compelling:**
-- At-a-glance status visibility across all agents and workspaces
-- Hybrid runtime awareness (Windows vs WSL vs mixed projects)
-- One-click workspace creation from issues, branches, or PRs
-- First-class diff review and checkpoint rollback
-- Script automation for setup/run/archive cycles
+- Multi-session dashboard: see all agents across all projects at a glance
+- Auto-resume: agents keep running when app closes; restored on reopen via `--resume`
+- Worktree-aware: sessions on the same repo use git worktrees for true parallelism
+- Terminal-native: the agent CLI runs interactively in an xterm — no chat abstraction
+- Auto-checkpoints: git-ref snapshots after each prompt, no manual saves needed
 
 ---
 
 ## 2. Conductor Feature Analysis
 
-| Feature | What Conductor Does | Windows Adaptation |
+| Feature | Conductor Clone MVP | Notes |
 |---|---|---|
-| **Parallel Agents** | Multiple Claude/Codex instances in isolated workspaces | Support both Windows-native agents (Claude Code Windows, Codex) and WSL-hosted agents (Linux CLIs, bash environments) |
-| **Isolated Workspaces** | ⌘+N creates new workspace, each with own git branch, chat history, files | Same — but workspaces can target Windows paths, WSL paths (`\\wsl$\Ubuntu\...`), or mixed |
-| **Diff Viewer** | Review agent changes inline, see turn-by-turn modifications | Native diff view; WSL diffs may involve files across the mount boundary |
-| **Checkpoints** | Auto-snapshot before each agent response, revert to any point | Same — checkpoint storage works across both filesystems |
-| **MCP Support** | Connect to external tools via MCP servers | MCP servers may run on Windows or inside WSL; hybrid connection pooling |
-| **Slash Commands** | Reusable prompt macros stored as `.md` files | Same — stored in `~/.conductor/commands/` |
-| **Scripts (Setup/Run/Archive)** | Automate `npm install`, `npm run dev`, etc. per workspace | Scripts must detect and target correct environment (Windows `.bat`/`.ps1` vs WSL `bash`) |
-| **Run Panel / Terminal** | Integrated terminal to run dev servers, tests | Split view: Windows Terminal + WSL terminal tabs; process lifecycle management for both |
-| **PR Workflow** | Issue → Workspace → Develop → Review → PR → Merge → Archive | Same structured workflow |
-| **Deep Links** | `conductor://` URL scheme for external triggers | Windows URL scheme registration (`conductor://`) |
+| **Parallel Agents** | Multiple sessions across projects, auto-resume on restart | Sessions run as durable CLI processes |
+| **Projects** | Folders on disk (git or not), auto-named from folder | Open via native folder picker |
+| **Sessions** | Auto-named (3-word generator), tied to worktree or folder | `Session` not `Workspace` |
+| **Diff Viewer** | syntect-highlighted side-by-side diffs | MVP |
+| **File Watcher/Tree** | Directory tree with changed files highlighted | MVP |
+| **Checkpoints** | Auto-snapshot (git ref) after each prompt, no UI | No manual save, no revert UI |
+| **Terminal** | Single xterm.js showing agent CLI interactively | No chat abstraction |
+| **MCP Support** | CLI-native (handled by agent CLIs) | Not in MVP scope |
+| **Slash Commands** | Clickable chips in toolbar | Low-cost MVP approach |
+| **PR Workflow** | Deferred | Post-MVP |
+| **Deep Links** | Deferred | Post-MVP |
 
 ---
 
@@ -39,109 +40,119 @@
 ### 3.1 Primary User Activities
 
 **Daily Driver Flow:**
-1. Open the app → land on the **Workspaces Dashboard**
-2. See all active workspaces with status chips (Running, Idle, Error, Archived)
-3. Click a workspace → see the **Session View** with agent chat, file tree, terminal output
-4. Watch agent work in real-time (streaming logs, token usage)
-5. Review changes in **Diff Viewer**
-6. Create PR, merge, archive
+1. Open the app → see all projects and sessions restored (auto-resume)
+2. Click a session → see the terminal running the agent CLI
+3. Watch agent work in real-time in the xterm
+4. Review changes in **Diff Viewer**
+5. Auto-checkpoints captured after each prompt (git ref, no UI needed)
+6. Close app → agents keep running → reopen → auto-resumed
 
 **Key Interactions:**
-- **⌘+N** (Windows: **Ctrl+Shift+N**) → New workspace picker (from branch, issue, or blank)
-- **Ctrl+D** → Open diff viewer on selected workspace
-- **Ctrl+Shift+P** → Create PR for workspace
-- **Right-click workspace** → Archive, duplicate, move to different project
-- **Double-click WSL path** in file tree → Opens Ubuntu terminal at that path
+- **Open Project** → Native folder picker, folder name becomes project name
+- **+ New Session** → Pick project → auto-generate 3-word name → create worktree → launch agent
+- **Provider dropdown** → Per-session agent selector (sidebar, next to session)
+- **Stop** → Kill agent (session persists, can be resumed)
+- **Ctrl+D** → Open diff viewer on selected session
 
 ### 3.2 Projects Panel (Primary Navigation)
 
 The left sidebar shows a **Projects** tree — the top-level organizational unit:
 
 ```
-▼ My Projects
-  ▼ Web Dashboard
-      ▶ feature-user-auth (WSL) — Running ●
-      ▶ bug-fix-login-redirect (Win) — Idle ○
-      ▶ refactor-api-client (WSL) — Error ✗
-  ▼ Backend Services
-      ▶ migrate-to-postgres (WSL) — Running ●
-      ▶ add-health-checks (Win) — Archived ⊗
-  ▼ Scripts & Tools
-      ▶ update-deps (WSL) — Completed ✓
+▼ Projects
+  ▼ conductor-clone
+      ● fluffy-rainbow-panda (WSL) — Running
+      ● sharp-mountain-river (Win) — Running
+      ○ gentle-forest-dawn (Win) — Idle
+  ▼ my-webapp
+      ● swift-ocean-breeze (WSL) — Running
 ```
 
-Each project groups related workspaces. Projects are just top-level folders in the configured root directory.
+Each project is a folder on disk. Sessions are listed under their project. The provider dropdown appears next to each session (default, or pick Claude Code Anthropic/Minimax, Gemini, Open Code).
+
+**First launch:** Shows "Open a project" empty state. **Subsequent launches:** Restores full state with all projects and sessions, auto-resumes running agents.
 
 ### 3.3 Session & Agent Visualization
 
 **Session View** is the heart of the app. It shows:
 
-- **Header**: Workspace name, branch, environment badge (WSL/Ubuntu or Windows/Native), checkpoint count
-- **Agent Chat Panel**: Scrollable chat with the agent — shows tool calls, file edits, command executions
-- **File Tree**: Live view of files changed by the agent, with git status indicators
-- **Terminal Panel**: Real-time stdout/stderr from any running processes (dev server, test watcher, etc.)
-- **Checkpoint Rail**: Horizontal strip showing snapshot points; hover to preview diff, click to revert
+- **Header**: Session name, branch/worktree, environment badge (WSL or Windows), checkpoint count
+- **Terminal**: xterm.js showing the agent CLI running interactively — no chat abstraction
+- **File Tree**: Project directory tree with changed files highlighted (git status)
+- **Checkpoint Rail**: Present but minimal (MVP: auto-snapshot only, no revert UI needed)
 
 **Status Indicators:**
-- **● Running** — Agent is actively working (pulsing indicator)
+- **● Running** — Agent is actively working
 - **○ Idle** — Waiting for user input
-- **✓ Completed** — Task done, awaiting review
-- **✗ Error** — Something failed (click to see error log)
-- **⊗ Archived** — Stored but not active
+- **✗ Error** — Something failed
 
 ### 3.4 Hybrid Environment Awareness
 
-Since your setup is mixed (Windows Native + WSL), the app must track:
+Since the setup is mixed (Windows Native + WSL), the app tracks:
 
 | Dimension | Windows Native | WSL (Ubuntu) |
 |---|---|---|
-| **Agent runtime** | `claude.bat` via cmd/PowerShell | `claude` via bash |
+| **Agent runtime** | `cwrap --anthropic` / `cwrap --minimax` via cmd | `cwrap` via bash, launched via `wsl.exe --cd <path>` |
 | **File paths** | `C:\Projects\...` | `/home/user/projects/...` or `\\wsl$\Ubuntu\home\...` |
-| **Terminal** | Windows Terminal, `cmd.exe`, PowerShell | Ubuntu shell via `wsl.exe` |
-| **Git** | Git for Windows | Git inside WSL |
-| **Package manager** | npm/pnpm (via npx or native) | apt, npm/pnpm inside WSL |
-| **Scripts** | `.bat` / `.ps1` | `.sh` bash scripts |
-| **Dev servers** | `localhost:3000` | `localhost:3000` forwarded via `localhost` |
+| **Terminal** | xterm.js PTY | xterm.js PTY via `wsl.exe` |
+| **Git worktrees** | Git for Windows | Git inside WSL |
+| **Dev servers** | `localhost:3000` | `localhost:3000` forwarded |
 
-**The app should automatically detect which environment a workspace's project lives in** (by scanning for `package.json` + `node_modules` patterns, or by path location), but allow manual override.
+**Auto-detection:** If project path starts with `/home/` or matches a WSL mount pattern → WSL. Otherwise → Windows. Manual override available.
+
+**Key commands:**
+```bash
+# Windows agent
+cwrap --anthropic
+cwrap --minimax
+
+# WSL agent (session "swift-ocean-breeze" on branch "swift-ocean-breeze")
+wsl.exe --cd /home/user/projects/my-webapp -- cwrap --anthropic
+wsl.exe --cd /home/user/projects/my-webapp -- cwrap --minimax
+
+# Other agents
+gemini
+opencode
+```
 
 ---
 
 ## 4. Feature List
 
-### 4.1 Core Features (MVP)
+### 4.1 MVP Features
 
-- [ ] **Projects Dashboard** — Sidebar with project tree, workspace list, status chips
-- [ ] **Workspace Manager** — Create, open, archive workspaces; branch tracking
-- [ ] **Session View** — Chat panel, file tree, terminal panel, checkpoint rail
-- [ ] **Parallel Agent Execution** — Launch multiple agents simultaneously
-- [ ] **Real-time Streaming** — Live output from agent tool calls and terminal
-- [ ] **Diff Viewer** — Side-by-side diff with syntax highlighting, approve/reject
-- [ ] **Checkpoint System** — Auto-snapshot before each agent turn; revert UI
-- [ ] **Script Automation** — Setup, Run, Archive scripts per workspace
-- [ ] **Hybrid Runtime Detection** — Auto-detect WSL vs Windows environment per workspace
-- [ ] **Integrated Terminal** — Split Windows Terminal + WSL terminal tabs
-- [ ] **PR Workflow** — Create PR from workspace, merge assistance
+- [x] **Projects** — Open folder via native picker, auto-named from folder
+- [x] **Sessions** — Auto-named (3-word generator), worktree/branch auto-created
+- [x] **Multi-provider** — Claude Code (Anthropic/Minimax), Gemini, Open Code
+- [x] **Provider hierarchy** — Global default > project default > session override
+- [x] **Auto-resume** — Agents restored on app reopen via `--resume <session-id>`
+- [ ] **Session View** — Single terminal (xterm.js), no chat abstraction
+- [ ] **File Tree** — Directory listing with changed files highlighted
+- [ ] **File Watcher** — Live file change tracking via `notify`
+- [ ] **Diff Viewer** — syntect-highlighted side-by-side diffs
+- [ ] **Auto-checkpoints** — Git ref snapshot after each prompt (no revert UI)
+- [ ] **Hybrid Runtime** — Auto-detect WSL vs Windows by path
+- [ ] **Status Indicators** — Running, Idle, Error per session
+- [ ] **Session Kill** — Stop button to terminate agent
 
-### 4.2 Secondary Features
+### 4.2 Post-MVP
 
-- [ ] **MCP Server Management** — Add/remove/configure MCP servers (Windows and WSL variants)
-- [ ] **Slash Commands UI** — Create, edit, invoke slash commands via UI
-- [ ] **Deep Links** — `conductor://` URL scheme for external integration
-- [ ] **Workspaces Page** — Access archived workspaces, full history
-- [ ] **Spotlight Testing** — Quick-run specific tests or files
-- [ ] **Multi-provider Support** — Connect to OpenRouter, Bedrock, Vertex, Vercel
-- [ ] **Codex Support** — Run OpenAI Codex as an alternative agent
-- [ ] **Notification Center** — Alerts when agents complete, fail, or need input
-- [ ] **Usage / Token Analytics** — Per-workspace and aggregate token usage
-- [ ] **Monorepo Support** — Nested source directories, multi-package workspaces
+- [ ] **Conductor name refinement** — Auto-rename session after first prompt
+- [ ] **Checkpoint revert UI** — Click to revert to git ref snapshot
+- [ ] **MCP Server Management** — Add/remove/configure MCP servers
+- [ ] **PR Workflow** — Create PR from session
+- [ ] **Slash Commands UI** — Create, edit, invoke via UI
+- [ ] **Deep Links** — `conductor://` URL scheme
+- [ ] **Notification Center** — Alerts when agents complete or fail
+- [ ] **Usage / Token Analytics** — Per-session token usage
+- [ ] **Script Automation** — Setup/Run/Archive scripts per project
 
-### 4.3 Nice-to-Have
+### 4.3 Deferred / Not Planned
 
-- [ ] **Shared Scripts via conductor.json** — Commit scripts to repo, share with teammates
-- [ ] **VS Code / Cursor Integration Tips** — Guidance panel for IDE搭档 usage
-- [ ] **Migration from Cursor** — Import MCP servers and rules from Cursor config
-- [ ] **OpenAPI Specs** — Programmatically control Conductor via REST API
+- [ ] **Multi-window** — Single window only (MVP)
+- [ ] **Workspaces Page** — Archived sessions (deferred)
+- [ ] **Monorepo Support** — Nested source dirs (deferred)
+- [ ] **OpenAPI** — Programmatic control (deferred)
 
 ---
 
@@ -182,35 +193,50 @@ Since your setup is mixed (Windows Native + WSL), the app must track:
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| **UI Framework** | Tauri (Rust backend + web frontend) | Native Windows performance, small binary, Rust backend is well-suited for process management |
-| **Frontend** | React + TypeScript + TailwindCSS | Fast iteration, mature component ecosystem |
-| **Backend** | Rust (in Tauri) | Process spawning, file watching, SQLite — all native |
-| **State Management** | Zustand (frontend) | Lightweight, minimal boilerplate |
-| **Database** | SQLite via `rusqlite` | Local checkpoint/workspace metadata, zero setup |
-| **Terminal** | xterm.js + windows pts multiplexing | Cross-platform terminal emulator, WSL `tty` passthrough |
-| **Diff Engine** | `differ` + `syntect` | Fast targeted diffs without tree-sitter overhead |
-| **File Tree** | `notify` (Rust crate) + real-time watch | Windows-native fs watching; WSL side via `inotifywait` |
-| **Agent Protocol** | Claude Code via `cc` wrapper (Anthropic + Minimax) | Single agent type; provider switching via `cc` |
-| **MCP** | via child `npx` / `cmd` processes | MCP servers are CLI-based; bridge via process IO |
+| **UI Framework** | Tauri 2 (Rust backend + web frontend) | Native Windows performance, small binary, Rust excels at PTY/process management |
+| **Frontend** | React 19 + TypeScript + TailwindCSS 4 | Fast iteration, Zustand for state |
+| **Backend** | Rust (in Tauri) | Process spawning, PTY management, SQLite, file watching — all native |
+| **State Management** | Zustand 5 (frontend) | Lightweight, minimal boilerplate |
+| **Database** | SQLite via `rusqlite` | Local session/project metadata, zero setup |
+| **Terminal** | xterm.js + `portable-pty` | Cross-platform PTY for agent + shell |
+| **Diff Engine** | `syntect` (syntax highlighting) + `difference-rs` | Targeted diffs with proper highlighting |
+| **File Watcher** | `notify` (Rust crate) | Windows-native fs watching |
+| **Git Operations** | `git2` Rust crate | Worktree creation, checkpoint refs |
+| **Agent CLIs** | `cwrap --anthropic/--minimax`, `gemini`, `opencode` | All on system PATH |
 
 ### 5.3 Data Model
 
 ```
 Project
-  └── Workspace
-        ├── metadata (name, branch, env, created_at, status)
-        ├── chat_history[] (role, content, timestamp, tool_calls)
-        ├── checkpoints[] (id, turn_index, git_ref, timestamp)
-        ├── scripts { setup, run, archive }
-        └── files_changed[] (path, status: modified/created/deleted)
+  ├── id: i64
+  ├── name: string        // auto-derived from folder name
+  ├── path: string        // absolute path to folder on disk
+  ├── default_provider: string  // "anthropic" | "minimax" | "gemini" | "opencode"
+  └── created_at: datetime
 
-Settings
+Session
+  ├── id: i64
+  ├── project_id: i64
+  ├── name: string        // auto-generated (3-word hyphenated)
+  ├── branch: string     // worktree branch name
+  ├── path: string        // absolute path (worktree or project folder)
+  ├── env: string        // "windows" | "wsl"
+  ├── provider: string    // "anthropic" | "minimax" | "gemini" | "opencode"
+  ├── status: string     // "running" | "idle" | "error"
+  ├── session_id: string  // CLI's session ID (for --resume)
+  └── created_at: datetime
+
+Checkpoint
+  ├── id: i64
+  ├── session_id: i64
+  ├── git_ref: string
+  ├── turn_index: i32
+  └── created_at: datetime
+
+AppSettings
+  ├── default_provider: string  // global default
   ├── default_projects_root: string
-  ├── windows_cli_path: string  // path to claude.bat or cmd
-  ├── wsl_cli_path: string      // path to claude in WSL
-  ├── mcp_servers[]: { name, command, env_vars }
-  └── slash_commands[]: { name, description, content }
-```
+  └── ...
 
 ### 5.4 WSL Interop Strategy
 
@@ -223,9 +249,12 @@ Since WSL and Windows file systems differ, the app needs careful path handling:
 
 **Key WSL commands the app will use:**
 ```bash
-wsl.exe --cd <path> --bash -c "claude"           # spawn agent in WSL
-wsl.exe --bash -c "cd /path && npm run dev"      # run scripts in WSL
-wsl.exe --bash -c "tail -f /proc/.../fd/1"       # stream terminal output
+# Spawn agent in WSL
+wsl.exe --cd /home/user/projects/my-webapp -- cwrap --anthropic
+wsl.exe --cd /home/user/projects/my-webapp -- cwrap --minimax
+
+# Resume agent session in WSL
+wsl.exe --cd /path/to/worktree -- cwrap --anthropic --resume <session-id>
 ```
 
 ---
@@ -234,36 +263,28 @@ wsl.exe --bash -c "tail -f /proc/.../fd/1"       # stream terminal output
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  Conductor Clone                              [Search... Ctrl+K]  [⚙️]   │
+│  Conductor Clone                                              [Settings] │
 ├──────────────────────┬──────────────────────────────────────────────────┤
-│ ▼ My Projects        │  ┌─ Session: feature-user-auth ──────────────┐   │
-│                      │  │ [WSL: Ubuntu] [Branch: user-auth] [⏸ 3]  │   │
-│  ▼ Web Dashboard     │  ├───────────────────────────────────────────┤   │
-│      ▶ user-auth    │  │                                           │   │
-│      ▶ admin-panel  │  │  🤖 Claude: I'll start by examining the   │   │
-│  ▼ Backend          │  │  existing auth middleware and...          │   │
-│      ▶ api-server   │  │                                           │   │
-│      ▶ worker-jobs  │  │  [TOOL CALL] Read: src/auth/middleware.ts │   │
-│                      │  │  [TOOL CALL] Edit: src/auth/routes.ts     │   │
-│  [+ New Project]    │  │  [TOOL CALL] Bash: npm run test auth     │   │
-│                      │  │                                           │   │
-│──────────────────────│  ├───────────────┬─────────────────────────────┤   │
-│ Workspaces: 5 active│  │ FILE TREE     │ TERMINAL                   │   │
-│                      │  │               │                            │   │
-│  ● user-auth (WSL)   │  │ ▶ src/        │ $ npm run dev             │   │
-│  ○ admin-panel (WSL) │  │   ▶ auth/     │ ✓ Ready on localhost:3000 │   │
-│  ○ api-server (Win)  │  │     routes.ts │                            │   │
-│  ✗ worker-jobs (WSL)│  │     middleware│                            │   │
-│  ✓ archived-task     │  │   ▶ config/  │                            │   │
-│                      │  │               │                            │   │
-│                      │  └───────────────┴─────────────────────────────┘   │
-│                      │  ├─ Checkpoints: [1]--[2]--[3]--[4]--[5] ────┤   │
-│                      │  │ Click any checkpoint to preview/revert      │   │
-│                      │  └──────────────────────────────────────────────┘   │
-│                      ├──────────────────────────────────────────────────┤
-│                      │  [Diff Viewer ⌘D]  [Create PR ⌘⇧P]  [Archive]  │
-│                      └──────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
+│ ▼ Projects          │  ┌─ fluffy-rainbow-panda ────────────────────┐   │
+│                      │  │ [WSL] [Branch: fluffy-rainbow-panda]    │   │
+│  ▼ conductor-clone  │  │ [Anthropic ▼]        [Stop]  [Diff ⌘D] │   │
+│    ● fluffy-... (WSL)                                       │   ├───────────────┬─────────────────────────────┤
+│    ● sharp-... (Win)                                       │   │ FILE TREE     │ TERMINAL                   │   │
+│    ○ gentle-... (Win)                                      │   │               │                            │   │
+│  ▼ my-webapp        │                                       │   │ ▶ src/       │ $ cwrap --anthropic        │   │
+│    ● swift-o... (WSL)                                      │   │   ▶ auth/ M │ > ready                    │   │
+│                      │  └───────────────────────────────────┘   │     routes.ts│                              │   │
+│  [+ Open Project]   │                                              │   └───────────┴─────────────────────────────┘   │
+│─────────────────────│                                              │  ├─ Checkpoints: [1]--[2]--[3]--[4] ─────┤   │
+│ Sessions: 4 active  │                                              └──────────────────────────────────────────────────┘   │
+└─────────────────────┴──────────────────────────────────────────────────┘
+
+Legend:
+  M = modified (git status)
+  [Anthropic ▼] = provider dropdown per session (per-project default or override)
+  ● = running  ○ = idle  ✗ = error
+  Sessions auto-resume on app restart
+  No chat panel — terminal shows agent CLI directly
 ```
 
 ---
@@ -272,32 +293,20 @@ wsl.exe --bash -c "tail -f /proc/.../fd/1"       # stream terminal output
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Runtime detection | Auto-detect WSL vs Windows by path, with manual override | Workspaces are definitively one or the other — simple binary choice |
-| Checkpoint storage | Git refs via colocated Git | Environment is definitive per workspace — no cross-Git complexity |
-| Agent type | Claude Code only via `cc` wrapper | `cc` already handles Anthropic + Minimax provider switching |
-| Provider mid-session switch | Close + respawn `cc --<provider> --resume` | Clean, no protocol complexity |
-| Session state | Colocalized with environment | WSL workspaces → `~/.claude` inside WSL. Windows workspaces → `~/.claude` on Windows |
-| Window model | Single window, sidebar navigation | Focused single-user workflow; multi-window deferred |
-| UI framework | Tauri (Rust + web frontend) | Rust backend excels at process/PTY management; small binary |
-| Integrated terminal | MVP requirement | Key UX — users need to see dev server output in context |
-| Diff engine | `differ` + `syntect` | Fast, sufficient for targeted code edits |
-| PR workflow | GitHub CLI (`gh pr create` / `gh pr merge`) | Likely already installed; covers 90% of workflow |
-| MCP | Config viewing MVP only; full lifecycle in Phase 2 | MCP servers are CLI-based; add/remove deferred |
-| Slash commands | Clickable chips above chat input in MVP | Low cost, high discoverability |
-| Chat history | SQLite via `rusqlite` — app owns the data | Not coupled to Claude Code's session file format |
-| Projects panel MVP | Create/list/archive workspaces only; rename/delete deferred | MVP scope discipline |
-| File tree MVP | Agent-changed files + real-time `notify` watch | Full project tree deferred to Phase 2 |
-
-## 8. Open Questions (Resolved)
-
-1. **Runtime detection** → Auto-detect by path ✓
-2. **Multi-window** → Single window only (MVP) ✓
-3. **Git integration** → `gh` CLI for PR workflow ✓
-4. **Agent compatibility** → Claude Code only via `cc` ✓
-5. **Checkpoint format** → Git refs (colocated) ✓
-6. **MCP lifecycle** → View-only in MVP ✓
-7. **Offline** → Fully local (no cloud dependency) ✓
-8. **Pricing** → Open-source / personal tool (no commercial intent stated) ✓
+| Session naming | Auto-generated 3-word hyphenated names | User doesn't need to think about naming; Conductor refines post-MVP |
+| Worktree creation | App handles automatically | Session path derived from project path + worktree name |
+| Non-git projects | Session runs directly in project folder | No worktree, no isolation — simplest path |
+| Agent providers | 4 options: Claude Code (Anthropic/Minimax), Gemini, Open Code | `cwrap` handles Anthropic/Minimax; others are standalone CLIs |
+| Provider hierarchy | Global default > project default > session override | Flexible per-session choice without losing sensible defaults |
+| Terminal UX | Single xterm showing agent CLI interactively | No chat abstraction — CLI runs as-is |
+| Session persistence | CLI owns history; app persists session ID only | App is UI layer only, agents are durable |
+| Auto-resume | Resume all running sessions on app restart | All CLIs support `--resume`; agents keep running when app closes |
+| Checkpoints | Auto-snapshot after each prompt (git ref), no UI | No manual saves; revert UI deferred to post-MVP |
+| File tree | Directory tree with changed files highlighted (git status) | MVP scope — full tree with status indicators |
+| MCP | CLI-native (handled by agent CLIs) | Not in MVP scope |
+| PR workflow | Deferred | Post-MVP |
+| Window model | Single window, sidebar navigation | Focused single-user workflow |
+| UI framework | Tauri 2 (Rust + web frontend) | Rust excels at PTY/process management |
 
 ---
 
@@ -314,14 +323,32 @@ wsl.exe --bash -c "tail -f /proc/.../fd/1"       # stream terminal output
 
 ---
 
-## 10. Phased Rollout Plan
+## 8. Phased Rollout Plan
 
-### Phase 1: Core Product (MVP)
-- Projects sidebar + Workspace manager
-- Session view (chat + file tree + terminal)
-- Single agent launch (WSL or Windows)
-- Basic diff viewer
-- Manual checkpoint creation
+### Phase 1: MVP
+- Projects: open folder, list all opened projects, native folder picker
+- Sessions: auto-named, worktree creation, provider dropdown, kill/resume
+- Session view: single xterm showing agent CLI (no chat panel)
+- Auto-checkpoint after each prompt (git ref, no UI)
+- File tree with changed files highlighted
+- Diff viewer
+- Auto-resume on app restart
+- Hybrid runtime detection (WSL vs Windows by path)
+
+### Phase 2: Post-MVP
+- Conductor auto-renames session after first prompt
+- Checkpoint revert UI
+- MCP server management
+- PR workflow (via `gh` CLI)
+- Slash commands UI
+- Notification center
+- Token usage analytics
+
+### Phase 3: Future
+- Deep links (`conductor://`)
+- Multi-window
+- Script automation (setup/run/archive)
+- OpenAPI for programmatic control
 
 ### Phase 2: Parallel Execution
 - Multiple simultaneous agents
@@ -346,5 +373,5 @@ wsl.exe --bash -c "tail -f /proc/.../fd/1"       # stream terminal output
 
 ---
 
-*Document version: 1.1 — 2026-04-13*
-*Status: All open questions resolved — ready for implementation*
+*Document version: 1.2 — 2026-04-23*
+*Status: MVP scope defined; implementation plan pending*

@@ -26,6 +26,29 @@ pub fn run() {
             db::init(&db_path)?;
 
             log::info!("Conductor Clone started — db at {:?}", db_path);
+
+            // Auto-resume all sessions that were running
+            let app_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Ok(sessions) = db::list_workspaces() {
+                    for session in sessions.iter().filter(|s| s.status == models::WorkspaceStatus::Running) {
+                        log::info!("Auto-resuming session {} ({})", session.name, session.id);
+                        // Resume with empty session_id — agents will create new session if needed
+                        let provider_str = session.provider.to_string();
+                        if let Err(e) = tokio::runtime::Runtime::new()
+                            .unwrap()
+                            .block_on(commands::agent::spawn_agent(
+                                app_handle.clone(),
+                                session.id,
+                                provider_str,
+                                None,
+                            )) {
+                            log::error!("Failed to resume session {}: {}", session.id, e);
+                        }
+                    }
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -46,6 +69,7 @@ pub fn run() {
             commands::agent::spawn_agent,
             commands::agent::kill_agent,
             commands::agent::is_agent_running,
+            commands::agent::send_to_agent,
             // Checkpoint
             commands::checkpoint::create_checkpoint,
             commands::checkpoint::list_checkpoints,
@@ -54,6 +78,10 @@ pub fn run() {
             // Diff
             commands::diff::diff_files,
             commands::diff::diff_workspace_checkpoint,
+            // File tree
+            commands::file_tree::list_directory,
+            // Git
+            commands::git::get_git_status,
             // Terminal
             commands::terminal::spawn_pty,
             commands::terminal::write_pty,

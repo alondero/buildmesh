@@ -1,11 +1,11 @@
 import { useProjectStore } from '../../stores/projectStore';
-import { useWorkspaceStore } from '../../stores/workspaceStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import type { Project } from '../../stores/projectStore';
-import type { Workspace } from '../../stores/workspaceStore';
+import type { Session } from '../../stores/sessionStore';
 
 export function Sidebar() {
   const { projects, addProject } = useProjectStore();
-  const { workspaces, activeWorkspaceId, setActiveWorkspace, createWorkspace } = useWorkspaceStore();
+  const { sessions, activeSessionId, setActiveSession, createSession } = useSessionStore();
 
   const handleAddProject = async () => {
     await addProject();
@@ -14,7 +14,7 @@ export function Sidebar() {
   const handleNewSession = async (project: Project) => {
     const branch = prompt('Branch name:', 'main');
     if (!branch) return;
-    await createWorkspace(project.id, project.name, project.path, branch);
+    await createSession(project.id, project.name, project.path, branch);
   };
 
   return (
@@ -43,7 +43,7 @@ export function Sidebar() {
             </p>
           ) : (
             projects.map(project => {
-              const projectWorkspaces = workspaces.filter(w => w.project_id === project.id);
+              const projectSessions = sessions.filter(w => w.project_id === project.id);
               return (
                 <div key={project.id} className="mb-2">
                   <div className="flex items-center gap-1">
@@ -58,12 +58,12 @@ export function Sidebar() {
                       {project.name}
                     </div>
                   </div>
-                  {projectWorkspaces.map(ws => (
-                    <WorkspaceItem
-                      key={ws.id}
-                      workspace={ws}
-                      isActive={activeWorkspaceId === ws.id}
-                      onSelect={() => setActiveWorkspace(ws.id)}
+                  {projectSessions.map(session => (
+                    <SessionItem
+                      key={session.id}
+                      session={session}
+                      isActive={activeSessionId === session.id}
+                      onSelect={() => setActiveSession(session.id)}
                     />
                   ))}
                 </div>
@@ -75,14 +75,14 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="p-2 border-t border-[#2a2a2a] text-xs text-[#666]">
-        <span>{workspaces.filter(w => w.status === 'running').length} active</span>
+        <span>{sessions.filter(w => w.status === 'running').length} active</span>
       </div>
     </div>
   );
 }
 
-function WorkspaceItem({ workspace, isActive, onSelect }: {
-  workspace: Workspace;
+function SessionItem({ session, isActive, onSelect }: {
+  session: Session;
   isActive: boolean;
   onSelect: () => void;
 }) {
@@ -91,16 +91,16 @@ function WorkspaceItem({ workspace, isActive, onSelect }: {
     idle: 'text-[#888]',
     error: 'text-[#ef4444]',
     archived: 'text-[#666]',
-  }[workspace.status];
+  }[session.status];
 
   const statusDot = {
     running: '●',
     idle: '○',
     error: '✗',
     archived: '⊗',
-  }[workspace.status];
+  }[session.status];
 
-  const envBadge = workspace.env === 'wsl' ? 'WSL' : 'WIN';
+  const envBadge = session.env === 'wsl' ? 'WSL' : 'WIN';
 
   return (
     <div
@@ -111,7 +111,7 @@ function WorkspaceItem({ workspace, isActive, onSelect }: {
       `}
     >
       <span className={statusColor}>{statusDot}</span>
-      <span className="flex-1 truncate text-[#aaa]">{workspace.name}</span>
+      <span className="flex-1 truncate text-[#aaa]">{session.name}</span>
       <span className="text-[10px] text-[#666] font-mono">{envBadge}</span>
     </div>
   );

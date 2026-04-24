@@ -2,16 +2,16 @@ import { useEffect } from 'react';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
 import { useProjectStore } from './stores/projectStore';
-import { useWorkspaceStore } from './stores/workspaceStore';
+import { useSessionStore } from './stores/sessionStore';
 import './App.css';
 
 function App() {
   const { fetchProjects } = useProjectStore();
-  const { fetchWorkspaces } = useWorkspaceStore();
+  const { fetchSessions } = useSessionStore();
 
   useEffect(() => {
     fetchProjects();
-    fetchWorkspaces();
+    fetchSessions();
   }, []);
 
   return (

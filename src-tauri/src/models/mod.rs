@@ -35,6 +35,38 @@ impl From<super::env::Environment> for EnvType {
 pub enum Provider {
     Anthropic,
     Minimax,
+    Gemini,
+    OpenCode,
+}
+
+impl Provider {
+    /// Returns the CLI command name for this provider
+    pub fn cli_command(&self) -> &'static str {
+        match self {
+            Provider::Anthropic => "cwrap --anthropic",
+            Provider::Minimax => "cwrap --minimax",
+            Provider::Gemini => "gemini",
+            Provider::OpenCode => "opencode",
+        }
+    }
+
+    /// Returns just the binary name (without args)
+    pub fn binary(&self) -> &'static str {
+        match self {
+            Provider::Anthropic | Provider::Minimax => "cwrap",
+            Provider::Gemini => "gemini",
+            Provider::OpenCode => "opencode",
+        }
+    }
+
+    /// Returns the argument flag for this provider
+    pub fn cli_flag(&self) -> &'static str {
+        match self {
+            Provider::Anthropic => "--anthropic",
+            Provider::Minimax => "--minimax",
+            Provider::Gemini | Provider::OpenCode => "",
+        }
+    }
 }
 
 impl std::fmt::Display for Provider {
@@ -42,6 +74,8 @@ impl std::fmt::Display for Provider {
         match self {
             Provider::Anthropic => write!(f, "anthropic"),
             Provider::Minimax => write!(f, "minimax"),
+            Provider::Gemini => write!(f, "gemini"),
+            Provider::OpenCode => write!(f, "opencode"),
         }
     }
 }
@@ -145,6 +179,10 @@ pub struct DiffHunk {
     pub old_lines: usize,
     pub new_start: usize,
     pub new_lines: usize,
+    /// Full highlighted HTML for the old version of this hunk
+    pub old_highlighted: String,
+    /// Full highlighted HTML for the new version of this hunk
+    pub new_highlighted: String,
     pub lines: Vec<DiffLine>,
 }
 

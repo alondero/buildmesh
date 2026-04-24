@@ -1,11 +1,40 @@
-//! Diff computation using difference-rs
+//! Diff computation using difference-rs with syntect syntax highlighting
 
 use crate::db;
 use crate::models::{DiffHunk, DiffLine, FileDiff, DiffResult};
 use difference_rs::{Changeset, Difference};
+use once_cell::sync::Lazy;
+use syntect::highlighting::ThemeSet;
+use syntect::html::highlighted_html_for_string;
+use syntect::parsing::SyntaxSet;
 use std::path::PathBuf;
 use std::fs;
 use tauri::command;
+
+static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(|| SyntaxSet::load_defaults_newlines());
+static THEME_SET: Lazy<ThemeSet> = Lazy::new(|| ThemeSet::load_defaults());
+
+/// Highlight a string with syntect, returning HTML
+fn highlight_content(content: &str, path: &str) -> String {
+    let ext = ext_for_path(path);
+    let syntax = SYNTAX_SET
+        .find_syntax_by_extension(&ext)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+
+    let theme = &THEME_SET.themes["base16-ocean.dark"];
+
+    highlighted_html_for_string(content, &SYNTAX_SET, syntax, theme)
+        .unwrap_or_else(|_| content.to_string())
+}
+
+/// Get file extension from path
+fn ext_for_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string()
+}
 
 /// Compute a diff between two strings, returning DiffLine structs
 fn compute_file_diff(old_content: &str, new_content: &str) -> Vec<DiffLine> {
@@ -55,6 +84,32 @@ fn compute_file_diff(old_content: &str, new_content: &str) -> Vec<DiffLine> {
     lines
 }
 
+/// Build highlighted old/new content strings from diff lines
+fn build_sides(lines: &[DiffLine]) -> (String, String) {
+    let mut old_lines: Vec<&str> = Vec::new();
+    let mut new_lines: Vec<&str> = Vec::new();
+
+    for line in lines {
+        match line.line_type.as_str() {
+            "context" => {
+                old_lines.push(&line.content);
+                new_lines.push(&line.content);
+            }
+            "add" => {
+                old_lines.push("");
+                new_lines.push(&line.content);
+            }
+            "remove" => {
+                old_lines.push(&line.content);
+                new_lines.push("");
+            }
+            _ => {}
+        }
+    }
+
+    (old_lines.join("\n"), new_lines.join("\n"))
+}
+
 /// Diff two files on disk
 #[command]
 pub async fn diff_files(
@@ -64,12 +119,17 @@ pub async fn diff_files(
     let old_content = fs::read_to_string(&old_path).unwrap_or_default();
     let new_content = fs::read_to_string(&new_path).unwrap_or_default();
     let lines = compute_file_diff(&old_content, &new_content);
+    let (old_highlighted, new_highlighted) = build_sides(&lines);
+    let old_hl = highlight_content(&old_highlighted, &new_path);
+    let new_hl = highlight_content(&new_highlighted, &new_path);
 
     let hunks = vec![DiffHunk {
         old_start: 1,
         old_lines: lines.iter().filter(|l| l.line_type == "remove").count(),
         new_start: 1,
         new_lines: lines.iter().filter(|l| l.line_type == "add").count(),
+        old_highlighted: old_hl,
+        new_highlighted: new_hl,
         lines,
     }];
 
@@ -130,22 +190,32 @@ pub async fn diff_workspace_checkpoint(
                     };
                     if current_content != checkpoint_content {
                         let lines = compute_file_diff(&checkpoint_content, &current_content);
+                        let (old_highlighted, new_highlighted) = build_sides(&lines);
+                        let old_hl = highlight_content(&old_highlighted, &file_path);
+                        let new_hl = highlight_content(&new_highlighted, &file_path);
                         let hunks = vec![DiffHunk {
                             old_start: 1,
                             old_lines: lines.iter().filter(|l| l.line_type == "remove").count(),
                             new_start: 1,
                             new_lines: lines.iter().filter(|l| l.line_type == "add").count(),
+                            old_highlighted: old_hl,
+                            new_highlighted: new_hl,
                             lines,
                         }];
                         files.push(FileDiff { path: file_path, hunks });
                     }
                 } else {
                     let lines = compute_file_diff("", &current_content);
+                    let (old_highlighted, new_highlighted) = build_sides(&lines);
+                    let old_hl = highlight_content(&old_highlighted, &file_path);
+                    let new_hl = highlight_content(&new_highlighted, &file_path);
                     let hunks = vec![DiffHunk {
                         old_start: 0,
                         old_lines: 0,
                         new_start: 1,
                         new_lines: lines.len(),
+                        old_highlighted: old_hl,
+                        new_highlighted: new_hl,
                         lines,
                     }];
                     files.push(FileDiff { path: file_path, hunks });

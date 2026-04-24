@@ -171,6 +171,8 @@ pub fn get_workspace_by_id(id: i64) -> SqlResult<Workspace> {
             },
             provider: match row.get::<_, String>(6)?.as_str() {
                 "minimax" => Provider::Minimax,
+                "gemini" => Provider::Gemini,
+                "opencode" => Provider::OpenCode,
                 _ => Provider::Anthropic,
             },
             status: match row.get::<_, String>(7)?.as_str() {
@@ -205,6 +207,8 @@ pub fn list_workspaces() -> SqlResult<Vec<Workspace>> {
             },
             provider: match row.get::<_, String>(6)?.as_str() {
                 "minimax" => Provider::Minimax,
+                "gemini" => Provider::Gemini,
+                "opencode" => Provider::OpenCode,
                 _ => Provider::Anthropic,
             },
             status: match row.get::<_, String>(7)?.as_str() {
@@ -240,6 +244,8 @@ pub fn list_workspaces_by_project(project_id: i64) -> SqlResult<Vec<Workspace>> 
             },
             provider: match row.get::<_, String>(6)?.as_str() {
                 "minimax" => Provider::Minimax,
+                "gemini" => Provider::Gemini,
+                "opencode" => Provider::OpenCode,
                 _ => Provider::Anthropic,
             },
             status: match row.get::<_, String>(7)?.as_str() {

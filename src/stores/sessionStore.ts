@@ -1,0 +1,162 @@
+import { create } from 'zustand';
+import { invoke } from '@tauri-apps/api/core';
+
+export interface Session {
+  id: number;
+  project_id: number;
+  name: string;
+  path: string;
+  branch: string;
+  env: 'windows' | 'wsl';
+  provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode';
+  status: 'running' | 'idle' | 'error' | 'archived';
+  created_at: string;
+}
+
+export interface Checkpoint {
+  id: number;
+  workspace_id: number;
+  git_ref: string;
+  turn_index: number;
+  message: string;
+  created_at: string;
+}
+
+interface SessionState {
+  sessions: Session[];
+  activeSessionId: number | null;
+  activeSession: Session | null;
+  checkpoints: Checkpoint[];
+  loading: boolean;
+  error: string | null;
+
+  fetchSessions: () => Promise<void>;
+  createSession: (projectId: number, name: string, path: string, branch: string) => Promise<void>;
+  archiveSession: (id: number) => Promise<void>;
+  restoreSession: (id: number) => Promise<void>;
+  setActiveSession: (id: number | null) => Promise<void>;
+  fetchCheckpoints: (sessionId: number) => Promise<void>;
+  spawnAgent: (sessionId: number, provider: string) => Promise<void>;
+  killAgent: (sessionId: number) => Promise<void>;
+  sendToAgent: (sessionId: number, input: string) => Promise<void>;
+  createCheckpoint: (sessionId: number, turnIndex: number, message?: string) => Promise<void>;
+  revertCheckpoint: (checkpointId: number) => Promise<void>;
+}
+
+export const useSessionStore = create<SessionState>((set, get) => ({
+  sessions: [],
+  activeSessionId: null,
+  activeSession: null,
+  checkpoints: [],
+  loading: false,
+  error: null,
+
+  fetchSessions: async () => {
+    set({ loading: true, error: null });
+    try {
+      // Uses existing list_workspaces command (DB table still named workspaces)
+      const sessions = await invoke<Session[]>('list_workspaces');
+      set({ sessions, loading: false });
+    } catch (e) {
+      set({ error: String(e), loading: false });
+    }
+  },
+
+  createSession: async (projectId, name, path, branch) => {
+    try {
+      const session = await invoke<Session>('create_workspace', {
+        projectId, name, path, branch,
+      });
+      set((state) => ({ sessions: [session, ...state.sessions] }));
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  archiveSession: async (id) => {
+    try {
+      await invoke('archive_workspace', { workspaceId: id });
+      await get().fetchSessions();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  restoreSession: async (id) => {
+    try {
+      await invoke('restore_workspace', { workspaceId: id });
+      await get().fetchSessions();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  setActiveSession: async (id) => {
+    set({ activeSessionId: id });
+    if (id !== null) {
+      try {
+        const session = await invoke<Session>('get_workspace', { workspaceId: id });
+        set({ activeSession: session });
+        await get().fetchCheckpoints(id);
+      } catch (e) {
+        set({ error: String(e) });
+      }
+    } else {
+      set({ activeSession: null, checkpoints: [] });
+    }
+  },
+
+  fetchCheckpoints: async (sessionId) => {
+    try {
+      const checkpoints = await invoke<Checkpoint[]>('list_checkpoints', { workspaceId: sessionId });
+      set({ checkpoints });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  spawnAgent: async (sessionId, provider) => {
+    try {
+      await invoke('spawn_agent', { workspaceId: sessionId, provider });
+      await get().fetchSessions();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  killAgent: async (sessionId) => {
+    try {
+      await invoke('kill_agent', { workspaceId: sessionId });
+      await get().fetchSessions();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  sendToAgent: async (sessionId, input) => {
+    try {
+      await invoke('send_to_agent', { workspaceId: sessionId, input });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  createCheckpoint: async (sessionId, turnIndex, message) => {
+    try {
+      await invoke('create_checkpoint', { workspaceId: sessionId, turnIndex, message });
+      await get().fetchCheckpoints(sessionId);
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  revertCheckpoint: async (checkpointId) => {
+    try {
+      await invoke('revert_to_checkpoint', { checkpointId });
+      const { activeSessionId } = get();
+      if (activeSessionId) await get().fetchCheckpoints(activeSessionId);
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+}));

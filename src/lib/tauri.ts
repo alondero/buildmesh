@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Workspace, Checkpoint } from '../stores/workspaceStore';
+import type { Session, Checkpoint } from '../stores/sessionStore';
 import type { Project } from '../stores/projectStore';
 
 export interface DiffResult {
@@ -10,6 +10,8 @@ export interface DiffResult {
       old_lines: number;
       new_start: number;
       new_lines: number;
+      old_highlighted: string;
+      new_highlighted: string;
       lines: Array<{
         line_type: string;
         content: string;
@@ -20,18 +22,18 @@ export interface DiffResult {
   }>;
 }
 
-// Workspace
+// Session (backend still uses workspace naming)
 export const createWorkspace = (projectId: number, name: string, path: string, branch: string) =>
-  invoke<Workspace>('create_workspace', { projectId, name, path, branch });
+  invoke<Session>('create_workspace', { projectId, name, path, branch });
 
 export const listWorkspaces = () =>
-  invoke<Workspace[]>('list_workspaces');
+  invoke<Session[]>('list_workspaces');
 
 export const listWorkspacesByProject = (projectId: number) =>
-  invoke<Workspace[]>('list_workspaces_by_project', { projectId });
+  invoke<Session[]>('list_workspaces_by_project', { projectId });
 
 export const getWorkspace = (workspaceId: number) =>
-  invoke<Workspace>('get_workspace', { workspaceId });
+  invoke<Session>('get_workspace', { workspaceId });
 
 export const archiveWorkspace = (workspaceId: number) =>
   invoke('archive_workspace', { workspaceId });
@@ -64,6 +66,9 @@ export const killAgent = (workspaceId: number) =>
 
 export const isAgentRunning = (workspaceId: number) =>
   invoke<boolean>('is_agent_running', { workspaceId });
+
+export const sendToAgent = (workspaceId: number, input: string) =>
+  invoke('send_to_agent', { workspaceId, input });
 
 // Checkpoint
 export const createCheckpoint = (workspaceId: number, turnIndex: number, message?: string) =>
@@ -104,6 +109,26 @@ export const watchWorkspace = (workspaceId: number) =>
 
 export const unwatchWorkspace = (workspaceId: number) =>
   invoke('unwatch_workspace', { workspaceId });
+
+// File tree
+export interface FileNode {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children: FileNode[];
+}
+
+export const listDirectory = (path: string, maxDepth?: number) =>
+  invoke<FileNode>('list_directory', { path, maxDepth });
+
+// Git
+export interface GitStatus {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+}
+
+export const getGitStatus = (path: string) =>
+  invoke<GitStatus[]>('get_git_status', { path });
 
 // MCP
 export const listMcpServers = (workspaceId: number) =>
