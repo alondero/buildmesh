@@ -28,11 +28,11 @@ fn spawn_pty_output_reader(app: AppHandle, pty_id: String, reader: Box<dyn std::
                         "pty_id": pty_id,
                         "data": data
                     })) {
-                        log::error!("Failed to emit pty-output: {}", e);
+                        tracing::error!("Failed to emit pty-output: {}", e);
                     }
                 }
                 Err(e) => {
-                    log::error!("PTY read error: {}", e);
+                    tracing::error!("PTY read error: {}", e);
                     break;
                 }
             }

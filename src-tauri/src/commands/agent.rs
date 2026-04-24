@@ -73,15 +73,36 @@ pub async fn spawn_agent(
         c.args(args);
         c
     } else {
-        let mut c = CommandBuilder::new(binary);
-        c.args(args);
-        c
+        // On Windows, cwrap is a .cmd batch script — must use cmd.exe (fully qualified to avoid MSYS2 path resolution)
+        let use_cmd_shell = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
+        if use_cmd_shell {
+            let mut c = CommandBuilder::new("C:\\Windows\\System32\\cmd.exe");
+            c.arg("/c");
+            c.arg("cwrap");
+            for a in &args {
+                c.arg(a);
+            }
+            c
+        } else {
+            let mut c = CommandBuilder::new(binary);
+            c.args(args);
+            c
+        }
     };
 
     cmd.cwd(&workspace.path);
 
     let child = pair.slave.spawn_command(cmd)
-        .map_err(|e| format!("failed to spawn agent: {}", e))?;
+        .map_err(|e| {
+            let err_msg = format!("failed to spawn agent: {}", e);
+            tracing::error!("{}", err_msg);
+            let _ = app.emit("provider-error", serde_json::json!({
+                "workspace_id": workspace_id,
+                "provider": provider,
+                "message": err_msg
+            }));
+            err_msg
+        })?;
 
     // Get reader and writer for the PTY
     let reader_for_map = pair.master.try_clone_reader()
@@ -112,11 +133,11 @@ pub async fn spawn_agent(
                         "workspace_id": workspace_id_for_reader,
                         "line": data
                     })) {
-                        log::error!("Failed to emit agent-output: {}", e);
+                        tracing::error!("Failed to emit agent-output: {}", e);
                     }
                 }
                 Err(e) => {
-                    log::error!("Agent PTY read error: {}", e);
+                    tracing::error!("Agent PTY read error: {}", e);
                     break;
                 }
             }

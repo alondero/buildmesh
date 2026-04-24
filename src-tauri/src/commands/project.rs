@@ -14,20 +14,24 @@ pub async fn add_project(app: tauri::AppHandle) -> Result<Project, String> {
         .ok_or("No folder selected")?;
 
     let path = folder_path.to_string();
-    let name = match folder_path {
-        tauri_plugin_dialog::FilePath::Path(p) => {
-            std::path::Path::new(&p)
-                .file_name()
-                .map(|n: &std::ffi::OsStr| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone())
-        }
-        tauri_plugin_dialog::FilePath::Url(uri) => {
-            uri.path()
-                .rsplit('/')
-                .next()
-                .unwrap_or(&path)
-                .to_string()
-        }
+    let name = if let tauri_plugin_dialog::FilePath::Path(p) = folder_path {
+        std::path::Path::new(&p)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                // fallback: split on either slash to get last segment
+                p.to_string_lossy()
+                    .rsplit(|c| c == '/' || c == '\\')
+                    .next()
+                    .unwrap_or(&p.to_string_lossy())
+                    .to_string()
+            })
+    } else {
+        // Url case — rsplit on '/' to get last path segment
+        path.rsplit('/')
+            .next()
+            .unwrap_or(&path)
+            .to_string()
     };
 
     db::create_project(&name, &path).map_err(|e| e.to_string())

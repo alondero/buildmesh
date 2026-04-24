@@ -20,11 +20,7 @@ export function SessionView() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [fileTreeKey, setFileTreeKey] = useState(0);
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  // Watch workspace for file changes when session becomes active
+  // Watch workspace for file changes
   useEffect(() => {
     if (!activeSession) return;
 
@@ -32,7 +28,6 @@ export function SessionView() {
 
     const unlisten = listen<{ workspace_id: number; change: { path: string; kind: string } }>('file-change', (event) => {
       if (activeSession && event.payload.workspace_id === activeSession.id) {
-        // Refresh file tree on changes
         setFileTreeKey(k => k + 1);
       }
     });
@@ -75,7 +70,6 @@ export function SessionView() {
     setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
     setStreaming(true);
 
-    // Send to the agent via PTY
     try {
       await sendToAgent(activeSession.id, userMsg + '\n');
     } catch (e) {

@@ -10,10 +10,6 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info")
-    ).init();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -25,15 +21,31 @@ pub fn run() {
             let db_path = app_dir.join("conductor.db");
             db::init(&db_path)?;
 
-            log::info!("Conductor Clone started — db at {:?}", db_path);
+            // Set up file-based logging with tracing
+            let log_dir = app_dir.join("logs");
+            std::fs::create_dir_all(&log_dir)?;
+            let file_appender = tracing_appender::rolling::never(&log_dir, "conductor.log");
+            let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+            tracing_subscriber::fmt()
+                .with_writer(non_blocking)
+                .with_ansi(false)
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive("conductor_clone_lib=debug".parse().unwrap())
+                    .add_directive("conductor_clone=debug".parse().unwrap())
+                    .add_directive("info".parse().unwrap()))
+                .init();
+
+            // Keep guard alive for app lifetime
+            Box::leak(Box::new(_guard));
+
+            tracing::info!("Conductor Clone started — db at {:?}", db_path);
 
             // Auto-resume all sessions that were running
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 if let Ok(sessions) = db::list_workspaces() {
                     for session in sessions.iter().filter(|s| s.status == models::WorkspaceStatus::Running) {
-                        log::info!("Auto-resuming session {} ({})", session.name, session.id);
-                        // Resume with empty session_id — agents will create new session if needed
+                        tracing::info!("Auto-resuming session {} ({})", session.name, session.id);
                         let provider_str = session.provider.to_string();
                         if let Err(e) = tokio::runtime::Runtime::new()
                             .unwrap()
@@ -43,7 +55,7 @@ pub fn run() {
                                 provider_str,
                                 None,
                             )) {
-                            log::error!("Failed to resume session {}: {}", session.id, e);
+                            tracing::error!("Failed to resume session {}: {}", session.id, e);
                         }
                     }
                 }

@@ -86,3 +86,21 @@ Agents are spawned via PTY using CLI tools on system PATH:
 - Output is streamed back via Tauri events (`agent-output`)
 - All CLIs support `--resume <session-id>` for re-attach
 - CLIs own their own history; app persists only session ID
+
+### Windows Agent Spawning (Critical)
+On Windows, `cwrap` is a `.cmd` batch script. `portable-pty`'s `CommandBuilder` uses `CreateProcessW` directly, which **cannot invoke `.cmd` files** — it finds the MSYS2/Git Bash `cmd.exe` first (at `c:\devkitPro\msys2\usr\bin\cmd`) which is not a valid Win32 application (error 193).
+
+**Fix**: For Anthropic/Minimax (cwrap-based providers), spawn via fully-qualified `C:\Windows\System32\cmd.exe`:
+```rust
+let mut c = CommandBuilder::new("C:\\Windows\\System32\\cmd.exe");
+c.arg("/c");
+c.arg("cwrap");
+c.arg("--anthropic"); // or --minimax
+```
+
+This bypasses any PATH-shadowing from MSYS2/Git Bash installations.
+
+### Logging
+- Uses `tracing-appender` writing to `%APPDATA%\com.alond.conductor-clone\logs\conductor.log`
+- Enabled in release builds (no stderr/stdout in GUI mode)
+- Log level: `info` by default, `debug` for `conductor_clone_lib`
