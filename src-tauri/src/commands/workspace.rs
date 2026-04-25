@@ -61,11 +61,6 @@ pub async fn update_workspace_status(
     workspace_id: i64,
     status: String,
 ) -> Result<(), String> {
-    let status = match status.as_str() {
-        "running" => WorkspaceStatus::Running,
-        "error" => WorkspaceStatus::Error,
-        "archived" => WorkspaceStatus::Archived,
-        _ => WorkspaceStatus::Idle,
-    };
+    let status = WorkspaceStatus::from_db_str(&status);
     db::update_workspace_status(workspace_id, status).map_err(|e| e.to_string())
 }

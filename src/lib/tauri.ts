@@ -134,6 +134,16 @@ export const getGitStatus = (path: string) =>
 export const listMcpServers = (workspaceId: number) =>
   invoke('list_mcp_servers', { workspaceId });
 
+// Attention
+export const registerAttentionSession = (workspaceId: number) =>
+  invoke('register_attention_session', { workspaceId });
+
+export const clearAttentionSession = (workspaceId: number) =>
+  invoke('clear_attention_session', { workspaceId });
+
+export const isAttentionPending = (workspaceId: number) =>
+  invoke<boolean>('is_attention_pending', { workspaceId });
+
 // PR
 export const createPr = (workspaceId: number, title: string, body: string) =>
   invoke<string>('create_pr', { workspaceId, title, body });

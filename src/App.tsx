@@ -14,10 +14,11 @@ interface ErrorToast {
 
 function App() {
   const { fetchProjects } = useProjectStore();
-  const { fetchSessions } = useSessionStore();
+  const { fetchSessions, initAttentionListeners } = useSessionStore();
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
 
   useEffect(() => {
+    initAttentionListeners();
     fetchProjects();
     fetchSessions();
 

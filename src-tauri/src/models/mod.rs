@@ -86,8 +86,32 @@ impl std::fmt::Display for Provider {
 pub enum WorkspaceStatus {
     Running,
     Idle,
+    AwaitingInput,
     Error,
     Archived,
+}
+
+/// Parse a workspace status from a DB string column
+impl WorkspaceStatus {
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "running" => WorkspaceStatus::Running,
+            "awaiting_input" => WorkspaceStatus::AwaitingInput,
+            "error" => WorkspaceStatus::Error,
+            "archived" => WorkspaceStatus::Archived,
+            _ => WorkspaceStatus::Idle,
+        }
+    }
+
+    pub fn to_db_str(&self) -> &'static str {
+        match self {
+            WorkspaceStatus::Running => "running",
+            WorkspaceStatus::Idle => "idle",
+            WorkspaceStatus::AwaitingInput => "awaiting_input",
+            WorkspaceStatus::Error => "error",
+            WorkspaceStatus::Archived => "archived",
+        }
+    }
 }
 
 /// A project — top-level folder containing workspaces

@@ -175,12 +175,7 @@ pub fn get_workspace_by_id(id: i64) -> SqlResult<Workspace> {
                 "opencode" => Provider::OpenCode,
                 _ => Provider::Anthropic,
             },
-            status: match row.get::<_, String>(7)?.as_str() {
-                "running" => WorkspaceStatus::Running,
-                "error" => WorkspaceStatus::Error,
-                "archived" => WorkspaceStatus::Archived,
-                _ => WorkspaceStatus::Idle,
-            },
+            status: WorkspaceStatus::from_db_str(&row.get::<_, String>(7)?),
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
@@ -211,12 +206,7 @@ pub fn list_workspaces() -> SqlResult<Vec<Workspace>> {
                 "opencode" => Provider::OpenCode,
                 _ => Provider::Anthropic,
             },
-            status: match row.get::<_, String>(7)?.as_str() {
-                "running" => WorkspaceStatus::Running,
-                "error" => WorkspaceStatus::Error,
-                "archived" => WorkspaceStatus::Archived,
-                _ => WorkspaceStatus::Idle,
-            },
+            status: WorkspaceStatus::from_db_str(&row.get::<_, String>(7)?),
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
@@ -248,12 +238,7 @@ pub fn list_workspaces_by_project(project_id: i64) -> SqlResult<Vec<Workspace>> 
                 "opencode" => Provider::OpenCode,
                 _ => Provider::Anthropic,
             },
-            status: match row.get::<_, String>(7)?.as_str() {
-                "running" => WorkspaceStatus::Running,
-                "error" => WorkspaceStatus::Error,
-                "archived" => WorkspaceStatus::Archived,
-                _ => WorkspaceStatus::Idle,
-            },
+            status: WorkspaceStatus::from_db_str(&row.get::<_, String>(7)?),
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(8)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
@@ -264,13 +249,7 @@ pub fn list_workspaces_by_project(project_id: i64) -> SqlResult<Vec<Workspace>> 
 
 pub fn update_workspace_status(id: i64, status: WorkspaceStatus) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    let status_str = match status {
-        WorkspaceStatus::Running => "running",
-        WorkspaceStatus::Idle => "idle",
-        WorkspaceStatus::Error => "error",
-        WorkspaceStatus::Archived => "archived",
-    };
-    db.execute("UPDATE workspaces SET status = ?1 WHERE id = ?2", params![status_str, id])?;
+    db.execute("UPDATE workspaces SET status = ?1 WHERE id = ?2", params![status.to_db_str(), id])?;
     Ok(())
 }
 

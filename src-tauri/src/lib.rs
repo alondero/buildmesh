@@ -86,6 +86,10 @@ pub fn run() {
             commands::file_watcher::unwatch_workspace,
             // MCP
             commands::mcp::list_mcp_servers,
+            // Attention
+            commands::attention::register_attention_session,
+            commands::attention::clear_attention_session,
+            commands::attention::is_attention_pending,
             // PR
             commands::pr::create_pr,
             commands::pr::merge_pr,

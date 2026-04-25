@@ -2,6 +2,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import type { Project } from '../../stores/projectStore';
 import type { Session } from '../../stores/sessionStore';
+import { STATUS_CONFIG } from '../../lib/status';
 
 export function Sidebar() {
   const projects = useProjectStore(state => state.projects);
@@ -90,20 +91,8 @@ function SessionItem({ session, isActive, onSelect }: {
   isActive: boolean;
   onSelect: () => void;
 }) {
-  const statusColor = {
-    running: 'text-[#22c55e]',
-    idle: 'text-[#888]',
-    error: 'text-[#ef4444]',
-    archived: 'text-[#666]',
-  }[session.status];
-
-  const statusDot = {
-    running: '●',
-    idle: '○',
-    error: '✗',
-    archived: '⊗',
-  }[session.status];
-
+  const config = STATUS_CONFIG[session.status];
+  const isAwaiting = session.status === 'awaiting_input';
   const envBadge = session.env === 'wsl' ? 'WSL' : 'WIN';
 
   return (
@@ -112,10 +101,14 @@ function SessionItem({ session, isActive, onSelect }: {
       className={`
         pl-8 pr-2 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2
         ${isActive ? 'bg-[#222] border border-[#3b82f6]' : 'hover:bg-[#1a1a1a] border border-transparent'}
+        ${isAwaiting ? 'bg-[#2a2010]' : ''}
       `}
     >
-      <span className={statusColor}>{statusDot}</span>
+      <span className={config.color}>{config.dot}</span>
       <span className="flex-1 truncate text-[#aaa]">{session.name}</span>
+      {isAwaiting && (
+        <span className="text-[10px] text-[#f59e0b] font-semibold animate-pulse">ATTN</span>
+      )}
       <span className="text-[10px] text-[#666] font-mono">{envBadge}</span>
     </div>
   );

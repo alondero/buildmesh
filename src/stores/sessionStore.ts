@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 export interface Session {
   id: number;
@@ -9,7 +10,7 @@ export interface Session {
   branch: string;
   env: 'windows' | 'wsl';
   provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode';
-  status: 'running' | 'idle' | 'error' | 'archived';
+  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'archived';
   created_at: string;
 }
 
@@ -42,6 +43,7 @@ interface SessionState {
   writeToAgent: (sessionId: number, data: string) => Promise<void>;
   createCheckpoint: (sessionId: number, turnIndex: number, message?: string) => Promise<void>;
   revertCheckpoint: (checkpointId: number) => Promise<void>;
+  initAttentionListeners: () => Promise<void>;
 }
 
 export const useSessionStore = create<SessionState>((set, get) => ({
@@ -62,6 +64,37 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       set({ error: String(e), loading: false });
     }
   },
+
+  // Set up attention event listeners once
+  ...(() => {
+    let listenersAttached = false;
+    return {
+      initAttentionListeners: async () => {
+        if (listenersAttached) return;
+        listenersAttached = true;
+
+        // Listen for attention-needed events from agents
+        await listen<{ workspace_id: number }>('attention-needed', (event) => {
+          const workspaceId = event.payload.workspace_id;
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === workspaceId ? { ...s, status: 'awaiting_input' as const } : s
+            ),
+          }));
+        });
+
+        // Listen for attention-cleared events when user resumes a session
+        await listen<{ workspace_id: number }>('attention-cleared', (event) => {
+          const workspaceId = event.payload.workspace_id;
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === workspaceId ? { ...s, status: 'running' as const } : s
+            ),
+          }));
+        });
+      },
+    };
+  })(),
 
   createSession: async (projectId, name, path, branch) => {
     try {

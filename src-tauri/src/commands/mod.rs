@@ -3,6 +3,7 @@
 pub mod agent;
 #[cfg(test)]
 pub mod agent_tests;
+pub mod attention;
 pub mod checkpoint;
 pub mod diff;
 pub mod file_tree;
