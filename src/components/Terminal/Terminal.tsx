@@ -6,10 +6,10 @@ import { listen } from '@tauri-apps/api/event';
 import { useSessionStore } from '../../stores/sessionStore';
 
 interface AgentTerminalProps {
-  workspaceId: number;
+  sessionId: number;
 }
 
-export function AgentTerminal({ workspaceId }: AgentTerminalProps) {
+export function AgentTerminal({ sessionId }: AgentTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const [connected, setConnected] = useState(false);
@@ -32,8 +32,8 @@ export function AgentTerminal({ workspaceId }: AgentTerminalProps) {
     termRef.current = term;
 
     // Listen for agent output
-    const unlisten = await listen<{ workspace_id: number; line: string }>('agent-output', (event) => {
-      if (event.payload.workspace_id === workspaceId) {
+    const unlisten = await listen<{ session_id: number; line: string }>('agent-output', (event) => {
+      if (event.payload.session_id === sessionId) {
         term.write(event.payload.line);
       }
     });
@@ -45,7 +45,7 @@ export function AgentTerminal({ workspaceId }: AgentTerminalProps) {
 
     // Send keystrokes directly to agent PTY
     term.onData((data) => {
-      writeToAgent(workspaceId, data);
+      writeToAgent(sessionId, data);
     });
 
     return () => {
@@ -53,7 +53,7 @@ export function AgentTerminal({ workspaceId }: AgentTerminalProps) {
       observer.disconnect();
       term.dispose();
     };
-  }, [workspaceId, writeToAgent]);
+  }, [sessionId, writeToAgent]);
 
   useEffect(() => {
     const cleanup = connect();

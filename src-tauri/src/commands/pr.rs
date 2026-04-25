@@ -5,20 +5,20 @@ use crate::models::EnvType;
 use std::process::Command;
 use tauri::command;
 
-/// Create a PR for a workspace
+/// Create a PR for a session
 #[command]
 pub fn create_pr(
-    workspace_id: i64,
+    session_id: i64,
     title: String,
     body: String,
 ) -> Result<String, String> {
-    let workspace = db::get_workspace_by_id(workspace_id)
+    let session = db::get_session_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let branch = &workspace.branch;
-    let path = &workspace.path;
+    let branch = &session.branch;
+    let path = &session.path;
 
-    let output = if workspace.env == EnvType::Wsl {
+    let output = if session.env == EnvType::Wsl {
         Command::new("wsl.exe")
             .args(["--cd", path, "--", "gh", "pr", "create",
                    "--title", &title, "--body", &body, "--base", branch])
@@ -57,15 +57,15 @@ pub fn merge_pr(pr_url: String) -> Result<String, String> {
     }
 }
 
-/// Get the current branch for a workspace
+/// Get the current branch for a session
 #[command]
-pub fn get_current_branch(workspace_id: i64) -> Result<String, String> {
-    let workspace = db::get_workspace_by_id(workspace_id)
+pub fn get_current_branch(session_id: i64) -> Result<String, String> {
+    let session = db::get_session_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let output = if workspace.env == EnvType::Wsl {
+    let output = if session.env == EnvType::Wsl {
         Command::new("wsl.exe")
-            .args(["--cd", &workspace.path, "--", "git", "branch", "--show-current"])
+            .args(["--cd", &session.path, "--", "git", "branch", "--show-current"])
             .output()
     } else {
         Command::new("git")

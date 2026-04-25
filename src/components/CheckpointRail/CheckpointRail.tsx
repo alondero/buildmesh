@@ -7,7 +7,7 @@ interface CheckpointRailProps {
 
 export function CheckpointRail({ checkpoints }: CheckpointRailProps) {
   const handleRevert = async (checkpointId: number) => {
-    if (!confirm('Revert workspace to this checkpoint? This will discard all changes since.')) {
+    if (!confirm('Revert session to this checkpoint? This will discard all changes since.')) {
       return;
     }
     await revertToCheckpoint(checkpointId);

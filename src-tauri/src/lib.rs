@@ -45,14 +45,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Workspace
-            commands::workspace::create_workspace,
-            commands::workspace::list_workspaces,
-            commands::workspace::list_workspaces_by_project,
-            commands::workspace::get_workspace,
-            commands::workspace::archive_workspace,
-            commands::workspace::restore_workspace,
-            commands::workspace::update_workspace_status,
+            // Session
+            commands::session::create_session,
+            commands::session::list_sessions,
+            commands::session::list_sessions_by_project,
+            commands::session::get_session,
+            commands::session::archive_session,
+            commands::session::restore_session,
+            commands::session::update_session_status,
             // Project
             commands::project::add_project,
             commands::project::create_project,
@@ -71,7 +71,7 @@ pub fn run() {
             commands::checkpoint::diff_checkpoints,
             // Diff
             commands::diff::diff_files,
-            commands::diff::diff_workspace_checkpoint,
+            commands::diff::diff_session_checkpoint,
             // File tree
             commands::file_tree::list_directory,
             // Git
@@ -82,8 +82,8 @@ pub fn run() {
             commands::terminal::close_pty,
             commands::terminal::spawn_shell,
             // File watcher
-            commands::file_watcher::watch_workspace,
-            commands::file_watcher::unwatch_workspace,
+            commands::file_watcher::watch_session,
+            commands::file_watcher::unwatch_session,
             // MCP
             commands::mcp::list_mcp_servers,
             // Attention

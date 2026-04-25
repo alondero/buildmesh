@@ -5,15 +5,15 @@ use crate::models::{EnvType, McpServer};
 use std::process::Command;
 use tauri::command;
 
-/// List MCP servers configured for a workspace
+/// List MCP servers configured for a session
 #[command]
-pub async fn list_mcp_servers(workspace_id: i64) -> Result<Vec<McpServer>, String> {
-    let workspace = db::get_workspace_by_id(workspace_id)
+pub async fn list_mcp_servers(session_id: i64) -> Result<Vec<McpServer>, String> {
+    let session = db::get_session_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let output = if workspace.env == EnvType::Wsl {
+    let output = if session.env == EnvType::Wsl {
         Command::new("wsl.exe")
-            .args(["--cd", &workspace.path, "--", "claude", "mcp", "list"])
+            .args(["--cd", &session.path, "--", "claude", "mcp", "list"])
             .output()
     } else {
         Command::new("claude")

@@ -40,16 +40,6 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// Returns the CLI command name for this provider
-    pub fn cli_command(&self) -> &'static str {
-        match self {
-            Provider::Anthropic => "cwrap --anthropic",
-            Provider::Minimax => "cwrap --minimax",
-            Provider::Gemini => "gemini",
-            Provider::OpenCode => "opencode",
-        }
-    }
-
     /// Returns just the binary name (without args)
     pub fn binary(&self) -> &'static str {
         match self {
@@ -80,10 +70,10 @@ impl std::fmt::Display for Provider {
     }
 }
 
-/// Workspace status
+/// Session status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum WorkspaceStatus {
+pub enum SessionStatus {
     Running,
     Idle,
     AwaitingInput,
@@ -91,30 +81,30 @@ pub enum WorkspaceStatus {
     Archived,
 }
 
-/// Parse a workspace status from a DB string column
-impl WorkspaceStatus {
+/// Parse a session status from a DB string column
+impl SessionStatus {
     pub fn from_db_str(s: &str) -> Self {
         match s {
-            "running" => WorkspaceStatus::Running,
-            "awaiting_input" => WorkspaceStatus::AwaitingInput,
-            "error" => WorkspaceStatus::Error,
-            "archived" => WorkspaceStatus::Archived,
-            _ => WorkspaceStatus::Idle,
+            "running" => SessionStatus::Running,
+            "awaiting_input" => SessionStatus::AwaitingInput,
+            "error" => SessionStatus::Error,
+            "archived" => SessionStatus::Archived,
+            _ => SessionStatus::Idle,
         }
     }
 
     pub fn to_db_str(&self) -> &'static str {
         match self {
-            WorkspaceStatus::Running => "running",
-            WorkspaceStatus::Idle => "idle",
-            WorkspaceStatus::AwaitingInput => "awaiting_input",
-            WorkspaceStatus::Error => "error",
-            WorkspaceStatus::Archived => "archived",
+            SessionStatus::Running => "running",
+            SessionStatus::Idle => "idle",
+            SessionStatus::AwaitingInput => "awaiting_input",
+            SessionStatus::Error => "error",
+            SessionStatus::Archived => "archived",
         }
     }
 }
 
-/// A project — top-level folder containing workspaces
+/// A project — top-level folder containing sessions
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: i64,
@@ -123,25 +113,25 @@ pub struct Project {
     pub created_at: DateTime<Utc>,
 }
 
-/// A workspace — isolated agent working directory
+/// A session — isolated agent working directory
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Workspace {
+pub struct Session {
     pub id: i64,
     pub project_id: i64,
     pub name: String,
-    pub path: String,         // absolute path to workspace directory
+    pub path: String,         // absolute path to session directory
     pub branch: String,
     pub env: EnvType,         // windows or wsl
     pub provider: Provider,   // anthropic or minimax
-    pub status: WorkspaceStatus,
+    pub status: SessionStatus,
     pub created_at: DateTime<Utc>,
 }
 
-/// A checkpoint — git ref snapshot of workspace state
+/// A checkpoint — git ref snapshot of session state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: i64,
-    pub workspace_id: i64,
+    pub session_id: i64,
     pub git_ref: String,      // e.g., "conductor/checkpoints/c1"
     pub turn_index: i32,      // which turn this was created at
     pub message: String,     // optional description
@@ -152,18 +142,18 @@ pub struct Checkpoint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: i64,
-    pub workspace_id: i64,
+    pub session_id: i64,
     pub role: String,         // "user" or "assistant"
     pub content: String,
     pub tool_calls: Option<String>, // JSON array of tool calls if any
     pub created_at: DateTime<Utc>,
 }
 
-/// A script attached to a workspace
+/// A script attached to a session
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceScript {
+pub struct SessionScript {
     pub id: i64,
-    pub workspace_id: i64,
+    pub session_id: i64,
     pub script_type: String,  // "setup" | "run" | "archive"
     pub content: String,
 }

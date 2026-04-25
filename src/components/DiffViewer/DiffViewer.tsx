@@ -1,23 +1,23 @@
 import { useState, useEffect } from 'react';
-import { diffWorkspaceCheckpoint } from '../../lib/tauri';
+import { diffSessionCheckpoint } from '../../lib/tauri';
 import type { DiffResult } from '../../lib/tauri';
 
 interface DiffViewerProps {
-  workspaceId: number;
+  sessionId: number;
   checkpointId: number;
   onClose: () => void;
 }
 
-export function DiffViewer({ workspaceId, checkpointId, onClose }: DiffViewerProps) {
+export function DiffViewer({ sessionId, checkpointId, onClose }: DiffViewerProps) {
   const [diff, setDiff] = useState<DiffResult | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    diffWorkspaceCheckpoint(workspaceId, checkpointId)
+    diffSessionCheckpoint(sessionId, checkpointId)
       .then(setDiff)
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [workspaceId, checkpointId]);
+  }, [sessionId, checkpointId]);
 
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">

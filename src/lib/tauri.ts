@@ -22,27 +22,27 @@ export interface DiffResult {
   }>;
 }
 
-// Session (backend still uses workspace naming)
-export const createWorkspace = (projectId: number, name: string, path: string, branch: string) =>
-  invoke<Session>('create_workspace', { projectId, name, path, branch });
+// Session
+export const createSession = (projectId: number, name: string, path: string, branch: string) =>
+  invoke<Session>('create_session', { projectId, name, path, branch });
 
-export const listWorkspaces = () =>
-  invoke<Session[]>('list_workspaces');
+export const listSessions = () =>
+  invoke<Session[]>('list_sessions');
 
-export const listWorkspacesByProject = (projectId: number) =>
-  invoke<Session[]>('list_workspaces_by_project', { projectId });
+export const listSessionsByProject = (projectId: number) =>
+  invoke<Session[]>('list_sessions_by_project', { projectId });
 
-export const getWorkspace = (workspaceId: number) =>
-  invoke<Session>('get_workspace', { workspaceId });
+export const getSession = (sessionId: number) =>
+  invoke<Session>('get_session', { sessionId });
 
-export const archiveWorkspace = (workspaceId: number) =>
-  invoke('archive_workspace', { workspaceId });
+export const archiveSession = (sessionId: number) =>
+  invoke('archive_session', { sessionId });
 
-export const restoreWorkspace = (workspaceId: number) =>
-  invoke('restore_workspace', { workspaceId });
+export const restoreSession = (sessionId: number) =>
+  invoke('restore_session', { sessionId });
 
-export const updateWorkspaceStatus = (workspaceId: number, status: string) =>
-  invoke('update_workspace_status', { workspaceId, status });
+export const updateSessionStatus = (sessionId: number, status: string) =>
+  invoke('update_session_status', { sessionId, status });
 
 // Project
 export const addProject = () =>
@@ -58,24 +58,24 @@ export const deleteProject = (projectId: number) =>
   invoke('delete_project', { projectId });
 
 // Agent
-export const spawnAgent = (workspaceId: number, provider: string) =>
-  invoke('spawn_agent', { workspaceId, provider });
+export const spawnAgent = (sessionId: number, provider: string) =>
+  invoke('spawn_agent', { sessionId, provider });
 
-export const killAgent = (workspaceId: number) =>
-  invoke('kill_agent', { workspaceId });
+export const killAgent = (sessionId: number) =>
+  invoke('kill_agent', { sessionId });
 
-export const isAgentRunning = (workspaceId: number) =>
-  invoke<boolean>('is_agent_running', { workspaceId });
+export const isAgentRunning = (sessionId: number) =>
+  invoke<boolean>('is_agent_running', { sessionId });
 
-export const sendToAgent = (workspaceId: number, input: string) =>
-  invoke('send_to_agent', { workspaceId, input });
+export const sendToAgent = (sessionId: number, input: string) =>
+  invoke('send_to_agent', { sessionId, input });
 
 // Checkpoint
-export const createCheckpoint = (workspaceId: number, turnIndex: number, message?: string) =>
-  invoke<Checkpoint>('create_checkpoint', { workspaceId, turnIndex, message });
+export const createCheckpoint = (sessionId: number, turnIndex: number, message?: string) =>
+  invoke<Checkpoint>('create_checkpoint', { sessionId, turnIndex, message });
 
-export const listCheckpoints = (workspaceId: number) =>
-  invoke<Checkpoint[]>('list_checkpoints', { workspaceId });
+export const listCheckpoints = (sessionId: number) =>
+  invoke<Checkpoint[]>('list_checkpoints', { sessionId });
 
 export const revertToCheckpoint = (checkpointId: number) =>
   invoke('revert_to_checkpoint', { checkpointId });
@@ -87,8 +87,8 @@ export const diffCheckpoints = (checkpointAId: number, checkpointBId: number) =>
 export const diffFiles = (oldPath: string, newPath: string) =>
   invoke<DiffResult>('diff_files', { oldPath, newPath });
 
-export const diffWorkspaceCheckpoint = (workspaceId: number, checkpointId: number) =>
-  invoke<DiffResult>('diff_workspace_checkpoint', { workspaceId, checkpointId });
+export const diffSessionCheckpoint = (sessionId: number, checkpointId: number) =>
+  invoke<DiffResult>('diff_session_checkpoint', { sessionId, checkpointId });
 
 // Terminal
 export const spawnPty = (command: string, args: string[], cwd: string, ptyId: string) =>
@@ -104,11 +104,11 @@ export const spawnShell = (ptyId: string, isWsl: boolean, cwd: string) =>
   invoke('spawn_shell', { ptyId, isWsl, cwd });
 
 // File watcher
-export const watchWorkspace = (workspaceId: number) =>
-  invoke('watch_workspace', { workspaceId });
+export const watchSession = (sessionId: number) =>
+  invoke('watch_session', { sessionId });
 
-export const unwatchWorkspace = (workspaceId: number) =>
-  invoke('unwatch_workspace', { workspaceId });
+export const unwatchSession = (sessionId: number) =>
+  invoke('unwatch_session', { sessionId });
 
 // File tree
 export interface FileNode {
@@ -131,25 +131,25 @@ export const getGitStatus = (path: string) =>
   invoke<GitStatus[]>('get_git_status', { path });
 
 // MCP
-export const listMcpServers = (workspaceId: number) =>
-  invoke('list_mcp_servers', { workspaceId });
+export const listMcpServers = (sessionId: number) =>
+  invoke('list_mcp_servers', { sessionId });
 
 // Attention
-export const registerAttentionSession = (workspaceId: number) =>
-  invoke('register_attention_session', { workspaceId });
+export const registerAttentionSession = (sessionId: number) =>
+  invoke('register_attention_session', { sessionId });
 
-export const clearAttentionSession = (workspaceId: number) =>
-  invoke('clear_attention_session', { workspaceId });
+export const clearAttentionSession = (sessionId: number) =>
+  invoke('clear_attention_session', { sessionId });
 
-export const isAttentionPending = (workspaceId: number) =>
-  invoke<boolean>('is_attention_pending', { workspaceId });
+export const isAttentionPending = (sessionId: number) =>
+  invoke<boolean>('is_attention_pending', { sessionId });
 
 // PR
-export const createPr = (workspaceId: number, title: string, body: string) =>
-  invoke<string>('create_pr', { workspaceId, title, body });
+export const createPr = (sessionId: number, title: string, body: string) =>
+  invoke<string>('create_pr', { sessionId, title, body });
 
 export const mergePr = (prUrl: string) =>
   invoke<string>('merge_pr', { prUrl });
 
-export const getCurrentBranch = (workspaceId: number) =>
-  invoke<string>('get_current_branch', { workspaceId });
+export const getCurrentBranch = (sessionId: number) =>
+  invoke<string>('get_current_branch', { sessionId });

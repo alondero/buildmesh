@@ -1,7 +1,7 @@
 //! Agent spawning and management via PTY
 
 use crate::db;
-use crate::models::{EnvType, Provider, WorkspaceStatus};
+use crate::models::{EnvType, Provider, SessionStatus};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,11 +15,11 @@ struct AgentProcess {
 static AGENT_PROCESSES: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, AgentProcess>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-/// Spawn a new agent for the given workspace with the specified provider
+/// Spawn a new agent for the given session with the specified provider
 #[command]
 pub async fn spawn_agent(
     app: AppHandle,
-    workspace_id: i64,
+    session_id: i64,
     provider: String,
     resume: Option<String>,
 ) -> Result<(), String> {
@@ -31,12 +31,12 @@ pub async fn spawn_agent(
         _ => Provider::Anthropic,
     };
 
-    let workspace = db::get_workspace_by_id(workspace_id)
+    let session = db::get_session_by_id(session_id)
         .map_err(|e| e.to_string())?;
-    let is_wsl = workspace.env == EnvType::Wsl;
+    let is_wsl = session.env == EnvType::Wsl;
 
     // Kill existing agent if running
-    kill_agent(workspace_id).await.ok();
+    kill_agent(session_id).await.ok();
 
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize::default())
@@ -68,7 +68,7 @@ pub async fn spawn_agent(
     let mut cmd: CommandBuilder = if is_wsl {
         // For WSL, run via wsl.exe with Unix-style path
         let mut c = CommandBuilder::new("wsl.exe");
-        c.args(["--cd", &workspace.path, "--", binary]);
+        c.args(["--cd", &session.path, "--", binary]);
         c.args(args);
         c
     } else {
@@ -89,14 +89,14 @@ pub async fn spawn_agent(
         }
     };
 
-    cmd.cwd(&workspace.path);
+    cmd.cwd(&session.path);
 
     let child = pair.slave.spawn_command(cmd)
         .map_err(|e| {
             let err_msg = format!("failed to spawn agent: {}", e);
             tracing::error!("{}", err_msg);
             let _ = app.emit("provider-error", serde_json::json!({
-                "workspace_id": workspace_id,
+                "session_id": session_id,
                 "provider": provider,
                 "message": err_msg
             }));
@@ -111,11 +111,11 @@ pub async fn spawn_agent(
     let writer = pair.master.take_writer()
         .map_err(|e| format!("failed to get PTY writer: {}", e))?;
 
-    let workspace_id_for_reader = workspace_id;
+    let session_id_for_reader = session_id;
 
     {
         let mut processes = AGENT_PROCESSES.lock().unwrap();
-        processes.insert(workspace_id, AgentProcess { child, writer });
+        processes.insert(session_id, AgentProcess { child, writer });
     }
 
     // Spawn a task to read agent output and emit events
@@ -129,7 +129,7 @@ pub async fn spawn_agent(
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
                     if let Err(e) = app_for_reader.emit("agent-output", serde_json::json!({
-                        "workspace_id": workspace_id_for_reader,
+                        "session_id": session_id_for_reader,
                         "line": data
                     })) {
                         tracing::error!("Failed to emit agent-output: {}", e);
@@ -143,7 +143,7 @@ pub async fn spawn_agent(
         }
     });
 
-    db::update_workspace_status(workspace_id, WorkspaceStatus::Running)
+    db::update_session_status(session_id, SessionStatus::Running)
         .map_err(|e| e.to_string())?;
 
     Ok(())
@@ -151,9 +151,9 @@ pub async fn spawn_agent(
 
 /// Send input to the running agent (raw keystrokes, no newline)
 #[command]
-pub async fn write_to_agent(workspace_id: i64, data: String) -> Result<(), String> {
+pub async fn write_to_agent(session_id: i64, data: String) -> Result<(), String> {
     let mut processes = AGENT_PROCESSES.lock().unwrap();
-    if let Some(ref mut agent) = processes.get_mut(&workspace_id) {
+    if let Some(ref mut agent) = processes.get_mut(&session_id) {
         use std::io::Write;
         agent.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
         Ok(())
@@ -164,33 +164,33 @@ pub async fn write_to_agent(workspace_id: i64, data: String) -> Result<(), Strin
 
 /// Send input to the running agent (with newline appended)
 #[command]
-pub async fn send_to_agent(workspace_id: i64, input: String) -> Result<(), String> {
+pub async fn send_to_agent(session_id: i64, input: String) -> Result<(), String> {
     let mut processes = AGENT_PROCESSES.lock().unwrap();
-    if let Some(ref mut agent) = processes.get_mut(&workspace_id) {
+    if let Some(ref mut agent) = processes.get_mut(&session_id) {
         use std::io::Write;
         let input_with_newline = format!("{}\n", input);
         agent.writer.write_all(input_with_newline.as_bytes()).map_err(|e| e.to_string())?;
         Ok(())
     } else {
-        Err("Agent not running for this workspace".to_string())
+        Err("Agent not running for this session".to_string())
     }
 }
 
-/// Kill the running agent for a workspace
+/// Kill the running agent for a session
 #[command]
-pub async fn kill_agent(workspace_id: i64) -> Result<(), String> {
+pub async fn kill_agent(session_id: i64) -> Result<(), String> {
     let mut processes = AGENT_PROCESSES.lock().unwrap();
-    if let Some(mut agent) = processes.remove(&workspace_id) {
+    if let Some(mut agent) = processes.remove(&session_id) {
         agent.child.kill().ok();
     }
-    db::update_workspace_status(workspace_id, WorkspaceStatus::Idle)
+    db::update_session_status(session_id, SessionStatus::Idle)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Check if agent is running for a workspace
+/// Check if agent is running for a session
 #[command]
-pub async fn is_agent_running(workspace_id: i64) -> bool {
+pub async fn is_agent_running(session_id: i64) -> bool {
     let processes = AGENT_PROCESSES.lock().unwrap();
-    processes.contains_key(&workspace_id)
+    processes.contains_key(&session_id)
 }

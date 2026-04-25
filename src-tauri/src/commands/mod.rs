@@ -13,4 +13,4 @@ pub mod mcp;
 pub mod pr;
 pub mod project;
 pub mod terminal;
-pub mod workspace;
+pub mod session;

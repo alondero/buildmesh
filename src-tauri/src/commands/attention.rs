@@ -5,70 +5,70 @@
 //! relays them to the frontend as Tauri events.
 
 use crate::db;
-use crate::models::WorkspaceStatus;
+use crate::models::SessionStatus;
 use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter};
 
-/// In-memory set of workspaces awaiting user input
+/// In-memory set of sessions awaiting user input
 static ATTENTION_PENDING: once_cell::sync::Lazy<Arc<Mutex<std::collections::HashSet<i64>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(std::collections::HashSet::new())));
 
-/// Register that a workspace session is awaiting user input.
+/// Register that a session is awaiting user input.
 /// Called by the agent via the notify-attention stop hook.
 /// Emits an `attention-needed` event to the frontend.
 #[command]
 pub async fn register_attention_session(
     app: AppHandle,
-    workspace_id: i64,
+    session_id: i64,
 ) -> Result<(), String> {
     {
         let mut pending = ATTENTION_PENDING.lock().unwrap();
-        pending.insert(workspace_id);
+        pending.insert(session_id);
     }
 
     // Update database status
-    db::update_workspace_status(workspace_id, WorkspaceStatus::AwaitingInput)
+    db::update_session_status(session_id, SessionStatus::AwaitingInput)
         .map_err(|e| e.to_string())?;
 
     // Emit event to frontend
     app.emit("attention-needed", serde_json::json!({
-        "workspace_id": workspace_id
+        "session_id": session_id
     }))
     .map_err(|e| e.to_string())?;
 
-    tracing::info!("Session {} awaiting user input", workspace_id);
+    tracing::info!("Session {} awaiting user input", session_id);
     Ok(())
 }
 
-/// Clear the attention state for a workspace session.
+/// Clear the attention state for a session.
 /// Called when the user clicks on an awaiting session to resume interaction.
 #[command]
 pub async fn clear_attention_session(
     app: AppHandle,
-    workspace_id: i64,
+    session_id: i64,
 ) -> Result<(), String> {
     {
         let mut pending = ATTENTION_PENDING.lock().unwrap();
-        pending.remove(&workspace_id);
+        pending.remove(&session_id);
     }
 
     // Update database status back to running
-    db::update_workspace_status(workspace_id, WorkspaceStatus::Running)
+    db::update_session_status(session_id, SessionStatus::Running)
         .map_err(|e| e.to_string())?;
 
     // Emit event to frontend
     app.emit("attention-cleared", serde_json::json!({
-        "workspace_id": workspace_id
+        "session_id": session_id
     }))
     .map_err(|e| e.to_string())?;
 
-    tracing::info!("Session {} attention cleared", workspace_id);
+    tracing::info!("Session {} attention cleared", session_id);
     Ok(())
 }
 
-/// Check if a workspace session is currently awaiting input
+/// Check if a session is currently awaiting input
 #[command]
-pub async fn is_attention_pending(workspace_id: i64) -> bool {
+pub async fn is_attention_pending(session_id: i64) -> bool {
     let pending = ATTENTION_PENDING.lock().unwrap();
-    pending.contains(&workspace_id)
+    pending.contains(&session_id)
 }

@@ -62,7 +62,7 @@ pub fn current_env() -> Environment {
     *CURRENT_ENV
 }
 
-/// Convert a workspace path to the correct form for spawning commands
+/// Convert a session path to the correct form for spawning commands
 /// WSL paths are stored as Unix paths internally, Windows paths as Windows paths
 pub fn to_spawn_path(path: &PathBuf) -> PathBuf {
     match current_env() {
@@ -128,7 +128,7 @@ pub fn git_path() -> PathBuf {
     }
 }
 
-/// Determine the environment for a given workspace path
+/// Determine the environment for a given session path
 pub fn env_for_path(path: &PathBuf) -> Environment {
     let path_str = path.to_string_lossy().to_lowercase();
 

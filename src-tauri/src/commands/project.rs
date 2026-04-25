@@ -56,7 +56,7 @@ pub async fn list_projects() -> Result<Vec<Project>, String> {
     db::list_projects().map_err(|e| e.to_string())
 }
 
-/// Delete a project and its workspaces
+/// Delete a project and its sessions
 #[command]
 pub async fn delete_project(project_id: i64) -> Result<(), String> {
     db::delete_project(project_id).map_err(|e| e.to_string())

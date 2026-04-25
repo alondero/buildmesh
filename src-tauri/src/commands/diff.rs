@@ -141,19 +141,19 @@ pub async fn diff_files(
     })
 }
 
-/// Diff workspace files against a checkpoint
+/// Diff session files against a checkpoint
 #[command]
-pub async fn diff_workspace_checkpoint(
-    workspace_id: i64,
+pub async fn diff_session_checkpoint(
+    session_id: i64,
     checkpoint_id: i64,
 ) -> Result<DiffResult, String> {
-    let workspace = db::get_workspace_by_id(workspace_id)
+    let session = db::get_session_by_id(session_id)
         .map_err(|e| e.to_string())?;
     let checkpoint = db::get_checkpoint_by_id(checkpoint_id)
         .map_err(|e| e.to_string())?;
     let ref_name = format!("refs/heads/conductor/checkpoints/c{}", checkpoint.turn_index);
 
-    let repo = git2::Repository::open(&workspace.path)
+    let repo = git2::Repository::open(&session.path)
         .map_err(|e| e.to_string())?;
 
     let reference = repo.find_reference(&ref_name)
@@ -164,7 +164,7 @@ pub async fn diff_workspace_checkpoint(
         .map_err(|e| e.to_string())?;
 
     let mut files = Vec::new();
-    let current_path = PathBuf::from(&workspace.path);
+    let current_path = PathBuf::from(&session.path);
 
     if let Ok(entries) = fs::read_dir(&current_path) {
         for entry in entries.filter_map(|e| e.ok()) {

@@ -8,14 +8,14 @@ use tauri::command;
 /// Create a checkpoint — commits current state to a private git ref
 #[command]
 pub async fn create_checkpoint(
-    workspace_id: i64,
+    session_id: i64,
     turn_index: i32,
     message: Option<String>,
 ) -> Result<Checkpoint, String> {
-    let workspace = db::get_workspace_by_id(workspace_id)
+    let session = db::get_session_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let repo = Repository::open(&workspace.path)
+    let repo = Repository::open(&session.path)
         .map_err(|e| e.to_string())?;
 
     let mut index = repo.index()
@@ -62,25 +62,25 @@ pub async fn create_checkpoint(
     ).map_err(|e| e.to_string())?;
 
     let git_ref = format!("conductor/checkpoints/c{}", turn_index);
-    db::create_checkpoint(workspace_id, &git_ref, turn_index, message.as_deref())
+    db::create_checkpoint(session_id, &git_ref, turn_index, message.as_deref())
         .map_err(|e| e.to_string())
 }
 
-/// List checkpoints for a workspace
+/// List checkpoints for a session
 #[command]
-pub async fn list_checkpoints(workspace_id: i64) -> Result<Vec<Checkpoint>, String> {
-    db::list_checkpoints(workspace_id).map_err(|e| e.to_string())
+pub async fn list_checkpoints(session_id: i64) -> Result<Vec<Checkpoint>, String> {
+    db::list_checkpoints(session_id).map_err(|e| e.to_string())
 }
 
-/// Revert workspace to a specific checkpoint
+/// Revert session to a specific checkpoint
 #[command]
 pub async fn revert_to_checkpoint(checkpoint_id: i64) -> Result<(), String> {
     let checkpoint = db::get_checkpoint_by_id(checkpoint_id)
         .map_err(|e| e.to_string())?;
-    let workspace = db::get_workspace_by_id(checkpoint.workspace_id)
+    let session = db::get_session_by_id(checkpoint.session_id)
         .map_err(|e| e.to_string())?;
 
-    let repo = Repository::open(&workspace.path)
+    let repo = Repository::open(&session.path)
         .map_err(|e| e.to_string())?;
 
     let ref_name = format!("refs/heads/{}", checkpoint.git_ref);
@@ -108,9 +108,9 @@ pub async fn diff_checkpoints(
     let cp_b = db::get_checkpoint_by_id(checkpoint_b_id)
         .map_err(|e| e.to_string())?;
 
-    let workspace = db::get_workspace_by_id(cp_a.workspace_id)
+    let session = db::get_session_by_id(cp_a.session_id)
         .map_err(|e| e.to_string())?;
-    let repo = Repository::open(&workspace.path)
+    let repo = Repository::open(&session.path)
         .map_err(|e| e.to_string())?;
 
     let ref_a = format!("refs/heads/conductor/checkpoints/c{}", cp_a.turn_index);

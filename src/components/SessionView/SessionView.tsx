@@ -4,26 +4,26 @@ import { AgentTerminal } from '../Terminal/Terminal';
 import { CheckpointRail } from '../CheckpointRail/CheckpointRail';
 import { FileTree } from '../FileTree/FileTree';
 import { listen } from '@tauri-apps/api/event';
-import { watchWorkspace, unwatchWorkspace } from '../../lib/tauri';
+import { watchSession, unwatchSession } from '../../lib/tauri';
 
 export function SessionView() {
   const { activeSession, checkpoints, killAgent, spawnAgent, createCheckpoint } = useSessionStore();
   const [fileTreeKey, setFileTreeKey] = useState(0);
 
-  // Watch workspace for file changes
+  // Watch session for file changes
   useEffect(() => {
     if (!activeSession) return;
 
-    watchWorkspace(activeSession.id).catch(console.error);
+    watchSession(activeSession.id).catch(console.error);
 
-    const unlisten = listen<{ workspace_id: number; change: { path: string; kind: string } }>('file-change', (event) => {
-      if (activeSession && event.payload.workspace_id === activeSession.id) {
+    const unlisten = listen<{ session_id: number; change: { path: string; kind: string } }>('file-change', (event) => {
+      if (activeSession && event.payload.session_id === activeSession.id) {
         setFileTreeKey(k => k + 1);
       }
     });
 
     return () => {
-      unwatchWorkspace(activeSession.id).catch(console.error);
+      unwatchSession(activeSession.id).catch(console.error);
       unlisten.then(fn => fn());
     };
   }, [activeSession?.id]);
@@ -124,7 +124,7 @@ export function SessionView() {
       <div className="flex-1 flex overflow-hidden">
         {/* Agent terminal - takes full height, main area */}
         <div className="flex-1 min-w-0">
-          <AgentTerminal workspaceId={activeSession.id} />
+          <AgentTerminal sessionId={activeSession.id} />
         </div>
 
         {/* File tree sidebar */}

@@ -11,7 +11,7 @@ pub struct GitStatus {
     pub status: String, // "modified" | "added" | "deleted" | "renamed" | "untracked"
 }
 
-/// Get git status for a workspace — returns list of changed files
+/// Get git status for a directory — returns list of changed files
 #[command]
 pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
     let repo = Repository::open(&path).map_err(|e| e.to_string())?;

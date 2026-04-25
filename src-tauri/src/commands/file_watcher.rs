@@ -9,14 +9,14 @@ use tauri::{command, Emitter};
 static WATCHERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, RecommendedWatcher>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-/// Start watching a workspace for file changes
+/// Start watching a session for file changes
 #[command]
-pub fn watch_workspace(
-    workspace_id: i64,
+pub fn watch_session(
+    session_id: i64,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let app_handle_clone = app_handle.clone();
-    let workspace_id_clone = workspace_id;
+    let session_id_clone = session_id;
 
     let watcher = RecommendedWatcher::new(
         move |result: Result<Event, notify::Error>| {
@@ -36,7 +36,7 @@ pub fn watch_workspace(
 
                 for change in changes {
                     let _ = app_handle_clone.emit("file-change", serde_json::json!({
-                        "workspace_id": workspace_id_clone,
+                        "session_id": session_id_clone,
                         "change": change
                     }));
                 }
@@ -46,15 +46,15 @@ pub fn watch_workspace(
     ).map_err(|e| e.to_string())?;
 
     let mut watchers = WATCHERS.lock().unwrap();
-    watchers.insert(workspace_id, watcher);
+    watchers.insert(session_id, watcher);
 
     Ok(())
 }
 
-/// Stop watching a workspace
+/// Stop watching a session
 #[command]
-pub fn unwatch_workspace(workspace_id: i64) -> Result<(), String> {
+pub fn unwatch_session(session_id: i64) -> Result<(), String> {
     let mut watchers = WATCHERS.lock().unwrap();
-    watchers.remove(&workspace_id);
+    watchers.remove(&session_id);
     Ok(())
 }
