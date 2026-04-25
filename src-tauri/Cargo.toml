@@ -1,12 +1,12 @@
 [package]
-name = "conductor-clone"
+name = "buildmesh"
 version = "0.1.0"
 description = "AI Agent Orchestration Hub for Windows + WSL"
 authors = ["alond"]
 edition = "2021"
 
 [lib]
-name = "conductor_clone_lib"
+name = "buildmesh_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

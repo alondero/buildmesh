@@ -39,6 +39,7 @@ interface SessionState {
   spawnAgent: (sessionId: number, provider: string) => Promise<void>;
   killAgent: (sessionId: number) => Promise<void>;
   sendToAgent: (sessionId: number, input: string) => Promise<void>;
+  writeToAgent: (sessionId: number, data: string) => Promise<void>;
   createCheckpoint: (sessionId: number, turnIndex: number, message?: string) => Promise<void>;
   revertCheckpoint: (checkpointId: number) => Promise<void>;
 }
@@ -136,6 +137,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   sendToAgent: async (sessionId, input) => {
     try {
       await invoke('send_to_agent', { workspaceId: sessionId, input });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  writeToAgent: async (sessionId, data) => {
+    try {
+      await invoke('write_to_agent', { workspaceId: sessionId, data });
     } catch (e) {
       set({ error: String(e) });
     }

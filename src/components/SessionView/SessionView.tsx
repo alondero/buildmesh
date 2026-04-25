@@ -1,23 +1,13 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useSessionStore } from '../../stores/sessionStore';
-import { TerminalPanel } from '../Terminal/Terminal';
+import { AgentTerminal } from '../Terminal/Terminal';
 import { CheckpointRail } from '../CheckpointRail/CheckpointRail';
 import { FileTree } from '../FileTree/FileTree';
 import { listen } from '@tauri-apps/api/event';
 import { watchWorkspace, unwatchWorkspace } from '../../lib/tauri';
 
-interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  tool_calls?: string;
-}
-
 export function SessionView() {
-  const { activeSession, checkpoints, killAgent, spawnAgent, sendToAgent, createCheckpoint } = useSessionStore();
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
-  const [streaming, setStreaming] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const { activeSession, checkpoints, killAgent, spawnAgent, createCheckpoint } = useSessionStore();
   const [fileTreeKey, setFileTreeKey] = useState(0);
 
   // Watch workspace for file changes
@@ -38,18 +28,6 @@ export function SessionView() {
     };
   }, [activeSession?.id]);
 
-  // Listen for agent output
-  useEffect(() => {
-    const unlisten = listen<{ workspace_id: number; line: string }>('agent-output', (event) => {
-      if (activeSession && event.payload.workspace_id === activeSession.id) {
-        setMessages(prev => [...prev, { role: 'assistant', content: event.payload.line }]);
-        setStreaming(false);
-      }
-    });
-
-    return () => { unlisten.then(fn => fn()); };
-  }, [activeSession]);
-
   if (!activeSession) {
     return (
       <div className="flex-1 flex items-center justify-center text-[#666]">
@@ -61,26 +39,8 @@ export function SessionView() {
     );
   }
 
-  const handleSend = async () => {
-    if (!input.trim()) return;
-    if (activeSession?.status !== 'running') return;
-
-    const userMsg = input;
-    setInput('');
-    setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
-    setStreaming(true);
-
-    try {
-      await sendToAgent(activeSession.id, userMsg + '\n');
-    } catch (e) {
-      console.error('Failed to send to agent:', e);
-      setStreaming(false);
-    }
-  };
-
   const handleKillAgent = async () => {
     await killAgent(activeSession.id);
-    setMessages([]);
   };
 
   const handleSpawnAgent = async (provider: string) => {
@@ -162,76 +122,16 @@ export function SessionView() {
 
       {/* Main content area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Chat panel */}
-        <div className="flex-1 flex flex-col border-r border-[#2a2a2a]">
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
-            {messages.length === 0 && (
-              <div className="text-center text-[#666] mt-20">
-                <p className="text-sm">Agent not started yet</p>
-                <p className="text-xs mt-1">Click a provider button above to spawn an agent</p>
-              </div>
-            )}
-
-            {messages.map((msg, i) => (
-              <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div
-                  className={`
-                    max-w-[80%] rounded-lg px-3 py-2 text-sm
-                    ${msg.role === 'user'
-                      ? 'bg-[#3b82f6] text-white'
-                      : 'bg-[#1a1a1a] text-[#e0e0e0] border border-[#2a2a2a]'}
-                  `}
-                >
-                  {msg.content}
-                </div>
-              </div>
-            ))}
-
-            {streaming && (
-              <div className="flex justify-start">
-                <div className="bg-[#1a1a1a] text-[#888] rounded-lg px-3 py-2 text-sm border border-[#2a2a2a]">
-                  <span className="animate-pulse">●</span> Agent is thinking...
-                </div>
-              </div>
-            )}
-
-            <div ref={chatEndRef} />
-          </div>
-
-          {/* Input */}
-          <div className="p-3 border-t border-[#2a2a2a]">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-                placeholder="Type a message to the agent..."
-                className="flex-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded px-3 py-2 text-sm text-[#e0e0e0] placeholder-[#666] focus:border-[#3b82f6] focus:outline-none"
-              />
-              <button
-                onClick={handleSend}
-                className="px-4 py-2 rounded bg-[#3b82f6] text-white text-sm hover:bg-[#2563eb]"
-              >
-                Send
-              </button>
-            </div>
-          </div>
+        {/* Agent terminal - takes full height, main area */}
+        <div className="flex-1 min-w-0">
+          <AgentTerminal workspaceId={activeSession.id} />
         </div>
 
-        {/* Right panel: file tree + terminal */}
-        <div className="w-80 flex flex-col">
-          {/* File tree */}
-          <div className="h-1/2 border-b border-[#2a2a2a] p-3 overflow-y-auto">
+        {/* File tree sidebar */}
+        <div className="w-72 border-l border-[#2a2a2a] overflow-y-auto">
+          <div className="p-3">
             <h3 className="text-xs font-medium text-[#888] uppercase mb-2">Files</h3>
-            {activeSession && (
-              <FileTree key={fileTreeKey} sessionPath={activeSession.path} />
-            )}
-          </div>
-
-          {/* Terminal */}
-          <div className="h-1/2">
-            <TerminalPanel workspaceId={activeSession.id} isWsl={activeSession.env === 'wsl'} />
+            <FileTree key={fileTreeKey} sessionPath={activeSession.path} />
           </div>
         </div>
       </div>

@@ -1,4 +1,4 @@
-//! Data models for Conductor Clone
+//! Data models for Buildmesh
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

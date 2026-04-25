@@ -8,12 +8,15 @@ use tauri_plugin_dialog::DialogExt;
 /// Add a project by opening a folder picker dialog
 #[command]
 pub async fn add_project(app: tauri::AppHandle) -> Result<Project, String> {
+    tracing::debug!("add_project called");
     let folder_path = app.dialog()
         .file()
-        .blocking_pick_folder()
-        .ok_or("No folder selected")?;
+        .blocking_pick_folder();
+    tracing::debug!("folder picker returned: {:?}", folder_path);
+    let folder_path = folder_path.ok_or("No folder selected")?;
 
     let path = folder_path.to_string();
+    tracing::debug!("selected path: {}", path);
     let name = if let tauri_plugin_dialog::FilePath::Path(p) = folder_path {
         std::path::Path::new(&p)
             .file_name()
@@ -33,8 +36,12 @@ pub async fn add_project(app: tauri::AppHandle) -> Result<Project, String> {
             .unwrap_or(&path)
             .to_string()
     };
+    tracing::debug!("project name: {}", name);
 
-    db::create_project(&name, &path).map_err(|e| e.to_string())
+    db::create_project(&name, &path).map_err(|e| {
+        tracing::error!("create_project failed: {}", e);
+        e.to_string()
+    })
 }
 
 /// Create a new project

@@ -38,9 +38,12 @@ export const useProjectStore = create<ProjectState>((set) => ({
 
   addProject: async () => {
     try {
-      await invoke('add_project');
+      const result = await invoke<Project>('add_project');
+      console.log('[projectStore] add_project returned:', result);
       await useProjectStore.getState().fetchProjects();
+      console.log('[projectStore] projects after fetch:', useProjectStore.getState().projects.length);
     } catch (e) {
+      console.error('[projectStore] add_project failed:', e);
       set({ error: String(e) });
     }
   },

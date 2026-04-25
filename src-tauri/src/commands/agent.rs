@@ -9,7 +9,6 @@ use tauri::{command, AppHandle, Emitter};
 
 struct AgentProcess {
     child: Box<dyn portable_pty::Child + Send>,
-    reader: Box<dyn std::io::Read + Send>,
     writer: Box<dyn std::io::Write + Send>,
 }
 
@@ -116,7 +115,7 @@ pub async fn spawn_agent(
 
     {
         let mut processes = AGENT_PROCESSES.lock().unwrap();
-        processes.insert(workspace_id, AgentProcess { child, reader: reader_for_map, writer });
+        processes.insert(workspace_id, AgentProcess { child, writer });
     }
 
     // Spawn a task to read agent output and emit events
@@ -150,13 +149,27 @@ pub async fn spawn_agent(
     Ok(())
 }
 
-/// Send input to the running agent
+/// Send input to the running agent (raw keystrokes, no newline)
+#[command]
+pub async fn write_to_agent(workspace_id: i64, data: String) -> Result<(), String> {
+    let mut processes = AGENT_PROCESSES.lock().unwrap();
+    if let Some(ref mut agent) = processes.get_mut(&workspace_id) {
+        use std::io::Write;
+        agent.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Agent not running".to_string())
+    }
+}
+
+/// Send input to the running agent (with newline appended)
 #[command]
 pub async fn send_to_agent(workspace_id: i64, input: String) -> Result<(), String> {
     let mut processes = AGENT_PROCESSES.lock().unwrap();
     if let Some(ref mut agent) = processes.get_mut(&workspace_id) {
         use std::io::Write;
-        agent.writer.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
+        let input_with_newline = format!("{}\n", input);
+        agent.writer.write_all(input_with_newline.as_bytes()).map_err(|e| e.to_string())?;
         Ok(())
     } else {
         Err("Agent not running for this workspace".to_string())

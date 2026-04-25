@@ -329,6 +329,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "buildmesh"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "difference-rs",
+ "git2",
+ "notify",
+ "once_cell",
+ "portable-pty",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tauri-plugin-shell",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -498,32 +524,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
-]
-
-[[package]]
-name = "conductor-clone"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "difference-rs",
- "git2",
- "notify",
- "once_cell",
- "portable-pty",
- "rusqlite",
- "serde",
- "serde_json",
- "syntect",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tauri-plugin-shell",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
 ]
 
 [[package]]

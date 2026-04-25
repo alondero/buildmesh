@@ -1,4 +1,4 @@
-//! Checkpoint management via Git refs
+//! Checkpoint management via Git refs for Buildmesh
 
 use crate::db;
 use crate::models::Checkpoint;

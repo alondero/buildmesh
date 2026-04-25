@@ -2,19 +2,18 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { useSessionStore } from '../../stores/sessionStore';
 
-interface TerminalPanelProps {
+interface AgentTerminalProps {
   workspaceId: number;
-  isWsl: boolean;
 }
 
-export function TerminalPanel({ workspaceId, isWsl }: TerminalPanelProps) {
+export function AgentTerminal({ workspaceId }: AgentTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
-  const ptyIdRef = useRef(`term-${workspaceId}-${Date.now()}`);
   const [connected, setConnected] = useState(false);
+  const writeToAgent = useSessionStore((s) => s.writeToAgent);
 
   const connect = useCallback(async () => {
     if (!containerRef.current) return;
@@ -31,41 +30,30 @@ export function TerminalPanel({ workspaceId, isWsl }: TerminalPanelProps) {
     fitAddon.fit();
 
     termRef.current = term;
-    const ptyId = ptyIdRef.current;
 
-    try {
-      await invoke('spawn_shell', {
-        ptyId,
-        isWsl,
-        cwd: '',
-      });
-      setConnected(true);
+    // Listen for agent output
+    const unlisten = await listen<{ workspace_id: number; line: string }>('agent-output', (event) => {
+      if (event.payload.workspace_id === workspaceId) {
+        term.write(event.payload.line);
+      }
+    });
 
-      // Handle resize
-      const observer = new ResizeObserver(() => fitAddon.fit());
-      observer.observe(containerRef.current);
+    setConnected(true);
 
-      term.onData((data) => {
-        invoke('write_pty', { ptyId, data });
-      });
+    // Handle resize
+    const observer = new ResizeObserver(() => fitAddon.fit());
 
-      // Listen for PTY output
-      const unlisten = await listen<{ pty_id: string; data: string }>('pty-output', (event) => {
-        if (event.payload.pty_id === ptyId) {
-          term.write(event.payload.data);
-        }
-      });
+    // Send keystrokes directly to agent PTY
+    term.onData((data) => {
+      writeToAgent(workspaceId, data);
+    });
 
-      return () => {
-        unlisten();
-        observer.disconnect();
-        invoke('close_pty', { ptyId });
-        term.dispose();
-      };
-    } catch (e) {
-      term.write(`Failed to start terminal: ${e}\r\n`);
-    }
-  }, [isWsl]);
+    return () => {
+      unlisten();
+      observer.disconnect();
+      term.dispose();
+    };
+  }, [workspaceId, writeToAgent]);
 
   useEffect(() => {
     const cleanup = connect();
@@ -77,7 +65,7 @@ export function TerminalPanel({ workspaceId, isWsl }: TerminalPanelProps) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#2a2a2a] bg-[#111]">
-        <h3 className="text-xs font-medium text-[#888] uppercase">Terminal</h3>
+        <h3 className="text-xs font-medium text-[#888] uppercase">Agent Terminal</h3>
         <span className={`text-xs ${connected ? 'text-[#22c55e]' : 'text-[#666]'}`}>
           {connected ? '●' : '○'}
         </span>

@@ -1,4 +1,4 @@
-# Conductor Clone — Product Vision & PRD
+# Buildmesh — Product Vision & PRD
 
 ## 1. Concept & Vision
 
@@ -6,7 +6,7 @@
 
 **Core purpose:** Enable developers to run, monitor, and coordinate multiple AI coding agents (Claude Code, Gemini, Open Code) across any number of projects and sessions simultaneously. The app is the ephemeral UI layer — agents are durable CLI processes that survive app restarts.
 
-**Why it matters:** Running agents in parallel on a complex project means juggling terminals and losing visibility. Conductor Clone gives you a dashboard where every agent session is visible, resumable, and inspectable — with diff review and file change tracking.
+**Why it matters:** Running agents in parallel on a complex project means juggling terminals and losing visibility. Buildmesh gives you a dashboard where every agent session is visible, resumable, and inspectable — with diff review and file change tracking.
 
 **What makes it compelling:**
 - Multi-session dashboard: see all agents across all projects at a glance
@@ -17,9 +17,9 @@
 
 ---
 
-## 2. Conductor Feature Analysis
+## 2. Buildmesh Feature Analysis
 
-| Feature | Conductor Clone MVP | Notes |
+| Feature | Buildmesh MVP | Notes |
 |---|---|---|
 | **Parallel Agents** | Multiple sessions across projects, auto-resume on restart | Sessions run as durable CLI processes |
 | **Projects** | Folders on disk (git or not), auto-named from folder | Open via native folder picker |
@@ -60,7 +60,7 @@ The left sidebar shows a **Projects** tree — the top-level organizational unit
 
 ```
 ▼ Projects
-  ▼ conductor-clone
+  ▼ my-app
       ● fluffy-rainbow-panda (WSL) — Running
       ● sharp-mountain-river (Win) — Running
       ○ gentle-forest-dawn (Win) — Idle
@@ -162,7 +162,7 @@ opencode
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Conductor Clone UI                     │
+│                    Buildmesh UI                          │
 │         (Electron / Tauri — Windows Native)              │
 ├─────────────────────────────────────────────────────────┤
 │  Workspace Manager                                       │
@@ -263,11 +263,11 @@ wsl.exe --cd /path/to/worktree -- cwrap --anthropic --resume <session-id>
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  Conductor Clone                                              [Settings] │
+│  Buildmesh                                              [Settings] │
 ├──────────────────────┬──────────────────────────────────────────────────┤
 │ ▼ Projects          │  ┌─ fluffy-rainbow-panda ────────────────────┐   │
 │                      │  │ [WSL] [Branch: fluffy-rainbow-panda]    │   │
-│  ▼ conductor-clone  │  │ [Anthropic ▼]        [Stop]  [Diff ⌘D] │   │
+│  ▼ my-app           │  │ [Anthropic ▼]        [Stop]  [Diff ⌘D] │   │
 │    ● fluffy-... (WSL)                                       │   ├───────────────┬─────────────────────────────┤
 │    ● sharp-... (Win)                                       │   │ FILE TREE     │ TERMINAL                   │   │
 │    ○ gentle-... (Win)                                      │   │               │                            │   │

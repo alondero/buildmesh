@@ -1,4 +1,4 @@
-//! Conductor Clone — Rust Backend
+//! Buildmesh — Rust Backend
 //! AI Agent Orchestration Hub for Windows + WSL
 
 mod commands;
@@ -18,48 +18,29 @@ pub fn run() {
             // Initialize database
             let app_dir = app.path().app_data_dir().unwrap();
             std::fs::create_dir_all(&app_dir)?;
-            let db_path = app_dir.join("conductor.db");
+            let db_path = app_dir.join("buildmesh.db");
             db::init(&db_path)?;
 
             // Set up file-based logging with tracing
             let log_dir = app_dir.join("logs");
             std::fs::create_dir_all(&log_dir)?;
-            let file_appender = tracing_appender::rolling::never(&log_dir, "conductor.log");
+            let file_appender = tracing_appender::rolling::never(&log_dir, "buildmesh.log");
             let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
             tracing_subscriber::fmt()
                 .with_writer(non_blocking)
                 .with_ansi(false)
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("conductor_clone_lib=debug".parse().unwrap())
-                    .add_directive("conductor_clone=debug".parse().unwrap())
+                    .add_directive("buildmesh_lib=debug".parse().unwrap())
+                    .add_directive("buildmesh=debug".parse().unwrap())
                     .add_directive("info".parse().unwrap()))
                 .init();
 
             // Keep guard alive for app lifetime
             Box::leak(Box::new(_guard));
 
-            tracing::info!("Conductor Clone started — db at {:?}", db_path);
+            tracing::info!("Buildmesh started — db at {:?}", db_path);
 
-            // Auto-resume all sessions that were running
-            let app_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                if let Ok(sessions) = db::list_workspaces() {
-                    for session in sessions.iter().filter(|s| s.status == models::WorkspaceStatus::Running) {
-                        tracing::info!("Auto-resuming session {} ({})", session.name, session.id);
-                        let provider_str = session.provider.to_string();
-                        if let Err(e) = tokio::runtime::Runtime::new()
-                            .unwrap()
-                            .block_on(commands::agent::spawn_agent(
-                                app_handle.clone(),
-                                session.id,
-                                provider_str,
-                                None,
-                            )) {
-                            tracing::error!("Failed to resume session {}: {}", session.id, e);
-                        }
-                    }
-                }
-            });
+            // Auto-resume removed per architecture decision — sessions start explicitly, not on app restart
 
             Ok(())
         })
@@ -82,6 +63,7 @@ pub fn run() {
             commands::agent::kill_agent,
             commands::agent::is_agent_running,
             commands::agent::send_to_agent,
+            commands::agent::write_to_agent,
             // Checkpoint
             commands::checkpoint::create_checkpoint,
             commands::checkpoint::list_checkpoints,

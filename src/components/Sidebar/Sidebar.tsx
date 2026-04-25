@@ -4,8 +4,12 @@ import type { Project } from '../../stores/projectStore';
 import type { Session } from '../../stores/sessionStore';
 
 export function Sidebar() {
-  const { projects, addProject } = useProjectStore();
-  const { sessions, activeSessionId, setActiveSession, createSession } = useSessionStore();
+  const projects = useProjectStore(state => state.projects);
+  const addProject = useProjectStore(state => state.addProject);
+  const sessions = useSessionStore(state => state.sessions);
+  const activeSessionId = useSessionStore(state => state.activeSessionId);
+  const setActiveSession = useSessionStore(state => state.setActiveSession);
+  const createSession = useSessionStore(state => state.createSession);
 
   const handleAddProject = async () => {
     await addProject();
@@ -21,7 +25,7 @@ export function Sidebar() {
     <div className="w-64 bg-[#111] border-r border-[#2a2a2a] flex flex-col h-full">
       {/* Header */}
       <div className="p-3 border-b border-[#2a2a2a]">
-        <h1 className="text-sm font-semibold text-[#e0e0e0]">Conductor Clone</h1>
+        <h1 className="text-sm font-semibold text-[#e0e0e0]">Buildmesh</h1>
       </div>
 
       {/* Projects list */}

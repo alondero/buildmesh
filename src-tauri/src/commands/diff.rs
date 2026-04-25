@@ -1,4 +1,4 @@
-//! Diff computation using difference-rs with syntect syntax highlighting
+//! Diff computation using difference-rs with syntect syntax highlighting for Buildmesh
 
 use crate::db;
 use crate::models::{DiffHunk, DiffLine, FileDiff, DiffResult};
