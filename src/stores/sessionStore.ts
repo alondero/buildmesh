@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { disposeTerminal } from '../components/Terminal/Terminal';
 
 export interface Session {
   id: number;
@@ -109,6 +110,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   archiveSession: async (id) => {
     try {
       await invoke('archive_session', { sessionId: id });
+      disposeTerminal(id); // Clean up terminal when session is archived
       await get().fetchSessions();
     } catch (e) {
       set({ error: String(e) });
@@ -160,6 +162,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   killAgent: async (sessionId) => {
     try {
       await invoke('kill_agent', { sessionId });
+      disposeTerminal(sessionId); // Clean up terminal when agent is killed
       await get().fetchSessions();
     } catch (e) {
       set({ error: String(e) });

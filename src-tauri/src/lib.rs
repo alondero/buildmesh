@@ -40,7 +40,12 @@ pub fn run() {
 
             tracing::info!("Buildmesh started — db at {:?}", db_path);
 
-            // Auto-resume removed per architecture decision — sessions start explicitly, not on app restart
+            // Log window creation
+            if let Some(window) = app.get_webview_window("main") {
+                tracing::info!("Main window found, ready to load content");
+            } else {
+                tracing::warn!("Main window not found during setup");
+            }
 
             Ok(())
         })

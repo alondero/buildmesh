@@ -16,12 +16,10 @@ function App() {
   const { fetchProjects } = useProjectStore();
   const { fetchSessions, initAttentionListeners } = useSessionStore();
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
+  const [isReady, setIsReady] = useState(false);
 
+  // Set up error event listener
   useEffect(() => {
-    initAttentionListeners();
-    fetchProjects();
-    fetchSessions();
-
     const unlisten = listen<{ provider: string; message: string }>('provider-error', (event) => {
       const toast: ErrorToast = {
         id: Date.now(),
@@ -39,9 +37,31 @@ function App() {
     };
   }, []);
 
+  // Initialize app
+  useEffect(() => {
+    const init = async () => {
+      await initAttentionListeners();
+      await fetchProjects();
+      await fetchSessions();
+      setIsReady(true);
+    };
+    init();
+  }, []);
+
   const dismissToast = (id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
+
+  if (!isReady) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-[#0f0f0f]">
+        <div className="text-center">
+          <div className="text-[#22c55e] text-2xl mb-4">●</div>
+          <p className="text-[#888]">Loading Buildmesh...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
