@@ -124,6 +124,7 @@ pub struct Session {
     pub env: EnvType,         // windows or wsl
     pub provider: Provider,   // anthropic or minimax
     pub status: SessionStatus,
+    pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
     pub created_at: DateTime<Utc>,
 }
 

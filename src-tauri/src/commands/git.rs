@@ -2,7 +2,6 @@
 
 use git2::{Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use tauri::command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

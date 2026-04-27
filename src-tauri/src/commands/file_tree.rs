@@ -1,9 +1,10 @@
-//! File tree listing
+//! File tree listing with host/guest path mapping
 
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::command;
+use crate::env;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
@@ -13,13 +14,22 @@ pub struct FileNode {
     pub children: Vec<FileNode>,
 }
 
-fn read_dir_recursive(path: &Path, depth: usize, max_depth: usize) -> FileNode {
+fn read_dir_recursive(path: &Path, base_path: &str, host_base: &str, depth: usize, max_depth: usize) -> FileNode {
     let name = path.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string_lossy().to_string());
 
     let is_dir = path.is_dir();
     let mut children = Vec::new();
+
+    // Calculate the internal path for the frontend
+    // We replace the host-specific prefix with the original guest path
+    let host_path_str = path.to_string_lossy().to_string();
+    let internal_path = if host_path_str.starts_with(host_base) {
+        format!("{}{}", base_path, &host_path_str[host_base.len()..].replace('\\', "/"))
+    } else {
+        host_path_str.replace('\\', "/")
+    };
 
     if is_dir && depth < max_depth {
         if let Ok(entries) = fs::read_dir(path) {
@@ -35,19 +45,18 @@ fn read_dir_recursive(path: &Path, depth: usize, max_depth: usize) -> FileNode {
                 }
             });
             for entry in entries {
-                // Skip hidden files/dirs
                 let name = entry.file_name();
                 if name.to_string_lossy().starts_with('.') {
                     continue;
                 }
-                children.push(read_dir_recursive(&entry.path(), depth + 1, max_depth));
+                children.push(read_dir_recursive(&entry.path(), base_path, host_base, depth + 1, max_depth));
             }
         }
     }
 
     FileNode {
         name,
-        path: path.to_string_lossy().to_string(),
+        path: internal_path,
         is_dir,
         children,
     }
@@ -56,13 +65,16 @@ fn read_dir_recursive(path: &Path, depth: usize, max_depth: usize) -> FileNode {
 /// List a directory as a tree structure
 #[command]
 pub fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode, String> {
-    let path = Path::new(&path);
-    if !path.exists() {
-        return Err(format!("Path does not exist: {}", path.display()));
+    let host_path = env::to_host_path(&path);
+    let path_obj = Path::new(&host_path);
+    
+    if !path_obj.exists() {
+        return Err(format!("Path does not exist: {} (mapped from {})", host_path, path));
     }
-    if !path.is_dir() {
-        return Err(format!("Path is not a directory: {}", path.display()));
+    if !path_obj.is_dir() {
+        return Err(format!("Path is not a directory: {}", host_path));
     }
+    
     let depth = max_depth.unwrap_or(3);
-    Ok(read_dir_recursive(path, 0, depth))
+    Ok(read_dir_recursive(path_obj, &path, &host_path, 0, depth))
 }

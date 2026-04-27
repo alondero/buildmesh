@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
 import { useProjectStore } from './stores/projectStore';
@@ -12,13 +13,53 @@ interface ErrorToast {
   message: string;
 }
 
+interface BackendAgentState {
+  session_id: number;
+  is_alive: boolean;
+}
+
 function App() {
   const { fetchProjects } = useProjectStore();
   const { fetchSessions, initAttentionListeners } = useSessionStore();
+  const storeError = useSessionStore(state => state.error);
+  
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
   const [isReady, setIsReady] = useState(false);
+  const [backendAgents, setBackendAgents] = useState<BackendAgentState[]>([]);
+  const [eventCounts, setEventCounts] = useState<Record<number, number>>({});
+  const [uiErrors, setUiErrors] = useState<string[]>([]);
 
-  // Set up error event listener
+  // Capture global JS errors
+  useEffect(() => {
+    const handleError = (e: ErrorEvent) => {
+      setUiErrors(prev => [...prev.slice(-4), `UI Error: ${e.message}`]);
+    };
+    window.addEventListener('error', handleError);
+    return () => window.removeEventListener('error', handleError);
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<{ session_id: number; line: string }>('agent-output', (event) => {
+      setEventCounts(prev => ({
+        ...prev,
+        [event.payload.session_id]: (prev[event.payload.session_id] || 0) + event.payload.line.length
+      }));
+    });
+    return () => { unlisten.then(f => f()); };
+  }, []);
+
+  useEffect(() => {
+    const timer = setInterval(async () => {
+      try {
+        const agents = await invoke<BackendAgentState[]>('debug_list_agents');
+        setBackendAgents(agents);
+      } catch (e) { 
+        setUiErrors(prev => [...prev.slice(-4), `Backend Fetch Error: ${e}`]);
+      }
+    }, 2000);
+    return () => clearInterval(timer);
+  }, []);
+
   useEffect(() => {
     const unlisten = listen<{ provider: string; message: string }>('provider-error', (event) => {
       const toast: ErrorToast = {
@@ -27,61 +68,86 @@ function App() {
         message: event.payload.message,
       };
       setToasts((prev) => [...prev, toast]);
-      setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== toast.id));
-      }, 5000);
     });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [setToasts]);
 
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, []);
+  useEffect(() => {
+    if (storeError) {
+      const toast: ErrorToast = { id: Date.now(), provider: 'System', message: storeError };
+      setToasts((prev) => [...prev, toast]);
+    }
+  }, [storeError, setToasts]);
 
-  // Initialize app
   useEffect(() => {
     const init = async () => {
-      await initAttentionListeners();
-      await fetchProjects();
-      await fetchSessions();
-      setIsReady(true);
+      try {
+        await initAttentionListeners();
+        await fetchProjects();
+        await fetchSessions();
+        setIsReady(true);
+      } catch (e) {
+        setUiErrors(prev => [...prev, `Init Error: ${e}`]);
+      }
     };
     init();
   }, []);
 
   const dismissToast = (id: number) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
+    setToasts(prev => prev.filter(t => t.id !== id));
   };
 
-  if (!isReady) {
+  if (!isReady && uiErrors.length === 0) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-[#0f0f0f]">
-        <div className="text-center">
-          <div className="text-[#22c55e] text-2xl mb-4">●</div>
-          <p className="text-[#888]">Loading Buildmesh...</p>
-        </div>
+        <div className="text-[#3b82f6] text-2xl animate-pulse">●</div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#0a0a0a] text-[#e0e0e0]">
       <Sidebar />
       <SessionView />
-      {toasts.map((toast) => (
-        <div
-          key={toast.id}
-          className="fixed bottom-4 right-4 bg-red-600 text-white px-4 py-3 rounded-lg shadow-lg flex items-center gap-3 max-w-md z-50"
-        >
-          <span className="font-semibold">{(toast.provider).toUpperCase()} Error:</span>
-          <span className="text-sm">{toast.message}</span>
-          <button
-            onClick={() => dismissToast(toast.id)}
-            className="ml-2 text-white/70 hover:text-white text-lg leading-none"
-          >
-            ×
-          </button>
+      
+      {/* DEBUG OVERLAY */}
+      <div className="fixed bottom-0 left-0 right-0 bg-black/90 border-t border-red-500/30 flex flex-col z-[100] font-mono text-[10px]">
+        <div className="h-8 flex items-center px-4 gap-4">
+          <span className="text-red-500 font-bold">SYSTEM DEBUG:</span>
+          <div className="flex gap-3">
+            {backendAgents.map(a => (
+              <div key={a.session_id} className="flex items-center gap-1">
+                <span className={a.is_alive ? 'text-green-500' : 'text-gray-500'}>
+                  ID:{a.session_id} {a.is_alive ? 'RUN' : 'DEAD'}
+                </span>
+                <span className="text-[#888]">({eventCounts[a.session_id] || 0} bytes)</span>
+              </div>
+            ))}
+          </div>
+          <button onClick={() => window.location.reload()} className="ml-auto bg-red-900/40 px-2 py-0.5 rounded text-red-200">RELOAD</button>
         </div>
-      ))}
+        
+        {uiErrors.length > 0 && (
+          <div className="p-2 bg-red-950/20 border-t border-red-900/30 max-h-24 overflow-y-auto">
+            {uiErrors.map((err, i) => (
+              <div key={i} className="text-red-400 border-b border-red-900/10 py-0.5">{err}</div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Toast notifications */}
+      <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
+        {toasts.map((toast) => (
+          <div key={toast.id} className="bg-[#1a1a1a] border border-red-500/50 text-white px-4 py-3 rounded flex items-center gap-2">
+            <div className="flex-1">
+              <div className="text-[10px] font-bold text-red-500 uppercase">{toast.provider} Error</div>
+              <div className="text-xs text-[#ccc]">{toast.message}</div>
+            </div>
+            <button onClick={() => dismissToast(toast.id)} className="text-white/50 hover:text-white">&times;</button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

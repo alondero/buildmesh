@@ -1,123 +1,165 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
-import { listen } from '@tauri-apps/api/event';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 
-// Module-level registry - persists across session switches
-// Each session gets its own xterm.js instance with its own scrollback buffer
-const TERMINALS = new Map<number, Terminal>();
-const FIT_ADDONS = new Map<number, FitAddon>();
-const LISTENERS = new Map<number, () => void>();
-
-interface AgentTerminalProps {
-  sessionId: number;
+interface TerminalInstance {
+  term: Terminal;
+  fitAddon: FitAddon;
+  unlisten: UnlistenFn;
 }
 
-async function writeToAgent(sessionId: number, data: string) {
-  try {
-    await invoke('write_to_agent', { sessionId, data });
-  } catch (e) {
-    console.error('write_to_agent error:', e);
-  }
-}
+class TerminalManager {
+  private instances = new Map<number, TerminalInstance>();
+  private listeners = new Set<() => void>();
 
-function getOrCreateTerminal(sessionId: number): Terminal {
-  if (TERMINALS.has(sessionId)) {
-    return TERMINALS.get(sessionId)!;
-  }
+  async getOrCreate(sessionId: number): Promise<TerminalInstance | null> {
+    try {
+      if (this.instances.has(sessionId)) {
+        return this.instances.get(sessionId)!;
+      }
 
-  const term = new Terminal({
-    theme: { background: '#0f0f0f', foreground: '#e0e0e0' },
-    fontSize: 13,
-    fontFamily: 'Cascadia Code, Consolas, monospace',
-    scrollback: 10000,
-  });
-  const fitAddon = new FitAddon();
-  term.loadAddon(fitAddon);
+      console.log(`[TerminalManager] Creating terminal for session ${sessionId}`);
+      const term = new Terminal({
+        theme: { 
+          background: '#0f0f0f', 
+          foreground: '#e0e0e0',
+          cursor: '#3b82f6',
+          selectionBackground: 'rgba(59, 130, 246, 0.3)'
+        },
+        fontSize: 13,
+        fontFamily: 'Cascadia Code, Consolas, monospace',
+        scrollback: 10000,
+        cursorBlink: true,
+        allowProposedApi: true
+      });
 
-  // Set up event listener for this session
-  listen<{ session_id: number; line: string }>('agent-output', (event) => {
-    if (event.payload.session_id === sessionId) {
-      term.write(event.payload.line);
+      const fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+
+      const unlisten = await listen<{ session_id: number; line: string }>('agent-output', (event) => {
+        if (event.payload.session_id === sessionId) {
+          term.write(event.payload.line);
+        }
+      });
+
+      term.onData((data) => {
+        invoke('write_to_agent', { sessionId, data }).catch(console.error);
+      });
+
+      const instance = { term, fitAddon, unlisten };
+      this.instances.set(sessionId, instance);
+      this.notify();
+      return instance;
+    } catch (e) {
+      console.error(`[TerminalManager] Failed to create terminal for ${sessionId}`, e);
+      return null;
     }
-  }).then((unlisten) => {
-    LISTENERS.set(sessionId, () => unlisten());
-  });
+  }
 
-  // Input forwarding
-  term.onData((data) => {
-    writeToAgent(sessionId, data);
-  });
+  subscribe(cb: () => void) {
+    this.listeners.add(cb);
+    return () => { this.listeners.delete(cb); };
+  }
 
-  TERMINALS.set(sessionId, term);
-  FIT_ADDONS.set(sessionId, fitAddon);
-  return term;
+  private notify() {
+    this.listeners.forEach(cb => cb());
+  }
+
+  dispose(sessionId: number) {
+    const instance = this.instances.get(sessionId);
+    if (instance) {
+      instance.unlisten();
+      instance.term.dispose();
+      this.instances.delete(sessionId);
+      this.notify();
+    }
+  }
 }
 
+export const terminalManager = new TerminalManager();
+
+/**
+ * Backward compatibility export
+ */
 export function disposeTerminal(sessionId: number) {
-  const unlisten = LISTENERS.get(sessionId);
-  if (unlisten) {
-    unlisten();
-    LISTENERS.delete(sessionId);
-  }
-  const term = TERMINALS.get(sessionId);
-  if (term) {
-    term.dispose();
-    TERMINALS.delete(sessionId);
-  }
-  FIT_ADDONS.delete(sessionId);
+  terminalManager.dispose(sessionId);
 }
 
-export function AgentTerminal({ sessionId }: AgentTerminalProps) {
+function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisible: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const prevSessionIdRef = useRef<number | null>(null);
+  const instanceRef = useRef<TerminalInstance | null>(null);
 
   useEffect(() => {
-    if (!containerRef.current) {
-      return;
-    }
-
-    // Clean up the previous session's terminal BEFORE mounting the new one.
-    // This ensures the old Terminal's DOM is removed so xterm.js starts fresh.
-    if (prevSessionIdRef.current !== null && prevSessionIdRef.current !== sessionId) {
-      disposeTerminal(prevSessionIdRef.current);
-    }
-
-    prevSessionIdRef.current = sessionId;
-
-    const terminal = getOrCreateTerminal(sessionId);
-    try {
-      terminal.open(containerRef.current);
-    } catch (e) {
-      console.error('[AgentTerminal] terminal.open() failed:', e);
-    }
-    const fitAddon = FIT_ADDONS.get(sessionId);
-    if (fitAddon) {
-      fitAddon.fit();
-    }
-
-    const observer = new ResizeObserver(() => {
-      const fitAddon = FIT_ADDONS.get(sessionId);
-      if (fitAddon) {
-        fitAddon.fit();
+    let isActive = true;
+    terminalManager.getOrCreate(sessionId).then(inst => {
+      if (isActive && inst && containerRef.current) {
+        instanceRef.current = inst;
+        inst.term.open(containerRef.current);
+        inst.fitAddon.fit();
       }
     });
-    observer.observe(containerRef.current);
-
-    return () => {
-      observer.disconnect();
-    };
+    return () => { isActive = false; };
   }, [sessionId]);
 
+  useEffect(() => {
+    if (isVisible && instanceRef.current) {
+      const inst = instanceRef.current;
+      setTimeout(() => {
+        inst.fitAddon.fit();
+        inst.term.focus();
+      }, 50);
+    }
+  }, [isVisible]);
+
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#2a2a2a] bg-[#111]">
-        <h3 className="text-xs font-medium text-[#888] uppercase">Agent Terminal</h3>
-        <span className="text-xs text-[#22c55e]">●</span>
-      </div>
-      <div ref={containerRef} className="flex-1 overflow-hidden" />
+    <div 
+      ref={containerRef} 
+      className={`h-full w-full ${isVisible ? 'block' : 'hidden'}`}
+      style={{ padding: '8px' }}
+    />
+  );
+}
+
+export function TerminalStack({ activeSessionId }: { activeSessionId: number | null }) {
+  const [sessionIds, setSessionIds] = useState<number[]>([]);
+  const trackedIds = useRef<Set<number>>(new Set());
+
+  useEffect(() => {
+    if (activeSessionId !== null && !trackedIds.current.has(activeSessionId)) {
+      trackedIds.current.add(activeSessionId);
+      setSessionIds(Array.from(trackedIds.current));
+    }
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const unsubscribe = terminalManager.subscribe(() => {
+      // Logic for manager-driven updates if needed
+    });
+    return () => unsubscribe();
+  }, []);
+
+  return (
+    <div className="relative h-full w-full bg-[#0f0f0f] overflow-hidden">
+      {sessionIds.map(id => (
+        <TerminalContainer 
+          key={id} 
+          sessionId={id} 
+          isVisible={id === activeSessionId} 
+        />
+      ))}
+      
+      {activeSessionId === null && (
+        <div className="h-full w-full flex items-center justify-center text-[#444] text-xs font-mono uppercase tracking-widest">
+          No Active Session
+        </div>
+      )}
     </div>
   );
+}
+
+export function AgentTerminal({ sessionId }: { sessionId: number }) {
+  return <TerminalStack activeSessionId={sessionId} />;
 }

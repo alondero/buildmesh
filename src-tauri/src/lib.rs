@@ -41,7 +41,7 @@ pub fn run() {
             tracing::info!("Buildmesh started — db at {:?}", db_path);
 
             // Log window creation
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(_window) = app.get_webview_window("main") {
                 tracing::info!("Main window found, ready to load content");
             } else {
                 tracing::warn!("Main window not found during setup");
@@ -67,6 +67,7 @@ pub fn run() {
             commands::agent::spawn_agent,
             commands::agent::kill_agent,
             commands::agent::is_agent_running,
+            commands::agent::debug_list_agents,
             commands::agent::send_to_agent,
             commands::agent::write_to_agent,
             // Checkpoint

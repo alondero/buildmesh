@@ -136,10 +136,26 @@ pub fn env_for_path(path: &PathBuf) -> Environment {
     if path_str.starts_with("/mnt/")
         || path_str.starts_with("/home/")
         || path_str.starts_with("\\\\wsl$")
+        || path_str.starts_with("/")
     {
         Environment::Wsl
     } else {
         Environment::Windows
+    }
+}
+
+/// Convert a path from session internal form to host-readable form
+/// (e.g., /home/user -> \\wsl$\Ubuntu\home\user)
+pub fn to_host_path(path: &str) -> String {
+    if path.starts_with('/') && !path.starts_with("/mnt/") {
+        // Assume default Ubuntu distro for now - in production this would be dynamic
+        format!("\\\\wsl$\\Ubuntu{}", path.replace('/', "\\"))
+    } else if path.starts_with("/mnt/") {
+        // /mnt/c/Users -> C:\Users
+        let drive = path.chars().nth(5).unwrap_or('c').to_uppercase().next().unwrap();
+        format!("{}:{}", drive, path[6..].replace('/', "\\"))
+    } else {
+        path.to_string()
     }
 }
 
