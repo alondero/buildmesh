@@ -15,6 +15,7 @@ interface ProjectState {
   error: string | null;
   fetchProjects: () => Promise<void>;
   addProject: () => Promise<void>;
+  addTestProject: (name: string) => Promise<Project | null>;
   createProject: (name: string, path: string) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
   selectProject: (id: number | null) => void;
@@ -45,6 +46,18 @@ export const useProjectStore = create<ProjectState>((set) => ({
     } catch (e) {
       console.error('[projectStore] add_project failed:', e);
       set({ error: String(e) });
+    }
+  },
+
+  addTestProject: async (name) => {
+    try {
+      const result = await invoke<Project>('create_test_project', { name });
+      await useProjectStore.getState().fetchProjects();
+      return result;
+    } catch (e) {
+      console.error('[projectStore] addTestProject failed:', e);
+      set({ error: String(e) });
+      return null;
     }
   },
 

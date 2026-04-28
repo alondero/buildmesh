@@ -12,5 +12,6 @@ pub mod git;
 pub mod mcp;
 pub mod pr;
 pub mod project;
-pub mod terminal;
 pub mod session;
+pub mod terminal;
+pub mod test;

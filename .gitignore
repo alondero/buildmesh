@@ -31,3 +31,5 @@ test-results/
 
 # Claude worktrees (local only)
 .claude/worktrees/
+coverage/
+coverage/

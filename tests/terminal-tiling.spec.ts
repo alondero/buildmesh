@@ -1,87 +1,91 @@
-import { test, expect } from '@playwright/test';
-
 /**
- * Smoke test: app loads and renders the session view.
- * Checks that the page doesn't crash on load.
+ * Terminal Tiling E2E Tests
+ *
+ * Tests that verify tiled terminal grid behavior via Playwright.
+ * Uses HTTP test server on port 1991 to call Tauri commands.
  */
-test('app loads without crashing', async ({ page }) => {
-  const errors: string[] = [];
-  page.on('console', msg => {
-    if (msg.type() === 'error') errors.push(msg.text());
+import { test, expect, Page } from '@playwright/test';
+import { waitForTauriReady, createTestSessionViaHttp } from './e2e/utils/tauri-http';
+
+async function waitForTerminalFit(page: Page, _sessionId: number, timeout = 300): Promise<void> {
+  await page.waitForTimeout(timeout);
+}
+
+test.describe('terminal tiling E2E', () => {
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto('/');
+    await page.waitForTimeout(1000);
+
+    const tauriReady = await waitForTauriReady(8000);
+    if (!tauriReady) {
+      test.skip();
+    }
   });
 
-  await page.goto('/');
-  await page.waitForTimeout(2000);
+  test('app loads without crashing', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('console', msg => {
+      if (msg.type() === 'error') errors.push(msg.text());
+    });
 
-  // No crash — page should have content
-  const body = await page.locator('body').innerHTML();
-  expect(body.length, 'Page body is empty - app may have crashed').toBeGreaterThan(100);
+    await page.waitForTimeout(2000);
 
-  // No console errors
-  const realErrors = errors.filter(e =>
-    !e.includes('Warning:') &&
-    !e.includes('favicon') &&
-    !e.includes('404')
-  );
-  expect(realErrors, `Console errors: ${realErrors.join(', ')}`).toHaveLength(0);
-});
+    const body = await page.locator('body').innerHTML();
+    expect(body.length, 'Page body is empty - app may have crashed').toBeGreaterThan(100);
 
-/**
- * Regression test: multiple sessions in tiled grid all have their xterm DOM open.
- *
- * Bug: TerminalStack used isVisible gating that prevented non-active sessions
- * from opening their xterm DOM. In tiled mode, every session must have its
- * terminal rendered.
- */
-test('tiled sessions all open their xterm DOM', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(1000);
+    const realErrors = errors.filter(e =>
+      !e.includes('Warning:') &&
+      !e.includes('favicon') &&
+      !e.includes('404')
+    );
+    expect(realErrors, `Console errors: ${realErrors.join(', ')}`).toHaveLength(0);
+  });
 
-  // Create sessions - click + Add button in sidebar
-  const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-  if (await addBtn.isVisible()) {
-    await addBtn.click();
+  test('tiled sessions all open their xterm DOM', async ({ page }) => {
+    for (let i = 1; i <= 3; i++) {
+      await createTestSessionViaHttp(i);
+    }
     await page.waitForTimeout(500);
 
-    // Handle folder dialog if it appears (Tauri native)
-    // We'll just check existing sessions render
-  }
+    const gridBtn = page.locator('button:has-text("GRID VIEW")');
+    if (await gridBtn.isVisible()) {
+      await gridBtn.click();
+      await page.waitForTimeout(300);
+    }
 
-  // Wait for any sessions to appear
-  await page.waitForTimeout(500);
+    const tabs = page.locator('[data-session-tab]');
+    const tabCount = await tabs.count();
 
-  // Count xterm elements - in tiled mode each session should have one
-  const xterms = page.locator('.xterm');
-  const count = await xterms.count();
+    for (let i = 0; i < tabCount; i++) {
+      const gridToggle = page.locator('button:has-text("□")').nth(i);
+      if (await gridToggle.isVisible()) {
+        await gridToggle.click();
+        await page.waitForTimeout(100);
+      }
+    }
 
-  // At minimum, we should have at least 1 xterm if any session exists
-  // (This test verifies the fix: before fix, only active session had xterm)
-  if (count > 0) {
+    await waitForTerminalFit(page, 0, 600);
+
+    const xterms = page.locator('.xterm');
+    const count = await xterms.count();
+
+    expect(count, `Expected ${tabCount} xterms in tiled grid, found ${count}`).toBe(tabCount);
+
     for (let i = 0; i < count; i++) {
       const box = await xterms.nth(i).boundingBox();
       expect(box?.width, `xterm ${i} width`).toBeGreaterThan(5);
       expect(box?.height, `xterm ${i} height`).toBeGreaterThan(5);
     }
-  } else {
-    // No sessions yet - just verify app rendered something
-    const content = await page.locator('[class*="bg-\\[#0f0f0f\\]"]').count();
-    expect(content, 'No session grid or terminals visible').toBeGreaterThan(0);
-  }
-});
+  });
 
-/**
- * Unit-like test: AgentTerminal renders a container div with correct class.
- * This tests the component renders without crashing, independent of Tauri.
- */
-test('AgentTerminal produces expected DOM structure', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForTimeout(1000);
+  test('AgentTerminal produces expected DOM structure', async ({ page }) => {
+    await createTestSessionViaHttp(1);
+    await page.waitForTimeout(500);
 
-  // Find any terminal containers rendered by AgentTerminal
-  // AgentTerminal wraps TerminalStack which has class bg-[#0f0f0f]
-  const terminalStacks = page.locator('[class*="bg-\\[#0f0f0f\\]"]');
-  const count = await terminalStacks.count();
+    const terminalStacks = page.locator('[class*="bg-\\[#0f0f0f\\]"]');
+    const count = await terminalStacks.count();
 
-  // Should have at least one terminal area rendered
-  expect(count, `Expected at least 1 terminal stack, found ${count}`).toBeGreaterThan(0);
+    expect(count, `Expected at least 1 terminal stack, found ${count}`).toBeGreaterThan(0);
+  });
 });

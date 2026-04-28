@@ -1,15 +1,25 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
   timeout: 30000,
+  expect: {
+    timeout: 10000,
+  },
   use: {
     baseURL: 'http://localhost:1420',
-    headless: true,
+    trace: 'on-first-retry',
   },
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
   webServer: {
-    command: 'npm run dev',
+    command: 'npm run tauri dev',
     url: 'http://localhost:1420',
-    reuseExistingServer: true,
+    reuseExistingServer: !process.env.CI,
+    timeout: 300000,
   },
 });

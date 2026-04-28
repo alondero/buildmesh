@@ -74,11 +74,12 @@ export function SessionView() {
           return (
             <div key={session.id} className="flex items-center mr-0.5">
               <button
+                data-session-tab={session.id}
                 onClick={() => setActiveSession(session.id)}
                 className={`
                   flex items-center gap-2 px-3 h-8 rounded-t-md text-xs transition-colors whitespace-nowrap
-                  ${isActive 
-                    ? 'bg-[#1a1a1a] text-[#fff] border-x border-t border-[#2a2a2a]' 
+                  ${isActive
+                    ? 'bg-[#1a1a1a] text-[#fff] border-x border-t border-[#2a2a2a]'
                     : 'text-[#666] hover:bg-[#151515] hover:text-[#aaa]'
                   }
                 `}

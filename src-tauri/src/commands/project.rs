@@ -50,6 +50,19 @@ pub async fn create_project(name: String, path: String) -> Result<Project, Strin
     db::create_project(&name, &path).map_err(|e| e.to_string())
 }
 
+/// Create a project for testing without dialog (uses temp directory)
+#[command]
+pub async fn create_test_project(name: String) -> Result<Project, String> {
+    let temp_dir = std::env::temp_dir();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let project_path = temp_dir.join(format!("buildmesh_test_{}_{}", name.replace(' ', "_"), timestamp));
+    std::fs::create_dir_all(&project_path).map_err(|e| e.to_string())?;
+    db::create_project(&name, &project_path.to_string_lossy()).map_err(|e| e.to_string())
+}
+
 /// List all projects
 #[command]
 pub async fn list_projects() -> Result<Vec<Project>, String> {

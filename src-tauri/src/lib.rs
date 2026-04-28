@@ -47,6 +47,9 @@ pub fn run() {
                 tracing::warn!("Main window not found during setup");
             }
 
+            // Start HTTP test server on port 1991 for Playwright E2E tests
+            commands::test::start_test_server(app.handle().clone());
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -61,6 +64,7 @@ pub fn run() {
             // Project
             commands::project::add_project,
             commands::project::create_project,
+            commands::project::create_test_project,
             commands::project::list_projects,
             commands::project::delete_project,
             // Agent

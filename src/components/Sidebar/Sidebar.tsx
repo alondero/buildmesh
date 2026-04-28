@@ -97,6 +97,8 @@ function SessionItem({ session, isActive, onSelect }: {
 
   return (
     <div
+      data-session-item
+      data-session-id={session.id}
       onClick={onSelect}
       className={`
         pl-8 pr-2 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2

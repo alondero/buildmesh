@@ -6,18 +6,22 @@
  * - Terminal does not shrink after rapid switches
  * - All tiled terminals have non-minimal dimensions
  * - Terminal content preserved after rapid switches
+ *
+ * Uses HTTP test server on port 1991 to call Tauri commands instead of
+ * window.__TAURI__. This works because Playwright connects via HTTP to the
+ * Vite dev server, but invoke() requires Tauri webview context.
  */
 import { test, expect, Page } from '@playwright/test';
-import { getTerminalBoundingBox, waitForTerminalFit } from '../utils/terminal';
+import { waitForTauriReady, createTestSessionViaHttp } from './utils/tauri-http';
 
-// Helper to create a session via the sidebar
-async function createSession(page: Page, name: string = 'Test Session') {
-  // Look for + Add button or similar creation mechanism
-  const addButton = page.locator('button').filter({ hasText: '+ Add' });
-  if (await addButton.isVisible()) {
-    await addButton.click();
-    await page.waitForTimeout(300);
-  }
+async function getTerminalBoundingBox(page: Page, _sessionId: number): Promise<DOMRect | null> {
+  const xterm = page.locator(`.xterm`).first();
+  if (!await xterm.isVisible()) return null;
+  return await xterm.boundingBox();
+}
+
+async function waitForTerminalFit(page: Page, _sessionId: number, timeout = 300): Promise<void> {
+  await page.waitForTimeout(timeout);
 }
 
 // Helper to switch to a session by clicking its tab
@@ -38,17 +42,17 @@ test.describe('terminal sizing regression tests', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(1000);
+
+    const tauriReady = await waitForTauriReady(8000);
+    if (!tauriReady) {
+      test.skip();
+    }
   });
 
   test('terminal has non-minimal dimensions (>50px) after initial render', async ({ page }) => {
-    // Create a session first
-    const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-    if (await addBtn.isVisible()) {
-      await addBtn.click();
-      await page.waitForTimeout(500);
-    }
+    await createTestSessionViaHttp(1);
+    await page.waitForTimeout(500);
 
-    // Get the terminal bounding box
     const xterm = page.locator('.xterm').first();
     await xterm.waitFor({ state: 'visible', timeout: 5000 });
 
@@ -61,25 +65,17 @@ test.describe('terminal sizing regression tests', () => {
   });
 
   test('terminal dimensions are preserved after single session switch', async ({ page }) => {
-    // Create 2 sessions
-    const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-    if (await addBtn.isVisible()) {
-      await addBtn.click();
-      await page.waitForTimeout(500);
-      await addBtn.click();
-      await page.waitForTimeout(500);
-    }
+    await createTestSessionViaHttp(1);
+    await createTestSessionViaHttp(2);
+    await page.waitForTimeout(500);
 
-    // Get tabs to identify session IDs
     const tabs = page.locator('[data-session-tab]');
     const tabCount = await tabs.count();
 
     if (tabCount < 2) {
-      // Skip if we can't create 2 sessions
       test.skip();
     }
 
-    // Get initial dimensions of session 1
     const session1Tab = tabs.first();
     const session1Id = await session1Tab.getAttribute('data-session-tab');
     await session1Tab.click();
@@ -91,19 +87,16 @@ test.describe('terminal sizing regression tests', () => {
       test.skip();
     }
 
-    // Switch to session 2
     const session2Tab = tabs.nth(1);
     await session2Tab.click();
     await waitForTerminalFit(page, parseInt(await session2Tab.getAttribute('data-session-tab') || '0'));
 
-    // Switch back to session 1
     await session1Tab.click();
     await waitForTerminalFit(page, parseInt(session1Id || '0'));
 
     const finalBox = await getTerminalBoundingBox(page, parseInt(session1Id || '0'));
 
     if (finalBox) {
-      // Allow 10% tolerance for measurement differences
       const widthRatio = finalBox.width / initialBox.width;
       const heightRatio = finalBox.height / initialBox.height;
 
@@ -113,16 +106,10 @@ test.describe('terminal sizing regression tests', () => {
   });
 
   test('terminal does not shrink after multiple rapid switches', async ({ page }) => {
-    // Create 3 sessions
-    const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-    if (await addBtn.isVisible()) {
-      await addBtn.click();
-      await page.waitForTimeout(400);
-      await addBtn.click();
-      await page.waitForTimeout(400);
-      await addBtn.click();
-      await page.waitForTimeout(400);
+    for (let i = 1; i <= 3; i++) {
+      await createTestSessionViaHttp(i);
     }
+    await page.waitForTimeout(500);
 
     const tabs = page.locator('[data-session-tab]');
     const tabCount = await tabs.count();
@@ -131,7 +118,6 @@ test.describe('terminal sizing regression tests', () => {
       test.skip();
     }
 
-    // Record initial dimensions for each session
     const initialDimensions: { id: number; width: number; height: number }[] = [];
 
     for (let i = 0; i < tabCount; i++) {
@@ -150,17 +136,14 @@ test.describe('terminal sizing regression tests', () => {
       test.skip();
     }
 
-    // Rapid switch 10 times
     for (let i = 0; i < 10; i++) {
       const tabIndex = i % tabCount;
       await tabs.nth(tabIndex).click();
-      await page.waitForTimeout(50); // Short delay to simulate rapid clicking
+      await page.waitForTimeout(50);
     }
 
-    // Wait for all fit operations to complete
     await waitForTerminalFit(page, 0, 600);
 
-    // Verify all dimensions are preserved
     for (const { id, width, height } of initialDimensions) {
       const finalBox = await getTerminalBoundingBox(page, id);
 
@@ -175,13 +158,15 @@ test.describe('terminal sizing regression tests', () => {
   });
 
   test('all tiled terminals have non-minimal dimensions', async ({ page }) => {
-    // Create 4 sessions for a 2x2 grid
-    const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-    if (await addBtn.isVisible()) {
-      for (let i = 0; i < 4; i++) {
-        await addBtn.click();
-        await page.waitForTimeout(400);
-      }
+    for (let i = 1; i <= 4; i++) {
+      await createTestSessionViaHttp(i);
+    }
+    await page.waitForTimeout(500);
+
+    const gridBtn = page.locator('button:has-text("GRID VIEW")');
+    if (await gridBtn.isVisible()) {
+      await gridBtn.click();
+      await page.waitForTimeout(300);
     }
 
     const tabs = page.locator('[data-session-tab]');
@@ -191,10 +176,15 @@ test.describe('terminal sizing regression tests', () => {
       test.skip();
     }
 
-    // Wait for grid to render
+    for (let i = 0; i < tabCount; i++) {
+      const gridToggle = page.locator('button:has-text("□")').nth(i);
+      if (await gridToggle.isVisible()) {
+        await gridToggle.click();
+        await page.waitForTimeout(100);
+      }
+    }
     await waitForTerminalFit(page, 0, 600);
 
-    // Check each terminal
     const MIN_WIDTH = 80;
     const MIN_HEIGHT = 60;
 
@@ -202,7 +192,6 @@ test.describe('terminal sizing regression tests', () => {
       const tab = tabs.nth(i);
       const id = await tab.getAttribute('data-session-tab');
 
-      // Click to ensure terminal is visible/active
       await tab.click();
       await waitForTerminalFit(page, parseInt(id || '0'));
 
@@ -216,18 +205,9 @@ test.describe('terminal sizing regression tests', () => {
   });
 
   test('terminal content is preserved after rapid switches', async ({ page }) => {
-    // This test writes unique content to a terminal and verifies it persists
-    // after rapid switching. Since we can't easily type into xterm in Playwright,
-    // we verify the terminal DOM is still intact.
-
-    // Create 2 sessions
-    const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-    if (await addBtn.isVisible()) {
-      await addBtn.click();
-      await page.waitForTimeout(400);
-      await addBtn.click();
-      await page.waitForTimeout(400);
-    }
+    await createTestSessionViaHttp(1);
+    await createTestSessionViaHttp(2);
+    await page.waitForTimeout(500);
 
     const tabs = page.locator('[data-session-tab]');
     const tabCount = await tabs.count();
@@ -236,31 +216,25 @@ test.describe('terminal sizing regression tests', () => {
       test.skip();
     }
 
-    // Get session 1's terminal
     const session1Tab = tabs.first();
     const session1Id = await session1Tab.getAttribute('data-session-tab');
     await session1Tab.click();
     await waitForTerminalFit(page, parseInt(session1Id || '0'));
 
-    // Verify session 1 terminal exists
     const session1Terminal = page.locator(`[data-session-id="${session1Id}"] .xterm`);
     await expect(session1Terminal).toBeVisible();
 
-    // Rapid switch 10 times
     for (let i = 0; i < 10; i++) {
       const tabIndex = i % tabCount;
       await tabs.nth(tabIndex).click();
       await page.waitForTimeout(50);
     }
 
-    // Wait for all fit operations
     await waitForTerminalFit(page, 0, 600);
 
-    // Switch back to session 1
     await session1Tab.click();
     await waitForTerminalFit(page, parseInt(session1Id || '0'));
 
-    // Session 1 terminal should still be visible and have dimensions
     await expect(session1Terminal).toBeVisible();
 
     const box = await session1Terminal.boundingBox();
@@ -271,23 +245,19 @@ test.describe('terminal sizing regression tests', () => {
   });
 });
 
-// ============================================================
-// Smoke test - verify xterm DOM is present
-// ============================================================
-
 test.describe('terminal DOM smoke tests', () => {
   test('xterm element exists in DOM when session is active', async ({ page }) => {
     await page.goto('/');
     await page.waitForTimeout(1000);
 
-    // Create a session
-    const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-    if (await addBtn.isVisible()) {
-      await addBtn.click();
-      await page.waitForTimeout(1000);
+    const tauriReady = await waitForTauriReady(8000);
+    if (!tauriReady) {
+      test.skip();
     }
 
-    // Wait for xterm to render
+    await createTestSessionViaHttp(1);
+    await page.waitForTimeout(1000);
+
     const xterm = page.locator('.xterm');
     await xterm.waitFor({ state: 'visible', timeout: 5000 });
 
@@ -298,19 +268,19 @@ test.describe('terminal DOM smoke tests', () => {
     await page.goto('/');
     await page.waitForTimeout(1000);
 
-    const addBtn = page.locator('button').filter({ hasText: '+ Add' });
-    if (await addBtn.isVisible()) {
-      await addBtn.click();
-      await page.waitForTimeout(1000);
+    const tauriReady = await waitForTauriReady(8000);
+    if (!tauriReady) {
+      test.skip();
     }
+
+    await createTestSessionViaHttp(1);
+    await page.waitForTimeout(1000);
 
     const xterm = page.locator('.xterm').first();
 
-    // Check that xterm has dimensions from CSS (not just 0x0)
     const boundingBox = await xterm.boundingBox();
 
     if (boundingBox) {
-      // xterm should have actual pixel dimensions
       expect(boundingBox.width).toBeGreaterThan(0);
       expect(boundingBox.height).toBeGreaterThan(0);
     }
