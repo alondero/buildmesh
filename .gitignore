@@ -25,3 +25,9 @@ dist-ssr
 
 # Local research files (not for public repo)
 user-research-grillme-*.md
+
+# Test artifacts
+test-results/
+
+# Claude worktrees (local only)
+.claude/worktrees/

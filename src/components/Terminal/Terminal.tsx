@@ -15,6 +15,11 @@ class TerminalManager {
   private instances = new Map<number, TerminalInstance>();
   private listeners = new Set<() => void>();
 
+  // Exposed for TerminalStack to trigger focus/fit on active session
+  getInstance(sessionId: number): TerminalInstance | undefined {
+    return this.instances.get(sessionId);
+  }
+
   async getOrCreate(sessionId: number): Promise<TerminalInstance | null> {
     try {
       if (this.instances.has(sessionId)) {
