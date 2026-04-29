@@ -379,6 +379,12 @@ pub fn archive_session(id: i64) -> SqlResult<()> {
     update_session_status(id, SessionStatus::Archived)
 }
 
+pub fn delete_session(id: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 pub fn restore_session(id: i64) -> SqlResult<()> {
     update_session_status(id, SessionStatus::Idle)
 }

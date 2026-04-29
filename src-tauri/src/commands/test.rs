@@ -134,6 +134,9 @@ fn process_request(request: &str, app: &AppHandle) -> String {
             "get_session" => handle_get_session(&rpc_req.args),
             "spawn_agent" => handle_spawn_agent(&rpc_req.args, app),
             "kill_agent" => handle_kill_agent(&rpc_req.args),
+            "delete_project" => handle_delete_project(&rpc_req.args),
+            "delete_session" => handle_delete_session(&rpc_req.args),
+            "archive_session" => handle_archive_session(&rpc_req.args),
             _ => JsonRpcResponse::error(&format!("Unknown command: {}", rpc_req.cmd)),
         }
     } else if request.starts_with("GET /health") {
@@ -244,5 +247,32 @@ fn handle_kill_agent(args: &serde_json::Value) -> String {
     match result {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
         Err(e) => JsonRpcResponse::error(&e),
+    }
+}
+
+fn handle_delete_project(args: &serde_json::Value) -> String {
+    let project_id = args.get("projectId").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    match crate::db::delete_project(project_id) {
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "project_id": project_id })),
+        Err(e) => JsonRpcResponse::error(&e.to_string()),
+    }
+}
+
+fn handle_delete_session(args: &serde_json::Value) -> String {
+    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    match crate::db::delete_session(session_id) {
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
+        Err(e) => JsonRpcResponse::error(&e.to_string()),
+    }
+}
+
+fn handle_archive_session(args: &serde_json::Value) -> String {
+    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    match crate::db::archive_session(session_id) {
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
+        Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }

@@ -12,6 +12,9 @@
 
 const TEST_SERVER_URL = 'http://127.0.0.1:1991';
 
+// Track created test projects for cleanup
+const createdProjects: number[] = [];
+
 export interface InvokeOptions {
   cmd: string;
   args?: Record<string, unknown>;
@@ -105,4 +108,29 @@ export async function createTestSessionViaHttp(index: number): Promise<void> {
     path: project.path,
     branch: 'main',
   });
+
+  // Track for cleanup
+  createdProjects.push(project.id);
+}
+
+/**
+ * Cleanup all test projects and sessions created via createTestSessionViaHttp.
+ * Call this in afterEach or afterAll to prevent test data from polluting the app.
+ */
+export async function cleanupTestProjects(): Promise<void> {
+  for (const projectId of createdProjects) {
+    try {
+      await invokeViaHttp('delete_project', { projectId });
+    } catch (e) {
+      console.warn(`Failed to cleanup project ${projectId}:`, e);
+    }
+  }
+  createdProjects.length = 0;
+}
+
+/**
+ * Reset the created projects tracker (useful between test files).
+ */
+export function resetCreatedProjects(): void {
+  createdProjects.length = 0;
 }

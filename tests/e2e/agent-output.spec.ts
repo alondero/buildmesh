@@ -12,8 +12,7 @@ import { test, expect } from '@playwright/test';
 import { spawn } from 'child_process';
 import { exec } from 'child_process';
 import util from 'util';
-import http from 'http';
-import fs from 'fs';
+import { invokeViaHttp } from './utils/tauri-http';
 
 const execPromise = util.promisify(exec);
 
@@ -42,42 +41,6 @@ async function waitForPort(port: number, timeoutMs: number = 10000): Promise<boo
   return false;
 }
 
-async function invokeHttp(cmd: string, args: Record<string, unknown> = {}): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    const postData = JSON.stringify({ cmd, args });
-    const options = {
-      hostname: '127.0.0.1',
-      port: 1991,
-      path: '/invoke',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-      },
-    };
-
-    const req = http.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          if (json.ok) {
-            resolve(json.data);
-          } else {
-            reject(new Error(json.error || 'Unknown error'));
-          }
-        } catch (e) {
-          reject(e);
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(postData);
-    req.end();
-  });
-}
-
 function getLogTimestamp(line: string): string | null {
   const match = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:]+)/);
   return match ? match[1] : null;
@@ -91,6 +54,18 @@ test.describe('agent output', () => {
   });
 
   test.afterEach(async () => {
+    // Clean up test project and sessions
+    try {
+      // List projects and delete ones with test-related names
+      const projects = await invokeViaHttp('list_projects') as Array<{id: number; name: string}>;
+      for (const project of projects) {
+        if (project.name.includes('Test') || project.name.includes('Agent Output') || project.name.includes('Cwrap')) {
+          await invokeViaHttp('delete_project', { projectId: project.id });
+        }
+      }
+    } catch (e) {
+      console.error('Cleanup failed:', e);
+    }
     await killAllBuildmeshProcesses();
   });
 
@@ -116,11 +91,11 @@ test.describe('agent output', () => {
     const lastTimeBefore = getLogTimestamp(lastLineBefore);
 
     // Create a test project
-    const project = await invokeHttp('create_test_project', { name: 'Agent Output Test' }) as { id: number };
+    const project = await invokeViaHttp('create_test_project', { name: 'Agent Output Test' }) as { id: number };
     expect(project.id).toBeGreaterThan(0);
 
     // Create a session
-    const session = await invokeHttp('create_session', {
+    const session = await invokeViaHttp('create_session', {
       projectId: project.id,
       name: 'Test Session',
       path: 'X:\\src\\playbook',
@@ -130,7 +105,7 @@ test.describe('agent output', () => {
     expect(session.id).toBeGreaterThan(0);
 
     // Spawn an agent
-    const spawnResult = await invokeHttp('spawn_agent', {
+    const spawnResult = await invokeViaHttp('spawn_agent', {
       sessionId: session.id,
       provider: 'anthropic',
     });
@@ -206,8 +181,8 @@ test.describe('agent output', () => {
     expect(serverReady).toBe(true);
 
     // Create project and session
-    const project = await invokeHttp('create_test_project', { name: 'Cwrap Exit Test' }) as { id: number };
-    const session = await invokeHttp('create_session', {
+    const project = await invokeViaHttp('create_test_project', { name: 'Cwrap Exit Test' }) as { id: number };
+    const session = await invokeViaHttp('create_session', {
       projectId: project.id,
       name: 'Cwrap Test',
       path: 'X:\\src\\playbook',
@@ -215,7 +190,7 @@ test.describe('agent output', () => {
     }) as { id: number };
 
     // Spawn agent
-    const spawnResult = await invokeHttp('spawn_agent', { sessionId: session.id, provider: 'anthropic' });
+    const spawnResult = await invokeViaHttp('spawn_agent', { sessionId: session.id, provider: 'anthropic' });
     expect(spawnResult).toBeTruthy();
 
     // Wait 5 seconds for any potential output

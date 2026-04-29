@@ -50,7 +50,7 @@ class TerminalManager {
           cursor: '#3b82f6',
           selectionBackground: 'rgba(59, 130, 246, 0.3)'
         },
-        fontSize: 13,
+        fontSize: 10,  // 75% of standard 13px (13 * 0.75 ≈ 10)
         fontFamily: 'Cascadia Code, Consolas, monospace',
         scrollback: 10000,
         cursorBlink: true,
@@ -126,9 +126,14 @@ function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisi
         inst.fitAddon.fit();
 
         // Setup ResizeObserver for robust fitting
+        // Only call fit() when the terminal is visible to avoid dimension calculation issues
         const observer = new ResizeObserver(() => {
-          if (isVisible && instanceRef.current) {
-            instanceRef.current.fitAddon.fit();
+          if (isVisible && instanceRef.current && containerRef.current) {
+            // Only fit if the container actually has visible dimensions
+            const rect = containerRef.current.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              instanceRef.current.fitAddon.fit();
+            }
           }
         });
         observer.observe(containerRef.current);

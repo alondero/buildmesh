@@ -12,7 +12,7 @@
  * Vite dev server, but invoke() requires Tauri webview context.
  */
 import { test, expect, Page } from '@playwright/test';
-import { waitForTauriReady, createTestSessionViaHttp } from './utils/tauri-http';
+import { waitForTauriReady, createTestSessionViaHttp, cleanupTestProjects } from './utils/tauri-http';
 
 test.describe('session switching E2E', () => {
 
@@ -25,6 +25,10 @@ test.describe('session switching E2E', () => {
     if (!tauriReady) {
       test.skip();
     }
+  });
+
+  test.afterEach(async () => {
+    await cleanupTestProjects();
   });
 
   test('sidebar session click selects and shows terminal', async ({ page }) => {

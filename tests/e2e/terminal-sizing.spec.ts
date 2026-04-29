@@ -12,7 +12,7 @@
  * Vite dev server, but invoke() requires Tauri webview context.
  */
 import { test, expect, Page } from '@playwright/test';
-import { waitForTauriReady, createTestSessionViaHttp } from './utils/tauri-http';
+import { waitForTauriReady, createTestSessionViaHttp, cleanupTestProjects } from './utils/tauri-http';
 
 async function getTerminalBoundingBox(page: Page, _sessionId: number): Promise<DOMRect | null> {
   const xterm = page.locator(`.xterm`).first();
@@ -47,6 +47,10 @@ test.describe('terminal sizing regression tests', () => {
     if (!tauriReady) {
       test.skip();
     }
+  });
+
+  test.afterEach(async () => {
+    await cleanupTestProjects();
   });
 
   test('terminal has non-minimal dimensions (>50px) after initial render', async ({ page }) => {

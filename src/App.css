@@ -33,5 +33,4 @@ body {
 .status-idle { color: var(--color-idle); }
 .status-archived { color: var(--color-text-muted); }
 
-/* Terminal styling */
-.xterm { padding: 8px; }
+/* xterm.js internal terminal element - no extra padding needed since TerminalContainer handles it */

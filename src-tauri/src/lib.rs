@@ -61,6 +61,7 @@ pub fn run() {
             commands::session::archive_session,
             commands::session::restore_session,
             commands::session::update_session_status,
+            commands::session::delete_session,
             // Project
             commands::project::add_project,
             commands::project::create_project,

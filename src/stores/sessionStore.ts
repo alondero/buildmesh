@@ -129,6 +129,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         sessions: state.sessions.filter(s => s.id !== id),
         activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
       }));
+      // Also delete from backend so session doesn't reappear on refresh
+      await invoke('delete_session', { sessionId: id });
     } catch (e) {
       set({ error: String(e) });
     }

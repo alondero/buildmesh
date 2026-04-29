@@ -65,3 +65,9 @@ pub async fn update_session_status(
     let status = SessionStatus::from_db_str(&status);
     db::update_session_status(session_id, status).map_err(|e| e.to_string())
 }
+
+/// Delete a session permanently
+#[command]
+pub async fn delete_session(session_id: i64) -> Result<(), String> {
+    db::delete_session(session_id).map_err(|e| e.to_string())
+}
