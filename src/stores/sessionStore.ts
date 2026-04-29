@@ -28,17 +28,19 @@ export interface Checkpoint {
 interface SessionState {
   sessions: Session[];
   activeSessionId: number | null;
-  gridSessionIds: number[];
+  // Map of project_id -> list of session_ids in grid
+  projectGrids: Record<number, number[]>;
   layout: 'single' | 'grid';
   checkpoints: Checkpoint[];
   loading: boolean;
   error: string | null;
 
-  // Derived getter
+  // Derived getters
   getActiveSession: () => Session | null;
+  getGridSessionIds: () => number[];
 
   fetchSessions: () => Promise<void>;
-  createSession: (projectId: number, name: string, path: string, branch: string) => Promise<void>;
+  createSession: (projectId: number, name: string, path: string, branch: string) => Promise<Session>;
   archiveSession: (id: number) => Promise<void>;
   restoreSession: (id: number) => Promise<void>;
   setActiveSession: (id: number | null) => Promise<void>;
@@ -57,7 +59,7 @@ interface SessionState {
 export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
-  gridSessionIds: [],
+  projectGrids: {},
   layout: 'single',
   checkpoints: [],
   loading: false,
@@ -67,6 +69,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     const { sessions, activeSessionId } = get();
     if (activeSessionId === null) return null;
     return sessions.find(s => s.id === activeSessionId) || null;
+  },
+
+  getGridSessionIds: () => {
+    const { activeSessionId, sessions, projectGrids } = get();
+    const activeSession = sessions.find(s => s.id === activeSessionId);
+    if (!activeSession) return [];
+    return projectGrids[activeSession.project_id] || [];
   },
 
   fetchSessions: async () => {
@@ -81,15 +90,37 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   toggleGridSession: (id) => {
     set((state) => {
-      const isSelected = state.gridSessionIds.includes(id);
-      const newGridSessionIds = isSelected
-        ? state.gridSessionIds.filter((gid) => gid !== id)
-        : [...state.gridSessionIds, id].slice(-4);
-      return { gridSessionIds: newGridSessionIds };
+      const session = state.sessions.find(s => s.id === id);
+      if (!session) return state;
+
+      const projectId = session.project_id;
+      const currentGrid = state.projectGrids[projectId] || [];
+      const isSelected = currentGrid.includes(id);
+      
+      const newGrid = isSelected
+        ? currentGrid.filter((gid) => gid !== id)
+        : [...currentGrid, id].slice(-6); // Support up to 6 for now
+
+      return { 
+        projectGrids: { 
+          ...state.projectGrids, 
+          [projectId]: newGrid 
+        } 
+      };
     });
   },
 
-  setLayout: (layout) => set({ layout }),
+  setLayout: (layout) => {
+    const { sessions, activeSessionId } = get();
+    set({ layout });
+    // Persist layout change to the active session's project
+    if (activeSessionId) {
+      const session = sessions.find(s => s.id === activeSessionId);
+      if (session) {
+        invoke('update_project_layout', { projectId: session.project_id, layout }).catch(console.error);
+      }
+    }
+  },
 
   ...(() => {
     let listenersAttached = false;
@@ -119,15 +150,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     };
   })(),
 
-  createSession: async (projectId, name, path, branch) => {
+  createSession: async (projectId, name, path, branch): Promise<Session> => {
     try {
       const session = await invoke<Session>('create_session', {
         projectId, name, path, branch,
       });
       set((state) => ({ sessions: [session, ...state.sessions] }));
       await get().setActiveSession(session.id);
+      return session;
     } catch (e) {
       set({ error: String(e) });
+      throw e;
     }
   },
 
@@ -154,12 +187,20 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   setActiveSession: async (id) => {
-    set({ activeSessionId: id });
     if (id !== null) {
+      const session = get().sessions.find(s => s.id === id);
+      if (session) {
+        const projects = await invoke<{id: number; layout: string}[]>('list_projects');
+        const project = projects.find(p => p.id === session.project_id);
+        if (project) {
+          set({ layout: project.layout as 'single' | 'grid' });
+        }
+      }
       await get().fetchCheckpoints(id);
     } else {
       set({ checkpoints: [] });
     }
+    set({ activeSessionId: id });
   },
 
   fetchCheckpoints: async (sessionId) => {

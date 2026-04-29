@@ -1,5 +1,14 @@
 //! Database module using rusqlite for local SQLite storage
 
+#[cfg(test)]
+mod migration_tests;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod project_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -17,15 +26,27 @@ const SCHEMA_VERSION: i32 = 3;
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     let conn = Connection::open(db_path)?;
 
-    // Run migrations
+    // Ensure app_settings exists first (needed by migrate_if_needed to check version)
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        "
+    )?;
+
+    // Run migrations (may add columns to existing tables)
     migrate_if_needed(&conn)?;
 
+    // Create schema (all tables + indexes, IF NOT EXISTS so they're idempotent)
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS projects (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             path TEXT NOT NULL UNIQUE,
+            layout TEXT NOT NULL DEFAULT 'grid',
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -51,11 +72,6 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS app_settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
         "
     )?;
@@ -72,19 +88,66 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
         .unwrap_or(0);
 
     if current_version < SCHEMA_VERSION {
-        tracing::info!("Resetting database for version {}", SCHEMA_VERSION);
-        // Simplest migration for dev: drop and recreate
-        conn.execute_batch("
-            PRAGMA foreign_keys = OFF;
-            DROP TABLE IF EXISTS sessions;
-            DROP TABLE IF EXISTS projects;
-            DROP TABLE IF EXISTS checkpoints;
-            DROP TABLE IF EXISTS app_settings;
-            PRAGMA foreign_keys = ON;
-            CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        ")?;
+        tracing::info!("Migrating database from version {} to {}", current_version, SCHEMA_VERSION);
+
+        // Check if projects table exists yet (fresh install vs. upgrade)
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
+                [],
+                |row| row.get::<_, i64>(0).map(|c| c > 0),
+            )
+            .unwrap_or(false);
+
+        if !table_exists {
+            // Fresh DB: init() will create the table with layout column.
+            // Update version now so we don't re-enter migration on next init().
+        } else {
+            // Existing DB: run incremental migration to add layout column.
+            migrate_projects_layout(conn)?;
+        }
+
         conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES ('schema_version', ?1)",
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
+            params![SCHEMA_VERSION.to_string()],
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate_projects_layout(conn: &Connection) -> SqlResult<()> {
+    let has_layout: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'layout'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_layout {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN layout TEXT NOT NULL DEFAULT 'grid'",
+            [],
+        )?;
+        tracing::info!("Added layout column to projects table");
+    }
+    Ok(())
+}
+
+/// Exposes migrate_if_needed for integration testing.
+/// In tests, call this on an existing Connection to simulate schema upgrade.
+#[cfg(test)]
+pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
+    let current_version: i32 = conn
+        .query_row("SELECT value FROM app_settings WHERE key = 'schema_version'", [], |row| {
+            row.get::<_, String>(0).map(|v| v.parse().unwrap_or(0))
+        })
+        .unwrap_or(0);
+
+    if current_version < SCHEMA_VERSION {
+        migrate_projects_layout(conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
     }
@@ -95,16 +158,27 @@ pub fn get() -> &'static Mutex<Connection> {
     DB.get().expect("database not initialized")
 }
 
+/// Resets the DB global between test runs. This is only for use in tests.
+#[cfg(test)]
+pub(crate) fn reset_for_testing() {
+    use std::sync::Mutex;
+    // Replace the global DB with a fresh in-memory connection.
+    // This is only safe in tests which run single-threaded with exclusive access.
+    let fresh = Mutex::new(rusqlite::Connection::open_in_memory().unwrap());
+    let _ = DB.set(fresh);
+}
+
 // --- Internal Helpers (no locking) ---
 
 fn get_project_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Project> {
-    let mut stmt = conn.prepare("SELECT id, name, path, created_at FROM projects WHERE id = ?1")?;
+    let mut stmt = conn.prepare("SELECT id, name, path, layout, created_at FROM projects WHERE id = ?1")?;
     stmt.query_row(params![id], |row| {
         Ok(Project {
             id: row.get(0)?,
             name: row.get(1)?,
             path: row.get(2)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+            layout: row.get::<_, String>(3)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })
@@ -146,7 +220,22 @@ fn get_session_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Session> {
 
 pub fn create_project(name: &str, path: &str) -> SqlResult<Project> {
     let db = get().lock().unwrap();
-    db.execute("INSERT INTO projects (name, path) VALUES (?1, ?2)", params![name, path])?;
+
+    // Check if project with this path already exists (idempotent upsert)
+    let existing: Option<i64> = db.query_row(
+        "SELECT id FROM projects WHERE path = ?1",
+        params![path],
+        |row| row.get(0),
+    ).ok();
+
+    if let Some(id) = existing {
+        return get_project_by_id_inner(&db, id);
+    }
+
+    db.execute(
+        "INSERT INTO projects (name, path, layout) VALUES (?1, ?2, 'grid')",
+        params![name, path],
+    )?;
     let id = db.last_insert_rowid();
     get_project_by_id_inner(&db, id)
 }
@@ -156,15 +245,25 @@ pub fn get_project_by_id(id: i64) -> SqlResult<Project> {
     get_project_by_id_inner(&db, id)
 }
 
+pub fn update_project_layout(id: i64, layout: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE projects SET layout = ?1 WHERE id = ?2",
+        params![layout, id],
+    )?;
+    Ok(())
+}
+
 pub fn list_projects() -> SqlResult<Vec<Project>> {
     let db = get().lock().unwrap();
-    let mut stmt = db.prepare("SELECT id, name, path, created_at FROM projects ORDER BY name")?;
+    let mut stmt = db.prepare("SELECT id, name, path, layout, created_at FROM projects ORDER BY name")?;
     let rows = stmt.query_map([], |row| {
         Ok(Project {
             id: row.get(0)?,
             name: row.get(1)?,
             path: row.get(2)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
+            layout: row.get::<_, String>(3)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })

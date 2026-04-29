@@ -74,3 +74,12 @@ pub async fn list_projects() -> Result<Vec<Project>, String> {
 pub async fn delete_project(project_id: i64) -> Result<(), String> {
     db::delete_project(project_id).map_err(|e| e.to_string())
 }
+
+/// Update a project's layout preference
+#[command]
+pub async fn update_project_layout(project_id: i64, layout: String) -> Result<(), String> {
+    if layout != "grid" && layout != "single" {
+        return Err("layout must be 'grid' or 'single'".to_string());
+    }
+    db::update_project_layout(project_id, &layout).map_err(|e| e.to_string())
+}

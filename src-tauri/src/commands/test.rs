@@ -85,7 +85,7 @@ pub fn start_test_server(app_handle: AppHandle) {
     });
 }
 
-async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: SocketAddr, _app: &AppHandle) {
+async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: SocketAddr, app: &AppHandle) {
     let mut buf = vec![0u8; 16384];
     let n = match stream.read(&mut buf).await {
         Ok(n) if n > 0 => n,
@@ -93,7 +93,7 @@ async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: Sock
     };
 
     let request = String::from_utf8_lossy(&buf[..n]);
-    let response = process_request(&request);
+    let response = process_request(&request, app);
 
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -111,7 +111,7 @@ async fn handle_connection(stream: &mut tokio::net::TcpStream, client_addr: Sock
     }
 }
 
-fn process_request(request: &str) -> String {
+fn process_request(request: &str, app: &AppHandle) -> String {
     // Route based on request line
     if request.starts_with("POST /invoke") {
         let body = match request.find("\r\n\r\n") {
@@ -132,6 +132,8 @@ fn process_request(request: &str) -> String {
             "list_projects" => handle_list_projects(),
             "list_sessions" => handle_list_sessions(),
             "get_session" => handle_get_session(&rpc_req.args),
+            "spawn_agent" => handle_spawn_agent(&rpc_req.args, app),
+            "kill_agent" => handle_kill_agent(&rpc_req.args),
             _ => JsonRpcResponse::error(&format!("Unknown command: {}", rpc_req.cmd)),
         }
     } else if request.starts_with("GET /health") {
@@ -195,5 +197,52 @@ fn handle_get_session(args: &serde_json::Value) -> String {
     match crate::db::get_session_by_id(session_id) {
         Ok(session) => JsonRpcResponse::success(&session),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
+    }
+}
+
+fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
+    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let provider = args.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic").to_string();
+    let resume = args.get("resume").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+
+    tracing::info!("[test_server] spawn_agent: spawning thread for session_id={}", session_id);
+
+    // Spawn a dedicated thread to avoid panics corrupting the async runtime
+    let app_clone = app.clone();
+    let result = std::thread::spawn(move || {
+        tauri::async_runtime::block_on(crate::commands::agent::spawn_agent(
+            app_clone,
+            session_id,
+            provider,
+            resume,
+        ))
+    }).join();
+
+    tracing::info!("[test_server] spawn_agent result: {:?}", result);
+
+    match result {
+        Ok(Ok(_)) => {
+            tracing::info!("[test_server] spawn_agent returning success");
+            JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id }))
+        }
+        Ok(Err(e)) => {
+            tracing::error!("[test_server] spawn_agent error: {}", e);
+            JsonRpcResponse::error(&e)
+        }
+        Err(e) => {
+            tracing::error!("[test_server] spawn_agent panicked: {:?}", e);
+            JsonRpcResponse::error(&format!("spawn_agent panicked: {:?}", e))
+        }
+    }
+}
+
+fn handle_kill_agent(args: &serde_json::Value) -> String {
+    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let result = tauri::async_runtime::block_on(crate::commands::agent::kill_agent(session_id));
+
+    match result {
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
+        Err(e) => JsonRpcResponse::error(&e),
     }
 }

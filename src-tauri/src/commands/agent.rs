@@ -133,15 +133,19 @@ pub async fn spawn_agent(
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let reader_alive = Arc::new(AtomicBool::new(true));
 
+    tracing::info!("spawn_agent: storing agent process for session {}", session_id);
     {
         let mut processes = AGENT_PROCESSES.lock().unwrap();
-        processes.insert(session_id, AgentProcess { 
-            child, 
-            writer, 
-            pair, 
-            reader_alive: reader_alive.clone() 
+        processes.insert(session_id, AgentProcess {
+            child,
+            writer,
+            pair,
+            reader_alive: reader_alive.clone()
         });
     }
+    tracing::info!("spawn_agent: stored agent process");
+
+    tracing::info!("spawn_agent: about to spawn reader thread for session {}", session_id);
 
     // 8. Start reader thread
     let app_clone = app.clone();
@@ -154,7 +158,10 @@ pub async fn spawn_agent(
         
         loop {
             match r.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) => {
+                    tracing::debug!("PTY EOF received for session {}, reader exiting", session_id);
+                    break;
+                }
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
                     
@@ -171,14 +178,19 @@ pub async fn spawn_agent(
                         "line": data
                     }));
                 }
-                Err(_) => break,
+                Err(e) => {
+                    tracing::error!("PTY read error for session {}: {}", session_id, e);
+                    break;
+                }
             }
         }
         reader_alive_clone.store(false, Ordering::SeqCst);
         tracing::debug!("PTY reader thread exited for session {}", session_id);
     });
 
+    tracing::info!("spawn_agent: reader thread spawned, updating session status");
     db::update_session_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
+    tracing::info!("spawn_agent: complete");
     Ok(())
 }
 

@@ -7,12 +7,22 @@ This document captures key technical insights and architectural decisions made d
 ### The Problem
 Initial implementations suffered from "terminal blanking" or loss of color/context when switching between session tabs. This was caused by React's component lifecycle unmounting the `xterm.js` instance and attempting to reconstruct it from plain text.
 
-### The Solution: Hidden Terminal Stack
+### The Solution: Hidden Terminal Stack & ResizeObserver
 Instead of re-parenting or reconstructing terminals, we implemented a **Persistent Terminal Stack**:
 - **Global Manager:** A `TerminalManager` (singleton) maintains a `Map<number, TerminalInstance>` that survives any React unmounting.
 - **Hidden Containers:** The `TerminalStack` component renders a `TerminalContainer` for *every* session that has been opened.
 - **CSS Toggling:** Sessions are hidden/shown using the CSS `hidden` attribute (display: none) rather than being removed from the DOM.
-- **Re-fitting:** Terminals require an explicit `.fit()` call when transitioning from `display: none` to `block`. We used `requestAnimationFrame` and `setTimeout` to ensure the DOM had settled before fitting.
+- **Robust Re-fitting:** We transitioned from brittle `setTimeout` calls to a native `ResizeObserver` per terminal. This ensures xterm.js correctly calculates dimensions the moment it becomes visible or its container changes size (e.g., in a tiled grid).
+
+## 2. Project-Scoped Multiplexing
+
+### The Problem
+Users need to switch between different "workspaces" (projects) without losing their specific arrangement of terminals (tiling).
+
+### The Solution: Per-Project Grid State
+- **State Partitioning:** The `sessionStore` now partitions grid configurations by `project_id`.
+- **Layout Restoration:** When a session is activated, the app identifies its project and restores the last used layout (Single or Grid) and the specific set of sessions that were tiled.
+- **Flex-Grid:** The UI uses a dynamic grid system that scales from 1 to 6 panes automatically, providing a responsive "tmux-in-a-window" experience.
 
 ## 2. Hybrid Environment Path Mapping (Windows/WSL)
 

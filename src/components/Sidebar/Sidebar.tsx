@@ -1,8 +1,16 @@
+import { useState, useEffect } from 'react';
 import { useProjectStore } from '../../stores/projectStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import type { Project } from '../../stores/projectStore';
 import type { Session } from '../../stores/sessionStore';
 import { STATUS_CONFIG } from '../../lib/status';
+
+const PROVIDERS = [
+  { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
+  { id: 'minimax', label: 'Minimax', color: 'bg-indigo-500' },
+  { id: 'gemini', label: 'Gemini', color: 'bg-emerald-500' },
+  { id: 'opencode', label: 'OpenCode', color: 'bg-amber-500' },
+];
 
 export function Sidebar() {
   const projects = useProjectStore(state => state.projects);
@@ -11,15 +19,49 @@ export function Sidebar() {
   const activeSessionId = useSessionStore(state => state.activeSessionId);
   const setActiveSession = useSessionStore(state => state.setActiveSession);
   const createSession = useSessionStore(state => state.createSession);
+  const spawnAgent = useSessionStore(state => state.spawnAgent);
+  const archiveSession = useSessionStore(state => state.archiveSession);
+
+  const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      const target = e.target as HTMLElement;
+      // Check if click is inside a dropdown for the currently open project
+      const clickedInsideDropdown = target.closest('[data-dropdown-for]');
+      if (openDropdownFor !== null && !clickedInsideDropdown) {
+        setOpenDropdownFor(null);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [openDropdownFor]);
 
   const handleAddProject = async () => {
     await addProject();
   };
 
   const handleNewSession = async (project: Project) => {
-    const branch = prompt('Branch name:', 'main');
-    if (!branch) return;
-    await createSession(project.id, project.name, project.path, branch);
+    // Open dropdown instead of prompting for branch
+    setOpenDropdownFor(openDropdownFor === project.id ? null : project.id);
+  };
+
+  const handleSelectProvider = async (project: Project, providerId: string) => {
+    setOpenDropdownFor(null);
+    try {
+      // Create session with branch 'main' and immediately spawn agent
+      const session = await createSession(project.id, project.name, project.path, 'main');
+      await spawnAgent(session.id, providerId);
+      await setActiveSession(session.id);
+    } catch (e) {
+      console.error('Failed to create session with agent:', e);
+    }
+  };
+
+  const handleArchiveSession = async (e: React.MouseEvent, sessionId: number) => {
+    e.stopPropagation();
+    await archiveSession(sessionId);
   };
 
   return (
@@ -49,28 +91,50 @@ export function Sidebar() {
           ) : (
             projects.map(project => {
               const projectSessions = sessions.filter(w => w.project_id === project.id);
+              const isDropdownOpen = openDropdownFor === project.id;
               return (
                 <div key={project.id} className="mb-2">
                   <div className="flex items-center gap-1">
-                    <button
-                      onClick={() => handleNewSession(project)}
-                      className="text-xs text-[#3b82f6] hover:text-[#60a5fa] px-1"
-                      title="New session"
-                    >
-                      +
-                    </button>
+                    <div className="relative">
+                      <button
+                        onClick={() => handleNewSession(project)}
+                        className={`text-xs px-1 ${isDropdownOpen ? 'text-[#60a5fa]' : 'text-[#3b82f6] hover:text-[#60a5fa]'}`}
+                        title="New session"
+                      >
+                        +
+                      </button>
+                      {isDropdownOpen && (
+                        <div data-dropdown-for={project.id} className="absolute left-0 top-full mt-1 z-50 bg-[#1a1a1a] border border-[#3a3a3a] rounded shadow-lg py-1 min-w-[120px]">
+                          {PROVIDERS.map(p => (
+                            <button
+                              key={p.id}
+                              onClick={() => handleSelectProvider(project, p.id)}
+                              className="w-full text-left px-3 py-1.5 text-xs text-[#ccc] hover:bg-[#252525] flex items-center gap-2"
+                            >
+                              <span className={`w-2 h-2 rounded-full ${p.color}`} />
+                              {p.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                     <div className="flex-1 px-2 py-1.5 rounded cursor-pointer text-sm text-[#ccc] hover:bg-[#1a1a1a]">
                       {project.name}
                     </div>
                   </div>
-                  {projectSessions.map(session => (
-                    <SessionItem
-                      key={session.id}
-                      session={session}
-                      isActive={activeSessionId === session.id}
-                      onSelect={() => setActiveSession(session.id)}
-                    />
-                  ))}
+                  {projectSessions.map(session => {
+                    const isInGrid = (projectGrids[project.id] || []).includes(session.id);
+                    return (
+                      <SessionItem
+                        key={session.id}
+                        session={session}
+                        isActive={activeSessionId === session.id}
+                        isInGrid={isInGrid}
+                        onSelect={() => setActiveSession(session.id)}
+                        onArchive={(e) => handleArchiveSession(e, session.id)}
+                      />
+                    );
+                  })}
                 </div>
               );
             })
@@ -86,10 +150,11 @@ export function Sidebar() {
   );
 }
 
-function SessionItem({ session, isActive, onSelect }: {
+function SessionItem({ session, isActive, onSelect, onArchive }: {
   session: Session;
   isActive: boolean;
   onSelect: () => void;
+  onArchive: (e: React.MouseEvent) => void;
 }) {
   const config = STATUS_CONFIG[session.status];
   const isAwaiting = session.status === 'awaiting_input';
@@ -101,7 +166,7 @@ function SessionItem({ session, isActive, onSelect }: {
       data-session-id={session.id}
       onClick={onSelect}
       className={`
-        pl-8 pr-2 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2
+        pl-8 pr-1 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2
         ${isActive ? 'bg-[#222] border border-[#3b82f6]' : 'hover:bg-[#1a1a1a] border border-transparent'}
         ${isAwaiting ? 'bg-[#2a2010]' : ''}
       `}
@@ -112,6 +177,13 @@ function SessionItem({ session, isActive, onSelect }: {
         <span className="text-[10px] text-[#f59e0b] font-semibold animate-pulse">ATTN</span>
       )}
       <span className="text-[10px] text-[#666] font-mono">{envBadge}</span>
+      <button
+        onClick={onArchive}
+        className="text-[#555] hover:text-[#ef4444] text-xs px-1 transition-colors"
+        title="Archive session"
+      >
+        ×
+      </button>
     </div>
   );
 }

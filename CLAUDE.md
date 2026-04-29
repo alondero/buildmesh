@@ -1,21 +1,13 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
 Buildmesh is a Tauri desktop application for orchestrating AI agents (Claude Code, Gemini, Open Code) across multiple projects concurrently. It provides a multiplexer-style environment with persistent terminals and hybrid Windows/WSL support.
 
-## Architecture
-
-### High-Level Design
+## High-Level Design
 
 Single-window desktop app with a **sidebar** for navigation and a **Session View** with a tab bar.
 - **Persistent Terminal Registry:** `xterm.js` instances are stored in a global registry (`Terminal.tsx`), ensuring colors and context are preserved during session switches.
 - **Hybrid Path Mapping:** Linux paths in WSL are mapped to Windows UNC paths (`\\wsl$\...`) for host-side file tree and watcher operations.
 - **PTY Management:** Simplified backend PTY lifecycle in `agent.rs`. Agents are spawned as durable processes.
 
-### Key Data Types
+## Key Data Types
 
 - **Project:** Top-level folder on disk.
 - **Session:** An isolated agent instance. Persists `cli_session_id` for robust `--resume` support.

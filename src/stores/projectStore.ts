@@ -5,6 +5,7 @@ export interface Project {
   id: number;
   name: string;
   path: string;
+  layout: 'grid' | 'single';
   created_at: string;
 }
 
@@ -19,6 +20,7 @@ interface ProjectState {
   createProject: (name: string, path: string) => Promise<void>;
   deleteProject: (id: number) => Promise<void>;
   selectProject: (id: number | null) => void;
+  updateProjectLayout: (id: number, layout: 'grid' | 'single') => Promise<void>;
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
@@ -80,4 +82,13 @@ export const useProjectStore = create<ProjectState>((set) => ({
   },
 
   selectProject: (id) => set({ selectedProjectId: id }),
+
+  updateProjectLayout: async (id, layout) => {
+    try {
+      await invoke('update_project_layout', { projectId: id, layout });
+      await useProjectStore.getState().fetchProjects();
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
 }));

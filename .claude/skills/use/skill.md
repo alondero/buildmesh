@@ -26,16 +26,39 @@ The user says "run /use" — activate this skill.
 $existing = Get-Process -Name 'buildmesh' -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Output "Found existing buildmesh process(es):"
-    $existing | Format-Table Id, StartTime -AutoSize
+    $existing | Format-Table Id, Path, StartTime -AutoSize
     Stop-Process -Id $existing.Id -Force
     Start-Sleep -Milliseconds 500
 }
 ```
-Capture the PID(s) of any pre-existing instance. Stop them before launching so you start clean.
+Capture the PID(s) of any pre-existing instance. **IMPORTANT:** Check the `Path` column — if it shows `target\debug\buildmesh.exe`, that debug build expects Vite dev server on port 1420 and will show "can't reach this page" if launched standalone. Only `target\release\buildmesh.exe` has bundled frontend and works without dev server.
+
+Stop ALL buildmesh instances before proceeding.
 
 ### Step 2: Ensure frontend is bundled
-```bash
-cd X:/src/buildmesh && npm run tauri build
+```powershell
+# Verify we're about to launch the RELEASE build, not debug
+$releaseExe = "X:\src\buildmesh\src-tauri\target\release\buildmesh.exe"
+$debugExe = "X:\src\buildmesh\src-tauri\target\debug\buildmesh.exe"
+
+# Stop any debug builds that might be running
+Get-Process -Name 'buildmesh' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "*debug*" } | Stop-Process -Force
+
+# Verify release exe exists and is newer than debug
+if (-not (Test-Path $releaseExe)) {
+    Write-Output "Release exe not found, running npm run tauri build..."
+    cd X:/src/buildmesh && npm run tauri build
+} else {
+    $releaseInfo = Get-Item $releaseExe
+    $debugExists = Test-Path $debugExe
+    if ($debugExists) {
+        $debugInfo = Get-Item $debugExe
+        if ($debugInfo.LastWriteTime -gt $releaseInfo.LastWriteTime) {
+            Write-Output "DEBUG build is newer than RELEASE — running npm run tauri build to update release"
+            cd X:/src/buildmesh && npm run tauri build
+        }
+    }
+}
 ```
 This bundles the frontend into the release exe. Wait for completion.
 

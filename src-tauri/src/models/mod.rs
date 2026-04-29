@@ -110,6 +110,7 @@ pub struct Project {
     pub id: i64,
     pub name: String,
     pub path: String, // absolute path to project root
+    pub layout: String, // 'grid' or 'single'
     pub created_at: DateTime<Utc>,
 }
 

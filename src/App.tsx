@@ -29,13 +29,37 @@ function App() {
   const [eventCounts, setEventCounts] = useState<Record<number, number>>({});
   const [uiErrors, setUiErrors] = useState<string[]>([]);
 
-  // Capture global JS errors
+  const [showDebug, setShowDebug] = useState(false);
+
+  // Keyboard shortcuts
   useEffect(() => {
-    const handleError = (e: ErrorEvent) => {
-      setUiErrors(prev => [...prev.slice(-4), `UI Error: ${e.message}`]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Toggle Debug: Ctrl+Alt+D
+      if (e.ctrlKey && e.altKey && e.key === 'd') {
+        setShowDebug(prev => !prev);
+      }
+
+      // Quick switch session: Alt+1..9
+      if (e.altKey && /^[1-9]$/.test(e.key)) {
+        const index = parseInt(e.key) - 1;
+        const currentSessions = useSessionStore.getState().sessions.filter(s => 
+          s.project_id === useSessionStore.getState().getActiveSession()?.project_id && 
+          s.status !== 'archived'
+        );
+        if (currentSessions[index]) {
+          useSessionStore.getState().setActiveSession(currentSessions[index].id);
+        }
+      }
+
+      // Toggle Grid: Alt+G
+      if (e.altKey && e.key === 'g') {
+        const currentLayout = useSessionStore.getState().layout;
+        useSessionStore.getState().setLayout(currentLayout === 'single' ? 'grid' : 'single');
+      }
     };
-    window.addEventListener('error', handleError);
-    return () => window.removeEventListener('error', handleError);
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
   useEffect(() => {

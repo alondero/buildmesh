@@ -215,28 +215,57 @@ function SingleLayout({
 function GridLayout({ gridSessionIds, sessions, onSlashCommand }: any) {
   if (gridSessionIds.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center text-[#444]">
-        <p>No sessions selected for Grid View. Click the □ icon on session tabs.</p>
+      <div className="flex-1 flex flex-col items-center justify-center text-[#444] bg-[#0f0f0f]">
+        <div className="mb-4 text-4xl">⊞</div>
+        <p className="text-sm">No sessions selected for Grid View.</p>
+        <p className="text-[10px] mt-1 text-[#333]">Click the □ icon on session tabs to add them to the grid.</p>
       </div>
     );
   }
 
+  const count = gridSessionIds.length;
+  let gridCols = "grid-cols-1";
+  let gridRows = "grid-rows-1";
+
+  if (count === 2) {
+    gridCols = "grid-cols-2";
+  } else if (count === 3) {
+    gridCols = "grid-cols-2";
+    gridRows = "grid-rows-2";
+  } else if (count === 4) {
+    gridCols = "grid-cols-2";
+    gridRows = "grid-rows-2";
+  } else if (count > 4) {
+    gridCols = "grid-cols-3";
+    gridRows = "grid-rows-2";
+  }
+
   return (
-    <div className={`flex-1 grid gap-1 p-1 bg-[#1a1a1a] 
-      ${gridSessionIds.length <= 1 ? 'grid-cols-1' : gridSessionIds.length <= 2 ? 'grid-cols-2' : 'grid-cols-2 grid-rows-2'}
-    `}>
+    <div className={`flex-1 grid gap-1.5 p-1.5 bg-[#0a0a0a] ${gridCols} ${gridRows}`}>
       {gridSessionIds.map((id: number) => {
         const session = sessions.find((s: Session) => s.id === id);
         return (
-          <div key={id} className="flex flex-col bg-[#0f0f0f] border border-[#2a2a2a] rounded overflow-hidden">
-            <div className="flex items-center justify-between px-2 py-1 bg-[#111] border-b border-[#2a2a2a]">
-              <span className="text-[10px] font-bold text-[#aaa] truncate">{session?.name}</span>
-              <span className="text-[9px] text-[#444]">{session?.env.toUpperCase()}</span>
+          <div key={id} className="flex flex-col bg-[#0f0f0f] border border-[#2a2a2a] rounded-sm overflow-hidden group hover:border-[#3b82f6]/50 transition-colors">
+            <div className="flex items-center justify-between px-2.5 py-1.5 bg-[#161616] border-b border-[#2a2a2a]">
+              <div className="flex items-center gap-2 overflow-hidden">
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  session?.status === 'running' ? 'bg-green-500' : 
+                  session?.status === 'awaiting_input' ? 'bg-orange-500 animate-pulse' : 
+                  'bg-gray-600'
+                }`} />
+                <span className="text-[11px] font-bold text-[#aaa] truncate">{session?.name}</span>
+                {session?.status === 'awaiting_input' && (
+                  <span className="text-[9px] text-orange-500 font-bold ml-1">ATTN</span>
+                )}
+              </div>
+              <span className="text-[9px] text-[#444] font-mono px-1 rounded bg-[#0f0f0f]">{session?.env.toUpperCase()}</span>
             </div>
-            <div className="flex-1 overflow-hidden">
+            <div className="flex-1 overflow-hidden bg-black">
               <AgentTerminal sessionId={id} />
             </div>
-            <SlashCommandBar onCommand={(cmd) => onSlashCommand(id, cmd)} />
+            <div className="opacity-40 group-hover:opacity-100 transition-opacity">
+              <SlashCommandBar onCommand={(cmd) => onSlashCommand(id, cmd)} />
+            </div>
           </div>
         );
       })}

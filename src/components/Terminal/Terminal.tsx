@@ -96,26 +96,42 @@ export function disposeTerminal(sessionId: number) {
 function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisible: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<TerminalInstance | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
   useEffect(() => {
     let isActive = true;
+    
     terminalManager.getOrCreate(sessionId).then(inst => {
       if (isActive && inst && containerRef.current) {
         instanceRef.current = inst;
         inst.term.open(containerRef.current);
         inst.fitAddon.fit();
+
+        // Setup ResizeObserver for robust fitting
+        const observer = new ResizeObserver(() => {
+          if (isVisible && instanceRef.current) {
+            instanceRef.current.fitAddon.fit();
+          }
+        });
+        observer.observe(containerRef.current);
+        resizeObserverRef.current = observer;
       }
     });
-    return () => { isActive = false; };
+
+    return () => {
+      isActive = false;
+      if (resizeObserverRef.current) {
+        resizeObserverRef.current.disconnect();
+      }
+    };
   }, [sessionId]);
 
+  // Re-fit when visibility changes (session switch) or focus
   useEffect(() => {
     if (isVisible && instanceRef.current) {
       const inst = instanceRef.current;
-      setTimeout(() => {
-        inst.fitAddon.fit();
-        inst.term.focus();
-      }, 50);
+      inst.fitAddon.fit();
+      inst.term.focus();
     }
   }, [isVisible]);
 
@@ -123,7 +139,7 @@ function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisi
     <div 
       ref={containerRef} 
       className={`h-full w-full ${isVisible ? 'block' : 'hidden'}`}
-      style={{ padding: '8px' }}
+      style={{ padding: '4px' }}
     />
   );
 }
