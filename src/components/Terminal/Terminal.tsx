@@ -14,6 +14,7 @@ interface TerminalInstance {
 class TerminalManager {
   private instances = new Map<number, TerminalInstance>();
   private listeners = new Set<() => void>();
+  private pending = new Map<number, Promise<TerminalInstance | null>>();
 
   // Exposed for TerminalStack to trigger focus/fit on active session
   getInstance(sessionId: number): TerminalInstance | undefined {
@@ -21,15 +22,30 @@ class TerminalManager {
   }
 
   async getOrCreate(sessionId: number): Promise<TerminalInstance | null> {
+    // Return existing instance immediately if available
+    if (this.instances.has(sessionId)) {
+      return this.instances.get(sessionId)!;
+    }
+    // If creation is already in progress, wait for it
+    if (this.pending.has(sessionId)) {
+      return this.pending.get(sessionId)!;
+    }
+    // Start new creation and track the promise
+    const promise = this.doCreate(sessionId);
+    this.pending.set(sessionId, promise);
     try {
-      if (this.instances.has(sessionId)) {
-        return this.instances.get(sessionId)!;
-      }
+      return await promise;
+    } finally {
+      this.pending.delete(sessionId);
+    }
+  }
 
+  private async doCreate(sessionId: number): Promise<TerminalInstance | null> {
+    try {
       console.log(`[TerminalManager] Creating terminal for session ${sessionId}`);
       const term = new Terminal({
-        theme: { 
-          background: '#0f0f0f', 
+        theme: {
+          background: '#0f0f0f',
           foreground: '#e0e0e0',
           cursor: '#3b82f6',
           selectionBackground: 'rgba(59, 130, 246, 0.3)'
@@ -105,6 +121,8 @@ function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisi
       if (isActive && inst && containerRef.current) {
         instanceRef.current = inst;
         inst.term.open(containerRef.current);
+        inst.term.scrollToBottom();
+        inst.term.refresh(0, inst.term.rows - 1);
         inst.fitAddon.fit();
 
         // Setup ResizeObserver for robust fitting
@@ -130,8 +148,14 @@ function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisi
   useEffect(() => {
     if (isVisible && instanceRef.current) {
       const inst = instanceRef.current;
-      inst.fitAddon.fit();
-      inst.term.focus();
+      // Use requestAnimationFrame to ensure DOM has settled before fit operations
+      const frameId = requestAnimationFrame(() => {
+        inst.fitAddon.fit();
+        inst.term.focus();
+        inst.term.scrollToBottom();
+        inst.term.refresh(0, inst.term.rows - 1);
+      });
+      return () => cancelAnimationFrame(frameId);
     }
   }, [isVisible]);
 

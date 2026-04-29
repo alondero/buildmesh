@@ -20,7 +20,7 @@ export function Sidebar() {
   const setActiveSession = useSessionStore(state => state.setActiveSession);
   const createSession = useSessionStore(state => state.createSession);
   const spawnAgent = useSessionStore(state => state.spawnAgent);
-  const archiveSession = useSessionStore(state => state.archiveSession);
+  const deleteSession = useSessionStore(state => state.deleteSession);
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
 
@@ -28,7 +28,6 @@ export function Sidebar() {
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       const target = e.target as HTMLElement;
-      // Check if click is inside a dropdown for the currently open project
       const clickedInsideDropdown = target.closest('[data-dropdown-for]');
       if (openDropdownFor !== null && !clickedInsideDropdown) {
         setOpenDropdownFor(null);
@@ -43,14 +42,12 @@ export function Sidebar() {
   };
 
   const handleNewSession = async (project: Project) => {
-    // Open dropdown instead of prompting for branch
     setOpenDropdownFor(openDropdownFor === project.id ? null : project.id);
   };
 
   const handleSelectProvider = async (project: Project, providerId: string) => {
     setOpenDropdownFor(null);
     try {
-      // Create session with branch 'main' and immediately spawn agent
       const session = await createSession(project.id, project.name, project.path, 'main');
       await spawnAgent(session.id, providerId);
       await setActiveSession(session.id);
@@ -59,9 +56,9 @@ export function Sidebar() {
     }
   };
 
-  const handleArchiveSession = async (e: React.MouseEvent, sessionId: number) => {
+  const handleDeleteSession = async (e: React.MouseEvent, sessionId: number) => {
     e.stopPropagation();
-    await archiveSession(sessionId);
+    await deleteSession(sessionId);
   };
 
   return (
@@ -122,19 +119,15 @@ export function Sidebar() {
                       {project.name}
                     </div>
                   </div>
-                  {projectSessions.map(session => {
-                    const isInGrid = (projectGrids[project.id] || []).includes(session.id);
-                    return (
-                      <SessionItem
-                        key={session.id}
-                        session={session}
-                        isActive={activeSessionId === session.id}
-                        isInGrid={isInGrid}
-                        onSelect={() => setActiveSession(session.id)}
-                        onArchive={(e) => handleArchiveSession(e, session.id)}
-                      />
-                    );
-                  })}
+                  {projectSessions.map(session => (
+                    <SessionItem
+                      key={session.id}
+                      session={session}
+                      isActive={activeSessionId === session.id}
+                      onSelect={() => setActiveSession(session.id)}
+                      onDelete={(e) => handleDeleteSession(e, session.id)}
+                    />
+                  ))}
                 </div>
               );
             })
@@ -150,11 +143,11 @@ export function Sidebar() {
   );
 }
 
-function SessionItem({ session, isActive, onSelect, onArchive }: {
+function SessionItem({ session, isActive, onSelect, onDelete }: {
   session: Session;
   isActive: boolean;
   onSelect: () => void;
-  onArchive: (e: React.MouseEvent) => void;
+  onDelete: (e: React.MouseEvent) => void;
 }) {
   const config = STATUS_CONFIG[session.status];
   const isAwaiting = session.status === 'awaiting_input';
@@ -178,9 +171,9 @@ function SessionItem({ session, isActive, onSelect, onArchive }: {
       )}
       <span className="text-[10px] text-[#666] font-mono">{envBadge}</span>
       <button
-        onClick={onArchive}
+        onClick={onDelete}
         className="text-[#555] hover:text-[#ef4444] text-xs px-1 transition-colors"
-        title="Archive session"
+        title="Delete session"
       >
         ×
       </button>

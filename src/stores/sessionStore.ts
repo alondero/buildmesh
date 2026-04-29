@@ -11,7 +11,7 @@ export interface Session {
   branch: string;
   env: 'windows' | 'wsl';
   provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode';
-  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'archived';
+  status: 'running' | 'idle' | 'awaiting_input' | 'error';
   cli_session_id?: string;
   created_at: string;
 }
@@ -28,24 +28,18 @@ export interface Checkpoint {
 interface SessionState {
   sessions: Session[];
   activeSessionId: number | null;
-  // Map of project_id -> list of session_ids in grid
-  projectGrids: Record<number, number[]>;
-  layout: 'single' | 'grid';
   checkpoints: Checkpoint[];
   loading: boolean;
   error: string | null;
 
   // Derived getters
   getActiveSession: () => Session | null;
-  getGridSessionIds: () => number[];
+  getActiveProjectId: () => number | null;
 
   fetchSessions: () => Promise<void>;
   createSession: (projectId: number, name: string, path: string, branch: string) => Promise<Session>;
-  archiveSession: (id: number) => Promise<void>;
-  restoreSession: (id: number) => Promise<void>;
+  deleteSession: (id: number) => Promise<void>;
   setActiveSession: (id: number | null) => Promise<void>;
-  toggleGridSession: (id: number) => void;
-  setLayout: (layout: 'single' | 'grid') => void;
   fetchCheckpoints: (sessionId: number) => Promise<void>;
   spawnAgent: (sessionId: number, provider: string) => Promise<void>;
   killAgent: (sessionId: number) => Promise<void>;
@@ -59,8 +53,6 @@ interface SessionState {
 export const useSessionStore = create<SessionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
-  projectGrids: {},
-  layout: 'single',
   checkpoints: [],
   loading: false,
   error: null,
@@ -71,11 +63,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     return sessions.find(s => s.id === activeSessionId) || null;
   },
 
-  getGridSessionIds: () => {
-    const { activeSessionId, sessions, projectGrids } = get();
-    const activeSession = sessions.find(s => s.id === activeSessionId);
-    if (!activeSession) return [];
-    return projectGrids[activeSession.project_id] || [];
+  getActiveProjectId: () => {
+    const session = get().getActiveSession();
+    return session?.project_id ?? null;
   },
 
   fetchSessions: async () => {
@@ -85,40 +75,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       set({ sessions, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
-    }
-  },
-
-  toggleGridSession: (id) => {
-    set((state) => {
-      const session = state.sessions.find(s => s.id === id);
-      if (!session) return state;
-
-      const projectId = session.project_id;
-      const currentGrid = state.projectGrids[projectId] || [];
-      const isSelected = currentGrid.includes(id);
-      
-      const newGrid = isSelected
-        ? currentGrid.filter((gid) => gid !== id)
-        : [...currentGrid, id].slice(-6); // Support up to 6 for now
-
-      return { 
-        projectGrids: { 
-          ...state.projectGrids, 
-          [projectId]: newGrid 
-        } 
-      };
-    });
-  },
-
-  setLayout: (layout) => {
-    const { sessions, activeSessionId } = get();
-    set({ layout });
-    // Persist layout change to the active session's project
-    if (activeSessionId) {
-      const session = sessions.find(s => s.id === activeSessionId);
-      if (session) {
-        invoke('update_project_layout', { projectId: session.project_id, layout }).catch(console.error);
-      }
     }
   },
 
@@ -164,23 +120,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  archiveSession: async (id) => {
+  deleteSession: async (id) => {
     try {
-      await invoke('archive_session', { sessionId: id });
-      disposeTerminal(id); 
-      await get().fetchSessions();
-      if (get().activeSessionId === id) {
-        set({ activeSessionId: null });
-      }
-    } catch (e) {
-      set({ error: String(e) });
-    }
-  },
-
-  restoreSession: async (id) => {
-    try {
-      await invoke('restore_session', { sessionId: id });
-      await get().fetchSessions();
+      await invoke('kill_agent', { sessionId: id });
+      disposeTerminal(id);
+      // Remove session from local state — no fetch needed
+      set((state) => ({
+        sessions: state.sessions.filter(s => s.id !== id),
+        activeSessionId: state.activeSessionId === id ? null : state.activeSessionId,
+      }));
     } catch (e) {
       set({ error: String(e) });
     }
@@ -188,14 +136,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   setActiveSession: async (id) => {
     if (id !== null) {
-      const session = get().sessions.find(s => s.id === id);
-      if (session) {
-        const projects = await invoke<{id: number; layout: string}[]>('list_projects');
-        const project = projects.find(p => p.id === session.project_id);
-        if (project) {
-          set({ layout: project.layout as 'single' | 'grid' });
-        }
-      }
       await get().fetchCheckpoints(id);
     } else {
       set({ checkpoints: [] });
@@ -215,16 +155,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   spawnAgent: async (sessionId, provider) => {
     try {
       const session = get().sessions.find(s => s.id === sessionId);
-      await invoke('spawn_agent', { 
-        sessionId, 
+      await invoke('spawn_agent', {
+        sessionId,
         provider,
-        resume: session?.cli_session_id 
+        resume: session?.cli_session_id
       });
       await get().fetchSessions();
     } catch (e) {
       console.error('[sessionStore] spawnAgent failed:', e);
       set({ error: String(e) });
-      // Re-throw to allow component-level handling if needed
       throw e;
     }
   },

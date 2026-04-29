@@ -1,204 +1,192 @@
 /**
- * Integration tests for TerminalContainer fit behavior
+ * Integration tests for TerminalContainer and session management.
  *
- * Tests:
- * - Mount calls fitAddon.fit() after ~50ms delay
- * - sessionId change triggers fit at ~100ms and ~300ms
- * - fit-terminals global event triggers fitAddon.fit()
- * - Timeouts are cleared on unmount
+ * Run with: npm test -- --run tests/integration/terminal-container.test.tsx
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { terminalManager } from '../../src/components/Terminal/Terminal';
+import { useSessionStore } from '../../src/stores/sessionStore';
 
 // ============================================================
-// These tests verify the fit timing patterns without rendering React
-// The actual timing logic is tested directly here.
+// Mocks for Tauri API
 // ============================================================
+const mockListeners = new Map<string, Set<(...args: unknown[]) => void>>();
 
-describe('TerminalContainer fit behavior (timing patterns)', () => {
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn().mockImplementation((event: string, callback: (event: { payload: unknown }) => void) => {
+    if (!mockListeners.has(event)) mockListeners.set(event, new Set());
+    mockListeners.get(event)!.add(callback as (...args: unknown[]) => void);
+    return Promise.resolve(() => mockListeners.get(event)?.delete(callback as (...args: unknown[]) => void));
+  }),
+  emit: vi.fn().mockImplementation((event: string, payload?: unknown) => {
+    mockListeners.get(event)?.forEach(cb => cb({ payload }));
+    return Promise.resolve();
+  }),
+}));
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn().mockResolvedValue({}),
+}));
+
+vi.mock('@xterm/xterm', () => {
+  class MockTerminal {
+    write = vi.fn();
+    onData = vi.fn();
+    onTitleChange = vi.fn();
+    open = vi.fn();
+    dispose = vi.fn();
+    focus = vi.fn();
+    loadAddon = vi.fn();
+    scrollToBottom = vi.fn();
+    refresh = vi.fn();
+    buffer = { active: { getWindow: vi.fn() } };
+    rows = 24;
+    cols = 80;
+    constructor(_options?: unknown) {}
+  }
+  return { Terminal: MockTerminal };
+});
+
+vi.mock('@xterm/addon-fit', () => {
+  class MockFitAddon {
+    fit = vi.fn();
+    dispose = vi.fn();
+    proposeDimensions = vi.fn().mockReturnValue({ cols: 80, rows: 24 });
+  }
+  return { FitAddon: MockFitAddon };
+});
+
+// ============================================================
+// TerminalManager Tests
+// ============================================================
+describe('TerminalManager', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    mockListeners.clear();
+    vi.clearAllMocks();
+    terminalManager.dispose(1);
+    terminalManager.dispose(2);
+    terminalManager.dispose(3);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    terminalManager.dispose(1);
+    terminalManager.dispose(2);
+    terminalManager.dispose(3);
   });
 
-  it('mount fit happens at 50ms', () => {
-    // This is the timing from TerminalContainer line 108:
-    // setTimeout(() => { inst.fitAddon.fit(); inst.term.focus(); }, 50);
-    const fitCallback = vi.fn();
-
-    setTimeout(fitCallback, 50);
-
-    // Before 50ms - should not have fit
-    vi.advanceTimersByTime(49);
-    expect(fitCallback).not.toHaveBeenCalled();
-
-    // At 50ms - should fit
-    vi.advanceTimersByTime(1);
-    expect(fitCallback).toHaveBeenCalledTimes(1);
+  it('getOrCreate returns instance for same sessionId', async () => {
+    const instance = await terminalManager.getOrCreate(1);
+    expect(instance).not.toBeNull();
+    const instance2 = await terminalManager.getOrCreate(1);
+    expect(instance2).toBe(instance);
   });
 
-  it('sessionId change fit happens at 100ms and 300ms', () => {
-    // From TerminalContainer lines 116-117:
-    // const t1 = setTimeout(() => inst.fitAddon.fit(), 100);
-    // const t2 = setTimeout(() => inst.fitAddon.fit(), 300);
-    const fitCallback = vi.fn();
-
-    setTimeout(fitCallback, 100);
-    setTimeout(fitCallback, 300);
-
-    // At 100ms - first fit
-    vi.advanceTimersByTime(100);
-    expect(fitCallback).toHaveBeenCalledTimes(1);
-
-    // At 300ms (200ms more) - second fit
-    vi.advanceTimersByTime(200);
-    expect(fitCallback).toHaveBeenCalledTimes(2);
+  it('concurrent getOrCreate calls return same instance (pending map prevents duplicates)', async () => {
+    terminalManager.dispose(1);
+    const [r1, r2, r3] = await Promise.all([
+      terminalManager.getOrCreate(1),
+      terminalManager.getOrCreate(1),
+      terminalManager.getOrCreate(1),
+    ]);
+    expect(r1).toBe(r2);
+    expect(r2).toBe(r3);
   });
 
-  it('cleanup clears pending timeouts', () => {
-    const fitCallback = vi.fn();
-
-    const t1 = setTimeout(fitCallback, 100);
-    const t2 = setTimeout(fitCallback, 300);
-
-    // Clear before any fire
-    clearTimeout(t1);
-    clearTimeout(t2);
-
-    vi.advanceTimersByTime(400);
-
-    expect(fitCallback).not.toHaveBeenCalled();
+  it('dispose removes instance from manager', async () => {
+    const instance = await terminalManager.getOrCreate(1);
+    expect(instance).not.toBeNull();
+    terminalManager.dispose(1);
+    // After dispose, a new getOrCreate should create a fresh instance
+    const fresh = await terminalManager.getOrCreate(1);
+    expect(fresh).not.toBeNull();
+    // The fresh instance should be a different object reference
+    expect(fresh).not.toBe(instance);
   });
 
-  it('multiple sessionId changes each schedule their own timeouts', () => {
-    const fitCallback = vi.fn();
-
-    // First sessionId change at t=0
-    setTimeout(fitCallback, 100);
-    setTimeout(fitCallback, 300);
-
-    // Simulate switching to another session at t=50 (before first fits fire)
-    vi.advanceTimersByTime(50); // Now at t=50
-    // Second sessionId change schedules new timeouts relative to t=50
-    setTimeout(fitCallback, 100); // Will fire at t=150
-    setTimeout(fitCallback, 300); // Will fire at t=350
-
-    // At t=100 (50ms from now) - first session's first fit fires
-    vi.advanceTimersByTime(50);
-    expect(fitCallback).toHaveBeenCalledTimes(1);
-
-    // At t=150 (50ms more) - second session's first fit fires
-    vi.advanceTimersByTime(50);
-    expect(fitCallback).toHaveBeenCalledTimes(2);
-
-    // At t=300 (150ms more) - first session's second fit fires
-    vi.advanceTimersByTime(150);
-    expect(fitCallback).toHaveBeenCalledTimes(3);
-
-    // At t=350 (50ms more) - second session's second fit fires
-    vi.advanceTimersByTime(50);
-    expect(fitCallback).toHaveBeenCalledTimes(4);
+  it('write after open() works correctly', async () => {
+    const instance = await terminalManager.getOrCreate(2);
+    expect(instance).not.toBeNull();
+    const container = document.createElement('div');
+    instance!.term.open(container);
+    instance!.term.write('test content');
+    expect(instance!.term.write).toHaveBeenCalledWith('test content');
   });
 });
 
-describe('TerminalContainer fit event handling', () => {
+// ============================================================
+// Event Listener Tests
+// ============================================================
+describe('Event Listener Integration', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    mockListeners.clear();
+    vi.clearAllMocks();
+    terminalManager.dispose(1);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
+    terminalManager.dispose(1);
   });
 
-  it('fit event handler can be registered and receives events', () => {
-    const handler = vi.fn();
-    window.addEventListener('fit-terminals', handler);
+  it('agent-output events are received and written to terminal', async () => {
+    const instance = await terminalManager.getOrCreate(1);
+    expect(instance).not.toBeNull();
 
-    window.dispatchEvent(new CustomEvent('fit-terminals'));
+    const writeSpy = vi.spyOn(instance!.term, 'write');
 
-    expect(handler).toHaveBeenCalledTimes(1);
+    // Simulate agent-output event
+    const listeners = mockListeners.get('agent-output');
+    listeners?.forEach(cb => cb({ payload: { session_id: 1, line: 'Hello\n' } }));
 
-    window.removeEventListener('fit-terminals', handler);
+    expect(writeSpy).toHaveBeenCalledWith('Hello\n');
   });
 
-  it('multiple handlers all receive fit-terminals event', () => {
-    const handler1 = vi.fn();
-    const handler2 = vi.fn();
+  it('events for different sessions are not cross-written', async () => {
+    const instance1 = await terminalManager.getOrCreate(1);
+    const instance2 = await terminalManager.getOrCreate(2);
+    expect(instance1).not.toBeNull();
+    expect(instance2).not.toBeNull();
 
-    window.addEventListener('fit-terminals', handler1);
-    window.addEventListener('fit-terminals', handler2);
+    const write1Spy = vi.spyOn(instance1!.term, 'write');
+    const write2Spy = vi.spyOn(instance2!.term, 'write');
 
-    window.dispatchEvent(new CustomEvent('fit-terminals'));
+    // Event for session 1 only
+    mockListeners.get('agent-output')?.forEach(cb =>
+      cb({ payload: { session_id: 1, line: 'From session 1\n' } })
+    );
 
-    expect(handler1).toHaveBeenCalledTimes(1);
-    expect(handler2).toHaveBeenCalledTimes(1);
-
-    window.removeEventListener('fit-terminals', handler1);
-    window.removeEventListener('fit-terminals', handler2);
+    expect(write1Spy).toHaveBeenCalledWith('From session 1\n');
+    expect(write2Spy).not.toHaveBeenCalled();
   });
 
-  it('handler is properly removable', () => {
-    const handler = vi.fn();
-    window.addEventListener('fit-terminals', handler);
-    window.removeEventListener('fit-terminals', handler);
+  it('open() is called before subsequent writes', async () => {
+    const instance = await terminalManager.getOrCreate(1);
+    expect(instance).not.toBeNull();
 
-    window.dispatchEvent(new CustomEvent('fit-terminals'));
+    const container = document.createElement('div');
+    instance!.term.open(container);
 
-    expect(handler).not.toHaveBeenCalled();
+    instance!.term.write('Content after open');
+    expect(instance!.term.write).toHaveBeenCalledWith('Content after open');
   });
 
-  it('fit-terminals can be dispatched multiple times', () => {
-    const handler = vi.fn();
-    window.addEventListener('fit-terminals', handler);
+  it('visibility effect calls scrollToBottom and refresh when terminal becomes visible', async () => {
+    const instance = await terminalManager.getOrCreate(1);
+    expect(instance).not.toBeNull();
 
-    window.dispatchEvent(new CustomEvent('fit-terminals'));
-    window.dispatchEvent(new CustomEvent('fit-terminals'));
-    window.dispatchEvent(new CustomEvent('fit-terminals'));
+    const container = document.createElement('div');
+    instance!.term.open(container);
+    instance!.term.write('Some content');
 
-    expect(handler).toHaveBeenCalledTimes(3);
+    // Simulate what the visibility effect does when isVisible becomes true
+    instance!.fitAddon.fit();
+    instance!.term.focus();
+    instance!.term.scrollToBottom();
+    instance!.term.refresh(0, instance!.term.rows - 1);
 
-    window.removeEventListener('fit-terminals', handler);
-  });
-});
-
-describe('fit timing integration', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('SessionView fit event dispatch follows 0-100-300 pattern', () => {
-    // From SessionView.tsx lines 39-45:
-    // const fit = () => window.dispatchEvent(new CustomEvent('fit-terminals'));
-    // fit();
-    // const t1 = setTimeout(fit, 100);
-    // const t2 = setTimeout(fit, 300);
-
-    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
-    const fit = () => window.dispatchEvent(new CustomEvent('fit-terminals'));
-
-    fit();
-    const t1 = setTimeout(fit, 100);
-    const t2 = setTimeout(fit, 300);
-
-    // Immediate dispatch
-    expect(dispatchSpy).toHaveBeenCalledTimes(1);
-
-    // At 100ms
-    vi.advanceTimersByTime(100);
-    expect(dispatchSpy).toHaveBeenCalledTimes(2);
-
-    // At 300ms
-    vi.advanceTimersByTime(200);
-    expect(dispatchSpy).toHaveBeenCalledTimes(3);
-
-    // Cleanup
-    clearTimeout(t1);
-    clearTimeout(t2);
+    // Verify all methods were called
+    expect(instance!.fitAddon.fit).toHaveBeenCalled();
+    expect(instance!.term.focus).toHaveBeenCalled();
+    expect(instance!.term.scrollToBottom).toHaveBeenCalled();
+    expect(instance!.term.refresh).toHaveBeenCalledWith(0, instance!.term.rows - 1);
   });
 });

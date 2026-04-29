@@ -29,7 +29,7 @@ function App() {
   const [eventCounts, setEventCounts] = useState<Record<number, number>>({});
   const [uiErrors, setUiErrors] = useState<string[]>([]);
 
-  const [showDebug, setShowDebug] = useState(false);
+  const [_showDebug, setShowDebug] = useState(false);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -42,19 +42,12 @@ function App() {
       // Quick switch session: Alt+1..9
       if (e.altKey && /^[1-9]$/.test(e.key)) {
         const index = parseInt(e.key) - 1;
-        const currentSessions = useSessionStore.getState().sessions.filter(s => 
-          s.project_id === useSessionStore.getState().getActiveSession()?.project_id && 
-          s.status !== 'archived'
+        const currentSessions = useSessionStore.getState().sessions.filter(s =>
+          s.project_id === useSessionStore.getState().getActiveSession()?.project_id
         );
         if (currentSessions[index]) {
           useSessionStore.getState().setActiveSession(currentSessions[index].id);
         }
-      }
-
-      // Toggle Grid: Alt+G
-      if (e.altKey && e.key === 'g') {
-        const currentLayout = useSessionStore.getState().layout;
-        useSessionStore.getState().setLayout(currentLayout === 'single' ? 'grid' : 'single');
       }
     };
 
