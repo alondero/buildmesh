@@ -5,6 +5,52 @@ use once_cell::sync::Lazy;
 use std::process::Command;
 use std::env;
 
+/// The default WSL distro name (e.g., "Ubuntu"), cached after first detection
+static DETECTED_DISTRO: Lazy<Option<String>> = Lazy::new(get_default_wsl_distro_impl);
+
+/// The Windows username, cached after first lookup
+static WINDOWS_USERNAME: Lazy<Option<String>> = Lazy::new(get_windows_username_impl);
+
+/// Get the default WSL distro name by parsing `wsl.exe -l -v` output.
+/// Returns the distro marked as (default) or the first one if none marked.
+fn get_default_wsl_distro_impl() -> Option<String> {
+    let output = Command::new("wsl.exe")
+        .args(["-l", "-v"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.contains('(') && line.contains("Default") {
+            // Line format: "  Ubuntu    Active          2"
+            return line.split_whitespace().next().map(|s| s.to_string());
+        }
+    }
+    // No default marked, use first distro
+    stdout
+        .lines()
+        .skip(1) // skip header
+        .filter(|l| !l.trim().is_empty())
+        .next()
+        .and_then(|l| l.split_whitespace().next())
+        .map(|s| s.to_string())
+}
+
+/// Get the cached default WSL distro name
+fn get_default_wsl_distro() -> Option<String> {
+    DETECTED_DISTRO.clone()
+}
+
+/// Get the Windows username (used for path construction)
+fn get_windows_username_impl() -> Option<String> {
+    env::var("USERNAME").ok()
+}
+
+/// Get the cached Windows username
+fn get_windows_username() -> Option<String> {
+    WINDOWS_USERNAME.clone()
+}
+
 /// The detected runtime environment for this process
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -148,8 +194,9 @@ pub fn env_for_path(path: &PathBuf) -> Environment {
 /// (e.g., /home/user -> \\wsl$\Ubuntu\home\user)
 pub fn to_host_path(path: &str) -> String {
     if path.starts_with('/') && !path.starts_with("/mnt/") {
-        // Assume default Ubuntu distro for now - in production this would be dynamic
-        format!("\\\\wsl$\\Ubuntu{}", path.replace('/', "\\"))
+        // Use cached default distro
+        let distro = get_default_wsl_distro().unwrap_or_else(|| "Ubuntu".to_string());
+        format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
     } else if path.starts_with("/mnt/") {
         // /mnt/c/Users -> C:\Users
         let drive = path.chars().nth(5).unwrap_or('c').to_uppercase().next().unwrap();
