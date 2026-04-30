@@ -33,3 +33,4 @@ test-results/
 .claude/worktrees/
 coverage/
 coverage/
+.worktrees/
