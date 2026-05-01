@@ -404,6 +404,48 @@ pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     Ok(())
 }
 
+pub fn mark_running_sessions_suspended() -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    let count = db.execute(
+        "UPDATE sessions SET status = 'suspended' WHERE status IN ('running', 'awaiting_input')",
+        [],
+    )?;
+    Ok(count)
+}
+
+pub fn list_suspended_sessions() -> SqlResult<Vec<Session>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, created_at
+         FROM sessions WHERE status = 'suspended' AND cli_session_id IS NOT NULL"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(Session {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            name: row.get(2)?,
+            path: row.get(3)?,
+            branch: row.get(4)?,
+            env: match row.get::<_, String>(5)?.as_str() {
+                "wsl" => EnvType::Wsl,
+                _ => EnvType::Windows,
+            },
+            provider: match row.get::<_, String>(6)?.as_str() {
+                "minimax" => Provider::Minimax,
+                "gemini" => Provider::Gemini,
+                "opencode" => Provider::OpenCode,
+                _ => Provider::Anthropic,
+            },
+            status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
+            cli_session_id: row.get(8)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now()),
+        })
+    })?;
+    rows.collect()
+}
+
 // --- Checkpoint operations ---
 
 pub fn create_checkpoint(

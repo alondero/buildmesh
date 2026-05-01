@@ -79,6 +79,7 @@ pub enum SessionStatus {
     AwaitingInput,
     Error,
     Archived,
+    Suspended,
 }
 
 /// Parse a session status from a DB string column
@@ -89,6 +90,7 @@ impl SessionStatus {
             "awaiting_input" => SessionStatus::AwaitingInput,
             "error" => SessionStatus::Error,
             "archived" => SessionStatus::Archived,
+            "suspended" => SessionStatus::Suspended,
             _ => SessionStatus::Idle,
         }
     }
@@ -100,6 +102,7 @@ impl SessionStatus {
             SessionStatus::AwaitingInput => "awaiting_input",
             SessionStatus::Error => "error",
             SessionStatus::Archived => "archived",
+            SessionStatus::Suspended => "suspended",
         }
     }
 }

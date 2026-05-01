@@ -42,6 +42,16 @@ pub fn run() {
 
             tracing::info!("Buildmesh started — db at {:?}", db_path);
 
+            // Crash recovery: any sessions still marked 'running' from a previous
+            // crash have no live process. Mark them suspended for auto-resume.
+            match db::mark_running_sessions_suspended() {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Crash recovery: marked {} orphaned sessions as suspended", count);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!("Crash recovery failed: {}", e),
+            }
+
             // Log window creation
             if let Some(_window) = app.get_webview_window("main") {
                 tracing::info!("Main window found, ready to load content");
@@ -78,6 +88,7 @@ pub fn run() {
             commands::agent::debug_list_agents,
             commands::agent::send_to_agent,
             commands::agent::write_to_agent,
+            commands::agent::auto_resume_sessions,
             // Checkpoint
             commands::checkpoint::create_checkpoint,
             commands::checkpoint::list_checkpoints,
@@ -109,6 +120,15 @@ pub fn run() {
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = &event {
+                tracing::info!("App exit requested, marking running sessions as suspended");
+                if let Err(e) = db::mark_running_sessions_suspended() {
+                    tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
+                }
+                commands::agent::kill_all_agents();
+            }
+        });
 }

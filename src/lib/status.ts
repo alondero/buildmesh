@@ -1,7 +1,7 @@
 // Centralized session status constants
 // These are shared between sessionStore.ts and Sidebar.tsx
 
-export type SessionStatus = 'running' | 'idle' | 'awaiting_input' | 'error';
+export type SessionStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
 
 export const STATUS_CONFIG = {
   running: {
@@ -19,6 +19,10 @@ export const STATUS_CONFIG = {
   error: {
     color: 'text-[#ef4444]',
     dot: '✗',
+  },
+  suspended: {
+    color: 'text-[#a78bfa]',
+    dot: '⏸',
   },
 } as const;
 

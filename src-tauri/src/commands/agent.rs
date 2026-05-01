@@ -53,11 +53,6 @@ impl ProcessRegistry {
 static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(ProcessRegistry::new())));
 
-/// Regex for capturing session ID from agent output.
-/// Compiled once at first use and reused thereafter.
-static SESSION_ID_REGEX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    regex::Regex::new(r"session[_-]id[:\s]+([a-zA-Z0-9\-_]+)").unwrap()
-});
 
 // ---------------------------------------------------------------------------
 // Helper functions for spawn_agent
@@ -107,12 +102,22 @@ fn open_pty_pair() -> Result<PtyPair, String> {
         .map_err(|e| format!("failed to open PTY: {}", e))
 }
 
+/// Session ID mode: either assign a new ID or resume an existing one.
+enum SessionIdMode {
+    /// Fresh session: pass --session-id <uuid> to Claude
+    Assign(String),
+    /// Resuming: pass --resume <uuid> to Claude
+    Resume(String),
+    /// No session ID handling (non-Anthropic providers)
+    None,
+}
+
 /// Build the spawn command based on provider and environment.
 fn build_spawn_command(
     session: &crate::models::Session,
     is_wsl: EnvType,
     provider_enum: Provider,
-    resume: Option<&str>,
+    session_id_mode: &SessionIdMode,
 ) -> CommandBuilder {
     let is_macos = cfg!(target_os = "macos");
 
@@ -130,12 +135,18 @@ fn build_spawn_command(
         }
     };
 
-    if let Some(ref res_id) = resume {
-        if !res_id.is_empty() {
-            tracing::info!("spawn_agent: adding resume flag for session {}", res_id);
-            args.push("--resume".to_string());
-            args.push(res_id.to_string());
+    match session_id_mode {
+        SessionIdMode::Assign(id) => {
+            tracing::info!("spawn_agent: assigning session-id {}", id);
+            args.push("--session-id".to_string());
+            args.push(id.clone());
         }
+        SessionIdMode::Resume(id) => {
+            tracing::info!("spawn_agent: resuming session {}", id);
+            args.push("--resume".to_string());
+            args.push(id.clone());
+        }
+        SessionIdMode::None => {}
     }
 
     let mut cmd = if is_wsl == EnvType::Wsl {
@@ -202,7 +213,7 @@ fn register_agent(
 }
 
 /// Start the PTY reader thread.
-fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>) {
+fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>, spawned_at: std::time::Instant) {
     let app_clone = app;
     let reader_alive = Arc::new(AtomicBool::new(true));
     let reader_alive_clone = reader_alive.clone();
@@ -223,14 +234,6 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                    // Try to capture session ID if not already known
-                    if let Some(caps) = SESSION_ID_REGEX.captures(&data) {
-                        if let Some(cli_id) = caps.get(1) {
-                            let cli_id_str = cli_id.as_str().to_string();
-                            let _ = db::update_cli_session_id(session_id, &cli_id_str);
-                        }
-                    }
-
                     crate::session_namer::append_output(session_id, &data);
 
                     let _ = app_clone.emit(
@@ -248,6 +251,20 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
             }
         }
         reader_alive_clone.store(false, Ordering::SeqCst);
+
+        // Detect early exit (likely a failed --resume)
+        let elapsed = spawned_at.elapsed();
+        if elapsed < std::time::Duration::from_secs(3) {
+            tracing::warn!("Session {} reader exited after {:?} — likely resume failure", session_id, elapsed);
+            let _ = db::update_session_status(session_id, SessionStatus::Error);
+            let _ = app_clone.emit("resume-failed", serde_json::json!({
+                "session_id": session_id,
+                "error": "Agent exited immediately after spawn — session may have expired"
+            }));
+        } else {
+            let _ = db::update_session_status(session_id, SessionStatus::Idle);
+        }
+
         tracing::debug!("PTY reader thread exited for session {}", session_id);
     });
 }
@@ -256,16 +273,15 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
 // Tauri commands
 // ---------------------------------------------------------------------------
 
-/// Spawn a new agent for the given session with the specified provider
-#[command]
-pub async fn spawn_agent(
-    app: AppHandle,
+/// Inner implementation shared by spawn_agent command and auto_resume_sessions.
+async fn spawn_agent_inner(
+    app: &AppHandle,
     session_id: i64,
     provider: String,
     resume: Option<String>,
 ) -> Result<(), String> {
     tracing::info!(
-        "spawn_agent: session_id={}, provider={}, resume={:?}",
+        "spawn_agent_inner: session_id={}, provider={}, resume={:?}",
         session_id,
         provider,
         resume
@@ -277,24 +293,40 @@ pub async fn spawn_agent(
     }
 
     // 2. Kill any stale process for this session
-    tracing::debug!("spawn_agent: killing stale processes for session {}", session_id);
+    tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
     kill_agent(session_id).await.ok();
 
     // 3. Get session info
     let (session, is_wsl) = get_session_and_env(&session_id)?;
-    tracing::info!("spawn_agent: session path={}, env={:?}", session.path, session.env);
+    tracing::info!("spawn_agent_inner: session path={}, env={:?}", session.path, session.env);
 
     let provider_enum = parse_provider(&provider);
 
-    // 4. Open PTY
-    tracing::debug!("spawn_agent: opening PTY system");
+    // 4. Determine session ID mode for Anthropic provider
+    let session_id_mode = if provider_enum == Provider::Anthropic {
+        match resume {
+            Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
+            _ => {
+                // Fresh session: generate UUID and store it immediately
+                let cli_uuid = uuid::Uuid::new_v4().to_string();
+                db::update_cli_session_id(session_id, &cli_uuid).map_err(|e| e.to_string())?;
+                tracing::info!("spawn_agent_inner: assigned cli_session_id={}", cli_uuid);
+                SessionIdMode::Assign(cli_uuid)
+            }
+        }
+    } else {
+        SessionIdMode::None
+    };
+
+    // 5. Open PTY
+    tracing::debug!("spawn_agent_inner: opening PTY system");
     let pair = open_pty_pair()?;
 
-    // 5. Build command
-    let cmd = build_spawn_command(&session, is_wsl, provider_enum, resume.as_deref());
+    // 6. Build command
+    let cmd = build_spawn_command(&session, is_wsl, provider_enum, &session_id_mode);
 
-    // 6. Spawn
-    tracing::info!("spawn_agent: spawning process in {}", session.path);
+    // 7. Spawn
+    tracing::info!("spawn_agent_inner: spawning process in {}", session.path);
     let child = spawn_child(&pair, cmd).map_err(|e| {
         let err_msg = e.clone();
         let _ = app.emit(
@@ -308,9 +340,9 @@ pub async fn spawn_agent(
         e
     })?;
 
-    tracing::info!("spawn_agent: process spawned successfully");
+    tracing::info!("spawn_agent_inner: process spawned successfully");
 
-    // 7. Setup IO and register
+    // 8. Setup IO and register
     let reader = pair
         .master
         .try_clone_reader()
@@ -318,24 +350,94 @@ pub async fn spawn_agent(
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let reader_alive = Arc::new(AtomicBool::new(true));
 
-    tracing::info!("spawn_agent: storing agent process for session {}", session_id);
+    tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
     register_agent(session_id, child, writer, pair, reader_alive.clone());
-    tracing::info!("spawn_agent: stored agent process");
+    tracing::info!("spawn_agent_inner: stored agent process");
 
-    // 8. Start reader thread
-    tracing::info!(
-        "spawn_agent: about to spawn reader thread for session {}",
-        session_id
-    );
-    tracing::debug!("spawn_agent: starting reader thread for session {}", session_id);
-    start_reader(app.clone(), session_id, reader);
+    // 9. Start reader thread with spawn timestamp for early-exit detection
+    let spawned_at = std::time::Instant::now();
+    tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
+    start_reader(app.clone(), session_id, reader, spawned_at);
 
     tracing::info!(
-        "spawn_agent: reader thread spawned, updating session status"
+        "spawn_agent_inner: reader thread spawned, updating session status"
     );
     db::update_session_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
-    tracing::info!("spawn_agent: complete");
+    tracing::info!("spawn_agent_inner: complete");
     Ok(())
+}
+
+/// Spawn a new agent for the given session with the specified provider
+#[command]
+pub async fn spawn_agent(
+    app: AppHandle,
+    session_id: i64,
+    provider: String,
+    resume: Option<String>,
+) -> Result<(), String> {
+    spawn_agent_inner(&app, session_id, provider, resume).await
+}
+
+/// Auto-resume all suspended sessions that have a stored CLI session ID.
+/// Called by the frontend on startup after event listeners are ready.
+#[command]
+pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
+    let sessions = db::list_suspended_sessions().map_err(|e| e.to_string())?;
+
+    if sessions.is_empty() {
+        tracing::info!("auto_resume_sessions: no suspended sessions to resume");
+        return Ok(vec![]);
+    }
+
+    tracing::info!("auto_resume_sessions: resuming {} sessions", sessions.len());
+    let mut resumed: Vec<i64> = Vec::new();
+
+    for session in &sessions {
+        let cli_id = match &session.cli_session_id {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => {
+                tracing::warn!("auto_resume_sessions: session {} has no cli_session_id, skipping", session.id);
+                db::update_session_status(session.id, SessionStatus::Idle).ok();
+                continue;
+            }
+        };
+
+        if session.provider != Provider::Anthropic {
+            tracing::info!("auto_resume_sessions: skipping non-Anthropic session {} ({:?})", session.id, session.provider);
+            db::update_session_status(session.id, SessionStatus::Idle).ok();
+            continue;
+        }
+
+        let provider_str = session.provider.to_string();
+        match spawn_agent_inner(&app, session.id, provider_str, Some(cli_id)).await {
+            Ok(()) => {
+                resumed.push(session.id);
+                tracing::info!("auto_resume_sessions: resumed session {}", session.id);
+            }
+            Err(e) => {
+                tracing::error!("auto_resume_sessions: failed to resume session {}: {}", session.id, e);
+                db::update_session_status(session.id, SessionStatus::Error).ok();
+                let _ = app.emit("resume-failed", serde_json::json!({
+                    "session_id": session.id,
+                    "error": e
+                }));
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    Ok(resumed)
+}
+
+/// Kill all running agent processes. Used during graceful shutdown.
+pub fn kill_all_agents() {
+    let mut registry = PROCESS_REGISTRY.lock().unwrap();
+    for (id, mut agent) in registry.processes.drain() {
+        agent.child.kill().ok();
+        agent.reader_alive.store(false, Ordering::SeqCst);
+        tracing::info!("kill_all_agents: killed agent for session {}", id);
+    }
 }
 
 #[command]

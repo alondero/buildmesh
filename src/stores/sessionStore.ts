@@ -11,7 +11,7 @@ export interface Session {
   branch: string;
   env: 'windows' | 'wsl';
   provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode';
-  status: 'running' | 'idle' | 'awaiting_input' | 'error';
+  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
   cli_session_id?: string;
   created_at: string;
 }

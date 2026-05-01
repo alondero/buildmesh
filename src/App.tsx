@@ -103,12 +103,38 @@ function App() {
         await fetchProjects();
         await fetchSessions();
         setIsReady(true);
+
+        // Auto-resume suspended sessions after a brief delay to ensure
+        // terminals and event listeners are mounted
+        setTimeout(async () => {
+          try {
+            const resumed = await invoke<number[]>('auto_resume_sessions');
+            if (resumed.length > 0) {
+              console.log(`[App] Auto-resumed ${resumed.length} sessions`);
+              await fetchSessions();
+            }
+          } catch (e) {
+            console.error('[App] Auto-resume failed:', e);
+          }
+        }, 1000);
       } catch (e) {
         setUiErrors(prev => [...prev, `Init Error: ${e}`]);
       }
     };
     init();
   }, []);
+
+  useEffect(() => {
+    const unlisten = listen<{ session_id: number; error: string }>('resume-failed', (event) => {
+      const toast: ErrorToast = {
+        id: Date.now(),
+        provider: 'Resume',
+        message: `Session ${event.payload.session_id}: ${event.payload.error}`,
+      };
+      setToasts((prev) => [...prev, toast]);
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [setToasts]);
 
   const dismissToast = (id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
