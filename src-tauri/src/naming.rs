@@ -44,6 +44,16 @@ pub fn generate_random_name() -> String {
     format!("{}-{}-{}", adj1, adj2, noun)
 }
 
+pub fn is_default_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    ADJECTIVES.contains(&parts[0])
+        && ADJECTIVES.contains(&parts[1])
+        && NOUNS.contains(&parts[2])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

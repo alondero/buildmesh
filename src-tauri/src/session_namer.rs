@@ -39,16 +39,27 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
         return;
     }
 
+    // Check DB: if session already has a non-default name, it was renamed in a previous run
+    if let Ok(session) = crate::db::get_session_by_id(session_id) {
+        if !crate::naming::is_default_name(&session.name) {
+            RENAMED_SESSIONS.lock().unwrap().insert(session_id);
+            return;
+        }
+    }
+
     let should_rename = {
         let mut counters = TURN_COUNTERS.lock().unwrap();
         let count = counters.entry(session_id).or_insert(0);
         *count += 1;
+        tracing::info!("session_namer: record_turn session={} turn={}", session_id, *count);
         *count == RENAME_AT_TURN
     };
 
     if !should_rename {
         return;
     }
+
+    tracing::info!("session_namer: triggering rename for session {}", session_id);
 
     RENAMED_SESSIONS.lock().unwrap().insert(session_id);
 
@@ -67,7 +78,7 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
         return;
     }
 
-    tokio::task::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         match summarize_and_rename(session_id, &buffer_snapshot).await {
             Ok(slug) => {
                 let _ = app.emit(
@@ -99,7 +110,10 @@ async fn summarize_and_rename(session_id: i64, buffer: &str) -> Result<String, S
         buffer
     );
 
+    tracing::info!("session_namer: running summarize command for session {}", session_id);
+
     let output = build_summarize_command(&prompt)
+        .stdin(std::process::Stdio::null())
         .output()
         .await
         .map_err(|e| format!("failed to run CLI: {}", e))?;
@@ -124,15 +138,28 @@ fn build_summarize_command(prompt: &str) -> tokio::process::Command {
     let is_macos = cfg!(target_os = "macos");
 
     if is_macos {
-        let mut cmd = tokio::process::Command::new("claude");
-        cmd.args(["-p", prompt]);
+        let claude_path = which_claude().unwrap_or_else(|| "claude".into());
+        let mut cmd = tokio::process::Command::new(claude_path);
+        cmd.args(["-p", prompt, "--output-format", "text"]);
         cmd
     } else {
-        // Windows: use cmd.exe /c cwrap anthropic -p "..."
         let mut cmd = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
         cmd.args(["/c", "cwrap", "anthropic", "-p", prompt]);
         cmd
     }
+}
+
+fn which_claude() -> Option<String> {
+    let paths = [
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+    ];
+    for p in paths {
+        if std::path::Path::new(p).exists() {
+            return Some(p.to_string());
+        }
+    }
+    None
 }
 
 fn validate_slug(raw: &str) -> Result<String, String> {

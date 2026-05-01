@@ -7,6 +7,7 @@ mod env;
 mod models;
 mod naming;
 mod session_namer;
+mod turn_detector;
 
 use tauri::Manager;
 

@@ -53,6 +53,9 @@ impl ProcessRegistry {
 static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(ProcessRegistry::new())));
 
+static LAST_INPUT_TIME: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, std::time::Instant>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
 
 // ---------------------------------------------------------------------------
 // Helper functions for spawn_agent
@@ -213,7 +216,7 @@ fn register_agent(
 }
 
 /// Start the PTY reader thread.
-fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>, spawned_at: std::time::Instant) {
+fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>, spawned_at: std::time::Instant, provider: crate::models::Provider) {
     let app_clone = app;
     let reader_alive = Arc::new(AtomicBool::new(true));
     let reader_alive_clone = reader_alive.clone();
@@ -221,7 +224,7 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
     std::thread::spawn(move || {
         let mut r = reader;
         let mut buf = [0u8; 8192];
-
+        let mut detector = crate::turn_detector::TurnDetector::new(provider);
         loop {
             match r.read(&mut buf) {
                 Ok(0) => {
@@ -235,6 +238,21 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
 
                     crate::session_namer::append_output(session_id, &data);
+
+                    if detector.contains_prompt(&data) {
+                        let suppress = LAST_INPUT_TIME.lock().unwrap()
+                            .get(&session_id)
+                            .map(|t| t.elapsed() < std::time::Duration::from_secs(3))
+                            .unwrap_or(false);
+
+                        if !suppress {
+                            crate::session_namer::record_turn(session_id, app_clone.clone());
+                            let _ = db::update_session_status(session_id, SessionStatus::AwaitingInput);
+                            let _ = app_clone.emit("attention-needed", serde_json::json!({
+                                "session_id": session_id
+                            }));
+                        }
+                    }
 
                     let _ = app_clone.emit(
                         "agent-output",
@@ -357,7 +375,7 @@ async fn spawn_agent_inner(
     // 9. Start reader thread with spawn timestamp for early-exit detection
     let spawned_at = std::time::Instant::now();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
-    start_reader(app.clone(), session_id, reader, spawned_at);
+    start_reader(app.clone(), session_id, reader, spawned_at, provider_enum);
 
     tracing::info!(
         "spawn_agent_inner: reader thread spawned, updating session status"
@@ -441,12 +459,17 @@ pub fn kill_all_agents() {
 }
 
 #[command]
-pub async fn write_to_agent(session_id: i64, data: String) -> Result<(), String> {
+pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
     let mut registry = PROCESS_REGISTRY.lock().unwrap();
     if let Some(agent) = registry.get_mut(&session_id) {
         use std::io::Write;
         agent.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
         agent.writer.flush().map_err(|e| e.to_string())?;
+        if data.contains('\n') || data.contains('\r') {
+            LAST_INPUT_TIME.lock().unwrap().insert(session_id, std::time::Instant::now());
+            db::update_session_status(session_id, SessionStatus::Running).ok();
+            let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
+        }
         Ok(())
     } else {
         Err("Agent not running".to_string())
@@ -454,8 +477,8 @@ pub async fn write_to_agent(session_id: i64, data: String) -> Result<(), String>
 }
 
 #[command]
-pub async fn send_to_agent(session_id: i64, input: String) -> Result<(), String> {
-    write_to_agent(session_id, format!("{}\n", input)).await
+pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Result<(), String> {
+    write_to_agent(app, session_id, format!("{}\n", input)).await
 }
 
 #[command]
