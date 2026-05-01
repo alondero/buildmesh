@@ -103,6 +103,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           }));
         });
 
+        await listen<{ session_id: number; name: string }>('session-renamed', (event) => {
+          const { session_id: sessionId, name } = event.payload;
+          set((state) => ({
+            sessions: state.sessions.map((s) =>
+              s.id === sessionId ? { ...s, name } : s
+            ),
+          }));
+        });
+
         // Listen for session-created events from test server (HTTP-based E2E tests)
         await listen<{ id: number }>('session-created', async () => {
           // Refetch sessions via invoke since they were created via HTTP test server

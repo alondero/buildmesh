@@ -36,6 +36,8 @@ pub async fn register_attention_session(
     }))
     .map_err(|e| e.to_string())?;
 
+    crate::session_namer::record_turn(session_id, app.clone());
+
     tracing::info!("Session {} awaiting user input", session_id);
     Ok(())
 }

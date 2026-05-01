@@ -10,16 +10,17 @@ use tauri::{command, Emitter};
 #[command]
 pub async fn create_session(
     project_id: i64,
-    name: String,
+    _name: String,
     path: String,
     branch: String,
 ) -> Result<Session, String> {
-    tracing::debug!("create_session called: project_id={}, name={}, path={}, branch={}", project_id, name, path, branch);
+    let session_name = crate::naming::generate_random_name();
+    tracing::debug!("create_session called: project_id={}, name={}, path={}, branch={}", project_id, session_name, path, branch);
     let path_buf = PathBuf::from(&path);
     let env_internal = env::env_for_path(&path_buf);
     let env_type = EnvType::from(env_internal);
     let provider = Provider::Anthropic;
-    db::create_session(project_id, &name, &path, &branch, env_type, provider)
+    db::create_session(project_id, &session_name, &path, &branch, env_type, provider)
         .map_err(|e| {
             tracing::error!("create_session failed: {}", e);
             e.to_string()
@@ -69,6 +70,7 @@ pub async fn update_session_status(
 /// Delete a session permanently
 #[command]
 pub async fn delete_session(session_id: i64) -> Result<(), String> {
+    crate::session_namer::cleanup(session_id);
     db::delete_session(session_id).map_err(|e| e.to_string())
 }
 

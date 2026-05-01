@@ -231,6 +231,8 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                         }
                     }
 
+                    crate::session_namer::append_output(session_id, &data);
+
                     let _ = app_clone.emit(
                         "agent-output",
                         serde_json::json!({

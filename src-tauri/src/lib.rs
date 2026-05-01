@@ -5,6 +5,8 @@ mod commands;
 mod db;
 mod env;
 mod models;
+mod naming;
+mod session_namer;
 
 use tauri::Manager;
 

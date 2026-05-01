@@ -298,6 +298,15 @@ pub fn create_session(
     get_session_by_id_inner(&db, id)
 }
 
+pub fn update_session_name(id: i64, name: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE sessions SET name = ?1 WHERE id = ?2",
+        params![name, id],
+    )?;
+    Ok(())
+}
+
 pub fn get_session_by_id(id: i64) -> SqlResult<Session> {
     let db = get().lock().unwrap();
     get_session_by_id_inner(&db, id)
