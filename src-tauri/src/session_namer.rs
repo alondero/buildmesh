@@ -26,7 +26,10 @@ pub fn append_output(session_id: i64, data: &str) {
     let buf = buffers.entry(session_id).or_default();
     buf.push_str(data);
     if buf.len() > MAX_BUFFER_CHARS {
-        let drain_to = buf.len() - MAX_BUFFER_CHARS;
+        let mut drain_to = buf.len() - MAX_BUFFER_CHARS;
+        while !buf.is_char_boundary(drain_to) {
+            drain_to += 1;
+        }
         buf.drain(..drain_to);
     }
 }
