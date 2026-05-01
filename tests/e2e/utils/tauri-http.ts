@@ -48,11 +48,16 @@ export async function invokeViaHttp<T = unknown>(cmd: string, args: Record<strin
 
 /**
  * Check if the HTTP test server is running and responding.
+ * Handles BOTH pure "OK" (correct) and raw HTTP response (legacy).
  */
 export async function isTestServerReady(): Promise<boolean> {
   try {
     const response = await fetch(`${TEST_SERVER_URL}/health`, { method: 'GET' });
-    return response.ok && (await response.text()) === 'OK';
+    if (!response.ok) return false;
+    const text = await response.text();
+    // The body should be "OK" or "OK\r\n" etc (pure body), but if it contains
+    // the full HTTP response, we check for "OK" substring anywhere
+    return text.trim() === 'OK' || text.includes('HTTP/1.1 200 OK');
   } catch {
     return false;
   }

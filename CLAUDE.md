@@ -31,3 +31,19 @@ Single-window desktop app with a **sidebar** for navigation and a **Session View
 - **Path Handling:** Use `env::to_host_path` when accessing the file system from the backend to ensure compatibility with WSL sessions.
 - **Agent Spawning:** On Windows, spawn `cwrap` via `cmd.exe /c` to ensure ConPTY correctly handles ANSI sequences.
 - **Session ID Capture:** The backend PTY reader thread automatically captures `session-id` patterns from agent output to update the database for future resumes.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues in `alondero/buildmesh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Defaults: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+See @docs/knowledge-primer.md for codebase conventions, anti-patterns, and key architectural decisions.

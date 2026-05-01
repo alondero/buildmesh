@@ -102,6 +102,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             ),
           }));
         });
+
+        // Listen for session-created events from test server (HTTP-based E2E tests)
+        await listen<{ id: number }>('session-created', async () => {
+          // Refetch sessions via invoke since they were created via HTTP test server
+          await get().fetchSessions();
+        });
+
+        // Listen for session-activated events from test server (HTTP-based E2E tests)
+        await listen<{ session_id: number }>('session-activated', (event) => {
+          const sessionId = event.payload.session_id;
+          set({ activeSessionId: sessionId });
+        });
       },
     };
   })(),

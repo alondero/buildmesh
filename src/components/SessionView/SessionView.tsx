@@ -1,12 +1,15 @@
 import { useEffect, useMemo } from 'react';
 import { useSessionStore, Session } from '../../stores/sessionStore';
+import { useProjectStore } from '../../stores/projectStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
 import { listen } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession } from '../../lib/tauri';
 import { STATUS_CONFIG } from '../../lib/status';
+import { FILE_CHANGE, FIT_TERMINALS } from '../../lib/events';
 
 export function SessionView() {
+  const selectedProjectId = useProjectStore(state => state.selectedProjectId);
   const {
     sessions,
     getActiveSession,
@@ -16,14 +19,21 @@ export function SessionView() {
 
   const activeSession = getActiveSession();
 
+  const filteredSessions = useMemo(() => {
+    if (selectedProjectId === null) {
+      return sessions;
+    }
+    return sessions.filter(s => s.project_id === selectedProjectId);
+  }, [sessions, selectedProjectId]);
+
   const tabSessions = useMemo(() => {
-    return sessions.slice(0, 10);
-  }, [sessions]);
+    return filteredSessions.slice(0, 10);
+  }, [filteredSessions]);
 
   useEffect(() => {
     if (!activeSession) return;
     watchSession(activeSession.id).catch(console.error);
-    const unlisten = listen<{ session_id: number; change: { path: string; kind: string } }>('file-change', () => {
+    const unlisten = listen<{ session_id: number; change: { path: string; kind: string } }>(FILE_CHANGE, () => {
       // File tree refresh handled by parent if needed
     });
     return () => {
@@ -33,9 +43,19 @@ export function SessionView() {
   }, [activeSession?.id]);
 
   // Dispatch fit-terminals event when active session changes
+  // Auto-select first session when switching to a project that doesn't include the active session
+  useEffect(() => {
+    if (filteredSessions.length > 0 && activeSession && !filteredSessions.find(s => s.id === activeSession.id)) {
+      // Active session is not in filtered sessions - auto-select the first one
+      setActiveSession(filteredSessions[0].id);
+    }
+  }, [selectedProjectId, filteredSessions, activeSession, setActiveSession]);
+
+  // Dispatch fit-terminals event when active session changes
   useEffect(() => {
     if (activeSession) {
-      window.dispatchEvent(new CustomEvent('fit-terminals', { detail: { sessionId: activeSession.id } }));
+      console.log(`[DEBUG SessionView] Dispatching FIT_TERMINALS for session ${activeSession.id}`);
+      window.dispatchEvent(new CustomEvent(FIT_TERMINALS, { detail: { sessionId: activeSession.id } }));
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession?.id]);
@@ -44,7 +64,7 @@ export function SessionView() {
     sendToAgent(sessionId, cmd);
   };
 
-  if (sessions.length === 0) {
+  if (filteredSessions.length === 0) {
     return (
       <div className="flex-1 flex flex-col bg-[#0f0f0f]">
         <div className="flex-1 flex items-center justify-center text-[#666]">
@@ -87,8 +107,8 @@ export function SessionView() {
         })}
       </div>
 
-      {/* Grid of all sessions */}
-      <GridLayout sessions={sessions} onSlashCommand={handleSlashCommand} />
+      {/* Grid of filtered sessions */}
+      <GridLayout sessions={filteredSessions} onSlashCommand={handleSlashCommand} />
     </div>
   );
 }

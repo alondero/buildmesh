@@ -11,6 +11,7 @@ export interface Project {
 
 interface ProjectState {
   projects: Project[];
+  projectsById: Map<number, Project>;
   selectedProjectId: number | null;
   loading: boolean;
   error: string | null;
@@ -25,6 +26,7 @@ interface ProjectState {
 
 export const useProjectStore = create<ProjectState>((set) => ({
   projects: [],
+  projectsById: new Map(),
   selectedProjectId: null,
   loading: false,
   error: null,
@@ -33,7 +35,8 @@ export const useProjectStore = create<ProjectState>((set) => ({
     set({ loading: true, error: null });
     try {
       const projects = await invoke<Project[]>('list_projects');
-      set({ projects, loading: false });
+      const projectsById = new Map(projects.map((p) => [p.id, p]));
+      set({ projects, projectsById, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -41,23 +44,25 @@ export const useProjectStore = create<ProjectState>((set) => ({
 
   addProject: async () => {
     try {
-      const result = await invoke<Project>('add_project');
-      console.log('[projectStore] add_project returned:', result);
-      await useProjectStore.getState().fetchProjects();
-      console.log('[projectStore] projects after fetch:', useProjectStore.getState().projects.length);
+      const project = await invoke<Project>('add_project');
+      set((state) => ({
+        projects: [...state.projects, project],
+        projectsById: new Map([...state.projectsById, [project.id, project]])
+      }));
     } catch (e) {
-      console.error('[projectStore] add_project failed:', e);
       set({ error: String(e) });
     }
   },
 
   addTestProject: async (name) => {
     try {
-      const result = await invoke<Project>('create_test_project', { name });
-      await useProjectStore.getState().fetchProjects();
-      return result;
+      const project = await invoke<Project>('create_test_project', { name });
+      set((state) => ({
+        projects: [...state.projects, project],
+        projectsById: new Map([...state.projectsById, [project.id, project]])
+      }));
+      return project;
     } catch (e) {
-      console.error('[projectStore] addTestProject failed:', e);
       set({ error: String(e) });
       return null;
     }
@@ -86,7 +91,15 @@ export const useProjectStore = create<ProjectState>((set) => ({
   updateProjectLayout: async (id, layout) => {
     try {
       await invoke('update_project_layout', { projectId: id, layout });
-      await useProjectStore.getState().fetchProjects();
+      set((state) => {
+        const existing = state.projectsById.get(id);
+        if (!existing) return state;
+        const updated = { ...existing, layout };
+        return {
+          projects: state.projects.map((p) => (p.id === id ? updated : p)),
+          projectsById: new Map([...state.projectsById, [id, updated]])
+        };
+      });
     } catch (e) {
       set({ error: String(e) });
     }

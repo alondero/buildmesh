@@ -34,3 +34,5 @@ test-results/
 coverage/
 coverage/
 .worktrees/
+bash.exe.stackdump
+.stackdump

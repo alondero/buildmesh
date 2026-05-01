@@ -4,7 +4,7 @@ use crate::db;
 use crate::env;
 use crate::models::{EnvType, Provider, Session, SessionStatus};
 use std::path::PathBuf;
-use tauri::command;
+use tauri::{command, Emitter};
 
 /// Create a new session
 #[command]
@@ -70,4 +70,12 @@ pub async fn update_session_status(
 #[command]
 pub async fn delete_session(session_id: i64) -> Result<(), String> {
     db::delete_session(session_id).map_err(|e| e.to_string())
+}
+
+/// Set the active session (emits event for frontend to handle)
+#[command]
+pub async fn set_active_session(session_id: i64, app: tauri::AppHandle) -> Result<(), String> {
+    tracing::debug!("set_active_session called: session_id={}", session_id);
+    app.emit("session-activated", serde_json::json!({ "session_id": session_id }))
+        .map_err(|e: tauri::Error| e.to_string())
 }

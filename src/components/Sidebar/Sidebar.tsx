@@ -15,6 +15,8 @@ const PROVIDERS = [
 export function Sidebar() {
   const projects = useProjectStore(state => state.projects);
   const addProject = useProjectStore(state => state.addProject);
+  const selectedProjectId = useProjectStore(state => state.selectedProjectId);
+  const selectProject = useProjectStore(state => state.selectProject);
   const sessions = useSessionStore(state => state.sessions);
   const activeSessionId = useSessionStore(state => state.activeSessionId);
   const setActiveSession = useSessionStore(state => state.setActiveSession);
@@ -23,6 +25,14 @@ export function Sidebar() {
   const deleteSession = useSessionStore(state => state.deleteSession);
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
+
+  const handleSelectProject = (projectId: number) => {
+    if (selectedProjectId === projectId) {
+      selectProject(null);
+    } else {
+      selectProject(projectId);
+    }
+  };
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -51,6 +61,7 @@ export function Sidebar() {
       const session = await createSession(project.id, project.name, project.path, 'main');
       await spawnAgent(session.id, providerId);
       await setActiveSession(session.id);
+      selectProject(project.id);
     } catch (e) {
       console.error('Failed to create session with agent:', e);
     }
@@ -115,7 +126,12 @@ export function Sidebar() {
                         </div>
                       )}
                     </div>
-                    <div className="flex-1 px-2 py-1.5 rounded cursor-pointer text-sm text-[#ccc] hover:bg-[#1a1a1a]">
+                    <div
+                      onClick={() => handleSelectProject(project.id)}
+                      className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-[#1a1a1a] ${
+                        selectedProjectId === project.id ? 'text-[#3b82f6] font-semibold' : 'text-[#ccc]'
+                      }`}
+                    >
                       {project.name}
                     </div>
                   </div>
@@ -124,7 +140,10 @@ export function Sidebar() {
                       key={session.id}
                       session={session}
                       isActive={activeSessionId === session.id}
-                      onSelect={() => setActiveSession(session.id)}
+                      onSelect={() => {
+                        setActiveSession(session.id);
+                        selectProject(session.project_id);
+                      }}
                       onDelete={(e) => handleDeleteSession(e, session.id)}
                     />
                   ))}
