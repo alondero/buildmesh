@@ -142,13 +142,17 @@ function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisi
 
       instanceRef.current = inst;
 
-      // Always try to open - xterm.js handles being already open gracefully
       if (!inst.opened) {
         console.log(`[DEBUG TerminalContainer] session ${sessionId}: calling open()`);
         inst.opened = true;
         inst.term.open(containerRef.current);
       } else {
-        console.log(`[DEBUG TerminalContainer] session ${sessionId}: already opened`);
+        // Re-parent terminal element into this container if it was mounted elsewhere
+        const termEl = inst.term.element;
+        if (termEl && termEl.parentElement !== containerRef.current) {
+          console.log(`[DEBUG TerminalContainer] session ${sessionId}: re-parenting terminal element`);
+          containerRef.current.appendChild(termEl);
+        }
       }
 
       // Always do fit/refresh when effect runs - use rAF to ensure DOM dimensions are computed

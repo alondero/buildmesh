@@ -114,11 +114,20 @@ fn build_spawn_command(
     provider_enum: Provider,
     resume: Option<&str>,
 ) -> CommandBuilder {
-    let (binary, mut args): (&str, Vec<String>) = match provider_enum {
-        Provider::Anthropic | Provider::Minimax => {
-            ("cwrap", vec![provider_enum.cli_flag().to_string()])
+    let is_macos = cfg!(target_os = "macos");
+
+    let (binary, mut args): (&str, Vec<String>) = if is_macos {
+        match provider_enum {
+            Provider::Anthropic => ("claude", vec![]),
+            _ => (provider_enum.binary(), vec![]),
         }
-        _ => (provider_enum.binary(), vec![]),
+    } else {
+        match provider_enum {
+            Provider::Anthropic | Provider::Minimax => {
+                ("cwrap", vec![provider_enum.cli_flag().to_string()])
+            }
+            _ => (provider_enum.binary(), vec![]),
+        }
     };
 
     if let Some(ref res_id) = resume {
@@ -133,6 +142,11 @@ fn build_spawn_command(
         tracing::info!("spawn_agent: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
         c.args(["--cd", &session.path, "--", binary]);
+        c.args(args);
+        c
+    } else if is_macos {
+        tracing::info!("spawn_agent: building macOS command for {}", binary);
+        let mut c = CommandBuilder::new(binary);
         c.args(args);
         c
     } else {

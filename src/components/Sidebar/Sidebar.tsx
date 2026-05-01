@@ -5,12 +5,17 @@ import type { Project } from '../../stores/projectStore';
 import type { Session } from '../../stores/sessionStore';
 import { STATUS_CONFIG } from '../../lib/status';
 
-const PROVIDERS = [
+const ALL_PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
   { id: 'minimax', label: 'Minimax', color: 'bg-indigo-500' },
   { id: 'gemini', label: 'Gemini', color: 'bg-emerald-500' },
   { id: 'opencode', label: 'OpenCode', color: 'bg-amber-500' },
 ];
+
+const isMac = navigator.platform.toUpperCase().includes('MAC');
+const PROVIDERS = isMac
+  ? ALL_PROVIDERS.filter(p => p.id === 'anthropic')
+  : ALL_PROVIDERS;
 
 export function Sidebar() {
   const projects = useProjectStore(state => state.projects);
@@ -170,7 +175,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }: {
 }) {
   const config = STATUS_CONFIG[session.status];
   const isAwaiting = session.status === 'awaiting_input';
-  const envBadge = session.env === 'wsl' ? 'WSL' : 'WIN';
+  const envBadge = session.env === 'wsl' ? 'WSL' : isMac ? 'MAC' : 'WIN';
 
   return (
     <div

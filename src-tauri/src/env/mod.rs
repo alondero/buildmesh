@@ -176,6 +176,10 @@ pub fn git_path() -> PathBuf {
 
 /// Determine the environment for a given session path
 pub fn env_for_path(path: &PathBuf) -> Environment {
+    if cfg!(target_os = "macos") {
+        return Environment::Windows;
+    }
+
     let path_str = path.to_string_lossy().to_lowercase();
 
     // WSL detection: paths starting with /mnt/, /home/, or \\wsl$
