@@ -108,10 +108,9 @@ async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, 
 
     tracing::info!("session_namer: running summarize command for session {}", session_id);
 
-    if cfg!(target_os = "windows") {
+    let mut cmd = if cfg!(target_os = "windows") {
         let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
         c.args(["/c", "cwrap", "--minimax", "-p", &prompt]);
-        // Suppress visible console window on Windows
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x08000000);
         c

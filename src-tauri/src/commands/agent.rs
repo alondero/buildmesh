@@ -164,19 +164,14 @@ fn build_spawn_command(
         c.args(args);
         c
     } else {
-        // Windows direct execution
+        // Windows direct execution — use cmd.exe /c which suppresses console window
+        // when the parent process is a GUI (no CREATE_NO_WINDOW needed via portable-pty)
         let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
         if is_cwrap {
-            tracing::info!(
-                "spawn_agent: building Windows command via cmd.exe /c {}",
-                binary
-            );
-            let mut c = CommandBuilder::new("C:\\Windows\\System32\\cmd.exe");
-            c.arg("/c");
-            c.arg(binary);
+            tracing::info!("spawn_agent: building Windows cmd.exe /c for cwrap {}", binary);
+            let mut c = CommandBuilder::new("cmd.exe");
+            c.args(["/c", binary]);
             c.args(args);
-            // Suppress visible console window on Windows (cwrap is a GUI tool)
-            c.creation_flags(0x08000000);
             c
         } else {
             tracing::info!("spawn_agent: building direct binary command for {}", binary);

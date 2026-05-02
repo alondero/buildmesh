@@ -11,6 +11,8 @@ interface TerminalInstance {
   fitAddon: FitAddon;
   unlisten: UnlistenFn;
   opened: boolean;
+  writeBuffer: string;
+  frameRequested: boolean;
 }
 
 class TerminalManager {
@@ -68,7 +70,11 @@ class TerminalManager {
 
       const unlisten = await listen<{ session_id: number; line: string }>('agent-output', (event) => {
         if (event.payload.session_id === sessionId) {
-          term.write(event.payload.line);
+          const inst = this.instances.get(sessionId);
+          if (inst) {
+            inst.writeBuffer += event.payload.line;
+            this.scheduleFlush(sessionId);
+          }
         }
       });
 
@@ -76,7 +82,7 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId, data }).catch(console.error);
       });
 
-      const instance = { term, fitAddon, unlisten, opened: false };
+      const instance: TerminalInstance = { term, fitAddon, unlisten, opened: false, writeBuffer: '', frameRequested: false };
       this.instances.set(sessionId, instance);
       this.notify();
       return instance;
@@ -84,6 +90,21 @@ class TerminalManager {
       console.error(`[TerminalManager] Failed to create terminal for ${sessionId}`, e);
       return null;
     }
+  }
+
+  private scheduleFlush(sessionId: number) {
+    const inst = this.instances.get(sessionId);
+    if (!inst || inst.frameRequested) return;
+    inst.frameRequested = true;
+    requestAnimationFrame(() => {
+      // Guard against stale closures — only write if sessionId still maps to same instance
+      const current = this.instances.get(sessionId);
+      if (current === inst && inst.writeBuffer) {
+        inst.term.write(inst.writeBuffer);
+        inst.writeBuffer = '';
+      }
+      inst.frameRequested = false;
+    });
   }
 
   subscribe(cb: () => void) {
