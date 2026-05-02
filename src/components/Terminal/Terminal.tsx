@@ -53,13 +53,14 @@ class TerminalManager {
       console.log(`[TerminalManager] Creating terminal for session ${sessionId}`);
       const term = new Terminal({
         theme: {
-          background: '#0f0f0f',
-          foreground: '#e0e0e0',
-          cursor: '#3b82f6',
-          selectionBackground: 'rgba(59, 130, 246, 0.3)'
+          background: '#09090f',
+          foreground: '#e2e8f0',
+          cursor: '#00d4ff',
+          selectionBackground: 'rgba(0, 212, 255, 0.15)'
         },
         fontSize: 10,  // 75% of standard 13px (13 * 0.75 ≈ 10)
-        fontFamily: 'Cascadia Code, Consolas, monospace',
+        fontFamily: 'JetBrains Mono, Fira Code, Cascadia Code, Consolas, monospace',
+        fontWeight: 500,
         scrollback: 10000,
         cursorBlink: true,
         allowProposedApi: true

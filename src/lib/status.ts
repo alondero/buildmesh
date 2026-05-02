@@ -5,28 +5,28 @@ export type SessionStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 's
 
 export const STATUS_CONFIG = {
   running: {
-    color: 'text-[#22c55e]',
+    color: 'status-running',
     dot: '●',
   },
   idle: {
-    color: 'text-[#888]',
+    color: 'status-idle',
     dot: '○',
   },
   awaiting_input: {
-    color: 'text-[#f59e0b]',
+    color: 'status-waiting',
     dot: '◐',
   },
   error: {
-    color: 'text-[#ef4444]',
+    color: 'status-error',
     dot: '✗',
   },
   suspended: {
-    color: 'text-[#a78bfa]',
+    color: 'text-violet',
     dot: '⏸',
   },
   archived: {
-    color: 'text-[#444]',
-    dot: '📁',
+    color: 'status-archived',
+    dot: '○',
   },
 } as const;
 

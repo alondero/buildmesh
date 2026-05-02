@@ -66,10 +66,10 @@ export function SessionView() {
 
   if (filteredSessions.length === 0) {
     return (
-      <div className="flex-1 flex flex-col bg-[#0f0f0f]">
-        <div className="flex-1 flex items-center justify-center text-[#666]">
+      <div className="flex-1 flex flex-col bg-bg-base">
+        <div className="flex-1 flex items-center justify-center text-text-muted">
           <div className="text-center">
-            <p className="text-lg mb-2 text-[#aaa]">Buildmesh Orchestrator</p>
+            <p className="text-lg mb-2 text-text-secondary">Buildmesh Orchestrator</p>
             <p className="text-sm">Select a session to start managing your agents</p>
           </div>
         </div>
@@ -78,9 +78,9 @@ export function SessionView() {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-[#0f0f0f] overflow-hidden">
+    <div className="flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
       {/* Session Tabs Bar */}
-      <div className="flex items-center bg-[#0a0a0a] border-b border-[#2a2a2a] px-2 h-10 overflow-x-auto no-scrollbar">
+      <div className="flex items-center bg-bg-surface border-b border-border-subtle px-2 h-10 overflow-x-auto no-scrollbar">
         {tabSessions.map(session => {
           const isActive = session.id === activeSession?.id;
           const status = getStatusConfig(session.status);
@@ -92,8 +92,8 @@ export function SessionView() {
               className={`
                 flex items-center gap-2 px-3 h-8 rounded-t-md text-xs transition-colors whitespace-nowrap mr-0.5
                 ${isActive
-                  ? 'bg-[#1a1a1a] text-[#fff] border-x border-t border-[#2a2a2a]'
-                  : 'text-[#666] hover:bg-[#151515] hover:text-[#aaa]'
+                  ? 'bg-bg-overlay text-text-primary border-x border-t border-border-default'
+                  : 'text-text-muted hover:bg-bg-card hover:text-text-secondary'
                 }
               `}
             >
@@ -132,23 +132,23 @@ function GridLayout({ sessions, onSlashCommand }: { sessions: Session[]; onSlash
   }
 
   return (
-    <div className={`flex-1 grid gap-1.5 p-1.5 bg-[#0a0a0a] ${gridCols} ${gridRows}`}>
+    <div className={`flex-1 grid gap-1.5 p-1.5 bg-bg-surface ${gridCols} ${gridRows}`}>
       {sessions.map((session) => {
         return (
-          <div key={session.id} className="flex flex-col bg-[#0f0f0f] border border-[#2a2a2a] rounded-sm overflow-hidden group hover:border-[#3b82f6]/50 transition-colors">
-            <div className="flex items-center justify-between px-2.5 py-1.5 bg-[#161616] border-b border-[#2a2a2a]">
+          <div key={session.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
+            <div className="flex items-center justify-between px-2.5 py-1.5 bg-bg-overlay border-b border-border-default">
               <div className="flex items-center gap-2 overflow-hidden">
                 <span className={`w-1.5 h-1.5 rounded-full ${
-                  session.status === 'running' ? 'bg-green-500' :
-                  session.status === 'awaiting_input' ? 'bg-orange-500 animate-pulse' :
-                  'bg-gray-600'
+                  session.status === 'running' ? 'bg-accent-cyan' :
+                  session.status === 'awaiting_input' ? 'bg-status-warning animate-pulse' :
+                  'bg-text-muted'
                 }`} />
-                <span className="text-[11px] font-bold text-[#aaa] truncate">{session.name}</span>
+                <span className="text-[11px] font-bold text-text-secondary truncate">{session.name}</span>
                 {session.status === 'awaiting_input' && (
-                  <span className="text-[9px] text-orange-500 font-bold ml-1">ATTN</span>
+                  <span className="text-[9px] text-status-warning font-bold ml-1">ATTN</span>
                 )}
               </div>
-              <span className="text-[9px] text-[#444] font-mono px-1 rounded bg-[#0f0f0f]">{session.env.toUpperCase()}</span>
+              <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{session.env.toUpperCase()}</span>
             </div>
             <div className="flex-1 overflow-hidden bg-black">
               <AgentTerminal sessionId={session.id} />

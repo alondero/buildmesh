@@ -142,14 +142,14 @@ function App() {
 
   if (!isReady && uiErrors.length === 0) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-[#0f0f0f]">
-        <div className="text-[#3b82f6] text-2xl animate-pulse">●</div>
+      <div className="flex h-screen w-screen items-center justify-center bg-[#09090f]">
+        <div className="text-[#00d4ff] text-2xl animate-pulse">●</div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#0a0a0a] text-[#e0e0e0]">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#09090f] text-[#e0e0e0]">
       <Sidebar />
       <SessionView />
       
@@ -182,10 +182,10 @@ function App() {
       {/* Toast notifications */}
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
         {toasts.map((toast) => (
-          <div key={toast.id} className="bg-[#1a1a1a] border border-red-500/50 text-white px-4 py-3 rounded flex items-center gap-2">
+          <div key={toast.id} className="bg-[#0d0d16] border border-[#ef4444]/50 text-white px-4 py-3 rounded flex items-center gap-2">
             <div className="flex-1">
               <div className="text-[10px] font-bold text-red-500 uppercase">{toast.provider} Error</div>
-              <div className="text-xs text-[#ccc]">{toast.message}</div>
+              <div className="text-xs text-[#94a3b8]">{toast.message}</div>
             </div>
             <button onClick={() => dismissToast(toast.id)} className="text-white/50 hover:text-white">&times;</button>
           </div>

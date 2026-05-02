@@ -96,27 +96,27 @@ export function Sidebar() {
   };
 
   return (
-    <div className="w-64 bg-[#111] border-r border-[#2a2a2a] flex flex-col h-full">
+    <div className="w-64 bg-bg-surface border-r border-border-subtle flex flex-col h-full">
       {/* Header */}
-      <div className="p-3 border-b border-[#2a2a2a]">
-        <h1 className="text-sm font-semibold text-[#e0e0e0]">Buildmesh</h1>
+      <div className="p-3 border-b border-border-subtle">
+        <h1 className="text-sm font-semibold text-text-primary">Buildmesh</h1>
       </div>
 
       {/* Projects list */}
       <div className="flex-1 overflow-y-auto">
         <div className="p-2">
           <div className="flex items-center justify-between mb-1 px-2">
-            <span className="text-xs font-medium text-[#888] uppercase">Sessions</span>
+            <span className="text-xs font-medium text-text-secondary uppercase">Sessions</span>
             <button
               onClick={handleAddProject}
-              className="text-xs text-[#3b82f6] hover:text-[#60a5fa]"
+              className="text-xs text-accent-cyan hover:text-accent-blue transition-colors"
             >
               + Add
             </button>
           </div>
 
           {projects.length === 0 ? (
-            <p className="text-xs text-[#666] px-2 py-4 text-center">
+            <p className="text-xs text-text-muted px-2 py-4 text-center">
               No sessions yet.{'\n'}Click + Add to get started.
             </p>
           ) : (
@@ -149,7 +149,7 @@ export function Sidebar() {
       </div>
 
       {/* Footer */}
-      <div className="p-2 border-t border-[#2a2a2a] text-xs text-[#666]">
+      <div className="p-2 border-t border-border-subtle text-xs text-text-muted">
         <span>{sessions.filter(w => w.status === 'running').length} active</span>
       </div>
     </div>
@@ -173,19 +173,19 @@ function SessionItem({ session, isActive, onSelect, onDelete }: {
       onClick={onSelect}
       className={`
         pl-8 pr-1 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2
-        ${isActive ? 'bg-[#222] border border-[#3b82f6]' : 'hover:bg-[#1a1a1a] border border-transparent'}
-        ${isAwaiting ? 'bg-[#2a2010]' : ''}
+        ${isActive ? 'bg-bg-overlay border border-accent-cyan/50' : 'hover:bg-bg-card border border-transparent'}
+        ${isAwaiting ? 'bg-status-warning-bg/10' : ''}
       `}
     >
       <span className={config.color}>{config.dot}</span>
-      <span className="flex-1 truncate text-[#aaa]">{session.name}</span>
+      <span className="flex-1 truncate text-text-secondary">{session.name}</span>
       {isAwaiting && (
-        <span className="text-[10px] text-[#f59e0b] font-semibold animate-pulse">ATTN</span>
+        <span className="text-[10px] text-status-warning font-semibold animate-pulse">ATTN</span>
       )}
-      <span className="text-[10px] text-[#666] font-mono">{envBadge}</span>
+      <span className="text-[10px] text-text-muted font-mono">{envBadge}</span>
       <button
         onClick={onDelete}
-        className="text-[#555] hover:text-[#ef4444] text-xs px-1 transition-colors"
+        className="text-text-muted hover:text-status-error text-xs px-1 transition-colors"
         title="Delete session"
       >
         ×
@@ -243,7 +243,7 @@ function SortableProject({
         <button
           {...attributes}
           {...listeners}
-          className="text-[#444] hover:text-[#888] cursor-grab active:cursor-grabbing text-xs px-1"
+          className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-xs px-1"
           title="Drag to reorder"
         >
           ⋮⋮
@@ -252,18 +252,18 @@ function SortableProject({
         <div className="relative">
           <button
             onClick={() => onNewSession(project)}
-            className={`text-xs px-1 ${isDropdownOpen ? 'text-[#60a5fa]' : 'text-[#3b82f6] hover:text-[#60a5fa]'}`}
+            className={`text-xs px-1 ${isDropdownOpen ? 'text-accent-blue' : 'text-accent-cyan hover:text-accent-blue'}`}
             title="New session"
           >
             +
           </button>
           {isDropdownOpen && (
-            <div data-dropdown-for={project.id} className="absolute left-0 top-full mt-1 z-50 bg-[#1a1a1a] border border-[#3a3a3a] rounded shadow-lg py-1 min-w-[120px]">
+            <div data-dropdown-for={project.id} className="absolute left-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[120px]">
               {PROVIDERS.map(p => (
                 <button
                   key={p.id}
                   onClick={() => onSelectProvider(project, p.id)}
-                  className="w-full text-left px-3 py-1.5 text-xs text-[#ccc] hover:bg-[#252525] flex items-center gap-2"
+                  className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
                 >
                   <span className={`w-2 h-2 rounded-full ${p.color}`} />
                   {p.label}
@@ -274,8 +274,8 @@ function SortableProject({
         </div>
         <div
           onClick={() => onSelectProject(project.id)}
-          className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-[#1a1a1a] ${
-            isSelected ? 'text-[#3b82f6] font-semibold' : 'text-[#ccc]'
+          className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-bg-card ${
+            isSelected ? 'text-accent-cyan font-semibold' : 'text-text-secondary'
           }`}
         >
           {project.name}
