@@ -175,6 +175,8 @@ fn build_spawn_command(
             c.arg("/c");
             c.arg(binary);
             c.args(args);
+            // Suppress visible console window on Windows (cwrap is a GUI tool)
+            c.creation_flags(0x08000000);
             c
         } else {
             tracing::info!("spawn_agent: building direct binary command for {}", binary);
