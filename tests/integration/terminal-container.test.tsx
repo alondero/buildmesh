@@ -33,6 +33,7 @@ vi.mock('@xterm/xterm', () => {
     write = vi.fn();
     onData = vi.fn();
     onTitleChange = vi.fn();
+    onResize = vi.fn();
     open = vi.fn();
     dispose = vi.fn();
     focus = vi.fn();
@@ -42,6 +43,7 @@ vi.mock('@xterm/xterm', () => {
     buffer = { active: { getWindow: vi.fn() } };
     rows = 24;
     cols = 80;
+    element: HTMLElement | null = null;
     constructor(_options?: unknown) {}
   }
   return { Terminal: MockTerminal };
@@ -120,10 +122,12 @@ describe('Event Listener Integration', () => {
   beforeEach(() => {
     mockListeners.clear();
     vi.clearAllMocks();
+    vi.useFakeTimers();
     terminalManager.dispose(1);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     terminalManager.dispose(1);
   });
 
@@ -136,6 +140,9 @@ describe('Event Listener Integration', () => {
     // Simulate agent-output event
     const listeners = mockListeners.get('agent-output');
     listeners?.forEach(cb => cb({ payload: { session_id: 1, line: 'Hello\n' } }));
+
+    // Flush the requestAnimationFrame that scheduleFlush uses
+    vi.runAllTimers();
 
     expect(writeSpy).toHaveBeenCalledWith('Hello\n');
   });
@@ -153,6 +160,8 @@ describe('Event Listener Integration', () => {
     mockListeners.get('agent-output')?.forEach(cb =>
       cb({ payload: { session_id: 1, line: 'From session 1\n' } })
     );
+
+    vi.runAllTimers();
 
     expect(write1Spy).toHaveBeenCalledWith('From session 1\n');
     expect(write2Spy).not.toHaveBeenCalled();
