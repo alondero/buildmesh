@@ -114,6 +114,7 @@ pub fn run() {
             commands::project::create_test_project,
             commands::project::list_projects,
             commands::project::delete_project,
+            commands::project::update_project_positions,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

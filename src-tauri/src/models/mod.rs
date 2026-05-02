@@ -114,6 +114,7 @@ pub struct Project {
     pub name: String,
     pub path: String, // absolute path to project root
     pub layout: String, // 'grid' or 'single'
+    pub position: i64, // sort order in sidebar
     pub created_at: DateTime<Utc>,
 }
 

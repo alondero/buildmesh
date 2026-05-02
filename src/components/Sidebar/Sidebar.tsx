@@ -4,6 +4,16 @@ import { useSessionStore } from '../../stores/sessionStore';
 import type { Project } from '../../stores/projectStore';
 import type { Session } from '../../stores/sessionStore';
 import { getStatusConfig } from '../../lib/status';
+import {
+  DndContext,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 const ALL_PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
@@ -22,6 +32,7 @@ export function Sidebar() {
   const addProject = useProjectStore(state => state.addProject);
   const selectedProjectId = useProjectStore(state => state.selectedProjectId);
   const selectProject = useProjectStore(state => state.selectProject);
+  const reorderProjects = useProjectStore(state => state.reorderProjects);
   const sessions = useSessionStore(state => state.sessions);
   const activeSessionId = useSessionStore(state => state.activeSessionId);
   const setActiveSession = useSessionStore(state => state.setActiveSession);
@@ -75,6 +86,15 @@ export function Sidebar() {
     await deleteSession(sessionId);
   };
 
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const activeIndex = projects.findIndex(p => p.id === active.id);
+    const overIndex = projects.findIndex(p => p.id === over.id);
+    if (activeIndex === -1 || overIndex === -1) return;
+    reorderProjects(active.id as number, overIndex);
+  };
+
   return (
     <div className="w-64 bg-[#111] border-r border-[#2a2a2a] flex flex-col h-full">
       {/* Header */}
@@ -100,59 +120,30 @@ export function Sidebar() {
               No sessions yet.{'\n'}Click + Add to get started.
             </p>
           ) : (
-            projects.map(project => {
-              const projectSessions = sessions.filter(w => w.project_id === project.id);
-              const isDropdownOpen = openDropdownFor === project.id;
-              return (
-                <div key={project.id} className="mb-2">
-                  <div className="flex items-center gap-1">
-                    <div className="relative">
-                      <button
-                        onClick={() => handleNewSession(project)}
-                        className={`text-xs px-1 ${isDropdownOpen ? 'text-[#60a5fa]' : 'text-[#3b82f6] hover:text-[#60a5fa]'}`}
-                        title="New session"
-                      >
-                        +
-                      </button>
-                      {isDropdownOpen && (
-                        <div data-dropdown-for={project.id} className="absolute left-0 top-full mt-1 z-50 bg-[#1a1a1a] border border-[#3a3a3a] rounded shadow-lg py-1 min-w-[120px]">
-                          {PROVIDERS.map(p => (
-                            <button
-                              key={p.id}
-                              onClick={() => handleSelectProvider(project, p.id)}
-                              className="w-full text-left px-3 py-1.5 text-xs text-[#ccc] hover:bg-[#252525] flex items-center gap-2"
-                            >
-                              <span className={`w-2 h-2 rounded-full ${p.color}`} />
-                              {p.label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div
-                      onClick={() => handleSelectProject(project.id)}
-                      className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-[#1a1a1a] ${
-                        selectedProjectId === project.id ? 'text-[#3b82f6] font-semibold' : 'text-[#ccc]'
-                      }`}
-                    >
-                      {project.name}
-                    </div>
-                  </div>
-                  {projectSessions.map(session => (
-                    <SessionItem
-                      key={session.id}
-                      session={session}
-                      isActive={activeSessionId === session.id}
-                      onSelect={() => {
-                        setActiveSession(session.id);
-                        selectProject(session.project_id);
-                      }}
-                      onDelete={(e) => handleDeleteSession(e, session.id)}
+            <DndContext onDragEnd={handleDragEnd}>
+              <SortableContext items={projects.map(p => p.id)} strategy={verticalListSortingStrategy}>
+                {projects.map(project => {
+                  const projectSessions = sessions.filter(w => w.project_id === project.id);
+                  const isDropdownOpen = openDropdownFor === project.id;
+                  return (
+                    <SortableProject
+                      key={project.id}
+                      project={project}
+                      isSelected={selectedProjectId === project.id}
+                      isDropdownOpen={isDropdownOpen}
+                      onSelectProject={handleSelectProject}
+                      onNewSession={handleNewSession}
+                      onSelectProvider={handleSelectProvider}
+                      projectSessions={projectSessions}
+                      activeSessionId={activeSessionId}
+                      setActiveSession={setActiveSession}
+                      selectProject={selectProject}
+                      onDeleteSession={handleDeleteSession}
                     />
-                  ))}
-                </div>
-              );
-            })
+                  );
+                })}
+              </SortableContext>
+            </DndContext>
           )}
         </div>
       </div>
@@ -199,6 +190,109 @@ function SessionItem({ session, isActive, onSelect, onDelete }: {
       >
         ×
       </button>
+    </div>
+  );
+}
+
+interface SortableProjectProps {
+  project: Project;
+  isSelected: boolean;
+  isDropdownOpen: boolean;
+  onSelectProject: (id: number) => void;
+  onNewSession: (project: Project) => void;
+  onSelectProvider: (project: Project, providerId: string) => void;
+  projectSessions: Session[];
+  activeSessionId: number | null;
+  setActiveSession: (id: number) => void;
+  selectProject: (id: number | null) => void;
+  onDeleteSession: (e: React.MouseEvent, sessionId: number) => void;
+}
+
+function SortableProject({
+  project,
+  isSelected,
+  isDropdownOpen,
+  onSelectProject,
+  onNewSession,
+  onSelectProvider,
+  projectSessions,
+  activeSessionId,
+  setActiveSession,
+  selectProject,
+  onDeleteSession,
+}: SortableProjectProps) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: project.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style} className="mb-2">
+      <div className="flex items-center gap-1">
+        {/* Drag handle */}
+        <button
+          {...attributes}
+          {...listeners}
+          className="text-[#444] hover:text-[#888] cursor-grab active:cursor-grabbing text-xs px-1"
+          title="Drag to reorder"
+        >
+          ⋮⋮
+        </button>
+
+        <div className="relative">
+          <button
+            onClick={() => onNewSession(project)}
+            className={`text-xs px-1 ${isDropdownOpen ? 'text-[#60a5fa]' : 'text-[#3b82f6] hover:text-[#60a5fa]'}`}
+            title="New session"
+          >
+            +
+          </button>
+          {isDropdownOpen && (
+            <div data-dropdown-for={project.id} className="absolute left-0 top-full mt-1 z-50 bg-[#1a1a1a] border border-[#3a3a3a] rounded shadow-lg py-1 min-w-[120px]">
+              {PROVIDERS.map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => onSelectProvider(project, p.id)}
+                  className="w-full text-left px-3 py-1.5 text-xs text-[#ccc] hover:bg-[#252525] flex items-center gap-2"
+                >
+                  <span className={`w-2 h-2 rounded-full ${p.color}`} />
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div
+          onClick={() => onSelectProject(project.id)}
+          className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-[#1a1a1a] ${
+            isSelected ? 'text-[#3b82f6] font-semibold' : 'text-[#ccc]'
+          }`}
+        >
+          {project.name}
+        </div>
+      </div>
+      {projectSessions.map(session => (
+        <SessionItem
+          key={session.id}
+          session={session}
+          isActive={activeSessionId === session.id}
+          onSelect={() => {
+            setActiveSession(session.id);
+            selectProject(session.project_id);
+          }}
+          onDelete={(e) => onDeleteSession(e, session.id)}
+        />
+      ))}
     </div>
   );
 }
