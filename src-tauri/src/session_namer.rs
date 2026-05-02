@@ -68,8 +68,14 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
         buffers
             .remove(&session_id)
             .map(|b| {
-                let len = b.len().min(SUMMARIZE_BUFFER_CHARS);
-                b[..len].to_string()
+                // Scan backward from the byte limit to find a valid UTF-8 character boundary,
+                // so we never slice in the middle of a multi-byte sequence.
+                let target = b.len().min(SUMMARIZE_BUFFER_CHARS);
+                let mut end = target;
+                while end > 0 && !b.is_char_boundary(end) {
+                    end -= 1;
+                }
+                b[..end].to_string()
             })
             .unwrap_or_default()
     };
@@ -103,6 +109,19 @@ pub fn cleanup(session_id: i64) {
     RENAMED_SESSIONS.lock().unwrap().remove(&session_id);
 }
 
+pub fn renamed_sessions_count() -> usize {
+    RENAMED_SESSIONS.lock().unwrap().len()
+}
+
+pub fn buffers_size_bytes() -> usize {
+    let buffers = SESSION_BUFFERS.lock().unwrap();
+    buffers.values().map(|b| b.len()).sum()
+}
+
+pub fn turn_counter_count() -> usize {
+    TURN_COUNTERS.lock().unwrap().len()
+}
+
 async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, String> {
     let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.".to_string();
 
@@ -111,6 +130,7 @@ async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, 
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
         c.args(["/c", "cwrap", "--minimax", "-p", &prompt]);
+        #[allow(unused_imports)]
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x08000000);
         c

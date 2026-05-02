@@ -81,6 +81,22 @@ describe('TerminalManager', () => {
       });
     });
 
+    it('sets up onResize handler that calls invoke', async () => {
+      const invokeSpy = vi.spyOn(await import('@tauri-apps/api/core'), 'invoke');
+      await terminalManager.getOrCreate(1);
+      const instance = terminalManager.getInstance(1)!;
+
+      // Get the onResize callback and call it
+      const onResizeCallback = (instance!.term as unknown as { onResize: ReturnType<typeof vi.fn> }).onResize.mock.calls[0][0];
+      onResizeCallback({ cols: 100, rows: 40 });
+
+      expect(invokeSpy).toHaveBeenCalledWith('resize_agent', {
+        sessionId: 1,
+        cols: 100,
+        rows: 40,
+      });
+    });
+
     it('notifies subscribers after creating instance', async () => {
       const notifyCallback = vi.fn();
       terminalManager.subscribe(notifyCallback);

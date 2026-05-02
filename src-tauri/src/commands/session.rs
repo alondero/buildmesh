@@ -13,14 +13,22 @@ pub async fn create_session(
     _name: String,
     path: String,
     branch: String,
+    provider: Option<String>,
 ) -> Result<Session, String> {
     let session_name = crate::naming::generate_random_name();
-    tracing::debug!("create_session called: project_id={}, name={}, path={}, branch={}", project_id, session_name, path, branch);
+    tracing::debug!("create_session called: project_id={}, name={}, path={}, branch={}, provider={:?}", project_id, session_name, path, branch, provider);
     let path_buf = PathBuf::from(&path);
     let env_internal = env::env_for_path(&path_buf);
     let env_type = EnvType::from(env_internal);
-    let provider = Provider::Anthropic;
-    db::create_session(project_id, &session_name, &path, &branch, env_type, provider)
+    
+    let provider_enum = match provider.as_deref() {
+        Some("minimax") => Provider::Minimax,
+        Some("gemini") => Provider::Gemini,
+        Some("opencode") => Provider::OpenCode,
+        _ => Provider::Anthropic,
+    };
+
+    db::create_session(project_id, &session_name, &path, &branch, env_type, provider_enum)
         .map_err(|e| {
             tracing::error!("create_session failed: {}", e);
             e.to_string()

@@ -3,7 +3,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import type { Project } from '../../stores/projectStore';
 import type { Session } from '../../stores/sessionStore';
-import { STATUS_CONFIG } from '../../lib/status';
+import { getStatusConfig } from '../../lib/status';
 
 const ALL_PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
@@ -26,7 +26,6 @@ export function Sidebar() {
   const activeSessionId = useSessionStore(state => state.activeSessionId);
   const setActiveSession = useSessionStore(state => state.setActiveSession);
   const createSession = useSessionStore(state => state.createSession);
-  const spawnAgent = useSessionStore(state => state.spawnAgent);
   const deleteSession = useSessionStore(state => state.deleteSession);
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
@@ -63,12 +62,11 @@ export function Sidebar() {
   const handleSelectProvider = async (project: Project, providerId: string) => {
     setOpenDropdownFor(null);
     try {
-      const session = await createSession(project.id, project.name, project.path, 'main');
-      await spawnAgent(session.id, providerId);
+      const session = await createSession(project.id, project.name, project.path, 'main', providerId);
       await setActiveSession(session.id);
       selectProject(project.id);
     } catch (e) {
-      console.error('Failed to create session with agent:', e);
+      console.error('Failed to create session:', e);
     }
   };
 
@@ -173,7 +171,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }: {
   onSelect: () => void;
   onDelete: (e: React.MouseEvent) => void;
 }) {
-  const config = STATUS_CONFIG[session.status];
+  const config = getStatusConfig(session.status);
   const isAwaiting = session.status === 'awaiting_input';
   const envBadge = session.env === 'wsl' ? 'WSL' : isMac ? 'MAC' : 'WIN';
 

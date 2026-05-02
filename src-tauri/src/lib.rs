@@ -63,6 +63,38 @@ pub fn run() {
             // Start HTTP test server on port 1991 for Playwright E2E tests
             commands::test::start_test_server(app.handle().clone());
 
+            // Install panic hook that logs thread ID + backtrace on every panic
+            let app_dir = app.path().app_data_dir().unwrap();
+            let crash_log_path = app_dir.join("logs").join("panic.log");
+            std::panic::set_hook(Box::new(move |info| {
+                let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".to_string());
+                let thread_info = std::thread::current();
+                let thread = thread_info.name().unwrap_or("unnamed");
+                let thread_id = thread_info.id();
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let backtrace = std::backtrace::Backtrace::capture();
+                let panic_msg = format!(
+                    "[{}] PANIC in thread '{}' ({:?}): {} at {}\nBacktrace:\n{}",
+                    timestamp, thread, thread_id, msg, location, backtrace
+                );
+                eprintln!("{}", panic_msg);
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&crash_log_path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "{}", panic_msg);
+                }
+            }));
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -84,12 +116,14 @@ pub fn run() {
             commands::project::delete_project,
             // Agent
             commands::agent::spawn_agent,
+            commands::agent::resize_agent,
             commands::agent::kill_agent,
             commands::agent::is_agent_running,
             commands::agent::debug_list_agents,
             commands::agent::send_to_agent,
             commands::agent::write_to_agent,
             commands::agent::auto_resume_sessions,
+            commands::agent::debug_crash_snapshot,
             // Checkpoint
             commands::checkpoint::create_checkpoint,
             commands::checkpoint::list_checkpoints,
@@ -104,6 +138,7 @@ pub fn run() {
             commands::git::get_git_status,
             // Terminal
             commands::terminal::spawn_pty,
+            commands::terminal::resize_pty,
             commands::terminal::write_pty,
             commands::terminal::close_pty,
             commands::terminal::spawn_shell,

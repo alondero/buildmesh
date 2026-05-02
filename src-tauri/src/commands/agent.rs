@@ -9,17 +9,15 @@ use std::sync::{Arc, Mutex};
 use tauri::{command, AppHandle, Emitter};
 
 struct AgentProcess {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    writer: Box<dyn std::io::Write + Send>,
-    #[allow(dead_code)]
-    pair: portable_pty::PtyPair,
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
+    writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
     reader_alive: Arc<AtomicBool>,
 }
 
 /// Thread-safe registry for agent processes.
-/// Replaces the global AGENT_PROCESSES HashMap.
 struct ProcessRegistry {
-    processes: HashMap<i64, AgentProcess>,
+    processes: HashMap<i64, Arc<AgentProcess>>,
 }
 
 impl ProcessRegistry {
@@ -29,19 +27,15 @@ impl ProcessRegistry {
         }
     }
 
-    fn get(&self, session_id: &i64) -> Option<&AgentProcess> {
-        self.processes.get(session_id)
+    fn get(&self, session_id: &i64) -> Option<Arc<AgentProcess>> {
+        self.processes.get(session_id).cloned()
     }
 
     fn insert(&mut self, session_id: i64, agent: AgentProcess) {
-        self.processes.insert(session_id, agent);
+        self.processes.insert(session_id, Arc::new(agent));
     }
 
-    fn get_mut(&mut self, session_id: &i64) -> Option<&mut AgentProcess> {
-        self.processes.get_mut(session_id)
-    }
-
-    fn remove(&mut self, session_id: &i64) -> Option<AgentProcess> {
+    fn remove(&mut self, session_id: &i64) -> Option<Arc<AgentProcess>> {
         self.processes.remove(session_id)
     }
 
@@ -98,10 +92,15 @@ fn parse_provider(provider: &str) -> Provider {
 }
 
 /// Open a PTY pair using the native PTY system.
-fn open_pty_pair() -> Result<PtyPair, String> {
+fn open_pty_pair(rows: u16, cols: u16) -> Result<PtyPair, String> {
     let pty_system = native_pty_system();
     pty_system
-        .openpty(PtySize::default())
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| format!("failed to open PTY: {}", e))
 }
 
@@ -138,6 +137,23 @@ fn build_spawn_command(
         }
     };
 
+    // Add -w for git worktree support on cwrap providers (Anthropic, Minimax)
+    // This creates a dedicated worktree per session, preventing concurrent session conflicts
+    let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
+    if is_cwrap {
+        match session_id_mode {
+            SessionIdMode::Assign(_) => {
+                tracing::info!("spawn_agent: enabling worktree support (-w) for new session");
+                args.push("-w".to_string());
+            }
+            SessionIdMode::Resume(ref id) => {
+                tracing::info!("spawn_agent: resuming session {} with worktree support (-w)", id);
+                args.push("-w".to_string());
+            }
+            SessionIdMode::None => {}
+        }
+    }
+
     match session_id_mode {
         SessionIdMode::Assign(id) => {
             tracing::info!("spawn_agent: assigning session-id {}", id);
@@ -164,17 +180,17 @@ fn build_spawn_command(
         c.args(args);
         c
     } else {
-        // Windows direct execution — use cmd.exe /c which suppresses console window
-        // when the parent process is a GUI (no CREATE_NO_WINDOW needed via portable-pty)
-        let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
+        // Windows: cwrap-wrapped providers (Anthropic, Minimax) use cmd.exe /c for
+        // ConPTY compatibility and console suppression. Non-cwrap providers (gemini,
+        // opencode) are typically Node.js shims that resolve correctly via direct exec.
         if is_cwrap {
-            tracing::info!("spawn_agent: building Windows cmd.exe /c for cwrap {}", binary);
+            tracing::info!("spawn_agent: building Windows cmd.exe /c for cwrap provider {}", binary);
             let mut c = CommandBuilder::new("cmd.exe");
             c.args(["/c", binary]);
             c.args(args);
             c
         } else {
-            tracing::info!("spawn_agent: building direct binary command for {}", binary);
+            tracing::info!("spawn_agent: building Windows direct command for {}", binary);
             let mut c = CommandBuilder::new(binary);
             c.args(args);
             c
@@ -197,16 +213,16 @@ fn register_agent(
     session_id: i64,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     writer: Box<dyn std::io::Write + Send>,
-    pair: portable_pty::PtyPair,
+    master: Box<dyn portable_pty::MasterPty + Send>,
     reader_alive: Arc<AtomicBool>,
 ) {
     let mut registry = PROCESS_REGISTRY.lock().unwrap();
     registry.insert(
         session_id,
         AgentProcess {
-            child,
-            writer,
-            pair,
+            child: Arc::new(Mutex::new(child)),
+            writer: Arc::new(Mutex::new(writer)),
+            master: Arc::new(Mutex::new(master)),
             reader_alive,
         },
     );
@@ -294,12 +310,16 @@ async fn spawn_agent_inner(
     session_id: i64,
     provider: String,
     resume: Option<String>,
+    rows: u16,
+    cols: u16,
 ) -> Result<(), String> {
     tracing::info!(
-        "spawn_agent_inner: session_id={}, provider={}, resume={:?}",
+        "spawn_agent_inner: session_id={}, provider={}, resume={:?}, size={}x{}",
         session_id,
         provider,
-        resume
+        resume,
+        cols,
+        rows
     );
 
     // 1. Check if already running
@@ -336,7 +356,7 @@ async fn spawn_agent_inner(
 
     // 5. Open PTY
     tracing::debug!("spawn_agent_inner: opening PTY system");
-    let pair = open_pty_pair()?;
+    let pair = open_pty_pair(rows, cols)?;
 
     // 6. Build command
     let cmd = build_spawn_command(&session, is_wsl, provider_enum, &session_id_mode);
@@ -364,10 +384,11 @@ async fn spawn_agent_inner(
         .try_clone_reader()
         .map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
+    let master = pair.master;
     let reader_alive = Arc::new(AtomicBool::new(true));
 
     tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
-    register_agent(session_id, child, writer, pair, reader_alive.clone());
+    register_agent(session_id, child, writer, master, reader_alive.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
 
     // 9. Start reader thread with spawn timestamp for early-exit detection
@@ -390,8 +411,12 @@ pub async fn spawn_agent(
     session_id: i64,
     provider: String,
     resume: Option<String>,
+    rows: Option<u16>,
+    cols: Option<u16>,
 ) -> Result<(), String> {
-    spawn_agent_inner(&app, session_id, provider, resume).await
+    let r = rows.unwrap_or(24);
+    let c = cols.unwrap_or(80);
+    spawn_agent_inner(&app, session_id, provider, resume, r, c).await
 }
 
 /// Auto-resume all suspended sessions that have a stored CLI session ID.
@@ -425,7 +450,8 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
         }
 
         let provider_str = session.provider.to_string();
-        match spawn_agent_inner(&app, session.id, provider_str, Some(cli_id)).await {
+        // Default to 80x24 for auto-resume since we don't know the size yet
+        match spawn_agent_inner(&app, session.id, provider_str, Some(cli_id), 24, 80).await {
             Ok(()) => {
                 resumed.push(session.id);
                 tracing::info!("auto_resume_sessions: resumed session {}", session.id);
@@ -449,20 +475,49 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
 /// Kill all running agent processes. Used during graceful shutdown.
 pub fn kill_all_agents() {
     let mut registry = PROCESS_REGISTRY.lock().unwrap();
-    for (id, mut agent) in registry.processes.drain() {
-        agent.child.kill().ok();
+    for (id, agent) in registry.processes.drain() {
+        agent.child.lock().unwrap().kill().ok();
         agent.reader_alive.store(false, Ordering::SeqCst);
         tracing::info!("kill_all_agents: killed agent for session {}", id);
     }
 }
 
 #[command]
+pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), String> {
+    let agent = {
+        let registry = PROCESS_REGISTRY.lock().unwrap();
+        registry.get(&session_id)
+    };
+
+    if let Some(agent) = agent {
+        let master = agent.master.lock().unwrap();
+        master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        }).map_err(|e| e.to_string())?;
+        Ok(())
+    } else {
+        Err("Agent not running".to_string())
+    }
+}
+
+#[command]
 pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
-    let mut registry = PROCESS_REGISTRY.lock().unwrap();
-    if let Some(agent) = registry.get_mut(&session_id) {
-        use std::io::Write;
-        agent.writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        agent.writer.flush().map_err(|e| e.to_string())?;
+    let agent = {
+        let registry = PROCESS_REGISTRY.lock().unwrap();
+        registry.get(&session_id)
+    };
+
+    if let Some(agent) = agent {
+        {
+            let mut writer = agent.writer.lock().unwrap();
+            use std::io::Write;
+            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+        }
+
         if data.contains('\n') || data.contains('\r') {
             LAST_INPUT_TIME.lock().unwrap().insert(session_id, std::time::Instant::now());
             db::update_session_status(session_id, SessionStatus::Running).ok();
@@ -481,9 +536,13 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
 
 #[command]
 pub async fn kill_agent(session_id: i64) -> Result<(), String> {
-    let mut registry = PROCESS_REGISTRY.lock().unwrap();
-    if let Some(mut agent) = registry.remove(&session_id) {
-        agent.child.kill().ok();
+    let agent = {
+        let mut registry = PROCESS_REGISTRY.lock().unwrap();
+        registry.remove(&session_id)
+    };
+
+    if let Some(agent) = agent {
+        agent.child.lock().unwrap().kill().ok();
         agent.reader_alive.store(false, Ordering::SeqCst);
     }
     db::update_session_status(session_id, SessionStatus::Idle).map_err(|e| e.to_string())?;
@@ -516,4 +575,40 @@ pub async fn debug_list_agents() -> Vec<AgentDebugState> {
             is_alive: agent.reader_alive.load(Ordering::SeqCst),
         })
         .collect()
+}
+
+/// Snapshot of all relevant state at the time of a crash, for post-mortem diagnosis.
+/// Call this via invoke('debug_crash_snapshot') immediately after a crash to get
+/// a consistent view of what the backend was doing.
+#[derive(serde::Serialize)]
+pub struct CrashSnapshot {
+    pub process_registry_ids: Vec<i64>,
+    pub session_count: usize,
+    pub last_input_entries: usize,
+    pub renamed_sessions: usize,
+    pub buffers_size_bytes: usize,
+    pub turn_counters_entries: usize,
+}
+
+#[command]
+pub async fn debug_crash_snapshot() -> CrashSnapshot {
+    let registry = PROCESS_REGISTRY.lock().unwrap();
+    let process_ids: Vec<i64> = registry.processes.keys().copied().collect();
+
+    drop(registry);
+
+    let session_count = db::list_sessions().map(|s| s.len()).unwrap_or(0);
+    let last_input_count = LAST_INPUT_TIME.lock().unwrap().len();
+    let renamed_count = crate::session_namer::renamed_sessions_count();
+    let buffers_size = crate::session_namer::buffers_size_bytes();
+    let turn_counter_count = crate::session_namer::turn_counter_count();
+
+    CrashSnapshot {
+        process_registry_ids: process_ids,
+        session_count,
+        last_input_entries: last_input_count,
+        renamed_sessions: renamed_count,
+        buffers_size_bytes: buffers_size,
+        turn_counters_entries: turn_counter_count,
+    }
 }

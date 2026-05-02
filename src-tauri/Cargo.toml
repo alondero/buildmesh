@@ -34,6 +34,7 @@ regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 rand = "0.9"
+backtrace = "0.3"
 uuid = { version = "1", features = ["v4"] }
 
 [profile.release]

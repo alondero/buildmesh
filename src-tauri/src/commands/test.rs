@@ -261,6 +261,8 @@ fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
             session_id,
             provider,
             resume,
+            None,
+            None,
         ))
     }).join();
 

@@ -38,8 +38,10 @@ vi.mock('@xterm/xterm', () => {
   class MockTerminal {
     write = vi.fn();
     onData = vi.fn();
+    onResize = vi.fn();
     onTitleChange = vi.fn();
     open = vi.fn();
+    resize = vi.fn();
     dispose = vi.fn();
     focus = vi.fn();
     loadAddon = vi.fn();

@@ -11,7 +11,7 @@ export interface Session {
   branch: string;
   env: 'windows' | 'wsl';
   provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode';
-  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
+  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended' | 'archived';
   cli_session_id?: string;
   created_at: string;
 }
@@ -37,11 +37,11 @@ interface SessionState {
   getActiveProjectId: () => number | null;
 
   fetchSessions: () => Promise<void>;
-  createSession: (projectId: number, name: string, path: string, branch: string) => Promise<Session>;
+  createSession: (projectId: number, name: string, path: string, branch: string, provider?: string) => Promise<Session>;
   deleteSession: (id: number) => Promise<void>;
   setActiveSession: (id: number | null) => Promise<void>;
   fetchCheckpoints: (sessionId: number) => Promise<void>;
-  spawnAgent: (sessionId: number, provider: string) => Promise<void>;
+  spawnAgent: (sessionId: number, provider: string, rows?: number, cols?: number) => Promise<void>;
   killAgent: (sessionId: number) => Promise<void>;
   sendToAgent: (sessionId: number, input: string) => Promise<void>;
   writeToAgent: (sessionId: number, data: string) => Promise<void>;
@@ -127,10 +127,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     };
   })(),
 
-  createSession: async (projectId, name, path, branch): Promise<Session> => {
+  createSession: async (projectId, name, path, branch, provider?: string): Promise<Session> => {
     try {
       const session = await invoke<Session>('create_session', {
-        projectId, name, path, branch,
+        projectId, name, path, branch, provider
       });
       set((state) => ({ sessions: [session, ...state.sessions] }));
       await get().setActiveSession(session.id);
@@ -175,13 +175,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
   },
 
-  spawnAgent: async (sessionId, provider) => {
+  spawnAgent: async (sessionId, provider, rows?: number, cols?: number) => {
     try {
       const session = get().sessions.find(s => s.id === sessionId);
       await invoke('spawn_agent', {
         sessionId,
         provider,
-        resume: session?.cli_session_id
+        resume: session?.cli_session_id,
+        rows,
+        cols
       });
       await get().fetchSessions();
     } catch (e) {

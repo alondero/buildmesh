@@ -3,9 +3,9 @@ import { useSessionStore, Session } from '../../stores/sessionStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
-import { listen } from '@tauri-apps/api/event';
+import { listen, emit } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession } from '../../lib/tauri';
-import { STATUS_CONFIG } from '../../lib/status';
+import { getStatusConfig } from '../../lib/status';
 import { FILE_CHANGE, FIT_TERMINALS } from '../../lib/events';
 
 export function SessionView() {
@@ -54,8 +54,8 @@ export function SessionView() {
   // Dispatch fit-terminals event when active session changes
   useEffect(() => {
     if (activeSession) {
-      console.log(`[DEBUG SessionView] Dispatching FIT_TERMINALS for session ${activeSession.id}`);
-      window.dispatchEvent(new CustomEvent(FIT_TERMINALS, { detail: { sessionId: activeSession.id } }));
+      console.log(`[DEBUG SessionView] Emitting FIT_TERMINALS for session ${activeSession.id}`);
+      emit(FIT_TERMINALS, { sessionId: activeSession.id }).catch(console.error);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSession?.id]);
@@ -83,7 +83,7 @@ export function SessionView() {
       <div className="flex items-center bg-[#0a0a0a] border-b border-[#2a2a2a] px-2 h-10 overflow-x-auto no-scrollbar">
         {tabSessions.map(session => {
           const isActive = session.id === activeSession?.id;
-          const status = STATUS_CONFIG[session.status];
+          const status = getStatusConfig(session.status);
           return (
             <button
               key={session.id}

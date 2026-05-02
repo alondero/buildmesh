@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { FIT_TERMINALS } from '../../lib/events';
+import { useSessionStore } from '../../stores/sessionStore';
 
 interface TerminalInstance {
   term: Terminal;
@@ -82,6 +82,16 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId, data }).catch(console.error);
       });
 
+      term.onResize(({ cols, rows }) => {
+        console.log(`[TerminalManager] Resizing session ${sessionId} to ${cols}x${rows}`);
+        invoke('resize_agent', { sessionId, rows, cols }).catch(err => {
+          // Ignore "Agent not running" errors - these are common during initial mount or rapid resizing
+          if (err !== 'Agent not running') {
+            console.error(`[TerminalManager] Resize failed for session ${sessionId}:`, err);
+          }
+        });
+      });
+
       const instance: TerminalInstance = { term, fitAddon, unlisten, opened: false, writeBuffer: '', frameRequested: false };
       this.instances.set(sessionId, instance);
       this.notify();
@@ -144,176 +154,91 @@ declare global {
 }
 window.__terminalManager = terminalManager;
 
-function TerminalContainer({ sessionId, isVisible }: { sessionId: number; isVisible: boolean }) {
+export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<TerminalInstance | null>(null);
+  const spawnAgent = useSessionStore(state => state.spawnAgent);
+  const sessions = useSessionStore(state => state.sessions);
+  const session = sessions.find(s => s.id === sessionId);
+
+  // ResizeObserver for automatic fitting when container size changes
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const observer = new ResizeObserver(() => {
+      if (instanceRef.current) {
+        requestAnimationFrame(() => {
+          // H1 Fix: Explicitly call CharSizeService.measure() to ensure cell dimensions are populated
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const charSizeService = (instanceRef.current?.term as any)['_core']?.['_charSizeService'];
+          if (charSizeService) {
+            charSizeService.measure();
+          }
+          instanceRef.current?.fitAddon.fit();
+        });
+      }
+    });
+
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, [sessionId]);
 
   useEffect(() => {
-    console.log(`[DEBUG TerminalContainer] Effect started for session ${sessionId}`);
-
-    // H3 Fix: Use object ref instead of primitive boolean to avoid closure capture race
     const cancelled = { current: false };
 
     terminalManager.getOrCreate(sessionId).then(inst => {
       if (cancelled.current) return;
-      if (!inst || !containerRef.current) {
-        console.log(`[DEBUG TerminalContainer] session ${sessionId}: no instance or no container`);
-        return;
-      }
+      if (!inst || !containerRef.current) return;
 
       instanceRef.current = inst;
 
       if (!inst.opened) {
-        console.log(`[DEBUG TerminalContainer] session ${sessionId}: calling open()`);
         inst.opened = true;
         inst.term.open(containerRef.current);
       } else {
-        // Re-parent terminal element into this container if it was mounted elsewhere
         const termEl = inst.term.element;
         if (termEl && termEl.parentElement !== containerRef.current) {
-          console.log(`[DEBUG TerminalContainer] session ${sessionId}: re-parenting terminal element`);
           containerRef.current.appendChild(termEl);
         }
       }
 
-      // Always do fit/refresh when effect runs - use rAF to ensure DOM dimensions are computed
-      requestAnimationFrame(() => {
+      // Initial fit and check if we need to spawn the agent
+      requestAnimationFrame(async () => {
         if (cancelled.current || !inst) return;
-        console.log(`[DEBUG TerminalContainer] session ${sessionId}: fit/refresh via rAF`);
-        const dims = inst.fitAddon.proposeDimensions();
-        console.log(`[DEBUG TerminalContainer] session ${sessionId}: proposeDimensions=${JSON.stringify(dims)}, actual rows=${inst.term.rows}, cols=${inst.term.cols}`);
-        // Force a resize from container bounding rect - works regardless of proposeDimensions state
-        if (containerRef.current) {
-          const rect = containerRef.current.getBoundingClientRect();
-          const cols = Math.floor((rect.width - 14) / 8.16);
-          const rows = Math.floor((rect.height - 14) / 17);
-          console.log(`[DEBUG TerminalContainer] session ${sessionId}: forcing resize cols=${cols}, rows=${rows} from rect ${rect.width}x${rect.height}`);
-          inst.term.resize(cols, rows);
-          inst.fitAddon.fit();
-          const dimsAfter = inst.fitAddon.proposeDimensions();
-          console.log(`[DEBUG TerminalContainer] session ${sessionId}: after resize proposeDimensions=${JSON.stringify(dimsAfter)}`);
-        } else {
-          console.log(`[DEBUG TerminalContainer] session ${sessionId}: no container ref, skipping`);
-        }
+        
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
+        charSizeService?.measure();
+        
+        inst.fitAddon.fit();
         inst.term.scrollToBottom();
         inst.term.refresh(0, inst.term.rows - 1);
+
+        // If session is idle and has a provider, spawn the agent with current dimensions
+        if (session && session.provider && session.status === 'idle' && !cancelled.current) {
+          const dims = inst.fitAddon.proposeDimensions();
+          console.log(`[AgentTerminal] Auto-spawning agent for session ${sessionId} with dims:`, dims);
+          try {
+            await spawnAgent(sessionId, session.provider, dims?.rows, dims?.cols);
+          } catch (e) {
+            console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
+          }
+        }
       });
     });
 
     return () => {
-      console.log(`[DEBUG TerminalContainer] Cleanup for session ${sessionId}`);
       cancelled.current = true;
     };
-  }, [sessionId]);
-
-  // Re-fit when visibility changes - always fit when visible, with manual resize fallback
-  useEffect(() => {
-    console.log(`[DEBUG TerminalContainer] Visibility effect for ${sessionId}, isVisible=${isVisible}`);
-    if (isVisible && instanceRef.current) {
-      // H5 Fix: Use double rAF to ensure element is fully painted before measuring
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (!instanceRef.current || !containerRef.current) return;
-          console.log(`[DEBUG TerminalContainer] ${sessionId}: visibility=true, doing H1 charSizeService.measure() + fit via double rAF`);
-
-          // H1 Fix: Explicitly call CharSizeService.measure() to ensure cell dimensions are populated
-          // Using any assertion because _core is private internal API
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const charSizeService = (instanceRef.current.term as any)['_core']?.['_charSizeService'];
-          if (charSizeService) {
-            console.log(`[DEBUG TerminalContainer] ${sessionId}: calling charSizeService.measure()`);
-            charSizeService.measure();
-          } else {
-            console.log(`[DEBUG TerminalContainer] ${sessionId}: charSizeService not found on _core`);
-          }
-
-          const dims = instanceRef.current.fitAddon.proposeDimensions();
-          console.log(`[DEBUG TerminalContainer] ${sessionId}: pre-fit proposeDimensions=${JSON.stringify(dims)}`);
-
-          const rect = containerRef.current.getBoundingClientRect();
-          const cols = Math.floor((rect.width - 14) / 8.16);
-          const rows = Math.floor((rect.height - 14) / 17);
-          console.log(`[DEBUG TerminalContainer] ${sessionId}: visibility resize cols=${cols}, rows=${rows} from rect ${rect.width}x${rect.height}`);
-          instanceRef.current.term.resize(cols, rows);
-          instanceRef.current.fitAddon.fit();
-
-          const dimsAfter = instanceRef.current.fitAddon.proposeDimensions();
-          console.log(`[DEBUG TerminalContainer] ${sessionId}: post-fit proposeDimensions=${JSON.stringify(dimsAfter)}`);
-          instanceRef.current.term.focus();
-          instanceRef.current.term.scrollToBottom();
-          instanceRef.current.term.refresh(0, instanceRef.current.term.rows - 1);
-        });
-      });
-    }
-  }, [isVisible]);
+  }, [sessionId, session?.status]);
 
   return (
     <div
       ref={containerRef}
-      className={`h-full w-full ${isVisible ? '' : 'opacity-0 pointer-events-none'}`}
+      className="h-full w-full"
       style={{ padding: '4px' }}
     />
   );
 }
 
-export function TerminalStack({ activeSessionId }: { activeSessionId: number | null }) {
-  const [sessionIds, setSessionIds] = useState<number[]>([]);
-  const trackedIds = useRef<Set<number>>(new Set());
 
-  useEffect(() => {
-    if (activeSessionId !== null && !trackedIds.current.has(activeSessionId)) {
-      trackedIds.current.add(activeSessionId);
-      setSessionIds(Array.from(trackedIds.current));
-    }
-  }, [activeSessionId]);
-
-  // Listen for FIT_TERMINALS events and trigger fit on the active terminal
-  useEffect(() => {
-    console.log(`[DEBUG TerminalStack] FIT_TERMINALS listener registered`);
-    const unlisten = listen<{ sessionId: number }>(FIT_TERMINALS, (event) => {
-      const sessionId = event.payload.sessionId;
-      console.log(`[DEBUG TerminalStack] FIT_TERMINALS received for session ${sessionId}`);
-      const inst = terminalManager.getInstance(sessionId);
-      console.log(`[DEBUG TerminalStack] inst exists=${!!inst}, opened=${inst?.opened}`);
-      if (inst && inst.opened) {
-        console.log(`[DEBUG TerminalStack] Fitting terminal ${sessionId}`);
-        inst.fitAddon.fit();
-        inst.term.focus();
-        inst.term.scrollToBottom();
-        inst.term.refresh(0, inst.term.rows - 1);
-      } else {
-        console.log(`[DEBUG TerminalStack] Cannot fit terminal ${sessionId} - inst=${!!inst}, opened=${inst?.opened}`);
-      }
-    });
-    return () => { unlisten.then(fn => fn()); };
-  }, []);
-
-  useEffect(() => {
-    const unsubscribe = terminalManager.subscribe(() => {
-      // Logic for manager-driven updates if needed
-    });
-    return () => unsubscribe();
-  }, []);
-
-  return (
-    <div className="relative h-full w-full bg-[#0f0f0f] overflow-hidden">
-      {sessionIds.map(id => (
-        <TerminalContainer
-          key={id}
-          sessionId={id}
-          isVisible={id === activeSessionId}
-        />
-      ))}
-
-      {activeSessionId === null && (
-        <div className="h-full w-full flex items-center justify-center text-[#444] text-xs font-mono uppercase tracking-widest">
-          No Active Session
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function AgentTerminal({ sessionId }: { sessionId: number }) {
-  return <TerminalStack activeSessionId={sessionId} />;
-}

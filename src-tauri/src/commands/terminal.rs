@@ -100,6 +100,21 @@ pub fn write_pty(pty_id: String, data: String) -> Result<(), String> {
     }
 }
 
+#[command]
+pub fn resize_pty(pty_id: String, rows: u16, cols: u16) -> Result<(), String> {
+    let mut instances = PTY_INSTANCES.lock().unwrap();
+    let pty = instances.get_mut(&pty_id).ok_or("PTY not found")?;
+
+    pty.master.resize(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 /// Close a PTY
 #[command]
 pub fn close_pty(pty_id: String) -> Result<(), String> {
