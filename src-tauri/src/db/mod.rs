@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -47,6 +47,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             name TEXT NOT NULL,
             path TEXT NOT NULL UNIQUE,
             layout TEXT NOT NULL DEFAULT 'grid',
+            position INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -103,8 +104,9 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             // Fresh DB: init() will create the table with layout column.
             // Update version now so we don't re-enter migration on next init().
         } else {
-            // Existing DB: run incremental migration to add layout column.
+            // Existing DB: run incremental migrations.
             migrate_projects_layout(conn)?;
+            migrate_projects_position(conn)?;
         }
 
         conn.execute(
@@ -134,6 +136,31 @@ fn migrate_projects_layout(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+fn migrate_projects_position(conn: &Connection) -> SqlResult<()> {
+    let has_position: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'position'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_position {
+        conn.execute(
+            "ALTER TABLE projects ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        tracing::info!("Added position column to projects table");
+        conn.execute(
+            "UPDATE projects SET position = (
+                SELECT COUNT(*) FROM projects p2 WHERE p2.created_at < projects.created_at
+            )",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// Exposes migrate_if_needed for integration testing.
 /// In tests, call this on an existing Connection to simulate schema upgrade.
 #[cfg(test)]
@@ -146,6 +173,7 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
 
     if current_version < SCHEMA_VERSION {
         migrate_projects_layout(conn)?;
+        migrate_projects_position(conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -171,14 +199,15 @@ pub(crate) fn reset_for_testing() {
 // --- Internal Helpers (no locking) ---
 
 fn get_project_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Project> {
-    let mut stmt = conn.prepare("SELECT id, name, path, layout, created_at FROM projects WHERE id = ?1")?;
+    let mut stmt = conn.prepare("SELECT id, name, path, layout, position, created_at FROM projects WHERE id = ?1")?;
     stmt.query_row(params![id], |row| {
         Ok(Project {
             id: row.get(0)?,
             name: row.get(1)?,
             path: row.get(2)?,
             layout: row.get::<_, String>(3)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+            position: row.get(4)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })
@@ -232,9 +261,16 @@ pub fn create_project(name: &str, path: &str) -> SqlResult<Project> {
         return get_project_by_id_inner(&db, id);
     }
 
+    // Append at end of position list
+    let next_position: i64 = db.query_row(
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM projects",
+        [],
+        |row| row.get(0),
+    )?;
+
     db.execute(
-        "INSERT INTO projects (name, path, layout) VALUES (?1, ?2, 'grid')",
-        params![name, path],
+        "INSERT INTO projects (name, path, layout, position) VALUES (?1, ?2, 'grid', ?3)",
+        params![name, path, next_position],
     )?;
     let id = db.last_insert_rowid();
     get_project_by_id_inner(&db, id)
@@ -254,16 +290,29 @@ pub fn update_project_layout(id: i64, layout: &str) -> SqlResult<()> {
     Ok(())
 }
 
+pub fn update_project_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
+    if updates.is_empty() { return Ok(()); }
+    let db = get().lock().unwrap();
+    for (id, pos) in updates {
+        db.execute(
+            "UPDATE projects SET position = ?1 WHERE id = ?2",
+            params![pos, id],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn list_projects() -> SqlResult<Vec<Project>> {
     let db = get().lock().unwrap();
-    let mut stmt = db.prepare("SELECT id, name, path, layout, created_at FROM projects ORDER BY name")?;
+    let mut stmt = db.prepare("SELECT id, name, path, layout, position, created_at FROM projects ORDER BY position ASC, name ASC")?;
     let rows = stmt.query_map([], |row| {
         Ok(Project {
             id: row.get(0)?,
             name: row.get(1)?,
             path: row.get(2)?,
             layout: row.get::<_, String>(3)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
+            position: row.get(4)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })

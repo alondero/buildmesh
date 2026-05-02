@@ -6,6 +6,7 @@ export interface Project {
   name: string;
   path: string;
   layout: 'grid' | 'single';
+  position: number;
   created_at: string;
 }
 
@@ -22,6 +23,7 @@ interface ProjectState {
   deleteProject: (id: number) => Promise<void>;
   selectProject: (id: number | null) => void;
   updateProjectLayout: (id: number, layout: 'grid' | 'single') => Promise<void>;
+  reorderProjects: (projectId: number, newPosition: number) => Promise<void>;
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
@@ -102,6 +104,29 @@ export const useProjectStore = create<ProjectState>((set) => ({
       });
     } catch (e) {
       set({ error: String(e) });
+    }
+  },
+
+  reorderProjects: async (projectId, newPosition) => {
+    let updatedProjects: Project[];
+    set((state) => {
+      const projects = [...state.projects];
+      const draggedIdx = projects.findIndex((p) => p.id === projectId);
+      if (draggedIdx === -1) return state;
+      const [dragged] = projects.splice(draggedIdx, 1);
+      projects.splice(newPosition, 0, dragged);
+      updatedProjects = projects.map((p, idx) => ({ ...p, position: idx }));
+      const projectsById = new Map(updatedProjects.map((p) => [p.id, p]));
+      return { projects: updatedProjects, projectsById };
+    });
+    try {
+      // Send ALL projects' positions so DB stays in sync with optimistic update
+      const currentProjects = updatedProjects!;
+      const updates = currentProjects.map((p) => [p.id, p.position] as [number, number]);
+      await invoke('update_project_positions', { updates });
+    } catch (e) {
+      set({ error: String(e) });
+      await useProjectStore.getState().fetchProjects();
     }
   },
 }));

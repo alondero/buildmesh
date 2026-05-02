@@ -83,3 +83,9 @@ pub async fn update_project_layout(project_id: i64, layout: String) -> Result<()
     }
     db::update_project_layout(project_id, &layout).map_err(|e| e.to_string())
 }
+
+/// Update multiple projects' sort positions in the sidebar
+#[command]
+pub async fn update_project_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
+    db::update_project_positions_batch(&updates).map_err(|e| e.to_string())
+}
