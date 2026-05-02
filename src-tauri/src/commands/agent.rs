@@ -320,8 +320,9 @@ async fn spawn_agent_inner(
 
     let provider_enum = parse_provider(&provider);
 
-    // 4. Determine session ID mode for Anthropic provider
-    let session_id_mode = if provider_enum == Provider::Anthropic {
+    // 4. Determine session ID mode for cwrap-wrapped providers (Anthropic, Minimax)
+    // Both use cwrap which forwards --session-id and --resume to the underlying CLI
+    let session_id_mode = if provider_enum == Provider::Anthropic || provider_enum == Provider::Minimax {
         match resume {
             Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
             _ => {
@@ -420,8 +421,8 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
             }
         };
 
-        if session.provider != Provider::Anthropic {
-            tracing::info!("auto_resume_sessions: skipping non-Anthropic session {} ({:?})", session.id, session.provider);
+        if session.provider != Provider::Anthropic && session.provider != Provider::Minimax {
+            tracing::info!("auto_resume_sessions: skipping non-cwrap session {} ({:?})", session.id, session.provider);
             db::update_session_status(session.id, SessionStatus::Idle).ok();
             continue;
         }

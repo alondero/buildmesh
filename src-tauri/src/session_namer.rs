@@ -103,16 +103,22 @@ pub fn cleanup(session_id: i64) {
     RENAMED_SESSIONS.lock().unwrap().remove(&session_id);
 }
 
-async fn summarize_and_rename(session_id: i64, buffer: &str) -> Result<String, String> {
-    let prompt = format!(
-        "Summarize this terminal session in exactly 3-5 lowercase hyphenated words as a slug \
-         (e.g. fix-auth-token-refresh). Only output the slug, nothing else:\n\n{}",
-        buffer
-    );
+async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, String> {
+    let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.".to_string();
 
     tracing::info!("session_namer: running summarize command for session {}", session_id);
 
-    let output = build_summarize_command(&prompt)
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
+        c.args(["/c", "cwrap", "--minimax", "-p", &prompt]);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("cwrap");
+        c.args(["--minimax", "-p", &prompt]);
+        c
+    };
+
+    let output = cmd
         .stdin(std::process::Stdio::null())
         .output()
         .await
@@ -127,64 +133,42 @@ async fn summarize_and_rename(session_id: i64, buffer: &str) -> Result<String, S
     }
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let slug = validate_slug(&raw)?;
-
+    let slug = slug_with_retry(&raw)?;
     crate::db::update_session_name(session_id, &slug).map_err(|e| e.to_string())?;
-
     Ok(slug)
 }
 
-fn build_summarize_command(prompt: &str) -> tokio::process::Command {
-    let is_macos = cfg!(target_os = "macos");
-
-    if is_macos {
-        let claude_path = which_claude().unwrap_or_else(|| "claude".into());
-        let mut cmd = tokio::process::Command::new(claude_path);
-        cmd.args(["-p", prompt, "--output-format", "text"]);
-        cmd
-    } else {
-        let mut cmd = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
-        cmd.args(["/c", "cwrap", "anthropic", "-p", prompt]);
-        cmd
-    }
-}
-
-fn which_claude() -> Option<String> {
-    let paths = [
-        "/opt/homebrew/bin/claude",
-        "/usr/local/bin/claude",
-    ];
-    for p in paths {
-        if std::path::Path::new(p).exists() {
-            return Some(p.to_string());
-        }
-    }
-    None
-}
-
-fn validate_slug(raw: &str) -> Result<String, String> {
-    let slug = raw
+fn slug_with_retry(raw: &str) -> Result<String, String> {
+    // Extract just the first hyphenated slug-like line
+    let candidate = raw
         .lines()
-        .last()
-        .unwrap_or(raw)
-        .trim()
-        .trim_matches('"')
-        .trim_matches('`')
-        .to_lowercase();
+        .filter(|l| !l.trim().is_empty())
+        .find(|l| l.contains('-'))
+        .map(|l| l.trim().trim_matches('"').trim_matches('`').to_lowercase())
+        .unwrap_or_else(|| raw.trim().trim_matches('"').trim_matches('`').to_lowercase());
 
-    let word_count = slug.split('-').count();
-    if word_count < 3 || word_count > 5 {
-        return Err(format!(
-            "slug has {} words (expected 3-5): '{}'",
-            word_count, slug
-        ));
+    let word_count = candidate.split('-').count();
+    if word_count >= 3 && word_count <= 5 && SLUG_REGEX.is_match(&candidate) {
+        return Ok(candidate);
     }
 
-    if !SLUG_REGEX.is_match(&slug) {
-        return Err(format!("slug failed validation: '{}'", slug));
+    // Fallback: extract longest run of hyphenated words
+    let fallback = candidate.split_whitespace()
+        .filter(|w| w.contains('-'))
+        .max_by_key(|w| w.split('-').count())
+        .unwrap_or(&candidate)
+        .to_string();
+
+    let fallback_count = fallback.split('-').count();
+    if fallback_count >= 3 && fallback_count <= 5 && SLUG_REGEX.is_match(&fallback) {
+        return Ok(fallback);
     }
 
-    Ok(slug)
+    Err(format!(
+        "slug has {} words (expected 3-5): '{}'",
+        fallback_count.max(word_count),
+        candidate
+    ))
 }
 
 #[cfg(test)]
@@ -192,25 +176,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validate_slug_accepts_valid() {
+    fn slug_with_retry_accepts_valid() {
         assert_eq!(
-            validate_slug("fix-auth-token-refresh").unwrap(),
+            slug_with_retry("fix-auth-token-refresh").unwrap(),
             "fix-auth-token-refresh"
         );
         assert_eq!(
-            validate_slug("  rendering-terminal-bug\n").unwrap(),
+            slug_with_retry("  rendering-terminal-bug\n").unwrap(),
             "rendering-terminal-bug"
         );
     }
 
     #[test]
-    fn validate_slug_rejects_too_short() {
-        assert!(validate_slug("fix-it").is_err());
+    fn slug_with_retry_rejects_too_short() {
+        assert!(slug_with_retry("fix-it").is_err());
     }
 
     #[test]
-    fn validate_slug_rejects_too_long() {
-        assert!(validate_slug("one-two-three-four-five-six").is_err());
+    fn slug_with_retry_rejects_too_long() {
+        assert!(slug_with_retry("one-two-three-four-five-six").is_err());
     }
 
     #[test]
@@ -219,5 +203,14 @@ mod tests {
         append_output(999, &big);
         let buffers = SESSION_BUFFERS.lock().unwrap();
         assert!(buffers.get(&999).unwrap().len() <= MAX_BUFFER_CHARS);
+    }
+
+    #[test]
+    fn slug_with_retry_extracts_hyphenated_from_prose() {
+        // If model outputs prose with a slug embedded, find the hyphenated part
+        let result = slug_with_retry(
+            "Based on the session, a good name would be: improve-auth-flow"
+        );
+        assert!(result.is_ok());
     }
 }

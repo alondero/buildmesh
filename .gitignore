@@ -1,3 +1,6 @@
+# Local scripts (helper scripts for CI/dev)
+scripts/
+
 # Logs
 logs
 *.log
@@ -29,8 +32,10 @@ user-research-grillme-*.md
 # Test artifacts
 test-results/
 
-# Claude worktrees (local only)
+# Claude worktrees and local settings (local only)
 .claude/worktrees/
+.claude/settings.local.json
+.claude/tasks/
 coverage/
 coverage/
 .worktrees/
