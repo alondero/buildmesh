@@ -210,11 +210,38 @@ fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
         return Ok(());
     }
 
-    conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
-    conn.execute("ALTER TABLE sessions RENAME TO agent_nodes", [])?;
-    conn.execute("ALTER TABLE agent_nodes RENAME COLUMN project_id TO mesh_id", [])?;
-    conn.execute("ALTER TABLE checkpoints RENAME COLUMN session_id TO node_id", [])?;
-    tracing::info!("Migrated to v6: projects→meshes, sessions→agent_nodes, project_id→mesh_id, session_id→node_id");
+    // Also guard on sessions — partial schemas (v2 without sessions) would crash otherwise
+    let sessions_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+
+    if !sessions_exists {
+        tracing::info!("sessions table not found — skipping mesh rename migration");
+        return Ok(());
+    }
+
+    let result: SqlResult<()> = (|| {
+        conn.execute("BEGIN TRANSACTION", [])?;
+        conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
+        conn.execute("ALTER TABLE sessions RENAME TO agent_nodes", [])?;
+        conn.execute("ALTER TABLE agent_nodes RENAME COLUMN project_id TO mesh_id", [])?;
+        conn.execute("ALTER TABLE checkpoints RENAME COLUMN session_id TO node_id", [])?;
+        conn.execute("COMMIT", [])?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            tracing::info!("Migrated to v6: projects→meshes, sessions→agent_nodes, project_id→mesh_id, session_id→node_id");
+        }
+        Err(e) => {
+            conn.execute("ROLLBACK", [])?;
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
