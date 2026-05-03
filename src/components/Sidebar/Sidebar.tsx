@@ -4,6 +4,7 @@ import { useSessionStore } from '../../stores/sessionStore';
 import type { Project } from '../../stores/projectStore';
 import type { Session } from '../../stores/sessionStore';
 import { getStatusConfig } from '../../lib/status';
+import Logo from '../../assets/logo.svg';
 import {
   DndContext,
   type DragEndEvent,
@@ -99,7 +100,7 @@ export function Sidebar() {
     <div className="w-64 bg-bg-surface border-r border-border-subtle flex flex-col h-full">
       {/* Header */}
       <div className="p-3 border-b border-border-subtle">
-        <h1 className="text-sm font-semibold text-text-primary">Buildmesh</h1>
+        <img src={Logo} className="h-5" alt="Buildmesh" />
       </div>
 
       {/* Projects list */}
