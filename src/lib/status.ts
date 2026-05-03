@@ -1,5 +1,5 @@
-// Centralized session status constants
-// These are shared between sessionStore.ts and Sidebar.tsx
+// Centralized agent node status constants
+// These are shared between agentNodeStore.ts and Sidebar.tsx
 
 export type SessionStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended' | 'archived';
 

@@ -18,7 +18,7 @@ export interface AgentNode {
 
 export interface Checkpoint {
   id: number;
-  session_id: number;
+  node_id: number;
   git_ref: string;
   turn_index: number;
   message: string;
