@@ -141,11 +141,20 @@ fn build_spawn_command(
     // This creates a dedicated worktree per node, preventing concurrent node conflicts.
     // When worktree_name is set (node's hyphenated name), pass it explicitly so cwrap
     // can find the same node data on resume.
+    //
+    // On Resume: skip -w if the worktree directory already exists. The worktree was
+    // already created during the first spawn (when SessionIdMode::Assign was used).
+    // Passing -w on resume causes cwrap to call `git worktree add` again for the same
+    // worktree, which fails with "worktree already checked out" because git internally
+    // stores the worktree with a "worktree-" prefix that's different from the directory
+    // name. The session_id is sufficient for cwrap to find and resume the existing
+    // session without needing -w.
     let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
     if is_cwrap {
         match session_id_mode {
-            SessionIdMode::Assign(_) | SessionIdMode::Resume(_) => {
-                tracing::info!("spawn_agent: enabling worktree support (-w) for node");
+            SessionIdMode::Assign(_) => {
+                // Fresh spawn: always pass -w so cwrap creates the worktree
+                tracing::info!("spawn_agent: enabling worktree support (-w) for fresh spawn");
                 if let Some(ref wt_name) = node.worktree_name {
                     args.push("-w".to_string());
                     args.push(wt_name.clone());
@@ -155,6 +164,14 @@ fn build_spawn_command(
                     args.push("-w".to_string());
                     tracing::info!("spawn_agent: no explicit worktree name, using auto-generated");
                 }
+            }
+            SessionIdMode::Resume(_) => {
+                // Resume: skip -w entirely. The worktree was already created during the
+                // first spawn (Assign mode). Passing -w causes cwrap to call `git worktree add`
+                // again, which fails with "already checked out" due to git's internal
+                // worktree naming (worktree-<name> prefix differs from directory name).
+                // The session_id is sufficient for cwrap to find and resume the existing session.
+                tracing::info!("spawn_agent: skipping -w on resume, using session_id to find existing worktree");
             }
             SessionIdMode::None => {}
         }
