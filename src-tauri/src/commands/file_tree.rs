@@ -84,3 +84,27 @@ pub fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode
 pub fn to_host_path(path: String) -> String {
     env::to_host_path(&path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_host_path_preserves_windows_path() {
+        let result = to_host_path("C:\\Users\\test\\file.txt".to_string());
+        assert_eq!(result, "C:\\Users\\test\\file.txt");
+    }
+
+    #[test]
+    fn test_to_host_path_converts_linux_path() {
+        let result = to_host_path("/home/user/file.txt".to_string());
+        assert!(result.contains("\\wsl$"), "Should convert to UNC path");
+        assert!(result.contains("\\home\\user\\file.txt"), "Should use backslashes");
+    }
+
+    #[test]
+    fn test_to_host_path_converts_mnt_path() {
+        let result = to_host_path("/mnt/c/Users/test/file.txt".to_string());
+        assert_eq!(result, "C:\\Users\\test\\file.txt");
+    }
+}
