@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
-import { useProjectStore } from '../../stores/projectStore';
-import { useSessionStore } from '../../stores/sessionStore';
-import type { Project } from '../../stores/projectStore';
-import type { Session } from '../../stores/sessionStore';
+import { useMeshStore } from '../../stores/meshStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import type { Mesh } from '../../stores/meshStore';
+import type { AgentNode } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import Logo from '../../assets/logo.svg';
 import {
@@ -29,24 +29,24 @@ const PROVIDERS = isMac
   : ALL_PROVIDERS;
 
 export function Sidebar() {
-  const projects = useProjectStore(state => state.projects);
-  const addProject = useProjectStore(state => state.addProject);
-  const selectedProjectId = useProjectStore(state => state.selectedProjectId);
-  const selectProject = useProjectStore(state => state.selectProject);
-  const reorderProjects = useProjectStore(state => state.reorderProjects);
-  const sessions = useSessionStore(state => state.sessions);
-  const activeSessionId = useSessionStore(state => state.activeSessionId);
-  const setActiveSession = useSessionStore(state => state.setActiveSession);
-  const createSession = useSessionStore(state => state.createSession);
-  const deleteSession = useSessionStore(state => state.deleteSession);
+  const meshes = useMeshStore(state => state.meshes);
+  const addMesh = useMeshStore(state => state.addMesh);
+  const selectedMeshId = useMeshStore(state => state.selectedMeshId);
+  const selectMesh = useMeshStore(state => state.selectMesh);
+  const reorderMeshes = useMeshStore(state => state.reorderMeshes);
+  const agentNodes = useAgentNodeStore(state => state.agentNodes);
+  const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
+  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const createAgentNode = useAgentNodeStore(state => state.createAgentNode);
+  const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
 
-  const handleSelectProject = (projectId: number) => {
-    if (selectedProjectId === projectId) {
-      selectProject(null);
+  const handleSelectMesh = (meshId: number) => {
+    if (selectedMeshId === meshId) {
+      selectMesh(null);
     } else {
-      selectProject(projectId);
+      selectMesh(meshId);
     }
   };
 
@@ -63,37 +63,37 @@ export function Sidebar() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [openDropdownFor]);
 
-  const handleAddProject = async () => {
-    await addProject();
+  const handleAddMesh = async () => {
+    await addMesh();
   };
 
-  const handleNewSession = async (project: Project) => {
-    setOpenDropdownFor(openDropdownFor === project.id ? null : project.id);
+  const handleNewNode = async (mesh: Mesh) => {
+    setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
   };
 
-  const handleSelectProvider = async (project: Project, providerId: string) => {
+  const handleSelectProvider = async (mesh: Mesh, providerId: string) => {
     setOpenDropdownFor(null);
     try {
-      const session = await createSession(project.id, project.name, project.path, 'main', providerId);
-      await setActiveSession(session.id);
-      selectProject(project.id);
+      const node = await createAgentNode(mesh.id, mesh.name, mesh.path, 'main', providerId);
+      await setActiveNode(node.id);
+      selectMesh(mesh.id);
     } catch (e) {
-      console.error('Failed to create session:', e);
+      console.error('Failed to create node:', e);
     }
   };
 
-  const handleDeleteSession = async (e: React.MouseEvent, sessionId: number) => {
+  const handleDeleteNode = async (e: React.MouseEvent, nodeId: number) => {
     e.stopPropagation();
-    await deleteSession(sessionId);
+    await deleteAgentNode(nodeId);
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
-    const activeIndex = projects.findIndex(p => p.id === active.id);
-    const overIndex = projects.findIndex(p => p.id === over.id);
+    const activeIndex = meshes.findIndex(p => p.id === active.id);
+    const overIndex = meshes.findIndex(p => p.id === over.id);
     if (activeIndex === -1 || overIndex === -1) return;
-    reorderProjects(active.id as number, overIndex);
+    reorderMeshes(active.id as number, overIndex);
   };
 
   return (
@@ -103,43 +103,43 @@ export function Sidebar() {
         <img src={Logo} className="h-5" alt="Buildmesh" />
       </div>
 
-      {/* Projects list */}
+      {/* Meshes list */}
       <div className="flex-1 overflow-y-auto">
         <div className="p-2">
           <div className="flex items-center justify-between mb-1 px-2">
-            <span className="text-xs font-medium text-text-secondary uppercase">Sessions</span>
+            <span className="text-xs font-medium text-text-secondary uppercase">Meshes</span>
             <button
-              onClick={handleAddProject}
+              onClick={handleAddMesh}
               className="text-xs text-accent-cyan hover:text-accent-blue transition-colors"
             >
               + Add
             </button>
           </div>
 
-          {projects.length === 0 ? (
+          {meshes.length === 0 ? (
             <p className="text-xs text-text-muted px-2 py-4 text-center">
-              No sessions yet.{'\n'}Click + Add to get started.
+              No meshes yet.{'\n'}Click + Add to get started.
             </p>
           ) : (
             <DndContext onDragEnd={handleDragEnd}>
-              <SortableContext items={projects.map(p => p.id)} strategy={verticalListSortingStrategy}>
-                {projects.map(project => {
-                  const projectSessions = sessions.filter(w => w.project_id === project.id);
-                  const isDropdownOpen = openDropdownFor === project.id;
+              <SortableContext items={meshes.map(p => p.id)} strategy={verticalListSortingStrategy}>
+                {meshes.map(mesh => {
+                  const meshNodes = agentNodes.filter(w => w.project_id === mesh.id);
+                  const isDropdownOpen = openDropdownFor === mesh.id;
                   return (
-                    <SortableProject
-                      key={project.id}
-                      project={project}
-                      isSelected={selectedProjectId === project.id}
+                    <SortableMesh
+                      key={mesh.id}
+                      mesh={mesh}
+                      isSelected={selectedMeshId === mesh.id}
                       isDropdownOpen={isDropdownOpen}
-                      onSelectProject={handleSelectProject}
-                      onNewSession={handleNewSession}
+                      onSelectMesh={handleSelectMesh}
+                      onNewNode={handleNewNode}
                       onSelectProvider={handleSelectProvider}
-                      projectSessions={projectSessions}
-                      activeSessionId={activeSessionId}
-                      setActiveSession={setActiveSession}
-                      selectProject={selectProject}
-                      onDeleteSession={handleDeleteSession}
+                      meshNodes={meshNodes}
+                      activeNodeId={activeNodeId}
+                      setActiveNode={setActiveNode}
+                      selectMesh={selectMesh}
+                      onDeleteNode={handleDeleteNode}
                     />
                   );
                 })}
@@ -151,26 +151,26 @@ export function Sidebar() {
 
       {/* Footer */}
       <div className="p-2 border-t border-border-subtle text-xs text-text-muted">
-        <span>{sessions.filter(w => w.status === 'running').length} active</span>
+        <span>{agentNodes.filter(w => w.status === 'running').length} active</span>
       </div>
     </div>
   );
 }
 
-function SessionItem({ session, isActive, onSelect, onDelete }: {
-  session: Session;
+function NodeItem({ node, isActive, onSelect, onDelete }: {
+  node: AgentNode;
   isActive: boolean;
   onSelect: () => void;
   onDelete: (e: React.MouseEvent) => void;
 }) {
-  const config = getStatusConfig(session.status);
-  const isAwaiting = session.status === 'awaiting_input';
-  const envBadge = session.env === 'wsl' ? 'WSL' : isMac ? 'MAC' : 'WIN';
+  const config = getStatusConfig(node.status);
+  const isAwaiting = node.status === 'awaiting_input';
+  const envBadge = node.env === 'wsl' ? 'WSL' : isMac ? 'MAC' : 'WIN';
 
   return (
     <div
       data-session-item
-      data-session-id={session.id}
+      data-session-id={node.id}
       onClick={onSelect}
       className={`
         pl-8 pr-1 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2
@@ -179,7 +179,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }: {
       `}
     >
       <span className={config.color}>{config.dot}</span>
-      <span className="flex-1 truncate text-text-secondary">{session.name}</span>
+      <span className="flex-1 truncate text-text-secondary">{node.name}</span>
       {isAwaiting && (
         <span className="text-[10px] text-status-warning font-semibold animate-pulse">ATTN</span>
       )}
@@ -187,7 +187,7 @@ function SessionItem({ session, isActive, onSelect, onDelete }: {
       <button
         onClick={onDelete}
         className="text-text-muted hover:text-status-error text-xs px-1 transition-colors"
-        title="Delete session"
+        title="Delete node"
       >
         ×
       </button>
@@ -195,33 +195,33 @@ function SessionItem({ session, isActive, onSelect, onDelete }: {
   );
 }
 
-interface SortableProjectProps {
-  project: Project;
+interface SortableMeshProps {
+  mesh: Mesh;
   isSelected: boolean;
   isDropdownOpen: boolean;
-  onSelectProject: (id: number) => void;
-  onNewSession: (project: Project) => void;
-  onSelectProvider: (project: Project, providerId: string) => void;
-  projectSessions: Session[];
-  activeSessionId: number | null;
-  setActiveSession: (id: number) => void;
-  selectProject: (id: number | null) => void;
-  onDeleteSession: (e: React.MouseEvent, sessionId: number) => void;
+  onSelectMesh: (id: number) => void;
+  onNewNode: (mesh: Mesh) => void;
+  onSelectProvider: (mesh: Mesh, providerId: string) => void;
+  meshNodes: AgentNode[];
+  activeNodeId: number | null;
+  setActiveNode: (id: number) => void;
+  selectMesh: (id: number | null) => void;
+  onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
 }
 
-function SortableProject({
-  project,
+function SortableMesh({
+  mesh,
   isSelected,
   isDropdownOpen,
-  onSelectProject,
-  onNewSession,
+  onSelectMesh,
+  onNewNode,
   onSelectProvider,
-  projectSessions,
-  activeSessionId,
-  setActiveSession,
-  selectProject,
-  onDeleteSession,
-}: SortableProjectProps) {
+  meshNodes,
+  activeNodeId,
+  setActiveNode,
+  selectMesh,
+  onDeleteNode,
+}: SortableMeshProps) {
   const {
     attributes,
     listeners,
@@ -229,7 +229,7 @@ function SortableProject({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: project.id });
+  } = useSortable({ id: mesh.id });
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -252,18 +252,18 @@ function SortableProject({
 
         <div className="relative">
           <button
-            onClick={() => onNewSession(project)}
+            onClick={() => onNewNode(mesh)}
             className={`text-xs px-1 ${isDropdownOpen ? 'text-accent-blue' : 'text-accent-cyan hover:text-accent-blue'}`}
-            title="New session"
+            title="New node"
           >
             +
           </button>
           {isDropdownOpen && (
-            <div data-dropdown-for={project.id} className="absolute left-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[120px]">
+            <div data-dropdown-for={mesh.id} className="absolute left-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[120px]">
               {PROVIDERS.map(p => (
                 <button
                   key={p.id}
-                  onClick={() => onSelectProvider(project, p.id)}
+                  onClick={() => onSelectProvider(mesh, p.id)}
                   className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
                 >
                   <span className={`w-2 h-2 rounded-full ${p.color}`} />
@@ -274,24 +274,24 @@ function SortableProject({
           )}
         </div>
         <div
-          onClick={() => onSelectProject(project.id)}
+          onClick={() => onSelectMesh(mesh.id)}
           className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-bg-card ${
             isSelected ? 'text-accent-cyan font-semibold' : 'text-text-secondary'
           }`}
         >
-          {project.name}
+          {mesh.name}
         </div>
       </div>
-      {projectSessions.map(session => (
-        <SessionItem
-          key={session.id}
-          session={session}
-          isActive={activeSessionId === session.id}
+      {meshNodes.map(node => (
+        <NodeItem
+          key={node.id}
+          node={node}
+          isActive={activeNodeId === node.id}
           onSelect={() => {
-            setActiveSession(session.id);
-            selectProject(session.project_id);
+            setActiveNode(node.id);
+            selectMesh(node.project_id);
           }}
-          onDelete={(e) => onDeleteSession(e, session.id)}
+          onDelete={(e) => onDeleteNode(e, node.id)}
         />
       ))}
     </div>

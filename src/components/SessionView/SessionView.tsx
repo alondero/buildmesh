@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useSessionStore, Session } from '../../stores/sessionStore';
-import { useProjectStore } from '../../stores/projectStore';
+import { useAgentNodeStore, AgentNode } from '../../stores/agentNodeStore';
+import { useMeshStore } from '../../stores/meshStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
 import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
@@ -10,61 +10,59 @@ import { FILE_CHANGE, FIT_TERMINALS } from '../../lib/events';
 import type { GitStatus, DiffResult } from '../../lib/tauri';
 
 export function SessionView() {
-  const selectedProjectId = useProjectStore(state => state.selectedProjectId);
+  const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   const {
-    sessions,
-    getActiveSession,
-    setActiveSession,
+    agentNodes,
+    getActiveNode,
+    setActiveNode,
     sendToAgent,
-  } = useSessionStore();
+  } = useAgentNodeStore();
 
-  const activeSession = getActiveSession();
+  const activeNode = getActiveNode();
 
   const [changedFilesOpen, setChangedFilesOpen] = useState(false);
   const [selectedDiff, setSelectedDiff] = useState<{ file: GitStatus; diff: DiffResult } | null>(null);
 
-  const filteredSessions = useMemo(() => {
-    if (selectedProjectId === null) {
-      return sessions;
+  const filteredNodes = useMemo(() => {
+    if (selectedMeshId === null) {
+      return agentNodes;
     }
-    return sessions.filter(s => s.project_id === selectedProjectId);
-  }, [sessions, selectedProjectId]);
+    return agentNodes.filter(s => s.project_id === selectedMeshId);
+  }, [agentNodes, selectedMeshId]);
 
-  // Get session path for git status
-  const sessionPath = activeSession?.path || '';
+  // Get node path for git status
+  const nodePath = activeNode?.path || '';
 
   useEffect(() => {
-    if (!activeSession) return;
-    watchSession(activeSession.id).catch(console.error);
+    if (!activeNode) return;
+    watchSession(activeNode.id).catch(console.error);
     const unlisten = listen<{ session_id: number; change: { path: string; kind: string } }>(FILE_CHANGE, () => {
       // File tree refresh handled by parent if needed
     });
     return () => {
-      unwatchSession(activeSession.id).catch(console.error);
+      unwatchSession(activeNode.id).catch(console.error);
       unlisten.then(fn => fn());
     };
-  }, [activeSession?.id]);
+  }, [activeNode?.id]);
 
-  // Dispatch fit-terminals event when active session changes
-  // Auto-select first session when switching to a project that doesn't include the active session
+  // Auto-select first node when switching to a mesh that doesn't include the active node
   useEffect(() => {
-    if (filteredSessions.length > 0 && activeSession && !filteredSessions.find(s => s.id === activeSession.id)) {
-      // Active session is not in filtered sessions - auto-select the first one
-      setActiveSession(filteredSessions[0].id);
+    if (filteredNodes.length > 0 && activeNode && !filteredNodes.find(s => s.id === activeNode.id)) {
+      setActiveNode(filteredNodes[0].id);
     }
-  }, [selectedProjectId, filteredSessions, activeSession, setActiveSession]);
+  }, [selectedMeshId, filteredNodes, activeNode, setActiveNode]);
 
-  // Dispatch fit-terminals event when active session changes
+  // Dispatch fit-terminals event when active node changes
   useEffect(() => {
-    if (activeSession) {
-      console.log(`[DEBUG SessionView] Emitting FIT_TERMINALS for session ${activeSession.id}`);
-      emit(FIT_TERMINALS, { sessionId: activeSession.id }).catch(console.error);
+    if (activeNode) {
+      console.log(`[DEBUG SessionView] Emitting FIT_TERMINALS for node ${activeNode.id}`);
+      emit(FIT_TERMINALS, { sessionId: activeNode.id }).catch(console.error);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSession?.id]);
+  }, [activeNode?.id]);
 
-  const handleSlashCommand = (sessionId: number, cmd: string) => {
-    sendToAgent(sessionId, cmd);
+  const handleSlashCommand = (nodeId: number, cmd: string) => {
+    sendToAgent(nodeId, cmd);
   };
 
   const handleFileSelect = (file: GitStatus, diff: DiffResult) => {
@@ -75,13 +73,13 @@ export function SessionView() {
     setSelectedDiff(null);
   };
 
-  if (filteredSessions.length === 0) {
+  if (filteredNodes.length === 0) {
     return (
       <div className="flex-1 flex flex-col bg-bg-base">
         <div className="flex-1 flex items-center justify-center text-text-muted">
           <div className="text-center">
             <p className="text-lg mb-2 text-text-secondary">Buildmesh Orchestrator</p>
-            <p className="text-sm">Select a session to start managing your agents</p>
+            <p className="text-sm">Select a node to start managing your agents</p>
           </div>
         </div>
       </div>
@@ -113,12 +111,12 @@ export function SessionView() {
 
       {/* Main content area with grid and optional panel */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Grid of filtered sessions */}
-        <GridLayout sessions={filteredSessions} onSlashCommand={handleSlashCommand} />
+        {/* Grid of filtered nodes */}
+        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} />
 
         {/* Changed Files Panel */}
         <ChangedFilesPanel
-          projectPath={sessionPath}
+          projectPath={nodePath}
           isOpen={changedFilesOpen}
           onFileSelect={handleFileSelect}
         />
@@ -136,8 +134,8 @@ export function SessionView() {
   );
 }
 
-function GridLayout({ sessions, onSlashCommand }: { sessions: Session[]; onSlashCommand: (sessionId: number, cmd: string) => void }) {
-  const count = sessions.length;
+function GridLayout({ nodes, onSlashCommand }: { nodes: AgentNode[]; onSlashCommand: (nodeId: number, cmd: string) => void }) {
+  const count = nodes.length;
   let gridCols = "grid-cols-1";
   let gridRows = "grid-rows-1";
 
@@ -156,28 +154,28 @@ function GridLayout({ sessions, onSlashCommand }: { sessions: Session[]; onSlash
 
   return (
     <div className={`flex-1 grid gap-1.5 p-1.5 bg-bg-surface ${gridCols} ${gridRows}`}>
-      {sessions.map((session) => {
+      {nodes.map((node) => {
         return (
-          <div key={session.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
+          <div key={node.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
             <div className="flex items-center justify-between px-2.5 py-1.5 bg-bg-overlay border-b border-border-default">
               <div className="flex items-center gap-2 overflow-hidden">
                 <span className={`w-1.5 h-1.5 rounded-full ${
-                  session.status === 'running' ? 'bg-accent-cyan' :
-                  session.status === 'awaiting_input' ? 'bg-status-warning animate-pulse' :
+                  node.status === 'running' ? 'bg-accent-cyan' :
+                  node.status === 'awaiting_input' ? 'bg-status-warning animate-pulse' :
                   'bg-text-muted'
                 }`} />
-                <span className="text-[11px] font-bold text-text-secondary truncate">{session.name}</span>
-                {session.status === 'awaiting_input' && (
+                <span className="text-[11px] font-bold text-text-secondary truncate">{node.name}</span>
+                {node.status === 'awaiting_input' && (
                   <span className="text-[9px] text-status-warning font-bold ml-1">ATTN</span>
                 )}
               </div>
-              <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{session.env.toUpperCase()}</span>
+              <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{node.env.toUpperCase()}</span>
             </div>
             <div className="flex-1 overflow-hidden bg-black">
-              <AgentTerminal sessionId={session.id} />
+              <AgentTerminal sessionId={node.id} />
             </div>
             <div className="opacity-40 group-hover:opacity-100 transition-opacity">
-              <SlashCommandBar onCommand={(cmd) => onSlashCommand(session.id, cmd)} />
+              <SlashCommandBar onCommand={(cmd) => onSlashCommand(node.id, cmd)} />
             </div>
           </div>
         );
