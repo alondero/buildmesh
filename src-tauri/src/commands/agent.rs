@@ -166,12 +166,19 @@ fn build_spawn_command(
                 }
             }
             SessionIdMode::Resume(_) => {
-                // Resume: skip -w entirely. The worktree was already created during the
-                // first spawn (Assign mode). Passing -w causes cwrap to call `git worktree add`
-                // again, which fails with "already checked out" due to git's internal
-                // worktree naming (worktree-<name> prefix differs from directory name).
-                // The session_id is sufficient for cwrap to find and resume the existing session.
-                tracing::info!("spawn_agent: skipping -w on resume, using session_id to find existing worktree");
+                // Resume: pass -w <worktree_name> --resume <session_id>
+                // The worktree was already created during the first spawn (Assign mode).
+                // We pass -w <name> so cwrap knows WHERE to look for the session data.
+                // Without -w, cwrap uses a different auto-generated worktree name and
+                // cannot find the existing session data, resulting in "No conversation found".
+                if let Some(ref wt_name) = node.worktree_name {
+                    args.push("-w".to_string());
+                    args.push(wt_name.clone());
+                    tracing::info!("spawn_agent: resume with worktree name: {}", wt_name);
+                } else {
+                    // Fallback for old sessions without worktree_name: just --resume
+                    tracing::warn!("spawn_agent: resume without worktree_name, session may not be found");
+                }
             }
             SessionIdMode::None => {}
         }
