@@ -20,16 +20,16 @@ mod tests {
             );
             INSERT INTO app_settings (key, value) VALUES ('schema_version', '2');
 
-            CREATE TABLE IF NOT EXISTS projects (
+            CREATE TABLE IF NOT EXISTS meshes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 path TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
-            CREATE TABLE IF NOT EXISTS sessions (
+            CREATE TABLE IF NOT EXISTS agent_nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project_id INTEGER NOT NULL REFERENCES projects(id),
+                mesh_id INTEGER NOT NULL REFERENCES meshes(id),
                 name TEXT NOT NULL,
                 path TEXT NOT NULL,
                 branch TEXT NOT NULL DEFAULT 'main',
@@ -42,28 +42,28 @@ mod tests {
 
             CREATE TABLE IF NOT EXISTS checkpoints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id INTEGER NOT NULL REFERENCES sessions(id),
+                node_id INTEGER NOT NULL REFERENCES agent_nodes(id),
                 git_ref TEXT NOT NULL,
                 turn_index INTEGER NOT NULL,
                 message TEXT,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
-            CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
             "
         )?;
         Ok(())
     }
 
     /// Current schema version — must be updated when schema changes
-    const SCHEMA_VERSION: i32 = 3;
+    const SCHEMA_VERSION: i32 = 6;
 
     /// Incremental migration: adds layout column to projects if missing.
     /// Returns the number of columns added (0 if already migrated).
     fn migrate_projects_layout(conn: &Connection) -> SqlResult<usize> {
         // Check if layout column exists
         let has_layout: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'layout'",
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
             [],
             |row| row.get(0),
         ).unwrap_or(false);
@@ -74,7 +74,7 @@ mod tests {
 
         // Add layout column with default
         conn.execute(
-            "ALTER TABLE projects ADD COLUMN layout TEXT NOT NULL DEFAULT 'grid'",
+            "ALTER TABLE meshes ADD COLUMN layout TEXT NOT NULL DEFAULT 'grid'",
             [],
         )?;
         Ok(1)
@@ -107,7 +107,7 @@ mod tests {
 
         // Verify v2: layout column does NOT exist
         let has_layout_before: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'layout'",
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -115,7 +115,7 @@ mod tests {
 
         // Insert a test project before migration
         conn.execute(
-            "INSERT INTO projects (name, path) VALUES ('test-project', '/tmp/test')",
+            "INSERT INTO meshes (name, path) VALUES ('test-project', '/tmp/test')",
             [],
         ).unwrap();
 
@@ -125,7 +125,7 @@ mod tests {
 
         // Assert: layout column now exists
         let has_layout_after: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'layout'",
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -133,7 +133,7 @@ mod tests {
 
         // Assert: existing project got default 'grid' value
         let layout_value: String = conn.query_row(
-            "SELECT layout FROM projects WHERE name = 'test-project'",
+            "SELECT layout FROM meshes WHERE name = 'test-project'",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -141,11 +141,11 @@ mod tests {
 
         // Assert: new projects can override the default
         conn.execute(
-            "INSERT INTO projects (name, path, layout) VALUES ('another', '/tmp/another', 'single')",
+            "INSERT INTO meshes (name, path, layout) VALUES ('another', '/tmp/another', 'single')",
             [],
         ).unwrap();
         let single_layout: String = conn.query_row(
-            "SELECT layout FROM projects WHERE name = 'another'",
+            "SELECT layout FROM meshes WHERE name = 'another'",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -172,7 +172,7 @@ mod tests {
         // Arrange: create schema directly with layout column (already migrated)
         conn.execute_batch(
             "
-            CREATE TABLE IF NOT EXISTS projects (
+            CREATE TABLE IF NOT EXISTS meshes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 path TEXT NOT NULL UNIQUE,

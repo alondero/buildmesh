@@ -195,6 +195,29 @@ fn migrate_sessions_worktree_name(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
+    // Guard: only rename if old table names exist (upgrade path)
+    let projects_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+
+    if !projects_exists {
+        // Fresh install (meshes already exists via init()) — nothing to do
+        return Ok(());
+    }
+
+    conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
+    conn.execute("ALTER TABLE sessions RENAME TO agent_nodes", [])?;
+    conn.execute("ALTER TABLE agent_nodes RENAME COLUMN project_id TO mesh_id", [])?;
+    conn.execute("ALTER TABLE checkpoints RENAME COLUMN session_id TO node_id", [])?;
+    tracing::info!("Migrated to v6: projects→meshes, sessions→agent_nodes, project_id→mesh_id, session_id→node_id");
+    Ok(())
+}
+
 /// Exposes migrate_if_needed for integration testing.
 /// In tests, call this on an existing Connection to simulate schema upgrade.
 #[cfg(test)]
@@ -209,6 +232,7 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
         migrate_projects_layout(conn)?;
         migrate_projects_position(conn)?;
         migrate_sessions_worktree_name(conn)?;
+        migrate_mesh_rename(conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
