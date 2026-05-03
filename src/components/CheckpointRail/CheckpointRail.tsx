@@ -1,4 +1,4 @@
-import type { Checkpoint } from '../../stores/sessionStore';
+import type { Checkpoint } from '../../stores/agentNodeStore';
 import { revertToCheckpoint } from '../../lib/tauri';
 
 interface CheckpointRailProps {

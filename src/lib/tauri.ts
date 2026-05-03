@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Session, Checkpoint } from '../stores/sessionStore';
-import type { Project } from '../stores/projectStore';
+import type { AgentNode, Checkpoint } from '../stores/agentNodeStore';
+import type { Mesh } from '../stores/meshStore';
 
 export interface DiffResult {
   files: Array<{
@@ -22,37 +22,28 @@ export interface DiffResult {
   }>;
 }
 
-// Session
-export const createSession = (projectId: number, name: string, path: string, branch: string) =>
-  invoke<Session>('create_session', { projectId, name, path, branch });
+// Agent Node
+export const createSession = (meshId: number, name: string, path: string, branch: string) =>
+  invoke<AgentNode>('create_session', { meshId, name, path, branch });
 
 export const listSessions = () =>
-  invoke<Session[]>('list_sessions');
+  invoke<AgentNode[]>('list_sessions');
 
-export const listSessionsByProject = (projectId: number) =>
-  invoke<Session[]>('list_sessions_by_project', { projectId });
+export const listSessionsByMesh = (meshId: number) =>
+  invoke<AgentNode[]>('list_sessions_by_mesh', { meshId });
 
 export const getSession = (sessionId: number) =>
-  invoke<Session>('get_session', { sessionId });
+  invoke<AgentNode>('get_session', { sessionId });
 
-export const archiveSession = (sessionId: number) =>
-  invoke('archive_session', { sessionId });
-
-export const restoreSession = (sessionId: number) =>
-  invoke('restore_session', { sessionId });
-
-export const updateSessionStatus = (sessionId: number, status: string) =>
-  invoke('update_session_status', { sessionId, status });
-
-// Project
+// Mesh
 export const addProject = () =>
-  invoke<Project>('add_project');
+  invoke<Mesh>('add_project');
 
 export const createProject = (name: string, path: string) =>
-  invoke<Project>('create_project', { name, path });
+  invoke<Mesh>('create_project', { name, path });
 
 export const listProjects = () =>
-  invoke<Project[]>('list_projects');
+  invoke<Mesh[]>('list_projects');
 
 export const deleteProject = (projectId: number) =>
   invoke('delete_project', { projectId });

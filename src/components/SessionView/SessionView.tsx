@@ -27,7 +27,7 @@ export function SessionView() {
     if (selectedMeshId === null) {
       return agentNodes;
     }
-    return agentNodes.filter(s => s.project_id === selectedMeshId);
+    return agentNodes.filter(s => s.mesh_id === selectedMeshId);
   }, [agentNodes, selectedMeshId]);
 
   // Get node path for git status

@@ -124,7 +124,7 @@ export function Sidebar() {
             <DndContext onDragEnd={handleDragEnd}>
               <SortableContext items={meshes.map(p => p.id)} strategy={verticalListSortingStrategy}>
                 {meshes.map(mesh => {
-                  const meshNodes = agentNodes.filter(w => w.project_id === mesh.id);
+                  const meshNodes = agentNodes.filter(w => w.mesh_id === mesh.id);
                   const isDropdownOpen = openDropdownFor === mesh.id;
                   return (
                     <SortableMesh
@@ -289,7 +289,7 @@ function SortableMesh({
           isActive={activeNodeId === node.id}
           onSelect={() => {
             setActiveNode(node.id);
-            selectMesh(node.project_id);
+            selectMesh(node.mesh_id);
           }}
           onDelete={(e) => onDeleteNode(e, node.id)}
         />

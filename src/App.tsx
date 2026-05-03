@@ -3,8 +3,8 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
-import { useProjectStore } from './stores/projectStore';
-import { useSessionStore } from './stores/sessionStore';
+import { useMeshStore } from './stores/meshStore';
+import { useAgentNodeStore } from './stores/agentNodeStore';
 import './App.css';
 
 interface ErrorToast {
@@ -19,9 +19,9 @@ interface BackendAgentState {
 }
 
 function App() {
-  const { fetchProjects } = useProjectStore();
-  const { fetchSessions, initAttentionListeners } = useSessionStore();
-  const storeError = useSessionStore(state => state.error);
+  const { fetchMeshes } = useMeshStore();
+  const { fetchAgentNodes, initAttentionListeners } = useAgentNodeStore();
+  const storeError = useAgentNodeStore(state => state.error);
   
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
   const [isReady, setIsReady] = useState(false);
@@ -42,11 +42,11 @@ function App() {
       // Quick switch session: Alt+1..9
       if (e.altKey && /^[1-9]$/.test(e.key)) {
         const index = parseInt(e.key) - 1;
-        const currentSessions = useSessionStore.getState().sessions.filter(s =>
-          s.project_id === useSessionStore.getState().getActiveSession()?.project_id
+        const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
+          s.mesh_id === useAgentNodeStore.getState().getActiveNode()?.mesh_id
         );
-        if (currentSessions[index]) {
-          useSessionStore.getState().setActiveSession(currentSessions[index].id);
+        if (currentNodes[index]) {
+          useAgentNodeStore.getState().setActiveNode(currentNodes[index].id);
         }
       }
     };
@@ -100,8 +100,8 @@ function App() {
     const init = async () => {
       try {
         await initAttentionListeners();
-        await fetchProjects();
-        await fetchSessions();
+        await fetchMeshes();
+        await fetchAgentNodes();
         setIsReady(true);
 
         // Auto-resume suspended sessions after a brief delay to ensure
@@ -111,7 +111,7 @@ function App() {
             const resumed = await invoke<number[]>('auto_resume_sessions');
             if (resumed.length > 0) {
               console.log(`[App] Auto-resumed ${resumed.length} sessions`);
-              await fetchSessions();
+              await fetchAgentNodes();
             }
           } catch (e) {
             console.error('[App] Auto-resume failed:', e);

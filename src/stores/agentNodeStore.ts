@@ -5,7 +5,7 @@ import { disposeTerminal } from '../components/Terminal/Terminal';
 
 export interface AgentNode {
   id: number;
-  project_id: number;
+  mesh_id: number;
   name: string;
   path: string;
   branch: string;
@@ -65,7 +65,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   getActiveMeshId: () => {
     const node = get().getActiveNode();
-    return node?.project_id ?? null;
+    return node?.mesh_id ?? null;
   },
 
   fetchAgentNodes: async () => {
