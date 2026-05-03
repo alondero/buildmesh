@@ -133,3 +133,19 @@ html, body {
 /* Border utilities */
 .border-subtle { border-color: var(--color-border-subtle); }
 .border-default { border-color: var(--color-border-default); }
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--color-bg-surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-default);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
+}
