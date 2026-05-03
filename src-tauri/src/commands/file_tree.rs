@@ -67,14 +67,20 @@ fn read_dir_recursive(path: &Path, base_path: &str, host_base: &str, depth: usiz
 pub fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode, String> {
     let host_path = env::to_host_path(&path);
     let path_obj = Path::new(&host_path);
-    
+
     if !path_obj.exists() {
         return Err(format!("Path does not exist: {} (mapped from {})", host_path, path));
     }
     if !path_obj.is_dir() {
         return Err(format!("Path is not a directory: {}", host_path));
     }
-    
+
     let depth = max_depth.unwrap_or(3);
     Ok(read_dir_recursive(path_obj, &path, &host_path, 0, depth))
+}
+
+/// Convert a guest/internal path to host-readable absolute path
+#[command]
+pub fn to_host_path(path: String) -> String {
+    env::to_host_path(&path)
 }

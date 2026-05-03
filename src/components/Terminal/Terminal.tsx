@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -158,9 +158,46 @@ window.__terminalManager = terminalManager;
 export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<TerminalInstance | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
   const node = agentNodes.find(s => s.id === sessionId);
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    const inst = instanceRef.current;
+    if (!inst) return;
+
+    const paths = await Promise.all(
+      files.map(async (file) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const filePath = (file as any).path as string;
+        if (!filePath) return null;
+        return invoke<string>('to_host_path', { path: filePath });
+      })
+    );
+    for (const absPath of paths) {
+      if (absPath) inst.term.write(absPath);
+    }
+  };
 
   // ResizeObserver for automatic fitting when container size changes
   useEffect(() => {
@@ -236,8 +273,17 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   return (
     <div
       ref={containerRef}
-      className="h-full w-full"
+      className="h-full w-full relative"
       style={{ padding: '4px' }}
-    />
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="absolute inset-0 bg-cyan-500/10 border-2 border-dashed border-cyan-500 rounded-lg flex items-center justify-center z-50 pointer-events-none">
+          <span className="text-cyan-400 text-sm font-medium">Drop file to paste path</span>
+        </div>
+      )}
+    </div>
   );
 }
