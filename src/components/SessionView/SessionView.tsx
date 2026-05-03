@@ -124,7 +124,13 @@ const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
 
 function GridNodeHeader({ node, changedFilesNodeId }: { node: AgentNode; changedFilesNodeId: number | null }) {
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
+  const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   const [summary, setSummary] = useState<GitSummary | null>(null);
+
+  const handleClose = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await deleteAgentNode(node.id);
+  };
 
   useEffect(() => {
     if (!node.path) return;
@@ -178,7 +184,16 @@ function GridNodeHeader({ node, changedFilesNodeId }: { node: AgentNode; changed
           </span>
         )}
       </div>
-      <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{node.env.toUpperCase()}</span>
+      <div className="flex items-center gap-1.5">
+        <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{node.env.toUpperCase()}</span>
+        <button
+          onClick={handleClose}
+          className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors text-[10px]"
+          title="Close agent node"
+        >
+          ×
+        </button>
+      </div>
     </div>
   );
 }
