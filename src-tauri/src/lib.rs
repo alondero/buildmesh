@@ -114,6 +114,7 @@ pub fn run() {
             commands::mesh::create_test_project,
             commands::mesh::list_projects,
             commands::mesh::delete_project,
+            commands::mesh::update_project_layout,
             commands::mesh::update_project_positions,
             // Agent
             commands::agent::spawn_agent,
