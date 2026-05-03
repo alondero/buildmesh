@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useAgentNodeStore, AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
+import { useUIStore } from '../../stores/uiStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
 import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
 import { listen, emit } from '@tauri-apps/api/event';
-import { watchSession, unwatchSession } from '../../lib/tauri';
+import { watchSession, unwatchSession, getGitSummary, type GitSummary } from '../../lib/tauri';
 import { FILE_CHANGE, FIT_TERMINALS } from '../../lib/events';
 import type { GitStatus, DiffResult } from '../../lib/tauri';
 
@@ -20,7 +21,8 @@ export function SessionView() {
 
   const activeNode = getActiveNode();
 
-  const [changedFilesOpen, setChangedFilesOpen] = useState(false);
+  const changedFilesOpen = useUIStore(state => state.changedFilesOpen);
+  const changedFilesNodeId = useUIStore(state => state.changedFilesNodeId);
   const [selectedDiff, setSelectedDiff] = useState<{ file: GitStatus; diff: DiffResult } | null>(null);
 
   const filteredNodes = useMemo(() => {
@@ -30,8 +32,11 @@ export function SessionView() {
     return agentNodes.filter(s => s.mesh_id === selectedMeshId);
   }, [agentNodes, selectedMeshId]);
 
-  // Get node path for git status
-  const nodePath = activeNode?.path || '';
+  // Get node path for git status — from the node whose changes are shown in panel
+  const changedFilesNode = changedFilesNodeId
+    ? agentNodes.find(n => n.id === changedFilesNodeId)
+    : activeNode;
+  const nodePath = changedFilesNode?.path || '';
 
   useEffect(() => {
     if (!activeNode) return;
@@ -88,31 +93,10 @@ export function SessionView() {
 
   return (
     <div className="flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
-      {/* Changed Files Toggle */}
-      <div className="flex items-center justify-end px-3 py-2 border-b border-border-subtle">
-        <button
-          onClick={() => setChangedFilesOpen(!changedFilesOpen)}
-          className={`
-            flex items-center gap-1.5 px-2.5 h-8 rounded text-xs transition-colors
-            ${changedFilesOpen
-              ? 'bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/50'
-              : 'text-text-muted hover:bg-bg-card hover:text-text-secondary border border-transparent'
-            }
-          `}
-          title="Toggle Changed Files"
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M2 2.5A1.5 1.5 0 013.5 1h9A1.5 1.5 0 0114 2.5v11a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 13.5v-11zM3.5 2a.5.5 0 00-.5.5v11a.5.5 0 00.5.5h9a.5.5 0 00.5-.5v-11a.5.5 0 00-.5-.5h-9z"/>
-            <path d="M2 5a.5.5 0 01.5-.5h2a.5.5 0 010 1h-2a.5.5 0 01-.5-.5zM2 8a.5.5 0 01.5-.5h5a.5.5 0 010 1h-5a.5.5 0 01-.5-.5zM2 11a.5.5 0 01.5-.5h8a.5.5 0 010 1h-8a.5.5 0 01-.5-.5z"/>
-          </svg>
-          <span>Changed</span>
-        </button>
-      </div>
-
       {/* Main content area with grid and optional panel */}
       <div className="flex-1 flex overflow-hidden">
         {/* Grid of filtered nodes */}
-        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} />
+        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} changedFilesNodeId={changedFilesNodeId} />
 
         {/* Changed Files Panel */}
         <ChangedFilesPanel
@@ -134,7 +118,72 @@ export function SessionView() {
   );
 }
 
-function GridLayout({ nodes, onSlashCommand }: { nodes: AgentNode[]; onSlashCommand: (nodeId: number, cmd: string) => void }) {
+// Module-level cache for git summaries (keyed by path)
+const gridSummaryCache = new Map<string, GitSummary>();
+const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
+
+function GridNodeHeader({ node, changedFilesNodeId }: { node: AgentNode; changedFilesNodeId: number | null }) {
+  const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
+  const [summary, setSummary] = useState<GitSummary | null>(null);
+
+  useEffect(() => {
+    if (!node.path) return;
+
+    const cached = gridSummaryCache.get(node.path);
+    if (cached) {
+      setSummary(cached.total > 0 ? cached : null);
+      return;
+    }
+
+    if (gridPendingFetches.has(node.path)) return;
+
+    const fetchSummary = async (): Promise<GitSummary | null> => {
+      try {
+        const result = await getGitSummary(node.path);
+        gridSummaryCache.set(node.path, result);
+        gridPendingFetches.delete(node.path);
+        setSummary(result.total > 0 ? result : null);
+        return result;
+      } catch {
+        gridPendingFetches.delete(node.path);
+        return null;
+      }
+    };
+
+    const p = fetchSummary();
+    gridPendingFetches.set(node.path, p);
+  }, [node.path]);
+
+  const isPanelNode = changedFilesNodeId === node.id;
+
+  return (
+    <div className="flex items-center justify-between px-2.5 py-1.5 bg-bg-overlay border-b border-border-default">
+      <div className="flex items-center gap-2 overflow-hidden">
+        <span className={`w-1.5 h-1.5 rounded-full ${
+          node.status === 'running' ? 'bg-accent-cyan' :
+          node.status === 'awaiting_input' ? 'bg-status-warning animate-pulse' :
+          'bg-text-muted'
+        }`} />
+        <span className="text-[11px] font-bold text-text-secondary truncate">{node.name}</span>
+        {node.status === 'awaiting_input' && (
+          <span className="text-[9px] text-status-warning font-bold ml-1">ATTN</span>
+        )}
+        {summary && (
+          <span
+            onClick={() => toggleChangedFiles(node.id)}
+            className={`text-[10px] font-mono cursor-pointer hover:text-accent-cyan ${isPanelNode ? 'text-accent-cyan' : 'text-text-muted'}`}
+            title="Click to see changes"
+          >
+            +{summary.added} ~{summary.modified} -{summary.deleted}
+          </span>
+        )}
+      </div>
+      <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{node.env.toUpperCase()}</span>
+    </div>
+  );
+}
+
+function GridLayout({ nodes, onSlashCommand, changedFilesNodeId }: { nodes: AgentNode[]; onSlashCommand: (nodeId: number, cmd: string) => void; changedFilesNodeId: number | null }) {
   const count = nodes.length;
   let gridCols = "grid-cols-1";
   let gridRows = "grid-rows-1";
@@ -157,20 +206,7 @@ function GridLayout({ nodes, onSlashCommand }: { nodes: AgentNode[]; onSlashComm
       {nodes.map((node) => {
         return (
           <div key={node.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
-            <div className="flex items-center justify-between px-2.5 py-1.5 bg-bg-overlay border-b border-border-default">
-              <div className="flex items-center gap-2 overflow-hidden">
-                <span className={`w-1.5 h-1.5 rounded-full ${
-                  node.status === 'running' ? 'bg-accent-cyan' :
-                  node.status === 'awaiting_input' ? 'bg-status-warning animate-pulse' :
-                  'bg-text-muted'
-                }`} />
-                <span className="text-[11px] font-bold text-text-secondary truncate">{node.name}</span>
-                {node.status === 'awaiting_input' && (
-                  <span className="text-[9px] text-status-warning font-bold ml-1">ATTN</span>
-                )}
-              </div>
-              <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{node.env.toUpperCase()}</span>
-            </div>
+            <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} />
             <div className="flex-1 overflow-hidden bg-black">
               <AgentTerminal sessionId={node.id} />
             </div>

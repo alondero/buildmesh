@@ -9,6 +9,8 @@ pub mod diff;
 pub mod file_tree;
 pub mod file_watcher;
 pub mod git;
+#[cfg(test)]
+pub mod git_tests;
 pub mod mcp;
 pub mod pr;
 pub mod mesh;

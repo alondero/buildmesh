@@ -139,6 +139,7 @@ pub fn run() {
             commands::file_tree::list_directory,
             // Git
             commands::git::get_git_status,
+            commands::git::get_git_summary,
             // Terminal
             commands::terminal::spawn_pty,
             commands::terminal::resize_pty,

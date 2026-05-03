@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
+import { getGitSummary, type GitSummary } from '../../lib/tauri';
 import Logo from '../../assets/logo.svg';
 import {
   DndContext,
@@ -27,6 +29,10 @@ const isMac = navigator.platform.toUpperCase().includes('MAC');
 const PROVIDERS = isMac
   ? ALL_PROVIDERS.filter(p => p.id === 'anthropic')
   : ALL_PROVIDERS;
+
+// Module-level cache for git summaries (keyed by path)
+const summaryCache = new Map<string, GitSummary>();
+const pendingFetches = new Map<string, Promise<GitSummary | null>>();
 
 export function Sidebar() {
   const meshes = useMeshStore(state => state.meshes);
@@ -166,6 +172,43 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
   const config = getStatusConfig(node.status);
   const isAwaiting = node.status === 'awaiting_input';
   const envBadge = node.env === 'wsl' ? 'WSL' : isMac ? 'MAC' : 'WIN';
+  const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
+
+  const [summary, setSummary] = useState<GitSummary | null>(null);
+
+  useEffect(() => {
+    if (!node.path) return;
+
+    const cached = summaryCache.get(node.path);
+    if (cached) {
+      setSummary(cached.total > 0 ? cached : null);
+      return;
+    }
+
+    const pending = pendingFetches.get(node.path);
+    if (pending) {
+      pending.then(s => {
+        if (s) setSummary(s.total > 0 ? s : null);
+      });
+      return;
+    }
+
+    const fetchSummary = async (): Promise<GitSummary | null> => {
+      try {
+        const result = await getGitSummary(node.path);
+        summaryCache.set(node.path, result);
+        pendingFetches.delete(node.path);
+        setSummary(result.total > 0 ? result : null);
+        return result;
+      } catch {
+        pendingFetches.delete(node.path);
+        return null;
+      }
+    };
+
+    const p = fetchSummary();
+    pendingFetches.set(node.path, p);
+  }, [node.path]);
 
   return (
     <div
@@ -182,6 +225,15 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
       <span className="flex-1 truncate text-text-secondary">{node.name}</span>
       {isAwaiting && (
         <span className="text-[10px] text-status-warning font-semibold animate-pulse">ATTN</span>
+      )}
+      {summary && (
+        <span
+          onClick={(e) => { e.stopPropagation(); toggleChangedFiles(node.id); }}
+          className="text-[10px] font-mono cursor-pointer text-text-muted hover:text-accent-cyan"
+          title="Click to see changes"
+        >
+          +{summary.added} ~{summary.modified} -{summary.deleted}
+        </span>
       )}
       <span className="text-[10px] text-text-muted font-mono">{envBadge}</span>
       <button

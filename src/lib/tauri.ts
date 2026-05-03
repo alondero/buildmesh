@@ -124,6 +124,16 @@ export interface GitStatus {
 export const getGitStatus = (path: string) =>
   invoke<GitStatus[]>('get_git_status', { path });
 
+export interface GitSummary {
+  total: number;
+  added: number;
+  modified: number;
+  deleted: number;
+}
+
+export const getGitSummary = (path: string) =>
+  invoke<GitSummary>('get_git_summary', { path });
+
 // MCP
 export const listMcpServers = (sessionId: number) =>
   invoke('list_mcp_servers', { sessionId });
