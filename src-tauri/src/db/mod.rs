@@ -7,7 +7,7 @@ mod migration_tests;
 mod tests;
 
 #[cfg(test)]
-mod project_tests;
+mod mesh_tests;
 
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;

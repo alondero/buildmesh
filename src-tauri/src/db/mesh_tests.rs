@@ -1,9 +1,9 @@
-//! Integration tests for project creation edge cases.
+//! Integration tests for mesh creation edge cases.
 //!
-//! Tests that verify create_project handles duplicate paths gracefully,
-//! returning the existing project instead of crashing with UNIQUE constraint.
+//! Tests that verify create_mesh handles duplicate paths gracefully,
+//! returning the existing mesh instead of crashing with UNIQUE constraint.
 //!
-//! Run with: cargo test --package buildmesh --lib db::project_tests -- --test-threads=1
+//! Run with: cargo test --package buildmesh --lib db::mesh_tests -- --test-threads=1
 
 #[cfg(test)]
 mod tests {
