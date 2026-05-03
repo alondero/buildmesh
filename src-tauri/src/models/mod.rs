@@ -130,6 +130,7 @@ pub struct Session {
     pub provider: Provider,   // anthropic or minimax
     pub status: SessionStatus,
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
+    pub worktree_name: Option<String>,   // git worktree name (same as name for cwrap providers)
     pub created_at: DateTime<Utc>,
 }
 

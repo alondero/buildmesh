@@ -211,6 +211,7 @@ fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
         branch,
         EnvType::Windows,
         Provider::Anthropic,
+        Some(name),
     ) {
         Ok(session) => {
             // Emit event so frontend session store can refetch via invoke()

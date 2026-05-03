@@ -1,12 +1,14 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useSessionStore, Session } from '../../stores/sessionStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
+import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
 import { listen, emit } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession } from '../../lib/tauri';
 import { getStatusConfig } from '../../lib/status';
 import { FILE_CHANGE, FIT_TERMINALS } from '../../lib/events';
+import type { GitStatus, DiffResult } from '../../lib/tauri';
 
 export function SessionView() {
   const selectedProjectId = useProjectStore(state => state.selectedProjectId);
@@ -19,6 +21,9 @@ export function SessionView() {
 
   const activeSession = getActiveSession();
 
+  const [changedFilesOpen, setChangedFilesOpen] = useState(false);
+  const [selectedDiff, setSelectedDiff] = useState<{ file: GitStatus; diff: DiffResult } | null>(null);
+
   const filteredSessions = useMemo(() => {
     if (selectedProjectId === null) {
       return sessions;
@@ -29,6 +34,9 @@ export function SessionView() {
   const tabSessions = useMemo(() => {
     return filteredSessions.slice(0, 10);
   }, [filteredSessions]);
+
+  // Get session path for git status
+  const sessionPath = activeSession?.path || '';
 
   useEffect(() => {
     if (!activeSession) return;
@@ -62,6 +70,14 @@ export function SessionView() {
 
   const handleSlashCommand = (sessionId: number, cmd: string) => {
     sendToAgent(sessionId, cmd);
+  };
+
+  const handleFileSelect = (file: GitStatus, diff: DiffResult) => {
+    setSelectedDiff({ file, diff });
+  };
+
+  const closeDiff = () => {
+    setSelectedDiff(null);
   };
 
   if (filteredSessions.length === 0) {
@@ -105,10 +121,48 @@ export function SessionView() {
             </button>
           );
         })}
+
+        {/* Changed Files Toggle Button */}
+        <button
+          onClick={() => setChangedFilesOpen(!changedFilesOpen)}
+          className={`
+            ml-auto flex items-center gap-1.5 px-2.5 h-8 rounded text-xs transition-colors whitespace-nowrap
+            ${changedFilesOpen
+              ? 'bg-accent-cyan/20 text-accent-cyan border border-accent-cyan/50'
+              : 'text-text-muted hover:bg-bg-card hover:text-text-secondary border border-transparent'
+            }
+          `}
+          title="Toggle Changed Files"
+        >
+          <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M2 2.5A1.5 1.5 0 013.5 1h9A1.5 1.5 0 0114 2.5v11a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 13.5v-11zM3.5 2a.5.5 0 00-.5.5v11a.5.5 0 00.5.5h9a.5.5 0 00.5-.5v-11a.5.5 0 00-.5-.5h-9z"/>
+            <path d="M2 5a.5.5 0 01.5-.5h2a.5.5 0 010 1h-2a.5.5 0 01-.5-.5zM2 8a.5.5 0 01.5-.5h5a.5.5 0 010 1h-5a.5.5 0 01-.5-.5zM2 11a.5.5 0 01.5-.5h8a.5.5 0 010 1h-8a.5.5 0 01-.5-.5z"/>
+          </svg>
+          <span>Changed</span>
+        </button>
       </div>
 
-      {/* Grid of filtered sessions */}
-      <GridLayout sessions={filteredSessions} onSlashCommand={handleSlashCommand} />
+      {/* Main content area with grid and optional panel */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Grid of filtered sessions */}
+        <GridLayout sessions={filteredSessions} onSlashCommand={handleSlashCommand} />
+
+        {/* Changed Files Panel */}
+        <ChangedFilesPanel
+          sessionPath={sessionPath}
+          isOpen={changedFilesOpen}
+          onFileSelect={handleFileSelect}
+        />
+      </div>
+
+      {/* Diff Viewer Modal */}
+      {selectedDiff && (
+        <DiffViewerModal
+          file={selectedDiff.file}
+          diff={selectedDiff.diff}
+          onClose={closeDiff}
+        />
+      )}
     </div>
   );
 }
@@ -159,6 +213,83 @@ function GridLayout({ sessions, onSlashCommand }: { sessions: Session[]; onSlash
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Simple diff viewer modal for changed files
+function DiffViewerModal({ file, diff, onClose }: { file: GitStatus; diff: DiffResult; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50">
+      <div className="bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg w-[95vw] h-[85vh] flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-4 py-3 border-b border-[#2a2a2a]">
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${
+              file.status === 'added' ? 'bg-green-400' :
+              file.status === 'modified' ? 'bg-amber-400' :
+              file.status === 'deleted' ? 'bg-red-400' :
+              'bg-gray-400'
+            }`} />
+            <h2 className="text-sm font-semibold">{file.path}</h2>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-[#888] hover:text-white text-lg"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Diff content */}
+        <div className="flex-1 overflow-auto">
+          {diff.files.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-[#666]">
+              No changes
+            </div>
+          ) : (
+            <div className="space-y-4 p-4">
+              {diff.files.map((file) => (
+                <div key={file.path} className="border border-[#2a2a2a] rounded overflow-hidden">
+                  <div className="px-3 py-2 bg-[#111] text-xs text-[#888] border-b border-[#2a2a2a] font-mono">
+                    {file.path}
+                  </div>
+
+                  {/* Unified diff */}
+                  <div className="font-mono text-xs">
+                    {file.hunks.map((hunk, hi) => (
+                      <div key={hi} className="py-1">
+                        {hunk.lines.map((line, li) => (
+                          <div
+                            key={li}
+                            className={`
+                              px-3 py-0.5 flex
+                              ${line.line_type === 'add' ? 'bg-[#22c55e20] text-[#22c55e]' : ''}
+                              ${line.line_type === 'remove' ? 'bg-[#ef444420] text-[#ef4444]' : ''}
+                              ${line.line_type === 'context' ? 'text-[#e0e0e0]' : ''}
+                            `}
+                          >
+                            <span className="w-8 text-[#666] select-none text-right mr-2">
+                              {line.old_num || ''}
+                            </span>
+                            <span className="w-8 text-[#666] select-none text-right mr-2">
+                              {line.new_num || ''}
+                            </span>
+                            <span className="w-4 text-[#666] select-none">
+                              {line.line_type === 'add' ? '+' : line.line_type === 'remove' ? '-' : ' '}
+                            </span>
+                            <span>{line.content}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

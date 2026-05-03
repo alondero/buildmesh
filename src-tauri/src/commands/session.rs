@@ -28,7 +28,7 @@ pub async fn create_session(
         _ => Provider::Anthropic,
     };
 
-    db::create_session(project_id, &session_name, &path, &branch, env_type, provider_enum)
+    db::create_session(project_id, &session_name, &path, &branch, env_type, provider_enum, Some(&session_name))
         .map_err(|e| {
             tracing::error!("create_session failed: {}", e);
             e.to_string()

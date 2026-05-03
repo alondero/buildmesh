@@ -138,17 +138,23 @@ fn build_spawn_command(
     };
 
     // Add -w for git worktree support on cwrap providers (Anthropic, Minimax)
-    // This creates a dedicated worktree per session, preventing concurrent session conflicts
+    // This creates a dedicated worktree per session, preventing concurrent session conflicts.
+    // When worktree_name is set (session's hyphenated name), pass it explicitly so cwrap
+    // can find the same session data on resume.
     let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
     if is_cwrap {
         match session_id_mode {
-            SessionIdMode::Assign(_) => {
-                tracing::info!("spawn_agent: enabling worktree support (-w) for new session");
-                args.push("-w".to_string());
-            }
-            SessionIdMode::Resume(ref id) => {
-                tracing::info!("spawn_agent: resuming session {} with worktree support (-w)", id);
-                args.push("-w".to_string());
+            SessionIdMode::Assign(_) | SessionIdMode::Resume(_) => {
+                tracing::info!("spawn_agent: enabling worktree support (-w) for session");
+                if let Some(ref wt_name) = session.worktree_name {
+                    args.push("-w".to_string());
+                    args.push(wt_name.clone());
+                    tracing::info!("spawn_agent: using explicit worktree name: {}", wt_name);
+                } else {
+                    // Backward compat: old sessions without worktree_name get -w without explicit name
+                    args.push("-w".to_string());
+                    tracing::info!("spawn_agent: no explicit worktree name, using auto-generated");
+                }
             }
             SessionIdMode::None => {}
         }

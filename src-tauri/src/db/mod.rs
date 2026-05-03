@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -61,6 +61,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             provider TEXT NOT NULL DEFAULT 'anthropic',
             status TEXT NOT NULL DEFAULT 'idle',
             cli_session_id TEXT,
+            worktree_name TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -107,6 +108,7 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             // Existing DB: run incremental migrations.
             migrate_projects_layout(conn)?;
             migrate_projects_position(conn)?;
+            migrate_sessions_worktree_name(conn)?;
         }
 
         conn.execute(
@@ -161,6 +163,38 @@ fn migrate_projects_position(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+fn migrate_sessions_worktree_name(conn: &Connection) -> SqlResult<()> {
+    // Guard: sessions table may not exist in very old schemas (v2-v3)
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_worktree_name: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('sessions') WHERE name = 'worktree_name'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_worktree_name {
+        conn.execute(
+            "ALTER TABLE sessions ADD COLUMN worktree_name TEXT",
+            [],
+        )?;
+        tracing::info!("Added worktree_name column to sessions table");
+    }
+    Ok(())
+}
+
 /// Exposes migrate_if_needed for integration testing.
 /// In tests, call this on an existing Connection to simulate schema upgrade.
 #[cfg(test)]
@@ -174,6 +208,7 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
     if current_version < SCHEMA_VERSION {
         migrate_projects_layout(conn)?;
         migrate_projects_position(conn)?;
+        migrate_sessions_worktree_name(conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -216,7 +251,7 @@ fn get_project_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Project> {
 
 fn get_session_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Session> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, created_at
+        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
          FROM sessions WHERE id = ?1"
     )?;
     stmt.query_row(params![id], |row| {
@@ -238,7 +273,8 @@ fn get_session_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Session> {
             },
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+            worktree_name: row.get(9)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })
@@ -336,12 +372,13 @@ pub fn create_session(
     branch: &str,
     env: EnvType,
     provider: Provider,
+    worktree_name: Option<&str>,
 ) -> SqlResult<Session> {
     let db = get().lock().unwrap();
     db.execute(
-        "INSERT INTO sessions (project_id, name, path, branch, env, provider, status)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle')",
-        params![project_id, name, path, branch, env.to_string(), provider.to_string()],
+        "INSERT INTO sessions (project_id, name, path, branch, env, provider, status, worktree_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7)",
+        params![project_id, name, path, branch, env.to_string(), provider.to_string(), worktree_name],
     )?;
     let id = db.last_insert_rowid();
     get_session_by_id_inner(&db, id)
@@ -364,7 +401,7 @@ pub fn get_session_by_id(id: i64) -> SqlResult<Session> {
 pub fn list_sessions() -> SqlResult<Vec<Session>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, created_at
+        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
          FROM sessions WHERE status != 'archived' ORDER BY created_at DESC"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -386,7 +423,8 @@ pub fn list_sessions() -> SqlResult<Vec<Session>> {
             },
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+            worktree_name: row.get(9)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })
@@ -397,7 +435,7 @@ pub fn list_sessions() -> SqlResult<Vec<Session>> {
 pub fn list_sessions_by_project(project_id: i64) -> SqlResult<Vec<Session>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, created_at
+        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
          FROM sessions WHERE project_id = ?1 ORDER BY created_at DESC"
     )?;
     let rows = stmt.query_map(params![project_id], |row| {
@@ -419,7 +457,8 @@ pub fn list_sessions_by_project(project_id: i64) -> SqlResult<Vec<Session>> {
             },
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+            worktree_name: row.get(9)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })
@@ -465,7 +504,7 @@ pub fn mark_running_sessions_suspended() -> SqlResult<usize> {
 pub fn list_suspended_sessions() -> SqlResult<Vec<Session>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, created_at
+        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
          FROM sessions WHERE status = 'suspended' AND cli_session_id IS NOT NULL"
     )?;
     let rows = stmt.query_map([], |row| {
@@ -487,7 +526,8 @@ pub fn list_suspended_sessions() -> SqlResult<Vec<Session>> {
             },
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(9)?)
+            worktree_name: row.get(9)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
         })

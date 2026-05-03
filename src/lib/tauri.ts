@@ -90,6 +90,9 @@ export const diffFiles = (oldPath: string, newPath: string) =>
 export const diffSessionCheckpoint = (sessionId: number, checkpointId: number) =>
   invoke<DiffResult>('diff_session_checkpoint', { sessionId, checkpointId });
 
+export const diffFileAgainstHead = (sessionPath: string, filePath: string) =>
+  invoke<DiffResult>('diff_file_against_head', { sessionPath, filePath });
+
 // Terminal
 export const spawnPty = (command: string, args: string[], cwd: string, ptyId: string) =>
   invoke('spawn_pty', { command, args, cwd, ptyId });

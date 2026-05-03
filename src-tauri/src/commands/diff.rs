@@ -141,6 +141,57 @@ pub async fn diff_files(
     })
 }
 
+/// Diff a single file against HEAD
+#[command]
+pub async fn diff_file_against_head(
+    session_path: String,
+    file_path: String,
+) -> Result<DiffResult, String> {
+    let repo = git2::Repository::open(&session_path)
+        .map_err(|e| e.to_string())?;
+
+    let head = repo.head().ok();
+    let head_content = if let Some(reference) = &head {
+        reference.peel_to_commit().ok().and_then(|commit| {
+            commit.tree().ok().and_then(|tree| {
+                tree.get_path(std::path::Path::new(&file_path)).ok().and_then(|entry| {
+                    entry.to_object(&repo).ok().and_then(|obj| {
+                        obj.as_blob().map(|b| String::from_utf8_lossy(b.content()).to_string())
+                    })
+                })
+            })
+        })
+    } else {
+        None
+    };
+
+    let current_content = fs::read_to_string(format!("{}/{}", session_path, file_path))
+        .unwrap_or_default();
+
+    let old_content = head_content.as_deref().unwrap_or("");
+    let lines = compute_file_diff(old_content, &current_content);
+    let (old_highlighted, new_highlighted) = build_sides(&lines);
+    let old_hl = highlight_content(&old_highlighted, &file_path);
+    let new_hl = highlight_content(&new_highlighted, &file_path);
+
+    let hunks = vec![DiffHunk {
+        old_start: 1,
+        old_lines: lines.iter().filter(|l| l.line_type == "remove").count(),
+        new_start: 1,
+        new_lines: lines.iter().filter(|l| l.line_type == "add").count(),
+        old_highlighted: old_hl,
+        new_highlighted: new_hl,
+        lines,
+    }];
+
+    Ok(DiffResult {
+        files: vec![FileDiff {
+            path: file_path,
+            hunks,
+        }],
+    })
+}
+
 /// Diff session files against a checkpoint
 #[command]
 pub async fn diff_session_checkpoint(

@@ -133,6 +133,7 @@ pub fn run() {
             // Diff
             commands::diff::diff_files,
             commands::diff::diff_session_checkpoint,
+            commands::diff::diff_file_against_head,
             // File tree
             commands::file_tree::list_directory,
             // Git
