@@ -86,24 +86,6 @@ mod tests {
         .unwrap();
     }
 
-    fn count_status_debug(repo: &git2::Repository) -> String {
-        let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true).recurse_untracked_dirs(true);
-
-        let statuses = repo.statuses(Some(&mut opts)).unwrap();
-
-        let mut lines = Vec::new();
-        for entry in statuses.iter() {
-            let path = entry.path().unwrap_or("?");
-            let flag = entry.status();
-            lines.push(format!("  {}: idx_new={} wt_new={} idx_mod={} wt_mod={} idx_del={} wt_del={} ignored={}",
-                path, flag.is_index_new(), flag.is_wt_new(),
-                flag.is_index_modified(), flag.is_wt_modified(),
-                flag.is_index_deleted(), flag.is_wt_deleted(), flag.is_ignored()));
-        }
-        lines.join("\n")
-    }
-
     /// Mirrors the status-counting logic from get_git_summary.
     /// Keep in sync with git.rs.
     fn count_status(repo: &git2::Repository) -> (usize, usize, usize, usize) {
@@ -239,15 +221,13 @@ mod tests {
         fs::remove_file(_repo.path().join("deleted.txt")).unwrap();
 
         let (total, added, modified, deleted) = count_status(&repo);
-        let debug = count_status_debug(&repo);
-        eprintln!("DEBUG mixed_changes: total={}, added={}, modified={}, deleted={}\nStatuses:\n{}", total, added, modified, deleted, debug);
 
-        // Total should be 3 or 4 depending on whether staged.txt registers as a separate entry.
-        // git2 may combine staged+worktree-new for never-committed files into a single entry.
-        assert!(total >= 3, "expected at least 3 changed files (untracked, modified, deleted)");
-        assert!(added >= 1, "expected at least 1 added (untracked.txt)");
+        // Expected: deleted.txt(wt_del), modified.txt(wt_mod), untracked.txt(wt_new) = 3
+        // staged.txt: content matches disk, so git2 doesn't report it as changed.
+        assert_eq!(total, 3, "expected 3 (untracked + modified + deleted — staged.txt content matches disk)");
+        assert_eq!(added, 1, "expected 1 added (untracked.txt)");
         assert_eq!(modified, 1, "expected 1 modified");
-        assert!(deleted <= 1, "deleted should be 0 or 1");
+        assert_eq!(deleted, 1, "expected 1 deleted");
     }
 
     #[test]
