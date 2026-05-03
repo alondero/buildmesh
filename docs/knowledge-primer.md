@@ -16,7 +16,7 @@
 ## Key Conventions
 
 ### Terminal Persistence (CRITICAL)
-`TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the session is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.
+`TerminalManager` is a **singleton**. xterm.js instances survive React remounts via a hidden container stack. Never call `dispose()` on a terminal unless the agent node is explicitly deleted — see `src/components/Terminal/Terminal.tsx`. Disposing a terminal causes permanent blanking.
 
 ### Layout: Grid-Only
 Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
@@ -47,30 +47,30 @@ Gemini:           r"(?m)^\s*>>>\s*$"
 OpenCode:         r"(?m)^\s*[>$❯]\s*$"
 ```
 
-**`prompts_seen > 1` guard:** The first prompt (on agent spawn) is always skipped — it fires before any user work begins. Only the second and subsequent prompts trigger `attention-needed`. This prevents false attention events on session start.
+**`prompts_seen > 1` guard:** The first prompt (on agent spawn) is always skipped — it fires before any user work begins. Only the second and subsequent prompts trigger `attention-needed`. This prevents false attention events on agent node start.
 
 ### LAST_INPUT_TIME Suppression
 After user sends input (`\n` or `\r`), `LAST_INPUT_TIME` records the timestamp. For 3 seconds afterward, `attention-needed` events are suppressed to avoid duplicate attention triggers from agent output that immediately follows user typing. See `agent.rs:248-251`.
 
 ### Auto-Spawn Behavior
-`AgentTerminal` component auto-spawns the agent when mounting a session with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
+`AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
 
-## Session Management
+## Agent Node Management
 
-### Session ID Capture
+### Agent Node ID Capture
 The PTY reader thread sniffs `session-id:` or `session_id:` from agent output and auto-saves it to the DB for `--resume` support. Don't replicate this — it's backend-only.
 
-### Turn Counting and Session Naming
-`session_namer.rs` captures PTY output, increments turn counters, and auto-names sessions (e.g., infers name from working context). It also feeds the TurnDetector.
+### Turn Counting and Node Naming
+`node_namer.rs` captures PTY output, increments turn counters, and auto-names agent nodes (e.g., infers name from working context). It also feeds the TurnDetector.
 
 ### Crash Recovery on Startup
-`lib.rs:46-54` marks any sessions still showing `Running` status as `Suspended` during app startup, since a crash means no live process exists. These are then auto-resumed via `auto_resume_sessions` on the frontend's first draw.
+`lib.rs:46-54` marks any agent nodes still showing `Running` status as `Suspended` during app startup, since a crash means no live process exists. These are then auto-resumed via `auto_resume_nodes` on the frontend's first draw.
 
-### auto_resume_sessions
-On app restart, the frontend calls `auto_resume_sessions` which iterates all `Suspended` sessions with a `cli_session_id` and calls `spawn_agent_inner` with `SessionIdMode::Resume`. Only Anthropic and Minimax (cwrap providers) are auto-resumed — Gemini and OpenCode skip this path and go directly to `Idle`.
+### auto_resume_nodes
+On app restart, the frontend calls `auto_resume_nodes` which iterates all `Suspended` agent nodes with a `cli_session_id` and calls `spawn_agent_inner` with `SessionIdMode::Resume`. Only Anthropic and Minimax (cwrap providers) are auto-resumed — Gemini and OpenCode skip this path and go directly to `Idle`.
 
 ### Early-Exit Detection
-The PTY reader thread records `spawned_at`. If the reader exits within 3 seconds, the session is marked `Error` and a `resume-failed` event is emitted. This catches failed `--resume` attempts where the agent CLI exits because the session has expired.
+The PTY reader thread records `spawned_at`. If the reader exits within 3 seconds, the agent node is marked `Error` and a `resume-failed` event is emitted. This catches failed `--resume` attempts where the agent CLI exits because the session has expired.
 
 ## Agent Process Architecture
 
@@ -87,7 +87,7 @@ Each entry holds:
 All fields are behind `Arc<Mutex<...>>` so the PTY reader thread and Tauri command handlers can both access them safely.
 
 ### Worktree Support (`-w`)
-cwrap providers (Anthropic, Minimax) get the `-w` flag added to their args, which creates a dedicated worktree per session. This prevents concurrent session conflicts when multiple sessions target the same git repository. See `agent.rs:140-155`.
+cwrap providers (Anthropic, Minimax) get the `-w` flag added to their args, which creates a dedicated worktree per agent node. This prevents concurrent agent node conflicts when multiple agent nodes target the same git repository. See `agent.rs:140-155`.
 
 ## Logging and Crash Handling
 

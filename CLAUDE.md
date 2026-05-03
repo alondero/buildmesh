@@ -9,8 +9,8 @@ Single-window desktop app with a **sidebar** for navigation and a **Session View
 
 ## Key Data Types
 
-- **Project:** Top-level folder on disk.
-- **Session:** An isolated agent instance. Persists `cli_session_id` for robust `--resume` support.
+- **Mesh:** Top-level folder on disk.
+- **AgentNode:** An isolated agent instance. Persists `cli_session_id` for robust `--resume` support.
 - **Layout:** Supports `single` and `grid` (split-pane) views.
 
 ## Technical Stack
@@ -21,16 +21,16 @@ Single-window desktop app with a **sidebar** for navigation and a **Session View
 
 ## Database Schema (v3)
 
-- **projects:** id, name, path, created_at.
-- **sessions:** id, project_id, name, path, branch, env, provider, status, cli_session_id, created_at.
-- **checkpoints:** id, session_id, git_ref, turn_index, message, created_at.
+- **meshes:** id, name, path, created_at.
+- **agent_nodes:** id, mesh_id, name, path, branch, env, provider, status, cli_session_id, created_at.
+- **checkpoints:** id, agent_node_id, git_ref, turn_index, message, created_at.
 
 ## Guidelines
 
-- **Terminal Persistence:** Never dispose of a terminal instance unless the session is explicitly archived/deleted.
+- **Terminal Persistence:** Never dispose of a terminal instance unless the agent node is explicitly archived/deleted.
 - **Path Handling:** Use `env::to_host_path` when accessing the file system from the backend to ensure compatibility with WSL sessions.
 - **Agent Spawning:** On Windows, spawn `cwrap` via `cmd.exe /c` to ensure ConPTY correctly handles ANSI sequences.
-- **Session ID Capture:** The backend PTY reader thread automatically captures `session-id` patterns from agent output to update the database for future resumes.
+- **Agent Node ID Capture:** The backend PTY reader thread automatically captures `session-id` patterns from agent output to update the database for future resumes.
 
 ## Agent skills
 
