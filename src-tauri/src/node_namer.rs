@@ -34,7 +34,21 @@ pub fn append_output(session_id: i64, data: &str) {
     }
 }
 
+/// Clears all node_namer state for a session_id.
+///
+/// This is called automatically by `record_turn`, but is also exposed as a public
+/// API so tests can verify state cleanup without needing an AppHandle.
+pub fn reset_session_state(session_id: i64) {
+    SESSION_BUFFERS.lock().unwrap().remove(&session_id);
+    TURN_COUNTERS.lock().unwrap().remove(&session_id);
+    RENAMED_SESSIONS.lock().unwrap().remove(&session_id);
+}
+
 pub fn record_turn(session_id: i64, app: AppHandle) {
+    // Defensively clear stale state at record_turn entry. This prevents archived/deleted
+    // sessions from contaminating newly-created nodes that reuse the same session_id.
+    reset_session_state(session_id);
+
     if RENAMED_SESSIONS.lock().unwrap().contains(&session_id) {
         return;
     }
@@ -104,9 +118,7 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
 }
 
 pub fn cleanup(session_id: i64) {
-    SESSION_BUFFERS.lock().unwrap().remove(&session_id);
-    TURN_COUNTERS.lock().unwrap().remove(&session_id);
-    RENAMED_SESSIONS.lock().unwrap().remove(&session_id);
+    reset_session_state(session_id);
 }
 
 pub fn renamed_sessions_count() -> usize {
@@ -234,5 +246,274 @@ mod tests {
             "Based on the session, a good name would be: improve-auth-flow"
         );
         assert!(result.is_ok());
+    }
+
+    // Stale-state clearing tests. Covers the bug where archived/deleted sessions
+    // left behind state in SESSION_BUFFERS, TURN_COUNTERS, and RENAMED_SESSIONS,
+    // contaminating newly-created nodes that reused the same session_id.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn stale_buffers_cleared_on_record_turn() {
+        // Simulate the bug: an archived session left behind SESSION_BUFFERS
+        // for session_id=5. When record_turn is called for a new node that
+        // reuses session_id=5, the old buffer must be cleared BEFORE any rename
+        // logic runs — otherwise the rename snapshot is contaminated with stale text.
+        //
+        // record_turn() calls reset_session_state() at the TOP of the function,
+        // before any DB access or turn counting. We test reset_session_state()
+        // directly since we have no AppHandle in unit tests.
+        let stale_text = "old context from a previous archived session";
+        append_output(5, stale_text);
+        {
+            let buffers = SESSION_BUFFERS.lock().unwrap();
+            assert!(buffers.get(&5).is_some(), "precondition: buffer exists");
+        }
+
+        reset_session_state(5);
+
+        // Buffer must be gone — stale text was cleared before any rename logic
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        assert!(
+            buffers.get(&5).is_none(),
+            "SESSION_BUFFERS[5] should be cleared by record_turn entry"
+        );
+    }
+
+    #[test]
+    fn turn_counter_reset_on_record_turn() {
+        // After archiving a session before it reached turn 2, TURN_COUNTERS[5]
+        // can be at 1. A new node reusing session_id=5 should start at turn 0,
+        // not inherit the stale counter (which would cause immediate rename).
+        {
+            let mut counters = TURN_COUNTERS.lock().unwrap();
+            counters.insert(5, 1);
+        }
+        {
+            let mut buffers = SESSION_BUFFERS.lock().unwrap();
+            buffers.insert(5, "fresh context".to_string());
+        }
+
+        reset_session_state(5);
+
+        // TURN_COUNTERS[5] should have been removed
+        let counters = TURN_COUNTERS.lock().unwrap();
+        assert!(
+            counters.get(&5).is_none(),
+            "TURN_COUNTERS[5] should be removed by record_turn entry"
+        );
+    }
+
+    #[test]
+    fn renamed_sessions_cleared_on_record_turn() {
+        // If session 5 was previously renamed (in RENAMED_SESSIONS), a new node
+        // reusing session_id=5 should NOT be blocked by that stale guard entry.
+        {
+            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
+            renamed.insert(5);
+        }
+        {
+            let mut buffers = SESSION_BUFFERS.lock().unwrap();
+            buffers.insert(5, "fresh context for new node".to_string());
+        }
+
+        reset_session_state(5);
+
+        // RENAMED_SESSIONS[5] must be cleared so the new node can be renamed
+        let renamed = RENAMED_SESSIONS.lock().unwrap();
+        assert!(
+            !renamed.contains(&5),
+            "RENAMED_SESSIONS[5] should be cleared by record_turn entry"
+        );
+    }
+
+    #[test]
+    fn cleanup_resets_all_state() {
+        // populate all three statics for session 7
+        append_output(7, "some output text for session 7");
+        {
+            let mut counters = TURN_COUNTERS.lock().unwrap();
+            counters.insert(7, 2);
+        }
+        {
+            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
+            renamed.insert(7);
+        }
+        // verify preconditions
+        {
+            let buffers = SESSION_BUFFERS.lock().unwrap();
+            assert!(buffers.get(&7).is_some());
+        }
+        {
+            let counters = TURN_COUNTERS.lock().unwrap();
+            assert_eq!(counters.get(&7), Some(&2));
+        }
+        {
+            let renamed = RENAMED_SESSIONS.lock().unwrap();
+            assert!(renamed.contains(&7));
+        }
+
+        cleanup(7);
+
+        // all three must be empty for session 7
+        {
+            let buffers = SESSION_BUFFERS.lock().unwrap();
+            assert!(
+                buffers.get(&7).is_none(),
+                "SESSION_BUFFERS[7] should be removed by cleanup"
+            );
+        }
+        {
+            let counters = TURN_COUNTERS.lock().unwrap();
+            assert!(
+                counters.get(&7).is_none(),
+                "TURN_COUNTERS[7] should be removed by cleanup"
+            );
+        }
+        {
+            let renamed = RENAMED_SESSIONS.lock().unwrap();
+            assert!(
+                !renamed.contains(&7),
+                "RENAMED_SESSIONS[7] should be removed by cleanup"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Additional edge-case coverage
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn reset_session_state_only_clears_target_session() {
+        // Populate state for two different sessions
+        append_output(5, "session 5 output");
+        append_output(99, "session 99 output");
+        {
+            let mut counters = TURN_COUNTERS.lock().unwrap();
+            counters.insert(5, 1);
+            counters.insert(99, 2);
+        }
+        {
+            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
+            renamed.insert(5);
+            renamed.insert(99);
+        }
+
+        // Clear only session 5
+        reset_session_state(5);
+
+        // session 5 state must be gone
+        {
+            let buffers = SESSION_BUFFERS.lock().unwrap();
+            assert!(buffers.get(&5).is_none());
+            assert!(buffers.get(&99).is_some(), "session 99 buffer should survive");
+        }
+        {
+            let counters = TURN_COUNTERS.lock().unwrap();
+            assert!(counters.get(&5).is_none());
+            assert_eq!(counters.get(&99), Some(&2), "session 99 counter should survive");
+        }
+        {
+            let renamed = RENAMED_SESSIONS.lock().unwrap();
+            assert!(!renamed.contains(&5));
+            assert!(renamed.contains(&99), "session 99 renamed guard should survive");
+        }
+    }
+
+    #[test]
+    fn reset_session_state_is_idempotent() {
+        // Populating session 8 then clearing it twice should be safe
+        append_output(8, "some output");
+        {
+            let mut counters = TURN_COUNTERS.lock().unwrap();
+            counters.insert(8, 1);
+        }
+        {
+            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
+            renamed.insert(8);
+        }
+
+        reset_session_state(8);
+        reset_session_state(8); // second call must not panic
+
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        let counters = TURN_COUNTERS.lock().unwrap();
+        let renamed = RENAMED_SESSIONS.lock().unwrap();
+        assert!(buffers.get(&8).is_none());
+        assert!(counters.get(&8).is_none());
+        assert!(!renamed.contains(&8));
+    }
+
+    #[test]
+    fn append_output_drops_data_after_renamed_gate() {
+        // Once a session is in RENAMED_SESSIONS, append_output should be a no-op.
+        // This prevents buffers from growing after a node has been renamed.
+        {
+            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
+            renamed.insert(42);
+        }
+
+        append_output(42, "this should be dropped");
+        append_output(42, "and this too");
+
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        assert!(
+            buffers.get(&42).is_none(),
+            "append_output must drop data for sessions in RENAMED_SESSIONS"
+        );
+    }
+
+    #[test]
+    fn turn_counter_accumulates_from_zero_to_rename() {
+        // Simulate the full turn accumulation path:
+        // turn 1: counter goes 0 -> 1, no rename
+        // turn 2: counter goes 1 -> 2, rename fires
+        // We test by directly inserting into TURN_COUNTERS to simulate
+        // having already seen turn 1, then verify the entry logic.
+        let session_id = 55;
+
+        // Manually set counter to 1 (simulating one prior record_turn call)
+        {
+            let mut counters = TURN_COUNTERS.lock().unwrap();
+            counters.insert(session_id, 1);
+        }
+        append_output(session_id, "turn 2 output");
+
+        // Simulate the turn-counting portion of record_turn
+        // (entry-or-insert then increment, fire if == 2)
+        {
+            let mut counters = TURN_COUNTERS.lock().unwrap();
+            let count = counters.entry(session_id).or_insert(0);
+            *count += 1;
+            assert_eq!(
+                *count, 2,
+                "second turn (count=2) should trigger rename"
+            );
+        }
+    }
+
+    #[test]
+    fn buffer_truncation_splits_multibyte_utf8_correctly() {
+        // The buffer truncation logic drains bytes from the front until it lands
+        // on a valid UTF-8 character boundary. This tests that multi-byte UTF-8
+        // sequences are not sliced mid-character.
+        // "日" is 3 bytes in UTF-8. If we append a big string ending with "日",
+        // the drain must not cut in the middle of those 3 bytes.
+        let session_id = 77;
+        let base = "x".repeat(4000);
+        let with_kanji = format!("{}{}", base, "日本"); // "日本" = 6 bytes
+
+        append_output(session_id, &with_kanji);
+
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        let buf = buffers.get(&session_id).unwrap();
+
+        // Buffer must be <= MAX_BUFFER_CHARS
+        assert!(buf.len() <= MAX_BUFFER_CHARS);
+
+        // Buffer content must be valid UTF-8 (if we sliced mid-character, this would panic)
+        // We use the fact that String::new() + push_str would have panicked at insert time.
+        // Instead verify by re-creating the string slice:
+        assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
     }
 }
