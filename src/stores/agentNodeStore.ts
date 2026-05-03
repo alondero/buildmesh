@@ -130,7 +130,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   createAgentNode: async (meshId, name, path, branch, provider?: string): Promise<AgentNode> => {
     try {
       const node = await invoke<AgentNode>('create_session', {
-        projectId: meshId, name, path, branch, provider
+        meshId, name, path, branch, provider
       });
       set((state) => ({ agentNodes: [node, ...state.agentNodes] }));
       await get().setActiveNode(node.id);
