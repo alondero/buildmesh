@@ -99,8 +99,8 @@ export function Sidebar() {
   return (
     <div className="w-64 bg-bg-surface border-r border-border-subtle flex flex-col h-full">
       {/* Header */}
-      <div className="p-3 border-b border-border-subtle">
-        <img src={Logo} className="h-5" alt="Buildmesh" />
+      <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle">
+        <img src={Logo} className="h-10 w-auto max-w-full" alt="Buildmesh" />
       </div>
 
       {/* Meshes list */}
