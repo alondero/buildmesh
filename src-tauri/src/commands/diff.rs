@@ -198,13 +198,13 @@ pub async fn diff_session_checkpoint(
     session_id: i64,
     checkpoint_id: i64,
 ) -> Result<DiffResult, String> {
-    let session = db::get_session_by_id(session_id)
+    let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
     let checkpoint = db::get_checkpoint_by_id(checkpoint_id)
         .map_err(|e| e.to_string())?;
     let ref_name = format!("refs/heads/conductor/checkpoints/c{}", checkpoint.turn_index);
 
-    let repo = git2::Repository::open(&session.path)
+    let repo = git2::Repository::open(&node.path)
         .map_err(|e| e.to_string())?;
 
     let reference = repo.find_reference(&ref_name)
@@ -215,7 +215,7 @@ pub async fn diff_session_checkpoint(
         .map_err(|e| e.to_string())?;
 
     let mut files = Vec::new();
-    let current_path = PathBuf::from(&session.path);
+    let current_path = PathBuf::from(&node.path);
 
     if let Ok(entries) = fs::read_dir(&current_path) {
         for entry in entries.filter_map(|e| e.ok()) {

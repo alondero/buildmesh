@@ -70,15 +70,15 @@ fn is_agent_already_running(session_id: &i64) -> bool {
     false
 }
 
-/// Get the session and determine if it's WSL.
-fn get_session_and_env(session_id: &i64) -> Result<(crate::models::Session, EnvType), String> {
-    let session = db::get_session_by_id(*session_id).map_err(|e| {
-        let err = format!("spawn_agent: failed to get session {}: {}", session_id, e);
+/// Get the agent node and determine if it's WSL.
+fn get_session_and_env(session_id: &i64) -> Result<(crate::models::AgentNode, EnvType), String> {
+    let node = db::get_agent_node_by_id(*session_id).map_err(|e| {
+        let err = format!("spawn_agent: failed to get agent node {}: {}", session_id, e);
         tracing::error!("{}", err);
         err
     })?;
-    let is_wsl = session.env;
-    Ok((session, is_wsl))
+    let is_wsl = node.env;
+    Ok((node, is_wsl))
 }
 
 /// Parse provider string into Provider enum.
@@ -116,7 +116,7 @@ enum SessionIdMode {
 
 /// Build the spawn command based on provider and environment.
 fn build_spawn_command(
-    session: &crate::models::Session,
+    node: &crate::models::AgentNode,
     is_wsl: EnvType,
     provider_enum: Provider,
     session_id_mode: &SessionIdMode,
@@ -138,20 +138,20 @@ fn build_spawn_command(
     };
 
     // Add -w for git worktree support on cwrap providers (Anthropic, Minimax)
-    // This creates a dedicated worktree per session, preventing concurrent session conflicts.
-    // When worktree_name is set (session's hyphenated name), pass it explicitly so cwrap
-    // can find the same session data on resume.
+    // This creates a dedicated worktree per node, preventing concurrent node conflicts.
+    // When worktree_name is set (node's hyphenated name), pass it explicitly so cwrap
+    // can find the same node data on resume.
     let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
     if is_cwrap {
         match session_id_mode {
             SessionIdMode::Assign(_) | SessionIdMode::Resume(_) => {
-                tracing::info!("spawn_agent: enabling worktree support (-w) for session");
-                if let Some(ref wt_name) = session.worktree_name {
+                tracing::info!("spawn_agent: enabling worktree support (-w) for node");
+                if let Some(ref wt_name) = node.worktree_name {
                     args.push("-w".to_string());
                     args.push(wt_name.clone());
                     tracing::info!("spawn_agent: using explicit worktree name: {}", wt_name);
                 } else {
-                    // Backward compat: old sessions without worktree_name get -w without explicit name
+                    // Backward compat: old nodes without worktree_name get -w without explicit name
                     args.push("-w".to_string());
                     tracing::info!("spawn_agent: no explicit worktree name, using auto-generated");
                 }
@@ -177,7 +177,7 @@ fn build_spawn_command(
     let mut cmd = if is_wsl == EnvType::Wsl {
         tracing::info!("spawn_agent: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
-        c.args(["--cd", &session.path, "--", binary]);
+        c.args(["--cd", &node.path, "--", binary]);
         c.args(args);
         c
     } else if is_macos {
@@ -203,7 +203,7 @@ fn build_spawn_command(
         }
     };
 
-    cmd.cwd(&session.path);
+    cmd.cwd(&node.path);
     cmd
 }
 
@@ -256,7 +256,7 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                    crate::session_namer::append_output(session_id, &data);
+                    crate::node_namer::append_output(session_id, &data);
 
                     if detector.contains_prompt(&data) {
                         let suppress = LAST_INPUT_TIME.lock().unwrap()
@@ -265,8 +265,8 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                             .unwrap_or(false);
 
                         if !suppress {
-                            crate::session_namer::record_turn(session_id, app_clone.clone());
-                            let _ = db::update_session_status(session_id, SessionStatus::AwaitingInput);
+                            crate::node_namer::record_turn(session_id, app_clone.clone());
+                            let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
                             let _ = app_clone.emit("attention-needed", serde_json::json!({
                                 "session_id": session_id
                             }));
@@ -292,14 +292,14 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
         // Detect early exit (likely a failed --resume)
         let elapsed = spawned_at.elapsed();
         if elapsed < std::time::Duration::from_secs(3) {
-            tracing::warn!("Session {} reader exited after {:?} — likely resume failure", session_id, elapsed);
-            let _ = db::update_session_status(session_id, SessionStatus::Error);
+            tracing::warn!("Node {} reader exited after {:?} — likely resume failure", session_id, elapsed);
+            let _ = db::update_agent_node_status(session_id, SessionStatus::Error);
             let _ = app_clone.emit("resume-failed", serde_json::json!({
                 "session_id": session_id,
                 "error": "Agent exited immediately after spawn — session may have expired"
             }));
         } else {
-            let _ = db::update_session_status(session_id, SessionStatus::Idle);
+            let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
         }
 
         tracing::debug!("PTY reader thread exited for session {}", session_id);
@@ -337,9 +337,9 @@ async fn spawn_agent_inner(
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
     kill_agent(session_id).await.ok();
 
-    // 3. Get session info
-    let (session, is_wsl) = get_session_and_env(&session_id)?;
-    tracing::info!("spawn_agent_inner: session path={}, env={:?}", session.path, session.env);
+    // 3. Get node info
+    let (node, is_wsl) = get_session_and_env(&session_id)?;
+    tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
 
     let provider_enum = parse_provider(&provider);
 
@@ -365,10 +365,10 @@ async fn spawn_agent_inner(
     let pair = open_pty_pair(rows, cols)?;
 
     // 6. Build command
-    let cmd = build_spawn_command(&session, is_wsl, provider_enum, &session_id_mode);
+    let cmd = build_spawn_command(&node, is_wsl, provider_enum, &session_id_mode);
 
     // 7. Spawn
-    tracing::info!("spawn_agent_inner: spawning process in {}", session.path);
+    tracing::info!("spawn_agent_inner: spawning process in {}", node.path);
     let child = spawn_child(&pair, cmd).map_err(|e| {
         let err_msg = e.clone();
         let _ = app.emit(
@@ -403,9 +403,9 @@ async fn spawn_agent_inner(
     start_reader(app.clone(), session_id, reader, spawned_at, provider_enum);
 
     tracing::info!(
-        "spawn_agent_inner: reader thread spawned, updating session status"
+        "spawn_agent_inner: reader thread spawned, updating node status"
     );
-    db::update_session_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
+    db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
     tracing::info!("spawn_agent_inner: complete");
     Ok(())
 }
@@ -429,44 +429,44 @@ pub async fn spawn_agent(
 /// Called by the frontend on startup after event listeners are ready.
 #[command]
 pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
-    let sessions = db::list_suspended_sessions().map_err(|e| e.to_string())?;
+    let nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;
 
-    if sessions.is_empty() {
+    if nodes.is_empty() {
         tracing::info!("auto_resume_sessions: no suspended sessions to resume");
         return Ok(vec![]);
     }
 
-    tracing::info!("auto_resume_sessions: resuming {} sessions", sessions.len());
+    tracing::info!("auto_resume_sessions: resuming {} sessions", nodes.len());
     let mut resumed: Vec<i64> = Vec::new();
 
-    for session in &sessions {
-        let cli_id = match &session.cli_session_id {
+    for node in &nodes {
+        let cli_id = match &node.cli_session_id {
             Some(id) if !id.is_empty() => id.clone(),
             _ => {
-                tracing::warn!("auto_resume_sessions: session {} has no cli_session_id, skipping", session.id);
-                db::update_session_status(session.id, SessionStatus::Idle).ok();
+                tracing::warn!("auto_resume_sessions: node {} has no cli_session_id, skipping", node.id);
+                db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
                 continue;
             }
         };
 
-        if session.provider != Provider::Anthropic && session.provider != Provider::Minimax {
-            tracing::info!("auto_resume_sessions: skipping non-cwrap session {} ({:?})", session.id, session.provider);
-            db::update_session_status(session.id, SessionStatus::Idle).ok();
+        if node.provider != Provider::Anthropic && node.provider != Provider::Minimax {
+            tracing::info!("auto_resume_sessions: skipping non-cwrap node {} ({:?})", node.id, node.provider);
+            db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
             continue;
         }
 
-        let provider_str = session.provider.to_string();
+        let provider_str = node.provider.to_string();
         // Default to 80x24 for auto-resume since we don't know the size yet
-        match spawn_agent_inner(&app, session.id, provider_str, Some(cli_id), 24, 80).await {
+        match spawn_agent_inner(&app, node.id, provider_str, Some(cli_id), 24, 80).await {
             Ok(()) => {
-                resumed.push(session.id);
-                tracing::info!("auto_resume_sessions: resumed session {}", session.id);
+                resumed.push(node.id);
+                tracing::info!("auto_resume_sessions: resumed node {}", node.id);
             }
             Err(e) => {
-                tracing::error!("auto_resume_sessions: failed to resume session {}: {}", session.id, e);
-                db::update_session_status(session.id, SessionStatus::Error).ok();
+                tracing::error!("auto_resume_sessions: failed to resume node {}: {}", node.id, e);
+                db::update_agent_node_status(node.id, SessionStatus::Error).ok();
                 let _ = app.emit("resume-failed", serde_json::json!({
-                    "session_id": session.id,
+                    "session_id": node.id,
                     "error": e
                 }));
             }
@@ -526,7 +526,7 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
 
         if data.contains('\n') || data.contains('\r') {
             LAST_INPUT_TIME.lock().unwrap().insert(session_id, std::time::Instant::now());
-            db::update_session_status(session_id, SessionStatus::Running).ok();
+            db::update_agent_node_status(session_id, SessionStatus::Running).ok();
             let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
         }
         Ok(())
@@ -551,7 +551,7 @@ pub async fn kill_agent(session_id: i64) -> Result<(), String> {
         agent.child.lock().unwrap().kill().ok();
         agent.reader_alive.store(false, Ordering::SeqCst);
     }
-    db::update_session_status(session_id, SessionStatus::Idle).map_err(|e| e.to_string())?;
+    db::update_agent_node_status(session_id, SessionStatus::Idle).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -603,11 +603,11 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
 
     drop(registry);
 
-    let session_count = db::list_sessions().map(|s| s.len()).unwrap_or(0);
+    let session_count = db::list_agent_nodes().map(|s| s.len()).unwrap_or(0);
     let last_input_count = LAST_INPUT_TIME.lock().unwrap().len();
-    let renamed_count = crate::session_namer::renamed_sessions_count();
-    let buffers_size = crate::session_namer::buffers_size_bytes();
-    let turn_counter_count = crate::session_namer::turn_counter_count();
+    let renamed_count = crate::node_namer::renamed_sessions_count();
+    let buffers_size = crate::node_namer::buffers_size_bytes();
+    let turn_counter_count = crate::node_namer::turn_counter_count();
 
     CrashSnapshot {
         process_registry_ids: process_ids,

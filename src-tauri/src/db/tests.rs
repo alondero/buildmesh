@@ -9,7 +9,7 @@
 #[cfg(test)]
 mod tests {
     use crate::db::test_migrate_if_needed;
-    use crate::models::Project;
+    use crate::models::Mesh;
 
     /// Sets up an in-memory v2 schema (before layout column) directly,
     /// then calls the real migrate_if_needed to simulate what happens

@@ -1,13 +1,13 @@
-//! Project management commands
+//! Mesh management commands
 
 use crate::db;
-use crate::models::Project;
+use crate::models::Mesh;
 use tauri::command;
 use tauri_plugin_dialog::DialogExt;
 
-/// Add a project by opening a folder picker dialog
+/// Add a mesh by opening a folder picker dialog
 #[command]
-pub async fn add_project(app: tauri::AppHandle) -> Result<Project, String> {
+pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
     tracing::debug!("add_project called");
     let folder_path = app.dialog()
         .file()
@@ -36,56 +36,56 @@ pub async fn add_project(app: tauri::AppHandle) -> Result<Project, String> {
             .unwrap_or(&path)
             .to_string()
     };
-    tracing::debug!("project name: {}", name);
+    tracing::debug!("mesh name: {}", name);
 
-    db::create_project(&name, &path).map_err(|e| {
-        tracing::error!("create_project failed: {}", e);
+    db::create_mesh(&name, &path).map_err(|e| {
+        tracing::error!("create_mesh failed: {}", e);
         e.to_string()
     })
 }
 
-/// Create a new project
+/// Create a new mesh
 #[command]
-pub async fn create_project(name: String, path: String) -> Result<Project, String> {
-    db::create_project(&name, &path).map_err(|e| e.to_string())
+pub async fn create_project(name: String, path: String) -> Result<Mesh, String> {
+    db::create_mesh(&name, &path).map_err(|e| e.to_string())
 }
 
-/// Create a project for testing without dialog (uses temp directory)
+/// Create a mesh for testing without dialog (uses temp directory)
 #[command]
-pub async fn create_test_project(name: String) -> Result<Project, String> {
+pub async fn create_test_project(name: String) -> Result<Mesh, String> {
     let temp_dir = std::env::temp_dir();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let project_path = temp_dir.join(format!("buildmesh_test_{}_{}", name.replace(' ', "_"), timestamp));
-    std::fs::create_dir_all(&project_path).map_err(|e| e.to_string())?;
-    db::create_project(&name, &project_path.to_string_lossy()).map_err(|e| e.to_string())
+    let mesh_path = temp_dir.join(format!("buildmesh_test_{}_{}", name.replace(' ', "_"), timestamp));
+    std::fs::create_dir_all(&mesh_path).map_err(|e| e.to_string())?;
+    db::create_mesh(&name, &mesh_path.to_string_lossy()).map_err(|e| e.to_string())
 }
 
-/// List all projects
+/// List all meshes
 #[command]
-pub async fn list_projects() -> Result<Vec<Project>, String> {
-    db::list_projects().map_err(|e| e.to_string())
+pub async fn list_projects() -> Result<Vec<Mesh>, String> {
+    db::list_meshes().map_err(|e| e.to_string())
 }
 
-/// Delete a project and its sessions
+/// Delete a mesh and its nodes
 #[command]
 pub async fn delete_project(project_id: i64) -> Result<(), String> {
-    db::delete_project(project_id).map_err(|e| e.to_string())
+    db::delete_mesh(project_id).map_err(|e| e.to_string())
 }
 
-/// Update a project's layout preference
+/// Update a mesh's layout preference
 #[command]
 pub async fn update_project_layout(project_id: i64, layout: String) -> Result<(), String> {
     if layout != "grid" && layout != "single" {
         return Err("layout must be 'grid' or 'single'".to_string());
     }
-    db::update_project_layout(project_id, &layout).map_err(|e| e.to_string())
+    db::update_mesh_layout(project_id, &layout).map_err(|e| e.to_string())
 }
 
-/// Update multiple projects' sort positions in the sidebar
+/// Update multiple meshes' sort positions in the sidebar
 #[command]
 pub async fn update_project_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
-    db::update_project_positions_batch(&updates).map_err(|e| e.to_string())
+    db::update_mesh_positions_batch(&updates).map_err(|e| e.to_string())
 }

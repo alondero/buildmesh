@@ -12,10 +12,10 @@ pub async fn create_checkpoint(
     turn_index: i32,
     message: Option<String>,
 ) -> Result<Checkpoint, String> {
-    let session = db::get_session_by_id(session_id)
+    let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let repo = Repository::open(&session.path)
+    let repo = Repository::open(&node.path)
         .map_err(|e| e.to_string())?;
 
     let mut index = repo.index()
@@ -77,10 +77,10 @@ pub async fn list_checkpoints(session_id: i64) -> Result<Vec<Checkpoint>, String
 pub async fn revert_to_checkpoint(checkpoint_id: i64) -> Result<(), String> {
     let checkpoint = db::get_checkpoint_by_id(checkpoint_id)
         .map_err(|e| e.to_string())?;
-    let session = db::get_session_by_id(checkpoint.session_id)
+    let node = db::get_agent_node_by_id(checkpoint.node_id)
         .map_err(|e| e.to_string())?;
 
-    let repo = Repository::open(&session.path)
+    let repo = Repository::open(&node.path)
         .map_err(|e| e.to_string())?;
 
     let ref_name = format!("refs/heads/{}", checkpoint.git_ref);
@@ -108,9 +108,9 @@ pub async fn diff_checkpoints(
     let cp_b = db::get_checkpoint_by_id(checkpoint_b_id)
         .map_err(|e| e.to_string())?;
 
-    let session = db::get_session_by_id(cp_a.session_id)
+    let node = db::get_agent_node_by_id(cp_a.node_id)
         .map_err(|e| e.to_string())?;
-    let repo = Repository::open(&session.path)
+    let repo = Repository::open(&node.path)
         .map_err(|e| e.to_string())?;
 
     let ref_a = format!("refs/heads/conductor/checkpoints/c{}", cp_a.turn_index);

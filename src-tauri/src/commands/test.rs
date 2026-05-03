@@ -190,22 +190,22 @@ fn handle_create_test_project(args: &serde_json::Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("Test Project");
 
-    match crate::db::create_project(name, &std::env::temp_dir().to_string_lossy()) {
-        Ok(project) => JsonRpcResponse::success(&project),
+    match crate::db::create_mesh(name, &std::env::temp_dir().to_string_lossy()) {
+        Ok(mesh) => JsonRpcResponse::success(&mesh),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
 fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
-    let project_id = args.get("projectId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let mesh_id = args.get("projectId").and_then(|v| v.as_i64()).unwrap_or(0);
     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Session");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("/tmp");
     let branch = args.get("branch").and_then(|v| v.as_str()).unwrap_or("main");
 
     use crate::models::{EnvType, Provider};
 
-    match crate::db::create_session(
-        project_id,
+    match crate::db::create_agent_node(
+        mesh_id,
         name,
         path,
         branch,
@@ -213,25 +213,25 @@ fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
         Provider::Anthropic,
         Some(name),
     ) {
-        Ok(session) => {
+        Ok(node) => {
             // Emit event so frontend session store can refetch via invoke()
-            let _ = app.emit("session-created", serde_json::json!({ "id": session.id }));
-            JsonRpcResponse::success(&session)
+            let _ = app.emit("session-created", serde_json::json!({ "id": node.id }));
+            JsonRpcResponse::success(&node)
         }
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
 fn handle_list_projects() -> String {
-    match crate::db::list_projects() {
-        Ok(projects) => JsonRpcResponse::success(&projects),
+    match crate::db::list_meshes() {
+        Ok(meshes) => JsonRpcResponse::success(&meshes),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
 fn handle_list_sessions() -> String {
-    match crate::db::list_sessions() {
-        Ok(sessions) => JsonRpcResponse::success(&sessions),
+    match crate::db::list_agent_nodes() {
+        Ok(nodes) => JsonRpcResponse::success(&nodes),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
@@ -241,8 +241,8 @@ fn handle_get_session(args: &serde_json::Value) -> String {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    match crate::db::get_session_by_id(session_id) {
-        Ok(session) => JsonRpcResponse::success(&session),
+    match crate::db::get_agent_node_by_id(session_id) {
+        Ok(node) => JsonRpcResponse::success(&node),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
@@ -322,7 +322,7 @@ fn handle_inject_test_output(args: &serde_json::Value, app: AppHandle) -> String
 fn handle_delete_project(args: &serde_json::Value) -> String {
     let project_id = args.get("projectId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match crate::db::delete_project(project_id) {
+    match crate::db::delete_mesh(project_id) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "project_id": project_id })),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
@@ -331,7 +331,7 @@ fn handle_delete_project(args: &serde_json::Value) -> String {
 fn handle_delete_session(args: &serde_json::Value) -> String {
     let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match crate::db::delete_session(session_id) {
+    match crate::db::delete_agent_node(session_id) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
@@ -340,7 +340,7 @@ fn handle_delete_session(args: &serde_json::Value) -> String {
 fn handle_archive_session(args: &serde_json::Value) -> String {
     let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match crate::db::archive_session(session_id) {
+    match crate::db::archive_agent_node(session_id) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }

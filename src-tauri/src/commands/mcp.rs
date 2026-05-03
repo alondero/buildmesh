@@ -8,12 +8,12 @@ use tauri::command;
 /// List MCP servers configured for a session
 #[command]
 pub async fn list_mcp_servers(session_id: i64) -> Result<Vec<McpServer>, String> {
-    let session = db::get_session_by_id(session_id)
+    let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let output = if session.env == EnvType::Wsl {
+    let output = if node.env == EnvType::Wsl {
         Command::new("wsl.exe")
-            .args(["--cd", &session.path, "--", "claude", "mcp", "list"])
+            .args(["--cd", &node.path, "--", "claude", "mcp", "list"])
             .output()
     } else {
         Command::new("claude")

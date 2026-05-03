@@ -39,9 +39,9 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
         return;
     }
 
-    // Check DB: if session already has a non-default name, it was renamed in a previous run
-    if let Ok(session) = crate::db::get_session_by_id(session_id) {
-        if !crate::naming::is_default_name(&session.name) {
+    // Check DB: if node already has a non-default name, it was renamed in a previous run
+    if let Ok(node) = crate::db::get_agent_node_by_id(session_id) {
+        if !crate::naming::is_default_name(&node.name) {
             RENAMED_SESSIONS.lock().unwrap().insert(session_id);
             return;
         }
@@ -51,7 +51,7 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
         let mut counters = TURN_COUNTERS.lock().unwrap();
         let count = counters.entry(session_id).or_insert(0);
         *count += 1;
-        tracing::info!("session_namer: record_turn session={} turn={}", session_id, *count);
+        tracing::info!("node_namer: record_turn session={} turn={}", session_id, *count);
         *count == RENAME_AT_TURN
     };
 
@@ -59,7 +59,7 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
         return;
     }
 
-    tracing::info!("session_namer: triggering rename for session {}", session_id);
+    tracing::info!("node_namer: triggering rename for session {}", session_id);
 
     RENAMED_SESSIONS.lock().unwrap().insert(session_id);
 
@@ -125,7 +125,7 @@ pub fn turn_counter_count() -> usize {
 async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, String> {
     let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.".to_string();
 
-    tracing::info!("session_namer: running summarize command for session {}", session_id);
+    tracing::info!("node_namer: running summarize command for session {}", session_id);
 
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
@@ -156,7 +156,7 @@ async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, 
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let slug = slug_with_retry(&raw)?;
-    crate::db::update_session_name(session_id, &slug).map_err(|e| e.to_string())?;
+    crate::db::update_agent_node_name(session_id, &slug).map_err(|e| e.to_string())?;
     Ok(slug)
 }
 

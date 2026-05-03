@@ -6,7 +6,7 @@ mod db;
 mod env;
 mod models;
 mod naming;
-mod session_namer;
+mod node_namer;
 mod turn_detector;
 
 use tauri::Manager;
@@ -45,7 +45,7 @@ pub fn run() {
 
             // Crash recovery: any sessions still marked 'running' from a previous
             // crash have no live process. Mark them suspended for auto-resume.
-            match db::mark_running_sessions_suspended() {
+            match db::mark_running_nodes_suspended() {
                 Ok(count) if count > 0 => {
                     tracing::info!("Crash recovery: marked {} orphaned sessions as suspended", count);
                 }
@@ -98,23 +98,23 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            // Session
-            commands::session::create_session,
-            commands::session::list_sessions,
-            commands::session::list_sessions_by_project,
-            commands::session::get_session,
-            commands::session::archive_session,
-            commands::session::restore_session,
-            commands::session::update_session_status,
-            commands::session::delete_session,
-            commands::session::set_active_session,
-            // Project
-            commands::project::add_project,
-            commands::project::create_project,
-            commands::project::create_test_project,
-            commands::project::list_projects,
-            commands::project::delete_project,
-            commands::project::update_project_positions,
+            // Agent Node
+            commands::agent_node::create_session,
+            commands::agent_node::list_sessions,
+            commands::agent_node::list_sessions_by_project,
+            commands::agent_node::get_session,
+            commands::agent_node::archive_session,
+            commands::agent_node::restore_session,
+            commands::agent_node::update_session_status,
+            commands::agent_node::delete_session,
+            commands::agent_node::set_active_session,
+            // Mesh
+            commands::mesh::add_project,
+            commands::mesh::create_project,
+            commands::mesh::create_test_project,
+            commands::mesh::list_projects,
+            commands::mesh::delete_project,
+            commands::mesh::update_project_positions,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,
@@ -163,7 +163,7 @@ pub fn run() {
         .run(|_app_handle, event| {
             if let tauri::RunEvent::ExitRequested { .. } = &event {
                 tracing::info!("App exit requested, marking running sessions as suspended");
-                if let Err(e) = db::mark_running_sessions_suspended() {
+                if let Err(e) = db::mark_running_nodes_suspended() {
                     tracing::error!("Failed to mark sessions as suspended on exit: {}", e);
                 }
                 commands::agent::kill_all_agents();

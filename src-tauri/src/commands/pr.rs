@@ -5,20 +5,20 @@ use crate::models::EnvType;
 use std::process::Command;
 use tauri::command;
 
-/// Create a PR for a session
+/// Create a PR for the node
 #[command]
 pub fn create_pr(
     session_id: i64,
     title: String,
     body: String,
 ) -> Result<String, String> {
-    let session = db::get_session_by_id(session_id)
+    let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let branch = &session.branch;
-    let path = &session.path;
+    let branch = &node.branch;
+    let path = &node.path;
 
-    let output = if session.env == EnvType::Wsl {
+    let output = if node.env == EnvType::Wsl {
         Command::new("wsl.exe")
             .args(["--cd", path, "--", "gh", "pr", "create",
                    "--title", &title, "--body", &body, "--base", branch])
@@ -57,15 +57,15 @@ pub fn merge_pr(pr_url: String) -> Result<String, String> {
     }
 }
 
-/// Get the current branch for a session
+/// Get the current branch for a node
 #[command]
 pub fn get_current_branch(session_id: i64) -> Result<String, String> {
-    let session = db::get_session_by_id(session_id)
+    let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let output = if session.env == EnvType::Wsl {
+    let output = if node.env == EnvType::Wsl {
         Command::new("wsl.exe")
-            .args(["--cd", &session.path, "--", "git", "branch", "--show-current"])
+            .args(["--cd", &node.path, "--", "git", "branch", "--show-current"])
             .output()
     } else {
         Command::new("git")

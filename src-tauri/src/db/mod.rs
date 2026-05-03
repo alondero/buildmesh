@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -42,7 +42,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     // Create schema (all tables + indexes, IF NOT EXISTS so they're idempotent)
     conn.execute_batch(
         "
-        CREATE TABLE IF NOT EXISTS projects (
+        CREATE TABLE IF NOT EXISTS meshes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             path TEXT NOT NULL UNIQUE,
@@ -51,9 +51,9 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS sessions (
+        CREATE TABLE IF NOT EXISTS agent_nodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id INTEGER NOT NULL REFERENCES projects(id),
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id),
             name TEXT NOT NULL,
             path TEXT NOT NULL,
             branch TEXT NOT NULL DEFAULT 'main',
@@ -67,14 +67,14 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
 
         CREATE TABLE IF NOT EXISTS checkpoints (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id INTEGER NOT NULL REFERENCES sessions(id),
+            node_id INTEGER NOT NULL REFERENCES agent_nodes(id),
             git_ref TEXT NOT NULL,
             turn_index INTEGER NOT NULL,
             message TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+        CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
         "
     )?;
 
@@ -109,6 +109,9 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             migrate_projects_layout(conn)?;
             migrate_projects_position(conn)?;
             migrate_sessions_worktree_name(conn)?;
+            if current_version < 6 {
+                migrate_mesh_rename(conn)?;
+            }
         }
 
         conn.execute(
@@ -196,7 +199,7 @@ fn migrate_sessions_worktree_name(conn: &Connection) -> SqlResult<()> {
 }
 
 fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
-    // Guard: only rename if old table names exist (upgrade path)
+    // Guard: only rename if old table names exist (upgrade path from v5)
     let projects_exists: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
@@ -206,7 +209,7 @@ fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
         .unwrap_or(false);
 
     if !projects_exists {
-        // Fresh install (meshes already exists via init()) — nothing to do
+        // Already migrated or fresh install — nothing to do
         return Ok(());
     }
 
@@ -259,7 +262,9 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
         migrate_projects_layout(conn)?;
         migrate_projects_position(conn)?;
         migrate_sessions_worktree_name(conn)?;
-        migrate_mesh_rename(conn)?;
+        if current_version < 6 {
+            migrate_mesh_rename(conn)?;
+        }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -284,10 +289,10 @@ pub(crate) fn reset_for_testing() {
 
 // --- Internal Helpers (no locking) ---
 
-fn get_project_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Project> {
-    let mut stmt = conn.prepare("SELECT id, name, path, layout, position, created_at FROM projects WHERE id = ?1")?;
+fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
+    let mut stmt = conn.prepare("SELECT id, name, path, layout, position, created_at FROM meshes WHERE id = ?1")?;
     stmt.query_row(params![id], |row| {
-        Ok(Project {
+        Ok(Mesh {
             id: row.get(0)?,
             name: row.get(1)?,
             path: row.get(2)?,
@@ -300,15 +305,15 @@ fn get_project_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Project> {
     })
 }
 
-fn get_session_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Session> {
+fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM sessions WHERE id = ?1"
+        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
+         FROM agent_nodes WHERE id = ?1"
     )?;
     stmt.query_row(params![id], |row| {
-        Ok(Session {
+        Ok(AgentNode {
             id: row.get(0)?,
-            project_id: row.get(1)?,
+            mesh_id: row.get(1)?,
             name: row.get(2)?,
             path: row.get(3)?,
             branch: row.get(4)?,
@@ -332,68 +337,68 @@ fn get_session_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Session> {
     })
 }
 
-// --- Project operations ---
+// --- Mesh operations ---
 
-pub fn create_project(name: &str, path: &str) -> SqlResult<Project> {
+pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
     let db = get().lock().unwrap();
 
-    // Check if project with this path already exists (idempotent upsert)
+    // Check if mesh with this path already exists (idempotent upsert)
     let existing: Option<i64> = db.query_row(
-        "SELECT id FROM projects WHERE path = ?1",
+        "SELECT id FROM meshes WHERE path = ?1",
         params![path],
         |row| row.get(0),
     ).ok();
 
     if let Some(id) = existing {
-        return get_project_by_id_inner(&db, id);
+        return get_mesh_by_id_inner(&db, id);
     }
 
     // Append at end of position list
     let next_position: i64 = db.query_row(
-        "SELECT COALESCE(MAX(position), 0) + 1 FROM projects",
+        "SELECT COALESCE(MAX(position), 0) + 1 FROM meshes",
         [],
         |row| row.get(0),
     )?;
 
     db.execute(
-        "INSERT INTO projects (name, path, layout, position) VALUES (?1, ?2, 'grid', ?3)",
+        "INSERT INTO meshes (name, path, layout, position) VALUES (?1, ?2, 'grid', ?3)",
         params![name, path, next_position],
     )?;
     let id = db.last_insert_rowid();
-    get_project_by_id_inner(&db, id)
+    get_mesh_by_id_inner(&db, id)
 }
 
-pub fn get_project_by_id(id: i64) -> SqlResult<Project> {
+pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
     let db = get().lock().unwrap();
-    get_project_by_id_inner(&db, id)
+    get_mesh_by_id_inner(&db, id)
 }
 
-pub fn update_project_layout(id: i64, layout: &str) -> SqlResult<()> {
+pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
     db.execute(
-        "UPDATE projects SET layout = ?1 WHERE id = ?2",
+        "UPDATE meshes SET layout = ?1 WHERE id = ?2",
         params![layout, id],
     )?;
     Ok(())
 }
 
-pub fn update_project_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
+pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
     if updates.is_empty() { return Ok(()); }
     let db = get().lock().unwrap();
     for (id, pos) in updates {
         db.execute(
-            "UPDATE projects SET position = ?1 WHERE id = ?2",
+            "UPDATE meshes SET position = ?1 WHERE id = ?2",
             params![pos, id],
         )?;
     }
     Ok(())
 }
 
-pub fn list_projects() -> SqlResult<Vec<Project>> {
+pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
     let db = get().lock().unwrap();
-    let mut stmt = db.prepare("SELECT id, name, path, layout, position, created_at FROM projects ORDER BY position ASC, name ASC")?;
+    let mut stmt = db.prepare("SELECT id, name, path, layout, position, created_at FROM meshes ORDER BY position ASC, name ASC")?;
     let rows = stmt.query_map([], |row| {
-        Ok(Project {
+        Ok(Mesh {
             id: row.get(0)?,
             name: row.get(1)?,
             path: row.get(2)?,
@@ -407,58 +412,58 @@ pub fn list_projects() -> SqlResult<Vec<Project>> {
     rows.collect()
 }
 
-pub fn delete_project(id: i64) -> SqlResult<()> {
+pub fn delete_mesh(id: i64) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    db.execute("DELETE FROM sessions WHERE project_id = ?1", params![id])?;
-    db.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+    db.execute("DELETE FROM agent_nodes WHERE mesh_id = ?1", params![id])?;
+    db.execute("DELETE FROM meshes WHERE id = ?1", params![id])?;
     Ok(())
 }
 
-// --- Session operations ---
+// --- Agent Node operations ---
 
-pub fn create_session(
-    project_id: i64,
+pub fn create_agent_node(
+    mesh_id: i64,
     name: &str,
     path: &str,
     branch: &str,
     env: EnvType,
     provider: Provider,
     worktree_name: Option<&str>,
-) -> SqlResult<Session> {
+) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
     db.execute(
-        "INSERT INTO sessions (project_id, name, path, branch, env, provider, status, worktree_name)
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7)",
-        params![project_id, name, path, branch, env.to_string(), provider.to_string(), worktree_name],
+        params![mesh_id, name, path, branch, env.to_string(), provider.to_string(), worktree_name],
     )?;
     let id = db.last_insert_rowid();
-    get_session_by_id_inner(&db, id)
+    get_agent_node_by_id_inner(&db, id)
 }
 
-pub fn update_session_name(id: i64, name: &str) -> SqlResult<()> {
+pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
     db.execute(
-        "UPDATE sessions SET name = ?1 WHERE id = ?2",
+        "UPDATE agent_nodes SET name = ?1 WHERE id = ?2",
         params![name, id],
     )?;
     Ok(())
 }
 
-pub fn get_session_by_id(id: i64) -> SqlResult<Session> {
+pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
-    get_session_by_id_inner(&db, id)
+    get_agent_node_by_id_inner(&db, id)
 }
 
-pub fn list_sessions() -> SqlResult<Vec<Session>> {
+pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM sessions WHERE status != 'archived' ORDER BY created_at DESC"
+        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
+         FROM agent_nodes WHERE status != 'archived' ORDER BY created_at DESC"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(Session {
+        Ok(AgentNode {
             id: row.get(0)?,
-            project_id: row.get(1)?,
+            mesh_id: row.get(1)?,
             name: row.get(2)?,
             path: row.get(3)?,
             branch: row.get(4)?,
@@ -483,16 +488,16 @@ pub fn list_sessions() -> SqlResult<Vec<Session>> {
     rows.collect()
 }
 
-pub fn list_sessions_by_project(project_id: i64) -> SqlResult<Vec<Session>> {
+pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM sessions WHERE project_id = ?1 ORDER BY created_at DESC"
+        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
+         FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at DESC"
     )?;
-    let rows = stmt.query_map(params![project_id], |row| {
-        Ok(Session {
+    let rows = stmt.query_map(params![mesh_id], |row| {
+        Ok(AgentNode {
             id: row.get(0)?,
-            project_id: row.get(1)?,
+            mesh_id: row.get(1)?,
             name: row.get(2)?,
             path: row.get(3)?,
             branch: row.get(4)?,
@@ -517,51 +522,51 @@ pub fn list_sessions_by_project(project_id: i64) -> SqlResult<Vec<Session>> {
     rows.collect()
 }
 
-pub fn update_session_status(id: i64, status: SessionStatus) -> SqlResult<()> {
+pub fn update_agent_node_status(id: i64, status: SessionStatus) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    db.execute("UPDATE sessions SET status = ?1 WHERE id = ?2", params![status.to_db_str(), id])?;
+    db.execute("UPDATE agent_nodes SET status = ?1 WHERE id = ?2", params![status.to_db_str(), id])?;
     Ok(())
 }
 
-pub fn archive_session(id: i64) -> SqlResult<()> {
-    update_session_status(id, SessionStatus::Archived)
+pub fn archive_agent_node(id: i64) -> SqlResult<()> {
+    update_agent_node_status(id, SessionStatus::Archived)
 }
 
-pub fn delete_session(id: i64) -> SqlResult<()> {
+pub fn delete_agent_node(id: i64) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    db.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+    db.execute("DELETE FROM agent_nodes WHERE id = ?1", params![id])?;
     Ok(())
 }
 
-pub fn restore_session(id: i64) -> SqlResult<()> {
-    update_session_status(id, SessionStatus::Idle)
+pub fn restore_agent_node(id: i64) -> SqlResult<()> {
+    update_agent_node_status(id, SessionStatus::Idle)
 }
 
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    db.execute("UPDATE sessions SET cli_session_id = ?1 WHERE id = ?2", params![cli_id, id])?;
+    db.execute("UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2", params![cli_id, id])?;
     Ok(())
 }
 
-pub fn mark_running_sessions_suspended() -> SqlResult<usize> {
+pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
     let db = get().lock().unwrap();
     let count = db.execute(
-        "UPDATE sessions SET status = 'suspended' WHERE status IN ('running', 'awaiting_input')",
+        "UPDATE agent_nodes SET status = 'suspended' WHERE status IN ('running', 'awaiting_input')",
         [],
     )?;
     Ok(count)
 }
 
-pub fn list_suspended_sessions() -> SqlResult<Vec<Session>> {
+pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, project_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM sessions WHERE status = 'suspended' AND cli_session_id IS NOT NULL"
+        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
+         FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(Session {
+        Ok(AgentNode {
             id: row.get(0)?,
-            project_id: row.get(1)?,
+            mesh_id: row.get(1)?,
             name: row.get(2)?,
             path: row.get(3)?,
             branch: row.get(4)?,
@@ -589,26 +594,26 @@ pub fn list_suspended_sessions() -> SqlResult<Vec<Session>> {
 // --- Checkpoint operations ---
 
 pub fn create_checkpoint(
-    session_id: i64,
+    node_id: i64,
     git_ref: &str,
     turn_index: i32,
     message: Option<&str>,
 ) -> SqlResult<Checkpoint> {
     let db = get().lock().unwrap();
     db.execute(
-        "INSERT INTO checkpoints (session_id, git_ref, turn_index, message) VALUES (?1, ?2, ?3, ?4)",
-        params![session_id, git_ref, turn_index, message],
+        "INSERT INTO checkpoints (node_id, git_ref, turn_index, message) VALUES (?1, ?2, ?3, ?4)",
+        params![node_id, git_ref, turn_index, message],
     )?;
     let id = db.last_insert_rowid();
-    
+
     let mut stmt = db.prepare(
-        "SELECT id, session_id, git_ref, turn_index, message, created_at
+        "SELECT id, node_id, git_ref, turn_index, message, created_at
          FROM checkpoints WHERE id = ?1"
     )?;
     stmt.query_row(params![id], |row| {
         Ok(Checkpoint {
             id: row.get(0)?,
-            session_id: row.get(1)?,
+            node_id: row.get(1)?,
             git_ref: row.get(2)?,
             turn_index: row.get(3)?,
             message: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
@@ -622,13 +627,13 @@ pub fn create_checkpoint(
 pub fn get_checkpoint_by_id(id: i64) -> SqlResult<Checkpoint> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, session_id, git_ref, turn_index, message, created_at
+        "SELECT id, node_id, git_ref, turn_index, message, created_at
          FROM checkpoints WHERE id = ?1"
     )?;
     stmt.query_row(params![id], |row| {
         Ok(Checkpoint {
             id: row.get(0)?,
-            session_id: row.get(1)?,
+            node_id: row.get(1)?,
             git_ref: row.get(2)?,
             turn_index: row.get(3)?,
             message: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
@@ -639,16 +644,16 @@ pub fn get_checkpoint_by_id(id: i64) -> SqlResult<Checkpoint> {
     })
 }
 
-pub fn list_checkpoints(session_id: i64) -> SqlResult<Vec<Checkpoint>> {
+pub fn list_checkpoints(node_id: i64) -> SqlResult<Vec<Checkpoint>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, session_id, git_ref, turn_index, message, created_at
-         FROM checkpoints WHERE session_id = ?1 ORDER BY turn_index ASC"
+        "SELECT id, node_id, git_ref, turn_index, message, created_at
+         FROM checkpoints WHERE node_id = ?1 ORDER BY turn_index ASC"
     )?;
-    let rows = stmt.query_map(params![session_id], |row| {
+    let rows = stmt.query_map(params![node_id], |row| {
         Ok(Checkpoint {
             id: row.get(0)?,
-            session_id: row.get(1)?,
+            node_id: row.get(1)?,
             git_ref: row.get(2)?,
             turn_index: row.get(3)?,
             message: row.get::<_, Option<String>>(4)?.unwrap_or_default(),

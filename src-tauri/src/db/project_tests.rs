@@ -20,26 +20,26 @@ mod tests {
 
         crate::db::init(&temp_path).unwrap();
 
-        // Create first project
-        let first = crate::db::create_project("First Project", "/tmp/dup-test").unwrap();
+        // Create first mesh
+        let first = crate::db::create_mesh("First Project", "/tmp/dup-test").unwrap();
         assert_eq!(first.name, "First Project");
         assert_eq!(first.layout, "grid");
 
-        // Act: create another project with the same path but different name
-        let second_result = crate::db::create_project("Second Project", "/tmp/dup-test");
+        // Act: create another mesh with the same path but different name
+        let second_result = crate::db::create_mesh("Second Project", "/tmp/dup-test");
 
         // Cleanup
         drop(crate::db::get().lock().unwrap());
         std::fs::remove_file(&temp_path).ok();
 
-        // Assert: should return Ok(existing_project), NOT Err(UNIQUE constraint)
+        // Assert: should return Ok(existing_mesh), NOT Err(UNIQUE constraint)
         match second_result {
-            Ok(project) => {
-                assert_eq!(project.name, "First Project", "should return the FIRST (existing) project");
-                assert_eq!(project.layout, "grid", "should preserve original layout");
+            Ok(mesh) => {
+                assert_eq!(mesh.name, "First Project", "should return the FIRST (existing) mesh");
+                assert_eq!(mesh.layout, "grid", "should preserve original layout");
             }
             Err(e) => {
-                panic!("create_project with duplicate path should NOT error, but got: {}", e);
+                panic!("create_mesh with duplicate path should NOT error, but got: {}", e);
             }
         }
     }

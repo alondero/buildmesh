@@ -27,7 +27,7 @@ pub async fn register_attention_session(
     }
 
     // Update database status
-    db::update_session_status(session_id, SessionStatus::AwaitingInput)
+    db::update_agent_node_status(session_id, SessionStatus::AwaitingInput)
         .map_err(|e| e.to_string())?;
 
     // Emit event to frontend
@@ -36,7 +36,7 @@ pub async fn register_attention_session(
     }))
     .map_err(|e| e.to_string())?;
 
-    crate::session_namer::record_turn(session_id, app.clone());
+    crate::node_namer::record_turn(session_id, app.clone());
 
     tracing::info!("Session {} awaiting user input", session_id);
     Ok(())
@@ -55,7 +55,7 @@ pub async fn clear_attention_session(
     }
 
     // Update database status back to running
-    db::update_session_status(session_id, SessionStatus::Running)
+    db::update_agent_node_status(session_id, SessionStatus::Running)
         .map_err(|e| e.to_string())?;
 
     // Emit event to frontend

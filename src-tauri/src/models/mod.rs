@@ -107,24 +107,24 @@ impl SessionStatus {
     }
 }
 
-/// A project — top-level folder containing sessions
+/// A mesh — top-level folder containing agent nodes
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Project {
+pub struct Mesh {
     pub id: i64,
     pub name: String,
-    pub path: String, // absolute path to project root
+    pub path: String, // absolute path to mesh root
     pub layout: String, // 'grid' or 'single'
     pub position: i64, // sort order in sidebar
     pub created_at: DateTime<Utc>,
 }
 
-/// A session — isolated agent working directory
+/// An agent node — isolated agent working directory
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Session {
+pub struct AgentNode {
     pub id: i64,
-    pub project_id: i64,
+    pub mesh_id: i64,
     pub name: String,
-    pub path: String,         // absolute path to session directory
+    pub path: String,         // absolute path to node directory
     pub branch: String,
     pub env: EnvType,         // windows or wsl
     pub provider: Provider,   // anthropic or minimax
@@ -134,11 +134,11 @@ pub struct Session {
     pub created_at: DateTime<Utc>,
 }
 
-/// A checkpoint — git ref snapshot of session state
+/// A checkpoint — git ref snapshot of node state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: i64,
-    pub session_id: i64,
+    pub node_id: i64,
     pub git_ref: String,      // e.g., "conductor/checkpoints/c1"
     pub turn_index: i32,      // which turn this was created at
     pub message: String,     // optional description
