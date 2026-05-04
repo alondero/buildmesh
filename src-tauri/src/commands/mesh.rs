@@ -89,3 +89,30 @@ pub async fn update_project_layout(project_id: i64, layout: String) -> Result<()
 pub async fn update_project_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
     db::update_mesh_positions_batch(&updates).map_err(|e| e.to_string())
 }
+
+/// Get or create a mesh token for remote access authentication
+#[command]
+pub async fn get_mesh_token(mesh_id: i64) -> Result<String, String> {
+    db::get_or_create_mesh_token(mesh_id).map_err(|e| e.to_string())
+}
+
+/// Get the local machine's LAN IP address.
+#[command]
+pub async fn get_local_ip() -> Result<String, String> {
+    match local_ip_address::local_ip() {
+        Ok(ip) => {
+            let ip_str = ip.to_string();
+            // Skip Docker/NPIP/Tunnel interfaces
+            if !ip_str.starts_with("172.16.")
+               && !ip_str.starts_with("192.168.56.")
+               && !ip_str.starts_with("10.0.0.")
+               && ip_str != "0.0.0.0"
+            {
+                Ok(ip_str)
+            } else {
+                Err("no suitable LAN interface found".to_string())
+            }
+        }
+        Err(e) => Err(format!("failed to get local IP: {}", e)),
+    }
+}

@@ -44,7 +44,7 @@ impl ProcessRegistry {
     }
 }
 
-static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
+pub(crate) static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(ProcessRegistry::new())));
 
 static LAST_INPUT_TIME: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, std::time::Instant>>>> =
