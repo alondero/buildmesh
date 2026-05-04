@@ -3,8 +3,10 @@ import { useAgentNodeStore, AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { AgentTerminal } from '../Terminal/Terminal';
+import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
 import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
+import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { listen, emit } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession, getGitSummary, type GitSummary } from '../../lib/tauri';
 import { FILE_CHANGE, FIT_TERMINALS } from '../../lib/events';
@@ -24,6 +26,7 @@ export function SessionView() {
   const changedFilesOpen = useUIStore(state => state.changedFilesOpen);
   const changedFilesNodeId = useUIStore(state => state.changedFilesNodeId);
   const [selectedDiff, setSelectedDiff] = useState<{ file: GitStatus; diff: DiffResult } | null>(null);
+  const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' } | null>(null);
 
   const filteredNodes = useMemo(() => {
     if (selectedMeshId === null) {
@@ -96,7 +99,7 @@ export function SessionView() {
       {/* Main content area with grid and optional panel */}
       <div className="flex-1 flex overflow-hidden">
         {/* Grid of filtered nodes */}
-        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} changedFilesNodeId={changedFilesNodeId} />
+        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} changedFilesNodeId={changedFilesNodeId} onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })} buildRunOpen={openBuildRun} setBuildRunOpen={setOpenBuildRun} />
 
         {/* Changed Files Panel */}
         <ChangedFilesPanel
@@ -122,7 +125,7 @@ export function SessionView() {
 const gridSummaryCache = new Map<string, GitSummary>();
 const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
 
-function GridNodeHeader({ node, changedFilesNodeId }: { node: AgentNode; changedFilesNodeId: number | null }) {
+function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: { node: AgentNode; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void }) {
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   const [summary, setSummary] = useState<GitSummary | null>(null);
@@ -186,6 +189,7 @@ function GridNodeHeader({ node, changedFilesNodeId }: { node: AgentNode; changed
       </div>
       <div className="flex items-center gap-1.5">
         <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{node.env.toUpperCase()}</span>
+        <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <button
           onClick={handleClose}
           className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors text-[10px]"
@@ -198,7 +202,7 @@ function GridNodeHeader({ node, changedFilesNodeId }: { node: AgentNode; changed
   );
 }
 
-function GridLayout({ nodes, onSlashCommand, changedFilesNodeId }: { nodes: AgentNode[]; onSlashCommand: (nodeId: number, cmd: string) => void; changedFilesNodeId: number | null }) {
+function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, buildRunOpen, setBuildRunOpen }: { nodes: AgentNode[]; onSlashCommand: (nodeId: number, cmd: string) => void; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void; buildRunOpen: { nodeId: number; mode: 'build' | 'run' } | null; setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' } | null) => void }) {
   const count = nodes.length;
   let gridCols = "grid-cols-1";
   let gridRows = "grid-rows-1";
@@ -219,11 +223,19 @@ function GridLayout({ nodes, onSlashCommand, changedFilesNodeId }: { nodes: Agen
   return (
     <div className={`flex-1 grid gap-1.5 p-1.5 bg-bg-surface ${gridCols} ${gridRows}`}>
       {nodes.map((node) => {
+        const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
         return (
           <div key={node.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
-            <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} />
-            <div className="flex-1 overflow-hidden bg-black">
+            <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} onBuildRun={onBuildRun} />
+            <div className="flex-1 overflow-hidden bg-black relative">
               <AgentTerminal sessionId={node.id} />
+              {isBuildRunOpen && (
+                <BuildRunTerminal
+                  sessionId={node.id}
+                  mode={isBuildRunOpen}
+                  onClose={() => setBuildRunOpen(null)}
+                />
+              )}
             </div>
             <div className="opacity-40 group-hover:opacity-100 transition-opacity">
               <SlashCommandBar onCommand={(cmd) => onSlashCommand(node.id, cmd)} />

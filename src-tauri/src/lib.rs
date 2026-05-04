@@ -128,6 +128,10 @@ pub fn run() {
             commands::agent::debug_crash_snapshot,
             // Checkpoint
             commands::checkpoint::create_checkpoint,
+            // Build/Run
+            commands::build_run::build_run,
+            commands::build_run::get_mesh_config,
+            commands::build_run::close_build_run,
             commands::checkpoint::list_checkpoints,
             commands::checkpoint::revert_to_checkpoint,
             commands::checkpoint::diff_checkpoints,
