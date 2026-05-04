@@ -83,6 +83,24 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId: nodeId, data }).catch(console.error);
       });
 
+      // Handle Ctrl+V / Cmd+V paste explicitly using the system clipboard API.
+      // xterm.js v6 handles paste via the textarea's paste event, which on Windows can
+      // fail to fire correctly under ConPTY focus management. Using the browser's
+      // navigator.clipboard API gives us reliable cross-platform paste semantics.
+      // We route through send_to_agent (not write_to_agent) so that pasted input
+      // triggers LAST_INPUT_TIME suppression and attention-cleared events — same as
+      // typed input — and appends \n since paste is a user submit action.
+      term.element?.addEventListener('paste', async (e: ClipboardEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const text = e.clipboardData
+          ? e.clipboardData.getData('text/plain')
+          : await navigator.clipboard.readText().catch(() => '');
+        if (text) {
+          invoke('send_to_agent', { session_id: nodeId, input: text }).catch(console.error);
+        }
+      });
+
       term.onResize(({ cols, rows }) => {
         console.log(`[TerminalManager] Resizing node ${nodeId} to ${cols}x${rows}`);
         invoke('resize_agent', { sessionId: nodeId, rows, cols }).catch(err => {
