@@ -132,7 +132,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       const node = await invoke<AgentNode>('create_session', {
         meshId, name, path, branch, provider
       });
-      set((state) => ({ agentNodes: [...state.agentNodes, node] }));
+      set((state) => ({ agentNodes: [node, ...state.agentNodes] }));
       await get().setActiveNode(node.id);
       return node;
     } catch (e) {

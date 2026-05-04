@@ -146,6 +146,7 @@ export const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
 
 // Incremented when GIT_CHANGED fires to bust cache in GridNodeHeader useEffects
 let gridSummaryCacheVersion = 0;
+
 function GridNodeHeader({ node, changedFilesNodeId, onBuildRun, cacheVersion }: { node: AgentNode; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void; cacheVersion: number }) {
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
