@@ -32,8 +32,13 @@ const PROVIDERS = isMac
   : ALL_PROVIDERS;
 
 // Module-level cache for git summaries (keyed by path)
-const summaryCache = new Map<string, GitSummary>();
-const pendingFetches = new Map<string, Promise<GitSummary | null>>();
+export const summaryCache = new Map<string, GitSummary>();
+export const pendingFetches = new Map<string, Promise<GitSummary | null>>();
+
+export function invalidateSummaryCache(path: string) {
+  summaryCache.delete(path);
+  pendingFetches.delete(path);
+}
 
 export function Sidebar() {
   const meshes = useMeshStore(state => state.meshes);

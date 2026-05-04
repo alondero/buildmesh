@@ -3,7 +3,7 @@
 use crate::db;
 use crate::models::Checkpoint;
 use git2::Repository;
-use tauri::command;
+use tauri::{command, Emitter};
 
 /// Create a checkpoint — commits current state to a private git ref
 #[command]
@@ -11,6 +11,7 @@ pub async fn create_checkpoint(
     session_id: i64,
     turn_index: i32,
     message: Option<String>,
+    app: tauri::AppHandle,
 ) -> Result<Checkpoint, String> {
     let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
@@ -62,8 +63,13 @@ pub async fn create_checkpoint(
     ).map_err(|e| e.to_string())?;
 
     let git_ref = format!("conductor/checkpoints/c{}", turn_index);
-    db::create_checkpoint(session_id, &git_ref, turn_index, message.as_deref())
-        .map_err(|e| e.to_string())
+    let checkpoint = db::create_checkpoint(session_id, &git_ref, turn_index, message.as_deref())
+        .map_err(|e| e.to_string())?;
+
+    // Invalidate frontend git summary cache for this path
+    let _ = app.emit("git-changed", serde_json::json!({ "path": &node.path }));
+
+    Ok(checkpoint)
 }
 
 /// List checkpoints for a session
@@ -74,7 +80,7 @@ pub async fn list_checkpoints(session_id: i64) -> Result<Vec<Checkpoint>, String
 
 /// Revert session to a specific checkpoint
 #[command]
-pub async fn revert_to_checkpoint(checkpoint_id: i64) -> Result<(), String> {
+pub async fn revert_to_checkpoint(checkpoint_id: i64, app: tauri::AppHandle) -> Result<(), String> {
     let checkpoint = db::get_checkpoint_by_id(checkpoint_id)
         .map_err(|e| e.to_string())?;
     let node = db::get_agent_node_by_id(checkpoint.node_id)
@@ -93,6 +99,9 @@ pub async fn revert_to_checkpoint(checkpoint_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     repo.set_head(&ref_name)
         .map_err(|e| e.to_string())?;
+
+    // Invalidate frontend git summary cache for this path
+    let _ = app.emit("git-changed", serde_json::json!({ "path": &node.path }));
 
     Ok(())
 }

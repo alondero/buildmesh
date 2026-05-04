@@ -9,7 +9,8 @@ import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { listen, emit } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession, getGitSummary, type GitSummary } from '../../lib/tauri';
-import { FILE_CHANGE, FIT_TERMINALS } from '../../lib/events';
+import { FILE_CHANGE, FIT_TERMINALS, GIT_CHANGED } from '../../lib/events';
+import { invalidateSummaryCache } from '../Sidebar/Sidebar';
 import type { GitStatus, DiffResult } from '../../lib/tauri';
 
 export function SessionView() {
@@ -41,6 +42,8 @@ export function SessionView() {
     : activeNode;
   const nodePath = changedFilesNode?.path || '';
 
+  const closeChangedFiles = useUIStore(state => state.closeChangedFiles);
+
   useEffect(() => {
     if (!activeNode) return;
     watchSession(activeNode.id).catch(console.error);
@@ -52,6 +55,21 @@ export function SessionView() {
       unlisten.then(fn => fn());
     };
   }, [activeNode?.id]);
+
+  useEffect(() => {
+    closeChangedFiles();
+  }, [selectedMeshId, closeChangedFiles]);
+
+  useEffect(() => {
+    const unlisten = listen(GIT_CHANGED, (event) => {
+      const { path } = event.payload as { path: string };
+      gridSummaryCache.delete(path);
+      invalidateSummaryCache(path);
+    });
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, []);
 
   // Auto-select first node when switching to a mesh that doesn't include the active node
   useEffect(() => {
@@ -122,8 +140,8 @@ export function SessionView() {
 }
 
 // Module-level cache for git summaries (keyed by path)
-const gridSummaryCache = new Map<string, GitSummary>();
-const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
+export const gridSummaryCache = new Map<string, GitSummary>();
+export const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
 
 function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: { node: AgentNode; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void }) {
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
