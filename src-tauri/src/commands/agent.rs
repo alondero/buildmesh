@@ -50,6 +50,53 @@ static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
 static LAST_INPUT_TIME: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, std::time::Instant>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+/// Per-session pending attention — used to debounce prompt detection.
+/// When a prompt is detected, we set a 1-second window. If more output arrives
+/// within that window, the agent is still working and we cancel the pending event.
+/// If the window expires, the agent is genuinely waiting for input.
+struct PendingAttention {
+    fire_at: std::time::Instant,
+}
+
+static PENDING_ATTENTION: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, PendingAttention>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+// Pre-computed lowercase patterns — avoids per-call allocation in is_tool_result_output
+static TOOL_RESULT_PATTERNS: once_cell::sync::Lazy<Vec<&'static str>> =
+    once_cell::sync::Lazy::new(|| {
+        vec![
+            "exit code 0",
+            "exit code 1",
+            "process finished",
+            "created file",
+            "modified file",
+            "deleted file",
+            "written to",
+            "error:",
+            "failed to",
+            "panic:",
+        ]
+    });
+
+/// Returns true if the data looks like a tool execution result, indicating
+/// the agent is mid-turn and not yet waiting for input.
+fn is_tool_result_output(data: &str) -> bool {
+    let data_lower = data.trim().to_lowercase();
+    if data_lower.is_empty() {
+        return false;
+    }
+    for pattern in TOOL_RESULT_PATTERNS.iter() {
+        if data_lower.contains(pattern) {
+            return true;
+        }
+    }
+    // Bash prompts at end of line — agent running a sub-command
+    if data.trim().ends_with("$ ") || data.trim().ends_with('$') {
+        return true;
+    }
+    false
+}
+
 
 // ---------------------------------------------------------------------------
 // Helper functions for spawn_agent
@@ -288,12 +335,33 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                             .map(|t| t.elapsed() < std::time::Duration::from_secs(3))
                             .unwrap_or(false);
 
-                        if !suppress {
-                            crate::node_namer::record_turn(session_id, app_clone.clone());
-                            let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
-                            let _ = app_clone.emit("attention-needed", serde_json::json!({
-                                "session_id": session_id
-                            }));
+                        if !suppress && !is_tool_result_output(&data) {
+                            // Set 1-second debounce — if more output arrives within
+                            // 1s the pending is cancelled and agent is still working.
+                            let mut pending = PENDING_ATTENTION.lock().unwrap();
+                            pending.insert(session_id, PendingAttention {
+                                fire_at: std::time::Instant::now()
+                                    + std::time::Duration::from_millis(1000),
+                            });
+                        }
+                    }
+
+                    // Cancel pending on new output (agent still working) AND fire
+                    // any expired attention in a single lock acquisition.
+                    {
+                        let mut pending = PENDING_ATTENTION.lock().unwrap();
+                        pending.remove(&session_id); // cancel on new output
+
+                        if let Some(p) = pending.get(&session_id) {
+                            if p.fire_at <= std::time::Instant::now() {
+                                pending.remove(&session_id);
+                                drop(pending); // release lock before DB/event calls
+                                crate::node_namer::record_turn(session_id, app_clone.clone());
+                                let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
+                                let _ = app_clone.emit("attention-needed", serde_json::json!({
+                                    "session_id": session_id
+                                }));
+                            }
                         }
                     }
 
