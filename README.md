@@ -1,5 +1,7 @@
 # Buildmesh
 
+![Buildmesh Wordmark](./src/assets/wordmark.png)
+
 Buildmesh is a high-performance Tauri desktop application for orchestrating multiple AI agents (Claude Code, Gemini, Open Code) across multiple meshes concurrently. It provides a tmux-like multiplexer environment designed for developers who need to manage parallel agentic workflows.
 
 ## Features
