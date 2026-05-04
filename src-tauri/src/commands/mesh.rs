@@ -90,10 +90,10 @@ pub async fn update_project_positions(updates: Vec<(i64, i64)>) -> Result<(), St
     db::update_mesh_positions_batch(&updates).map_err(|e| e.to_string())
 }
 
-/// Get or create a mesh token for remote access authentication
+/// Get or create the root remote access token for the whole buildmesh instance
 #[command]
-pub async fn get_mesh_token(mesh_id: i64) -> Result<String, String> {
-    db::get_or_create_mesh_token(mesh_id).map_err(|e| e.to_string())
+pub async fn get_root_token() -> Result<String, String> {
+    db::get_or_create_root_token().map_err(|e| e.to_string())
 }
 
 /// Get the local machine's LAN IP address.

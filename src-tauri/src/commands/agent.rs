@@ -377,6 +377,9 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                             "line": data
                         }),
                     );
+
+                    // Forward to any connected mobile WebSocket clients
+                    crate::http_server::send_pty_output(session_id, data.into_bytes());
                 }
                 Err(e) => {
                     tracing::error!("PTY read error for session {}: {}", session_id, e);
@@ -497,6 +500,8 @@ async fn spawn_agent_inner(
     // 9. Start reader thread with spawn timestamp for early-exit detection
     let spawned_at = std::time::Instant::now();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
+    // Ensure mobile broadcast channel exists before reader starts
+    crate::http_server::ensure_pty_channel(session_id);
     start_reader(app.clone(), session_id, reader, spawned_at, provider_enum);
 
     tracing::info!(

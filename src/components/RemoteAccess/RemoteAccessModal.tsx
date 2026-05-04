@@ -3,7 +3,6 @@ import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'qrcode';
 
 interface RemoteAccessModalProps {
-  meshId: number;
   onClose: () => void;
 }
 
@@ -16,7 +15,7 @@ async function getLocalIp(): Promise<string> {
   }
 }
 
-export function RemoteAccessModal({ meshId, onClose }: RemoteAccessModalProps) {
+export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [ip, setIp] = useState<string>('discovering...');
   const [error, setError] = useState<string | null>(null);
@@ -25,15 +24,11 @@ export function RemoteAccessModal({ meshId, onClose }: RemoteAccessModalProps) {
   useEffect(() => {
     const init = async () => {
       try {
-        // Get token for this mesh
-        const meshToken = await invoke<string>('get_mesh_token', { meshId });
-
-        // Get local IP
+        const rootToken = await invoke<string>('get_root_token');
         const localIp = await getLocalIp();
         setIp(localIp);
 
-        // Generate QR code
-        const url = `http://${localIp}:${PORT}/?token=${meshToken}`;
+        const url = `http://${localIp}:${PORT}/?token=${rootToken}`;
         const dataUrl = await QRCode.toDataURL(url, {
           width: 240,
           margin: 2,
@@ -45,13 +40,10 @@ export function RemoteAccessModal({ meshId, onClose }: RemoteAccessModalProps) {
       }
     };
     init();
-  }, [meshId]);
+  }, []);
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
-      onClick={onClose}
-    >
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       {/* Backdrop */}
       <div className="absolute inset-0 bg-black/70" />
 

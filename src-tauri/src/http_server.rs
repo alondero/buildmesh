@@ -3,12 +3,13 @@
 //! Serves the mobile web app and handles WebSocket terminal connections
 //! for remote access from a phone on the same network.
 
-use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::{accept_async, tungstenite};
@@ -25,7 +26,7 @@ type PtySenders = HashMap<i64, broadcast::Sender<Vec<u8>>>;
 
 struct HttpServerState {
     _broadcast_tx: broadcast::Sender<Vec<u8>>,
-    _pty_outputs: Arc<RwLock<PtySenders>>,
+    pty_outputs: Arc<RwLock<PtySenders>>,
 }
 
 static SERVER_STATE: OnceLock<Arc<HttpServerState>> = OnceLock::new();
@@ -40,7 +41,7 @@ pub fn start_http_server(port: u16) {
     let (broadcast_tx, _) = broadcast::channel(1024);
     let state = Arc::new(HttpServerState {
         _broadcast_tx: broadcast_tx,
-        _pty_outputs: Arc::new(RwLock::new(HashMap::new())),
+        pty_outputs: Arc::new(RwLock::new(HashMap::new())),
     });
     let _ = SERVER_STATE.set(state.clone());
     drop(state);
@@ -71,88 +72,191 @@ pub fn start_http_server(port: u16) {
     });
 }
 
-async fn handle_connection(stream: TcpStream, addr: SocketAddr, state: Arc<HttpServerState>) {
-    // Try WebSocket upgrade first
-    let ws_stream = match accept_async(stream).await {
-        Ok(ws) => ws,
-        Err(_e) => {
-            // Not a WebSocket upgrade — serve HTTP response
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-                MOBILE_APP_HTML.len(),
-                MOBILE_APP_HTML
-            );
-            if let Ok(mut stream) = tokio::net::TcpStream::connect(addr).await {
-                use tokio::io::AsyncWriteExt;
-                let _ = stream.write_all(response.as_bytes()).await;
-            }
+async fn handle_connection(stream: TcpStream, _addr: SocketAddr, state: Arc<HttpServerState>) {
+    // Read the first line of the HTTP request to check method and path
+    let mut lines = tokio::io::BufStream::new(stream);
+    let mut request_line = String::new();
+    if lines.read_line(&mut request_line).await.is_err() {
+        return;
+    }
+
+    let request_line = request_line.trim();
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+
+    let token = extract_token_from_path(parts[1]);
+
+    // Read and discard remaining headers
+    let mut headers = String::new();
+    while headers.lines().count() == 0 || !headers.ends_with("\r\n\r\n") {
+        if lines.read_line(&mut headers).await.is_err() { break; }
+        if headers.trim().is_empty() { break; }
+    }
+
+    // WebSocket upgrade path: /ws/terminal/{nodeId}?token=xxx
+    if parts[0] == "GET" && parts[1].starts_with("/ws/terminal/") {
+        let ws_token = token.clone();
+        let path = parts[1];
+
+        // Extract nodeId from path like /ws/terminal/306?token=xxx
+        let node_id: Option<i64> = path.split('/').nth(3)
+            .map(|s| s.split('?').next().unwrap_or(s).parse().ok())
+            .flatten();
+
+        if node_id.is_none() {
+            let error = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
             return;
         }
-    };
+        let node_id = node_id.unwrap();
 
-    // WebSocket connection established
-    let (ws_tx, mut ws_rx) = ws_stream.split();
-    let mut broadcast_rx = state._broadcast_tx.subscribe();
+        if !validate_token(ws_token) {
+            let error = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
+            return;
+        }
 
-    // Read task: forward mobile messages to PTY (future use)
-    let read_handle = tokio::spawn(async move {
-        while let Some(msg) = ws_rx.next().await {
-            match msg {
-                Ok(tungstenite::Message::Text(text)) => {
-                    tracing::debug!("WS text from {}: {} bytes", addr, text.len());
-                }
-                Ok(tungstenite::Message::Binary(data)) => {
-                    tracing::debug!("WS binary from {}: {} bytes", addr, data.len());
-                }
-                Ok(tungstenite::Message::Close(_)) => {
-                    tracing::debug!("WS close from {}", addr);
-                    break;
-                }
-                Err(e) => {
-                    tracing::error!("WS read error from {}: {}", addr, e);
-                    break;
-                }
-                _ => {}
+        // Perform WebSocket upgrade
+        let stream = lines.into_inner();
+        match accept_async(stream).await {
+            Ok(ws_stream) => {
+                tracing::info!("WebSocket connected for node {}", node_id);
+                tauri::async_runtime::spawn(handle_ws_connection(ws_stream, node_id));
+            }
+            Err(e) => {
+                tracing::error!("WebSocket upgrade failed: {}", e);
             }
         }
-    });
-
-    // Write task: forward broadcast to mobile
-    let mut ws_tx = ws_tx;
-    let write_handle = tokio::spawn(async move {
-        loop {
-            match broadcast_rx.recv().await {
-                Ok(data) => {
-                    let msg = tungstenite::Message::Binary(data.into());
-                    if ws_tx.send(msg).await.is_err() {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    break;
-                }
-            }
-        }
-    });
-
-    // Wait for either to finish
-    tokio::select! {
-        _ = read_handle => {}
-        _ = write_handle => {}
+        return;
     }
+
+    // API routes — require token
+    let path_without_query = parts[1].split('?').next().unwrap_or(parts[1]);
+    if parts[0] == "GET" && path_without_query.starts_with("/api/") {
+        if !validate_token(token.clone()) {
+            let error = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
+            return;
+        }
+
+        let body: String;
+        let content_type = "application/json";
+
+        if path_without_query == "/api/nodes" {
+            body = match db::list_agent_nodes() {
+                Ok(nodes) => serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),
+                Err(_) => "[]".to_string(),
+            };
+        } else if path_without_query == "/api/meshes" {
+            body = match db::list_meshes() {
+                Ok(meshes) => serde_json::to_string(&meshes).unwrap_or_else(|_| "[]".to_string()),
+                Err(_) => "[]".to_string(),
+            };
+        } else {
+            body = r#"{"error":"not found"}"#.to_string();
+        }
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+            content_type,
+            body.len(),
+            body
+        );
+        let mut stream = lines.into_inner();
+        let _ = stream.write_all(response.as_bytes()).await;
+        return;
+    }
+
+    // Serve HTML — require token
+    if !validate_token(token) {
+        let error = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+        let mut stream = lines.into_inner();
+        let _ = stream.write_all(error).await;
+        return;
+    }
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+        MOBILE_APP_HTML.len(),
+        MOBILE_APP_HTML
+    );
+    let mut stream = lines.into_inner();
+    let _ = stream.write_all(response.as_bytes()).await;
+}
+
+/// Handle an established WebSocket connection for a terminal session.
+async fn handle_ws_connection(
+    ws_stream: tokio_tungstenite::WebSocketStream<TcpStream>,
+    node_id: i64,
+) {
+    let (mut write, mut read) = ws_stream.split();
+
+    // Subscribe to the PTY output broadcast channel for this node
+    let mut rx = subscribe_pty(node_id);
+
+    // Spawn a task to forward PTY broadcasts to the WebSocket client
+    let write_task = tauri::async_runtime::spawn(async move {
+        while let Ok(data) = rx.recv().await {
+            if write.send(tungstenite::Message::Binary(data.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Forward commands from WebSocket to PTY stdin via broadcast
+    // We use a second broadcast channel for client -> PTY direction
+    // For now, we just discard received messages (PTY input comes from desktop)
+    // The mobile app sends keystrokes which would need to go to the PTY writer
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(tungstenite::Message::Text(text)) => {
+                // Keystroke from mobile — broadcast to PTY stdin handler
+                // For now, log it; full implementation needs PTY writer access
+                tracing::debug!("WS received text from mobile: {:?}", &text[..text.len().min(32)]);
+            }
+            Ok(tungstenite::Message::Binary(data)) => {
+                tracing::debug!("WS received binary {} bytes from mobile", data.len());
+            }
+            Ok(tungstenite::Message::Close(_)) => {
+                tracing::debug!("WS client disconnected");
+                break;
+            }
+            Err(e) => {
+                tracing::error!("WS read error: {}", e);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    write_task.abort();
+    tracing::debug!("WS connection closed for node {}", node_id);
 }
 
 // --- Token Validation ---
 
-fn validate_token(token: &str) -> Option<i64> {
-    if let Ok(meshes) = db::list_meshes() {
-        for mesh in meshes {
-            if let Ok(true) = db::validate_mesh_token(mesh.id, token) {
-                return Some(mesh.id);
-            }
-        }
+/// Extract token from a URL path like /?token=abc123.
+fn extract_token_from_path(path: &str) -> Option<String> {
+    path.split('?')
+        .nth(1)
+        .and_then(|query| {
+            query.split('&')
+                .find(|pair| pair.starts_with("token="))
+                .map(|pair| pair[6..].to_string())
+        })
+}
+
+fn validate_token(token: Option<String>) -> bool {
+    if let Some(t) = token {
+        db::validate_root_token(&t).unwrap_or(false)
+    } else {
+        false
     }
-    None
 }
 
 // --- Broadcast Relay for PTY ---
@@ -162,41 +266,68 @@ fn validate_token(token: &str) -> Option<i64> {
 #[allow(dead_code)]
 pub fn register_pty_channel(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
     let state = get_server_state();
-
-    // First try with a read lock
-    let sender_opt: Option<broadcast::Sender<Vec<u8>>>;
-    {
-        let outputs = state._pty_outputs.read();
-        sender_opt = outputs.get(&node_id).map(|s| s.clone());
-    }
-    if let Some(sender) = sender_opt {
-        return sender.subscribe();
-    }
-
-    // Need to insert — upgrade to write lock
-    let rx;
-    {
-        let mut outputs = state._pty_outputs.write();
-        if let Some(sender) = outputs.get(&node_id).map(|s| s.clone()) {
-            rx = sender.subscribe();
-        } else {
-            let (tx, r) = broadcast::channel(1024);
-            outputs.insert(node_id, tx);
-            rx = r;
-        }
-    }
-    rx
+    let mut outputs = state.pty_outputs.write();
+    let sender = outputs.entry(node_id).or_insert_with(|| {
+        let (tx, _) = broadcast::channel(1024);
+        tx
+    }).clone();
+    sender.subscribe()
 }
 
 /// Broadcast PTY output to all connected mobile clients for a node.
 #[allow(dead_code)]
 pub fn broadcast_pty_output(node_id: i64, data: &[u8]) {
-    let state = get_server_state();
+    let state = match SERVER_STATE.get() {
+        Some(s) => s,
+        None => return,
+    };
     let sender = {
-        let outputs = state._pty_outputs.read();
-        outputs.get(&node_id).map(|s| s.clone())
+        let outputs = state.pty_outputs.read();
+        outputs.get(&node_id).cloned()
     };
     if let Some(sender) = sender {
         let _ = sender.send(data.to_vec());
+    }
+}
+
+// Keep broadcast channel alive for all known nodes
+static KNOWN_NODES: OnceLock<Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>>> = OnceLock::new();
+
+fn get_known_nodes() -> &'static Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>> {
+    KNOWN_NODES.get_or_init(|| {
+        Arc::new(RwLock::new(HashMap::new()))
+    })
+}
+
+/// Register a node's PTY broadcast channel so mobile can subscribe before data arrives.
+pub fn ensure_pty_channel(node_id: i64) {
+    let nodes = get_known_nodes();
+    let mut locked = nodes.write();
+    if !locked.contains_key(&node_id) {
+        let (tx, _) = broadcast::channel(1024);
+        locked.insert(node_id, tx);
+    }
+}
+
+/// Subscribe to PTY output for a node. Creates the channel if it doesn't exist.
+pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
+    let nodes = get_known_nodes();
+    let mut locked = nodes.write();
+    let sender = locked.entry(node_id).or_insert_with(|| {
+        let (tx, _) = broadcast::channel(1024);
+        tx
+    }).clone();
+    sender.subscribe()
+}
+
+/// Send data to all subscribers of a node's PTY output.
+pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
+    let nodes = get_known_nodes();
+    let sender = {
+        let locked = nodes.read();
+        locked.get(&node_id).cloned()
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(data);
     }
 }

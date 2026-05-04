@@ -26,6 +26,7 @@
       width: 8px; height: 8px;
       border-radius: 50%;
       background: #666;
+      flex-shrink: 0;
     }
     header .status-dot.connected { background: #4caf50; }
     header .status-dot.error { background: #f44336; }
@@ -34,6 +35,9 @@
       font-weight: 600;
       color: #fff;
       flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     header button {
       background: none;
@@ -43,10 +47,21 @@
       cursor: pointer;
       padding: 4px;
     }
+    .mesh-section {
+      margin-bottom: 4px;
+    }
+    .mesh-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: #555;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 8px 12px 4px;
+    }
     .node-list {
       flex: 1;
       overflow-y: auto;
-      padding: 8px;
+      padding: 0 8px 8px;
     }
     .node-item {
       display: flex;
@@ -55,7 +70,7 @@
       padding: 12px;
       background: #1a1a1a;
       border-radius: 8px;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
       cursor: pointer;
       border: 1px solid transparent;
       transition: border-color 0.15s;
@@ -69,18 +84,22 @@
       align-items: center;
       justify-content: center;
       font-size: 14px;
+      font-weight: 700;
+      flex-shrink: 0;
     }
-    .node-item .info { flex: 1; }
-    .node-item .name { font-size: 14px; font-weight: 500; color: #fff; }
-    .node-item .meta { font-size: 11px; color: #666; margin-top: 2px; }
+    .node-item .info { flex: 1; min-width: 0; }
+    .node-item .name { font-size: 14px; font-weight: 500; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .node-item .meta { font-size: 11px; color: #666; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-item .status-bar {
       width: 3px; height: 32px;
       border-radius: 2px;
+      flex-shrink: 0;
     }
     .status-bar.idle { background: #2196f3; }
     .status-bar.running { background: #4caf50; }
     .status-bar.suspended { background: #9e9e9e; }
     .status-bar.error { background: #f44336; }
+    .status-bar.awaiting_input { background: #ff9800; }
     .terminal-view { display: none; flex-direction: column; flex: 1; }
     .terminal-view.active { display: flex; }
     .node-list.hidden { display: none; }
@@ -88,6 +107,7 @@
       flex: 1;
       padding: 8px;
       overflow: hidden;
+      min-height: 0;
     }
     #terminal-container .xterm { height: 100%; }
     .input-bar {
@@ -96,6 +116,7 @@
       padding: 8px;
       background: #1a1a1a;
       border-top: 1px solid #333;
+      flex-shrink: 0;
     }
     .input-bar input {
       flex: 1;
@@ -147,6 +168,18 @@
     }
     .connection-page h2 { font-size: 20px; color: #fff; margin-bottom: 8px; }
     .connection-page p { color: #666; font-size: 13px; text-align: center; }
+    .loading-dots {
+      display: flex; gap: 4px; margin-top: 16px;
+    }
+    .loading-dots span {
+      width: 6px; height: 6px;
+      background: #555;
+      border-radius: 50%;
+      animation: pulse 1.4s infinite;
+    }
+    .loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes pulse { 0%,80%,100%{opacity:0.3} 40%{opacity:1} }
   </style>
 </head>
 <body>
@@ -154,7 +187,10 @@
   <div class="connection-page" id="connection-page">
     <h2>Buildmesh Remote</h2>
     <p>Scan the QR code from your desktop app to connect.</p>
-    <button onclick="useStoredToken()" style="margin-top:24px;background:#2196f3;border:none;border-radius:8px;padding:12px 24px;color:#fff;font-size:14px;cursor:pointer;">
+    <div class="loading-dots" id="loading-dots" style="display:none;">
+      <span></span><span></span><span></span>
+    </div>
+    <button onclick="useStoredToken()" id="use-session-btn" style="margin-top:24px;background:#2196f3;border:none;border-radius:8px;padding:12px 24px;color:#fff;font-size:14px;cursor:pointer;">
       Use Saved Session
     </button>
   </div>
@@ -198,17 +234,17 @@
   <script>
     // --- State ---
     let meshToken = null;
-    let meshId = null;
     let currentNodeId = null;
+    let currentNodeName = null;
     let ws = null;
     let reconnectAttempts = 0;
     let reconnectTimer = null;
-    const MAX_RECONNECT = 3;
-    const RECONNECT_DELAYS = [1000, 2000, 4000];
+    let offlineCheckTimer = null;
+    const MAX_RECONNECT = 5;
+    const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 
     // --- Init ---
     function init() {
-      // Check URL token
       const params = new URLSearchParams(window.location.search);
       const urlToken = params.get('token');
       const storedToken = localStorage.getItem('buildmesh_token');
@@ -234,6 +270,8 @@
       const stored = localStorage.getItem('buildmesh_token');
       if (stored) {
         meshToken = stored;
+        document.getElementById('loading-dots').style.display = 'flex';
+        document.getElementById('use-session-btn').style.display = 'none';
         connectApp();
       }
     }
@@ -242,7 +280,20 @@
     async function connectApp() {
       document.getElementById('connection-page').style.display = 'none';
       document.getElementById('main-app').style.display = 'flex';
+      startOfflineCheck();
       showNodeList();
+    }
+
+    function startOfflineCheck() {
+      // Poll the API to detect when desktop app goes offline
+      offlineCheckTimer = setInterval(async () => {
+        try {
+          const resp = await fetch('/api/nodes?token=' + encodeURIComponent(meshToken));
+          if (!resp.ok) throw new Error('not ok');
+        } catch {
+          showOffline();
+        }
+      }, 5000);
     }
 
     // --- Node List ---
@@ -250,34 +301,71 @@
       document.getElementById('node-list').classList.remove('hidden');
       document.getElementById('terminal-view').classList.remove('active');
       document.getElementById('back-btn').style.display = 'none';
-      document.getElementById('header-title').textContent = 'Loading...';
+      document.getElementById('header-title').textContent = 'Buildmesh';
       document.getElementById('status-dot').className = 'status-dot';
 
       try {
-        const nodes = await invoke('list_sessions_by_project', { projectId: meshId });
-        renderNodeList(nodes);
+        const [nodes, meshes] = await Promise.all([
+          apiGet('/api/nodes'),
+          apiGet('/api/meshes'),
+        ]);
+        renderNodeList(nodes, meshes);
       } catch (e) {
         document.getElementById('header-title').textContent = 'Offline';
         document.getElementById('status-dot').className = 'status-dot error';
+        renderOfflineNodeList();
       }
     }
 
-    function renderNodeList(nodes) {
+    async function apiGet(path) {
+      const url = path + (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(meshToken);
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('API error ' + resp.status);
+      return resp.json();
+    }
+
+    function renderNodeList(nodes, meshes) {
       const container = document.getElementById('node-list');
       if (!nodes || nodes.length === 0) {
-        container.innerHTML = '<p style="color:#666;text-align:center;padding:24px;">No agent nodes in this mesh.</p>';
+        container.innerHTML = '<p style="color:#666;text-align:center;padding:24px;">No agent nodes running. Start an agent on your desktop to see it here.</p>';
         return;
       }
-      container.innerHTML = nodes.map(node => `
-        <div class="node-item" onclick="openTerminal(${node.id}, '${escapeHtml(node.name)}', '${node.provider}')">
-          <div class="provider-icon">${providerIcon(node.provider)}</div>
-          <div class="info">
-            <div class="name">${escapeHtml(node.name)}</div>
-            <div class="meta">${node.provider} · ${node.status}</div>
-          </div>
-          <div class="status-bar ${node.status}"></div>
-        </div>
-      `).join('');
+
+      // Build mesh id -> name map
+      const meshMap = {};
+      if (meshes) {
+        meshes.forEach(m => { meshMap[m.id] = m.name; });
+      }
+
+      // Group nodes by mesh
+      const byMesh = {};
+      nodes.forEach(node => {
+        const meshName = meshMap[node.mesh_id] || 'Unknown Mesh';
+        if (!byMesh[meshName]) byMesh[meshName] = [];
+        byMesh[meshName].push(node);
+      });
+
+      let html = '';
+      Object.keys(byMesh).sort().forEach(meshName => {
+        html += `<div class="mesh-label">${escapeHtml(meshName)}</div>`;
+        byMesh[meshName].forEach(node => {
+          html += `
+          <div class="node-item" onclick="openTerminal(${node.id}, '${escapeHtml(node.name)}', '${node.provider}')">
+            <div class="provider-icon" style="background:${providerColor(node.provider)}">${providerIcon(node.provider)}</div>
+            <div class="info">
+              <div class="name">${escapeHtml(node.name)}</div>
+              <div class="meta">${node.provider} · ${node.status}</div>
+            </div>
+            <div class="status-bar ${node.status}"></div>
+          </div>`;
+        });
+      });
+      container.innerHTML = html;
+    }
+
+    function renderOfflineNodeList() {
+      const container = document.getElementById('node-list');
+      container.innerHTML = '<p style="color:#666;text-align:center;padding:24px;">Desktop app is offline. Check if buildmesh is still running on your computer.</p>';
     }
 
     function providerIcon(provider) {
@@ -285,13 +373,24 @@
       return icons[provider] || '?';
     }
 
+    function providerColor(provider) {
+      const colors = {
+        anthropic: '#1d7cfc',
+        minimax: '#6366f1',
+        gemini: '#10b981',
+        opencode: '#f59e0b',
+      };
+      return colors[provider] || '#555';
+    }
+
     function escapeHtml(s) {
-      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
 
     // --- Terminal View ---
     async function openTerminal(nodeId, nodeName, provider) {
       currentNodeId = nodeId;
+      currentNodeName = nodeName;
       document.getElementById('node-list').classList.add('hidden');
       document.getElementById('terminal-view').classList.add('active');
       document.getElementById('back-btn').style.display = 'block';
@@ -303,17 +402,56 @@
     }
 
     function initTerminal() {
-      // xterm.js is loaded dynamically
       const container = document.getElementById('terminal-container');
       container.innerHTML = '<div class="xterm" id="xterm"></div>';
+      // Dynamically load xterm.js from CDN
+      if (!document.getElementById('xterm-js')) {
+        const script = document.createElement('script');
+        script.id = 'xterm-js';
+        script.src = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js';
+        script.onload = initXterm;
+        document.head.appendChild(script);
+
+        const style = document.createElement('link');
+        style.rel = 'stylesheet';
+        style.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css';
+        document.head.appendChild(style);
+      } else {
+        initXterm();
+      }
+    }
+
+    function initXterm() {
+      if (window.term) {
+        window.term.dispose();
+      }
+      window.term = new window.Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: '"JetBrains Mono", "Cascadia Code", "Fira Code", monospace',
+        theme: {
+          background: '#0f0f0f',
+          foreground: '#e0e0e0',
+          cursor: '#e0e0e0',
+          cursorAccent: '#0f0f0f',
+          selectionBackground: '#3a3a3a',
+        },
+        scrollback: 1000,
+      });
+      window.term.open(document.getElementById('xterm'));
     }
 
     function connectWebSocket(nodeId) {
       const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.hostname;
-      const wsUrl = `${proto}//${host}:1992/ws/terminal/${nodeId}?token=${meshToken}`;
+      const wsUrl = `${proto}//${host}:1992/ws/terminal/${nodeId}?token=${encodeURIComponent(meshToken)}`;
 
-      ws = new WebSocket(wsUrl);
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch (e) {
+        scheduleReconnect(nodeId);
+        return;
+      }
 
       ws.onopen = () => {
         reconnectAttempts = 0;
@@ -322,7 +460,6 @@
       };
 
       ws.onmessage = (event) => {
-        // Feed to xterm
         if (window.term) {
           window.term.write(event.data);
         }
@@ -335,7 +472,9 @@
       };
 
       ws.onerror = () => {
-        showOffline();
+        if (currentNodeId) {
+          scheduleReconnect(nodeId);
+        }
       };
     }
 
@@ -344,10 +483,9 @@
         document.getElementById('reconnect-overlay').classList.remove('hidden');
         document.getElementById('reconnect-overlay').querySelector('h2').textContent = 'Connection lost';
         document.getElementById('reconnect-overlay').querySelector('p').textContent = 'Tap to retry';
-        reconnectAttempts++;
         return;
       }
-      const delay = RECONNECT_DELAYS[reconnectAttempts] || 4000;
+      const delay = RECONNECT_DELAYS[reconnectAttempts] || 16000;
       reconnectAttempts++;
       document.getElementById('retry-countdown').textContent = Math.ceil(delay / 1000);
       document.getElementById('reconnect-overlay').classList.remove('hidden');
@@ -377,11 +515,11 @@
       const cmd = input.value + '\n';
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(cmd);
+        if (window.term) window.term.write(cmd);
         input.value = '';
       }
     }
 
-    // Handle Enter key
     document.addEventListener('DOMContentLoaded', () => {
       const cmdInput = document.getElementById('cmd-input');
       if (cmdInput) {
@@ -397,24 +535,16 @@
     function goBack() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       currentNodeId = null;
+      currentNodeName = null;
       if (ws) { ws.close(); ws = null; }
+      document.getElementById('offline-overlay').classList.add('hidden');
       showNodeList();
     }
 
     function closeApp() {
       if (ws) { ws.close(); ws = null; }
-      window.location.href = window.location.pathname + '?token=' + meshToken;
-    }
-
-    // --- Tauri invoke shim (works in mobile browser) ---
-    async function invoke(cmd, args) {
-      const { invoke: tauriInvoke } = window.__TAURI__ || {};
-      if (tauriInvoke) {
-        return tauriInvoke(cmd, args);
-      }
-      // Fallback: fetch from backend via HTTP
-      // For now, throw since we're in a browser without Tauri
-      throw new Error('Tauri invoke not available in browser');
+      if (offlineCheckTimer) clearInterval(offlineCheckTimer);
+      window.location.href = window.location.pathname + '?token=' + encodeURIComponent(meshToken);
     }
 
     init();

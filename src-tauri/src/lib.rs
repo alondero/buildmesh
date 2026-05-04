@@ -109,6 +109,7 @@ pub fn run() {
             commands::agent_node::create_session,
             commands::agent_node::list_sessions,
             commands::agent_node::list_sessions_by_project,
+            commands::agent_node::list_all_sessions,
             commands::agent_node::get_session,
             commands::agent_node::archive_session,
             commands::agent_node::restore_session,
@@ -123,7 +124,7 @@ pub fn run() {
             commands::mesh::delete_project,
             commands::mesh::update_project_layout,
             commands::mesh::update_project_positions,
-            commands::mesh::get_mesh_token,
+            commands::mesh::get_root_token,
             commands::mesh::get_local_ip,
             // Agent
             commands::agent::spawn_agent,

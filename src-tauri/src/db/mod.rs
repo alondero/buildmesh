@@ -48,7 +48,6 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             path TEXT NOT NULL UNIQUE,
             layout TEXT NOT NULL DEFAULT 'grid',
             position INTEGER NOT NULL DEFAULT 0,
-            mesh_token TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -114,7 +113,7 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
                 migrate_mesh_rename(conn)?;
             }
             if current_version < 7 {
-                migrate_mesh_token(conn)?;
+                migrate_remote_access_token(conn)?;
             }
         }
 
@@ -252,21 +251,23 @@ fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
-fn migrate_mesh_token(conn: &Connection) -> SqlResult<()> {
+fn migrate_remote_access_token(conn: &Connection) -> SqlResult<()> {
+    // Ensure the remote_access_token key exists in app_settings with a generated token
     let has_token: bool = conn
         .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'mesh_token'",
+            "SELECT COUNT(*) > 0 FROM app_settings WHERE key = 'remote_access_token'",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
         )
         .unwrap_or(false);
 
     if !has_token {
+        let token = generate_token();
         conn.execute(
-            "ALTER TABLE meshes ADD COLUMN mesh_token TEXT",
-            [],
+            "INSERT INTO app_settings (key, value) VALUES ('remote_access_token', ?1)",
+            params![&token],
         )?;
-        tracing::info!("Added mesh_token column to meshes table");
+        tracing::info!("Generated remote access root token");
     }
     Ok(())
 }
@@ -279,13 +280,13 @@ fn generate_token() -> String {
     hex::encode(bytes)
 }
 
-pub fn get_or_create_mesh_token(mesh_id: i64) -> SqlResult<String> {
+/// Get or create the root remote access token (stored in app_settings).
+pub fn get_or_create_root_token() -> SqlResult<String> {
     let db = get().lock().unwrap();
 
-    // Try to get existing token
     let existing: Option<String> = db.query_row(
-        "SELECT mesh_token FROM meshes WHERE id = ?1",
-        params![mesh_id],
+        "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
+        [],
         |row| row.get(0),
     ).ok();
 
@@ -295,20 +296,20 @@ pub fn get_or_create_mesh_token(mesh_id: i64) -> SqlResult<String> {
         }
     }
 
-    // Generate and store new token
     let token = generate_token();
     db.execute(
-        "UPDATE meshes SET mesh_token = ?1 WHERE id = ?2",
-        params![&token, mesh_id],
+        "INSERT INTO app_settings (key, value) VALUES ('remote_access_token', ?1)",
+        params![&token],
     )?;
     Ok(token)
 }
 
-pub fn validate_mesh_token(mesh_id: i64, token: &str) -> SqlResult<bool> {
+/// Validate the root remote access token.
+pub fn validate_root_token(token: &str) -> SqlResult<bool> {
     let db = get().lock().unwrap();
     let stored: Option<String> = db.query_row(
-        "SELECT mesh_token FROM meshes WHERE id = ?1",
-        params![mesh_id],
+        "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
+        [],
         |row| row.get(0),
     ).ok();
 
@@ -333,7 +334,7 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             migrate_mesh_rename(conn)?;
         }
         if current_version < 7 {
-            migrate_mesh_token(conn)?;
+            migrate_remote_access_token(conn)?;
         }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
