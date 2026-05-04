@@ -346,16 +346,21 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                         }
                     }
 
-                    // Cancel pending on new output (agent still working) AND fire
-                    // any expired attention in a single lock acquisition.
+                    // Cancel pending only if this output ALSO contains a new prompt
+                    // (agent still working). If no prompt, leave the timer intact.
+                    // Then check if any pending has expired and fire attention.
                     {
                         let mut pending = PENDING_ATTENTION.lock().unwrap();
-                        pending.remove(&session_id); // cancel on new output
 
-                        if let Some(p) = pending.get(&session_id) {
+                        let prompt_in_data = detector.matches_prompt(&data);
+
+                        if prompt_in_data {
+                            pending.remove(&session_id);
+                        }
+
+                        if let Some(p) = pending.remove(&session_id) {
                             if p.fire_at <= std::time::Instant::now() {
-                                pending.remove(&session_id);
-                                drop(pending); // release lock before DB/event calls
+                                drop(pending);
                                 crate::node_namer::record_turn(session_id, app_clone.clone());
                                 let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
                                 let _ = app_clone.emit("attention-needed", serde_json::json!({
