@@ -64,6 +64,7 @@ export function SessionView() {
     const unlisten = listen(GIT_CHANGED, (event) => {
       const { path } = event.payload as { path: string };
       gridSummaryCache.delete(path);
+      gridSummaryCacheVersion++;
       invalidateSummaryCache(path);
     });
     return () => {
@@ -117,7 +118,7 @@ export function SessionView() {
       {/* Main content area with grid and optional panel */}
       <div className="flex-1 flex overflow-hidden">
         {/* Grid of filtered nodes */}
-        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} changedFilesNodeId={changedFilesNodeId} onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })} buildRunOpen={openBuildRun} setBuildRunOpen={setOpenBuildRun} />
+        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} changedFilesNodeId={changedFilesNodeId} onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })} buildRunOpen={openBuildRun} setBuildRunOpen={setOpenBuildRun} cacheVersion={gridSummaryCacheVersion} />
 
         {/* Changed Files Panel */}
         <ChangedFilesPanel
@@ -143,7 +144,9 @@ export function SessionView() {
 export const gridSummaryCache = new Map<string, GitSummary>();
 export const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
 
-function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: { node: AgentNode; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void }) {
+// Incremented when GIT_CHANGED fires to bust cache in GridNodeHeader useEffects
+let gridSummaryCacheVersion = 0;
+function GridNodeHeader({ node, changedFilesNodeId, onBuildRun, cacheVersion }: { node: AgentNode; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void; cacheVersion: number }) {
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   const [summary, setSummary] = useState<GitSummary | null>(null);
@@ -179,7 +182,7 @@ function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: { node: AgentN
 
     const p = fetchSummary();
     gridPendingFetches.set(node.path, p);
-  }, [node.path]);
+  }, [node.path, cacheVersion]);
 
   const isPanelNode = changedFilesNodeId === node.id;
 
@@ -220,7 +223,7 @@ function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: { node: AgentN
   );
 }
 
-function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, buildRunOpen, setBuildRunOpen }: { nodes: AgentNode[]; onSlashCommand: (nodeId: number, cmd: string) => void; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void; buildRunOpen: { nodeId: number; mode: 'build' | 'run' } | null; setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' } | null) => void }) {
+function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, buildRunOpen, setBuildRunOpen, cacheVersion }: { nodes: AgentNode[]; onSlashCommand: (nodeId: number, cmd: string) => void; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void; buildRunOpen: { nodeId: number; mode: 'build' | 'run' } | null; setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' } | null) => void; cacheVersion: number }) {
   const count = nodes.length;
   let gridCols = "grid-cols-1";
   let gridRows = "grid-rows-1";
@@ -244,7 +247,7 @@ function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, bui
         const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
         return (
           <div key={node.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
-            <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} onBuildRun={onBuildRun} />
+            <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} onBuildRun={onBuildRun} cacheVersion={cacheVersion} />
             <div className="flex-1 overflow-hidden bg-black relative">
               <AgentTerminal sessionId={node.id} />
               {isBuildRunOpen && (
