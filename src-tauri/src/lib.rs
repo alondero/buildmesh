@@ -53,9 +53,12 @@ pub fn run() {
                 Err(e) => tracing::error!("Crash recovery failed: {}", e),
             }
 
-            // Log window creation
-            if let Some(_window) = app.get_webview_window("main") {
-                tracing::info!("Main window found, ready to load content");
+            // Log window creation and set title with git commit
+            let git_sha = env!("GIT_SHA");
+            if let Some(window) = app.get_webview_window("main") {
+                let title = format!("Buildmesh - {}", git_sha);
+                window.set_title(&title).ok();
+                tracing::info!("Main window found, ready to load content: {}", title);
             } else {
                 tracing::warn!("Main window not found during setup");
             }
