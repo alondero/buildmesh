@@ -29,32 +29,27 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     };
   }, [isOpen]);
 
-  const handleBuild = async () => {
+  const closeDropdown = () => {
     setIsOpen(false);
     setError(null);
+  };
+
+  const handleBuildRun = async (mode: 'build' | 'run') => {
+    closeDropdown();
     try {
-      await invoke('build_run', { nodeId: node.id, mode: 'build' });
-      onBuildRun(node.id, 'build');
+      await invoke('build_run', { nodeId: node.id, mode });
+      onBuildRun(node.id, mode);
     } catch (e) {
       setError(String(e));
-      console.error('[BuildRunDropdown] build failed:', e);
+      console.error('[BuildRunDropdown] build/run failed:', e);
     }
   };
 
-  const handleRun = async () => {
-    setIsOpen(false);
-    setError(null);
-    try {
-      await invoke('build_run', { nodeId: node.id, mode: 'run' });
-      onBuildRun(node.id, 'run');
-    } catch (e) {
-      setError(String(e));
-      console.error('[BuildRunDropdown] run failed:', e);
-    }
-  };
+  const handleBuild = () => handleBuildRun('build');
+  const handleRun = () => handleBuildRun('run');
 
   const handleOpenConfig = () => {
-    setIsOpen(false);
+    closeDropdown();
     // Derive mesh root from worktree path by going up one level from worktrees/agent-{id}
     // The path is: mesh_root/worktrees/agent-{id}, so we need mesh_root
     const worktreesIndex = node.path.lastIndexOf('/worktrees/');
