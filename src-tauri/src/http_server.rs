@@ -35,7 +35,7 @@ fn get_server_state() -> Arc<HttpServerState> {
 }
 
 /// Start the HTTP server on the given port.
-/// Spawns a background task and returns immediately.
+/// Spawns a background task using Tauri-managed async runtime.
 pub fn start_http_server(port: u16) {
     let (broadcast_tx, _) = broadcast::channel(1024);
     let state = Arc::new(HttpServerState {
@@ -45,7 +45,7 @@ pub fn start_http_server(port: u16) {
     let _ = SERVER_STATE.set(state.clone());
     drop(state);
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => l,
@@ -61,7 +61,7 @@ pub fn start_http_server(port: u16) {
                 Ok((stream, addr)) => {
                     tracing::debug!("HTTP connection from {}", addr);
                     let state = get_server_state();
-                    tokio::spawn(handle_connection(stream, addr, state));
+                    tauri::async_runtime::spawn(handle_connection(stream, addr, state));
                 }
                 Err(e) => {
                     tracing::error!("HTTP accept error: {}", e);
