@@ -44,7 +44,7 @@ impl ProcessRegistry {
     }
 }
 
-static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
+pub(crate) static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(ProcessRegistry::new())));
 
 static LAST_INPUT_TIME: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, std::time::Instant>>>> =
@@ -346,16 +346,21 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                         }
                     }
 
-                    // Cancel pending on new output (agent still working) AND fire
-                    // any expired attention in a single lock acquisition.
+                    // Cancel pending only if this output ALSO contains a new prompt
+                    // (agent still working). If no prompt, leave the timer intact.
+                    // Then check if any pending has expired and fire attention.
                     {
                         let mut pending = PENDING_ATTENTION.lock().unwrap();
-                        pending.remove(&session_id); // cancel on new output
 
-                        if let Some(p) = pending.get(&session_id) {
+                        let prompt_in_data = detector.matches_prompt(&data);
+
+                        if prompt_in_data {
+                            pending.remove(&session_id);
+                        }
+
+                        if let Some(p) = pending.remove(&session_id) {
                             if p.fire_at <= std::time::Instant::now() {
-                                pending.remove(&session_id);
-                                drop(pending); // release lock before DB/event calls
+                                drop(pending);
                                 crate::node_namer::record_turn(session_id, app_clone.clone());
                                 let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
                                 let _ = app_clone.emit("attention-needed", serde_json::json!({
@@ -372,6 +377,9 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                             "line": data
                         }),
                     );
+
+                    // Forward to any connected mobile WebSocket clients
+                    crate::http_server::send_pty_output(session_id, data.into_bytes());
                 }
                 Err(e) => {
                     tracing::error!("PTY read error for session {}: {}", session_id, e);
@@ -492,6 +500,8 @@ async fn spawn_agent_inner(
     // 9. Start reader thread with spawn timestamp for early-exit detection
     let spawned_at = std::time::Instant::now();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
+    // Ensure mobile broadcast channel exists before reader starts
+    crate::http_server::ensure_pty_channel(session_id);
     start_reader(app.clone(), session_id, reader, spawned_at, provider_enum);
 
     tracing::info!(

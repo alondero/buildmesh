@@ -41,6 +41,12 @@ pub async fn list_sessions() -> Result<Vec<AgentNode>, String> {
     db::list_agent_nodes().map_err(|e| e.to_string())
 }
 
+/// List all agent nodes across all meshes (for remote access mobile app)
+#[command]
+pub async fn list_all_sessions() -> Result<Vec<AgentNode>, String> {
+    db::list_agent_nodes().map_err(|e| e.to_string())
+}
+
 /// List agent nodes for a specific mesh
 #[command]
 pub async fn list_sessions_by_project(mesh_id: i64) -> Result<Vec<AgentNode>, String> {

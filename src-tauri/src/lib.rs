@@ -4,6 +4,7 @@
 mod commands;
 mod db;
 mod env;
+mod http_server;
 mod models;
 mod naming;
 mod node_namer;
@@ -66,6 +67,9 @@ pub fn run() {
             // Start HTTP test server on port 1991 for Playwright E2E tests
             commands::test::start_test_server(app.handle().clone());
 
+            // Start embedded HTTP/WebSocket server on port 1992 for mobile remote access
+            http_server::start_http_server(1992);
+
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
             let crash_log_path = app_dir.join("logs").join("panic.log");
@@ -105,6 +109,7 @@ pub fn run() {
             commands::agent_node::create_session,
             commands::agent_node::list_sessions,
             commands::agent_node::list_sessions_by_project,
+            commands::agent_node::list_all_sessions,
             commands::agent_node::get_session,
             commands::agent_node::archive_session,
             commands::agent_node::restore_session,
@@ -119,6 +124,8 @@ pub fn run() {
             commands::mesh::delete_project,
             commands::mesh::update_project_layout,
             commands::mesh::update_project_positions,
+            commands::mesh::get_root_token,
+            commands::mesh::get_local_ip,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

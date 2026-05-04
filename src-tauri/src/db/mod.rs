@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -111,6 +111,9 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             migrate_sessions_worktree_name(conn)?;
             if current_version < 6 {
                 migrate_mesh_rename(conn)?;
+            }
+            if current_version < 7 {
+                migrate_remote_access_token(conn)?;
             }
         }
 
@@ -248,6 +251,71 @@ fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+fn migrate_remote_access_token(conn: &Connection) -> SqlResult<()> {
+    // Ensure the remote_access_token key exists in app_settings with a generated token
+    let has_token: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM app_settings WHERE key = 'remote_access_token'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+
+    if !has_token {
+        let token = generate_token();
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('remote_access_token', ?1)",
+            params![&token],
+        )?;
+        tracing::info!("Generated remote access root token");
+    }
+    Ok(())
+}
+
+/// Generate a random 32-character hex token (16 bytes of random data).
+fn generate_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let bytes: [u8; 16] = rng.random();
+    hex::encode(bytes)
+}
+
+/// Get or create the root remote access token (stored in app_settings).
+pub fn get_or_create_root_token() -> SqlResult<String> {
+    let db = get().lock().unwrap();
+
+    let existing: Option<String> = db.query_row(
+        "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
+        [],
+        |row| row.get(0),
+    ).ok();
+
+    if let Some(token) = existing {
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+
+    let token = generate_token();
+    db.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('remote_access_token', ?1)",
+        params![&token],
+    )?;
+    Ok(token)
+}
+
+/// Validate the root remote access token.
+pub fn validate_root_token(token: &str) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    let stored: Option<String> = db.query_row(
+        "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
+        [],
+        |row| row.get(0),
+    ).ok();
+
+    Ok(stored.as_ref().map(|s| s.as_str()).unwrap_or("") == token)
+}
+
 /// Exposes migrate_if_needed for integration testing.
 /// In tests, call this on an existing Connection to simulate schema upgrade.
 #[cfg(test)]
@@ -264,6 +332,9 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
         migrate_sessions_worktree_name(conn)?;
         if current_version < 6 {
             migrate_mesh_rename(conn)?;
+        }
+        if current_version < 7 {
+            migrate_remote_access_token(conn)?;
         }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",

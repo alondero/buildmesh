@@ -6,12 +6,24 @@ static ANSI_REGEX: once_cell::sync::Lazy<regex::Regex> =
             .unwrap()
     });
 
+/// Strip ANSI escape sequences so caller can do regex matching on clean text.
+pub fn strip_ansi_for_regex(raw: &str) -> String {
+    ANSI_REGEX.replace_all(raw, "").to_string()
+}
+
 pub struct TurnDetector {
     prompt_regex: regex::Regex,
     prompts_seen: u32,
 }
 
 impl TurnDetector {
+    /// Returns true if stripped text contains a prompt match.
+    /// Does NOT advance prompts_seen — caller decides whether to count it.
+    pub fn matches_prompt(&self, raw_data: &str) -> bool {
+        let stripped = ANSI_REGEX.replace_all(raw_data, "");
+        self.prompt_regex.is_match(&stripped)
+    }
+
     pub fn new(provider: Provider) -> Self {
         let pattern = match provider {
             Provider::Anthropic | Provider::Minimax => r"(?m)^\s*❯\s*$",
