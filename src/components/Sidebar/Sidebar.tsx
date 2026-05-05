@@ -8,6 +8,7 @@ import { getStatusConfig } from '../../lib/status';
 import { getGitSummary, type GitSummary } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   DndContext,
   type DragEndEvent,
@@ -43,6 +44,7 @@ export function invalidateSummaryCache(path: string) {
 export function Sidebar() {
   const meshes = useMeshStore(state => state.meshes);
   const addMesh = useMeshStore(state => state.addMesh);
+  const deleteMesh = useMeshStore(state => state.deleteMesh);
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   const selectMesh = useMeshStore(state => state.selectMesh);
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
@@ -54,6 +56,7 @@ export function Sidebar() {
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessMeshId, setRemoteAccessMeshId] = useState<boolean>(false);
+  const [meshToDelete, setMeshToDelete] = useState<Mesh | null>(null);
 
   const handleSelectMesh = (meshId: number) => {
     if (selectedMeshId === meshId) {
@@ -100,6 +103,25 @@ export function Sidebar() {
     await deleteAgentNode(nodeId);
   };
 
+  const handleDeleteMesh = (e: React.MouseEvent, mesh: Mesh) => {
+    e.stopPropagation();
+    setMeshToDelete(mesh);
+  };
+
+  const confirmDeleteMesh = async () => {
+    if (!meshToDelete) return;
+    const meshId = meshToDelete.id;
+    const meshNodes = agentNodes.filter(n => n.mesh_id === meshId);
+    for (const node of meshNodes) {
+      await deleteAgentNode(node.id);
+    }
+    if (selectedMeshId === meshId) {
+      selectMesh(null);
+    }
+    await deleteMesh(meshId);
+    setMeshToDelete(null);
+  };
+
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -131,6 +153,17 @@ export function Sidebar() {
       {remoteAccessMeshId && (
         <RemoteAccessModal
           onClose={() => setRemoteAccessMeshId(false)}
+        />
+      )}
+
+      {/* Delete Mesh Confirmation */}
+      {meshToDelete && (
+        <ConfirmDialog
+          title="Delete mesh"
+          message={`Are you sure you want to delete "${meshToDelete.name}"?${agentNodes.filter(n => n.mesh_id === meshToDelete.id).length > 0 ? ' This will also remove all agent nodes within it.' : ''} This action cannot be undone.`}
+          confirmLabel="Delete"
+          onConfirm={confirmDeleteMesh}
+          onCancel={() => setMeshToDelete(null)}
         />
       )}
 
@@ -166,6 +199,7 @@ export function Sidebar() {
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleNewNode}
                       onSelectProvider={handleSelectProvider}
+                      onDeleteMesh={handleDeleteMesh}
                       meshNodes={meshNodes}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}
@@ -279,6 +313,7 @@ interface SortableMeshProps {
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string) => void;
+  onDeleteMesh: (e: React.MouseEvent, mesh: Mesh) => void;
   meshNodes: AgentNode[];
   activeNodeId: number | null;
   setActiveNode: (id: number) => void;
@@ -293,6 +328,7 @@ function SortableMesh({
   onSelectMesh,
   onNewNode,
   onSelectProvider,
+  onDeleteMesh,
   meshNodes,
   activeNodeId,
   setActiveNode,
@@ -315,7 +351,7 @@ function SortableMesh({
   };
 
   return (
-    <div ref={setNodeRef} style={style} className="mb-2">
+    <div ref={setNodeRef} style={style} className="mb-2 group/mesh">
       <div className="flex items-center gap-1">
         {/* Drag handle */}
         <button
@@ -352,11 +388,18 @@ function SortableMesh({
         </div>
         <div
           onClick={() => onSelectMesh(mesh.id)}
-          className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-bg-card ${
+          className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-bg-card flex items-center ${
             isSelected ? 'text-accent-cyan font-semibold' : 'text-text-secondary'
           }`}
         >
-          {mesh.name}
+          <span className="flex-1 truncate">{mesh.name}</span>
+          <button
+            onClick={(e) => onDeleteMesh(e, mesh)}
+            className="opacity-0 group-hover/mesh:opacity-100 text-text-muted hover:text-status-error text-xs px-1 transition-all"
+            title="Delete mesh"
+          >
+            ×
+          </button>
         </div>
       </div>
       {meshNodes.map(node => (
