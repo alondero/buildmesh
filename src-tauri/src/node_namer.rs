@@ -139,17 +139,21 @@ async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, 
 
     tracing::info!("node_namer: running summarize command for session {}", session_id);
 
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
-        c.args(["/c", "cwrap", "--minimax", "-p", &prompt]);
-        #[allow(unused_imports)]
-        use std::os::windows::process::CommandExt;
-        c.creation_flags(0x08000000);
-        c
-    } else {
-        let mut c = tokio::process::Command::new("cwrap");
-        c.args(["--minimax", "-p", &prompt]);
-        c
+    let mut cmd = {
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
+            c.args(["/c", "cwrap", "--minimax", "-p", &prompt]);
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(0x08000000);
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut c = tokio::process::Command::new("cwrap");
+            c.args(["--minimax", "-p", &prompt]);
+            c
+        }
     };
 
     let output = cmd

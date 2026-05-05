@@ -72,7 +72,7 @@ pub fn start_http_server(port: u16) {
     });
 }
 
-async fn handle_connection(stream: TcpStream, _addr: SocketAddr, state: Arc<HttpServerState>) {
+async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<HttpServerState>) {
     // Read the first line of the HTTP request to check method and path
     let mut lines = tokio::io::BufStream::new(stream);
     let mut request_line = String::new();
