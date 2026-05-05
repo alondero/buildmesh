@@ -68,7 +68,7 @@ pub fn run() {
             commands::test::start_test_server(app.handle().clone());
 
             // Start embedded HTTP/WebSocket server on port 1992 for mobile remote access
-            http_server::start_http_server(1992);
+            http_server::start_http_server(1992, app.handle().clone());
 
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
@@ -173,6 +173,8 @@ pub fn run() {
             commands::pr::create_pr,
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
+            // Remote
+            commands::remote::submit_terminal_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

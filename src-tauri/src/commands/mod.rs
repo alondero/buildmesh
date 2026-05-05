@@ -16,5 +16,6 @@ pub mod mcp;
 pub mod pr;
 pub mod mesh;
 pub mod agent_node;
+pub mod remote;
 pub mod terminal;
 pub mod test;
