@@ -179,6 +179,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const [isDragging, setIsDragging] = useState(false);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
+  const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const node = agentNodes.find(s => s.id === sessionId);
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -269,6 +270,9 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
         inst.fitAddon.fit();
         inst.term.scrollToBottom();
         inst.term.refresh(0, inst.term.rows - 1);
+        if (sessionId === activeNodeId) {
+          inst.term.focus();
+        }
 
         // If node is idle and has a provider, spawn the agent with current dimensions
         if (node && node.provider && node.status === 'idle' && !cancelled.current) {
