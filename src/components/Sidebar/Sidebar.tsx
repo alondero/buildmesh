@@ -6,6 +6,7 @@ import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import { getGitSummary, type GitSummary } from '../../lib/tauri';
+import { isMac } from '../../lib/platform';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
@@ -27,7 +28,6 @@ const ALL_PROVIDERS = [
   { id: 'opencode', label: 'OpenCode', color: 'bg-amber-500' },
 ];
 
-const isMac = navigator.platform.toUpperCase().includes('MAC');
 const PROVIDERS = isMac
   ? ALL_PROVIDERS.filter(p => p.id === 'anthropic')
   : ALL_PROVIDERS;
