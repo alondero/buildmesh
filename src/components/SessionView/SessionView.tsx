@@ -249,8 +249,10 @@ function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, bui
         return (
           <div key={node.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
             <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} onBuildRun={onBuildRun} cacheVersion={cacheVersion} />
-            <div className="flex-1 overflow-hidden bg-black relative">
-              <AgentTerminal sessionId={node.id} />
+            <div className="flex-1 flex flex-col overflow-hidden bg-black">
+              <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
+                <AgentTerminal sessionId={node.id} />
+              </div>
               {isBuildRunOpen && (
                 <BuildRunTerminal
                   sessionId={node.id}
