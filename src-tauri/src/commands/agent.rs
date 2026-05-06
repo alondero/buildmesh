@@ -50,16 +50,17 @@ pub(crate) static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegis
 static LAST_INPUT_TIME: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, std::time::Instant>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-/// Per-session pending attention — used to debounce prompt detection.
-/// When a prompt is detected, we set a 1-second window. If more output arrives
-/// within that window, the agent is still working and we cancel the pending event.
-/// If the window expires, the agent is genuinely waiting for input.
+const ATTENTION_DEBOUNCE_MS: u64 = 1500;
+
 struct PendingAttention {
     fire_at: std::time::Instant,
 }
 
 static PENDING_ATTENTION: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, PendingAttention>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+static TIMER_STARTED: once_cell::sync::Lazy<AtomicBool> =
+    once_cell::sync::Lazy::new(|| AtomicBool::new(false));
 
 // Pre-computed lowercase patterns — avoids per-call allocation in is_tool_result_output
 static TOOL_RESULT_PATTERNS: once_cell::sync::Lazy<Vec<&'static str>> =
@@ -97,6 +98,52 @@ fn is_tool_result_output(data: &str) -> bool {
     false
 }
 
+
+/// Singleton thread that polls pending attention timers and fires events
+/// when the debounce window expires (agent has been silent long enough).
+fn start_attention_timer(app: AppHandle) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+
+            let expired: Vec<i64> = {
+                let mut pending = PENDING_ATTENTION.lock().unwrap();
+                let now = std::time::Instant::now();
+                let mut fired = Vec::new();
+                pending.retain(|session_id, p| {
+                    if p.fire_at <= now {
+                        fired.push(*session_id);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                fired
+            };
+
+            for session_id in expired {
+                let registry = PROCESS_REGISTRY.lock().unwrap();
+                let alive = registry
+                    .get(&session_id)
+                    .map(|a| a.reader_alive.load(Ordering::SeqCst))
+                    .unwrap_or(false);
+                drop(registry);
+
+                if !alive {
+                    continue;
+                }
+
+                tracing::info!("attention_timer: firing for session {}", session_id);
+                crate::node_namer::record_turn(session_id, app.clone());
+                let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
+                let _ = app.emit(
+                    "attention-needed",
+                    serde_json::json!({ "session_id": session_id }),
+                );
+            }
+        }
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Helper functions for spawn_agent
@@ -336,38 +383,16 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                             .unwrap_or(false);
 
                         if !suppress && !is_tool_result_output(&data) {
-                            // Set 1-second debounce — if more output arrives within
-                            // 1s the pending is cancelled and agent is still working.
-                            let mut pending = PENDING_ATTENTION.lock().unwrap();
-                            pending.insert(session_id, PendingAttention {
-                                fire_at: std::time::Instant::now()
-                                    + std::time::Duration::from_millis(1000),
-                            });
+                            PENDING_ATTENTION.lock().unwrap().insert(
+                                session_id,
+                                PendingAttention {
+                                    fire_at: std::time::Instant::now()
+                                        + std::time::Duration::from_millis(ATTENTION_DEBOUNCE_MS),
+                                },
+                            );
                         }
-                    }
-
-                    // Cancel pending only if this output ALSO contains a new prompt
-                    // (agent still working). If no prompt, leave the timer intact.
-                    // Then check if any pending has expired and fire attention.
-                    {
-                        let mut pending = PENDING_ATTENTION.lock().unwrap();
-
-                        let prompt_in_data = detector.matches_prompt(&data);
-
-                        if prompt_in_data {
-                            pending.remove(&session_id);
-                        }
-
-                        if let Some(p) = pending.remove(&session_id) {
-                            if p.fire_at <= std::time::Instant::now() {
-                                drop(pending);
-                                crate::node_namer::record_turn(session_id, app_clone.clone());
-                                let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
-                                let _ = app_clone.emit("attention-needed", serde_json::json!({
-                                    "session_id": session_id
-                                }));
-                            }
-                        }
+                    } else if !data.trim().is_empty() {
+                        PENDING_ATTENTION.lock().unwrap().remove(&session_id);
                     }
 
                     let _ = app_clone.emit(
@@ -388,6 +413,7 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
             }
         }
         reader_alive_clone.store(false, Ordering::SeqCst);
+        PENDING_ATTENTION.lock().unwrap().remove(&session_id);
 
         // Detect early exit (likely a failed --resume)
         let elapsed = spawned_at.elapsed();
@@ -497,7 +523,12 @@ async fn spawn_agent_inner(
     register_agent(session_id, child, writer, master, reader_alive.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
 
-    // 9. Start reader thread with spawn timestamp for early-exit detection
+    // 9. Ensure the attention timer singleton is running
+    if !TIMER_STARTED.swap(true, Ordering::SeqCst) {
+        start_attention_timer(app.clone());
+    }
+
+    // 10. Start reader thread with spawn timestamp for early-exit detection
     let spawned_at = std::time::Instant::now();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     // Ensure mobile broadcast channel exists before reader starts
@@ -644,6 +675,8 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
 
 #[command]
 pub async fn kill_agent(session_id: i64) -> Result<(), String> {
+    PENDING_ATTENTION.lock().unwrap().remove(&session_id);
+
     let agent = {
         let mut registry = PROCESS_REGISTRY.lock().unwrap();
         registry.remove(&session_id)
