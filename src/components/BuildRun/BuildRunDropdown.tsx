@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { openPath } from '@tauri-apps/plugin-opener';
 import { AgentNode } from '../../stores/agentNodeStore';
 
@@ -39,9 +40,8 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
 
   const handleOpenConfig = async () => {
     setIsOpen(false);
-    const worktreesIndex = node.path.lastIndexOf('/worktrees/');
-    const meshRoot = worktreesIndex !== -1 ? node.path.substring(0, worktreesIndex) : node.path;
-    await openPath(meshRoot + '/mesh.toml');
+    const configPath = await invoke<string>('ensure_mesh_config', { meshId: node.mesh_id });
+    await openPath(configPath);
   };
 
   return (
@@ -55,7 +55,7 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 top-full mt-1 w-44 bg-bg-elevated border border-border-default rounded shadow-lg z-50">
+        <div className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded shadow-lg z-50">
           <button
             onClick={handleBuild}
             className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"

@@ -142,6 +142,7 @@ pub fn run() {
             commands::build_run::build_run,
             commands::build_run::get_mesh_config,
             commands::build_run::close_build_run,
+            commands::build_run::ensure_mesh_config,
             commands::checkpoint::list_checkpoints,
             commands::checkpoint::revert_to_checkpoint,
             commands::checkpoint::diff_checkpoints,

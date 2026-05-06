@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
+const MESH_CONFIG_FILENAME: &str = "mesh.toml";
+
 // ---------------------------------------------------------------------------
 // Config parsing
 // ---------------------------------------------------------------------------
@@ -20,7 +22,7 @@ pub struct BuildRunConfig {
 
 /// Parse [build]command and [run]command from a mesh.toml file
 fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, String> {
-    let config_path = mesh_path.join("mesh.toml");
+    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
 
@@ -279,4 +281,37 @@ pub async fn close_build_run(node_id: i64) -> Result<(), String> {
         drop(master);
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn ensure_mesh_config(mesh_id: i64) -> Result<String, String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("failed to get mesh {}: {}", mesh_id, e))?;
+
+    let config_path = std::path::PathBuf::from(&mesh.path).join(MESH_CONFIG_FILENAME);
+
+    let template = r#"# Buildmesh configuration
+# Commands are executed in the agent's worktree directory.
+
+[build]
+# command = "npm run build"
+
+[run]
+# command = "npm run dev"
+"#;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&config_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(template.as_bytes())
+                .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("failed to create mesh.toml: {}", e)),
+    }
+
+    Ok(config_path.to_string_lossy().to_string())
 }
