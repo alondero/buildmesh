@@ -5,6 +5,7 @@ import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { TERMINAL_OPTIONS } from './terminalConfig';
 
 interface TerminalInstance {
   term: Terminal;
@@ -51,20 +52,7 @@ class TerminalManager {
   private async doCreate(nodeId: number): Promise<TerminalInstance | null> {
     try {
       console.log(`[TerminalManager] Creating terminal for node ${nodeId}`);
-      const term = new Terminal({
-        theme: {
-          background: '#09090f',
-          foreground: '#e2e8f0',
-          cursor: '#00d4ff',
-          selectionBackground: 'rgba(0, 212, 255, 0.15)'
-        },
-        fontSize: 10,  // 75% of standard 13px (13 * 0.75 ≈ 10)
-        fontFamily: 'JetBrains Mono, Fira Code, Cascadia Code, Consolas, monospace',
-        fontWeight: 500,
-        scrollback: 10000,
-        cursorBlink: true,
-        allowProposedApi: true
-      });
+      const term = new Terminal(TERMINAL_OPTIONS);
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);

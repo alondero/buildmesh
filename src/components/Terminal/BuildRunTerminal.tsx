@@ -3,6 +3,8 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import { invoke } from '@tauri-apps/api/core';
+import { TERMINAL_OPTIONS } from './terminalConfig';
 
 interface BuildRunTerminalProps {
   sessionId: number;
@@ -18,22 +20,9 @@ export function BuildRunTerminal({ sessionId, mode = 'build', onClose }: BuildRu
 
   useEffect(() => {
     if (!containerRef.current) return;
+    let cancelled = false;
 
-    const term = new Terminal({
-      theme: {
-        background: '#09090f',
-        foreground: '#e2e8f0',
-        cursor: '#00d4ff',
-        selectionBackground: 'rgba(0, 212, 255, 0.15)'
-      },
-      fontSize: 10,
-      fontFamily: 'JetBrains Mono, Fira Code, Cascadia Code, Consolas, monospace',
-      fontWeight: 500,
-      scrollback: 10000,
-      cursorBlink: true,
-      allowProposedApi: true
-    });
-
+    const term = new Terminal(TERMINAL_OPTIONS);
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
 
@@ -43,32 +32,39 @@ export function BuildRunTerminal({ sessionId, mode = 'build', onClose }: BuildRu
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    // Set up resize observer
     const resizeObserver = new ResizeObserver(() => {
-      fitAddonRef.current?.fit();
+      requestAnimationFrame(() => {
+        fitAddonRef.current?.fit();
+      });
     });
     resizeObserver.observe(containerRef.current);
 
-    // Listen for build/run output
     const eventName = `build-run-output-${sessionId}`;
-    listen<{ line: string }>(eventName, (event) => {
-      term.write(event.payload.line);
+    listen<string>(eventName, (event) => {
+      term.write(event.payload);
     }).then(unlisten => {
+      if (cancelled) {
+        unlisten();
+        return;
+      }
       unlistenRef.current = unlisten;
+      term.write(`${mode === 'build' ? 'Building' : 'Running'} from worktree...\r\n`);
+      invoke('build_run', { nodeId: sessionId, mode }).catch(err => {
+        term.write(`\r\nError: ${String(err)}\r\n`);
+      });
     });
 
-    term.write(`${mode === 'build' ? 'Building' : 'Running'} from worktree...\r\n`);
-
     return () => {
+      cancelled = true;
       resizeObserver.disconnect();
       unlistenRef.current?.();
       term.dispose();
+      invoke('close_build_run', { nodeId: sessionId }).catch(() => {});
     };
   }, [sessionId, mode]);
 
   return (
-    <div className="flex flex-col h-full bg-bg-overlay border-t border-border-default">
-      {/* Terminal header */}
+    <div className="flex flex-col flex-1 overflow-hidden bg-bg-overlay border-t border-border-default">
       <div className="flex items-center justify-between px-2 py-1 bg-bg-base border-b border-border-default">
         <span className="text-[10px] font-mono text-text-muted">
           {mode === 'build' ? 'Build' : 'Run'}: worktree
@@ -81,7 +77,6 @@ export function BuildRunTerminal({ sessionId, mode = 'build', onClose }: BuildRu
           ×
         </button>
       </div>
-      {/* Terminal */}
       <div
         ref={containerRef}
         className="flex-1 overflow-hidden"
