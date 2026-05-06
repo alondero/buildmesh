@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
+import { openPath } from '@tauri-apps/plugin-opener';
 import { AgentNode } from '../../stores/agentNodeStore';
 
 interface BuildRunDropdownProps {
@@ -36,13 +37,11 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     onBuildRun(node.id, 'run');
   };
 
-  const handleOpenConfig = () => {
+  const handleOpenConfig = async () => {
     setIsOpen(false);
-    // Derive mesh root from worktree path by going up one level from worktrees/agent-{id}
-    // The path is: mesh_root/worktrees/agent-{id}, so we need mesh_root
     const worktreesIndex = node.path.lastIndexOf('/worktrees/');
     const meshRoot = worktreesIndex !== -1 ? node.path.substring(0, worktreesIndex) : node.path;
-    window.open(meshRoot + '/mesh.toml');
+    await openPath(meshRoot + '/mesh.toml');
   };
 
   return (
