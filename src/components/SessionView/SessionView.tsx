@@ -210,7 +210,6 @@ function GridNodeHeader({ node, changedFilesNodeId, onBuildRun, cacheVersion }: 
         )}
       </div>
       <div className="flex items-center gap-1.5">
-        <span className="text-[9px] text-text-muted font-mono px-1 rounded bg-bg-base">{node.env.toUpperCase()}</span>
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <button
           onClick={handleClose}

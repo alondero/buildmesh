@@ -230,7 +230,6 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
 }) {
   const config = getStatusConfig(node.status);
   const isAwaiting = node.status === 'awaiting_input';
-  const envBadge = node.env === 'wsl' ? 'WSL' : isMac ? 'MAC' : 'WIN';
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
 
   const [summary, setSummary] = useState<GitSummary | null>(null);
@@ -294,7 +293,6 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
           +{summary.added} ~{summary.modified} -{summary.deleted}
         </span>
       )}
-      <span className="text-[10px] text-text-muted font-mono">{envBadge}</span>
       <button
         onClick={onDelete}
         className="text-text-muted hover:text-status-error text-xs px-1 transition-colors"
