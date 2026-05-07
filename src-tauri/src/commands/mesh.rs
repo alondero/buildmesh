@@ -6,6 +6,8 @@ use crate::services;
 use tauri::command;
 use tauri_plugin_dialog::DialogExt;
 
+use super::agent::inject_attention_hook;
+
 /// Add a mesh by opening a folder picker dialog
 #[command]
 pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
@@ -36,16 +38,20 @@ pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
     };
     tracing::debug!("mesh name: {}", name);
 
-    db::create_mesh(&name, &path).map_err(|e| {
+    let mesh = db::create_mesh(&name, &path).map_err(|e| {
         tracing::error!("create_mesh failed: {}", e);
         e.to_string()
-    })
+    })?;
+    inject_attention_hook(std::path::Path::new(&path));
+    Ok(mesh)
 }
 
 /// Create a new mesh
 #[command]
 pub async fn create_project(name: String, path: String) -> Result<Mesh, String> {
-    db::create_mesh(&name, &path).map_err(|e| e.to_string())
+    let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
+    inject_attention_hook(std::path::Path::new(&path));
+    Ok(mesh)
 }
 
 /// Create a mesh for testing without dialog (uses temp directory)
