@@ -45,7 +45,13 @@ vi.mock('@xterm/xterm', () => {
     dispose = vi.fn();
     focus = vi.fn();
     loadAddon = vi.fn();
+    attachCustomKeyEventHandler = vi.fn();
+    scrollToBottom = vi.fn();
+    refresh = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
+    rows = 24;
+    cols = 80;
+    element: HTMLElement | null = null;
 
     constructor(_options?: unknown) {
       // Accept options but don't use them in mock
@@ -65,7 +71,7 @@ vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
     fit = vi.fn();
     dispose = vi.fn();
-    propose_dimensions = vi.fn().mockReturnValue({ cols: 80, rows: 24 });
+    proposeDimensions = vi.fn().mockReturnValue({ cols: 80, rows: 24 });
   }
 
   return {

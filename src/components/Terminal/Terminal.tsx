@@ -14,6 +14,8 @@ interface TerminalInstance {
   opened: boolean;
   writeBuffer: string;
   frameRequested: boolean;
+  resizeObserver: ResizeObserver | null;
+  attachedContainer: HTMLElement | null;
 }
 
 class TerminalManager {
@@ -21,24 +23,130 @@ class TerminalManager {
   private listeners = new Set<() => void>();
   private pending = new Map<number, Promise<TerminalInstance | null>>();
 
-  // Exposed for TerminalStack to trigger focus/fit on active node
+  /**
+   * Returns the raw TerminalInstance if it exists (escape hatch).
+   */
   getInstance(nodeId: number): TerminalInstance | undefined {
     return this.instances.get(nodeId);
+  }
+
+  /**
+   * Returns the underlying xterm.js Terminal for direct access if needed.
+   */
+  getTerminal(nodeId: number): Terminal | undefined {
+    return this.instances.get(nodeId)?.term;
+  }
+
+  /**
+   * Attach a terminal to a visible DOM container. Creates the terminal instance
+   * if it doesn't exist yet, opens or reparents it into the container, sets up
+   * a ResizeObserver for auto-fitting, and subscribes to agent-output events.
+   */
+  async attach(nodeId: number, container: HTMLElement): Promise<TerminalInstance | null> {
+    const inst = await this.getOrCreate(nodeId);
+    if (!inst) return null;
+
+    // Open into the container (first time) or reparent (subsequent mounts)
+    if (!inst.opened) {
+      inst.opened = true;
+      inst.term.open(container);
+    } else {
+      const termEl = inst.term.element;
+      if (termEl && termEl.parentElement !== container) {
+        container.appendChild(termEl);
+      }
+    }
+
+    inst.attachedContainer = container;
+
+    // Set up ResizeObserver for this container
+    if (inst.resizeObserver) {
+      inst.resizeObserver.disconnect();
+    }
+    inst.resizeObserver = new ResizeObserver(() => {
+      requestAnimationFrame(() => {
+        if (!inst.attachedContainer) return;
+        // Ensure char dimensions are populated before fitting
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
+        if (charSizeService) {
+          charSizeService.measure();
+        }
+        inst.fitAddon.fit();
+      });
+    });
+    inst.resizeObserver.observe(container);
+
+    // Initial fit, scroll, and refresh
+    requestAnimationFrame(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
+      charSizeService?.measure();
+      inst.fitAddon.fit();
+      inst.term.scrollToBottom();
+      inst.term.refresh(0, inst.term.rows - 1);
+    });
+
+    return inst;
+  }
+
+  /**
+   * Detach a terminal from its visible container. Disconnects the ResizeObserver
+   * but preserves the terminal instance for later reattachment.
+   */
+  detach(nodeId: number): void {
+    const inst = this.instances.get(nodeId);
+    if (!inst) return;
+
+    if (inst.resizeObserver) {
+      inst.resizeObserver.disconnect();
+      inst.resizeObserver = null;
+    }
+    inst.attachedContainer = null;
+  }
+
+  /**
+   * Trigger a fit for a specific terminal.
+   */
+  fit(nodeId: number): void {
+    const inst = this.instances.get(nodeId);
+    if (!inst) return;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
+    charSizeService?.measure();
+    inst.fitAddon.fit();
+  }
+
+  /**
+   * Fit all currently attached terminals.
+   */
+  fitAll(): void {
+    for (const [nodeId, inst] of this.instances) {
+      if (inst.attachedContainer) {
+        this.fit(nodeId);
+      }
+    }
+  }
+
+  /**
+   * Write data to a specific terminal.
+   */
+  write(nodeId: number, data: string): void {
+    const inst = this.instances.get(nodeId);
+    if (!inst) return;
+    inst.term.write(data);
   }
 
   async getOrCreate(nodeId: number): Promise<TerminalInstance | null> {
     // Return existing instance immediately if available
     if (this.instances.has(nodeId)) {
-      console.log(`[DEBUG TerminalManager] getOrCreate(${nodeId}) - returning existing instance`);
       return this.instances.get(nodeId)!;
     }
     // If creation is already in progress, wait for it
     if (this.pending.has(nodeId)) {
-      console.log(`[DEBUG TerminalManager] getOrCreate(${nodeId}) - waiting on pending`);
       return this.pending.get(nodeId)!;
     }
     // Start new creation and track the promise
-    console.log(`[DEBUG TerminalManager] getOrCreate(${nodeId}) - creating NEW instance`);
     const promise = this.doCreate(nodeId);
     this.pending.set(nodeId, promise);
     try {
@@ -51,7 +159,6 @@ class TerminalManager {
 
   private async doCreate(nodeId: number): Promise<TerminalInstance | null> {
     try {
-      console.log(`[TerminalManager] Creating terminal for node ${nodeId}`);
       const term = new Terminal(TERMINAL_OPTIONS);
 
       const fitAddon = new FitAddon();
@@ -90,7 +197,6 @@ class TerminalManager {
       });
 
       term.onResize(({ cols, rows }) => {
-        console.log(`[TerminalManager] Resizing node ${nodeId} to ${cols}x${rows}`);
         invoke('resize_agent', { sessionId: nodeId, rows, cols }).catch(err => {
           // Ignore "Agent not running" errors - these are common during initial mount or rapid resizing
           if (err !== 'Agent not running') {
@@ -99,7 +205,16 @@ class TerminalManager {
         });
       });
 
-      const instance: TerminalInstance = { term, fitAddon, unlisten, opened: false, writeBuffer: '', frameRequested: false };
+      const instance: TerminalInstance = {
+        term,
+        fitAddon,
+        unlisten,
+        opened: false,
+        writeBuffer: '',
+        frameRequested: false,
+        resizeObserver: null,
+        attachedContainer: null,
+      };
       this.instances.set(nodeId, instance);
       this.notify();
       return instance;
@@ -133,9 +248,16 @@ class TerminalManager {
     this.listeners.forEach(cb => cb());
   }
 
+  /**
+   * Fully dispose a terminal instance. ONLY call this when an agent node is
+   * explicitly deleted — never for view switches or session changes.
+   */
   dispose(nodeId: number) {
     const instance = this.instances.get(nodeId);
     if (instance) {
+      if (instance.resizeObserver) {
+        instance.resizeObserver.disconnect();
+      }
       instance.unlisten();
       instance.term.dispose();
       this.instances.delete(nodeId);
@@ -163,7 +285,6 @@ window.__terminalManager = terminalManager;
 
 export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const instanceRef = useRef<TerminalInstance | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
@@ -190,7 +311,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     const files = Array.from(e.dataTransfer.files);
     if (files.length === 0) return;
 
-    const inst = instanceRef.current;
+    const inst = terminalManager.getInstance(sessionId);
     if (!inst) return;
 
     const paths = await Promise.all(
@@ -206,77 +327,32 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     }
   };
 
-  // ResizeObserver for automatic fitting when container size changes
   useEffect(() => {
     if (!containerRef.current) return;
-
-    const observer = new ResizeObserver(() => {
-      if (instanceRef.current) {
-        requestAnimationFrame(() => {
-          // H1 Fix: Explicitly call CharSizeService.measure() to ensure cell dimensions are populated
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const charSizeService = (instanceRef.current?.term as any)['_core']?.['_charSizeService'];
-          if (charSizeService) {
-            charSizeService.measure();
-          }
-          instanceRef.current?.fitAddon.fit();
-        });
-      }
-    });
-
-    observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, [sessionId]);
-
-  useEffect(() => {
     const cancelled = { current: false };
+    const container = containerRef.current;
 
-    terminalManager.getOrCreate(sessionId).then(inst => {
-      if (cancelled.current) return;
-      if (!inst || !containerRef.current) return;
+    terminalManager.attach(sessionId, container).then(async (inst) => {
+      if (cancelled.current || !inst) return;
 
-      instanceRef.current = inst;
-
-      if (!inst.opened) {
-        inst.opened = true;
-        inst.term.open(containerRef.current);
-      } else {
-        const termEl = inst.term.element;
-        if (termEl && termEl.parentElement !== containerRef.current) {
-          containerRef.current.appendChild(termEl);
-        }
+      if (sessionId === activeNodeId) {
+        inst.term.focus();
       }
 
-      // Initial fit and check if we need to spawn the agent
-      requestAnimationFrame(async () => {
-        if (cancelled.current || !inst) return;
-
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
-        charSizeService?.measure();
-
-        inst.fitAddon.fit();
-        inst.term.scrollToBottom();
-        inst.term.refresh(0, inst.term.rows - 1);
-        if (sessionId === activeNodeId) {
-          inst.term.focus();
+      // If node is idle and has a provider, spawn the agent with current dimensions
+      if (node && node.provider && node.status === 'idle') {
+        const dims = inst.fitAddon.proposeDimensions();
+        try {
+          await spawnAgent(sessionId, node.provider, dims?.rows, dims?.cols);
+        } catch (e) {
+          console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
         }
-
-        // If node is idle and has a provider, spawn the agent with current dimensions
-        if (node && node.provider && node.status === 'idle' && !cancelled.current) {
-          const dims = inst.fitAddon.proposeDimensions();
-          console.log(`[AgentTerminal] Auto-spawning agent for node ${sessionId} with dims:`, dims);
-          try {
-            await spawnAgent(sessionId, node.provider, dims?.rows, dims?.cols);
-          } catch (e) {
-            console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
-          }
-        }
-      });
+      }
     });
 
     return () => {
       cancelled.current = true;
+      terminalManager.detach(sessionId);
     };
   }, [sessionId, node?.status]);
 
