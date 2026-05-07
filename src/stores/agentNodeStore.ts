@@ -13,6 +13,7 @@ export interface AgentNode {
   provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode';
   status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended' | 'archived';
   cli_session_id?: string;
+  worktree_name?: string;
   created_at: string;
 }
 

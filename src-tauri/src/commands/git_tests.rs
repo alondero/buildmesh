@@ -266,4 +266,66 @@ mod tests {
         assert_eq!(added, 1);
         assert_eq!(deleted, 1);
     }
+
+    #[test]
+    fn test_count_status_worktree_isolation() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+
+        // Commit a baseline file
+        stage_file(&repo, _repo.path(), "base.txt", "base");
+        commit_staged(&repo, "add base");
+
+        // Create worktree OUTSIDE the main repo (avoids showing as untracked in main)
+        let wt_dir = TempGitRepo::new();
+        let wt_path = wt_dir.path().to_path_buf();
+        repo.branch("wt-branch", &repo.head().unwrap().peel_to_commit().unwrap(), false).unwrap();
+        repo.worktree("worktree1", &wt_path, None).unwrap();
+
+        // Make a change ONLY in the worktree
+        fs::write(wt_path.join("wt-only.txt"), "worktree change").unwrap();
+
+        // Open repo at worktree path — should only see worktree changes
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let (total, added, _modified, _deleted) = count_status(&wt_repo);
+        assert_eq!(total, 1, "worktree should only see its own changes");
+        assert_eq!(added, 1);
+
+        // Main repo should NOT see the worktree-only file
+        let (main_total, _, _, _) = count_status(&repo);
+        assert_eq!(main_total, 0, "main repo should not see worktree changes");
+    }
+
+    #[test]
+    fn test_count_status_main_repo_vs_worktree() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+
+        // Commit baseline
+        stage_file(&repo, _repo.path(), "base.txt", "base");
+        commit_staged(&repo, "add base");
+
+        // Create worktree OUTSIDE the main repo
+        let wt_dir = TempGitRepo::new();
+        let wt_path = wt_dir.path().to_path_buf();
+        repo.branch("wt-branch2", &repo.head().unwrap().peel_to_commit().unwrap(), false).unwrap();
+        repo.worktree("worktree2", &wt_path, None).unwrap();
+
+        // Make changes in the main working tree
+        fs::write(_repo.path().join("main-change.txt"), "main only").unwrap();
+
+        // Make changes in the worktree
+        fs::write(wt_path.join("wt-change.txt"), "wt only").unwrap();
+
+        // Main repo sees only main changes
+        let (main_total, main_added, _, _) = count_status(&repo);
+        assert_eq!(main_total, 1, "main sees only its own changes");
+        assert_eq!(main_added, 1);
+
+        // Worktree sees only worktree changes
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let (wt_total, wt_added, _, _) = count_status(&wt_repo);
+        assert_eq!(wt_total, 1, "worktree sees only its own changes");
+        assert_eq!(wt_added, 1);
+    }
 }

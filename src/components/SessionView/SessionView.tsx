@@ -9,8 +9,9 @@ import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { listen, emit } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession, getGitSummary, type GitSummary } from '../../lib/tauri';
-import { FILE_CHANGE, FIT_TERMINALS, GIT_CHANGED } from '../../lib/events';
+import { FIT_TERMINALS, GIT_CHANGED } from '../../lib/events';
 import { invalidateSummaryCache } from '../Sidebar/Sidebar';
+import { getNodeGitPath } from '../../lib/paths';
 import type { GitStatus, DiffResult } from '../../lib/tauri';
 
 export function SessionView() {
@@ -40,25 +41,27 @@ export function SessionView() {
   const changedFilesNode = changedFilesNodeId
     ? agentNodes.find(n => n.id === changedFilesNodeId)
     : activeNode;
-  const nodePath = changedFilesNode?.path || '';
+  const nodePath = changedFilesNode ? getNodeGitPath(changedFilesNode) : '';
 
   const closeChangedFiles = useUIStore(state => state.closeChangedFiles);
 
   useEffect(() => {
     if (!activeNode) return;
     watchSession(activeNode.id).catch(console.error);
-    const unlisten = listen<{ session_id: number; change: { path: string; kind: string } }>(FILE_CHANGE, () => {
-      // File tree refresh handled by parent if needed
-    });
     return () => {
       unwatchSession(activeNode.id).catch(console.error);
-      unlisten.then(fn => fn());
     };
   }, [activeNode?.id]);
 
   useEffect(() => {
     closeChangedFiles();
   }, [selectedMeshId, closeChangedFiles]);
+
+  useEffect(() => {
+    if (activeNode && changedFilesOpen && changedFilesNodeId !== activeNode.id) {
+      useUIStore.getState().setChangedFilesNodeId(activeNode.id);
+    }
+  }, [activeNode?.id, changedFilesOpen, changedFilesNodeId]);
 
   useEffect(() => {
     const unlisten = listen(GIT_CHANGED, (event) => {
@@ -157,33 +160,35 @@ function GridNodeHeader({ node, changedFilesNodeId, onBuildRun, cacheVersion }: 
     await deleteAgentNode(node.id);
   };
 
-  useEffect(() => {
-    if (!node.path) return;
+  const gitPath = getNodeGitPath(node);
 
-    const cached = gridSummaryCache.get(node.path);
+  useEffect(() => {
+    if (!gitPath) return;
+
+    const cached = gridSummaryCache.get(gitPath);
     if (cached) {
       setSummary(cached.total > 0 ? cached : null);
       return;
     }
 
-    if (gridPendingFetches.has(node.path)) return;
+    if (gridPendingFetches.has(gitPath)) return;
 
     const fetchSummary = async (): Promise<GitSummary | null> => {
       try {
-        const result = await getGitSummary(node.path);
-        gridSummaryCache.set(node.path, result);
-        gridPendingFetches.delete(node.path);
+        const result = await getGitSummary(gitPath);
+        gridSummaryCache.set(gitPath, result);
+        gridPendingFetches.delete(gitPath);
         setSummary(result.total > 0 ? result : null);
         return result;
       } catch {
-        gridPendingFetches.delete(node.path);
+        gridPendingFetches.delete(gitPath);
         return null;
       }
     };
 
     const p = fetchSummary();
-    gridPendingFetches.set(node.path, p);
-  }, [node.path, cacheVersion]);
+    gridPendingFetches.set(gitPath, p);
+  }, [gitPath, cacheVersion]);
 
   const isPanelNode = changedFilesNodeId === node.id;
 
