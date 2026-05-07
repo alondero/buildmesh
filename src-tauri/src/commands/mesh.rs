@@ -2,6 +2,7 @@
 
 use crate::db;
 use crate::models::Mesh;
+use crate::services;
 use tauri::command;
 use tauri_plugin_dialog::DialogExt;
 
@@ -31,10 +32,7 @@ pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
             })
     } else {
         // Url case — rsplit on '/' to get last path segment
-        path.rsplit('/')
-            .next()
-            .unwrap_or(&path)
-            .to_string()
+        services::mesh::name_from_path(&path)
     };
     tracing::debug!("mesh name: {}", name);
 
@@ -53,14 +51,7 @@ pub async fn create_project(name: String, path: String) -> Result<Mesh, String> 
 /// Create a mesh for testing without dialog (uses temp directory)
 #[command]
 pub async fn create_test_project(name: String) -> Result<Mesh, String> {
-    let temp_dir = std::env::temp_dir();
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis();
-    let mesh_path = temp_dir.join(format!("buildmesh_test_{}_{}", name.replace(' ', "_"), timestamp));
-    std::fs::create_dir_all(&mesh_path).map_err(|e| e.to_string())?;
-    db::create_mesh(&name, &mesh_path.to_string_lossy()).map_err(|e| e.to_string())
+    services::mesh::create_test(&name).map_err(|e| e.to_string())
 }
 
 /// List all meshes
@@ -78,10 +69,7 @@ pub async fn delete_project(project_id: i64) -> Result<(), String> {
 /// Update a mesh's layout preference
 #[command]
 pub async fn update_project_layout(project_id: i64, layout: String) -> Result<(), String> {
-    if layout != "grid" && layout != "single" {
-        return Err("layout must be 'grid' or 'single'".to_string());
-    }
-    db::update_mesh_layout(project_id, &layout).map_err(|e| e.to_string())
+    services::mesh::update_layout(project_id, &layout).map_err(|e| e.to_string())
 }
 
 /// Update multiple meshes' sort positions in the sidebar

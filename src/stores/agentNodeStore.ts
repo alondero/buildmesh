@@ -134,7 +134,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         meshId, name, path, branch, provider
       });
       set((state) => ({ agentNodes: [...state.agentNodes, node] }));
-      await get().setActiveNode(node.id);
       return node;
     } catch (e) {
       set({ error: String(e) });

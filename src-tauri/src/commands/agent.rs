@@ -284,10 +284,8 @@ fn inject_stop_hook(worktree_path: &std::path::Path, session_id: i64) {
 /// then injects the Stop hook settings file.
 fn spawn_hook_injector(project_path: String, worktree_name: String, session_id: i64) {
     tauri::async_runtime::spawn(async move {
-        let worktree_path = std::path::PathBuf::from(&project_path)
-            .join(".claude")
-            .join("worktrees")
-            .join(&worktree_name);
+        let resolved = crate::env::resolve_agent_path(&project_path, Some(&worktree_name));
+        let worktree_path = std::path::PathBuf::from(&resolved.host_path);
 
         for _ in 0..100 {
             if worktree_path.exists() {
@@ -351,7 +349,7 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                    crate::node_namer::append_output(session_id, &data);
+                    crate::session_naming::on_output(session_id, &data);
 
                     let _ = app_clone.emit(
                         "agent-output",
@@ -694,9 +692,9 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
     drop(registry);
 
     let session_count = db::list_agent_nodes().map(|s| s.len()).unwrap_or(0);
-    let renamed_count = crate::node_namer::renamed_sessions_count();
-    let buffers_size = crate::node_namer::buffers_size_bytes();
-    let turn_counter_count = crate::node_namer::turn_counter_count();
+    let renamed_count = crate::session_naming::renamed_sessions_count();
+    let buffers_size = crate::session_naming::buffers_size_bytes();
+    let turn_counter_count = crate::session_naming::turn_counter_count();
 
     CrashSnapshot {
         process_registry_ids: process_ids,

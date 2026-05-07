@@ -21,7 +21,7 @@ pub fn mark_attention(session_id: i64, app: &AppHandle) {
     }
     let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
     let _ = app.emit("attention-needed", serde_json::json!({ "session_id": session_id }));
-    crate::node_namer::record_turn(session_id, app.clone());
+    crate::session_naming::on_turn(session_id, app.clone());
     tracing::info!("Session {} awaiting user input", session_id);
 }
 

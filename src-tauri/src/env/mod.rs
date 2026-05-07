@@ -210,6 +210,64 @@ pub fn to_host_path(path: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ResolvedPath — high-level path resolution for agent operations
+// ---------------------------------------------------------------------------
+
+use crate::models::EnvType;
+
+/// A fully-resolved set of paths for an agent node, ready for use by callers
+/// without needing to compose env detection + host conversion + worktree logic.
+#[derive(Debug, Clone)]
+pub struct ResolvedPath {
+    /// Host-accessible path for file system operations (e.g. Windows UNC path for WSL,
+    /// or native path on macOS/Windows).
+    pub host_path: String,
+    /// Path to use as CWD when spawning agent/shell processes.
+    pub spawn_path: String,
+    /// The detected environment type for this path.
+    pub env_type: EnvType,
+}
+
+/// Resolve the working directory for an agent node, accounting for worktree
+/// layout and environment differences.
+///
+/// - `base_path`: The agent node's stored `path` field (project root).
+/// - `worktree_name`: If set, the worktree subdirectory name under
+///   `{base_path}/.claude/worktrees/{name}`.
+///
+/// Returns a `ResolvedPath` with host, spawn, and env fields populated.
+pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> ResolvedPath {
+    // Compute the effective path (with worktree if applicable)
+    let effective_path = match worktree_name {
+        Some(wt_name) if !wt_name.is_empty() => {
+            format!("{}/.claude/worktrees/{}", base_path, wt_name)
+        }
+        _ => base_path.to_string(),
+    };
+
+    // Detect environment from the effective path
+    let path_buf = PathBuf::from(&effective_path);
+    let env_internal = env_for_path(&path_buf);
+    let env_type = EnvType::from(env_internal);
+
+    // On macOS, paths are always native — no WSL conversion needed.
+    // On Windows, convert based on detected environment.
+    let (host_path, spawn_path) = if cfg!(target_os = "macos") {
+        (effective_path.clone(), effective_path)
+    } else {
+        let host = to_host_path(&effective_path);
+        let spawn = to_spawn_path(&path_buf).to_string_lossy().to_string();
+        (host, spawn)
+    };
+
+    ResolvedPath {
+        host_path,
+        spawn_path,
+        env_type,
+    }
+}
+
 /// Get the .claude directory for session storage in the correct environment
 pub fn claude_dir() -> PathBuf {
     match current_env() {

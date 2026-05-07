@@ -38,6 +38,7 @@ vi.mock('@xterm/xterm', () => {
     dispose = vi.fn();
     focus = vi.fn();
     loadAddon = vi.fn();
+    attachCustomKeyEventHandler = vi.fn();
     scrollToBottom = vi.fn();
     refresh = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };

@@ -6,8 +6,8 @@ mod db;
 mod env;
 mod http_server;
 mod models;
-mod naming;
-mod node_namer;
+mod services;
+mod session_naming;
 
 use tauri::Manager;
 

@@ -63,44 +63,22 @@ fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String>
 // Worktree path resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve the worktree path for a given agent node.
-/// cwrap creates worktrees at `{node.path}/.claude/worktrees/{worktree_name}`.
-fn resolve_worktree_path(node_path: &str, worktree_name: Option<&str>) -> Result<String, String> {
+/// Validate that the worktree directory exists on disk.
+/// Returns an error if the node has no worktree_name or the directory hasn't been created yet.
+fn validate_worktree_exists(resolved: &env::ResolvedPath, worktree_name: Option<&str>) -> Result<(), String> {
     let wt_name = worktree_name.ok_or_else(|| {
         "No worktree name set for this agent node. Spawn the agent first to create a worktree.".to_string()
     })?;
 
-    let worktree_path = std::path::PathBuf::from(node_path)
-        .join(".claude")
-        .join("worktrees")
-        .join(wt_name);
-
-    if worktree_path.exists() {
-        return Ok(worktree_path.to_string_lossy().to_string());
+    let host_path = std::path::Path::new(&resolved.host_path);
+    if host_path.exists() {
+        return Ok(());
     }
 
     Err(format!(
-        "Worktree directory not found at {:?}. Spawn the agent first to create the worktree.",
-        worktree_path
+        "Worktree directory not found for '{}'. Spawn the agent first to create the worktree.",
+        wt_name
     ))
-}
-
-/// Get the shell working directory for a worktree path, accounting for environment
-fn get_shell_cwd(worktree_path: &str, env: env::Environment) -> String {
-    match env {
-        env::Environment::Wsl => {
-            // If the path is a Windows UNC path, convert to Linux path for WSL shell
-            if worktree_path.starts_with("\\\\wsl$\\") {
-                env::to_host_path(worktree_path)
-            } else {
-                worktree_path.to_string()
-            }
-        }
-        env::Environment::Windows => {
-            // For Windows, use the path as-is
-            worktree_path.to_string()
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -160,8 +138,9 @@ pub async fn build_run(
     // 2. Parse mesh.toml
     let config = parse_mesh_config(&std::path::PathBuf::from(&node.path))?;
 
-    // 3. Resolve worktree path
-    let worktree_path = resolve_worktree_path(&node.path, node.worktree_name.as_deref())?;
+    // 3. Resolve worktree path via centralized env module
+    let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
+    validate_worktree_exists(&resolved, node.worktree_name.as_deref())?;
 
     // 4. Get the command to run
     let command = match mode {
@@ -169,11 +148,8 @@ pub async fn build_run(
         BuildRunMode::Run => &config.run_command,
     };
 
-    // 5. Detect environment for path formatting
-    let env_type = env::env_for_path(&std::path::PathBuf::from(&worktree_path));
-
-    // 6. Get shell working directory
-    let shell_cwd = get_shell_cwd(&worktree_path, env_type);
+    // 5. Get shell working directory from resolved path
+    let shell_cwd = &resolved.spawn_path;
 
     // 7. Spawn PTY with shell
     let pty_system = native_pty_system();
@@ -184,7 +160,7 @@ pub async fn build_run(
         pixel_height: 0,
     }).map_err(|e| format!("failed to open PTY: {}", e))?;
 
-    let mut cmd = if matches!(env_type, env::Environment::Wsl) {
+    let mut cmd = if resolved.env_type == crate::models::EnvType::Wsl {
         let mut c = CommandBuilder::new("wsl.exe");
         c.arg("-e");
         c.arg(command.to_string());
@@ -200,7 +176,7 @@ pub async fn build_run(
         c.arg(command.to_string());
         c
     };
-    cmd.cwd(&shell_cwd);
+    cmd.cwd(shell_cwd);
 
     let child = pair.slave.spawn_command(cmd)
         .map_err(|e| format!("failed to spawn shell: {}", e))?;

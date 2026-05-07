@@ -1,9 +1,8 @@
 //! Agent Node management commands
 
 use crate::db;
-use crate::env;
-use crate::models::{EnvType, Provider, AgentNode, SessionStatus};
-use std::path::PathBuf;
+use crate::models::AgentNode;
+use crate::services;
 use tauri::{command, Emitter};
 
 /// Create a new agent node
@@ -15,20 +14,7 @@ pub async fn create_session(
     branch: String,
     provider: Option<String>,
 ) -> Result<AgentNode, String> {
-    let session_name = crate::naming::generate_random_name();
-    tracing::debug!("create_session called: mesh_id={}, name={}, path={}, branch={}, provider={:?}", mesh_id, session_name, path, branch, provider);
-    let path_buf = PathBuf::from(&path);
-    let env_internal = env::env_for_path(&path_buf);
-    let env_type = EnvType::from(env_internal);
-
-    let provider_enum = match provider.as_deref() {
-        Some("minimax") => Provider::Minimax,
-        Some("gemini") => Provider::Gemini,
-        Some("opencode") => Provider::OpenCode,
-        _ => Provider::Anthropic,
-    };
-
-    db::create_agent_node(mesh_id, &session_name, &path, &branch, env_type, provider_enum, Some(&session_name))
+    services::agent_node::create(mesh_id, &path, &branch, provider.as_deref())
         .map_err(|e| {
             tracing::error!("create_session failed: {}", e);
             e.to_string()
@@ -77,15 +63,15 @@ pub async fn update_session_status(
     session_id: i64,
     status: String,
 ) -> Result<(), String> {
-    let status = SessionStatus::from_db_str(&status);
-    db::update_agent_node_status(session_id, status).map_err(|e| e.to_string())
+    services::agent_node::update_status(session_id, &status)
+        .map_err(|e| e.to_string())
 }
 
 /// Delete an agent node permanently
 #[command]
 pub async fn delete_session(session_id: i64) -> Result<(), String> {
-    crate::node_namer::cleanup(session_id);
-    db::delete_agent_node(session_id).map_err(|e| e.to_string())
+    services::agent_node::delete(session_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Set the active session (emits event for frontend to handle)
