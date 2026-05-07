@@ -233,12 +233,12 @@ fn build_spawn_command(
     cmd
 }
 
-/// Writes the Stop hook into a worktree's settings.local.json.
-/// Preserves non-hook keys (permissions, etc.) but overwrites any existing hooks.
-fn inject_stop_hook(worktree_path: &std::path::Path, session_id: i64) {
-    let claude_dir = worktree_path.join(".claude");
+/// Ensures the Notification hook exists in `{project}/.claude/settings.local.json`.
+/// Uses $BUILDMESH_SESSION_ID env var so one hook works for all agents in the project.
+pub fn inject_attention_hook(project_path: &std::path::Path) {
+    let claude_dir = project_path.join(".claude");
     if let Err(e) = std::fs::create_dir_all(&claude_dir) {
-        tracing::warn!("inject_stop_hook: failed to create .claude dir: {}", e);
+        tracing::warn!("inject_attention_hook: failed to create .claude dir: {}", e);
         return;
     }
 
@@ -249,12 +249,11 @@ fn inject_stop_hook(worktree_path: &std::path::Path, session_id: i64) {
     };
 
     let hook_command = format!(
-        "curl -sf -X POST http://localhost:{}/api/attention/{} || true",
+        "curl -sf -X POST http://localhost:{}/api/attention/$BUILDMESH_SESSION_ID || true",
         crate::http_server::HTTP_PORT,
-        session_id
     );
 
-    settings["hooks"] = serde_json::json!({
+    let expected_hooks = serde_json::json!({
         "Notification": [{
             "matcher": "idle_prompt",
             "hooks": [{
@@ -264,41 +263,25 @@ fn inject_stop_hook(worktree_path: &std::path::Path, session_id: i64) {
         }]
     });
 
+    if settings.get("hooks") == Some(&expected_hooks) {
+        return;
+    }
+
+    settings["hooks"] = expected_hooks;
+
     match serde_json::to_string_pretty(&settings) {
         Ok(content) => {
             if let Err(e) = std::fs::write(&settings_path, content) {
-                tracing::warn!("inject_stop_hook: failed to write: {}", e);
+                tracing::warn!("inject_attention_hook: failed to write: {}", e);
             } else {
                 tracing::info!(
-                    "inject_stop_hook: wrote hook for session {} at {:?}",
-                    session_id,
+                    "inject_attention_hook: wrote hook at {:?}",
                     settings_path
                 );
             }
         }
-        Err(e) => tracing::warn!("inject_stop_hook: serialize failed: {}", e),
+        Err(e) => tracing::warn!("inject_attention_hook: serialize failed: {}", e),
     }
-}
-
-/// Async task that waits for the worktree to be created by Claude,
-/// then injects the Stop hook settings file.
-fn spawn_hook_injector(project_path: String, worktree_name: String, session_id: i64) {
-    tauri::async_runtime::spawn(async move {
-        let resolved = crate::env::resolve_agent_path(&project_path, Some(&worktree_name));
-        let worktree_path = std::path::PathBuf::from(&resolved.host_path);
-
-        for _ in 0..100 {
-            if worktree_path.exists() {
-                inject_stop_hook(&worktree_path, session_id);
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        tracing::warn!(
-            "spawn_hook_injector: timeout waiting for worktree {:?}",
-            worktree_path
-        );
-    });
 }
 
 /// Spawn the child process.
@@ -478,11 +461,9 @@ async fn spawn_agent_inner(
     register_agent(session_id, child, writer, master, reader_alive.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
 
-    // 9. Inject Stop hook into worktree for attention notifications
+    // 9. Ensure attention hook exists in project root (idempotent)
     if provider_enum == Provider::Anthropic || provider_enum == Provider::Minimax {
-        if let Some(ref wt_name) = node.worktree_name {
-            spawn_hook_injector(node.path.clone(), wt_name.clone(), session_id);
-        }
+        inject_attention_hook(std::path::Path::new(&node.path));
     }
 
     // 10. Start reader thread with spawn timestamp for early-exit detection
