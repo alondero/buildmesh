@@ -1,6 +1,62 @@
+//! Unified session naming module.
+//!
+//! Lifecycle-oriented interface for agent node naming:
+//! - `on_spawn()` — generates an initial random name
+//! - `on_output(node_id, data)` — buffers output for future summarization
+//! - `on_turn(node_id, app)` — increments turn counter, may trigger LLM rename
+//! - `is_default_name(name)` — checks if a name is still the random default
+//! - `cleanup(node_id)` — clears all state for a deleted/archived node
+//!
+//! Also exposes diagnostic helpers for crash snapshots.
+
+use rand::seq::IndexedRandom;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+
+// ---------------------------------------------------------------------------
+// Random name generation (word lists + combinatorics)
+// ---------------------------------------------------------------------------
+
+static ADJECTIVES: &[&str] = &[
+    "amber", "bold", "brave", "bright", "calm", "clean", "clear", "cool",
+    "crisp", "dark", "deep", "dry", "eager", "early", "easy", "fair",
+    "fast", "fine", "firm", "flat", "fond", "free", "fresh", "full",
+    "glad", "gold", "good", "grand", "great", "green", "happy", "hard",
+    "high", "holy", "hot", "huge", "keen", "kind", "lame", "last",
+    "late", "lazy", "lean", "light", "live", "lone", "long", "loud",
+    "lucky", "mad", "main", "mild", "neat", "new", "nice", "noble",
+    "odd", "old", "open", "pale", "plain", "proud", "pure", "quick",
+    "quiet", "rare", "raw", "real", "red", "rich", "ripe", "rough",
+    "round", "safe", "sharp", "shy", "slim", "slow", "small", "smart",
+    "soft", "solid", "sour", "spare", "steep", "still", "strong", "sure",
+    "sweet", "tall", "tame", "thick", "thin", "tight", "tiny", "tough",
+    "true", "vast", "warm", "weak", "wide", "wild", "wise", "young",
+    "zany",
+];
+
+static NOUNS: &[&str] = &[
+    "arch", "badge", "barn", "beam", "bell", "bird", "blade", "bloom",
+    "boat", "bolt", "bone", "book", "bow", "box", "breeze", "brick",
+    "brook", "brush", "cairn", "cape", "cave", "chain", "charm", "chest",
+    "cliff", "clock", "cloud", "coast", "coin", "coral", "crane", "creek",
+    "cross", "crown", "dawn", "deer", "dome", "dove", "drum", "dune",
+    "elm", "ember", "fern", "field", "flame", "flint", "fog", "forge",
+    "fork", "fox", "frost", "gate", "gem", "glen", "grove", "hawk",
+    "hedge", "heron", "hill", "horn", "isle", "jade", "jay", "knot",
+    "lake", "lamp", "lane", "lark", "leaf", "ledge", "marsh", "maze",
+    "mist", "moon", "moss", "nest", "oak", "oar", "orbit", "otter",
+    "owl", "palm", "path", "peak", "pine", "plume", "pond", "quill",
+    "rain", "ranch", "reef", "ridge", "river", "robin", "rock", "rose",
+    "sage", "seed", "shade", "shell", "shore", "slate", "slope", "spark",
+    "spire", "star", "stone", "storm", "sun", "surf", "swan", "thorn",
+    "tide", "tower", "trail", "tree", "vale", "vine", "wave", "well",
+    "wind", "wing", "wolf", "wood", "wren",
+];
+
+// ---------------------------------------------------------------------------
+// Global mutable state (required for PTY reader thread access)
+// ---------------------------------------------------------------------------
 
 static SESSION_BUFFERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
@@ -18,12 +74,28 @@ const MAX_BUFFER_CHARS: usize = 4000;
 const SUMMARIZE_BUFFER_CHARS: usize = 3000;
 const RENAME_AT_TURN: u32 = 2;
 
-pub fn append_output(session_id: i64, data: &str) {
-    if RENAMED_SESSIONS.lock().unwrap().contains(&session_id) {
+// ---------------------------------------------------------------------------
+// Public lifecycle API
+// ---------------------------------------------------------------------------
+
+/// Generate an initial random name for a newly spawned agent node.
+/// Returns a three-word hyphenated slug (e.g. "bold-keen-brook").
+pub fn on_spawn() -> String {
+    let mut rng = rand::rng();
+    let adj1 = ADJECTIVES.choose(&mut rng).unwrap();
+    let adj2 = ADJECTIVES.choose(&mut rng).unwrap();
+    let noun = NOUNS.choose(&mut rng).unwrap();
+    format!("{}-{}-{}", adj1, adj2, noun)
+}
+
+/// Buffer PTY output for a node. Used to build context for LLM summarization.
+/// No-op if the node has already been renamed.
+pub fn on_output(node_id: i64, data: &str) {
+    if RENAMED_SESSIONS.lock().unwrap().contains(&node_id) {
         return;
     }
     let mut buffers = SESSION_BUFFERS.lock().unwrap();
-    let buf = buffers.entry(session_id).or_default();
+    let buf = buffers.entry(node_id).or_default();
     buf.push_str(data);
     if buf.len() > MAX_BUFFER_CHARS {
         let mut drain_to = buf.len() - MAX_BUFFER_CHARS;
@@ -34,34 +106,26 @@ pub fn append_output(session_id: i64, data: &str) {
     }
 }
 
-/// Clears all node_namer state for a session_id.
-///
-/// This is called automatically by `record_turn`, but is also exposed as a public
-/// API so tests can verify state cleanup without needing an AppHandle.
-pub fn reset_session_state(session_id: i64) {
-    SESSION_BUFFERS.lock().unwrap().remove(&session_id);
-    TURN_COUNTERS.lock().unwrap().remove(&session_id);
-    RENAMED_SESSIONS.lock().unwrap().remove(&session_id);
-}
-
-pub fn record_turn(session_id: i64, app: AppHandle) {
-    if RENAMED_SESSIONS.lock().unwrap().contains(&session_id) {
+/// Record a completed turn for a node. Increments the turn counter and, when
+/// the threshold is reached, triggers an async LLM-based rename.
+pub fn on_turn(node_id: i64, app: AppHandle) {
+    if RENAMED_SESSIONS.lock().unwrap().contains(&node_id) {
         return;
     }
 
     // Check DB: if node already has a non-default name, it was renamed in a previous run
-    if let Ok(node) = crate::db::get_agent_node_by_id(session_id) {
-        if !crate::naming::is_default_name(&node.name) {
-            RENAMED_SESSIONS.lock().unwrap().insert(session_id);
+    if let Ok(node) = crate::db::get_agent_node_by_id(node_id) {
+        if !is_default_name(&node.name) {
+            RENAMED_SESSIONS.lock().unwrap().insert(node_id);
             return;
         }
     }
 
     let should_rename = {
         let mut counters = TURN_COUNTERS.lock().unwrap();
-        let count = counters.entry(session_id).or_insert(0);
+        let count = counters.entry(node_id).or_insert(0);
         *count += 1;
-        tracing::info!("node_namer: record_turn session={} turn={}", session_id, *count);
+        tracing::info!("session_naming: on_turn node={} turn={}", node_id, *count);
         *count == RENAME_AT_TURN
     };
 
@@ -69,17 +133,15 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
         return;
     }
 
-    tracing::info!("node_namer: triggering rename for session {}", session_id);
+    tracing::info!("session_naming: triggering rename for node {}", node_id);
 
-    RENAMED_SESSIONS.lock().unwrap().insert(session_id);
+    RENAMED_SESSIONS.lock().unwrap().insert(node_id);
 
     let buffer_snapshot = {
         let mut buffers = SESSION_BUFFERS.lock().unwrap();
         buffers
-            .remove(&session_id)
+            .remove(&node_id)
             .map(|b| {
-                // Scan backward from the byte limit to find a valid UTF-8 character boundary,
-                // so we never slice in the middle of a multi-byte sequence.
                 let target = b.len().min(SUMMARIZE_BUFFER_CHARS);
                 let mut end = target;
                 while end > 0 && !b.is_char_boundary(end) {
@@ -95,27 +157,46 @@ pub fn record_turn(session_id: i64, app: AppHandle) {
     }
 
     tauri::async_runtime::spawn(async move {
-        match summarize_and_rename(session_id, &buffer_snapshot).await {
+        match summarize_and_rename(node_id, &buffer_snapshot).await {
             Ok(slug) => {
                 let _ = app.emit(
                     "session-renamed",
                     serde_json::json!({
-                        "session_id": session_id,
+                        "session_id": node_id,
                         "name": slug
                     }),
                 );
-                tracing::info!("Session {} renamed to '{}'", session_id, slug);
+                tracing::info!("Node {} renamed to '{}'", node_id, slug);
             }
             Err(e) => {
-                tracing::warn!("Session {} rename failed: {}", session_id, e);
+                tracing::warn!("Node {} rename failed: {}", node_id, e);
             }
         }
     });
 }
 
-pub fn cleanup(session_id: i64) {
-    reset_session_state(session_id);
+/// Check if a name matches the random default pattern (adj-adj-noun).
+pub fn is_default_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('-').collect();
+    if parts.len() != 3 {
+        return false;
+    }
+    ADJECTIVES.contains(&parts[0])
+        && ADJECTIVES.contains(&parts[1])
+        && NOUNS.contains(&parts[2])
 }
+
+/// Clear all naming state for a node (buffers, counters, renamed guard).
+/// Call this when a node is deleted or archived.
+pub fn cleanup(node_id: i64) {
+    SESSION_BUFFERS.lock().unwrap().remove(&node_id);
+    TURN_COUNTERS.lock().unwrap().remove(&node_id);
+    RENAMED_SESSIONS.lock().unwrap().remove(&node_id);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic helpers (used by debug_crash_snapshot)
+// ---------------------------------------------------------------------------
 
 pub fn renamed_sessions_count() -> usize {
     RENAMED_SESSIONS.lock().unwrap().len()
@@ -130,10 +211,14 @@ pub fn turn_counter_count() -> usize {
     TURN_COUNTERS.lock().unwrap().len()
 }
 
-async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, String> {
+// ---------------------------------------------------------------------------
+// Internal: LLM-based summarization
+// ---------------------------------------------------------------------------
+
+async fn summarize_and_rename(node_id: i64, _buffer: &str) -> Result<String, String> {
     let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.".to_string();
 
-    tracing::info!("node_namer: running summarize command for session {}", session_id);
+    tracing::info!("session_naming: running summarize command for node {}", node_id);
 
     let mut cmd = {
         #[cfg(target_os = "windows")]
@@ -168,7 +253,7 @@ async fn summarize_and_rename(session_id: i64, _buffer: &str) -> Result<String, 
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let slug = slug_with_retry(&raw)?;
-    crate::db::update_agent_node_name(session_id, &slug).map_err(|e| e.to_string())?;
+    crate::db::update_agent_node_name(node_id, &slug).map_err(|e| e.to_string())?;
     Ok(slug)
 }
 
@@ -205,9 +290,36 @@ fn slug_with_retry(raw: &str) -> Result<String, String> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generates_three_word_hyphenated_name() {
+        let name = on_spawn();
+        let parts: Vec<&str> = name.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|p| !p.is_empty()));
+        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+    }
+
+    #[test]
+    fn is_default_name_positive() {
+        // A name composed of valid adj-adj-noun should return true
+        assert!(is_default_name("bold-keen-brook"));
+        assert!(is_default_name("calm-deep-oak"));
+    }
+
+    #[test]
+    fn is_default_name_negative() {
+        assert!(!is_default_name("fix-auth-token-refresh"));
+        assert!(!is_default_name("too-short"));
+        assert!(!is_default_name("not-a-valid-one-at-all"));
+    }
 
     #[test]
     fn slug_with_retry_accepts_valid() {
@@ -234,57 +346,39 @@ mod tests {
     #[test]
     fn buffer_caps_at_max() {
         let big = "x".repeat(5000);
-        append_output(999, &big);
+        on_output(999, &big);
         let buffers = SESSION_BUFFERS.lock().unwrap();
         assert!(buffers.get(&999).unwrap().len() <= MAX_BUFFER_CHARS);
     }
 
     #[test]
     fn slug_with_retry_extracts_hyphenated_from_prose() {
-        // If model outputs prose with a slug embedded, find the hyphenated part
         let result = slug_with_retry(
             "Based on the session, a good name would be: improve-auth-flow"
         );
         assert!(result.is_ok());
     }
 
-    // Stale-state clearing tests. Covers the bug where archived/deleted sessions
-    // left behind state in SESSION_BUFFERS, TURN_COUNTERS, and RENAMED_SESSIONS,
-    // contaminating newly-created nodes that reused the same session_id.
-    // -------------------------------------------------------------------------
-
     #[test]
-    fn stale_buffers_cleared_on_record_turn() {
-        // Simulate the bug: an archived session left behind SESSION_BUFFERS
-        // for session_id=5. When record_turn is called for a new node that
-        // reuses session_id=5, the old buffer must be cleared BEFORE any rename
-        // logic runs — otherwise the rename snapshot is contaminated with stale text.
-        //
-        // record_turn() calls reset_session_state() at the TOP of the function,
-        // before any DB access or turn counting. We test reset_session_state()
-        // directly since we have no AppHandle in unit tests.
+    fn stale_buffers_cleared_on_cleanup() {
         let stale_text = "old context from a previous archived session";
-        append_output(5, stale_text);
+        on_output(5, stale_text);
         {
             let buffers = SESSION_BUFFERS.lock().unwrap();
             assert!(buffers.get(&5).is_some(), "precondition: buffer exists");
         }
 
-        reset_session_state(5);
+        cleanup(5);
 
-        // Buffer must be gone — stale text was cleared before any rename logic
         let buffers = SESSION_BUFFERS.lock().unwrap();
         assert!(
             buffers.get(&5).is_none(),
-            "SESSION_BUFFERS[5] should be cleared by record_turn entry"
+            "SESSION_BUFFERS[5] should be cleared by cleanup"
         );
     }
 
     #[test]
-    fn turn_counter_reset_on_record_turn() {
-        // After archiving a session before it reached turn 2, TURN_COUNTERS[5]
-        // can be at 1. A new node reusing session_id=5 should start at turn 0,
-        // not inherit the stale counter (which would cause immediate rename).
+    fn turn_counter_reset_on_cleanup() {
         {
             let mut counters = TURN_COUNTERS.lock().unwrap();
             counters.insert(5, 1);
@@ -294,20 +388,17 @@ mod tests {
             buffers.insert(5, "fresh context".to_string());
         }
 
-        reset_session_state(5);
+        cleanup(5);
 
-        // TURN_COUNTERS[5] should have been removed
         let counters = TURN_COUNTERS.lock().unwrap();
         assert!(
             counters.get(&5).is_none(),
-            "TURN_COUNTERS[5] should be removed by record_turn entry"
+            "TURN_COUNTERS[5] should be removed by cleanup"
         );
     }
 
     #[test]
-    fn renamed_sessions_cleared_on_record_turn() {
-        // If session 5 was previously renamed (in RENAMED_SESSIONS), a new node
-        // reusing session_id=5 should NOT be blocked by that stale guard entry.
+    fn renamed_sessions_cleared_on_cleanup() {
         {
             let mut renamed = RENAMED_SESSIONS.lock().unwrap();
             renamed.insert(5);
@@ -317,20 +408,18 @@ mod tests {
             buffers.insert(5, "fresh context for new node".to_string());
         }
 
-        reset_session_state(5);
+        cleanup(5);
 
-        // RENAMED_SESSIONS[5] must be cleared so the new node can be renamed
         let renamed = RENAMED_SESSIONS.lock().unwrap();
         assert!(
             !renamed.contains(&5),
-            "RENAMED_SESSIONS[5] should be cleared by record_turn entry"
+            "RENAMED_SESSIONS[5] should be cleared by cleanup"
         );
     }
 
     #[test]
     fn cleanup_resets_all_state() {
-        // populate all three statics for session 7
-        append_output(7, "some output text for session 7");
+        on_output(7, "some output text for session 7");
         {
             let mut counters = TURN_COUNTERS.lock().unwrap();
             counters.insert(7, 2);
@@ -355,7 +444,6 @@ mod tests {
 
         cleanup(7);
 
-        // all three must be empty for session 7
         {
             let buffers = SESSION_BUFFERS.lock().unwrap();
             assert!(
@@ -379,15 +467,10 @@ mod tests {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Additional edge-case coverage
-    // -------------------------------------------------------------------------
-
     #[test]
-    fn reset_session_state_only_clears_target_session() {
-        // Populate state for two different sessions
-        append_output(5, "session 5 output");
-        append_output(99, "session 99 output");
+    fn cleanup_only_clears_target_session() {
+        on_output(5, "session 5 output");
+        on_output(99, "session 99 output");
         {
             let mut counters = TURN_COUNTERS.lock().unwrap();
             counters.insert(5, 1);
@@ -399,10 +482,8 @@ mod tests {
             renamed.insert(99);
         }
 
-        // Clear only session 5
-        reset_session_state(5);
+        cleanup(5);
 
-        // session 5 state must be gone
         {
             let buffers = SESSION_BUFFERS.lock().unwrap();
             assert!(buffers.get(&5).is_none());
@@ -421,9 +502,8 @@ mod tests {
     }
 
     #[test]
-    fn reset_session_state_is_idempotent() {
-        // Populating session 8 then clearing it twice should be safe
-        append_output(8, "some output");
+    fn cleanup_is_idempotent() {
+        on_output(8, "some output");
         {
             let mut counters = TURN_COUNTERS.lock().unwrap();
             counters.insert(8, 1);
@@ -433,8 +513,8 @@ mod tests {
             renamed.insert(8);
         }
 
-        reset_session_state(8);
-        reset_session_state(8); // second call must not panic
+        cleanup(8);
+        cleanup(8); // second call must not panic
 
         let buffers = SESSION_BUFFERS.lock().unwrap();
         let counters = TURN_COUNTERS.lock().unwrap();
@@ -445,45 +525,35 @@ mod tests {
     }
 
     #[test]
-    fn append_output_drops_data_after_renamed_gate() {
-        // Once a session is in RENAMED_SESSIONS, append_output should be a no-op.
-        // This prevents buffers from growing after a node has been renamed.
+    fn on_output_drops_data_after_renamed_gate() {
         {
             let mut renamed = RENAMED_SESSIONS.lock().unwrap();
             renamed.insert(42);
         }
 
-        append_output(42, "this should be dropped");
-        append_output(42, "and this too");
+        on_output(42, "this should be dropped");
+        on_output(42, "and this too");
 
         let buffers = SESSION_BUFFERS.lock().unwrap();
         assert!(
             buffers.get(&42).is_none(),
-            "append_output must drop data for sessions in RENAMED_SESSIONS"
+            "on_output must drop data for sessions in RENAMED_SESSIONS"
         );
     }
 
     #[test]
     fn turn_counter_accumulates_from_zero_to_rename() {
-        // Simulate the full turn accumulation path:
-        // turn 1: counter goes 0 -> 1, no rename
-        // turn 2: counter goes 1 -> 2, rename fires
-        // We test by directly inserting into TURN_COUNTERS to simulate
-        // having already seen turn 1, then verify the entry logic.
-        let session_id = 55;
+        let node_id = 55;
 
-        // Manually set counter to 1 (simulating one prior record_turn call)
         {
             let mut counters = TURN_COUNTERS.lock().unwrap();
-            counters.insert(session_id, 1);
+            counters.insert(node_id, 1);
         }
-        append_output(session_id, "turn 2 output");
+        on_output(node_id, "turn 2 output");
 
-        // Simulate the turn-counting portion of record_turn
-        // (entry-or-insert then increment, fire if == 2)
         {
             let mut counters = TURN_COUNTERS.lock().unwrap();
-            let count = counters.entry(session_id).or_insert(0);
+            let count = counters.entry(node_id).or_insert(0);
             *count += 1;
             assert_eq!(
                 *count, 2,
@@ -494,26 +564,16 @@ mod tests {
 
     #[test]
     fn buffer_truncation_splits_multibyte_utf8_correctly() {
-        // The buffer truncation logic drains bytes from the front until it lands
-        // on a valid UTF-8 character boundary. This tests that multi-byte UTF-8
-        // sequences are not sliced mid-character.
-        // "日" is 3 bytes in UTF-8. If we append a big string ending with "日",
-        // the drain must not cut in the middle of those 3 bytes.
-        let session_id = 77;
+        let node_id = 77;
         let base = "x".repeat(4000);
-        let with_kanji = format!("{}{}", base, "日本"); // "日本" = 6 bytes
+        let with_kanji = format!("{}{}", base, "日本");
 
-        append_output(session_id, &with_kanji);
+        on_output(node_id, &with_kanji);
 
         let buffers = SESSION_BUFFERS.lock().unwrap();
-        let buf = buffers.get(&session_id).unwrap();
+        let buf = buffers.get(&node_id).unwrap();
 
-        // Buffer must be <= MAX_BUFFER_CHARS
         assert!(buf.len() <= MAX_BUFFER_CHARS);
-
-        // Buffer content must be valid UTF-8 (if we sliced mid-character, this would panic)
-        // We use the fact that String::new() + push_str would have panicked at insert time.
-        // Instead verify by re-creating the string slice:
         assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
     }
 }
