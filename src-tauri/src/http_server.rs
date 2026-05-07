@@ -16,6 +16,12 @@ use tokio_tungstenite::{accept_async, tungstenite};
 
 use crate::db;
 
+// --- App Handle for emitting Tauri events from HTTP handlers ---
+
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+pub const HTTP_PORT: u16 = 1992;
+
 // --- Mobile Web App HTML (served as root) ---
 
 const MOBILE_APP_HTML: &str = include_str!("mobile_app.html");
@@ -37,7 +43,8 @@ fn get_server_state() -> Arc<HttpServerState> {
 
 /// Start the HTTP server on the given port.
 /// Spawns a background task using Tauri-managed async runtime.
-pub fn start_http_server(port: u16) {
+pub fn start_http_server(port: u16, app: tauri::AppHandle) {
+    let _ = APP_HANDLE.set(app);
     let (broadcast_tx, _) = broadcast::channel(1024);
     let state = Arc::new(HttpServerState {
         _broadcast_tx: broadcast_tx,
@@ -134,8 +141,38 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<Htt
         return;
     }
 
-    // API routes — require token
     let path_without_query = parts[1].split('?').next().unwrap_or(parts[1]);
+
+    // Attention webhook: POST /api/attention/{session_id}
+    // Called by Claude Code's Stop hook — no token required (localhost-only)
+    if parts[0] == "POST" && path_without_query.starts_with("/api/attention/") {
+        let session_id: Option<i64> = path_without_query
+            .strip_prefix("/api/attention/")
+            .and_then(|s| s.parse().ok());
+
+        let Some(session_id) = session_id else {
+            let error = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
+            return;
+        };
+
+        let Some(app) = APP_HANDLE.get() else {
+            let error = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
+            return;
+        };
+
+        crate::commands::attention::mark_attention(session_id, app);
+
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let mut stream = lines.into_inner();
+        let _ = stream.write_all(response).await;
+        return;
+    }
+
+    // API routes — require token
     if parts[0] == "GET" && path_without_query.starts_with("/api/") {
         if !validate_token(token.clone()) {
             let error = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
