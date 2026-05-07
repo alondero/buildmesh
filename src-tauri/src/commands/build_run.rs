@@ -63,46 +63,25 @@ fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String>
 // Worktree path resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve the worktree path for a given agent node ID.
-/// Uses `git worktree list --porcelain` to find the worktree directory.
-fn resolve_worktree_path(mesh_path: &std::path::Path, node_id: i64) -> Result<String, String> {
-    let worktree_name = format!("agent-{}", node_id);
+/// Resolve the worktree path for a given agent node.
+/// cwrap creates worktrees at `{node.path}/.claude/worktrees/{worktree_name}`.
+fn resolve_worktree_path(node_path: &str, worktree_name: Option<&str>) -> Result<String, String> {
+    let wt_name = worktree_name.ok_or_else(|| {
+        "No worktree name set for this agent node. Spawn the agent first to create a worktree.".to_string()
+    })?;
 
-    // Run git worktree list in the mesh directory
-    let output = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(mesh_path)
-        .output()
-        .map_err(|e| format!("failed to list worktrees: {}", e))?;
+    let worktree_path = std::path::PathBuf::from(node_path)
+        .join(".claude")
+        .join("worktrees")
+        .join(wt_name);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse output: each worktree starts with "worktree <path>" followed by "HEAD <ref>"
-    let mut current_worktree_path: Option<String> = None;
-    for line in stdout.lines() {
-        if line.starts_with("worktree ") {
-            current_worktree_path = Some(line.strip_prefix("worktree ").unwrap().to_string());
-        } else if line.starts_with("HEAD ") {
-            // Check if this worktree contains our agent- name
-            if let Some(ref wp) = current_worktree_path {
-                if wp.contains(&worktree_name) {
-                    return Ok(wp.clone());
-                }
-            }
-        } else if line.starts_with("baregit") || line.starts_with("gitdir") {
-            current_worktree_path = None;
-        }
-    }
-
-    // Fallback: construct the expected path
-    let fallback = mesh_path.join("worktrees").join(&worktree_name);
-    if fallback.exists() {
-        return Ok(fallback.to_string_lossy().to_string());
+    if worktree_path.exists() {
+        return Ok(worktree_path.to_string_lossy().to_string());
     }
 
     Err(format!(
-        "Worktree not found for agent-{}. Spawn an agent first to create the worktree.",
-        node_id
+        "Worktree directory not found at {:?}. Spawn the agent first to create the worktree.",
+        worktree_path
     ))
 }
 
@@ -174,17 +153,15 @@ pub async fn build_run(
     mode: BuildRunMode,
     app: AppHandle,
 ) -> Result<(), String> {
-    // 1. Get agent node to find mesh path
+    // 1. Get agent node (node.path == mesh.path for all nodes)
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;
-    let mesh = db::get_mesh_by_id(node.mesh_id)
-        .map_err(|e| format!("failed to get mesh {}: {}", node.mesh_id, e))?;
 
     // 2. Parse mesh.toml
-    let config = parse_mesh_config(&std::path::PathBuf::from(&mesh.path))?;
+    let config = parse_mesh_config(&std::path::PathBuf::from(&node.path))?;
 
     // 3. Resolve worktree path
-    let worktree_path = resolve_worktree_path(&std::path::PathBuf::from(&mesh.path), node_id)?;
+    let worktree_path = resolve_worktree_path(&node.path, node.worktree_name.as_deref())?;
 
     // 4. Get the command to run
     let command = match mode {
@@ -207,16 +184,23 @@ pub async fn build_run(
         pixel_height: 0,
     }).map_err(|e| format!("failed to open PTY: {}", e))?;
 
-    let mut cmd = CommandBuilder::new("cmd.exe");
-    if matches!(env_type, env::Environment::Wsl) {
-        // On WSL, use wsl.exe to run the command
-        cmd = CommandBuilder::new("wsl.exe");
-        cmd.arg("-e".to_string());
+    let mut cmd = if matches!(env_type, env::Environment::Wsl) {
+        let mut c = CommandBuilder::new("wsl.exe");
+        c.arg("-e");
+        c.arg(command.to_string());
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = CommandBuilder::new("sh");
+        c.arg("-c");
+        c.arg(command.to_string());
+        c
     } else {
-        cmd.cwd(&shell_cwd);
-        cmd.arg("/c".to_string());
-    }
-    cmd.arg(command.to_string());
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.arg("/c");
+        c.arg(command.to_string());
+        c
+    };
+    cmd.cwd(&shell_cwd);
 
     let child = pair.slave.spawn_command(cmd)
         .map_err(|e| format!("failed to spawn shell: {}", e))?;
