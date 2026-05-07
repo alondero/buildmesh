@@ -45,10 +45,6 @@ pub fn reset_session_state(session_id: i64) {
 }
 
 pub fn record_turn(session_id: i64, app: AppHandle) {
-    // Defensively clear stale state at record_turn entry. This prevents archived/deleted
-    // sessions from contaminating newly-created nodes that reuse the same session_id.
-    reset_session_state(session_id);
-
     if RENAMED_SESSIONS.lock().unwrap().contains(&session_id) {
         return;
     }

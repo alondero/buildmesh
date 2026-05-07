@@ -13,6 +13,18 @@ use tauri::{command, AppHandle, Emitter};
 static ATTENTION_PENDING: once_cell::sync::Lazy<Arc<Mutex<std::collections::HashSet<i64>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(std::collections::HashSet::new())));
 
+/// Core attention logic shared by the Tauri command and the HTTP webhook.
+pub fn mark_attention(session_id: i64, app: &AppHandle) {
+    {
+        let mut pending = ATTENTION_PENDING.lock().unwrap();
+        pending.insert(session_id);
+    }
+    let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
+    let _ = app.emit("attention-needed", serde_json::json!({ "session_id": session_id }));
+    crate::node_namer::record_turn(session_id, app.clone());
+    tracing::info!("Session {} awaiting user input", session_id);
+}
+
 /// Register that a session is awaiting user input.
 /// Called by the agent via the notify-attention stop hook.
 /// Emits an `attention-needed` event to the frontend.
@@ -21,24 +33,7 @@ pub async fn register_attention_session(
     app: AppHandle,
     session_id: i64,
 ) -> Result<(), String> {
-    {
-        let mut pending = ATTENTION_PENDING.lock().unwrap();
-        pending.insert(session_id);
-    }
-
-    // Update database status
-    db::update_agent_node_status(session_id, SessionStatus::AwaitingInput)
-        .map_err(|e| e.to_string())?;
-
-    // Emit event to frontend
-    app.emit("attention-needed", serde_json::json!({
-        "session_id": session_id
-    }))
-    .map_err(|e| e.to_string())?;
-
-    crate::node_namer::record_turn(session_id, app.clone());
-
-    tracing::info!("Session {} awaiting user input", session_id);
+    mark_attention(session_id, &app);
     Ok(())
 }
 
