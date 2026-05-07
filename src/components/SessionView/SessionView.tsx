@@ -10,7 +10,6 @@ import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { listen, emit } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession, getGitSummary, type GitSummary } from '../../lib/tauri';
 import { FIT_TERMINALS, GIT_CHANGED } from '../../lib/events';
-import { invalidateSummaryCache } from '../Sidebar/Sidebar';
 import { getNodeGitPath } from '../../lib/paths';
 import type { GitStatus, DiffResult } from '../../lib/tauri';
 
@@ -29,6 +28,7 @@ export function SessionView() {
   const changedFilesNodeId = useUIStore(state => state.changedFilesNodeId);
   const [selectedDiff, setSelectedDiff] = useState<{ file: GitStatus; diff: DiffResult } | null>(null);
   const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' } | null>(null);
+  const [cacheVersion, setCacheVersion] = useState(0);
 
   const filteredNodes = useMemo(() => {
     if (selectedMeshId === null) {
@@ -67,8 +67,8 @@ export function SessionView() {
     const unlisten = listen(GIT_CHANGED, (event) => {
       const { path } = event.payload as { path: string };
       gridSummaryCache.delete(path);
-      gridSummaryCacheVersion++;
-      invalidateSummaryCache(path);
+      gridPendingFetches.delete(path);
+      setCacheVersion(v => v + 1);
     });
     return () => {
       unlisten.then(fn => fn());
@@ -121,7 +121,7 @@ export function SessionView() {
       {/* Main content area with grid and optional panel */}
       <div className="flex-1 flex overflow-hidden">
         {/* Grid of filtered nodes */}
-        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} changedFilesNodeId={changedFilesNodeId} onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })} buildRunOpen={openBuildRun} setBuildRunOpen={setOpenBuildRun} cacheVersion={gridSummaryCacheVersion} />
+        <GridLayout nodes={filteredNodes} onSlashCommand={handleSlashCommand} changedFilesNodeId={changedFilesNodeId} onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })} buildRunOpen={openBuildRun} setBuildRunOpen={setOpenBuildRun} cacheVersion={cacheVersion} />
 
         {/* Changed Files Panel */}
         <ChangedFilesPanel
@@ -144,11 +144,8 @@ export function SessionView() {
 }
 
 // Module-level cache for git summaries (keyed by path)
-export const gridSummaryCache = new Map<string, GitSummary>();
-export const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
-
-// Incremented when GIT_CHANGED fires to bust cache in GridNodeHeader useEffects
-let gridSummaryCacheVersion = 0;
+const gridSummaryCache = new Map<string, GitSummary>();
+const gridPendingFetches = new Map<string, Promise<GitSummary | null>>();
 
 function GridNodeHeader({ node, changedFilesNodeId, onBuildRun, cacheVersion }: { node: AgentNode; changedFilesNodeId: number | null; onBuildRun: (nodeId: number, mode: 'build' | 'run') => void; cacheVersion: number }) {
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
