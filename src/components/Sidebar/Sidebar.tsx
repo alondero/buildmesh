@@ -219,7 +219,6 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
 }) {
   const config = getStatusConfig(node.status);
   const isAwaiting = node.status === 'awaiting_input';
-
   return (
     <div
       data-session-item
