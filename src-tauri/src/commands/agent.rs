@@ -219,7 +219,8 @@ fn build_spawn_command(
 
     let (binary, mut args): (&str, Vec<String>) = if is_macos {
         match provider_enum {
-            Provider::Anthropic => ("claude", vec![]),
+            Provider::Anthropic => ("claude", vec!["--dangerously-skip-permissions".to_string()]),
+            Provider::Gemini => (provider_enum.binary(), vec!["--yolo".to_string()]),
             _ => (provider_enum.binary(), vec![]),
         }
     } else {
@@ -227,6 +228,7 @@ fn build_spawn_command(
             Provider::Anthropic | Provider::Minimax => {
                 ("cwrap", vec![provider_enum.cli_flag().to_string()])
             }
+            Provider::Gemini => (provider_enum.binary(), vec!["--yolo".to_string()]),
             _ => (provider_enum.binary(), vec![]),
         }
     };
