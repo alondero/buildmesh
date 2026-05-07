@@ -6,6 +6,7 @@ import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import { getGitSummary, type GitSummary } from '../../lib/tauri';
+import { getNodeGitPath } from '../../lib/paths';
 import { isMac } from '../../lib/platform';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
@@ -234,16 +235,18 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
 
   const [summary, setSummary] = useState<GitSummary | null>(null);
 
-  useEffect(() => {
-    if (!node.path) return;
+  const gitPath = getNodeGitPath(node);
 
-    const cached = summaryCache.get(node.path);
+  useEffect(() => {
+    if (!gitPath) return;
+
+    const cached = summaryCache.get(gitPath);
     if (cached) {
       setSummary(cached.total > 0 ? cached : null);
       return;
     }
 
-    const pending = pendingFetches.get(node.path);
+    const pending = pendingFetches.get(gitPath);
     if (pending) {
       pending.then(s => {
         if (s) setSummary(s.total > 0 ? s : null);
@@ -253,20 +256,20 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
 
     const fetchSummary = async (): Promise<GitSummary | null> => {
       try {
-        const result = await getGitSummary(node.path);
-        summaryCache.set(node.path, result);
-        pendingFetches.delete(node.path);
+        const result = await getGitSummary(gitPath);
+        summaryCache.set(gitPath, result);
+        pendingFetches.delete(gitPath);
         setSummary(result.total > 0 ? result : null);
         return result;
       } catch {
-        pendingFetches.delete(node.path);
+        pendingFetches.delete(gitPath);
         return null;
       }
     };
 
     const p = fetchSummary();
-    pendingFetches.set(node.path, p);
-  }, [node.path]);
+    pendingFetches.set(gitPath, p);
+  }, [gitPath]);
 
   return (
     <div

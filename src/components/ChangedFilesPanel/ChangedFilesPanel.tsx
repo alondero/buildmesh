@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { getGitStatus, diffFileAgainstHead, type GitStatus, type DiffResult } from '../../lib/tauri';
+import { GIT_CHANGED } from '../../lib/events';
 
 interface ChangedFilesPanelProps {
   projectPath: string;
@@ -13,16 +15,28 @@ export function ChangedFilesPanel({ projectPath, isOpen, onFileSelect }: Changed
   const [error, setError] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState<string | null>(null);
 
-  useEffect(() => {
+  const fetchStatus = () => {
     if (!isOpen || !projectPath) return;
-
     setLoading(true);
     setError(null);
-
     getGitStatus(projectPath)
       .then(setFiles)
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchStatus();
+  }, [isOpen, projectPath]);
+
+  useEffect(() => {
+    if (!isOpen || !projectPath) return;
+    const unlisten = listen<{ path: string }>(GIT_CHANGED, (event) => {
+      if (event.payload.path === projectPath) {
+        fetchStatus();
+      }
+    });
+    return () => { unlisten.then(fn => fn()); };
   }, [isOpen, projectPath]);
 
   const handleFileClick = async (file: GitStatus) => {
@@ -38,7 +52,6 @@ export function ChangedFilesPanel({ projectPath, isOpen, onFileSelect }: Changed
     }
   };
 
-  // Calculate aggregate stats
   const totalFiles = files.length;
   const addedFiles = files.filter(f => f.status === 'added' || f.status === 'untracked').length;
   const modifiedFiles = files.filter(f => f.status === 'modified' || f.status === 'renamed').length;
