@@ -529,7 +529,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM agent_nodes WHERE status != 'archived' ORDER BY created_at DESC"
+         FROM agent_nodes WHERE status != 'archived' ORDER BY created_at ASC"
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(AgentNode {
@@ -563,7 +563,7 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at DESC"
+         FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at ASC"
     )?;
     let rows = stmt.query_map(params![mesh_id], |row| {
         Ok(AgentNode {
