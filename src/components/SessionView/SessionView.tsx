@@ -6,9 +6,8 @@ import { AgentTerminal } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
 import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
-import { emit } from '@tauri-apps/api/event';
 import { watchSession, unwatchSession } from '../../lib/tauri';
-import { FIT_TERMINALS } from '../../lib/events';
+import { terminalManager } from '../Terminal/Terminal';
 import { getNodeGitPath } from '../../lib/paths';
 import { useGridLayout } from '../../hooks/useGridLayout';
 import { DiffViewerModal } from './DiffViewerModal';
@@ -75,7 +74,7 @@ export function SessionView() {
   // Fit terminal when active node changes (e.g. container might have resized)
   useEffect(() => {
     if (activeNode) {
-      emit(FIT_TERMINALS, { sessionId: activeNode.id }).catch(console.error);
+      terminalManager.fit(activeNode.id);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNode?.id]);
