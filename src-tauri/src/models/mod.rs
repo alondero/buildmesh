@@ -233,3 +233,74 @@ impl Default for AppSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_status_round_trip_all_variants() {
+        let variants = [
+            SessionStatus::Running,
+            SessionStatus::Idle,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Error,
+            SessionStatus::Archived,
+            SessionStatus::Suspended,
+        ];
+        for status in variants {
+            let db_str = status.to_db_str();
+            let parsed = SessionStatus::from_db_str(db_str);
+            assert_eq!(parsed, status, "round-trip failed for {:?}", status);
+        }
+    }
+
+    #[test]
+    fn session_status_unknown_string_defaults_to_idle() {
+        assert_eq!(SessionStatus::from_db_str("garbage"), SessionStatus::Idle);
+        assert_eq!(SessionStatus::from_db_str(""), SessionStatus::Idle);
+        assert_eq!(SessionStatus::from_db_str("RUNNING"), SessionStatus::Idle);
+    }
+
+    #[test]
+    fn provider_binary_cwrap_for_anthropic_minimax() {
+        assert_eq!(Provider::Anthropic.binary(), "cwrap");
+        assert_eq!(Provider::Minimax.binary(), "cwrap");
+    }
+
+    #[test]
+    fn provider_binary_direct_for_gemini_opencode() {
+        assert_eq!(Provider::Gemini.binary(), "gemini");
+        assert_eq!(Provider::OpenCode.binary(), "opencode");
+    }
+
+    #[test]
+    fn provider_cli_flag_correct() {
+        assert_eq!(Provider::Anthropic.cli_flag(), "--anthropic");
+        assert_eq!(Provider::Minimax.cli_flag(), "--minimax");
+        assert_eq!(Provider::Gemini.cli_flag(), "");
+        assert_eq!(Provider::OpenCode.cli_flag(), "");
+    }
+
+    #[test]
+    fn provider_display_lowercase() {
+        assert_eq!(format!("{}", Provider::Anthropic), "anthropic");
+        assert_eq!(format!("{}", Provider::Minimax), "minimax");
+        assert_eq!(format!("{}", Provider::Gemini), "gemini");
+        assert_eq!(format!("{}", Provider::OpenCode), "opencode");
+    }
+
+    #[test]
+    fn env_type_display_lowercase() {
+        assert_eq!(format!("{}", EnvType::Windows), "windows");
+        assert_eq!(format!("{}", EnvType::Wsl), "wsl");
+    }
+
+    #[test]
+    fn session_status_serde_json_lowercase() {
+        let json = serde_json::to_string(&SessionStatus::AwaitingInput).unwrap();
+        assert_eq!(json, "\"awaitinginput\"");
+        let json = serde_json::to_string(&SessionStatus::Running).unwrap();
+        assert_eq!(json, "\"running\"");
+    }
+}

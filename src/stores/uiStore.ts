@@ -4,6 +4,7 @@ interface UIState {
   changedFilesOpen: boolean;
   changedFilesNodeId: number | null;
   toggleChangedFiles: (nodeId: number) => void;
+  setChangedFilesNodeId: (nodeId: number) => void;
   closeChangedFiles: () => void;
 }
 
@@ -17,6 +18,12 @@ export const useUIStore = create<UIState>((set, get) => ({
       set({ changedFilesOpen: false, changedFilesNodeId: null });
     } else {
       set({ changedFilesOpen: true, changedFilesNodeId: nodeId });
+    }
+  },
+
+  setChangedFilesNodeId: (nodeId: number) => {
+    if (get().changedFilesOpen) {
+      set({ changedFilesNodeId: nodeId });
     }
   },
 

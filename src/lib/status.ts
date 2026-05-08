@@ -1,32 +1,35 @@
-// Centralized agent node status constants
-// These are shared between agentNodeStore.ts and Sidebar.tsx
-
-export type SessionStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended' | 'archived';
+export type SessionStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
 
 export const STATUS_CONFIG = {
   running: {
     color: 'status-running',
+    bgColor: 'bg-accent-cyan',
     dot: '●',
+    label: 'Running',
   },
   idle: {
     color: 'status-idle',
+    bgColor: 'bg-accent-cyan',
     dot: '○',
+    label: 'Idle',
   },
   awaiting_input: {
-    color: 'status-waiting',
-    dot: '◐',
+    color: 'status-waiting animate-pulse-fast',
+    bgColor: 'bg-status-warning animate-pulse-fast',
+    dot: '●',
+    label: 'Needs attention',
   },
   error: {
     color: 'status-error',
+    bgColor: 'bg-status-error',
     dot: '✗',
+    label: 'Error',
   },
   suspended: {
     color: 'text-violet',
+    bgColor: 'bg-accent-violet',
     dot: '⏸',
-  },
-  archived: {
-    color: 'status-archived',
-    dot: '○',
+    label: 'Suspended',
   },
 } as const;
 

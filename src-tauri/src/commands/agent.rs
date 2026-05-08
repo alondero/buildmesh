@@ -47,56 +47,6 @@ impl ProcessRegistry {
 pub(crate) static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<ProcessRegistry>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(ProcessRegistry::new())));
 
-static LAST_INPUT_TIME: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, std::time::Instant>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-/// Per-session pending attention — used to debounce prompt detection.
-/// When a prompt is detected, we set a 1-second window. If more output arrives
-/// within that window, the agent is still working and we cancel the pending event.
-/// If the window expires, the agent is genuinely waiting for input.
-struct PendingAttention {
-    fire_at: std::time::Instant,
-}
-
-static PENDING_ATTENTION: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, PendingAttention>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-// Pre-computed lowercase patterns — avoids per-call allocation in is_tool_result_output
-static TOOL_RESULT_PATTERNS: once_cell::sync::Lazy<Vec<&'static str>> =
-    once_cell::sync::Lazy::new(|| {
-        vec![
-            "exit code 0",
-            "exit code 1",
-            "process finished",
-            "created file",
-            "modified file",
-            "deleted file",
-            "written to",
-            "error:",
-            "failed to",
-            "panic:",
-        ]
-    });
-
-/// Returns true if the data looks like a tool execution result, indicating
-/// the agent is mid-turn and not yet waiting for input.
-fn is_tool_result_output(data: &str) -> bool {
-    let data_lower = data.trim().to_lowercase();
-    if data_lower.is_empty() {
-        return false;
-    }
-    for pattern in TOOL_RESULT_PATTERNS.iter() {
-        if data_lower.contains(pattern) {
-            return true;
-        }
-    }
-    // Bash prompts at end of line — agent running a sub-command
-    if data.trim().ends_with("$ ") || data.trim().ends_with('$') {
-        return true;
-    }
-    false
-}
-
 
 // ---------------------------------------------------------------------------
 // Helper functions for spawn_agent
@@ -167,12 +117,14 @@ fn build_spawn_command(
     is_wsl: EnvType,
     provider_enum: Provider,
     session_id_mode: &SessionIdMode,
+    session_id: i64,
 ) -> CommandBuilder {
     let is_macos = cfg!(target_os = "macos");
 
     let (binary, mut args): (&str, Vec<String>) = if is_macos {
         match provider_enum {
-            Provider::Anthropic => ("claude", vec![]),
+            Provider::Anthropic => ("claude", vec!["--dangerously-skip-permissions".to_string()]),
+            Provider::Gemini => (provider_enum.binary(), vec!["--yolo".to_string()]),
             _ => (provider_enum.binary(), vec![]),
         }
     } else {
@@ -180,6 +132,7 @@ fn build_spawn_command(
             Provider::Anthropic | Provider::Minimax => {
                 ("cwrap", vec![provider_enum.cli_flag().to_string()])
             }
+            Provider::Gemini => (provider_enum.binary(), vec!["--yolo".to_string()]),
             _ => (provider_enum.binary(), vec![]),
         }
     };
@@ -275,7 +228,60 @@ fn build_spawn_command(
     };
 
     cmd.cwd(&node.path);
+    cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
+    cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT.to_string());
     cmd
+}
+
+/// Ensures the Notification hook exists in `{project}/.claude/settings.local.json`.
+/// Uses $BUILDMESH_SESSION_ID env var so one hook works for all agents in the project.
+pub fn inject_attention_hook(project_path: &std::path::Path) {
+    let claude_dir = project_path.join(".claude");
+    if let Err(e) = std::fs::create_dir_all(&claude_dir) {
+        tracing::warn!("inject_attention_hook: failed to create .claude dir: {}", e);
+        return;
+    }
+
+    let settings_path = claude_dir.join("settings.local.json");
+    let mut settings: serde_json::Value = match std::fs::read_to_string(&settings_path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({})),
+        Err(_) => serde_json::json!({}),
+    };
+
+    let hook_command = format!(
+        "curl -sf -X POST http://localhost:{}/api/attention/$BUILDMESH_SESSION_ID || true",
+        crate::http_server::HTTP_PORT,
+    );
+
+    let expected_hooks = serde_json::json!({
+        "Notification": [{
+            "matcher": "idle_prompt",
+            "hooks": [{
+                "type": "command",
+                "command": hook_command
+            }]
+        }]
+    });
+
+    if settings.get("hooks") == Some(&expected_hooks) {
+        return;
+    }
+
+    settings["hooks"] = expected_hooks;
+
+    match serde_json::to_string_pretty(&settings) {
+        Ok(content) => {
+            if let Err(e) = std::fs::write(&settings_path, content) {
+                tracing::warn!("inject_attention_hook: failed to write: {}", e);
+            } else {
+                tracing::info!(
+                    "inject_attention_hook: wrote hook at {:?}",
+                    settings_path
+                );
+            }
+        }
+        Err(e) => tracing::warn!("inject_attention_hook: serialize failed: {}", e),
+    }
 }
 
 /// Spawn the child process.
@@ -306,7 +312,7 @@ fn register_agent(
 }
 
 /// Start the PTY reader thread.
-fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>, spawned_at: std::time::Instant, provider: crate::models::Provider) {
+fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>, spawned_at: std::time::Instant) {
     let app_clone = app;
     let reader_alive = Arc::new(AtomicBool::new(true));
     let reader_alive_clone = reader_alive.clone();
@@ -314,7 +320,6 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
     std::thread::spawn(move || {
         let mut r = reader;
         let mut buf = [0u8; 8192];
-        let mut detector = crate::turn_detector::TurnDetector::new(provider);
         loop {
             match r.read(&mut buf) {
                 Ok(0) => {
@@ -327,48 +332,7 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                    crate::node_namer::append_output(session_id, &data);
-
-                    if detector.contains_prompt(&data) {
-                        let suppress = LAST_INPUT_TIME.lock().unwrap()
-                            .get(&session_id)
-                            .map(|t| t.elapsed() < std::time::Duration::from_secs(3))
-                            .unwrap_or(false);
-
-                        if !suppress && !is_tool_result_output(&data) {
-                            // Set 1-second debounce — if more output arrives within
-                            // 1s the pending is cancelled and agent is still working.
-                            let mut pending = PENDING_ATTENTION.lock().unwrap();
-                            pending.insert(session_id, PendingAttention {
-                                fire_at: std::time::Instant::now()
-                                    + std::time::Duration::from_millis(1000),
-                            });
-                        }
-                    }
-
-                    // Cancel pending only if this output ALSO contains a new prompt
-                    // (agent still working). If no prompt, leave the timer intact.
-                    // Then check if any pending has expired and fire attention.
-                    {
-                        let mut pending = PENDING_ATTENTION.lock().unwrap();
-
-                        let prompt_in_data = detector.matches_prompt(&data);
-
-                        if prompt_in_data {
-                            pending.remove(&session_id);
-                        }
-
-                        if let Some(p) = pending.remove(&session_id) {
-                            if p.fire_at <= std::time::Instant::now() {
-                                drop(pending);
-                                crate::node_namer::record_turn(session_id, app_clone.clone());
-                                let _ = db::update_agent_node_status(session_id, SessionStatus::AwaitingInput);
-                                let _ = app_clone.emit("attention-needed", serde_json::json!({
-                                    "session_id": session_id
-                                }));
-                            }
-                        }
-                    }
+                    crate::session_naming::on_output(session_id, &data);
 
                     let _ = app_clone.emit(
                         "agent-output",
@@ -465,7 +429,7 @@ async fn spawn_agent_inner(
     let pair = open_pty_pair(rows, cols)?;
 
     // 6. Build command
-    let cmd = build_spawn_command(&node, is_wsl, provider_enum, &session_id_mode);
+    let cmd = build_spawn_command(&node, is_wsl, provider_enum, &session_id_mode, session_id);
 
     // 7. Spawn
     tracing::info!("spawn_agent_inner: spawning process in {}", node.path);
@@ -497,12 +461,17 @@ async fn spawn_agent_inner(
     register_agent(session_id, child, writer, master, reader_alive.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
 
-    // 9. Start reader thread with spawn timestamp for early-exit detection
+    // 9. Ensure attention hook exists in project root (idempotent)
+    if provider_enum == Provider::Anthropic || provider_enum == Provider::Minimax {
+        inject_attention_hook(std::path::Path::new(&node.path));
+    }
+
+    // 10. Start reader thread with spawn timestamp for early-exit detection
     let spawned_at = std::time::Instant::now();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     // Ensure mobile broadcast channel exists before reader starts
     crate::http_server::ensure_pty_channel(session_id);
-    start_reader(app.clone(), session_id, reader, spawned_at, provider_enum);
+    start_reader(app.clone(), session_id, reader, spawned_at);
 
     tracing::info!(
         "spawn_agent_inner: reader thread spawned, updating node status"
@@ -627,7 +596,6 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
         }
 
         if data.contains('\n') || data.contains('\r') {
-            LAST_INPUT_TIME.lock().unwrap().insert(session_id, std::time::Instant::now());
             db::update_agent_node_status(session_id, SessionStatus::Running).ok();
             let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
         }
@@ -692,7 +660,6 @@ pub async fn debug_list_agents() -> Vec<AgentDebugState> {
 pub struct CrashSnapshot {
     pub process_registry_ids: Vec<i64>,
     pub session_count: usize,
-    pub last_input_entries: usize,
     pub renamed_sessions: usize,
     pub buffers_size_bytes: usize,
     pub turn_counters_entries: usize,
@@ -706,15 +673,13 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
     drop(registry);
 
     let session_count = db::list_agent_nodes().map(|s| s.len()).unwrap_or(0);
-    let last_input_count = LAST_INPUT_TIME.lock().unwrap().len();
-    let renamed_count = crate::node_namer::renamed_sessions_count();
-    let buffers_size = crate::node_namer::buffers_size_bytes();
-    let turn_counter_count = crate::node_namer::turn_counter_count();
+    let renamed_count = crate::session_naming::renamed_sessions_count();
+    let buffers_size = crate::session_naming::buffers_size_bytes();
+    let turn_counter_count = crate::session_naming::turn_counter_count();
 
     CrashSnapshot {
         process_registry_ids: process_ids,
         session_count,
-        last_input_entries: last_input_count,
         renamed_sessions: renamed_count,
         buffers_size_bytes: buffers_size,
         turn_counters_entries: turn_counter_count,

@@ -11,8 +11,9 @@ export interface AgentNode {
   branch: string;
   env: 'windows' | 'wsl';
   provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode';
-  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended' | 'archived';
+  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
   cli_session_id?: string;
+  worktree_name?: string;
   created_at: string;
 }
 
@@ -132,8 +133,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       const node = await invoke<AgentNode>('create_session', {
         meshId, name, path, branch, provider
       });
-      set((state) => ({ agentNodes: [node, ...state.agentNodes] }));
-      await get().setActiveNode(node.id);
+      set((state) => ({ agentNodes: [...state.agentNodes, node] }));
       return node;
     } catch (e) {
       set({ error: String(e) });

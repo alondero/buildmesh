@@ -49,8 +49,15 @@ OpenCode:         r"(?m)^\s*[>$❯]\s*$"
 
 **`prompts_seen > 1` guard:** The first prompt (on agent spawn) is always skipped — it fires before any user work begins. Only the second and subsequent prompts trigger `attention-needed`. This prevents false attention events on agent node start.
 
+### Attention Timer Architecture
+Detection and timing are separated into two threads:
+- **Reader thread** (per-session): sets `PENDING_ATTENTION[session_id]` when a prompt is detected, cancels it when non-prompt output arrives (agent still working).
+- **Timer thread** (singleton, polls every 250ms): fires `attention-needed` events when a pending's 1.5s debounce window expires without cancellation.
+
+This separation is required because the reader's `read()` call is blocking — the timer can only expire in a dedicated polling thread.
+
 ### LAST_INPUT_TIME Suppression
-After user sends input (`\n` or `\r`), `LAST_INPUT_TIME` records the timestamp. For 3 seconds afterward, `attention-needed` events are suppressed to avoid duplicate attention triggers from agent output that immediately follows user typing. See `agent.rs:248-251`.
+After user sends input (`\n` or `\r`), `LAST_INPUT_TIME` records the timestamp. For 3 seconds afterward, prompt detection is suppressed to avoid false attention triggers from agent output that immediately follows user typing.
 
 ### Auto-Spawn Behavior
 `AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
