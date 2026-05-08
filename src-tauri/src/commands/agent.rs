@@ -118,6 +118,8 @@ fn build_spawn_command(
     provider_enum: Provider,
     session_id_mode: &SessionIdMode,
     session_id: i64,
+    model_override: Option<&str>,
+    effort_override: Option<&str>,
 ) -> CommandBuilder {
     let is_macos = cfg!(target_os = "macos");
 
@@ -196,6 +198,18 @@ fn build_spawn_command(
             args.push(id.clone());
         }
         SessionIdMode::None => {}
+    }
+
+    // Add --model and --effort for cwrap providers when configured
+    if is_cwrap {
+        if let Some(model) = model_override {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        if let Some(effort) = effort_override {
+            args.push("--effort".to_string());
+            args.push(effort.to_string());
+        }
     }
 
     let mut cmd = if is_wsl == EnvType::Wsl {
@@ -428,8 +442,14 @@ async fn spawn_agent_inner(
     tracing::debug!("spawn_agent_inner: opening PTY system");
     let pair = open_pty_pair(rows, cols)?;
 
-    // 6. Build command
-    let cmd = build_spawn_command(&node, is_wsl, provider_enum, &session_id_mode, session_id);
+    // 6. Read mesh config for model/effort overrides
+    let mesh = db::get_mesh_by_id(node.mesh_id).map_err(|e| e.to_string())?;
+    let config = crate::commands::build_run::parse_mesh_config_for_spawn(&std::path::PathBuf::from(&mesh.path));
+    let model_override = config.as_ref().and_then(|c| c.model.as_deref());
+    let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
+
+    // 7. Build command
+    let cmd = build_spawn_command(&node, is_wsl, provider_enum, &session_id_mode, session_id, model_override, effort_override);
 
     // 7. Spawn
     tracing::info!("spawn_agent_inner: spawning process in {}", node.path);

@@ -3,8 +3,10 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
+import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshPropertiesPanel';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
+import { useUIStore } from './stores/uiStore';
 import { isMac } from './lib/platform';
 import './App.css';
 
@@ -29,6 +31,7 @@ function App() {
   const [backendAgents, setBackendAgents] = useState<BackendAgentState[]>([]);
   const [eventCounts, setEventCounts] = useState<Record<number, number>>({});
   const [uiErrors, setUiErrors] = useState<string[]>([]);
+  const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
 
   const [_showDebug, setShowDebug] = useState(false);
 
@@ -170,6 +173,8 @@ function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-[#09090f] text-[#e0e0e0]">
       <Sidebar />
       <SessionView />
+
+      {propertiesPanelMeshId != null && <MeshPropertiesPanel />}
       
       {/* DEBUG OVERLAY */}
       <div className="fixed bottom-0 left-0 right-0 bg-black/90 border-t border-red-500/30 flex flex-col z-[100] font-mono text-[10px]">
