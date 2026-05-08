@@ -6,9 +6,8 @@ mod db;
 mod env;
 mod http_server;
 mod models;
-mod naming;
-mod node_namer;
-mod turn_detector;
+mod services;
+mod session_naming;
 
 use tauri::Manager;
 
@@ -67,8 +66,8 @@ pub fn run() {
             // Start HTTP test server on port 1991 for Playwright E2E tests
             commands::test::start_test_server(app.handle().clone());
 
-            // Start embedded HTTP/WebSocket server on port 1992 for mobile remote access
-            http_server::start_http_server(1992, app.handle().clone());
+            // Start embedded HTTP/WebSocket server for mobile remote access
+            http_server::start_http_server(http_server::HTTP_PORT, app.handle().clone());
 
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
@@ -142,6 +141,7 @@ pub fn run() {
             commands::build_run::build_run,
             commands::build_run::get_mesh_config,
             commands::build_run::close_build_run,
+            commands::build_run::ensure_mesh_config,
             commands::checkpoint::list_checkpoints,
             commands::checkpoint::revert_to_checkpoint,
             commands::checkpoint::diff_checkpoints,

@@ -18,6 +18,12 @@ use tokio_tungstenite::{accept_async, tungstenite};
 use tauri::Emitter;
 use crate::db;
 
+// --- App Handle for emitting Tauri events from HTTP handlers ---
+
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+pub const HTTP_PORT: u16 = 1992;
+
 // --- Mobile Web App HTML (served as root) ---
 
 const MOBILE_APP_HTML: &str = include_str!("mobile_app.html");
@@ -26,6 +32,8 @@ const MOBILE_APP_HTML: &str = include_str!("mobile_app.html");
 
 struct HttpServerState {
     app: tauri::AppHandle,
+    _broadcast_tx: broadcast::Sender<Vec<u8>>,
+    pty_outputs: Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>>,
 }
 
 static SERVER_STATE: OnceLock<Arc<HttpServerState>> = OnceLock::new();
@@ -82,8 +90,15 @@ async fn request_terminal_snapshot(app: &tauri::AppHandle, node_id: i64) -> Opti
 
 /// Start the HTTP server on the given port.
 pub fn start_http_server(port: u16, app: tauri::AppHandle) {
-    let state = Arc::new(HttpServerState { app });
-    let _ = SERVER_STATE.set(state);
+    let _ = APP_HANDLE.set(app.clone());
+    let (broadcast_tx, _) = broadcast::channel(1024);
+    let state = Arc::new(HttpServerState {
+        app,
+        _broadcast_tx: broadcast_tx,
+        pty_outputs: Arc::new(RwLock::new(HashMap::new())),
+    });
+    let _ = SERVER_STATE.set(state.clone());
+    drop(state);
 
     tauri::async_runtime::spawn(async move {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -168,8 +183,38 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         return;
     }
 
-    // API routes
     let path_without_query = parts[1].split('?').next().unwrap_or(parts[1]);
+
+    // Attention webhook: POST /api/attention/{session_id}
+    // Called by Claude Code's Stop hook — no token required (localhost-only)
+    if parts[0] == "POST" && path_without_query.starts_with("/api/attention/") {
+        let session_id: Option<i64> = path_without_query
+            .strip_prefix("/api/attention/")
+            .and_then(|s| s.parse().ok());
+
+        let Some(session_id) = session_id else {
+            let error = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
+            return;
+        };
+
+        let Some(app) = APP_HANDLE.get() else {
+            let error = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
+            return;
+        };
+
+        crate::commands::attention::mark_attention(session_id, app);
+
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        let mut stream = lines.into_inner();
+        let _ = stream.write_all(response).await;
+        return;
+    }
+
+    // API routes — require token
     if parts[0] == "GET" && path_without_query.starts_with("/api/") {
         if !validate_token(token.clone()) {
             let error = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
@@ -327,5 +372,88 @@ pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
     };
     if let Some(sender) = sender {
         let _ = sender.send(data);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_token_from_simple_path() {
+        let token = extract_token_from_path("/?token=abc123");
+        assert_eq!(token, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn extract_token_from_path_with_multiple_params() {
+        let token = extract_token_from_path("/api/nodes?foo=bar&token=secret&baz=1");
+        assert_eq!(token, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn extract_token_returns_none_without_token_param() {
+        let token = extract_token_from_path("/api/nodes?foo=bar");
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn extract_token_returns_none_for_bare_path() {
+        let token = extract_token_from_path("/api/nodes");
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn extract_token_from_ws_path() {
+        let token = extract_token_from_path("/ws/terminal/306?token=deadbeef");
+        assert_eq!(token, Some("deadbeef".to_string()));
+    }
+
+    #[test]
+    fn extract_token_empty_value() {
+        let token = extract_token_from_path("/?token=");
+        assert_eq!(token, Some("".to_string()));
+    }
+
+    #[test]
+    fn validate_token_rejects_none() {
+        assert!(!validate_token(None));
+    }
+
+    #[test]
+    fn ensure_pty_channel_is_idempotent() {
+        ensure_pty_channel(9999);
+        ensure_pty_channel(9999);
+        let nodes = get_known_nodes();
+        let locked = nodes.read();
+        assert!(locked.contains_key(&9999));
+    }
+
+    #[test]
+    fn subscribe_pty_creates_channel_if_missing() {
+        let _rx = subscribe_pty(8888);
+        let nodes = get_known_nodes();
+        let locked = nodes.read();
+        assert!(locked.contains_key(&8888));
+    }
+
+    #[test]
+    fn send_pty_output_delivers_to_subscriber() {
+        ensure_pty_channel(7777);
+        let mut rx = subscribe_pty(7777);
+        send_pty_output(7777, vec![0x41, 0x42, 0x43]);
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received, vec![0x41, 0x42, 0x43]);
+    }
+
+    #[test]
+    fn send_pty_output_no_panic_without_subscribers() {
+        ensure_pty_channel(6666);
+        send_pty_output(6666, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn send_pty_output_no_panic_for_unknown_node() {
+        send_pty_output(1111, vec![1, 2, 3]);
     }
 }
