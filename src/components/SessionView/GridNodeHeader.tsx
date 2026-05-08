@@ -3,6 +3,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { useGitSummary } from '../../hooks/useGitSummary';
 import { getNodeGitPath } from '../../lib/paths';
+import { getStatusConfig } from '../../lib/status';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
@@ -27,15 +28,8 @@ export function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: GridNod
   return (
     <div className="flex items-center justify-between px-2.5 py-1.5 bg-bg-overlay border-b border-border-default">
       <div className="flex items-center gap-2 overflow-hidden">
-        <span className={`w-1.5 h-1.5 rounded-full ${
-          node.status === 'running' ? 'bg-accent-cyan' :
-          node.status === 'awaiting_input' ? 'bg-status-warning animate-pulse' :
-          'bg-text-muted'
-        }`} />
+        <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
         <span className="text-[11px] font-bold text-text-secondary truncate">{node.name}</span>
-        {node.status === 'awaiting_input' && (
-          <span className="text-[9px] text-status-warning font-bold ml-1">ATTN</span>
-        )}
         {summary && (
           <span
             onClick={() => toggleChangedFiles(node.id)}

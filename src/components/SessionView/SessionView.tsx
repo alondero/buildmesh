@@ -137,7 +137,9 @@ function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, bui
       {nodes.map((node) => {
         const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
         return (
-          <div key={node.id} className="flex flex-col bg-bg-card border border-border-default rounded-sm overflow-hidden group hover:border-accent-cyan/50 transition-colors">
+          <div key={node.id} className={`flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${
+            node.status === 'awaiting_input' ? 'border-status-warning animate-border-pulse' : 'border-border-default hover:border-accent-cyan/50'
+          }`}>
             <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} onBuildRun={onBuildRun} />
             <div className="flex-1 flex flex-col overflow-hidden bg-black">
               <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>

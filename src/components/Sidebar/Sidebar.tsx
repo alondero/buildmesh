@@ -218,7 +218,6 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
   onDelete: (e: React.MouseEvent) => void;
 }) {
   const config = getStatusConfig(node.status);
-  const isAwaiting = node.status === 'awaiting_input';
   return (
     <div
       data-session-item
@@ -227,14 +226,10 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
       className={`
         pl-8 pr-1 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2
         ${isActive ? 'bg-bg-overlay border border-accent-cyan/50' : 'hover:bg-bg-card border border-transparent'}
-        ${isAwaiting ? 'bg-status-warning-bg/10' : ''}
       `}
     >
-      <span className={config.color}>{config.dot}</span>
+      <span className={config.color} title={config.label}>{config.dot}</span>
       <span className="flex-1 truncate text-text-secondary">{node.name}</span>
-      {isAwaiting && (
-        <span className="text-[10px] text-status-warning font-semibold animate-pulse">ATTN</span>
-      )}
       <button
         onClick={onDelete}
         className="text-text-muted hover:text-status-error text-xs px-1 transition-colors"
