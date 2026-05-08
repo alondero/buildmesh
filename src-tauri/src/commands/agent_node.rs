@@ -48,12 +48,14 @@ pub async fn get_session(session_id: i64) -> Result<AgentNode, String> {
 /// Archive an agent node
 #[command]
 pub async fn archive_session(session_id: i64) -> Result<(), String> {
+    crate::session_naming::cleanup(session_id);
     db::archive_agent_node(session_id).map_err(|e| e.to_string())
 }
 
 /// Restore an archived agent node
 #[command]
 pub async fn restore_session(session_id: i64) -> Result<(), String> {
+    crate::session_naming::cleanup(session_id);
     db::restore_agent_node(session_id).map_err(|e| e.to_string())
 }
 
