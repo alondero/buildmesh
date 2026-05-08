@@ -448,6 +448,7 @@
 
       try {
         ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
       } catch (e) {
         scheduleReconnect(nodeId);
         return;
@@ -460,8 +461,11 @@
       };
 
       ws.onmessage = (event) => {
-        if (window.term) {
+        if (!window.term) return;
+        if (typeof event.data === 'string') {
           window.term.write(event.data);
+        } else {
+          window.term.write(new Uint8Array(event.data));
         }
       };
 

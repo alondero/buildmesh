@@ -173,6 +173,8 @@ pub fn run() {
             commands::pr::create_pr,
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
+            // Remote
+            commands::remote::submit_terminal_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

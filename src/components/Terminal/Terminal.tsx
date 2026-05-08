@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
@@ -10,6 +11,7 @@ import { TERMINAL_OPTIONS } from './terminalConfig';
 interface TerminalInstance {
   term: Terminal;
   fitAddon: FitAddon;
+  serializeAddon: SerializeAddon;
   unlisten: UnlistenFn;
   opened: boolean;
   writeBuffer: string;
@@ -163,6 +165,8 @@ class TerminalManager {
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
+      const serializeAddon = new SerializeAddon();
+      term.loadAddon(serializeAddon);
 
       const unlisten = await listen<{ session_id: number; line: string }>('agent-output', (event) => {
         if (event.payload.session_id === nodeId) {
@@ -170,6 +174,19 @@ class TerminalManager {
           if (inst) {
             inst.writeBuffer += event.payload.line;
             this.scheduleFlush(nodeId);
+          }
+        }
+      });
+
+      const unlistenSerialize = await listen<{ node_id: number; request_id: string }>('serialize-terminal-request', (event) => {
+        if (event.payload.node_id === nodeId) {
+          const inst = this.instances.get(nodeId);
+          if (inst) {
+            const snapshot = inst.serializeAddon.serialize({ scrollback: 200 });
+            invoke('submit_terminal_snapshot', {
+              requestId: event.payload.request_id,
+              data: snapshot,
+            }).catch(console.error);
           }
         }
       });
@@ -205,10 +222,12 @@ class TerminalManager {
         });
       });
 
+      const combinedUnlisten: UnlistenFn = () => { unlisten(); unlistenSerialize(); };
       const instance: TerminalInstance = {
         term,
         fitAddon,
-        unlisten,
+        serializeAddon,
+        unlisten: combinedUnlisten,
         opened: false,
         writeBuffer: '',
         frameRequested: false,
