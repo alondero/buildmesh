@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import type { Mesh } from '../../stores/meshStore';
@@ -31,6 +31,43 @@ const PROVIDERS = isMac
   : ALL_PROVIDERS;
 
 export function Sidebar() {
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(256);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    startXRef.current = e.clientX;
+    startWidthRef.current = sidebarWidth;
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const delta = e.clientX - startXRef.current;
+      const newWidth = Math.max(192, Math.min(480, startWidthRef.current + delta));
+      setSidebarWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = false;
+        setIsResizing(false);
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [sidebarWidth]);
+
   const meshes = useMeshStore(state => state.meshes);
   const addMesh = useMeshStore(state => state.addMesh);
   const deleteMesh = useMeshStore(state => state.deleteMesh);
@@ -121,22 +158,29 @@ export function Sidebar() {
   };
 
   return (
-    <div className="w-64 bg-bg-surface border-r border-border-subtle flex flex-col h-full">
-      {/* Header */}
-      <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
-        <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
-        {/* Remote access button — always visible */}
-        <button
-          onClick={() => setRemoteAccessMeshId(true)}
-          className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
-          title="Remote access"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
-            <line x1="12" y1="18" x2="12" y2="18"/>
-          </svg>
-        </button>
-      </div>
+    <div className="relative flex h-full" style={{ width: sidebarWidth }}>
+      {/* Resize handle */}
+      <div
+        onMouseDown={handleMouseDown}
+        className={`absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-accent-cyan/30 ${isResizing ? 'bg-accent-cyan/50' : 'bg-transparent'} transition-colors z-10`}
+      />
+
+      <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
+        {/* Header */}
+        <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
+          <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
+          {/* Remote access button — always visible */}
+          <button
+            onClick={() => setRemoteAccessMeshId(true)}
+            className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
+            title="Remote access"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+              <line x1="12" y1="18" x2="12" y2="18"/>
+            </svg>
+          </button>
+        </div>
 
       {/* Remote Access Modal */}
       {remoteAccessMeshId && (
@@ -206,6 +250,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="p-2 border-t border-border-subtle text-xs text-text-muted">
         <span>{agentNodes.filter(w => w.status === 'running').length} active</span>
+      </div>
       </div>
     </div>
   );
