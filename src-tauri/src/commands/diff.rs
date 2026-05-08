@@ -277,3 +277,118 @@ pub async fn diff_session_checkpoint(
 
     Ok(DiffResult { files })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_file_diff_identical_files() {
+        let lines = compute_file_diff("hello\nworld", "hello\nworld");
+        assert!(lines.iter().all(|l| l.line_type == "context"));
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn compute_file_diff_added_lines() {
+        let lines = compute_file_diff("a\n", "a\nb\n");
+        let adds: Vec<_> = lines.iter().filter(|l| l.line_type == "add").collect();
+        assert!(!adds.is_empty());
+        assert!(adds.iter().any(|l| l.content == "b"));
+    }
+
+    #[test]
+    fn compute_file_diff_removed_lines() {
+        let lines = compute_file_diff("a\nb\nc\n", "a\nc\n");
+        let removes: Vec<_> = lines.iter().filter(|l| l.line_type == "remove").collect();
+        assert!(!removes.is_empty());
+        assert!(removes.iter().any(|l| l.content == "b"));
+    }
+
+    #[test]
+    fn compute_file_diff_empty_old() {
+        let lines = compute_file_diff("", "new content\n");
+        assert!(lines.iter().all(|l| l.line_type == "add"));
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn compute_file_diff_empty_new() {
+        let lines = compute_file_diff("old content\n", "");
+        assert!(lines.iter().all(|l| l.line_type == "remove"));
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn compute_file_diff_both_empty() {
+        let lines = compute_file_diff("", "");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn compute_file_diff_line_numbers_context() {
+        let lines = compute_file_diff("a\nb\nc\n", "a\nb\nc\n");
+        assert_eq!(lines[0].old_num, Some(1));
+        assert_eq!(lines[0].new_num, Some(1));
+        assert_eq!(lines[2].old_num, Some(3));
+        assert_eq!(lines[2].new_num, Some(3));
+    }
+
+    #[test]
+    fn compute_file_diff_add_has_no_old_num() {
+        let lines = compute_file_diff("a\n", "a\nb\n");
+        let add = lines.iter().find(|l| l.line_type == "add").unwrap();
+        assert_eq!(add.old_num, None);
+        assert!(add.new_num.is_some());
+    }
+
+    #[test]
+    fn compute_file_diff_remove_has_no_new_num() {
+        let lines = compute_file_diff("a\nb\n", "a\n");
+        let rem = lines.iter().find(|l| l.line_type == "remove").unwrap();
+        assert!(rem.old_num.is_some());
+        assert_eq!(rem.new_num, None);
+    }
+
+    #[test]
+    fn build_sides_separates_old_and_new() {
+        let lines = vec![
+            DiffLine { line_type: "context".to_string(), content: "same".to_string(), old_num: Some(1), new_num: Some(1) },
+            DiffLine { line_type: "remove".to_string(), content: "old".to_string(), old_num: Some(2), new_num: None },
+            DiffLine { line_type: "add".to_string(), content: "new".to_string(), old_num: None, new_num: Some(2) },
+        ];
+        let (old, new) = build_sides(&lines);
+        assert!(old.contains("same"));
+        assert!(old.contains("old"));
+        assert!(new.contains("same"));
+        assert!(new.contains("new"));
+    }
+
+    #[test]
+    fn build_sides_empty_input() {
+        let (old, new) = build_sides(&[]);
+        assert_eq!(old, "");
+        assert_eq!(new, "");
+    }
+
+    #[test]
+    fn ext_for_path_extracts_extension() {
+        assert_eq!(ext_for_path("foo/bar.rs"), "rs");
+        assert_eq!(ext_for_path("Cargo.toml"), "toml");
+        assert_eq!(ext_for_path("no-extension"), "");
+        assert_eq!(ext_for_path("src/main.tsx"), "tsx");
+    }
+
+    #[test]
+    fn highlight_content_returns_non_empty_for_code() {
+        let result = highlight_content("fn main() {}", "test.rs");
+        assert!(!result.is_empty());
+        assert!(result.contains("main"));
+    }
+
+    #[test]
+    fn highlight_content_handles_unknown_extension() {
+        let result = highlight_content("random text", "file.xyz123");
+        assert!(result.contains("random text"));
+    }
+}

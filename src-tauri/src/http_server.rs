@@ -368,3 +368,86 @@ pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
         let _ = sender.send(data);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_token_from_simple_path() {
+        let token = extract_token_from_path("/?token=abc123");
+        assert_eq!(token, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn extract_token_from_path_with_multiple_params() {
+        let token = extract_token_from_path("/api/nodes?foo=bar&token=secret&baz=1");
+        assert_eq!(token, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn extract_token_returns_none_without_token_param() {
+        let token = extract_token_from_path("/api/nodes?foo=bar");
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn extract_token_returns_none_for_bare_path() {
+        let token = extract_token_from_path("/api/nodes");
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn extract_token_from_ws_path() {
+        let token = extract_token_from_path("/ws/terminal/306?token=deadbeef");
+        assert_eq!(token, Some("deadbeef".to_string()));
+    }
+
+    #[test]
+    fn extract_token_empty_value() {
+        let token = extract_token_from_path("/?token=");
+        assert_eq!(token, Some("".to_string()));
+    }
+
+    #[test]
+    fn validate_token_rejects_none() {
+        assert!(!validate_token(None));
+    }
+
+    #[test]
+    fn ensure_pty_channel_is_idempotent() {
+        ensure_pty_channel(9999);
+        ensure_pty_channel(9999);
+        let nodes = get_known_nodes();
+        let locked = nodes.read();
+        assert!(locked.contains_key(&9999));
+    }
+
+    #[test]
+    fn subscribe_pty_creates_channel_if_missing() {
+        let _rx = subscribe_pty(8888);
+        let nodes = get_known_nodes();
+        let locked = nodes.read();
+        assert!(locked.contains_key(&8888));
+    }
+
+    #[test]
+    fn send_pty_output_delivers_to_subscriber() {
+        ensure_pty_channel(7777);
+        let mut rx = subscribe_pty(7777);
+        send_pty_output(7777, vec![0x41, 0x42, 0x43]);
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received, vec![0x41, 0x42, 0x43]);
+    }
+
+    #[test]
+    fn send_pty_output_no_panic_without_subscribers() {
+        ensure_pty_channel(6666);
+        send_pty_output(6666, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn send_pty_output_no_panic_for_unknown_node() {
+        send_pty_output(1111, vec![1, 2, 3]);
+    }
+}
