@@ -195,18 +195,20 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId: nodeId, data }).catch(console.error);
       });
 
-      // attachCustomKeyEventHandler works before term.open(), unlike DOM listeners
-      // that require term.element. Raw write_to_agent avoids appending \n on multi-line paste.
-      let pasteInFlight = false;
+      let pasteBlocked = false;
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
         if (ev.type === 'keydown' && ev.key === 'v' && (ev.ctrlKey || ev.metaKey)) {
-          if (!pasteInFlight) {
-            pasteInFlight = true;
+          if (!pasteBlocked) {
+            pasteBlocked = true;
+            // Debounce: ConPTY on Windows synthesizes paste ~50-100ms after Ctrl+V.
+            // 500ms window catches both. .finally() clears the flag when the operation
+            // completes (not just after 500ms), so slow clipboard reads don't over-block.
+            setTimeout(() => { pasteBlocked = false; }, 500);
             navigator.clipboard.readText().then(text => {
               if (text) invoke('write_to_agent', { sessionId: nodeId, data: text }).catch(console.error);
             }).catch(err => {
               console.warn('[TerminalManager] Clipboard read failed:', err);
-            }).finally(() => { pasteInFlight = false; });
+            }).finally(() => { pasteBlocked = false; });
           }
           return false;
         }
