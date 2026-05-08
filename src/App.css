@@ -111,8 +111,7 @@ html, body {
 /* Status indicator utilities */
 .status-running { color: var(--color-status-running); }
 .status-error   { color: var(--color-status-error); }
-.status-idle    { color: var(--color-status-idle); }
-.status-archived { color: var(--color-text-muted); }
+.status-idle    { color: var(--color-accent-cyan); }
 .status-waiting { color: var(--color-status-warning); }
 .status-blocked { color: var(--color-status-blocked); }
 .status-success { color: var(--color-status-success); }
@@ -148,4 +147,24 @@ html, body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-border-strong);
+}
+
+/* Fast pulse for attention-needed indicators */
+.animate-pulse-fast {
+  animation: pulse-fast 1s ease-in-out infinite;
+}
+
+@keyframes pulse-fast {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* Border pulse for terminal cards needing attention */
+.animate-border-pulse {
+  animation: border-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes border-pulse {
+  0%, 100% { border-color: var(--color-status-warning); }
+  50% { border-color: transparent; }
 }
