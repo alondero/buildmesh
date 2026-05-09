@@ -414,14 +414,23 @@ async fn spawn_agent_inner(
     })?;
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
 
-    // Resolve paths: includes worktree subdirectory + environment-aware spawn path
-    let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
+    let provider_enum = parse_provider(&provider);
+    let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
+
+    // For cwrap providers, cwrap itself creates the worktree via git, so it MUST be run
+    // from the git repo root. For non-cwrap providers, we run them directly in the worktree.
+    let spawn_worktree_name = if is_cwrap {
+        None
+    } else {
+        node.worktree_name.as_deref()
+    };
+
+    // Resolve paths: includes worktree subdirectory (if applicable) + environment-aware spawn path
+    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
     tracing::info!(
         "spawn_agent_inner: resolved spawn_path={}, host_path={}, env={:?}",
         resolved.spawn_path, resolved.host_path, resolved.env_type
     );
-
-    let provider_enum = parse_provider(&provider);
 
     // 4. Determine session ID mode for cwrap-wrapped providers (Anthropic, Minimax)
     // Both use cwrap which forwards --session-id and --resume to the underlying CLI
@@ -453,8 +462,11 @@ async fn spawn_agent_inner(
     // 7. Build command
     let cmd = build_spawn_command(&node, &resolved, provider_enum, &session_id_mode, session_id, model_override, effort_override);
 
-    // 7. Spawn
-    tracing::info!("spawn_agent_inner: spawning process in {}", node.path);
+    // Log the CWD path for PTY child (this is the key fix from commit 99290c4)
+    tracing::info!(
+        "spawn_agent_inner: CWD= worktree_name={:?}",
+        node.worktree_name
+    );
     let child = spawn_child(&pair, cmd).map_err(|e| {
         let err_msg = e.clone();
         let _ = app.emit(

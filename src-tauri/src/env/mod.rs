@@ -186,7 +186,6 @@ pub fn env_for_path(path: &PathBuf) -> Environment {
     if path_str.starts_with("/mnt/")
         || path_str.starts_with("/home/")
         || path_str.starts_with("\\\\wsl$")
-        || path_str.starts_with("/")
     {
         Environment::Wsl
     } else {
@@ -198,9 +197,19 @@ pub fn env_for_path(path: &PathBuf) -> Environment {
 /// (e.g., /home/user -> \\wsl$\Ubuntu\home\user)
 pub fn to_host_path(path: &str) -> String {
     if path.starts_with('/') && !path.starts_with("/mnt/") {
-        // Use cached default distro
-        let distro = get_default_wsl_distro().unwrap_or_else(|| "Ubuntu".to_string());
-        format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
+        // Only convert to WSL UNC path if the path looks like an absolute Linux
+        // root path (starts with /home/, /mnt/, etc.). Unix-style absolute paths
+        // like /Users/... on Windows are stored by the DB and should NOT be
+        // converted — they will be native Windows paths (C:\Users\...) on the
+        // buildmesh host side.
+        if path.starts_with("/home/") || path.starts_with("/mnt/") {
+            let distro = get_default_wsl_distro().unwrap_or_else(|| "Ubuntu".to_string());
+            format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
+        } else {
+            // Unix-style absolute path on Windows — return as-is, caller will
+            // convert via to_spawn_path if needed
+            path.to_string()
+        }
     } else if path.starts_with("/mnt/") {
         // /mnt/c/Users -> C:\Users
         let drive = path.chars().nth(5).unwrap_or('c').to_uppercase().next().unwrap();

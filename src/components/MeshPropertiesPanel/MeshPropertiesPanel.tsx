@@ -95,6 +95,14 @@ export function MeshPropertiesPanel() {
         await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: 'head' });
       }
 
+      if (form.buildCommand !== (initialConfig?.build_command ?? '')) {
+        await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'build', key: 'command', value: form.buildCommand });
+      }
+
+      if (form.runCommand !== (initialConfig?.run_command ?? '')) {
+        await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'run', key: 'command', value: form.runCommand });
+      }
+
       closePropertiesPanel();
     } catch (e) {
       console.error('Failed to save mesh properties:', e);

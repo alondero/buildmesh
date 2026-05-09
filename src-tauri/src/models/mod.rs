@@ -57,6 +57,11 @@ impl Provider {
             Provider::Gemini | Provider::OpenCode => "",
         }
     }
+
+    /// Returns true if this provider uses cwrap (Anthropic or Minimax)
+    pub fn is_cwrap(&self) -> bool {
+        matches!(self, Provider::Anthropic | Provider::Minimax)
+    }
 }
 
 impl std::fmt::Display for Provider {
