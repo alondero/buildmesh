@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback, type WheelEvent as ReactWheelEvent } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
@@ -6,7 +6,7 @@ import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { TERMINAL_OPTIONS } from './terminalConfig';
+import { createTerminalOptions, terminalFontSize, setTerminalFontSize, onTerminalFontSizeChange, TERMINAL_FONT_SIZE_DEFAULT } from './terminalConfig';
 
 interface TerminalInstance {
   term: Terminal;
@@ -24,6 +24,15 @@ class TerminalManager {
   private instances = new Map<number, TerminalInstance>();
   private listeners = new Set<() => void>();
   private pending = new Map<number, Promise<TerminalInstance | null>>();
+  private fontSizeUnlisten: () => void;
+
+  constructor() {
+    this.fontSizeUnlisten = onTerminalFontSizeChange((size) => {
+      for (const inst of this.instances.values()) {
+        inst.term.options.fontSize = size;
+      }
+    });
+  }
 
   /**
    * Returns the raw TerminalInstance if it exists (escape hatch).
@@ -161,7 +170,7 @@ class TerminalManager {
 
   private async doCreate(nodeId: number): Promise<TerminalInstance | null> {
     try {
-      const term = new Terminal(TERMINAL_OPTIONS);
+      const term = new Terminal(createTerminalOptions());
 
       const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
@@ -285,6 +294,10 @@ class TerminalManager {
       this.notify();
     }
   }
+
+  destroy() {
+    this.fontSizeUnlisten();
+  }
 }
 
 export const terminalManager = new TerminalManager();
@@ -348,6 +361,33 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     }
   };
 
+  const handleWheel = useCallback((e: ReactWheelEvent<HTMLDivElement>) => {
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const delta = e.deltaY < 0 ? 2 : -2;
+      setTerminalFontSize(terminalFontSize() + delta);
+    }
+  }, []);
+
+  // Keyboard shortcuts: Ctrl+0 reset, Ctrl++ zoom in, Ctrl+- zoom out
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (!e.ctrlKey) return;
+      if (e.key === '0') {
+        e.preventDefault();
+        setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
+      } else if (e.key === '=' || e.key === '+') {
+        e.preventDefault();
+        setTerminalFontSize(terminalFontSize() + 2);
+      } else if (e.key === '-' || e.key === '_') {
+        e.preventDefault();
+        setTerminalFontSize(terminalFontSize() - 2);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   useEffect(() => {
     if (!containerRef.current) return;
     const cancelled = { current: false };
@@ -385,6 +425,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
+      onWheel={handleWheel}
     >
       {isDragging && (
         <div className="absolute inset-0 bg-cyan-500/10 border-2 border-dashed border-cyan-500 rounded-lg flex items-center justify-center z-50 pointer-events-none">
