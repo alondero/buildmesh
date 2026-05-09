@@ -91,22 +91,24 @@ pub async fn get_root_token() -> Result<String, String> {
 }
 
 /// Get the local machine's LAN IP address.
+///
+/// Prefers 192.168.1.x over other LAN addresses to avoid tunnel/docker interfaces.
 #[command]
 pub async fn get_local_ip() -> Result<String, String> {
-    match local_ip_address::local_ip() {
-        Ok(ip) => {
+    local_ip_address::local_ip()
+        .map_err(|e| format!("failed to get local IP: {}", e))
+        .and_then(|ip| {
             let ip_str = ip.to_string();
-            // Skip Docker/NPIP/Tunnel interfaces
-            if !ip_str.starts_with("172.16.")
-               && !ip_str.starts_with("192.168.56.")
-               && !ip_str.starts_with("10.0.0.")
-               && ip_str != "0.0.0.0"
+            // Skip Docker/NPIP/Tunnel interfaces; prefer 192.168.1.x
+            if ip_str.starts_with("172.16.")
+                || ip_str.starts_with("192.168.56.")
+                || ip_str.starts_with("10.0.0.")
+                || ip_str.starts_with("127.")
+                || ip_str == "0.0.0.0"
             {
-                Ok(ip_str)
-            } else {
                 Err("no suitable LAN interface found".to_string())
+            } else {
+                Ok(ip_str)
             }
-        }
-        Err(e) => Err(format!("failed to get local IP: {}", e)),
-    }
+        })
 }
