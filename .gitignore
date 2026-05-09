@@ -31,8 +31,10 @@ test-results/
 
 # Claude worktrees and local settings (local only)
 .claude/worktrees/
+.claude/settings.json
 .claude/settings.local.json
 .claude/tasks/
+.claude/memory/
 coverage/
 coverage/
 .worktrees/
