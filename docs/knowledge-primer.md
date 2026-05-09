@@ -21,6 +21,9 @@
 ### Layout: Grid-Only
 Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid. The UI auto-scales 1–6 panes via CSS grid.
 
+### Terminal Scroll Zoom (Ctrl+Wheel)
+xterm.js registers its own `wheel` listener on the terminal element during initialization. When Ctrl+scroll fires, xterm's handler consumes the event to zoom the viewport **before** React's bubbling-phase `onWheel` handler can call `preventDefault()`. The fix: attach the wheel listener to `window` with `{ capture: true }` so we intercept before xterm sees the event. See `Terminal.tsx` `wheelHandler` in `AgentTerminal`.
+
 ### WSL Path Mapping
 Linux paths from WSL agents must map to Windows UNC paths (`\\wsl$\...`) before backend file operations. Use `env::to_host_path` in `src-tauri/src/env/mod.rs`. Never pass Linux paths to Windows-side APIs.
 
