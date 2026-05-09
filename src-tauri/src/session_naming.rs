@@ -72,7 +72,7 @@ static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
 
 const MAX_BUFFER_CHARS: usize = 4000;
 const SUMMARIZE_BUFFER_CHARS: usize = 3000;
-const RENAME_AT_TURN: u32 = 2;
+const RENAME_AT_TURN: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // Public lifecycle API
