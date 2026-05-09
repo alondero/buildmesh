@@ -30,6 +30,10 @@ class TerminalManager {
     this.fontSizeUnlisten = onTerminalFontSizeChange((size) => {
       for (const inst of this.instances.values()) {
         inst.term.options.fontSize = size;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const charSizeService = (inst.term as any)['_core']?.['_charSizeService'];
+        charSizeService?.measure();
+        inst.fitAddon.fit();
       }
     });
   }
