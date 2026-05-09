@@ -1,6 +1,7 @@
 //! Agent spawning and management via PTY
 
 use crate::db;
+use crate::env;
 use crate::models::{EnvType, Provider, SessionStatus};
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::collections::HashMap;
@@ -67,17 +68,6 @@ fn is_agent_already_running(session_id: &i64) -> bool {
     false
 }
 
-/// Get the agent node and determine if it's WSL.
-fn get_session_and_env(session_id: &i64) -> Result<(crate::models::AgentNode, EnvType), String> {
-    let node = db::get_agent_node_by_id(*session_id).map_err(|e| {
-        let err = format!("spawn_agent: failed to get agent node {}: {}", session_id, e);
-        tracing::error!("{}", err);
-        err
-    })?;
-    let is_wsl = node.env;
-    Ok((node, is_wsl))
-}
-
 /// Parse provider string into Provider enum.
 fn parse_provider(provider: &str) -> Provider {
     match provider {
@@ -114,7 +104,7 @@ enum SessionIdMode {
 /// Build the spawn command based on provider and environment.
 fn build_spawn_command(
     node: &crate::models::AgentNode,
-    is_wsl: EnvType,
+    resolved: &env::ResolvedPath,
     provider_enum: Provider,
     session_id_mode: &SessionIdMode,
     session_id: i64,
@@ -122,6 +112,7 @@ fn build_spawn_command(
     effort_override: Option<&str>,
 ) -> CommandBuilder {
     let is_macos = cfg!(target_os = "macos");
+    let is_wsl = resolved.env_type == EnvType::Wsl;
 
     let (binary, mut args): (&str, Vec<String>) = if is_macos {
         match provider_enum {
@@ -212,10 +203,10 @@ fn build_spawn_command(
         }
     }
 
-    let mut cmd = if is_wsl == EnvType::Wsl {
+    let mut cmd = if is_wsl {
         tracing::info!("spawn_agent: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
-        c.args(["--cd", &node.path, "--", binary]);
+        c.args(["--cd", &resolved.spawn_path, "--", binary]);
         c.args(args);
         c
     } else if is_macos {
@@ -241,7 +232,7 @@ fn build_spawn_command(
         }
     };
 
-    cmd.cwd(&node.path);
+    cmd.cwd(&resolved.spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
     cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT.to_string());
     cmd
@@ -415,9 +406,20 @@ async fn spawn_agent_inner(
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
     kill_agent(session_id).await.ok();
 
-    // 3. Get node info
-    let (node, is_wsl) = get_session_and_env(&session_id)?;
+    // 3. Get node and resolve paths for the environment
+    let node = db::get_agent_node_by_id(session_id).map_err(|e| {
+        let err = format!("spawn_agent: failed to get agent node {}: {}", session_id, e);
+        tracing::error!("{}", err);
+        err
+    })?;
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
+
+    // Resolve paths: includes worktree subdirectory + environment-aware spawn path
+    let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
+    tracing::info!(
+        "spawn_agent_inner: resolved spawn_path={}, host_path={}, env={:?}",
+        resolved.spawn_path, resolved.host_path, resolved.env_type
+    );
 
     let provider_enum = parse_provider(&provider);
 
@@ -449,7 +451,7 @@ async fn spawn_agent_inner(
     let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
 
     // 7. Build command
-    let cmd = build_spawn_command(&node, is_wsl, provider_enum, &session_id_mode, session_id, model_override, effort_override);
+    let cmd = build_spawn_command(&node, &resolved, provider_enum, &session_id_mode, session_id, model_override, effort_override);
 
     // 7. Spawn
     tracing::info!("spawn_agent_inner: spawning process in {}", node.path);
