@@ -31,8 +31,9 @@ export function ChangedFilesPanel({ projectPath, isOpen, onFileSelect }: Changed
 
   useEffect(() => {
     if (!isOpen || !projectPath) return;
-    const unlisten = listen<{ path: string }>(GIT_CHANGED, (event) => {
-      if (event.payload.path === projectPath) {
+    const unlisten = listen<{ path: string; internal_path?: string }>(GIT_CHANGED, (event) => {
+      const { path: eventPath, internal_path } = event.payload;
+      if (eventPath === projectPath || internal_path === projectPath) {
         fetchStatus();
       }
     });

@@ -32,7 +32,8 @@ pub fn watch_session(
                 if now.duration_since(*last).as_millis() >= 500 {
                     *last = now;
                     let _ = app_handle.emit("git-changed", serde_json::json!({
-                        "path": &watch_path_for_callback
+                        "path": &watch_path_for_callback,
+                        "internal_path": &node.path
                     }));
                 }
             }
@@ -67,8 +68,7 @@ mod tests {
     #[test]
     fn test_watch_path_with_worktree_name() {
         let resolved = resolve_agent_path("/Users/adam/myproject", Some("gentle-fox"));
-        // On Windows, Unix-style paths like /Users/... are stored by the DB as-is
-        // and host_path returns them unchanged (no WSL conversion)
+        // On macOS (non-WSL), host_path passes through to_host_path which returns as-is
         assert!(resolved.host_path.contains(".claude/worktrees/gentle-fox"));
     }
 
