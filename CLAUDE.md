@@ -46,4 +46,4 @@ Defaults: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `w
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
 
-See docs/knowledge-primer.md for codebase conventions, anti-patterns, and key architectural decisions.
+See @docs/knowledge-primer.md for codebase conventions, anti-patterns, and key architectural decisions.

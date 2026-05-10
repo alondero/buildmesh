@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MeshConfig {
+    pub name: Option<String>,
     pub build_command: Option<String>,
     pub run_command: Option<String>,
     pub model: Option<String>,
@@ -30,6 +31,7 @@ fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
         .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
 
     Ok(MeshConfig {
+        name: None,
         build_command: extract_toml_value(&content, "build", "command"),
         run_command: extract_toml_value(&content, "run", "command"),
         model: extract_toml_value(&content, "agent", "model"),
@@ -165,6 +167,7 @@ pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
     let path = PathBuf::from(&mesh.path);
 
     let mut config = parse_mesh_toml(&path)?;
+    config.name = Some(mesh.name);
     config.base_ref = read_base_ref(&mesh.path);
 
     Ok(config)

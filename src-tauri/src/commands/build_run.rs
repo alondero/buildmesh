@@ -155,12 +155,12 @@ pub async fn build_run(
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;
 
-    // 2. Parse mesh.toml
-    let config = parse_mesh_config(&std::path::PathBuf::from(&node.path))?;
-
-    // 3. Resolve worktree path via centralized env module
+    // 2. Resolve worktree path via centralized env module
     let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
     validate_worktree_exists(&resolved, node.worktree_name.as_deref())?;
+
+    // 3. Parse mesh.toml from the worktree path (where mesh.toml was updated)
+    let config = parse_mesh_config(&std::path::PathBuf::from(&resolved.spawn_path))?;
 
     // 4. Get the command to run
     let command = match mode {
