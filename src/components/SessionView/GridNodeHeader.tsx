@@ -1,4 +1,6 @@
+import { useMemo } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { useGitSummary } from '../../hooks/useGitSummary';
@@ -14,6 +16,7 @@ interface GridNodeHeaderProps {
 export function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: GridNodeHeaderProps) {
   const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
+  const meshesById = useMeshStore(state => state.meshesById);
 
   const handleClose = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -25,11 +28,18 @@ export function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: GridNod
 
   const isPanelNode = changedFilesNodeId === node.id;
 
+  const meshLabel = useMemo(() => {
+    const m = meshesById.get(node.mesh_id);
+    return m ? `[${m.name} #${node.id}]` : `[#${node.id}]`;
+  }, [meshesById, node.mesh_id, node.id]);
+
   return (
     <div className="flex items-center justify-between px-2.5 py-1.5 bg-bg-overlay border-b border-border-default">
       <div className="flex items-center gap-2 overflow-hidden">
         <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
-        <span className="text-[11px] font-bold text-text-secondary truncate">{node.name}</span>
+        <span className="text-[11px] font-bold text-text-secondary truncate">
+          {node.name} {meshLabel}
+        </span>
         {summary && (
           <span
             onClick={() => toggleChangedFiles(node.id)}
