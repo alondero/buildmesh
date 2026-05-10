@@ -104,21 +104,27 @@ mod tests {
         assert_eq!(args, vec!["gemini"]);
     }
 
-    /// Test 4: Null worktree_name falls back to `-w` without explicit name
+    /// Test 4: Null worktree_name falls back to `-w` without explicit name on Assign mode
     /// (backward compatibility for old sessions)
     #[test]
     fn null_worktree_name_falls_back_to_w_without_name() {
         let is_cwrap = true;
         let worktree_name: Option<String> = None;
+        let session_id_mode = "Assign";
 
         let mut args = vec!["--minimax".to_string()];
         if is_cwrap {
-            if let Some(ref name) = worktree_name {
-                args.push("-w".to_string());
-                args.push(name.clone());
-            } else {
-                // Fallback: just -w without name
-                args.push("-w".to_string());
+            match session_id_mode {
+                "Assign" => {
+                    if let Some(ref name) = worktree_name {
+                        args.push("-w".to_string());
+                        args.push(name.clone());
+                    } else {
+                        args.push("-w".to_string());
+                    }
+                }
+                "Resume" => {}
+                _ => {}
             }
         }
 
@@ -126,18 +132,26 @@ mod tests {
         assert_eq!(args, vec!["--minimax", "-w"]);
     }
 
-    /// Test 5: Resume mode should still use the explicit worktree name
+    /// Test 5: Resume mode should omit `-w` entirely, as the process is spawned inside the worktree
     #[test]
-    fn resume_mode_uses_explicit_worktree_name() {
+    fn resume_mode_omits_w_flag() {
         let is_cwrap = true;
         let worktree_name = Some("async-plotting-riddle".to_string());
         let session_id_mode = "Resume";
 
         let mut args = vec!["--minimax".to_string()];
         if is_cwrap {
-            if let Some(ref name) = worktree_name {
-                args.push("-w".to_string());
-                args.push(name.clone());
+            match session_id_mode {
+                "Assign" => {
+                    if let Some(ref name) = worktree_name {
+                        args.push("-w".to_string());
+                        args.push(name.clone());
+                    } else {
+                        args.push("-w".to_string());
+                    }
+                }
+                "Resume" => {}
+                _ => {}
             }
         }
         match session_id_mode {
@@ -148,13 +162,8 @@ mod tests {
             _ => {}
         }
 
-        assert_eq!(args, vec![
-            "--minimax",
-            "-w",
-            "async-plotting-riddle",
-            "--resume",
-            "abc-123"
-        ]);
+        // Should just be ["--minimax", "--resume", "abc-123"]
+        assert_eq!(args, vec!["--minimax", "--resume", "abc-123"]);
     }
 
     /// Test 6: DB schema should have worktree_name column

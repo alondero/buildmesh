@@ -138,10 +138,9 @@ fn build_spawn_command(
     // On Resume: skip -w if the worktree directory already exists. The worktree was
     // already created during the first spawn (when SessionIdMode::Assign was used).
     // Passing -w on resume causes cwrap to call `git worktree add` again for the same
-    // worktree, which fails with "worktree already checked out" because git internally
-    // stores the worktree with a "worktree-" prefix that's different from the directory
-    // name. The session_id is sufficient for cwrap to find and resume the existing
-    // session without needing -w.
+    // worktree, which fails with "worktree already checked out".
+    // We now spawn the process directly inside the worktree directory on resume, so
+    // claude will correctly use the worktree as the project root and find its session data.
     let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
     if is_cwrap {
         match session_id_mode {
@@ -159,19 +158,10 @@ fn build_spawn_command(
                 }
             }
             SessionIdMode::Resume(_) => {
-                // Resume: pass -w <worktree_name> --resume <session_id>
-                // The worktree was already created during the first spawn (Assign mode).
-                // We pass -w <name> so cwrap knows WHERE to look for the session data.
-                // Without -w, cwrap uses a different auto-generated worktree name and
-                // cannot find the existing session data, resulting in "No conversation found".
-                if let Some(ref wt_name) = node.worktree_name {
-                    args.push("-w".to_string());
-                    args.push(wt_name.clone());
-                    tracing::info!("spawn_agent: resume with worktree name: {}", wt_name);
-                } else {
-                    // Fallback for old sessions without worktree_name: just --resume
-                    tracing::warn!("spawn_agent: resume without worktree_name, session may not be found");
-                }
+                // Resume: the worktree already exists and we are running directly inside it.
+                // We MUST NOT pass -w here, otherwise claude will attempt `git worktree add` again
+                // and fail with "worktree already checked out".
+                tracing::info!("spawn_agent: omitting -w for resume (running directly in worktree)");
             }
             SessionIdMode::None => {}
         }
@@ -417,21 +407,6 @@ async fn spawn_agent_inner(
     let provider_enum = parse_provider(&provider);
     let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
 
-    // For cwrap providers, cwrap itself creates the worktree via git, so it MUST be run
-    // from the git repo root. For non-cwrap providers, we run them directly in the worktree.
-    let spawn_worktree_name = if is_cwrap {
-        None
-    } else {
-        node.worktree_name.as_deref()
-    };
-
-    // Resolve paths: includes worktree subdirectory (if applicable) + environment-aware spawn path
-    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
-    tracing::info!(
-        "spawn_agent_inner: resolved spawn_path={}, host_path={}, env={:?}",
-        resolved.spawn_path, resolved.host_path, resolved.env_type
-    );
-
     // 4. Determine session ID mode for cwrap-wrapped providers (Anthropic, Minimax)
     // Both use cwrap which forwards --session-id and --resume to the underlying CLI
     let session_id_mode = if provider_enum == Provider::Anthropic || provider_enum == Provider::Minimax {
@@ -448,6 +423,40 @@ async fn spawn_agent_inner(
     } else {
         SessionIdMode::None
     };
+
+    // Determine the target CWD for spawning.
+    // For cwrap providers on a fresh spawn (Assign), cwrap itself creates the worktree via git, 
+    // so it MUST be run from the git repo root. 
+    // On resume (Resume), the worktree already exists, so we run directly in it.
+    // For non-cwrap providers, we always run them directly in the worktree.
+    let spawn_worktree_name = if is_cwrap {
+        if matches!(session_id_mode, SessionIdMode::Assign(_)) {
+            None
+        } else {
+            node.worktree_name.as_deref()
+        }
+    } else {
+        node.worktree_name.as_deref()
+    };
+
+    // Resolve paths: includes worktree subdirectory (if applicable) + environment-aware spawn path
+    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
+    tracing::info!(
+        "spawn_agent_inner: resolved spawn_path={}, host_path={}, env={:?}",
+        resolved.spawn_path, resolved.host_path, resolved.env_type
+    );
+
+    // If we are setting the CWD to a worktree directory, we MUST verify it exists on disk first.
+    // If it doesn't exist (e.g. deleted or failed to create), cmd.exe will silently fall back 
+    // to the user's home directory and cause confusing "Accessing workspace: C:\Users\..." messages.
+    if spawn_worktree_name.is_some() {
+        let host_path = std::path::Path::new(&resolved.host_path);
+        if !host_path.exists() {
+            let msg = format!("Worktree directory not found: {}. It may have been deleted or failed to create previously. Please archive/delete this agent node and create a new one.", resolved.host_path);
+            tracing::error!("spawn_agent_inner: {}", msg);
+            return Err(msg);
+        }
+    }
 
     // 5. Open PTY
     tracing::debug!("spawn_agent_inner: opening PTY system");
