@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
 import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshPropertiesPanel';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
-import { isMac } from './lib/platform';
 import './App.css';
 
 interface ErrorToast {
@@ -25,27 +25,48 @@ function App() {
   const [isReady, setIsReady] = useState(false);
   const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
+  // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events)
+  useEffect(() => {
+    const shortcuts = [
+      { key: 'CommandOrControl+T', action: 'new-agent' },
+      { key: 'CommandOrControl+1', action: 'switch-1' },
+      { key: 'CommandOrControl+2', action: 'switch-2' },
+      { key: 'CommandOrControl+3', action: 'switch-3' },
+      { key: 'CommandOrControl+4', action: 'switch-4' },
+      { key: 'CommandOrControl+5', action: 'switch-5' },
+      { key: 'CommandOrControl+6', action: 'switch-6' },
+      { key: 'CommandOrControl+7', action: 'switch-7' },
+      { key: 'CommandOrControl+8', action: 'switch-8' },
+      { key: 'CommandOrControl+9', action: 'switch-9' },
+    ];
+
+    const registerShortcuts = async () => {
+      for (const { key, action } of shortcuts) {
+        try {
+          if (!(await isRegistered(key))) {
+            await register(key, () => {
+              window.dispatchEvent(new CustomEvent('shortcut-triggered', { detail: action }));
+            });
+          }
+        } catch (e) {
+          console.warn(`Failed to register shortcut ${key}:`, e);
+        }
+      }
+    };
+
+    registerShortcuts();
+
+    return () => {
+      for (const { key } of shortcuts) {
+        unregister(key).catch(() => {});
+      }
+    };
+  }, []);
+
+  // Quick switch session: Alt+1..9 (not intercepted by xterm, so window listener is fine)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // New agent node: Cmd+T (Mac) / Ctrl+T (non-Mac)
-      if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 't') {
-        e.preventDefault();
-        const activeNode = useAgentNodeStore.getState().getActiveNode();
-        const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
-        if (!meshId) return;
-        const mesh = useMeshStore.getState().meshesById.get(meshId);
-        if (!mesh) return;
-        const provider = activeNode?.provider ?? 'anthropic';
-        useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, mesh.path, 'main', provider)
-          .then(node => {
-            useAgentNodeStore.getState().setActiveNode(node.id);
-            useMeshStore.getState().selectMesh(mesh.id);
-          })
-          .catch(() => {});
-      }
-
-      // Quick switch session: Alt+1..9
       if (e.altKey && /^[1-9]$/.test(e.key)) {
         const index = parseInt(e.key) - 1;
         const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
@@ -59,6 +80,41 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  // Handle shortcut events emitted from Rust (Ctrl+T, Ctrl+1..9)
+  useEffect(() => {
+    const handleShortcut = (e: Event) => {
+      const action = (e as CustomEvent<string>).detail;
+
+      if (action === 'new-agent') {
+        const activeNode = useAgentNodeStore.getState().getActiveNode();
+        const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
+        if (!meshId) return;
+        const mesh = useMeshStore.getState().meshesById.get(meshId);
+        if (!mesh) return;
+        const provider = activeNode?.provider ?? 'anthropic';
+        const branch = activeNode?.branch ?? 'main';
+        const path = activeNode?.path ?? mesh.path;
+        useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, path, branch, provider)
+          .then(node => {
+            useAgentNodeStore.getState().setActiveNode(node.id);
+            useMeshStore.getState().selectMesh(mesh.id);
+          })
+          .catch(() => {});
+      } else if (action.startsWith('switch-')) {
+        const index = parseInt(action.replace('switch-', '')) - 1;
+        const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
+          s.mesh_id === useAgentNodeStore.getState().getActiveNode()?.mesh_id
+        );
+        if (currentNodes[index]) {
+          useAgentNodeStore.getState().setActiveNode(currentNodes[index].id);
+        }
+      }
+    };
+
+    window.addEventListener('shortcut-triggered', handleShortcut);
+    return () => window.removeEventListener('shortcut-triggered', handleShortcut);
   }, []);
 
   useEffect(() => {
