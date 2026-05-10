@@ -208,26 +208,6 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId: nodeId, data }).catch(console.error);
       });
 
-      let pasteBlocked = false;
-      term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-        if (ev.type === 'keydown' && ev.key === 'v' && (ev.ctrlKey || ev.metaKey)) {
-          if (!pasteBlocked) {
-            pasteBlocked = true;
-            navigator.clipboard.readText().then(text => {
-              if (text) invoke('write_to_agent', { sessionId: nodeId, data: text }).catch(console.error);
-            }).catch(err => {
-              console.warn('[TerminalManager] Clipboard read failed:', err);
-            }).finally(() => {
-              // Use setTimeout to debounce against ConPTY's synthesized paste
-              // event ~50-100ms after Ctrl+V. The 500ms window catches both.
-              setTimeout(() => { pasteBlocked = false; }, 500);
-            });
-          }
-          return false;
-        }
-        return true;
-      });
-
       term.onResize(({ cols, rows }) => {
         invoke('resize_agent', { sessionId: nodeId, rows, cols }).catch(err => {
           // Ignore "Agent not running" errors - these are common during initial mount or rapid resizing
