@@ -213,15 +213,15 @@ class TerminalManager {
         if (ev.type === 'keydown' && ev.key === 'v' && (ev.ctrlKey || ev.metaKey)) {
           if (!pasteBlocked) {
             pasteBlocked = true;
-            // Debounce: ConPTY on Windows synthesizes paste ~50-100ms after Ctrl+V.
-            // 500ms window catches both. .finally() clears the flag when the operation
-            // completes (not just after 500ms), so slow clipboard reads don't over-block.
-            setTimeout(() => { pasteBlocked = false; }, 500);
             navigator.clipboard.readText().then(text => {
               if (text) invoke('write_to_agent', { sessionId: nodeId, data: text }).catch(console.error);
             }).catch(err => {
               console.warn('[TerminalManager] Clipboard read failed:', err);
-            }).finally(() => { pasteBlocked = false; });
+            }).finally(() => {
+              // Use setTimeout to debounce against ConPTY's synthesized paste
+              // event ~50-100ms after Ctrl+V. The 500ms window catches both.
+              setTimeout(() => { pasteBlocked = false; }, 500);
+            });
           }
           return false;
         }
