@@ -303,6 +303,7 @@ window.__terminalManager = terminalManager;
 
 export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const instRef = useRef<TerminalInstance | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
@@ -379,6 +380,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
 
     terminalManager.attach(sessionId, container).then(async (inst) => {
       if (cancelled.current || !inst) return;
+      instRef.current = inst;
 
       if (sessionId === activeNodeId) {
         inst.term.focus();
@@ -404,8 +406,16 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   return (
     <div
       ref={containerRef}
-      className="h-full w-full relative"
+      className="h-full w-full relative outline-none"
       style={{ padding: '4px' }}
+      tabIndex={0}
+      onFocus={() => instRef.current?.term.focus()}
+      onKeyDown={(e) => {
+        if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          instRef.current?.term.focus();
+        }
+      }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
