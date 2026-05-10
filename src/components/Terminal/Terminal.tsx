@@ -208,6 +208,23 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId: nodeId, data }).catch(console.error);
       });
 
+      // Use custom key handler to capture Ctrl+V paste. Without ev.preventDefault(),
+      // the browser synthesizes a separate paste event that causes duplicates.
+      term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
+        if (ev.type === 'keydown' && ev.ctrlKey && ev.key === 'v') {
+          ev.preventDefault();
+          navigator.clipboard.readText().then(text => {
+            if (text) {
+              term.paste(text);
+            }
+          }).catch(err => {
+            console.warn('[TerminalManager] Clipboard read failed:', err);
+          });
+          return false;
+        }
+        return true;
+      });
+
       term.onResize(({ cols, rows }) => {
         invoke('resize_agent', { sessionId: nodeId, rows, cols }).catch(err => {
           // Ignore "Agent not running" errors - these are common during initial mount or rapid resizing
