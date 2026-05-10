@@ -32,7 +32,8 @@ pub fn watch_session(
                 if now.duration_since(*last).as_millis() >= 500 {
                     *last = now;
                     let _ = app_handle.emit("git-changed", serde_json::json!({
-                        "path": &watch_path_for_callback
+                        "path": &watch_path_for_callback,
+                        "internal_path": &node.path
                     }));
                 }
             }
