@@ -5,7 +5,6 @@ import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 
 interface MeshConfig {
-  name: string | null;
   build_command: string | null;
   run_command: string | null;
   model: string | null;
@@ -57,7 +56,7 @@ export function MeshPropertiesPanel() {
       .then((config) => {
         setInitialConfig(config);
         setForm({
-          name: config.name ?? mesh?.name ?? '',
+          name: mesh?.name ?? '',
           model: config.model ?? '',
           effort: config.effort ?? '',
           baseRef: config.base_ref === 'HEAD' ? 'head' : config.base_ref?.includes('origin') ? 'fresh' : 'fresh',
