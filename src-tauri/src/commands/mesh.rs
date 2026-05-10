@@ -93,20 +93,48 @@ pub async fn get_root_token() -> Result<String, String> {
 /// Get the local machine's LAN IP address.
 #[command]
 pub async fn get_local_ip() -> Result<String, String> {
-    match local_ip_address::local_ip() {
-        Ok(ip) => {
-            let ip_str = ip.to_string();
-            // Skip Docker/NPIP/Tunnel interfaces
-            if !ip_str.starts_with("172.16.")
-               && !ip_str.starts_with("192.168.56.")
-               && !ip_str.starts_with("10.0.0.")
-               && ip_str != "0.0.0.0"
-            {
-                Ok(ip_str)
-            } else {
-                Err("no suitable LAN interface found".to_string())
-            }
+    let interfaces = local_ip_address::list_afinet_netifas()
+        .map_err(|e| format!("failed to list interfaces: {}", e))?;
+
+    for (name, ip) in interfaces {
+        if let Some(ip_str) = iface_addr_in_lan_range(&name, &ip) {
+            return Ok(ip_str);
         }
-        Err(e) => Err(format!("failed to get local IP: {}", e)),
     }
+
+    Err("no suitable LAN interface found".to_string())
+}
+
+/// Returns the IP address if this interface is a typical LAN address (not Docker/tunnel/VirtualBox).
+fn iface_addr_in_lan_range(name: &str, ip: &std::net::IpAddr) -> Option<String> {
+    let ip_str = ip.to_string();
+
+    // Skip Docker bridge (172.16-31.x), VirtualBox Host-Only (192.168.56.x),
+    // tunnel addresses (10.0.0.x), Loopback, and wildcard (0.0.0.0)
+    if ip.is_loopback() {
+        return None;
+    }
+    if let std::net::IpAddr::V4(ipv4) = ip {
+        let octets = ipv4.octets();
+        // Docker bridge: 172.16.0.0/12 (172.16–172.31)
+        if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+            return None;
+        }
+        if octets[0] == 192 && octets[1] == 168 && octets[2] == 56 {
+            return None; // VirtualBox Host-Only
+        }
+        if octets[0] == 10 && octets[1] == 0 && octets[2] == 0 {
+            return None; // Tunnel
+        }
+        if octets[0] == 0 && octets[1] == 0 && octets[2] == 0 && octets[3] == 0 {
+            return None; // Wildcard
+        }
+    }
+
+    // Accept classic private LAN ranges: 192.168.x.x and 10.x.x.x
+    if ip_str.starts_with("192.168.") || ip_str.starts_with("10.") {
+        return Some(ip_str);
+    }
+
+    None
 }

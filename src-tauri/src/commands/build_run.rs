@@ -162,6 +162,11 @@ pub async fn build_run(
     let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
     validate_worktree_exists(&resolved, node.worktree_name.as_deref())?;
 
+    // Sanitize .git file to ensure proper worktree isolation across environments
+    if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+        tracing::warn!("build_run: failed to sanitize worktree .git file: {}", e);
+    }
+
     // 4. Get the command to run
     let command = match mode {
         BuildRunMode::Build => &config.build_command,
@@ -197,6 +202,13 @@ pub async fn build_run(
         c
     };
     cmd.cwd(shell_cwd);
+
+    // Ensure clean worktree isolation by removing any inherited Git environment variables
+    cmd.env_remove("GIT_DIR");
+    cmd.env_remove("GIT_WORK_TREE");
+    cmd.env_remove("GIT_INDEX_FILE");
+    cmd.env_remove("GIT_OBJECT_DIRECTORY");
+    cmd.env_remove("GIT_COMMON_DIR");
 
     let child = pair.slave.spawn_command(cmd)
         .map_err(|e| format!("failed to spawn shell: {}", e))?;

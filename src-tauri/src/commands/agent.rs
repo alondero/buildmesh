@@ -229,11 +229,15 @@ fn build_spawn_command(
     cmd.cwd(&resolved.spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
     cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT.to_string());
-    // Fix Windows git worktree limitation: the .git file in worktrees contains a Unix
-    // path that Git on Windows can't resolve. Setting GIT_DIR explicitly bypasses it.
-    // GIT_WORK_TREE tells git which working tree to operate on.
-    cmd.env("GIT_DIR", format!("{}/.git", node.path));
-    cmd.env("GIT_WORK_TREE", &resolved.spawn_path);
+
+    // Ensure clean worktree isolation by removing any inherited Git environment variables
+    // that might point to the main repository or other worktrees.
+    cmd.env_remove("GIT_DIR");
+    cmd.env_remove("GIT_WORK_TREE");
+    cmd.env_remove("GIT_INDEX_FILE");
+    cmd.env_remove("GIT_OBJECT_DIRECTORY");
+    cmd.env_remove("GIT_COMMON_DIR");
+
     cmd
 }
 
@@ -464,6 +468,11 @@ async fn spawn_agent_inner(
             let msg = format!("Worktree directory not found: {}. It may have been deleted or failed to create previously. Please archive/delete this agent node and create a new one.", resolved.host_path);
             tracing::error!("spawn_agent_inner: {}", msg);
             return Err(msg);
+        }
+
+        // Sanitize .git file to ensure proper worktree isolation across environments
+        if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+            tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
         }
     }
 
