@@ -31,8 +31,12 @@ export function ChangedFilesPanel({ projectPath, isOpen, onFileSelect }: Changed
 
   useEffect(() => {
     if (!isOpen || !projectPath) return;
-    const unlisten = listen<{ path: string }>(GIT_CHANGED, (event) => {
-      if (event.payload.path === projectPath) {
+    const unlisten = listen<{ path: string; internal_path?: string }>(GIT_CHANGED, (event) => {
+      // Check both host path and internal path since we watch by internal path
+      // but receive events with host path (UNC) on Windows
+      const matchPath = event.payload.path === projectPath;
+      const matchInternal = event.payload.internal_path === projectPath;
+      if (matchPath || matchInternal) {
         fetchStatus();
       }
     });
