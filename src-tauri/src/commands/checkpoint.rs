@@ -17,10 +17,7 @@ pub async fn create_checkpoint(
             .map_err(|e| e.to_string())?;
 
     // Invalidate frontend git summary cache for this path
-    let _ = app.emit("git-changed", serde_json::json!({
-        "path": &node_path,
-        "internal_path": &node_path
-    }));
+    let _ = app.emit("git-changed", serde_json::json!({ "path": &node_path }));
 
     Ok(checkpoint)
 }
@@ -38,10 +35,7 @@ pub async fn revert_to_checkpoint(checkpoint_id: i64, app: tauri::AppHandle) -> 
         .map_err(|e| e.to_string())?;
 
     // Invalidate frontend git summary cache for this path
-    let _ = app.emit("git-changed", serde_json::json!({
-        "path": &node_path,
-        "internal_path": &node_path
-    }));
+    let _ = app.emit("git-changed", serde_json::json!({ "path": &node_path }));
 
     Ok(())
 }
