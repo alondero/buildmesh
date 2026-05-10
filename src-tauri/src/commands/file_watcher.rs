@@ -26,19 +26,24 @@ pub fn watch_session(
 
     let mut watcher = RecommendedWatcher::new(
         move |result: Result<Event, notify::Error>| {
-            if let Ok(_event) = result {
-                let mut last = last_emit.lock().unwrap();
-                let now = Instant::now();
-                if now.duration_since(*last).as_millis() >= 500 {
-                    *last = now;
-                    let _ = app_handle.emit("git-changed", serde_json::json!({
-                        "path": &watch_path_for_callback,
-                        "internal_path": &node.path
-                    }));
+            match result {
+                Ok(_event) => {
+                    let mut last = last_emit.lock().unwrap();
+                    let now = Instant::now();
+                    if now.duration_since(*last).as_millis() >= 500 {
+                        *last = now;
+                        let _ = app_handle.emit("git-changed", serde_json::json!({
+                            "path": &watch_path_for_callback,
+                            "internal_path": &node.path
+                        }));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("File watcher error for session {}: {:?}", session_id, e);
                 }
             }
         },
-        Config::default(),
+        Config::default().with_poll_interval(std::time::Duration::from_secs(2)),
     ).map_err(|e| e.to_string())?;
 
     let path = std::path::Path::new(&watch_path);
