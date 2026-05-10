@@ -3,8 +3,15 @@
 //! Uses build_run::extract_toml_value for TOML parsing (shared implementation).
 
 use crate::commands::build_run::extract_toml_value;
+use crate::commands::build_run::MESH_CONFIG_FILENAME;
 use crate::db;
 use std::path::PathBuf;
+
+const MESH_CONFIG_EMPTY_TEMPLATE: &str = r"# Buildmesh configuration
+[build]
+[run]
+[agent]
+";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -25,7 +32,7 @@ pub struct MeshConfig {
 
 /// Read all fields from mesh.toml
 fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
-    let config_path = mesh_path.join("mesh.toml");
+    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
     let content = std::fs::read_to_string(&config_path)
         .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
 
@@ -56,16 +63,16 @@ fn read_base_ref(mesh_path: &str) -> Option<String> {
 
 /// Update a single key inside an existing [section] in mesh.toml.
 /// If the key exists, replaces it. If the section exists but key doesn't, appends it.
-/// Fails if the section doesn't exist.
+/// Creates the file with default sections if it doesn't exist yet.
 fn write_mesh_toml_field(
     mesh_path: &PathBuf,
     section: &str,
     key: &str,
     value: &str,
 ) -> Result<(), String> {
-    let config_path = mesh_path.join("mesh.toml");
-    let content =
-        std::fs::read_to_string(&config_path).map_err(|e| format!("mesh.toml not found: {}", e))?;
+    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
+    let content = std::fs::read_to_string(&config_path)
+        .unwrap_or_else(|_| MESH_CONFIG_EMPTY_TEMPLATE.to_string());
 
     let section_pattern = format!("[{}]", section);
     let section_start = content

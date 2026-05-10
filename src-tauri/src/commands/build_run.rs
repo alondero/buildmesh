@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
-const MESH_CONFIG_FILENAME: &str = "mesh.toml";
+pub const MESH_CONFIG_FILENAME: &str = "mesh.toml";
 
 // ---------------------------------------------------------------------------
 // Config parsing
