@@ -277,6 +277,70 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
     }
 }
 
+/// Sanitize the .git file in a worktree to ensure it uses the correct path format
+/// for the target environment (Windows vs WSL).
+pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Result<(), String> {
+    let git_file_path = std::path::Path::new(worktree_host_path).join(".git");
+    if !git_file_path.is_file() {
+        return Ok(()); // Nothing to sanitize
+    }
+
+    let content = std::fs::read_to_string(&git_file_path)
+        .map_err(|e| format!("Failed to read .git file: {}", e))?;
+
+    if !content.starts_with("gitdir: ") {
+        return Ok(());
+    }
+
+    let git_dir_path = content.trim_start_matches("gitdir: ").trim();
+    if git_dir_path.is_empty() {
+        return Err("invalid .git file: empty gitdir path".to_string());
+    }
+
+    // Convert the path to the target environment's format
+    let new_path = match env_type {
+        EnvType::Wsl => {
+            // Ensure it's a WSL-friendly path
+            if git_dir_path.contains(':') || git_dir_path.starts_with("\\\\") {
+                // Convert Windows path to WSL (/mnt/c/...)
+                let mut path_str = git_dir_path.replace('\\', "/");
+                if let Some(pos) = path_str.find(':') {
+                    let drive = path_str[..pos].to_lowercase();
+                    format!("/mnt/{}{}", drive, &path_str[pos + 1..])
+                } else {
+                    path_str
+                }
+            } else {
+                git_dir_path.to_string()
+            }
+        }
+        EnvType::Windows => {
+            // Target is Windows. Use to_host_path to handle /mnt/ and /home/
+            let mut host_path = to_host_path(git_dir_path);
+
+            // Additionally handle Git Bash style /c/Users/ or /C/Users/
+            if host_path.starts_with('/') && host_path.len() > 2 && (host_path.chars().nth(2) == Some('/') || host_path.len() == 2) {
+                let drive_candidate = host_path.chars().nth(1).unwrap();
+                if drive_candidate.is_alphabetic() {
+                    let drive = drive_candidate.to_uppercase().next().unwrap();
+                    let rest = if host_path.len() > 2 { &host_path[2..] } else { "" };
+                    host_path = format!("{}:{}", drive, rest.replace('/', "\\"));
+                }
+            }
+            host_path
+        }
+    };
+
+    if new_path != git_dir_path {
+        tracing::info!("Sanitizing .git file: {} -> {}", git_dir_path, new_path);
+        // Ensure we use Unix line endings for the .git file as Git expects
+        std::fs::write(&git_file_path, format!("gitdir: {}\n", new_path))
+            .map_err(|e| format!("Failed to write sanitized .git file: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Get the .claude directory for session storage in the correct environment
 pub fn claude_dir() -> PathBuf {
     match current_env() {
