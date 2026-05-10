@@ -35,6 +35,7 @@ test-results/
 .claude/settings.local.json
 .claude/tasks/
 .claude/memory/
+CLAUDE.local.md
 coverage/
 coverage/
 .worktrees/
