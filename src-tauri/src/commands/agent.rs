@@ -229,6 +229,11 @@ fn build_spawn_command(
     cmd.cwd(&resolved.spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
     cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT.to_string());
+    // Fix Windows git worktree limitation: the .git file in worktrees contains a Unix
+    // path that Git on Windows can't resolve. Setting GIT_DIR explicitly bypasses it.
+    // GIT_WORK_TREE tells git which working tree to operate on.
+    cmd.env("GIT_DIR", format!("{}/.git", node.path));
+    cmd.env("GIT_WORK_TREE", &resolved.spawn_path);
     cmd
 }
 
