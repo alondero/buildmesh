@@ -209,10 +209,14 @@ fn build_spawn_command(
         // ConPTY compatibility and console suppression. Non-cwrap providers (gemini,
         // opencode) are typically Node.js shims that resolve correctly via direct exec.
         if is_cwrap {
-            tracing::info!("spawn_agent: building Windows cmd.exe /c for cwrap provider {}", binary);
-            let mut c = CommandBuilder::new("cmd.exe");
-            c.args(["/c", binary]);
-            c.args(args);
+            tracing::info!("spawn_agent: building Windows powershell.exe for cwrap provider {}", binary);
+            // Use -NoLogo to suppress banner, -Command to run cwrap directly without cmd.exe layer.
+            // PowerShell has native ConPTY support and provides better compatibility with
+            // modern Claude Code sessions compared to cmd.exe /c wrapping.
+            let mut c = CommandBuilder::new("powershell.exe");
+            // Build the command line as a single string: "cwrap --minimax -w foo --session-id bar"
+            let combined = format!("{} {}", binary, args.join(" "));
+            c.args(["-NoLogo", "-Command", &combined]);
             c
         } else {
             tracing::info!("spawn_agent: building Windows direct command for {}", binary);
@@ -447,7 +451,7 @@ async fn spawn_agent_inner(
     );
 
     // If we are setting the CWD to a worktree directory, we MUST verify it exists on disk first.
-    // If it doesn't exist (e.g. deleted or failed to create), cmd.exe will silently fall back 
+    // If it doesn't exist (e.g. deleted or failed to create), the shell will silently fall back
     // to the user's home directory and cause confusing "Accessing workspace: C:\Users\..." messages.
     if spawn_worktree_name.is_some() {
         let host_path = std::path::Path::new(&resolved.host_path);

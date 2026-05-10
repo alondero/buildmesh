@@ -210,11 +210,15 @@ mod tests {
         assert_eq!(worktree_path, "X:\\src\\pixelpath\\.claude\\worktrees\\async-plotting-riddle");
     }
 
-    /// Test 8: cwrap command structure for Windows cwrap providers
+    /// Test 8: cwrap command structure for Windows cwrap providers via PowerShell
     #[test]
     fn windows_cwrap_command_structure() {
-        // For Windows with cwrap providers, the command is:
-        // cmd.exe /c cwrap --<provider> -w <name> --session-id <id>
+        // For Windows with cwrap providers, the command now uses PowerShell:
+        // powershell.exe -NoLogo -Command "cwrap --<provider> -w <name> --session-id <id>"
+        //
+        // We pass -NoLogo to suppress the PowerShell banner and -Command to run
+        // the cwrap invocation directly. The combined args string is joined and
+        // passed as a single -Command argument rather than a cmd.exe /c layer.
 
         let binary = "cwrap";
         let provider_flag = "--minimax";
@@ -222,17 +226,23 @@ mod tests {
         let session_id_arg = "--session-id";
         let session_id = "abc-123";
 
-        // Simulating build_spawn_command for Windows cwrap
-        let mut cmd_args = vec![binary, "/c", provider_flag, "-w", worktree_name, session_id_arg, session_id];
+        // Build the inner args like build_spawn_command does
+        let mut args = vec![provider_flag.to_string()];
+        args.push("-w".to_string());
+        args.push(worktree_name.to_string());
+        args.push(session_id_arg.to_string());
+        args.push(session_id.to_string());
+
+        // Simulating build_spawn_command for Windows cwrap via PowerShell
+        // The combined inner command: "cwrap --minimax -w async-plotting-riddle --session-id abc-123"
+        let combined = format!("{} {}", binary, args.join(" "));
+        let cmd_args = vec!["powershell.exe", "-NoLogo", "-Command", &combined];
 
         let expected = vec![
-            "cwrap",
-            "/c",
-            "--minimax",
-            "-w",
-            "async-plotting-riddle",
-            "--session-id",
-            "abc-123"
+            "powershell.exe",
+            "-NoLogo",
+            "-Command",
+            "cwrap --minimax -w async-plotting-riddle --session-id abc-123"
         ];
 
         assert_eq!(cmd_args, expected);
