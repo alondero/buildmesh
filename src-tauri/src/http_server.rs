@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::{accept_async, tungstenite};
@@ -55,11 +55,14 @@ fn get_snapshot_requests() -> &'static Arc<RwLock<SnapshotSenders>> {
 
 /// Called by the Tauri command when the frontend responds with a serialized terminal snapshot.
 pub fn fulfill_snapshot(request_id: &str, data: String) {
+    tracing::debug!("[DEBUG-pty] fulfill_snapshot: request_id={}, data_len={}", request_id, data.len());
     let mut requests = get_snapshot_requests().write();
     if let Some(tx) = requests.remove(request_id) {
         if tx.send(data).is_err() {
             tracing::warn!("fulfill_snapshot: receiver already dropped for {}", request_id);
         }
+    } else {
+        tracing::debug!("[DEBUG-pty] fulfill_snapshot: no pending request found for {}", request_id);
     }
 }
 
@@ -73,14 +76,25 @@ async fn request_terminal_snapshot(app: &tauri::AppHandle, node_id: i64) -> Opti
         requests.insert(request_id.clone(), tx);
     }
 
+    tracing::debug!("[DEBUG-pty] request_terminal_snapshot: emitting for node {}, request_id={}", node_id, request_id);
     let _ = app.emit("serialize-terminal-request", serde_json::json!({
         "node_id": node_id,
         "request_id": request_id,
     }));
 
     match tokio::time::timeout(std::time::Duration::from_millis(500), rx).await {
-        Ok(Ok(data)) => Some(data),
-        _ => {
+        Ok(Ok(data)) => {
+            tracing::debug!("[DEBUG-pty] request_terminal_snapshot: got snapshot ({} bytes) for node {}", data.len(), node_id);
+            Some(data)
+        }
+        Ok(Err(e)) => {
+            tracing::debug!("[DEBUG-pty] request_terminal_snapshot: channel closed for node {}: {}", node_id, e);
+            let mut requests = get_snapshot_requests().write();
+            requests.remove(&request_id);
+            None
+        }
+        Err(_) => {
+            tracing::debug!("[DEBUG-pty] request_terminal_snapshot: TIMEOUT for node {} after 500ms", node_id);
             let mut requests = get_snapshot_requests().write();
             requests.remove(&request_id);
             None
@@ -148,8 +162,10 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
 
     // WebSocket upgrade path: /ws/terminal/{nodeId}?token=xxx
     if parts[0] == "GET" && parts[1].starts_with("/ws/terminal/") {
+        tracing::info!("[DEBUG-pty] WS path HIT: {} (token present: {})", parts[1], token.is_some());
         let ws_token = token.clone();
         let path = parts[1];
+        tracing::debug!("[DEBUG-pty] headers before WS upgrade: {}", headers.replace("\r\n", "|"));
 
         let node_id: Option<i64> = path.split('/').nth(3)
             .map(|s| s.split('?').next().unwrap_or(s).parse().ok())
@@ -170,14 +186,27 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             return;
         }
 
-        let stream = lines.into_inner();
-        match accept_async(stream).await {
-            Ok(ws_stream) => {
+        let mut stream = lines.into_inner();
+
+        // Drain any remaining buffered data before accept_async.
+        let mut drain_buf = [0u8; 4096];
+        let did_drain = stream.read(&mut drain_buf).await;
+        let drain_bytes = if did_drain.is_ok() { did_drain.unwrap() } else { 0 };
+        tracing::debug!("[DEBUG-pty] drain read {} bytes before accept_async", drain_bytes);
+
+        tracing::debug!("[DEBUG-pty] calling accept_async for node {}", node_id);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), accept_async(stream)).await;
+        match result {
+            Ok(Ok(ws_stream)) => {
                 tracing::info!("WebSocket connected for node {}", node_id);
+                tracing::debug!("[DEBUG-pty] WS upgrade SUCCESS, spawning handle_ws_connection task for node {}", node_id);
                 tauri::async_runtime::spawn(handle_ws_connection(ws_stream, node_id));
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::error!("WebSocket upgrade failed: {}", e);
+            }
+            Err(_) => {
+                tracing::error!("WebSocket upgrade timed out after 5s for node {}", node_id);
             }
         }
         return;
@@ -273,17 +302,23 @@ async fn handle_ws_connection(
     node_id: i64,
 ) {
     let (mut write, mut read) = ws_stream.split();
+    tracing::info!("[DEBUG-pty] >>> handle_ws_connection ENTERED for node {}", node_id);
 
     // Subscribe BEFORE requesting snapshot to avoid missing data between snapshot and live stream
     let mut rx = subscribe_pty(node_id);
 
     let app = get_server_state().app.clone();
+    tracing::debug!("[DEBUG-pty] handle_ws_connection: requesting snapshot for node {}", node_id);
     if let Some(snapshot) = request_terminal_snapshot(&app, node_id).await {
+        tracing::debug!("[DEBUG-pty] handle_ws_connection: snapshot received, {} bytes, sending to mobile", snapshot.len());
         if !snapshot.is_empty() {
             if write.send(tungstenite::Message::Text(snapshot.into())).await.is_err() {
+                tracing::debug!("[DEBUG-pty] handle_ws_connection: failed to send snapshot for node {}", node_id);
                 return;
             }
         }
+    } else {
+        tracing::debug!("[DEBUG-pty] handle_ws_connection: no snapshot for node {} (timeout or error)", node_id);
     }
 
     let write_task = tauri::async_runtime::spawn(async move {
@@ -351,6 +386,9 @@ pub fn ensure_pty_channel(node_id: i64) {
     if !locked.contains_key(&node_id) {
         let (tx, _) = broadcast::channel(1024);
         locked.insert(node_id, tx);
+        tracing::debug!("[DEBUG-pty] ensure_pty_channel: created NEW channel for node {}", node_id);
+    } else {
+        tracing::debug!("[DEBUG-pty] ensure_pty_channel: channel already exists for node {}", node_id);
     }
 }
 
@@ -359,8 +397,10 @@ pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
     let mut locked = nodes.write();
     let sender = locked.entry(node_id).or_insert_with(|| {
         let (tx, _) = broadcast::channel(1024);
+        tracing::debug!("[DEBUG-pty] subscribe_pty: created channel for node {} (was missing)", node_id);
         tx
     }).clone();
+    tracing::debug!("[DEBUG-pty] subscribe_pty: subscribing to node {} ({} active subscribers)", node_id, sender.len());
     sender.subscribe()
 }
 
@@ -371,7 +411,11 @@ pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
         locked.get(&node_id).cloned()
     };
     if let Some(sender) = sender {
+        let msg_len = data.len();
         let _ = sender.send(data);
+        tracing::debug!("[DEBUG-pty] send_pty_output: sent {} bytes to node {} (subscribers: {})", msg_len, node_id, sender.len());
+    } else {
+        tracing::debug!("[DEBUG-pty] send_pty_output: NO channel found for node {}", node_id);
     }
 }
 
