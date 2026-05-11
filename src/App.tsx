@@ -8,7 +8,10 @@ import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshProper
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
+import { createShortcutGuard } from './lib/shortcutGuard';
 import './App.css';
+
+const createNodeGuard = createShortcutGuard(300);
 
 interface ErrorToast {
   id: number;
@@ -88,20 +91,19 @@ function App() {
       const action = (e as CustomEvent<string>).detail;
 
       if (action === 'new-agent') {
-        const activeNode = useAgentNodeStore.getState().getActiveNode();
-        const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
-        if (!meshId) return;
-        const mesh = useMeshStore.getState().meshesById.get(meshId);
-        if (!mesh) return;
-        const provider = activeNode?.provider ?? 'anthropic';
-        const branch = activeNode?.branch ?? 'main';
-        const path = activeNode?.path ?? mesh.path;
-        useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, path, branch, provider)
-          .then(node => {
-            useAgentNodeStore.getState().setActiveNode(node.id);
-            useMeshStore.getState().selectMesh(mesh.id);
-          })
-          .catch(() => {});
+        createNodeGuard(async () => {
+          const activeNode = useAgentNodeStore.getState().getActiveNode();
+          const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
+          if (!meshId) return;
+          const mesh = useMeshStore.getState().meshesById.get(meshId);
+          if (!mesh) return;
+          const provider = activeNode?.provider ?? 'anthropic';
+          const branch = activeNode?.branch ?? 'main';
+          const path = activeNode?.path ?? mesh.path;
+          const node = await useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, path, branch, provider);
+          useAgentNodeStore.getState().setActiveNode(node.id);
+          useMeshStore.getState().selectMesh(mesh.id);
+        });
       } else if (action.startsWith('switch-')) {
         const index = parseInt(action.replace('switch-', '')) - 1;
         const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
@@ -211,4 +213,4 @@ function App() {
   );
 }
 
-export default App;;
+export default App;
