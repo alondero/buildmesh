@@ -16,7 +16,7 @@ struct AgentProcess {
 }
 
 /// Thread-safe registry for agent processes.
-struct ProcessRegistry {
+pub(crate) struct ProcessRegistry {
     processes: HashMap<i64, Arc<AgentProcess>>,
 }
 
@@ -29,6 +29,14 @@ impl ProcessRegistry {
 
     fn get(&self, session_id: &i64) -> Option<Arc<AgentProcess>> {
         self.processes.get(session_id).cloned()
+    }
+
+    pub(crate) fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
+        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
+        let mut writer = agent.writer.lock().unwrap();
+        use std::io::Write;
+        writer.write_all(data).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())
     }
 
     fn insert(&mut self, session_id: i64, agent: AgentProcess) {
@@ -582,27 +590,16 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
 
 #[command]
 pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
-    let agent = {
+    {
         let registry = PROCESS_REGISTRY.lock().unwrap();
-        registry.get(&session_id)
-    };
-
-    if let Some(agent) = agent {
-        {
-            let mut writer = agent.writer.lock().unwrap();
-            use std::io::Write;
-            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-            writer.flush().map_err(|e| e.to_string())?;
-        }
-
-        if data.contains('\n') || data.contains('\r') {
-            db::update_agent_node_status(session_id, SessionStatus::Running).ok();
-            let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
-        }
-        Ok(())
-    } else {
-        Err("Agent not running".to_string())
+        registry.write_bytes(session_id, data.as_bytes())?;
     }
+
+    if data.contains('\n') || data.contains('\r') {
+        db::update_agent_node_status(session_id, SessionStatus::Running).ok();
+        let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
+    }
+    Ok(())
 }
 
 #[command]

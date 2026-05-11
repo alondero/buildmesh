@@ -459,9 +459,15 @@
         document.getElementById('status-dot').className = 'status-dot connected';
       };
 
-      ws.onmessage = (event) => {
-        if (window.term) {
+      ws.onmessage = async (event) => {
+        if (!window.term) return;
+        if (typeof event.data === 'string') {
           window.term.write(event.data);
+        } else if (event.data instanceof Blob) {
+          const buf = await event.data.arrayBuffer();
+          window.term.write(new Uint8Array(buf));
+        } else {
+          window.term.write(new Uint8Array(event.data));
         }
       };
 
@@ -515,7 +521,6 @@
       const cmd = input.value + '\n';
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(cmd);
-        if (window.term) window.term.write(cmd);
         input.value = '';
       }
     }
