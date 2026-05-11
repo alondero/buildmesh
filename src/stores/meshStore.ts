@@ -24,6 +24,7 @@ interface MeshState {
   selectMesh: (id: number | null) => void;
   updateMeshLayout: (id: number, layout: 'grid' | 'single') => Promise<void>;
   reorderMeshes: (meshId: number, newPosition: number) => Promise<void>;
+  updateMeshName: (id: number, name: string) => Promise<void>;
 }
 
 export const useMeshStore = create<MeshState>((set) => ({
@@ -127,6 +128,23 @@ export const useMeshStore = create<MeshState>((set) => ({
     } catch (e) {
       set({ error: String(e) });
       await useMeshStore.getState().fetchMeshes();
+    }
+  },
+
+  updateMeshName: async (id, name) => {
+    try {
+      await invoke('update_mesh_name', { meshId: id, name });
+      set((state) => {
+        const existing = state.meshesById.get(id);
+        if (!existing) return state;
+        const updated = { ...existing, name };
+        return {
+          meshes: state.meshes.map((m) => (m.id === id ? updated : m)),
+          meshesById: new Map([...state.meshesById, [id, updated]])
+        };
+      });
+    } catch (e) {
+      set({ error: String(e) });
     }
   },
 }));

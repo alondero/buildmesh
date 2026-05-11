@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0) {
 
 # 3. Verify binary exists
 if (-not (Test-Path $Binary)) {
-    Write-Output "ERROR: Build failed — $Binary not found"
+    Write-Output "ERROR: Build failed - $Binary not found"
     exit 1
 }
 
@@ -33,7 +33,7 @@ if (Test-Path $LogPath) {
     $BeforeLines = (Get-Content $LogPath).Count
 }
 
-# 5. Launch raw binary (never the .app bundle — it can be stale)
+# 5. Launch raw binary
 $proc = Start-Process $Binary -PassThru
 Write-Output "Launched PID: $($proc.Id)"
 
@@ -45,7 +45,7 @@ if (Test-Path $LogPath) {
         $NewLines = $AllLines[$BeforeLines..($AllLines.Count - 1)]
         $started = $NewLines | Where-Object { $_ -match "started|ready" }
         if ($started) {
-            Write-Output "OK — Buildmesh running"
+            Write-Output "OK - Buildmesh running"
             exit 0
         }
     }
@@ -53,7 +53,7 @@ if (Test-Path $LogPath) {
 
 # Fallback: check process is alive
 if (-not $proc.HasExited) {
-    Write-Output "OK — Process alive (no log confirmation)"
+    Write-Output "OK - Process alive (no log confirmation)"
     exit 0
 }
 

@@ -96,7 +96,7 @@ All fields are behind `Arc<Mutex<...>>` so the PTY reader thread and Tauri comma
 ### Worktree Support (`-w`)
 cwrap providers (Anthropic, Minimax) get the `-w` flag added to their args, which creates a dedicated worktree per agent node. This prevents concurrent agent node conflicts when multiple agent nodes target the same git repository. See `agent.rs:140-186`.
 
-**Resume fix (2026-05-03):** On resume, `build_spawn_command` checks if the worktree directory already exists before passing `-w`. If it exists, only `--resume <session_id>` is passed (no `-w`), because the worktree was already created during the first spawn. Git internally stores worktrees with a `worktree-<name>` prefix that differs from the directory name, so passing `-w` on resume causes git to report "already checked out".
+**Resume fix (2026-05-03, Updated 2026-05-09):** On resume, we spawn the background process directly from inside the worktree directory, rather than the Git root. We completely omit the `-w` flag because the worktree was already created during the first spawn. Passing `-w` would cause `claude` (and `cwrap`) to attempt `git worktree add` again, resulting in a fatal "already checked out" error. Running it directly inside the worktree ensures the session finds its existing state.
 
 ## Logging and Crash Handling
 

@@ -1,6 +1,7 @@
 //! Agent spawning and management via PTY
 
 use crate::db;
+use crate::env;
 use crate::models::{EnvType, Provider, SessionStatus};
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::collections::HashMap;
@@ -67,17 +68,6 @@ fn is_agent_already_running(session_id: &i64) -> bool {
     false
 }
 
-/// Get the agent node and determine if it's WSL.
-fn get_session_and_env(session_id: &i64) -> Result<(crate::models::AgentNode, EnvType), String> {
-    let node = db::get_agent_node_by_id(*session_id).map_err(|e| {
-        let err = format!("spawn_agent: failed to get agent node {}: {}", session_id, e);
-        tracing::error!("{}", err);
-        err
-    })?;
-    let is_wsl = node.env;
-    Ok((node, is_wsl))
-}
-
 /// Parse provider string into Provider enum.
 fn parse_provider(provider: &str) -> Provider {
     match provider {
@@ -114,12 +104,15 @@ enum SessionIdMode {
 /// Build the spawn command based on provider and environment.
 fn build_spawn_command(
     node: &crate::models::AgentNode,
-    is_wsl: EnvType,
+    resolved: &env::ResolvedPath,
     provider_enum: Provider,
     session_id_mode: &SessionIdMode,
     session_id: i64,
+    model_override: Option<&str>,
+    effort_override: Option<&str>,
 ) -> CommandBuilder {
     let is_macos = cfg!(target_os = "macos");
+    let is_wsl = resolved.env_type == EnvType::Wsl;
 
     let (binary, mut args): (&str, Vec<String>) = if is_macos {
         match provider_enum {
@@ -137,53 +130,9 @@ fn build_spawn_command(
         }
     };
 
-    // Add -w for git worktree support on cwrap providers (Anthropic, Minimax)
-    // This creates a dedicated worktree per node, preventing concurrent node conflicts.
-    // When worktree_name is set (node's hyphenated name), pass it explicitly so cwrap
-    // can find the same node data on resume.
-    //
-    // On Resume: skip -w if the worktree directory already exists. The worktree was
-    // already created during the first spawn (when SessionIdMode::Assign was used).
-    // Passing -w on resume causes cwrap to call `git worktree add` again for the same
-    // worktree, which fails with "worktree already checked out" because git internally
-    // stores the worktree with a "worktree-" prefix that's different from the directory
-    // name. The session_id is sufficient for cwrap to find and resume the existing
-    // session without needing -w.
     let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
-    if is_cwrap {
-        match session_id_mode {
-            SessionIdMode::Assign(_) => {
-                // Fresh spawn: always pass -w so cwrap creates the worktree
-                tracing::info!("spawn_agent: enabling worktree support (-w) for fresh spawn");
-                if let Some(ref wt_name) = node.worktree_name {
-                    args.push("-w".to_string());
-                    args.push(wt_name.clone());
-                    tracing::info!("spawn_agent: using explicit worktree name: {}", wt_name);
-                } else {
-                    // Backward compat: old nodes without worktree_name get -w without explicit name
-                    args.push("-w".to_string());
-                    tracing::info!("spawn_agent: no explicit worktree name, using auto-generated");
-                }
-            }
-            SessionIdMode::Resume(_) => {
-                // Resume: pass -w <worktree_name> --resume <session_id>
-                // The worktree was already created during the first spawn (Assign mode).
-                // We pass -w <name> so cwrap knows WHERE to look for the session data.
-                // Without -w, cwrap uses a different auto-generated worktree name and
-                // cannot find the existing session data, resulting in "No conversation found".
-                if let Some(ref wt_name) = node.worktree_name {
-                    args.push("-w".to_string());
-                    args.push(wt_name.clone());
-                    tracing::info!("spawn_agent: resume with worktree name: {}", wt_name);
-                } else {
-                    // Fallback for old sessions without worktree_name: just --resume
-                    tracing::warn!("spawn_agent: resume without worktree_name, session may not be found");
-                }
-            }
-            SessionIdMode::None => {}
-        }
-    }
-
+    
+    // Add --session-id or --resume for cwrap providers
     match session_id_mode {
         SessionIdMode::Assign(id) => {
             tracing::info!("spawn_agent: assigning session-id {}", id);
@@ -198,10 +147,22 @@ fn build_spawn_command(
         SessionIdMode::None => {}
     }
 
-    let mut cmd = if is_wsl == EnvType::Wsl {
+    // Add --model and --effort for cwrap providers when configured
+    if is_cwrap {
+        if let Some(model) = model_override {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+        if let Some(effort) = effort_override {
+            args.push("--effort".to_string());
+            args.push(effort.to_string());
+        }
+    }
+
+    let mut cmd = if is_wsl {
         tracing::info!("spawn_agent: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
-        c.args(["--cd", &node.path, "--", binary]);
+        c.args(["--cd", &resolved.spawn_path, "--", binary]);
         c.args(args);
         c
     } else if is_macos {
@@ -214,10 +175,14 @@ fn build_spawn_command(
         // ConPTY compatibility and console suppression. Non-cwrap providers (gemini,
         // opencode) are typically Node.js shims that resolve correctly via direct exec.
         if is_cwrap {
-            tracing::info!("spawn_agent: building Windows cmd.exe /c for cwrap provider {}", binary);
-            let mut c = CommandBuilder::new("cmd.exe");
-            c.args(["/c", binary]);
-            c.args(args);
+            tracing::info!("spawn_agent: building Windows powershell.exe for cwrap provider {}", binary);
+            // Use -NoLogo to suppress banner, -Command to run cwrap directly without cmd.exe layer.
+            // PowerShell has native ConPTY support and provides better compatibility with
+            // modern Claude Code sessions compared to cmd.exe /c wrapping.
+            let mut c = CommandBuilder::new("powershell.exe");
+            // Build the command line as a single string: "cwrap --minimax -w foo --session-id bar"
+            let combined = format!("{} {}", binary, args.join(" "));
+            c.args(["-NoLogo", "-Command", &combined]);
             c
         } else {
             tracing::info!("spawn_agent: building Windows direct command for {}", binary);
@@ -227,9 +192,18 @@ fn build_spawn_command(
         }
     };
 
-    cmd.cwd(&node.path);
+    cmd.cwd(&resolved.spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
     cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT.to_string());
+
+    // Ensure clean worktree isolation by removing any inherited Git environment variables
+    // that might point to the main repository or other worktrees.
+    cmd.env_remove("GIT_DIR");
+    cmd.env_remove("GIT_WORK_TREE");
+    cmd.env_remove("GIT_INDEX_FILE");
+    cmd.env_remove("GIT_OBJECT_DIRECTORY");
+    cmd.env_remove("GIT_COMMON_DIR");
+
     cmd
 }
 
@@ -401,11 +375,16 @@ async fn spawn_agent_inner(
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
     kill_agent(session_id).await.ok();
 
-    // 3. Get node info
-    let (node, is_wsl) = get_session_and_env(&session_id)?;
+    // 3. Get node and resolve paths for the environment
+    let node = db::get_agent_node_by_id(session_id).map_err(|e| {
+        let err = format!("spawn_agent: failed to get agent node {}: {}", session_id, e);
+        tracing::error!("{}", err);
+        err
+    })?;
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
 
     let provider_enum = parse_provider(&provider);
+    let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
 
     // 4. Determine session ID mode for cwrap-wrapped providers (Anthropic, Minimax)
     // Both use cwrap which forwards --session-id and --resume to the underlying CLI
@@ -424,15 +403,50 @@ async fn spawn_agent_inner(
         SessionIdMode::None
     };
 
+    // Determine the target CWD for spawning.
+    // We now always run agents directly in their worktree directory for maximum isolation.
+    // This ensures the backend always handles creation and sanitization before the agent starts.
+    let spawn_worktree_name = node.worktree_name.as_deref();
+
+    // Resolve paths: includes worktree subdirectory (if applicable) + environment-aware spawn path
+    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
+    tracing::info!(
+        "spawn_agent_inner: resolved spawn_path={}, host_path={}, env={:?}",
+        resolved.spawn_path, resolved.host_path, resolved.env_type
+    );
+
+    // If a worktree name is set, we ensure the worktree exists and is sanitized before spawning.
+    if let Some(wt_name) = spawn_worktree_name {
+        let host_path = std::path::Path::new(&resolved.host_path);
+        if !host_path.exists() {
+            tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
+            if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name) {
+                let msg = format!("Failed to create git worktree: {}", e);
+                tracing::error!("spawn_agent_inner: {}", msg);
+                return Err(msg);
+            }
+        }
+
+        // Sanitize .git file to ensure proper worktree isolation across environments.
+        // This is crucial for the "first run" success where the worktree was just created.
+        if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+            tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
+        }
+    }
+
     // 5. Open PTY
     tracing::debug!("spawn_agent_inner: opening PTY system");
     let pair = open_pty_pair(rows, cols)?;
 
-    // 6. Build command
-    let cmd = build_spawn_command(&node, is_wsl, provider_enum, &session_id_mode, session_id);
+    // 6. Read mesh config for model/effort overrides
+    let mesh = db::get_mesh_by_id(node.mesh_id).map_err(|e| e.to_string())?;
+    let config = crate::commands::build_run::parse_mesh_config_for_spawn(&std::path::PathBuf::from(&mesh.path));
+    let model_override = config.as_ref().and_then(|c| c.model.as_deref());
+    let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
 
-    // 7. Spawn
-    tracing::info!("spawn_agent_inner: spawning process in {}", node.path);
+    // 7. Build command
+    let cmd = build_spawn_command(&node, &resolved, provider_enum, &session_id_mode, session_id, model_override, effort_override);
+
     let child = spawn_child(&pair, cmd).map_err(|e| {
         let err_msg = e.clone();
         let _ = app.emit(

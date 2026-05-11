@@ -208,18 +208,21 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId: nodeId, data }).catch(console.error);
       });
 
-      // Use custom key handler to capture Ctrl+V paste. Without ev.preventDefault(),
-      // the browser synthesizes a separate paste event that causes duplicates.
+      let pasteBlocked = false;
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-        if (ev.type === 'keydown' && ev.ctrlKey && ev.key === 'v') {
-          ev.preventDefault();
-          navigator.clipboard.readText().then(text => {
-            if (text) {
-              term.paste(text);
-            }
-          }).catch(err => {
-            console.warn('[TerminalManager] Clipboard read failed:', err);
-          });
+        if (ev.type === 'keydown' && ev.key === 'v' && (ev.ctrlKey || ev.metaKey)) {
+          if (!pasteBlocked) {
+            pasteBlocked = true;
+            // Debounce: ConPTY on Windows synthesizes paste ~50-100ms after Ctrl+V.
+            // 500ms window catches both. .finally() clears the flag when the operation
+            // completes (not just after 500ms), so slow clipboard reads don't over-block.
+            setTimeout(() => { pasteBlocked = false; }, 500);
+            navigator.clipboard.readText().then(text => {
+              if (text) invoke('write_to_agent', { sessionId: nodeId, data: text }).catch(console.error);
+            }).catch(err => {
+              console.warn('[TerminalManager] Clipboard read failed:', err);
+            }).finally(() => { pasteBlocked = false; });
+          }
           return false;
         }
         return true;
@@ -320,7 +323,6 @@ window.__terminalManager = terminalManager;
 
 export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const instRef = useRef<TerminalInstance | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
@@ -397,7 +399,6 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
 
     terminalManager.attach(sessionId, container).then(async (inst) => {
       if (cancelled.current || !inst) return;
-      instRef.current = inst;
 
       if (sessionId === activeNodeId) {
         inst.term.focus();
@@ -423,16 +424,8 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   return (
     <div
       ref={containerRef}
-      className="h-full w-full relative outline-none"
+      className="h-full w-full relative"
       style={{ padding: '4px' }}
-      tabIndex={0}
-      onFocus={() => instRef.current?.term.focus()}
-      onKeyDown={(e) => {
-        if (e.key === 'Tab' && !e.shiftKey && !e.altKey && !e.metaKey) {
-          e.preventDefault();
-          instRef.current?.term.focus();
-        }
-      }}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}

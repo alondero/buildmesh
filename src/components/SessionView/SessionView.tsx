@@ -4,7 +4,6 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
-import { SlashCommandBar } from '../SlashCommands/SlashCommandBar';
 import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
 import { watchSession, unwatchSession } from '../../lib/tauri';
 import { terminalManager } from '../Terminal/Terminal';
@@ -20,7 +19,6 @@ export function SessionView() {
     agentNodes,
     getActiveNode,
     setActiveNode,
-    sendToAgent,
   } = useAgentNodeStore();
 
   const activeNode = getActiveNode();
@@ -97,7 +95,6 @@ export function SessionView() {
       <div className="flex-1 flex overflow-hidden">
         <GridLayout
           nodes={filteredNodes}
-          onSlashCommand={(nodeId, cmd) => sendToAgent(nodeId, cmd)}
           changedFilesNodeId={changedFilesNodeId}
           onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
           buildRunOpen={openBuildRun}
@@ -122,9 +119,8 @@ export function SessionView() {
   );
 }
 
-function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, buildRunOpen, setBuildRunOpen }: {
+function GridLayout({ nodes, changedFilesNodeId, onBuildRun, buildRunOpen, setBuildRunOpen }: {
   nodes: AgentNode[];
-  onSlashCommand: (nodeId: number, cmd: string) => void;
   changedFilesNodeId: number | null;
   onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
   buildRunOpen: { nodeId: number; mode: 'build' | 'run' } | null;
@@ -152,9 +148,6 @@ function GridLayout({ nodes, onSlashCommand, changedFilesNodeId, onBuildRun, bui
                   onClose={() => setBuildRunOpen(null)}
                 />
               )}
-            </div>
-            <div className="opacity-40 group-hover:opacity-100 transition-opacity">
-              <SlashCommandBar onCommand={(cmd) => onSlashCommand(node.id, cmd)} />
             </div>
           </div>
         );
