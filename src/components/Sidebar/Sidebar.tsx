@@ -1,13 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import { isMac } from '../../lib/platform';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
-import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   DndContext,
   type DragEndEvent,
@@ -31,9 +31,45 @@ const PROVIDERS = isMac
   : ALL_PROVIDERS;
 
 export function Sidebar() {
+  const [sidebarWidth, setSidebarWidth] = useState(256);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(256);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    startXRef.current = e.clientX;
+    startWidthRef.current = sidebarWidth;
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const delta = e.clientX - startXRef.current;
+      const newWidth = Math.max(192, Math.min(480, startWidthRef.current + delta));
+      setSidebarWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = false;
+        setIsResizing(false);
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [sidebarWidth]);
+
   const meshes = useMeshStore(state => state.meshes);
   const addMesh = useMeshStore(state => state.addMesh);
-  const deleteMesh = useMeshStore(state => state.deleteMesh);
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   const selectMesh = useMeshStore(state => state.selectMesh);
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
@@ -45,7 +81,7 @@ export function Sidebar() {
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessMeshId, setRemoteAccessMeshId] = useState<boolean>(false);
-  const [meshToDelete, setMeshToDelete] = useState<Mesh | null>(null);
+  const openPropertiesPanel = useUIStore((s) => s.openPropertiesPanel);
 
   const handleSelectMesh = (meshId: number) => {
     if (selectedMeshId === meshId) {
@@ -92,25 +128,6 @@ export function Sidebar() {
     await deleteAgentNode(nodeId);
   };
 
-  const handleDeleteMesh = (e: React.MouseEvent, mesh: Mesh) => {
-    e.stopPropagation();
-    setMeshToDelete(mesh);
-  };
-
-  const confirmDeleteMesh = async () => {
-    if (!meshToDelete) return;
-    const meshId = meshToDelete.id;
-    const meshNodes = agentNodes.filter(n => n.mesh_id === meshId);
-    for (const node of meshNodes) {
-      await deleteAgentNode(node.id);
-    }
-    if (selectedMeshId === meshId) {
-      selectMesh(null);
-    }
-    await deleteMesh(meshId);
-    setMeshToDelete(null);
-  };
-
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -121,38 +138,34 @@ export function Sidebar() {
   };
 
   return (
-    <div className="w-64 bg-bg-surface border-r border-border-subtle flex flex-col h-full">
-      {/* Header */}
-      <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
-        <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
-        {/* Remote access button — always visible */}
-        <button
-          onClick={() => setRemoteAccessMeshId(true)}
-          className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
-          title="Remote access"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
-            <line x1="12" y1="18" x2="12" y2="18"/>
-          </svg>
-        </button>
-      </div>
+    <div className="relative flex h-full" style={{ width: sidebarWidth }}>
+      {/* Resize handle */}
+      <div
+        onMouseDown={handleMouseDown}
+        className={`absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-accent-cyan/30 ${isResizing ? 'bg-accent-cyan/50' : 'bg-transparent'} transition-colors z-10`}
+      />
+
+      <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
+        {/* Header */}
+        <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
+          <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
+          {/* Remote access button — always visible */}
+          <button
+            onClick={() => setRemoteAccessMeshId(true)}
+            className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
+            title="Remote access"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+              <line x1="12" y1="18" x2="12" y2="18"/>
+            </svg>
+          </button>
+        </div>
 
       {/* Remote Access Modal */}
       {remoteAccessMeshId && (
         <RemoteAccessModal
           onClose={() => setRemoteAccessMeshId(false)}
-        />
-      )}
-
-      {/* Delete Mesh Confirmation */}
-      {meshToDelete && (
-        <ConfirmDialog
-          title="Delete mesh"
-          message={`Are you sure you want to delete "${meshToDelete.name}"?${agentNodes.filter(n => n.mesh_id === meshToDelete.id).length > 0 ? ' This will also remove all agent nodes within it.' : ''} This action cannot be undone.`}
-          confirmLabel="Delete"
-          onConfirm={confirmDeleteMesh}
-          onCancel={() => setMeshToDelete(null)}
         />
       )}
 
@@ -188,7 +201,7 @@ export function Sidebar() {
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleNewNode}
                       onSelectProvider={handleSelectProvider}
-                      onDeleteMesh={handleDeleteMesh}
+                      onOpenProperties={openPropertiesPanel}
                       meshNodes={meshNodes}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}
@@ -206,6 +219,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="p-2 border-t border-border-subtle text-xs text-text-muted">
         <span>{agentNodes.filter(w => w.status === 'running').length} active</span>
+      </div>
       </div>
     </div>
   );
@@ -248,7 +262,7 @@ interface SortableMeshProps {
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string) => void;
-  onDeleteMesh: (e: React.MouseEvent, mesh: Mesh) => void;
+  onOpenProperties: (meshId: number) => void;
   meshNodes: AgentNode[];
   activeNodeId: number | null;
   setActiveNode: (id: number) => void;
@@ -263,7 +277,7 @@ function SortableMesh({
   onSelectMesh,
   onNewNode,
   onSelectProvider,
-  onDeleteMesh,
+  onOpenProperties,
   meshNodes,
   activeNodeId,
   setActiveNode,
@@ -329,11 +343,14 @@ function SortableMesh({
         >
           <span className="flex-1 truncate">{mesh.name}</span>
           <button
-            onClick={(e) => onDeleteMesh(e, mesh)}
-            className="opacity-0 group-hover/mesh:opacity-100 text-text-muted hover:text-status-error text-xs px-1 transition-all"
-            title="Delete mesh"
+            onClick={(e) => { e.stopPropagation(); onOpenProperties(mesh.id); }}
+            className="opacity-0 group-hover/mesh:opacity-100 text-text-muted hover:text-accent-cyan text-xs px-1 transition-all"
+            title="Mesh properties"
           >
-            ×
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
           </button>
         </div>
       </div>

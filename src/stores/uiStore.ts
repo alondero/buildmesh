@@ -6,6 +6,10 @@ interface UIState {
   toggleChangedFiles: (nodeId: number) => void;
   setChangedFilesNodeId: (nodeId: number) => void;
   closeChangedFiles: () => void;
+
+  propertiesPanelMeshId: number | null;
+  openPropertiesPanel: (meshId: number) => void;
+  closePropertiesPanel: () => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -29,5 +33,15 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   closeChangedFiles: () => {
     set({ changedFilesOpen: false, changedFilesNodeId: null });
+  },
+
+  propertiesPanelMeshId: null,
+
+  openPropertiesPanel: (meshId: number) => {
+    set({ propertiesPanelMeshId: meshId });
+  },
+
+  closePropertiesPanel: () => {
+    set({ propertiesPanelMeshId: null });
   },
 }));

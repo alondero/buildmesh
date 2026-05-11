@@ -17,6 +17,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             // Initialize database
             let app_dir = app.path().app_data_dir().unwrap();
@@ -142,6 +143,12 @@ pub fn run() {
             commands::build_run::get_mesh_config,
             commands::build_run::close_build_run,
             commands::build_run::ensure_mesh_config,
+            // Mesh config
+            commands::mesh_config::get_mesh_properties,
+            commands::mesh_config::update_mesh_name,
+            commands::mesh_config::update_mesh_field,
+            commands::mesh_config::update_worktree_base_ref,
+            commands::mesh_config::remove_worktree_base_ref,
             commands::checkpoint::list_checkpoints,
             commands::checkpoint::revert_to_checkpoint,
             commands::checkpoint::diff_checkpoints,
@@ -173,6 +180,8 @@ pub fn run() {
             commands::pr::create_pr,
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
+            // Remote
+            commands::remote::submit_terminal_snapshot,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

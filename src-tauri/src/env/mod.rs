@@ -186,7 +186,6 @@ pub fn env_for_path(path: &PathBuf) -> Environment {
     if path_str.starts_with("/mnt/")
         || path_str.starts_with("/home/")
         || path_str.starts_with("\\\\wsl$")
-        || path_str.starts_with("/")
     {
         Environment::Wsl
     } else {
@@ -195,16 +194,27 @@ pub fn env_for_path(path: &PathBuf) -> Environment {
 }
 
 /// Convert a path from session internal form to host-readable form
-/// (e.g., /home/user -> \\wsl$\Ubuntu\home\user)
+/// (e.g., /home/user -> \\wsl$\Ubuntu\home\user, /mnt/c/Users -> C:\Users, /c/Users -> C:\Users)
 pub fn to_host_path(path: &str) -> String {
-    if path.starts_with('/') && !path.starts_with("/mnt/") {
-        // Use cached default distro
-        let distro = get_default_wsl_distro().unwrap_or_else(|| "Ubuntu".to_string());
-        format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
-    } else if path.starts_with("/mnt/") {
-        // /mnt/c/Users -> C:\Users
-        let drive = path.chars().nth(5).unwrap_or('c').to_uppercase().next().unwrap();
-        format!("{}:{}", drive, path[6..].replace('/', "\\"))
+    if path.starts_with('/') {
+        if path.starts_with("/mnt/") {
+            // /mnt/c/Users -> C:\Users
+            let drive = path.chars().nth(5).unwrap_or('c').to_uppercase().next().unwrap();
+            format!("{}:{}", drive, path[6..].replace('/', "\\"))
+        } else if path.starts_with("/home/") {
+            // /home/user -> \\wsl$\Ubuntu\home\user
+            let distro = get_default_wsl_distro().unwrap_or_else(|| "Ubuntu".to_string());
+            format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
+        } else if path.len() >= 2 && path.chars().nth(1).unwrap().is_alphabetic() && (path.len() == 2 || path.chars().nth(2) == Some('/')) {
+            // Handle Git Bash style /c/Users/ or /c
+            let drive = path.chars().nth(1).unwrap().to_uppercase().next().unwrap();
+            let rest = if path.len() > 2 { &path[2..] } else { "" };
+            format!("{}:{}", drive, rest.replace('/', "\\"))
+        } else {
+            // Other Unix-style absolute path on Windows (e.g. /Users/...)
+            // Return as-is, caller will handle if needed.
+            path.to_string()
+        }
     } else {
         path.to_string()
     }
@@ -266,6 +276,135 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
         spawn_path,
         env_type,
     }
+}
+
+/// Sanitize the .git file in a worktree to ensure it uses the correct path format
+/// for the target environment (Windows vs WSL).
+pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Result<(), String> {
+    let git_file_path = std::path::Path::new(worktree_host_path).join(".git");
+    
+    if !git_file_path.is_file() {
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&git_file_path)
+        .map_err(|e| format!("Failed to read .git file: {}", e))?;
+
+    if !content.starts_with("gitdir: ") {
+        return Ok(());
+    }
+
+    let git_dir_path = content.trim_start_matches("gitdir: ").trim();
+    if git_dir_path.is_empty() {
+        return Err("invalid .git file: empty gitdir path".to_string());
+    }
+
+    // Convert the path to the target environment's format
+    let new_path = match env_type {
+        EnvType::Wsl => {
+            // Ensure it's a WSL-friendly path
+            if git_dir_path.contains(':') || git_dir_path.starts_with("\\\\") {
+                // Convert Windows path to WSL (/mnt/c/...)
+                let path_str = git_dir_path.replace('\\', "/");
+                if let Some(pos) = path_str.find(':') {
+                    let drive = path_str[..pos].to_lowercase();
+                    format!("/mnt/{}{}", drive, &path_str[pos + 1..])
+                } else {
+                    path_str
+                }
+            } else {
+                git_dir_path.to_string()
+            }
+        }
+        EnvType::Windows => {
+            // Target is Windows. Use to_host_path which now handles /mnt/, /home/, and /c/ styles.
+            to_host_path(git_dir_path)
+        }
+    };
+
+    if new_path != git_dir_path {
+        tracing::info!("Sanitizing .git file: {} -> {}", git_dir_path, new_path);
+        // Ensure we use Unix line endings for the .git file as Git expects
+        std::fs::write(&git_file_path, format!("gitdir: {}\n", new_path))
+            .map_err(|e| format!("Failed to write sanitized .git file: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Create a new Git worktree at the specified path and honor .worktreeinclude.
+pub fn create_git_worktree(project_root: &str, worktree_host_path: &str, branch_name: &str) -> Result<(), String> {
+    let host_path = std::path::Path::new(worktree_host_path);
+
+    if host_path.exists() {
+        return Ok(()); 
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = host_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create worktrees directory: {}", e))?;
+    }
+
+    tracing::info!("Creating git worktree: {} at {}", branch_name, worktree_host_path);
+
+    // Use git worktree add --detach <path>
+    let output = Command::new("git")
+        .args(["-C", project_root, "worktree", "add", "--detach", worktree_host_path])
+        .output()
+        .map_err(|e| format!("Failed to execute git worktree add: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("already checked out") || stderr.contains("already exists") {
+            tracing::warn!("Worktree already exists in git metadata, attempting to repair...");
+            let _ = Command::new("git").args(["-C", project_root, "worktree", "prune"]).output();
+            let retry = Command::new("git")
+                .args(["-C", project_root, "worktree", "add", "--detach", worktree_host_path])
+                .output()
+                .map_err(|e| format!("Retry failed to execute git worktree add: {}", e))?;
+            
+            if !retry.status.success() {
+                return Err(format!("Git worktree add failed after retry: {}", String::from_utf8_lossy(&retry.stderr)));
+            }
+        } else {
+            return Err(format!("Git worktree add failed: {}", stderr));
+        }
+    }
+
+    // Honor .worktreeinclude if it exists in the project root
+    let include_file_path = std::path::Path::new(project_root).join(".worktreeinclude");
+    if include_file_path.exists() {
+        tracing::info!("Found .worktreeinclude, copying included files...");
+        if let Ok(content) = std::fs::read_to_string(&include_file_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+
+                let src = std::path::Path::new(project_root).join(trimmed);
+                let dest = host_path.join(trimmed);
+
+                if src.exists() {
+                    if let Some(parent) = dest.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+
+                    if src.is_file() {
+                        if let Err(e) = std::fs::copy(&src, &dest) {
+                            tracing::warn!("Failed to copy included file {} -> {}: {}", src.display(), dest.display(), e);
+                        } else {
+                            tracing::info!("Copied included file: {}", trimmed);
+                        }
+                    } else if src.is_dir() {
+                        tracing::warn!(".worktreeinclude: directory copying not yet implemented: {}", trimmed);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Get the .claude directory for session storage in the correct environment

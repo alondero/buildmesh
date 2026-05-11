@@ -18,14 +18,19 @@ function installListener() {
   listenerInstalled = true;
 
   listen(GIT_CHANGED, (event) => {
-    const { path } = event.payload as { path: string };
+    const { path, internal_path } = event.payload as { path: string; internal_path?: string };
+    // Invalidate both the host path (UNC) and internal path (Linux) for this watched directory
     cache.delete(path);
+    if (internal_path) cache.delete(internal_path);
     pendingFetches.delete(path);
-    // Notify all subscribers watching this path
-    const subs = subscribers.get(path);
-    if (subs) {
-      subs.forEach(cb => cb());
-    }
+    if (internal_path) pendingFetches.delete(internal_path);
+    // Notify all subscribers watching either path
+    [path, internal_path].filter(Boolean).forEach(p => {
+      const subs = subscribers.get(p!);
+      if (subs) {
+        subs.forEach(cb => cb());
+      }
+    });
   });
 }
 

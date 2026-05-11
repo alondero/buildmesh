@@ -70,9 +70,14 @@ static RENAMED_SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashSet<i64>>>> =
 static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-z][a-z0-9-]{2,50}$").unwrap());
 
+static ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B012]").unwrap()
+    });
+
 const MAX_BUFFER_CHARS: usize = 4000;
 const SUMMARIZE_BUFFER_CHARS: usize = 3000;
-const RENAME_AT_TURN: u32 = 2;
+const RENAME_AT_TURN: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // Public lifecycle API
@@ -186,6 +191,14 @@ pub fn is_default_name(name: &str) -> bool {
         && NOUNS.contains(&parts[2])
 }
 
+/// Clear buffers and turn counter for a node, preserving the renamed guard.
+/// Call this when a node is killed/restarted so stale output doesn't bleed
+/// into the next run, but already-renamed nodes stay guarded.
+pub fn reset_buffers(node_id: i64) {
+    SESSION_BUFFERS.lock().unwrap().remove(&node_id);
+    TURN_COUNTERS.lock().unwrap().remove(&node_id);
+}
+
 /// Clear all naming state for a node (buffers, counters, renamed guard).
 /// Call this when a node is deleted or archived.
 pub fn cleanup(node_id: i64) {
@@ -215,10 +228,12 @@ pub fn turn_counter_count() -> usize {
 // Internal: LLM-based summarization
 // ---------------------------------------------------------------------------
 
-async fn summarize_and_rename(node_id: i64, _buffer: &str) -> Result<String, String> {
-    let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.".to_string();
+async fn summarize_and_rename(node_id: i64, buffer: &str) -> Result<String, String> {
+    let clean_buffer = ANSI_ESCAPE.replace_all(buffer, "").to_string();
 
-    tracing::info!("session_naming: running summarize command for node {}", node_id);
+    let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.";
+
+    tracing::info!("session_naming: running summarize command for node {} ({} chars)", node_id, clean_buffer.len());
 
     let mut cmd = {
         #[cfg(target_os = "windows")]
@@ -237,11 +252,28 @@ async fn summarize_and_rename(node_id: i64, _buffer: &str) -> Result<String, Str
         }
     };
 
-    let output = cmd
-        .stdin(std::process::Stdio::null())
-        .output()
-        .await
-        .map_err(|e| format!("failed to run CLI: {}", e))?;
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn CLI: {}", e))?;
+
+    let output = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(clean_buffer.as_bytes())
+                .await
+                .map_err(|e| format!("failed to write buffer to CLI: {}", e))?;
+        }
+        child
+            .wait_with_output()
+            .await
+            .map_err(|e| format!("failed to run CLI: {}", e))
+    })
+    .await
+    .map_err(|_| "CLI timed out after 15s".to_string())??;
 
     if !output.status.success() {
         return Err(format!(

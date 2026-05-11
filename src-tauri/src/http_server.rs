@@ -3,17 +3,19 @@
 //! Serves the mobile web app and handles WebSocket terminal connections
 //! for remote access from a phone on the same network.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::{accept_async, tungstenite};
 
+use tauri::Emitter;
 use crate::db;
 
 // --- App Handle for emitting Tauri events from HTTP handlers ---
@@ -28,11 +30,10 @@ const MOBILE_APP_HTML: &str = include_str!("mobile_app.html");
 
 // --- Server State ---
 
-type PtySenders = HashMap<i64, broadcast::Sender<Vec<u8>>>;
-
 struct HttpServerState {
+    app: tauri::AppHandle,
     _broadcast_tx: broadcast::Sender<Vec<u8>>,
-    pty_outputs: Arc<RwLock<PtySenders>>,
+    pty_outputs: Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>>,
 }
 
 static SERVER_STATE: OnceLock<Arc<HttpServerState>> = OnceLock::new();
@@ -41,12 +42,58 @@ fn get_server_state() -> Arc<HttpServerState> {
     SERVER_STATE.get().cloned().expect("HTTP server not started")
 }
 
+// --- Snapshot Request/Response ---
+
+static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+type SnapshotSenders = HashMap<String, oneshot::Sender<String>>;
+static SNAPSHOT_REQUESTS: OnceLock<Arc<RwLock<SnapshotSenders>>> = OnceLock::new();
+
+fn get_snapshot_requests() -> &'static Arc<RwLock<SnapshotSenders>> {
+    SNAPSHOT_REQUESTS.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+}
+
+/// Called by the Tauri command when the frontend responds with a serialized terminal snapshot.
+pub fn fulfill_snapshot(request_id: &str, data: String) {
+    let mut requests = get_snapshot_requests().write();
+    if let Some(tx) = requests.remove(request_id) {
+        if tx.send(data).is_err() {
+            tracing::warn!("fulfill_snapshot: receiver already dropped for {}", request_id);
+        }
+    }
+}
+
+async fn request_terminal_snapshot(app: &tauri::AppHandle, node_id: i64) -> Option<String> {
+    let seq = SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let request_id = format!("snap-{}-{}", node_id, seq);
+
+    let (tx, rx) = oneshot::channel();
+    {
+        let mut requests = get_snapshot_requests().write();
+        requests.insert(request_id.clone(), tx);
+    }
+
+    let _ = app.emit("serialize-terminal-request", serde_json::json!({
+        "node_id": node_id,
+        "request_id": request_id,
+    }));
+
+    match tokio::time::timeout(std::time::Duration::from_millis(500), rx).await {
+        Ok(Ok(data)) => Some(data),
+        _ => {
+            let mut requests = get_snapshot_requests().write();
+            requests.remove(&request_id);
+            None
+        }
+    }
+}
+
 /// Start the HTTP server on the given port.
-/// Spawns a background task using Tauri-managed async runtime.
 pub fn start_http_server(port: u16, app: tauri::AppHandle) {
-    let _ = APP_HANDLE.set(app);
+    let _ = APP_HANDLE.set(app.clone());
     let (broadcast_tx, _) = broadcast::channel(1024);
     let state = Arc::new(HttpServerState {
+        app,
         _broadcast_tx: broadcast_tx,
         pty_outputs: Arc::new(RwLock::new(HashMap::new())),
     });
@@ -68,8 +115,7 @@ pub fn start_http_server(port: u16, app: tauri::AppHandle) {
             match listener.accept().await {
                 Ok((stream, addr)) => {
                     tracing::debug!("HTTP connection from {}", addr);
-                    let state = get_server_state();
-                    tauri::async_runtime::spawn(handle_connection(stream, addr, state));
+                    tauri::async_runtime::spawn(handle_connection(stream, addr));
                 }
                 Err(e) => {
                     tracing::error!("HTTP accept error: {}", e);
@@ -79,8 +125,7 @@ pub fn start_http_server(port: u16, app: tauri::AppHandle) {
     });
 }
 
-async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<HttpServerState>) {
-    // Read the first line of the HTTP request to check method and path
+async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
     let mut lines = tokio::io::BufStream::new(stream);
     let mut request_line = String::new();
     if lines.read_line(&mut request_line).await.is_err() {
@@ -95,7 +140,6 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<Htt
 
     let token = extract_token_from_path(parts[1]);
 
-    // Read and discard remaining headers
     let mut headers = String::new();
     while headers.lines().count() == 0 || !headers.ends_with("\r\n\r\n") {
         if lines.read_line(&mut headers).await.is_err() { break; }
@@ -107,7 +151,6 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<Htt
         let ws_token = token.clone();
         let path = parts[1];
 
-        // Extract nodeId from path like /ws/terminal/306?token=xxx
         let node_id: Option<i64> = path.split('/').nth(3)
             .map(|s| s.split('?').next().unwrap_or(s).parse().ok())
             .flatten();
@@ -127,7 +170,6 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<Htt
             return;
         }
 
-        // Perform WebSocket upgrade
         let stream = lines.into_inner();
         match accept_async(stream).await {
             Ok(ws_stream) => {
@@ -209,7 +251,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<Htt
         return;
     }
 
-    // Serve HTML — require token
+    // Serve HTML
     if !validate_token(token) {
         let error = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
         let mut stream = lines.into_inner();
@@ -226,17 +268,24 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr, _state: Arc<Htt
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
-/// Handle an established WebSocket connection for a terminal session.
 async fn handle_ws_connection(
     ws_stream: tokio_tungstenite::WebSocketStream<TcpStream>,
     node_id: i64,
 ) {
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe to the PTY output broadcast channel for this node
+    // Subscribe to live broadcast before taking snapshot to avoid gaps
     let mut rx = subscribe_pty(node_id);
 
-    // Spawn a task to forward PTY broadcasts to the WebSocket client
+    // Replay scrollback buffer so mobile sees existing terminal content
+    let snapshot = get_scrollback_snapshot(node_id);
+    if !snapshot.is_empty() {
+        if write.send(tungstenite::Message::Binary(snapshot.into())).await.is_err() {
+            return;
+        }
+    }
+
+
     let write_task = tauri::async_runtime::spawn(async move {
         while let Ok(data) = rx.recv().await {
             if write.send(tungstenite::Message::Binary(data.into())).await.is_err() {
@@ -245,28 +294,17 @@ async fn handle_ws_connection(
         }
     });
 
-    // Forward commands from WebSocket to PTY stdin via broadcast
-    // We use a second broadcast channel for client -> PTY direction
-    // For now, we just discard received messages (PTY input comes from desktop)
-    // The mobile app sends keystrokes which would need to go to the PTY writer
     while let Some(msg) = read.next().await {
         match msg {
             Ok(tungstenite::Message::Text(text)) => {
-                // Keystroke from mobile — broadcast to PTY stdin handler
-                // For now, log it; full implementation needs PTY writer access
-                tracing::debug!("WS received text from mobile: {:?}", &text[..text.len().min(32)]);
+                forward_mobile_input(node_id, &text);
             }
             Ok(tungstenite::Message::Binary(data)) => {
-                tracing::debug!("WS received binary {} bytes from mobile", data.len());
+                let text = String::from_utf8_lossy(&data);
+                forward_mobile_input(node_id, &text);
             }
-            Ok(tungstenite::Message::Close(_)) => {
-                tracing::debug!("WS client disconnected");
-                break;
-            }
-            Err(e) => {
-                tracing::error!("WS read error: {}", e);
-                break;
-            }
+            Ok(tungstenite::Message::Close(_)) => break,
+            Err(_) => break,
             _ => {}
         }
     }
@@ -275,9 +313,21 @@ async fn handle_ws_connection(
     tracing::debug!("WS connection closed for node {}", node_id);
 }
 
+fn forward_mobile_input(node_id: i64, text: &str) {
+    if let Err(e) = crate::commands::agent::write_to_pty(node_id, text.as_bytes()) {
+        tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
+        return;
+    }
+    if text.bytes().any(|b| b == b'\n' || b == b'\r') {
+        let _ = db::update_agent_node_status(node_id, crate::models::SessionStatus::Running);
+        if let Some(app) = APP_HANDLE.get() {
+            let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": node_id }));
+        }
+    }
+}
+
 // --- Token Validation ---
 
-/// Extract token from a URL path like /?token=abc123.
 fn extract_token_from_path(path: &str) -> Option<String> {
     path.split('?')
         .nth(1)
@@ -296,38 +346,8 @@ fn validate_token(token: Option<String>) -> bool {
     }
 }
 
-// --- Broadcast Relay for PTY ---
+// --- PTY Broadcast ---
 
-/// Register a PTY output channel for a node.
-/// Returns a broadcast receiver that will receive all PTY output.
-#[allow(dead_code)]
-pub fn register_pty_channel(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
-    let state = get_server_state();
-    let mut outputs = state.pty_outputs.write();
-    let sender = outputs.entry(node_id).or_insert_with(|| {
-        let (tx, _) = broadcast::channel(1024);
-        tx
-    }).clone();
-    sender.subscribe()
-}
-
-/// Broadcast PTY output to all connected mobile clients for a node.
-#[allow(dead_code)]
-pub fn broadcast_pty_output(node_id: i64, data: &[u8]) {
-    let state = match SERVER_STATE.get() {
-        Some(s) => s,
-        None => return,
-    };
-    let sender = {
-        let outputs = state.pty_outputs.read();
-        outputs.get(&node_id).cloned()
-    };
-    if let Some(sender) = sender {
-        let _ = sender.send(data.to_vec());
-    }
-}
-
-// Keep broadcast channel alive for all known nodes
 static KNOWN_NODES: OnceLock<Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>>> = OnceLock::new();
 
 fn get_known_nodes() -> &'static Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>> {
@@ -336,7 +356,6 @@ fn get_known_nodes() -> &'static Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u
     })
 }
 
-/// Register a node's PTY broadcast channel so mobile can subscribe before data arrives.
 pub fn ensure_pty_channel(node_id: i64) {
     let nodes = get_known_nodes();
     let mut locked = nodes.write();
@@ -346,7 +365,6 @@ pub fn ensure_pty_channel(node_id: i64) {
     }
 }
 
-/// Subscribe to PTY output for a node. Creates the channel if it doesn't exist.
 pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
     let nodes = get_known_nodes();
     let mut locked = nodes.write();
@@ -357,8 +375,19 @@ pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
     sender.subscribe()
 }
 
-/// Send data to all subscribers of a node's PTY output.
 pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
+    // Buffer for scrollback replay before sending (avoids clone)
+    {
+        let buffers = get_scrollback();
+        let mut locked = buffers.write();
+        let buf = locked.entry(node_id).or_insert_with(|| VecDeque::with_capacity(PTY_SCROLLBACK_MAX));
+        buf.extend(&data);
+        if buf.len() > PTY_SCROLLBACK_MAX {
+            let excess = buf.len() - PTY_SCROLLBACK_MAX;
+            buf.drain(..excess);
+        }
+    }
+
     let nodes = get_known_nodes();
     let sender = {
         let locked = nodes.read();
@@ -367,6 +396,38 @@ pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
     if let Some(sender) = sender {
         let _ = sender.send(data);
     }
+}
+
+// --- Scrollback Buffer for Mobile Replay ---
+
+const PTY_SCROLLBACK_MAX: usize = 128 * 1024;
+
+static SCROLLBACK: OnceLock<Arc<RwLock<HashMap<i64, VecDeque<u8>>>>> = OnceLock::new();
+
+fn get_scrollback() -> &'static Arc<RwLock<HashMap<i64, VecDeque<u8>>>> {
+    SCROLLBACK.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+}
+
+fn get_scrollback_snapshot(node_id: i64) -> Vec<u8> {
+    let buffers = get_scrollback();
+    let locked = buffers.read();
+    match locked.get(&node_id) {
+        Some(buf) => {
+            let (a, b) = buf.as_slices();
+            let mut v = Vec::with_capacity(buf.len());
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            v
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Clear the scrollback buffer for a node. Called on agent kill.
+pub fn clear_scrollback(node_id: i64) {
+    let buffers = get_scrollback();
+    let mut locked = buffers.write();
+    locked.remove(&node_id);
 }
 
 #[cfg(test)]
@@ -449,5 +510,44 @@ mod tests {
     #[test]
     fn send_pty_output_no_panic_for_unknown_node() {
         send_pty_output(1111, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn scrollback_captures_output() {
+        ensure_pty_channel(5555);
+        let _rx = subscribe_pty(5555);
+        send_pty_output(5555, vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]);
+        send_pty_output(5555, vec![0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64]);
+        let snapshot = get_scrollback_snapshot(5555);
+        assert_eq!(snapshot, b"Hello World");
+    }
+
+    #[test]
+    fn scrollback_respects_max_size() {
+        ensure_pty_channel(4444);
+        let _rx = subscribe_pty(4444);
+        let chunk = vec![0x41; PTY_SCROLLBACK_MAX];
+        send_pty_output(4444, chunk);
+        send_pty_output(4444, vec![0x42, 0x43]);
+        let snapshot = get_scrollback_snapshot(4444);
+        assert_eq!(snapshot.len(), PTY_SCROLLBACK_MAX);
+        assert_eq!(snapshot[snapshot.len() - 1], 0x43);
+        assert_eq!(snapshot[snapshot.len() - 2], 0x42);
+    }
+
+    #[test]
+    fn scrollback_empty_for_unknown_node() {
+        let snapshot = get_scrollback_snapshot(3333);
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn clear_scrollback_removes_buffer() {
+        ensure_pty_channel(2222);
+        let _rx = subscribe_pty(2222);
+        send_pty_output(2222, vec![1, 2, 3]);
+        clear_scrollback(2222);
+        let snapshot = get_scrollback_snapshot(2222);
+        assert!(snapshot.is_empty());
     }
 }

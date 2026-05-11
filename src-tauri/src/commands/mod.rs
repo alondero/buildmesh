@@ -13,8 +13,10 @@ pub mod git;
 #[cfg(test)]
 pub mod git_tests;
 pub mod mcp;
+pub mod mesh_config;
 pub mod pr;
 pub mod mesh;
 pub mod agent_node;
+pub mod remote;
 pub mod terminal;
 pub mod test;
