@@ -286,10 +286,9 @@ fn register_agent(
 }
 
 /// Start the PTY reader thread.
-fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>, spawned_at: std::time::Instant) {
+fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read + Send>, spawned_at: std::time::Instant, reader_alive: Arc<AtomicBool>) {
     let app_clone = app;
-    let reader_alive = Arc::new(AtomicBool::new(true));
-    let reader_alive_clone = reader_alive.clone();
+    let reader_alive_clone = reader_alive;
 
     std::thread::spawn(move || {
         let mut r = reader;
@@ -485,7 +484,7 @@ async fn spawn_agent_inner(
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     // Ensure mobile broadcast channel exists before reader starts
     crate::http_server::ensure_pty_channel(session_id);
-    start_reader(app.clone(), session_id, reader, spawned_at);
+    start_reader(app.clone(), session_id, reader, spawned_at, reader_alive);
 
     tracing::info!(
         "spawn_agent_inner: reader thread spawned, updating node status"
@@ -627,6 +626,8 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
 
 #[command]
 pub async fn kill_agent(session_id: i64) -> Result<(), String> {
+    crate::session_naming::reset_buffers(session_id);
+
     let agent = {
         let mut registry = PROCESS_REGISTRY.lock().unwrap();
         registry.remove(&session_id)
