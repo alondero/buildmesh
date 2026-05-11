@@ -1,12 +1,17 @@
 import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
+import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshPropertiesPanel';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
-import { isMac } from './lib/platform';
+import { useUIStore } from './stores/uiStore';
+import { createShortcutGuard } from './lib/shortcutGuard';
 import './App.css';
+
+const createNodeGuard = createShortcutGuard(300);
 
 interface ErrorToast {
   id: number;
@@ -14,50 +19,57 @@ interface ErrorToast {
   message: string;
 }
 
-interface BackendAgentState {
-  session_id: number;
-  is_alive: boolean;
-}
-
 function App() {
   const { fetchMeshes } = useMeshStore();
   const { fetchAgentNodes, initAttentionListeners } = useAgentNodeStore();
   const storeError = useAgentNodeStore(state => state.error);
-  
+
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
   const [isReady, setIsReady] = useState(false);
-  const [backendAgents, setBackendAgents] = useState<BackendAgentState[]>([]);
-  const [eventCounts, setEventCounts] = useState<Record<number, number>>({});
-  const [uiErrors, setUiErrors] = useState<string[]>([]);
+  const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
 
-  const [_showDebug, setShowDebug] = useState(false);
+  // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
+  // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events)
+  useEffect(() => {
+    const shortcuts = [
+      { key: 'CommandOrControl+T', action: 'new-agent' },
+      { key: 'CommandOrControl+1', action: 'switch-1' },
+      { key: 'CommandOrControl+2', action: 'switch-2' },
+      { key: 'CommandOrControl+3', action: 'switch-3' },
+      { key: 'CommandOrControl+4', action: 'switch-4' },
+      { key: 'CommandOrControl+5', action: 'switch-5' },
+      { key: 'CommandOrControl+6', action: 'switch-6' },
+      { key: 'CommandOrControl+7', action: 'switch-7' },
+      { key: 'CommandOrControl+8', action: 'switch-8' },
+      { key: 'CommandOrControl+9', action: 'switch-9' },
+    ];
 
-  // Keyboard shortcuts
+    const registerShortcuts = async () => {
+      for (const { key, action } of shortcuts) {
+        try {
+          if (!(await isRegistered(key))) {
+            await register(key, () => {
+              window.dispatchEvent(new CustomEvent('shortcut-triggered', { detail: action }));
+            });
+          }
+        } catch (e) {
+          console.warn(`Failed to register shortcut ${key}:`, e);
+        }
+      }
+    };
+
+    registerShortcuts();
+
+    return () => {
+      for (const { key } of shortcuts) {
+        unregister(key).catch(() => {});
+      }
+    };
+  }, []);
+
+  // Quick switch session: Alt+1..9 (not intercepted by xterm, so window listener is fine)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Toggle Debug: Ctrl+Alt+D
-      if (e.ctrlKey && e.altKey && e.key === 'd') {
-        setShowDebug(prev => !prev);
-      }
-
-      // New agent node: Cmd+T (Mac) / Ctrl+T (non-Mac)
-      if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 't') {
-        e.preventDefault();
-        const activeNode = useAgentNodeStore.getState().getActiveNode();
-        const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
-        if (!meshId) return;
-        const mesh = useMeshStore.getState().meshesById.get(meshId);
-        if (!mesh) return;
-        const provider = activeNode?.provider ?? 'anthropic';
-        useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, mesh.path, 'main', provider)
-          .then(node => {
-            useAgentNodeStore.getState().setActiveNode(node.id);
-            useMeshStore.getState().selectMesh(mesh.id);
-          })
-          .catch(() => {});
-      }
-
-      // Quick switch session: Alt+1..9
       if (e.altKey && /^[1-9]$/.test(e.key)) {
         const index = parseInt(e.key) - 1;
         const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
@@ -73,26 +85,38 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // Handle shortcut events emitted from Rust (Ctrl+T, Ctrl+1..9)
   useEffect(() => {
-    const unlisten = listen<{ session_id: number; line: string }>('agent-output', (event) => {
-      setEventCounts(prev => ({
-        ...prev,
-        [event.payload.session_id]: (prev[event.payload.session_id] || 0) + event.payload.line.length
-      }));
-    });
-    return () => { unlisten.then(f => f()); };
-  }, []);
+    const handleShortcut = (e: Event) => {
+      const action = (e as CustomEvent<string>).detail;
 
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      try {
-        const agents = await invoke<BackendAgentState[]>('debug_list_agents');
-        setBackendAgents(agents);
-      } catch (e) { 
-        setUiErrors(prev => [...prev.slice(-4), `Backend Fetch Error: ${e}`]);
+      if (action === 'new-agent') {
+        createNodeGuard(async () => {
+          const activeNode = useAgentNodeStore.getState().getActiveNode();
+          const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
+          if (!meshId) return;
+          const mesh = useMeshStore.getState().meshesById.get(meshId);
+          if (!mesh) return;
+          const provider = activeNode?.provider ?? 'anthropic';
+          const branch = activeNode?.branch ?? 'main';
+          const path = activeNode?.path ?? mesh.path;
+          const node = await useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, path, branch, provider);
+          useAgentNodeStore.getState().setActiveNode(node.id);
+          useMeshStore.getState().selectMesh(mesh.id);
+        });
+      } else if (action.startsWith('switch-')) {
+        const index = parseInt(action.replace('switch-', '')) - 1;
+        const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
+          s.mesh_id === useAgentNodeStore.getState().getActiveNode()?.mesh_id
+        );
+        if (currentNodes[index]) {
+          useAgentNodeStore.getState().setActiveNode(currentNodes[index].id);
+        }
       }
-    }, 2000);
-    return () => clearInterval(timer);
+    };
+
+    window.addEventListener('shortcut-triggered', handleShortcut);
+    return () => window.removeEventListener('shortcut-triggered', handleShortcut);
   }, []);
 
   useEffect(() => {
@@ -136,7 +160,7 @@ function App() {
           }
         }, 1000);
       } catch (e) {
-        setUiErrors(prev => [...prev, `Init Error: ${e}`]);
+        console.error('[App] Init failed:', e);
       }
     };
     init();
@@ -152,13 +176,13 @@ function App() {
       setToasts((prev) => [...prev, toast]);
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [setToasts]);
+  }, []);
 
   const dismissToast = (id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
 
-  if (!isReady && uiErrors.length === 0) {
+  if (!isReady) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-[#09090f]">
         <div className="text-[#00d4ff] text-2xl animate-pulse">●</div>
@@ -170,32 +194,8 @@ function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-[#09090f] text-[#e0e0e0]">
       <Sidebar />
       <SessionView />
-      
-      {/* DEBUG OVERLAY */}
-      <div className="fixed bottom-0 left-0 right-0 bg-black/90 border-t border-red-500/30 flex flex-col z-[100] font-mono text-[10px]">
-        <div className="h-8 flex items-center px-4 gap-4">
-          <span className="text-red-500 font-bold">SYSTEM DEBUG:</span>
-          <div className="flex gap-3">
-            {backendAgents.map(a => (
-              <div key={a.session_id} className="flex items-center gap-1">
-                <span className={a.is_alive ? 'text-green-500' : 'text-gray-500'}>
-                  ID:{a.session_id} {a.is_alive ? 'RUN' : 'DEAD'}
-                </span>
-                <span className="text-[#888]">({eventCounts[a.session_id] || 0} bytes)</span>
-              </div>
-            ))}
-          </div>
-          <button onClick={() => window.location.reload()} className="ml-auto bg-red-900/40 px-2 py-0.5 rounded text-red-200">RELOAD</button>
-        </div>
-        
-        {uiErrors.length > 0 && (
-          <div className="p-2 bg-red-950/20 border-t border-red-900/30 max-h-24 overflow-y-auto">
-            {uiErrors.map((err, i) => (
-              <div key={i} className="text-red-400 border-b border-red-900/10 py-0.5">{err}</div>
-            ))}
-          </div>
-        )}
-      </div>
+
+      {propertiesPanelMeshId != null && <MeshPropertiesPanel />}
 
       {/* Toast notifications */}
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">

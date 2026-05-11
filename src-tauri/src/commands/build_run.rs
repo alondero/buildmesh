@@ -7,38 +7,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
-const MESH_CONFIG_FILENAME: &str = "mesh.toml";
+pub const MESH_CONFIG_FILENAME: &str = "mesh.toml";
 
 // ---------------------------------------------------------------------------
 // Config parsing
 // ---------------------------------------------------------------------------
 
-/// Represents the parsed mesh.toml build/run configuration
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BuildRunConfig {
-    pub build_command: String,
-    pub run_command: String,
-}
-
-/// Parse [build]command and [run]command from a mesh.toml file
-fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, String> {
-    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
-
-    let build_command = extract_toml_value(&content, "build", "command")
-        .ok_or_else(|| "build command not configured in mesh.toml".to_string())?;
-    let run_command = extract_toml_value(&content, "run", "command")
-        .ok_or_else(|| "run command not configured in mesh.toml".to_string())?;
-
-    Ok(BuildRunConfig {
-        build_command,
-        run_command,
-    })
-}
-
 /// Extract a value from a TOML table: [section] key = "value"
-fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String> {
+pub fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String> {
     let section_pattern = format!("[{}]", section);
     let section_start = content.find(&section_pattern)?;
 
@@ -57,6 +33,50 @@ fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String>
     let value_end = section_content[value_start..].find('"')? + value_start;
 
     Some(section_content[value_start..value_end].to_string())
+}
+
+/// Represents the parsed mesh.toml build/run configuration
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BuildRunConfig {
+    pub build_command: String,
+    pub run_command: String,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// Parse [build]command, [run]command, and [agent]model/effort from a mesh.toml file
+fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, String> {
+    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
+
+    let build_command = extract_toml_value(&content, "build", "command")
+        .ok_or_else(|| "build command not configured in mesh.toml".to_string())?;
+    let run_command = extract_toml_value(&content, "run", "command")
+        .ok_or_else(|| "run command not configured in mesh.toml".to_string())?;
+    let model = extract_toml_value(&content, "agent", "model");
+    let effort = extract_toml_value(&content, "agent", "effort");
+
+    Ok(BuildRunConfig {
+        build_command,
+        run_command,
+        model,
+        effort,
+    })
+}
+
+/// Parse mesh config returning an Option (used by agent.rs for spawn-time reading).
+/// Unlike parse_mesh_config, this does NOT fail if the file is missing or fields are absent.
+pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildRunConfig> {
+    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
+    let content = std::fs::read_to_string(&config_path).ok()?;
+
+    Some(BuildRunConfig {
+        build_command: extract_toml_value(&content, "build", "command").unwrap_or_default(),
+        run_command: extract_toml_value(&content, "run", "command").unwrap_or_default(),
+        model: extract_toml_value(&content, "agent", "model"),
+        effort: extract_toml_value(&content, "agent", "effort"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +162,11 @@ pub async fn build_run(
     let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
     validate_worktree_exists(&resolved, node.worktree_name.as_deref())?;
 
+    // Sanitize .git file to ensure proper worktree isolation across environments
+    if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+        tracing::warn!("build_run: failed to sanitize worktree .git file: {}", e);
+    }
+
     // 4. Get the command to run
     let command = match mode {
         BuildRunMode::Build => &config.build_command,
@@ -177,6 +202,13 @@ pub async fn build_run(
         c
     };
     cmd.cwd(shell_cwd);
+
+    // Ensure clean worktree isolation by removing any inherited Git environment variables
+    cmd.env_remove("GIT_DIR");
+    cmd.env_remove("GIT_WORK_TREE");
+    cmd.env_remove("GIT_INDEX_FILE");
+    cmd.env_remove("GIT_OBJECT_DIRECTORY");
+    cmd.env_remove("GIT_COMMON_DIR");
 
     let child = pair.slave.spawn_command(cmd)
         .map_err(|e| format!("failed to spawn shell: {}", e))?;
@@ -258,6 +290,10 @@ pub async fn ensure_mesh_config(mesh_id: i64) -> Result<String, String> {
 
 [run]
 # command = "npm run dev"
+
+[agent]
+# model = "claude-opus-4-7"
+# effort = "medium"
 "#;
     match std::fs::OpenOptions::new()
         .write(true)

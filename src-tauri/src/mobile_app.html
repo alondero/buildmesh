@@ -448,6 +448,7 @@
 
       try {
         ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
       } catch (e) {
         scheduleReconnect(nodeId);
         return;

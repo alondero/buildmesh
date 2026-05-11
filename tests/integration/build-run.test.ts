@@ -50,28 +50,28 @@ describe('build_run command', () => {
     });
   });
 
-  describe('get_mesh_config command', () => {
+  describe('get_mesh_properties command', () => {
     it('returns parsed mesh.toml config for valid mesh', async () => {
       const config = await invoke<{
-        build: { command: string };
-        run: { command: string };
-      }>('get_mesh_config', { meshId: 1 });
+        build_command: string | null;
+        run_command: string | null;
+        model: string | null;
+        effort: string | null;
+      }>('get_mesh_properties', { meshId: 1 });
 
-      expect(config).toHaveProperty('build');
-      expect(config).toHaveProperty('run');
-      expect(config.build).toHaveProperty('command');
-      expect(config.run).toHaveProperty('command');
+      expect(config).toHaveProperty('build_command');
+      expect(config).toHaveProperty('run_command');
     });
 
     it('throws when mesh.toml is missing', async () => {
       await expect(
-        invoke('get_mesh_config', { meshId: 9999 })
+        invoke('get_mesh_properties', { meshId: 9999 })
       ).rejects.toThrow('mesh.toml not found');
     });
 
     it('throws when build section is missing', async () => {
       await expect(
-        invoke('get_mesh_config', { meshId: 1 })
+        invoke('get_mesh_properties', { meshId: 1 })
       ).rejects.toThrow('build command not configured');
     });
   });

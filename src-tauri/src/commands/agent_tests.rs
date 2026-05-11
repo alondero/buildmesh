@@ -104,21 +104,27 @@ mod tests {
         assert_eq!(args, vec!["gemini"]);
     }
 
-    /// Test 4: Null worktree_name falls back to `-w` without explicit name
+    /// Test 4: Null worktree_name falls back to `-w` without explicit name on Assign mode
     /// (backward compatibility for old sessions)
     #[test]
     fn null_worktree_name_falls_back_to_w_without_name() {
         let is_cwrap = true;
         let worktree_name: Option<String> = None;
+        let session_id_mode = "Assign";
 
         let mut args = vec!["--minimax".to_string()];
         if is_cwrap {
-            if let Some(ref name) = worktree_name {
-                args.push("-w".to_string());
-                args.push(name.clone());
-            } else {
-                // Fallback: just -w without name
-                args.push("-w".to_string());
+            match session_id_mode {
+                "Assign" => {
+                    if let Some(ref name) = worktree_name {
+                        args.push("-w".to_string());
+                        args.push(name.clone());
+                    } else {
+                        args.push("-w".to_string());
+                    }
+                }
+                "Resume" => {}
+                _ => {}
             }
         }
 
@@ -126,18 +132,26 @@ mod tests {
         assert_eq!(args, vec!["--minimax", "-w"]);
     }
 
-    /// Test 5: Resume mode should still use the explicit worktree name
+    /// Test 5: Resume mode should omit `-w` entirely, as the process is spawned inside the worktree
     #[test]
-    fn resume_mode_uses_explicit_worktree_name() {
+    fn resume_mode_omits_w_flag() {
         let is_cwrap = true;
         let worktree_name = Some("async-plotting-riddle".to_string());
         let session_id_mode = "Resume";
 
         let mut args = vec!["--minimax".to_string()];
         if is_cwrap {
-            if let Some(ref name) = worktree_name {
-                args.push("-w".to_string());
-                args.push(name.clone());
+            match session_id_mode {
+                "Assign" => {
+                    if let Some(ref name) = worktree_name {
+                        args.push("-w".to_string());
+                        args.push(name.clone());
+                    } else {
+                        args.push("-w".to_string());
+                    }
+                }
+                "Resume" => {}
+                _ => {}
             }
         }
         match session_id_mode {
@@ -148,13 +162,8 @@ mod tests {
             _ => {}
         }
 
-        assert_eq!(args, vec![
-            "--minimax",
-            "-w",
-            "async-plotting-riddle",
-            "--resume",
-            "abc-123"
-        ]);
+        // Should just be ["--minimax", "--resume", "abc-123"]
+        assert_eq!(args, vec!["--minimax", "--resume", "abc-123"]);
     }
 
     /// Test 6: DB schema should have worktree_name column
@@ -201,11 +210,15 @@ mod tests {
         assert_eq!(worktree_path, "X:\\src\\pixelpath\\.claude\\worktrees\\async-plotting-riddle");
     }
 
-    /// Test 8: cwrap command structure for Windows cwrap providers
+    /// Test 8: cwrap command structure for Windows cwrap providers via PowerShell
     #[test]
     fn windows_cwrap_command_structure() {
-        // For Windows with cwrap providers, the command is:
-        // cmd.exe /c cwrap --<provider> -w <name> --session-id <id>
+        // For Windows with cwrap providers, the command now uses PowerShell:
+        // powershell.exe -NoLogo -Command "cwrap --<provider> -w <name> --session-id <id>"
+        //
+        // We pass -NoLogo to suppress the PowerShell banner and -Command to run
+        // the cwrap invocation directly. The combined args string is joined and
+        // passed as a single -Command argument rather than a cmd.exe /c layer.
 
         let binary = "cwrap";
         let provider_flag = "--minimax";
@@ -213,17 +226,23 @@ mod tests {
         let session_id_arg = "--session-id";
         let session_id = "abc-123";
 
-        // Simulating build_spawn_command for Windows cwrap
-        let mut cmd_args = vec![binary, "/c", provider_flag, "-w", worktree_name, session_id_arg, session_id];
+        // Build the inner args like build_spawn_command does
+        let mut args = vec![provider_flag.to_string()];
+        args.push("-w".to_string());
+        args.push(worktree_name.to_string());
+        args.push(session_id_arg.to_string());
+        args.push(session_id.to_string());
+
+        // Simulating build_spawn_command for Windows cwrap via PowerShell
+        // The combined inner command: "cwrap --minimax -w async-plotting-riddle --session-id abc-123"
+        let combined = format!("{} {}", binary, args.join(" "));
+        let cmd_args = vec!["powershell.exe", "-NoLogo", "-Command", &combined];
 
         let expected = vec![
-            "cwrap",
-            "/c",
-            "--minimax",
-            "-w",
-            "async-plotting-riddle",
-            "--session-id",
-            "abc-123"
+            "powershell.exe",
+            "-NoLogo",
+            "-Command",
+            "cwrap --minimax -w async-plotting-riddle --session-id abc-123"
         ];
 
         assert_eq!(cmd_args, expected);
