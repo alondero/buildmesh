@@ -96,17 +96,33 @@ pub async fn get_local_ip() -> Result<String, String> {
     let interfaces = local_ip_address::list_afinet_netifas()
         .map_err(|e| format!("failed to list interfaces: {}", e))?;
 
-    for (name, ip) in interfaces {
-        if let Some(ip_str) = iface_addr_in_lan_range(&name, &ip) {
-            return Ok(ip_str);
-        }
+    // Prefer 192.168.x.x (common LAN) over 10.x.x.x (VPN/corporate range)
+    if let Some(ip) = find_first_lan_ip(&interfaces, &[0xC0, 0xA8]) { // 192, 168
+        return Ok(ip);
+    }
+    if let Some(ip) = find_first_lan_ip(&interfaces, &[0x0A]) { // 10
+        return Ok(ip);
     }
 
     Err("no suitable LAN interface found".to_string())
 }
 
+/// Find the first IP matching one of the given /8 prefixes (big-endian octets).
+fn find_first_lan_ip(
+    interfaces: &[(String, std::net::IpAddr)],
+    prefixes: &[u8],
+) -> Option<String> {
+    for (name, ip) in interfaces {
+        if let Some(ip_str) = iface_addr_in_lan_range(name, ip, prefixes) {
+            return Some(ip_str);
+        }
+    }
+    None
+}
+
 /// Returns the IP address if this interface is a typical LAN address (not Docker/tunnel/VirtualBox).
-fn iface_addr_in_lan_range(name: &str, ip: &std::net::IpAddr) -> Option<String> {
+/// Only considers addresses matching one of the given /8 prefixes.
+fn iface_addr_in_lan_range(name: &str, ip: &std::net::IpAddr, prefixes: &[u8]) -> Option<String> {
     let ip_str = ip.to_string();
 
     // Skip Docker bridge (172.16-31.x), VirtualBox Host-Only (192.168.56.x),
@@ -131,9 +147,12 @@ fn iface_addr_in_lan_range(name: &str, ip: &std::net::IpAddr) -> Option<String> 
         }
     }
 
-    // Accept classic private LAN ranges: 192.168.x.x and 10.x.x.x
-    if ip_str.starts_with("192.168.") || ip_str.starts_with("10.") {
-        return Some(ip_str);
+    // Only accept addresses whose /8 prefix is in our allow-list
+    if let std::net::IpAddr::V4(ipv4) = ip {
+        let first_octet = ipv4.octets()[0];
+        if prefixes.contains(&first_octet) {
+            return Some(ip_str);
+        }
     }
 
     None
