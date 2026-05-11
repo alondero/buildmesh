@@ -17,7 +17,7 @@ struct AgentProcess {
 }
 
 /// Thread-safe registry for agent processes.
-struct ProcessRegistry {
+pub(crate) struct ProcessRegistry {
     processes: HashMap<i64, Arc<AgentProcess>>,
 }
 
@@ -30,6 +30,14 @@ impl ProcessRegistry {
 
     fn get(&self, session_id: &i64) -> Option<Arc<AgentProcess>> {
         self.processes.get(session_id).cloned()
+    }
+
+    pub(crate) fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
+        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
+        let mut writer = agent.writer.lock().unwrap();
+        use std::io::Write;
+        writer.write_all(data).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())
     }
 
     fn insert(&mut self, session_id: i64, agent: AgentProcess) {
@@ -594,23 +602,12 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
     }
 }
 
-pub(crate) fn write_to_pty(session_id: i64, data: &[u8]) -> Result<(), String> {
-    let agent = {
-        let registry = PROCESS_REGISTRY.lock().unwrap();
-        registry.get(&session_id)
-    };
-    let Some(agent) = agent else {
-        return Err("Agent not running".to_string());
-    };
-    let mut writer = agent.writer.lock().unwrap();
-    use std::io::Write;
-    writer.write_all(data).map_err(|e| e.to_string())?;
-    writer.flush().map_err(|e| e.to_string())
-}
-
 #[command]
 pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
-    write_to_pty(session_id, data.as_bytes())?;
+    {
+        let registry = PROCESS_REGISTRY.lock().unwrap();
+        registry.write_bytes(session_id, data.as_bytes())?;
+    }
 
     if data.bytes().any(|b| b == b'\n' || b == b'\r') {
         db::update_agent_node_status(session_id, SessionStatus::Running).ok();

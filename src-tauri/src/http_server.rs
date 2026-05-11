@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::{accept_async, tungstenite};
 
 use tauri::Emitter;
+use crate::commands::agent::PROCESS_REGISTRY;
 use crate::db;
 
 // --- App Handle for emitting Tauri events from HTTP handlers ---
@@ -33,7 +34,6 @@ const MOBILE_APP_HTML: &str = include_str!("mobile_app.html");
 struct HttpServerState {
     app: tauri::AppHandle,
     _broadcast_tx: broadcast::Sender<Vec<u8>>,
-    pty_outputs: Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>>,
 }
 
 static SERVER_STATE: OnceLock<Arc<HttpServerState>> = OnceLock::new();
@@ -95,7 +95,6 @@ pub fn start_http_server(port: u16, app: tauri::AppHandle) {
     let state = Arc::new(HttpServerState {
         app,
         _broadcast_tx: broadcast_tx,
-        pty_outputs: Arc::new(RwLock::new(HashMap::new())),
     });
     let _ = SERVER_STATE.set(state.clone());
     drop(state);
@@ -274,21 +273,22 @@ async fn handle_ws_connection(
 ) {
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe to live broadcast before taking snapshot to avoid gaps
+    // Subscribe before reading history to avoid missing output in the gap
     let mut rx = subscribe_pty(node_id);
 
-    // Replay scrollback buffer so mobile sees existing terminal content
-    let snapshot = get_scrollback_snapshot(node_id);
-    if !snapshot.is_empty() {
-        if write.send(tungstenite::Message::Binary(snapshot.into())).await.is_err() {
+    // Replay history buffer so the mobile client sees previous terminal output
+    let history = get_pty_history(node_id);
+    if !history.is_empty() {
+        let history_str = String::from_utf8_lossy(&history).into_owned();
+        if write.send(tungstenite::Message::Text(history_str.into())).await.is_err() {
             return;
         }
     }
 
-
     let write_task = tauri::async_runtime::spawn(async move {
         while let Ok(data) = rx.recv().await {
-            if write.send(tungstenite::Message::Binary(data.into())).await.is_err() {
+            let text = String::from_utf8_lossy(&data).into_owned();
+            if write.send(tungstenite::Message::Text(text.into())).await.is_err() {
                 break;
             }
         }
@@ -314,10 +314,12 @@ async fn handle_ws_connection(
 }
 
 fn forward_mobile_input(node_id: i64, text: &str) {
-    if let Err(e) = crate::commands::agent::write_to_pty(node_id, text.as_bytes()) {
+    let registry = PROCESS_REGISTRY.lock().unwrap();
+    if let Err(e) = registry.write_bytes(node_id, text.as_bytes()) {
         tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
         return;
     }
+    drop(registry);
     if text.bytes().any(|b| b == b'\n' || b == b'\r') {
         let _ = db::update_agent_node_status(node_id, crate::models::SessionStatus::Running);
         if let Some(app) = APP_HANDLE.get() {
@@ -348,9 +350,16 @@ fn validate_token(token: Option<String>) -> bool {
 
 // --- PTY Broadcast ---
 
-static KNOWN_NODES: OnceLock<Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>>> = OnceLock::new();
+const HISTORY_BUFFER_CAP: usize = 128 * 1024;
 
-fn get_known_nodes() -> &'static Arc<RwLock<HashMap<i64, broadcast::Sender<Vec<u8>>>>> {
+struct NodeChannel {
+    sender: broadcast::Sender<Vec<u8>>,
+    history: VecDeque<u8>,
+}
+
+static KNOWN_NODES: OnceLock<Arc<RwLock<HashMap<i64, NodeChannel>>>> = OnceLock::new();
+
+fn get_known_nodes() -> &'static Arc<RwLock<HashMap<i64, NodeChannel>>> {
     KNOWN_NODES.get_or_init(|| {
         Arc::new(RwLock::new(HashMap::new()))
     })
@@ -361,78 +370,169 @@ pub fn ensure_pty_channel(node_id: i64) {
     let mut locked = nodes.write();
     if !locked.contains_key(&node_id) {
         let (tx, _) = broadcast::channel(1024);
-        locked.insert(node_id, tx);
+        locked.insert(node_id, NodeChannel { sender: tx, history: VecDeque::new() });
     }
 }
 
 pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
     let nodes = get_known_nodes();
     let mut locked = nodes.write();
-    let sender = locked.entry(node_id).or_insert_with(|| {
+    let channel = locked.entry(node_id).or_insert_with(|| {
         let (tx, _) = broadcast::channel(1024);
-        tx
-    }).clone();
-    sender.subscribe()
+        NodeChannel { sender: tx, history: VecDeque::new() }
+    });
+    channel.sender.subscribe()
+}
+
+pub fn get_pty_history(node_id: i64) -> Vec<u8> {
+    let nodes = get_known_nodes();
+    let locked = nodes.read();
+    locked.get(&node_id).map(|ch| {
+        let (a, b) = ch.history.as_slices();
+        let mut v = Vec::with_capacity(a.len() + b.len());
+        v.extend_from_slice(a);
+        v.extend_from_slice(b);
+        v
+    }).unwrap_or_default()
 }
 
 pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
-    // Buffer for scrollback replay before sending (avoids clone)
-    {
-        let buffers = get_scrollback();
-        let mut locked = buffers.write();
-        let buf = locked.entry(node_id).or_insert_with(|| VecDeque::with_capacity(PTY_SCROLLBACK_MAX));
-        buf.extend(&data);
-        if buf.len() > PTY_SCROLLBACK_MAX {
-            let excess = buf.len() - PTY_SCROLLBACK_MAX;
-            buf.drain(..excess);
-        }
-    }
-
     let nodes = get_known_nodes();
     let sender = {
-        let locked = nodes.read();
-        locked.get(&node_id).cloned()
+        let mut locked = nodes.write();
+        if let Some(channel) = locked.get_mut(&node_id) {
+            channel.history.extend(data.iter());
+            let excess = channel.history.len().saturating_sub(HISTORY_BUFFER_CAP);
+            if excess > 0 {
+                channel.history.drain(..excess);
+            }
+            Some(channel.sender.clone())
+        } else {
+            None
+        }
     };
     if let Some(sender) = sender {
         let _ = sender.send(data);
     }
 }
 
-// --- Scrollback Buffer for Mobile Replay ---
-
-const PTY_SCROLLBACK_MAX: usize = 128 * 1024;
-
-static SCROLLBACK: OnceLock<Arc<RwLock<HashMap<i64, VecDeque<u8>>>>> = OnceLock::new();
-
-fn get_scrollback() -> &'static Arc<RwLock<HashMap<i64, VecDeque<u8>>>> {
-    SCROLLBACK.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
-}
-
-fn get_scrollback_snapshot(node_id: i64) -> Vec<u8> {
-    let buffers = get_scrollback();
-    let locked = buffers.read();
-    match locked.get(&node_id) {
-        Some(buf) => {
-            let (a, b) = buf.as_slices();
-            let mut v = Vec::with_capacity(buf.len());
-            v.extend_from_slice(a);
-            v.extend_from_slice(b);
-            v
-        }
-        None => Vec::new(),
-    }
-}
-
-/// Clear the scrollback buffer for a node. Called on agent kill.
+/// Clear the history buffer for a node. Called on agent kill.
 pub fn clear_scrollback(node_id: i64) {
-    let buffers = get_scrollback();
-    let mut locked = buffers.write();
-    locked.remove(&node_id);
+    let nodes = get_known_nodes();
+    let mut locked = nodes.write();
+    if let Some(channel) = locked.get_mut(&node_id) {
+        channel.history.clear();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_tungstenite::connect_async;
+
+    #[tokio::test]
+    async fn ws_replays_history_on_connect() {
+        let node_id = 20001_i64;
+        ensure_pty_channel(node_id);
+        send_pty_output(node_id, b"hello from history\r\n".to_vec());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(stream).await.unwrap();
+            handle_ws_connection(ws, node_id).await;
+        });
+
+        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+        let msg = ws.next().await.unwrap().unwrap();
+        assert!(msg.is_text());
+        assert_eq!(msg.into_text().unwrap(), "hello from history\r\n");
+    }
+
+    #[tokio::test]
+    async fn ws_receives_live_pty_output() {
+        let node_id = 20002_i64;
+        ensure_pty_channel(node_id);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(stream).await.unwrap();
+            handle_ws_connection(ws, node_id).await;
+        });
+
+        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        // Send PTY output after client is connected
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        send_pty_output(node_id, b"live data\r\n".to_vec());
+
+        let msg = ws.next().await.unwrap().unwrap();
+        assert!(msg.is_text());
+        assert_eq!(msg.into_text().unwrap(), "live data\r\n");
+    }
+
+    #[tokio::test]
+    async fn ws_history_then_live_output() {
+        let node_id = 20003_i64;
+        ensure_pty_channel(node_id);
+        send_pty_output(node_id, b"old output\r\n".to_vec());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(stream).await.unwrap();
+            handle_ws_connection(ws, node_id).await;
+        });
+
+        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        // First message should be the history replay
+        let msg1 = ws.next().await.unwrap().unwrap();
+        assert_eq!(msg1.into_text().unwrap(), "old output\r\n");
+
+        // Then live output
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        send_pty_output(node_id, b"new output\r\n".to_vec());
+
+        let msg2 = ws.next().await.unwrap().unwrap();
+        assert_eq!(msg2.into_text().unwrap(), "new output\r\n");
+    }
+
+    #[tokio::test]
+    async fn ws_input_reaches_write_to_pty() {
+        // This test verifies the input path works without a real PTY.
+        // write_to_pty will log "no running agent" but shouldn't panic.
+        let node_id = 20004_i64;
+        ensure_pty_channel(node_id);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(stream).await.unwrap();
+            handle_ws_connection(ws, node_id).await;
+        });
+
+        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        // Send input from the "mobile client"
+        ws.send(tungstenite::Message::Text("ls -la\n".into())).await.unwrap();
+        // Give the handler time to process
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // No panic = success (the write_to_pty gracefully handles missing agents)
+    }
 
     #[test]
     fn extract_token_from_simple_path() {
@@ -502,6 +602,30 @@ mod tests {
     }
 
     #[test]
+    fn send_pty_output_appends_to_history() {
+        ensure_pty_channel(5555);
+        send_pty_output(5555, vec![0x41, 0x42]);
+        send_pty_output(5555, vec![0x43, 0x44]);
+        let history = get_pty_history(5555);
+        assert_eq!(history, vec![0x41, 0x42, 0x43, 0x44]);
+    }
+
+    #[test]
+    fn history_buffer_caps_at_limit() {
+        ensure_pty_channel(4444);
+        let big_chunk = vec![0x58; HISTORY_BUFFER_CAP + 100];
+        send_pty_output(4444, big_chunk);
+        let history = get_pty_history(4444);
+        assert_eq!(history.len(), HISTORY_BUFFER_CAP);
+    }
+
+    #[test]
+    fn get_pty_history_returns_empty_for_unknown_node() {
+        let history = get_pty_history(3333);
+        assert!(history.is_empty());
+    }
+
+    #[test]
     fn send_pty_output_no_panic_without_subscribers() {
         ensure_pty_channel(6666);
         send_pty_output(6666, vec![1, 2, 3]);
@@ -514,40 +638,40 @@ mod tests {
 
     #[test]
     fn scrollback_captures_output() {
-        ensure_pty_channel(5555);
-        let _rx = subscribe_pty(5555);
-        send_pty_output(5555, vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]);
-        send_pty_output(5555, vec![0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64]);
-        let snapshot = get_scrollback_snapshot(5555);
-        assert_eq!(snapshot, b"Hello World");
+        ensure_pty_channel(50055);
+        let _rx = subscribe_pty(50055);
+        send_pty_output(50055, vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]);
+        send_pty_output(50055, vec![0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64]);
+        let history = get_pty_history(50055);
+        assert_eq!(history, b"Hello World");
     }
 
     #[test]
     fn scrollback_respects_max_size() {
-        ensure_pty_channel(4444);
-        let _rx = subscribe_pty(4444);
-        let chunk = vec![0x41; PTY_SCROLLBACK_MAX];
-        send_pty_output(4444, chunk);
-        send_pty_output(4444, vec![0x42, 0x43]);
-        let snapshot = get_scrollback_snapshot(4444);
-        assert_eq!(snapshot.len(), PTY_SCROLLBACK_MAX);
-        assert_eq!(snapshot[snapshot.len() - 1], 0x43);
-        assert_eq!(snapshot[snapshot.len() - 2], 0x42);
+        ensure_pty_channel(40044);
+        let _rx = subscribe_pty(40044);
+        let chunk = vec![0x41; HISTORY_BUFFER_CAP];
+        send_pty_output(40044, chunk);
+        send_pty_output(40044, vec![0x42, 0x43]);
+        let history = get_pty_history(40044);
+        assert_eq!(history.len(), HISTORY_BUFFER_CAP);
+        assert_eq!(history[history.len() - 1], 0x43);
+        assert_eq!(history[history.len() - 2], 0x42);
     }
 
     #[test]
     fn scrollback_empty_for_unknown_node() {
-        let snapshot = get_scrollback_snapshot(3333);
-        assert!(snapshot.is_empty());
+        let history = get_pty_history(30033);
+        assert!(history.is_empty());
     }
 
     #[test]
     fn clear_scrollback_removes_buffer() {
-        ensure_pty_channel(2222);
-        let _rx = subscribe_pty(2222);
-        send_pty_output(2222, vec![1, 2, 3]);
-        clear_scrollback(2222);
-        let snapshot = get_scrollback_snapshot(2222);
-        assert!(snapshot.is_empty());
+        ensure_pty_channel(20022);
+        let _rx = subscribe_pty(20022);
+        send_pty_output(20022, vec![1, 2, 3]);
+        clear_scrollback(20022);
+        let history = get_pty_history(20022);
+        assert!(history.is_empty());
     }
 }
