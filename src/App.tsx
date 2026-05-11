@@ -6,7 +6,10 @@ import { SessionView } from './components/SessionView/SessionView';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { isMac } from './lib/platform';
+import { createShortcutGuard } from './lib/shortcutGuard';
 import './App.css';
+
+const createNodeGuard = createShortcutGuard(300);
 
 interface ErrorToast {
   id: number;
@@ -43,18 +46,17 @@ function App() {
       // New agent node: Cmd+T (Mac) / Ctrl+T (non-Mac)
       if ((isMac ? e.metaKey : e.ctrlKey) && e.key === 't') {
         e.preventDefault();
-        const activeNode = useAgentNodeStore.getState().getActiveNode();
-        const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
-        if (!meshId) return;
-        const mesh = useMeshStore.getState().meshesById.get(meshId);
-        if (!mesh) return;
-        const provider = activeNode?.provider ?? 'anthropic';
-        useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, mesh.path, 'main', provider)
-          .then(node => {
-            useAgentNodeStore.getState().setActiveNode(node.id);
-            useMeshStore.getState().selectMesh(mesh.id);
-          })
-          .catch(() => {});
+        createNodeGuard(async () => {
+          const activeNode = useAgentNodeStore.getState().getActiveNode();
+          const meshId = activeNode?.mesh_id ?? useMeshStore.getState().selectedMeshId;
+          if (!meshId) return;
+          const mesh = useMeshStore.getState().meshesById.get(meshId);
+          if (!mesh) return;
+          const provider = activeNode?.provider ?? 'anthropic';
+          const node = await useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, mesh.path, 'main', provider);
+          useAgentNodeStore.getState().setActiveNode(node.id);
+          useMeshStore.getState().selectMesh(mesh.id);
+        });
       }
 
       // Quick switch session: Alt+1..9
