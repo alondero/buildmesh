@@ -3,7 +3,7 @@
 //! Serves the mobile web app and handles WebSocket terminal connections
 //! for remote access from a phone on the same network.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -233,10 +233,18 @@ async fn handle_ws_connection(
 ) {
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe to the PTY output broadcast channel for this node
+    // Subscribe to live broadcast before taking snapshot to avoid gaps
     let mut rx = subscribe_pty(node_id);
 
-    // Spawn a task to forward PTY broadcasts to the WebSocket client
+    // Replay scrollback buffer so mobile sees existing terminal content
+    let snapshot = get_scrollback_snapshot(node_id);
+    if !snapshot.is_empty() {
+        if write.send(tungstenite::Message::Binary(snapshot.into())).await.is_err() {
+            return;
+        }
+    }
+
+    // Forward live PTY broadcasts to the WebSocket client
     let write_task = tauri::async_runtime::spawn(async move {
         while let Ok(data) = rx.recv().await {
             if write.send(tungstenite::Message::Binary(data.into())).await.is_err() {
@@ -245,34 +253,38 @@ async fn handle_ws_connection(
         }
     });
 
-    // Forward commands from WebSocket to PTY stdin via broadcast
-    // We use a second broadcast channel for client -> PTY direction
-    // For now, we just discard received messages (PTY input comes from desktop)
-    // The mobile app sends keystrokes which would need to go to the PTY writer
+    // Forward mobile input to PTY
     while let Some(msg) = read.next().await {
         match msg {
             Ok(tungstenite::Message::Text(text)) => {
-                // Keystroke from mobile — broadcast to PTY stdin handler
-                // For now, log it; full implementation needs PTY writer access
-                tracing::debug!("WS received text from mobile: {:?}", &text[..text.len().min(32)]);
+                forward_mobile_input(node_id, &text);
             }
             Ok(tungstenite::Message::Binary(data)) => {
-                tracing::debug!("WS received binary {} bytes from mobile", data.len());
+                let text = String::from_utf8_lossy(&data);
+                forward_mobile_input(node_id, &text);
             }
-            Ok(tungstenite::Message::Close(_)) => {
-                tracing::debug!("WS client disconnected");
-                break;
-            }
-            Err(e) => {
-                tracing::error!("WS read error: {}", e);
-                break;
-            }
+            Ok(tungstenite::Message::Close(_)) => break,
+            Err(_) => break,
             _ => {}
         }
     }
 
     write_task.abort();
     tracing::debug!("WS connection closed for node {}", node_id);
+}
+
+fn forward_mobile_input(node_id: i64, text: &str) {
+    if let Err(e) = crate::commands::agent::write_to_pty(node_id, text.as_bytes()) {
+        tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
+        return;
+    }
+    if text.bytes().any(|b| b == b'\n' || b == b'\r') {
+        let _ = db::update_agent_node_status(node_id, crate::models::SessionStatus::Running);
+        if let Some(app) = APP_HANDLE.get() {
+            use tauri::Emitter;
+            let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": node_id }));
+        }
+    }
 }
 
 // --- Token Validation ---
@@ -359,6 +371,18 @@ pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
 
 /// Send data to all subscribers of a node's PTY output.
 pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
+    // Buffer for scrollback replay before sending (avoids clone)
+    {
+        let buffers = get_scrollback();
+        let mut locked = buffers.write();
+        let buf = locked.entry(node_id).or_insert_with(|| VecDeque::with_capacity(PTY_SCROLLBACK_MAX));
+        buf.extend(&data);
+        if buf.len() > PTY_SCROLLBACK_MAX {
+            let excess = buf.len() - PTY_SCROLLBACK_MAX;
+            buf.drain(..excess);
+        }
+    }
+
     let nodes = get_known_nodes();
     let sender = {
         let locked = nodes.read();
@@ -367,6 +391,38 @@ pub fn send_pty_output(node_id: i64, data: Vec<u8>) {
     if let Some(sender) = sender {
         let _ = sender.send(data);
     }
+}
+
+// --- Scrollback Buffer for Mobile Replay ---
+
+const PTY_SCROLLBACK_MAX: usize = 128 * 1024;
+
+static SCROLLBACK: OnceLock<Arc<RwLock<HashMap<i64, VecDeque<u8>>>>> = OnceLock::new();
+
+fn get_scrollback() -> &'static Arc<RwLock<HashMap<i64, VecDeque<u8>>>> {
+    SCROLLBACK.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+}
+
+fn get_scrollback_snapshot(node_id: i64) -> Vec<u8> {
+    let buffers = get_scrollback();
+    let locked = buffers.read();
+    match locked.get(&node_id) {
+        Some(buf) => {
+            let (a, b) = buf.as_slices();
+            let mut v = Vec::with_capacity(buf.len());
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            v
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Clear the scrollback buffer for a node. Called on agent kill.
+pub fn clear_scrollback(node_id: i64) {
+    let buffers = get_scrollback();
+    let mut locked = buffers.write();
+    locked.remove(&node_id);
 }
 
 #[cfg(test)]
@@ -449,5 +505,44 @@ mod tests {
     #[test]
     fn send_pty_output_no_panic_for_unknown_node() {
         send_pty_output(1111, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn scrollback_captures_output() {
+        ensure_pty_channel(5555);
+        let _rx = subscribe_pty(5555);
+        send_pty_output(5555, vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]);
+        send_pty_output(5555, vec![0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64]);
+        let snapshot = get_scrollback_snapshot(5555);
+        assert_eq!(snapshot, b"Hello World");
+    }
+
+    #[test]
+    fn scrollback_respects_max_size() {
+        ensure_pty_channel(4444);
+        let _rx = subscribe_pty(4444);
+        let chunk = vec![0x41; PTY_SCROLLBACK_MAX];
+        send_pty_output(4444, chunk);
+        send_pty_output(4444, vec![0x42, 0x43]);
+        let snapshot = get_scrollback_snapshot(4444);
+        assert_eq!(snapshot.len(), PTY_SCROLLBACK_MAX);
+        assert_eq!(snapshot[snapshot.len() - 1], 0x43);
+        assert_eq!(snapshot[snapshot.len() - 2], 0x42);
+    }
+
+    #[test]
+    fn scrollback_empty_for_unknown_node() {
+        let snapshot = get_scrollback_snapshot(3333);
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn clear_scrollback_removes_buffer() {
+        ensure_pty_channel(2222);
+        let _rx = subscribe_pty(2222);
+        send_pty_output(2222, vec![1, 2, 3]);
+        clear_scrollback(2222);
+        let snapshot = get_scrollback_snapshot(2222);
+        assert!(snapshot.is_empty());
     }
 }

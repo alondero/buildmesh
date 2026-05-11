@@ -555,6 +555,7 @@ pub fn kill_all_agents() {
     for (id, agent) in registry.processes.drain() {
         agent.child.lock().unwrap().kill().ok();
         agent.reader_alive.store(false, Ordering::SeqCst);
+        crate::http_server::clear_scrollback(id);
         tracing::info!("kill_all_agents: killed agent for session {}", id);
     }
 }
@@ -580,29 +581,29 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
     }
 }
 
-#[command]
-pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
+pub(crate) fn write_to_pty(session_id: i64, data: &[u8]) -> Result<(), String> {
     let agent = {
         let registry = PROCESS_REGISTRY.lock().unwrap();
         registry.get(&session_id)
     };
+    let Some(agent) = agent else {
+        return Err("Agent not running".to_string());
+    };
+    let mut writer = agent.writer.lock().unwrap();
+    use std::io::Write;
+    writer.write_all(data).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())
+}
 
-    if let Some(agent) = agent {
-        {
-            let mut writer = agent.writer.lock().unwrap();
-            use std::io::Write;
-            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-            writer.flush().map_err(|e| e.to_string())?;
-        }
+#[command]
+pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
+    write_to_pty(session_id, data.as_bytes())?;
 
-        if data.contains('\n') || data.contains('\r') {
-            db::update_agent_node_status(session_id, SessionStatus::Running).ok();
-            let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
-        }
-        Ok(())
-    } else {
-        Err("Agent not running".to_string())
+    if data.bytes().any(|b| b == b'\n' || b == b'\r') {
+        db::update_agent_node_status(session_id, SessionStatus::Running).ok();
+        let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
     }
+    Ok(())
 }
 
 #[command]
@@ -621,6 +622,7 @@ pub async fn kill_agent(session_id: i64) -> Result<(), String> {
         agent.child.lock().unwrap().kill().ok();
         agent.reader_alive.store(false, Ordering::SeqCst);
     }
+    crate::http_server::clear_scrollback(session_id);
     db::update_agent_node_status(session_id, SessionStatus::Idle).map_err(|e| e.to_string())?;
     Ok(())
 }
