@@ -459,19 +459,33 @@
     }
 
     function showProviderPicker(meshId) {
-      const providers = [
-        { id: 'anthropic', label: 'Anthropic (Claude)', color: '#1d7cfc', icon: 'A' },
-      ];
-
-      const optionsHtml = providers.map(p => `
-        <div class="picker-option" onclick="createNode(${meshId}, '${p.id}')">
-          <div class="picker-icon" style="background:${p.color}">${p.icon}</div>
-          <div class="picker-label">${p.label}</div>
-        </div>
-      `).join('');
-
-      document.getElementById('picker-options').innerHTML = optionsHtml;
-      document.getElementById('provider-picker').classList.remove('hidden');
+      // Fetch providers from the host so future detection work only requires a backend change
+      apiGet('/api/providers').then(providers => {
+        const optionsHtml = providers.map(p => `
+          <div class="picker-option" onclick="createNode(${meshId}, '${p.id}')">
+            <div class="picker-icon" style="background:${p.color}">${p.icon}</div>
+            <div class="picker-label">${p.label}</div>
+          </div>
+        `).join('');
+        document.getElementById('picker-options').innerHTML = optionsHtml;
+        document.getElementById('provider-picker').classList.remove('hidden');
+      }).catch(() => {
+        // Fallback to static list on error so the picker still works
+        const providers = [
+          { id: 'anthropic', label: 'Anthropic (Claude)', color: '#1d7cfc', icon: 'A' },
+          { id: 'minimax', label: 'MiniMax', color: '#6366f1', icon: 'M' },
+          { id: 'gemini', label: 'Google Gemini', color: '#10b981', icon: 'G' },
+          { id: 'opencode', label: 'OpenCode', color: '#f59e0b', icon: 'O' },
+        ];
+        const optionsHtml = providers.map(p => `
+          <div class="picker-option" onclick="createNode(${meshId}, '${p.id}')">
+            <div class="picker-icon" style="background:${p.color}">${p.icon}</div>
+            <div class="picker-label">${p.label}</div>
+          </div>
+        `).join('');
+        document.getElementById('picker-options').innerHTML = optionsHtml;
+        document.getElementById('provider-picker').classList.remove('hidden');
+      });
     }
 
     function hideProviderPicker() {
