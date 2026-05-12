@@ -62,7 +62,7 @@ export function DiffViewer({ sessionId, checkpointId, onClose }: DiffViewerProps
                         {file.hunks.map((hunk, hi) => (
                           <div
                             key={hi}
-                            className="font-mono text-xs leading-5 overflow-x-auto"
+                            className="font-mono text-xs leading-5 overflow-x-auto whitespace-pre"
                             dangerouslySetInnerHTML={{ __html: hunk.old_highlighted }}
                           />
                         ))}
@@ -78,7 +78,7 @@ export function DiffViewer({ sessionId, checkpointId, onClose }: DiffViewerProps
                         {file.hunks.map((hunk, hi) => (
                           <div
                             key={hi}
-                            className="font-mono text-xs leading-5 overflow-x-auto"
+                            className="font-mono text-xs leading-5 overflow-x-auto whitespace-pre"
                             dangerouslySetInnerHTML={{ __html: hunk.new_highlighted }}
                           />
                         ))}
@@ -113,7 +113,7 @@ export function DiffViewer({ sessionId, checkpointId, onClose }: DiffViewerProps
                               <span className="w-4 text-[#666] select-none">
                                 {line.line_type === 'add' ? '+' : line.line_type === 'remove' ? '-' : ' '}
                               </span>
-                              <span>{line.content}</span>
+                              <span className="whitespace-pre">{line.content}</span>
                             </div>
                           ))}
                         </div>
