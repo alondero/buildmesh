@@ -391,6 +391,12 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   }, []);
 
   useEffect(() => {
+    if (sessionId === activeNodeId && instRef.current) {
+      instRef.current.term.focus();
+    }
+  }, [activeNodeId, sessionId]);
+
+  useEffect(() => {
     if (!containerRef.current) return;
     const cancelled = { current: false };
     const container = containerRef.current;

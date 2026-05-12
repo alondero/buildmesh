@@ -127,15 +127,19 @@ function GridLayout({ nodes, changedFilesNodeId, onBuildRun, buildRunOpen, setBu
   setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' } | null) => void;
 }) {
   const { columns, rows } = useGridLayout(nodes.length);
+  const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
+  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
 
   return (
     <div className={`flex-1 grid gap-1.5 p-1.5 bg-bg-surface ${columns} ${rows}`}>
       {nodes.map((node) => {
         const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
+        const isActive = node.id === activeNodeId;
+        const borderClass = node.status === 'awaiting_input'
+          ? 'border-status-warning animate-border-pulse'
+          : isActive ? 'border-accent-cyan/60' : 'border-border-default hover:border-accent-cyan/50';
         return (
-          <div key={node.id} className={`flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${
-            node.status === 'awaiting_input' ? 'border-status-warning animate-border-pulse' : 'border-border-default hover:border-accent-cyan/50'
-          }`}>
+          <div key={node.id} onClick={() => { if (!isActive) setActiveNode(node.id); }} className={`flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${borderClass}`}>
             <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} onBuildRun={onBuildRun} />
             <div className="flex-1 flex flex-col overflow-hidden bg-black">
               <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
