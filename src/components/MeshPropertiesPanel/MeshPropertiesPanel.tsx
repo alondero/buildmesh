@@ -10,6 +10,7 @@ interface MeshConfig {
   model: string | null;
   effort: string | null;
   base_ref: string | null;
+  in_place: boolean;
 }
 
 const EFFORT_OPTIONS = [
@@ -24,6 +25,7 @@ const EFFORT_OPTIONS = [
 const BASEREF_OPTIONS = [
   { value: 'fresh', label: 'Fresh — start new session (origin/<default>)' },
   { value: 'head', label: 'Head — resume last session (HEAD)' },
+  { value: 'in-place', label: 'In-place — work directly in repo (no worktree)' },
 ];
 
 export function MeshPropertiesPanel() {
@@ -43,6 +45,7 @@ export function MeshPropertiesPanel() {
     baseRef: 'fresh',
     buildCommand: '',
     runCommand: '',
+    inPlace: false,
   });
   const [saving, setSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -59,9 +62,10 @@ export function MeshPropertiesPanel() {
           name: mesh?.name ?? '',
           model: config.model ?? '',
           effort: config.effort ?? '',
-          baseRef: config.base_ref === 'HEAD' ? 'head' : config.base_ref?.includes('origin') ? 'fresh' : 'fresh',
+          baseRef: config.in_place ? 'in-place' : (config.base_ref === 'HEAD' ? 'head' : config.base_ref?.includes('origin') ? 'fresh' : 'fresh'),
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
+          inPlace: config.in_place ?? false,
         });
         setLoading(false);
       })
@@ -89,10 +93,17 @@ export function MeshPropertiesPanel() {
         await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'effort', value: form.effort });
       }
 
-      if (form.baseRef === 'fresh') {
-        await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: 'fresh' });
+      // Handle baseRef and in_place: in-place is a third option, not part of baseRef
+      if (form.baseRef === 'in-place') {
+        await invoke('update_mesh_in_place', { meshId: propertiesPanelMeshId, inPlace: true });
       } else {
-        await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: 'head' });
+        // Not in-place: save in_place=false and baseRef as usual
+        await invoke('update_mesh_in_place', { meshId: propertiesPanelMeshId, inPlace: false });
+        if (form.baseRef === 'fresh') {
+          await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: 'fresh' });
+        } else {
+          await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: 'head' });
+        }
       }
 
       if (form.buildCommand !== (initialConfig?.build_command ?? '')) {

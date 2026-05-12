@@ -24,6 +24,7 @@ pub struct MeshConfig {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub base_ref: Option<String>,
+    pub in_place: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,6 +43,9 @@ fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
         model: extract_toml_value(&content, "agent", "model"),
         effort: extract_toml_value(&content, "agent", "effort"),
         base_ref: None, // baseRef lives in settings.json, not mesh.toml
+        in_place: extract_toml_value(&content, "agent", "in_place")
+            .map(|v| v == "true")
+            .unwrap_or(false),
     })
 }
 
@@ -219,4 +223,59 @@ pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<
 pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     remove_base_ref(&mesh.path)
+}
+
+/// Write in_place setting to mesh.toml [agent] section.
+/// Unlike write_mesh_toml_field, this writes bare booleans (true/false) not quoted strings.
+#[tauri::command]
+pub async fn update_mesh_in_place(mesh_id: i64, in_place: bool) -> Result<(), String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let config_path = PathBuf::from(&mesh.path).join(MESH_CONFIG_FILENAME);
+    let content = std::fs::read_to_string(&config_path)
+        .map_err(|e| format!("mesh.toml not found: {}", e))?;
+
+    let bool_str = if in_place { "true" } else { "false" };
+    let key = "in_place";
+
+    let section_pattern = "[agent]";
+    let section_start = content
+        .find(section_pattern)
+        .ok_or_else(|| "[agent] section not found in mesh.toml".to_string())?;
+
+    let section_end = content[section_start + section_pattern.len()..]
+        .find('[')
+        .map(|i| section_start + section_pattern.len() + i)
+        .unwrap_or(content.len());
+
+    let before = &content[..section_start];
+    let section_content = &content[section_start..section_end];
+    let after = &content[section_end..];
+
+    // For booleans, write without quotes: in_place = true
+    let key_pattern = format!("{} = ", key);
+    let new_line = format!("{} = {}", key, bool_str);
+
+    let updated_section = if let Some(key_start) = section_content.find(&key_pattern) {
+        // Key exists - check if it has quotes and remove them, or replace value
+        let key_line_end = section_content[key_start..]
+            .find('\n')
+            .map(|e| key_start + e)
+            .unwrap_or(section_content.len());
+        let before_key = &section_content[..key_start];
+        let after_key = &section_content[key_line_end..];
+        format!("{}{}{}", before_key, new_line, after_key)
+    } else {
+        // Key doesn't exist - insert it
+        let insert_pos = section_content.trim_end().trim_end_matches('\n').len();
+        let mut s = section_content[..insert_pos].to_string();
+        s.push_str(&format!("\n{} = {}", key, bool_str));
+        if insert_pos < section_content.len() {
+            s.push_str(&section_content[insert_pos..]);
+        }
+        s
+    };
+
+    let updated = format!("{}{}{}", before, updated_section, after);
+    std::fs::write(&config_path, updated).map_err(|e| format!("failed to write mesh.toml: {}", e))?;
+    Ok(())
 }

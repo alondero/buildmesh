@@ -14,6 +14,7 @@ pub const MESH_CONFIG_FILENAME: &str = "mesh.toml";
 // ---------------------------------------------------------------------------
 
 /// Extract a value from a TOML table: [section] key = "value"
+/// Also handles bare booleans: key = true or key = false
 pub fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String> {
     let section_pattern = format!("[{}]", section);
     let section_start = content.find(&section_pattern)?;
@@ -29,10 +30,32 @@ pub fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<Str
 
     let key_pattern = format!("{} = ", key);
     let key_start = section_content.find(&key_pattern)?;
-    let value_start = section_content[key_start + key_pattern.len()..].find('"')? + key_start + key_pattern.len() + 1;
-    let value_end = section_content[value_start..].find('"')? + value_start;
 
-    Some(section_content[value_start..value_end].to_string())
+    // Get the rest of the line after "key = "
+    let rest = &section_content[key_start + key_pattern.len()..];
+
+    // Try quoted string first
+    if let Some(quote_start) = rest.find('"') {
+        let after_quote = &rest[quote_start + 1..];
+        if let Some(quote_end) = after_quote.find('"') {
+            return Some(after_quote[..quote_end].to_string());
+        }
+    }
+
+    // Try bare boolean or identifier (true, false, or unquoted string)
+    let trimmed = rest.trim_start();
+    if trimmed.starts_with("true") || trimmed.starts_with("false") {
+        let bool_str = if trimmed.starts_with("true") { "true" } else { "false" };
+        return Some(bool_str.to_string());
+    }
+
+    // Try unquoted value until whitespace or end
+    let end = trimmed.find(|c: char| c.is_ascii_whitespace()).unwrap_or(trimmed.len());
+    if end > 0 {
+        return Some(trimmed[..end].to_string());
+    }
+
+    None
 }
 
 /// Represents the parsed mesh.toml build/run configuration
@@ -42,6 +65,8 @@ pub struct BuildRunConfig {
     pub run_command: String,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// If true, agents work directly in the repo root instead of in a worktree
+    pub in_place: bool,
 }
 
 /// Parse [build]command, [run]command, and [agent]model/effort from a mesh.toml file
@@ -56,12 +81,16 @@ fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, Stri
         .ok_or_else(|| "run command not configured in mesh.toml".to_string())?;
     let model = extract_toml_value(&content, "agent", "model");
     let effort = extract_toml_value(&content, "agent", "effort");
+    let in_place = extract_toml_value(&content, "agent", "in_place")
+        .map(|v| v == "true")
+        .unwrap_or(false);
 
     Ok(BuildRunConfig {
         build_command,
         run_command,
         model,
         effort,
+        in_place,
     })
 }
 
@@ -76,6 +105,9 @@ pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildR
         run_command: extract_toml_value(&content, "run", "command").unwrap_or_default(),
         model: extract_toml_value(&content, "agent", "model"),
         effort: extract_toml_value(&content, "agent", "effort"),
+        in_place: extract_toml_value(&content, "agent", "in_place")
+            .map(|v| v == "true")
+            .unwrap_or(false),
     })
 }
 
@@ -158,16 +190,28 @@ pub async fn build_run(
     // 2. Parse mesh.toml
     let config = parse_mesh_config(&std::path::PathBuf::from(&node.path))?;
 
-    // 3. Resolve worktree path via centralized env module
-    let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
-    validate_worktree_exists(&resolved, node.worktree_name.as_deref())?;
+    // 3. If in_place mode, work directly in repo root
+    let in_place = config.in_place;
+    let spawn_worktree_name = if in_place {
+        None
+    } else {
+        node.worktree_name.as_deref()
+    };
 
-    // Sanitize .git file to ensure proper worktree isolation across environments
-    if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
-        tracing::warn!("build_run: failed to sanitize worktree .git file: {}", e);
+    // 4. Resolve worktree path via centralized env module
+    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
+
+    // Only validate worktree exists if not in_place mode
+    if !in_place {
+        validate_worktree_exists(&resolved, spawn_worktree_name)?;
+
+        // Sanitize .git file to ensure proper worktree isolation across environments
+        if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+            tracing::warn!("build_run: failed to sanitize worktree .git file: {}", e);
+        }
     }
 
-    // 4. Get the command to run
+    // 5. Get the command to run
     let command = match mode {
         BuildRunMode::Build => &config.build_command,
         BuildRunMode::Run => &config.run_command,
@@ -310,4 +354,58 @@ pub async fn ensure_mesh_config(mesh_id: i64) -> Result<String, String> {
     }
 
     Ok(config_path.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test: BuildRunConfig should have in_place field
+    #[test]
+    fn build_run_config_has_in_place_field() {
+        let config = BuildRunConfig {
+            build_command: "npm run build".to_string(),
+            run_command: "npm run dev".to_string(),
+            model: None,
+            effort: None,
+            in_place: true,
+        };
+        assert!(config.in_place);
+    }
+
+    /// Test: extract_toml_value can extract in_place boolean
+    #[test]
+    fn extract_toml_value_extracts_in_place_bool() {
+        let content = r#"
+[agent]
+in_place = true
+"#;
+        let value = extract_toml_value(content, "agent", "in_place");
+        assert_eq!(value, Some("true".to_string()));
+    }
+
+    /// Test: extract_toml_value returns None for missing key
+    #[test]
+    fn extract_toml_value_returns_none_for_missing_key() {
+        let content = r#"
+[build]
+command = "npm run build"
+"#;
+        let value = extract_toml_value(content, "build", "in_place");
+        assert_eq!(value, None);
+    }
+
+    /// Test: extract_toml_value handles section with multiple keys
+    #[test]
+    fn extract_toml_value_handles_multiple_keys() {
+        let content = r#"
+[agent]
+model = "opus-4"
+effort = "medium"
+in_place = true
+"#;
+        assert_eq!(extract_toml_value(content, "agent", "model"), Some("opus-4".to_string()));
+        assert_eq!(extract_toml_value(content, "agent", "effort"), Some("medium".to_string()));
+        assert_eq!(extract_toml_value(content, "agent", "in_place"), Some("true".to_string()));
+    }
 }

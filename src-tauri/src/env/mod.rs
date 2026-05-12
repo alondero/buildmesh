@@ -422,3 +422,68 @@ pub fn claude_dir() -> PathBuf {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
+    /// (i.e., no .claude/worktrees/ subdirectory)
+    #[test]
+    fn resolve_agent_path_with_none_worktree_returns_base_path() {
+        let base = "/home/user/my-repo";
+        let resolved = resolve_agent_path(base, None);
+
+        // Should NOT contain worktrees subdirectory
+        assert!(!resolved.host_path.contains("worktrees"),
+            "Expected base path without worktree subdir, got: {}", resolved.host_path);
+        assert!(!resolved.spawn_path.contains("worktrees"),
+            "Expected base path without worktree subdir, got: {}", resolved.spawn_path);
+    }
+
+    /// Test: when worktree_name is Some("foo"), resolve_agent_path returns
+    /// {base}/.claude/worktrees/foo
+    #[test]
+    fn resolve_agent_path_with_some_worktree_returns_worktree_path() {
+        let base = "/home/user/my-repo";
+        let resolved = resolve_agent_path(base, Some("foo"));
+
+        // Path should contain worktrees subdirectory and the specific worktree name
+        assert!(resolved.host_path.contains("worktrees") && resolved.host_path.contains("foo"),
+            "Expected worktree subdir, got: {}", resolved.host_path);
+        assert!(resolved.spawn_path.contains("worktrees") && resolved.spawn_path.contains("foo"),
+            "Expected worktree subdir, got: {}", resolved.spawn_path);
+    }
+
+    /// Test: when worktree_name is Some(""), it's treated as no worktree
+    #[test]
+    fn resolve_agent_path_with_empty_worktree_returns_base_path() {
+        let base = "/home/user/my-repo";
+        let resolved = resolve_agent_path(base, Some(""));
+
+        assert!(!resolved.host_path.contains(".claude/worktrees"),
+            "Expected base path without worktree subdir, got: {}", resolved.host_path);
+    }
+
+    /// Test: resolve_agent_path works with Windows paths too
+    #[test]
+    fn resolve_agent_path_with_windows_path() {
+        let base = "C:\\Users\\user\\my-repo";
+        let resolved = resolve_agent_path(base, None);
+
+        // Should return a valid path without crashing
+        assert!(!resolved.host_path.is_empty());
+        assert!(!resolved.spawn_path.is_empty());
+    }
+
+    /// Test: resolve_agent_path works with WSL paths
+    #[test]
+    fn resolve_agent_path_with_wsl_path() {
+        let base = "/mnt/c/Users/user/my-repo";
+        let resolved = resolve_agent_path(base, None);
+
+        // Should return a valid path without crashing
+        assert!(!resolved.host_path.is_empty());
+        assert!(!resolved.spawn_path.is_empty());
+    }
+}

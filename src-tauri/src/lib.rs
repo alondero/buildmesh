@@ -149,6 +149,7 @@ pub fn run() {
             commands::mesh_config::update_mesh_field,
             commands::mesh_config::update_worktree_base_ref,
             commands::mesh_config::remove_worktree_base_ref,
+            commands::mesh_config::update_mesh_in_place,
             commands::checkpoint::list_checkpoints,
             commands::checkpoint::revert_to_checkpoint,
             commands::checkpoint::diff_checkpoints,
