@@ -337,6 +337,22 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
                 Ok(nodes) => serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string()),
                 Err(_) => "[]".to_string(),
             };
+        } else if path_without_query == "/api/providers" {
+            // Static list for now — future work will detect installed binaries.
+            #[derive(serde::Serialize)]
+            struct ProviderInfo {
+                id: &'static str,
+                label: &'static str,
+                color: &'static str,
+                icon: &'static str,
+            }
+            let providers = [
+                ProviderInfo { id: "anthropic", label: "Anthropic (Claude)", color: "#1d7cfc", icon: "A" },
+                ProviderInfo { id: "minimax", label: "MiniMax", color: "#6366f1", icon: "M" },
+                ProviderInfo { id: "gemini", label: "Google Gemini", color: "#10b981", icon: "G" },
+                ProviderInfo { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O" },
+            ];
+            body = serde_json::to_string(&providers).unwrap_or_else(|_| "[]".to_string());
         } else if path_without_query == "/api/meshes" {
             body = match db::list_meshes() {
                 Ok(meshes) => serde_json::to_string(&meshes).unwrap_or_else(|_| "[]".to_string()),
