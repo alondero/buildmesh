@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getGitStatus, diffFileAgainstHead, type GitStatus, type DiffResult } from '../../lib/tauri';
 import { GIT_CHANGED } from '../../lib/events';
@@ -6,14 +6,52 @@ import { GIT_CHANGED } from '../../lib/events';
 interface ChangedFilesPanelProps {
   projectPath: string;
   isOpen: boolean;
+  width: number;
+  onWidthChange: (width: number) => void;
   onFileSelect: (file: GitStatus, diff: DiffResult) => void;
+  onClose: () => void;
 }
 
-export function ChangedFilesPanel({ projectPath, isOpen, onFileSelect }: ChangedFilesPanelProps) {
+export function ChangedFilesPanel({ projectPath, isOpen, width, onWidthChange, onFileSelect, onClose }: ChangedFilesPanelProps) {
   const [files, setFiles] = useState<GitStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState<string | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
+  const resizingRef = useRef(false);
+  const startXRef = useRef(0);
+  const startWidthRef = useRef(0);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    startXRef.current = e.clientX;
+    startWidthRef.current = width;
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!resizingRef.current) return;
+      const delta = e.clientX - startXRef.current;
+      const newWidth = Math.max(200, Math.min(480, startWidthRef.current - delta));
+      onWidthChange(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      if (resizingRef.current) {
+        resizingRef.current = false;
+        setIsResizing(false);
+      }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   const fetchStatus = () => {
     if (!isOpen || !projectPath) return;
@@ -80,7 +118,26 @@ export function ChangedFilesPanel({ projectPath, isOpen, onFileSelect }: Changed
   if (!isOpen) return null;
 
   return (
-    <div className="w-[280px] bg-bg-surface border-l border-border-subtle flex flex-col h-full overflow-hidden">
+    <div className="relative flex h-full" style={{ width }}>
+      {/* Resize handle */}
+      <div
+        onMouseDown={handleMouseDown}
+        className={`absolute top-0 left-0 w-1 h-full cursor-col-resize hover:bg-accent-cyan/30 ${isResizing ? 'bg-accent-cyan/50' : 'bg-transparent'} transition-colors z-10`}
+      />
+
+      {/* Close button */}
+      <button
+        onClick={onClose}
+        className="absolute top-2 right-2 text-text-muted hover:text-text-secondary transition-colors z-10"
+        title="Close"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
+
+      <div className="w-full bg-bg-surface border-l border-border-subtle flex flex-col h-full overflow-hidden">
       {/* Header with stats */}
       <div className="px-3 py-2.5 border-b border-border-subtle">
         <div className="flex items-center gap-2 mb-1.5">
@@ -130,6 +187,7 @@ export function ChangedFilesPanel({ projectPath, isOpen, onFileSelect }: Changed
           </div>
         )}
       </div>
+    </div>
     </div>
   );
 }

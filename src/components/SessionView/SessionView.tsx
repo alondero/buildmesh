@@ -25,6 +25,8 @@ export function SessionView() {
 
   const changedFilesOpen = useUIStore(state => state.changedFilesOpen);
   const changedFilesNodeId = useUIStore(state => state.changedFilesNodeId);
+  const changedFilesWidth = useUIStore(state => state.changedFilesWidth);
+  const setChangedFilesWidth = useUIStore(state => state.setChangedFilesWidth);
   const [selectedDiff, setSelectedDiff] = useState<{ file: GitStatus; diff: DiffResult } | null>(null);
   const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' } | null>(null);
 
@@ -53,7 +55,9 @@ export function SessionView() {
   }, [activeNode?.id]);
 
   useEffect(() => {
-    closeChangedFiles();
+    if (selectedMeshId !== null) {
+      closeChangedFiles();
+    }
   }, [selectedMeshId, closeChangedFiles]);
 
   useEffect(() => {
@@ -104,7 +108,10 @@ export function SessionView() {
         <ChangedFilesPanel
           projectPath={nodePath}
           isOpen={changedFilesOpen}
+          width={changedFilesWidth}
+          onWidthChange={setChangedFilesWidth}
           onFileSelect={(file, diff) => setSelectedDiff({ file, diff })}
+          onClose={closeChangedFiles}
         />
       </div>
 
