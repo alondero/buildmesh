@@ -42,7 +42,7 @@ export function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: GridNod
         </span>
         {summary && (
           <span
-            onClick={() => toggleChangedFiles(node.id)}
+            onClick={(e) => { e.stopPropagation(); toggleChangedFiles(node.id); }}
             className={`text-[10px] font-mono cursor-pointer hover:text-accent-cyan ${isPanelNode ? 'text-accent-cyan' : 'text-text-muted'}`}
             title="Click to see changes"
           >
