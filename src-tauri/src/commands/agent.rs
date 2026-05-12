@@ -40,6 +40,13 @@ impl ProcessRegistry {
         writer.flush().map_err(|e| e.to_string())
     }
 
+    pub(crate) fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
+        let master = agent.master.lock().unwrap();
+        master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .map_err(|e| e.to_string())
+    }
+
     fn insert(&mut self, session_id: i64, agent: AgentProcess) {
         self.processes.insert(session_id, Arc::new(agent));
     }
@@ -594,23 +601,8 @@ pub fn kill_all_agents() {
 
 #[command]
 pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), String> {
-    let agent = {
-        let registry = PROCESS_REGISTRY.lock().unwrap();
-        registry.get(&session_id)
-    };
-
-    if let Some(agent) = agent {
-        let master = agent.master.lock().unwrap();
-        master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        }).map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("Agent not running".to_string())
-    }
+    let registry = PROCESS_REGISTRY.lock().unwrap();
+    registry.resize_pty(session_id, cols, rows)
 }
 
 #[command]
