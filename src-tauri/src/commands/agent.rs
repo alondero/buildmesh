@@ -690,9 +690,10 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
     drop(registry);
 
     let session_count = db::list_agent_nodes().map(|s| s.len()).unwrap_or(0);
-    let renamed_count = crate::session_naming::renamed_sessions_count();
+    let renamed_count = 0; // RENAMED_SESSIONS removed
+    let turn_counter_count = 0; // TURN_COUNTERS removed
+
     let buffers_size = crate::session_naming::buffers_size_bytes();
-    let turn_counter_count = crate::session_naming::turn_counter_count();
 
     CrashSnapshot {
         process_registry_ids: process_ids,

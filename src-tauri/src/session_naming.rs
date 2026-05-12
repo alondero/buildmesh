@@ -1,16 +1,16 @@
 //! Unified session naming module.
 //!
-//! Lifecycle-oriented interface for agent node naming:
-//! - `on_spawn()` — generates an initial random name
-//! - `on_output(node_id, data)` — buffers output for future summarization
-//! - `on_turn(node_id, app)` — increments turn counter, may trigger LLM rename
-//! - `is_default_name(name)` — checks if a name is still the random default
-//! - `cleanup(node_id)` — clears all state for a deleted/archived node
+//! Simplified single-map state machine:
+//! - `SESSION_BUFFERS` is the only state — buffer exists = hasn't been renamed yet
+//! - `on_spawn()` generates an initial random name
+//! - `on_output(node_id, data)` buffers PTY output
+//! - `on_turn(node_id, app)` triggers LLM rename when buffer is sufficient
+//! - `cleanup(node_id)` removes buffer entry
 //!
-//! Also exposes diagnostic helpers for crash snapshots.
+//! The buffer presence IS the renamed state. No separate guard map needed.
 
 use rand::seq::IndexedRandom;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
@@ -55,17 +55,11 @@ static NOUNS: &[&str] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Global mutable state (required for PTY reader thread access)
+// Single map — buffer exists = hasn't been renamed yet
 // ---------------------------------------------------------------------------
 
 static SESSION_BUFFERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-static TURN_COUNTERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, u32>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-static RENAMED_SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashSet<i64>>>> =
-    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
 
 static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-z][a-z0-9-]{2,50}$").unwrap());
@@ -77,7 +71,6 @@ static ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> =
 
 const MAX_BUFFER_CHARS: usize = 4000;
 const SUMMARIZE_BUFFER_CHARS: usize = 3000;
-const RENAME_AT_TURN: u32 = 1;
 
 // ---------------------------------------------------------------------------
 // Public lifecycle API
@@ -93,12 +86,8 @@ pub fn on_spawn() -> String {
     format!("{}-{}-{}", adj1, adj2, noun)
 }
 
-/// Buffer PTY output for a node. Used to build context for LLM summarization.
-/// No-op if the node has already been renamed.
+/// Buffer PTY output for a node. Accumulates in SESSION_BUFFERS until rename.
 pub fn on_output(node_id: i64, data: &str) {
-    if RENAMED_SESSIONS.lock().unwrap().contains(&node_id) {
-        return;
-    }
     let mut buffers = SESSION_BUFFERS.lock().unwrap();
     let buf = buffers.entry(node_id).or_default();
     buf.push_str(data);
@@ -111,58 +100,45 @@ pub fn on_output(node_id: i64, data: &str) {
     }
 }
 
-/// Record a completed turn for a node. Increments the turn counter and, when
-/// the threshold is reached, triggers an async LLM-based rename.
+/// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
 pub fn on_turn(node_id: i64, app: AppHandle) {
-    if RENAMED_SESSIONS.lock().unwrap().contains(&node_id) {
-        return;
-    }
-
-    // Check DB: if node already has a non-default name, it was renamed in a previous run
+    // Check DB: if node already has a non-default name, skip entirely.
+    // This handles nodes renamed in a previous app run (cross-process detection).
     if let Ok(node) = crate::db::get_agent_node_by_id(node_id) {
         if !is_default_name(&node.name) {
-            RENAMED_SESSIONS.lock().unwrap().insert(node_id);
+            SESSION_BUFFERS.lock().unwrap().remove(&node_id);
             return;
         }
     }
 
-    let should_rename = {
-        let mut counters = TURN_COUNTERS.lock().unwrap();
-        let count = counters.entry(node_id).or_insert(0);
-        *count += 1;
-        tracing::info!("session_naming: on_turn node={} turn={}", node_id, *count);
-        *count == RENAME_AT_TURN
+    // Check buffer existence and sufficiency BEFORE removing (avoid unnecessary I/O).
+    let buffer_len = {
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        buffers.get(&node_id).map(|b| b.len()).unwrap_or(0)
     };
 
-    if !should_rename {
-        return;
+    if buffer_len == 0 {
+        return; // No buffer = already renamed or no output received yet
     }
 
-    tracing::info!("session_naming: triggering rename for node {}", node_id);
+    if buffer_len < SUMMARIZE_BUFFER_CHARS / 2 {
+        return; // Not enough content for meaningful rename — keep buffering
+    }
 
-    RENAMED_SESSIONS.lock().unwrap().insert(node_id);
-
+    // Capture and remove buffer synchronously — the async task owns the content.
     let buffer_snapshot = {
         let mut buffers = SESSION_BUFFERS.lock().unwrap();
-        buffers
-            .remove(&node_id)
-            .map(|b| {
-                let target = b.len().min(SUMMARIZE_BUFFER_CHARS);
-                let mut end = target;
-                while end > 0 && !b.is_char_boundary(end) {
-                    end -= 1;
-                }
-                b[..end].to_string()
-            })
-            .unwrap_or_default()
+        buffers.remove(&node_id)
     };
 
-    if buffer_snapshot.is_empty() {
+    let Some(buffer) = buffer_snapshot else {
         return;
-    }
+    };
+
+    tracing::info!("session_naming: triggering rename for node {} ({} chars)", node_id, buffer.len());
 
     tauri::async_runtime::spawn(async move {
-        match summarize_and_rename(node_id, &buffer_snapshot).await {
+        match summarize_and_rename(node_id, &buffer).await {
             Ok(slug) => {
                 let _ = app.emit(
                     "session-renamed",
@@ -191,37 +167,23 @@ pub fn is_default_name(name: &str) -> bool {
         && NOUNS.contains(&parts[2])
 }
 
-/// Clear buffers and turn counter for a node, preserving the renamed guard.
-/// Call this when a node is killed/restarted so stale output doesn't bleed
-/// into the next run, but already-renamed nodes stay guarded.
+/// Clear the buffer for a node. Called on kill so the node can resume fresh.
 pub fn reset_buffers(node_id: i64) {
     SESSION_BUFFERS.lock().unwrap().remove(&node_id);
-    TURN_COUNTERS.lock().unwrap().remove(&node_id);
 }
 
-/// Clear all naming state for a node (buffers, counters, renamed guard).
-/// Call this when a node is deleted or archived.
+/// Clear the buffer for a node. Called on delete/archive.
 pub fn cleanup(node_id: i64) {
     SESSION_BUFFERS.lock().unwrap().remove(&node_id);
-    TURN_COUNTERS.lock().unwrap().remove(&node_id);
-    RENAMED_SESSIONS.lock().unwrap().remove(&node_id);
 }
 
 // ---------------------------------------------------------------------------
-// Diagnostic helpers (used by debug_crash_snapshot)
+// Diagnostic helpers
 // ---------------------------------------------------------------------------
-
-pub fn renamed_sessions_count() -> usize {
-    RENAMED_SESSIONS.lock().unwrap().len()
-}
 
 pub fn buffers_size_bytes() -> usize {
     let buffers = SESSION_BUFFERS.lock().unwrap();
     buffers.values().map(|b| b.len()).sum()
-}
-
-pub fn turn_counter_count() -> usize {
-    TURN_COUNTERS.lock().unwrap().len()
 }
 
 // ---------------------------------------------------------------------------
@@ -341,7 +303,6 @@ mod tests {
 
     #[test]
     fn is_default_name_positive() {
-        // A name composed of valid adj-adj-noun should return true
         assert!(is_default_name("bold-keen-brook"));
         assert!(is_default_name("calm-deep-oak"));
     }
@@ -392,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_buffers_cleared_on_cleanup() {
+    fn stale_buffer_cleared_on_cleanup() {
         let stale_text = "old context from a previous archived session";
         on_output(5, stale_text);
         {
@@ -410,109 +371,9 @@ mod tests {
     }
 
     #[test]
-    fn turn_counter_reset_on_cleanup() {
-        {
-            let mut counters = TURN_COUNTERS.lock().unwrap();
-            counters.insert(5, 1);
-        }
-        {
-            let mut buffers = SESSION_BUFFERS.lock().unwrap();
-            buffers.insert(5, "fresh context".to_string());
-        }
-
-        cleanup(5);
-
-        let counters = TURN_COUNTERS.lock().unwrap();
-        assert!(
-            counters.get(&5).is_none(),
-            "TURN_COUNTERS[5] should be removed by cleanup"
-        );
-    }
-
-    #[test]
-    fn renamed_sessions_cleared_on_cleanup() {
-        {
-            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
-            renamed.insert(5);
-        }
-        {
-            let mut buffers = SESSION_BUFFERS.lock().unwrap();
-            buffers.insert(5, "fresh context for new node".to_string());
-        }
-
-        cleanup(5);
-
-        let renamed = RENAMED_SESSIONS.lock().unwrap();
-        assert!(
-            !renamed.contains(&5),
-            "RENAMED_SESSIONS[5] should be cleared by cleanup"
-        );
-    }
-
-    #[test]
-    fn cleanup_resets_all_state() {
-        on_output(7, "some output text for session 7");
-        {
-            let mut counters = TURN_COUNTERS.lock().unwrap();
-            counters.insert(7, 2);
-        }
-        {
-            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
-            renamed.insert(7);
-        }
-        // verify preconditions
-        {
-            let buffers = SESSION_BUFFERS.lock().unwrap();
-            assert!(buffers.get(&7).is_some());
-        }
-        {
-            let counters = TURN_COUNTERS.lock().unwrap();
-            assert_eq!(counters.get(&7), Some(&2));
-        }
-        {
-            let renamed = RENAMED_SESSIONS.lock().unwrap();
-            assert!(renamed.contains(&7));
-        }
-
-        cleanup(7);
-
-        {
-            let buffers = SESSION_BUFFERS.lock().unwrap();
-            assert!(
-                buffers.get(&7).is_none(),
-                "SESSION_BUFFERS[7] should be removed by cleanup"
-            );
-        }
-        {
-            let counters = TURN_COUNTERS.lock().unwrap();
-            assert!(
-                counters.get(&7).is_none(),
-                "TURN_COUNTERS[7] should be removed by cleanup"
-            );
-        }
-        {
-            let renamed = RENAMED_SESSIONS.lock().unwrap();
-            assert!(
-                !renamed.contains(&7),
-                "RENAMED_SESSIONS[7] should be removed by cleanup"
-            );
-        }
-    }
-
-    #[test]
     fn cleanup_only_clears_target_session() {
         on_output(5, "session 5 output");
         on_output(99, "session 99 output");
-        {
-            let mut counters = TURN_COUNTERS.lock().unwrap();
-            counters.insert(5, 1);
-            counters.insert(99, 2);
-        }
-        {
-            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
-            renamed.insert(5);
-            renamed.insert(99);
-        }
 
         cleanup(5);
 
@@ -521,77 +382,17 @@ mod tests {
             assert!(buffers.get(&5).is_none());
             assert!(buffers.get(&99).is_some(), "session 99 buffer should survive");
         }
-        {
-            let counters = TURN_COUNTERS.lock().unwrap();
-            assert!(counters.get(&5).is_none());
-            assert_eq!(counters.get(&99), Some(&2), "session 99 counter should survive");
-        }
-        {
-            let renamed = RENAMED_SESSIONS.lock().unwrap();
-            assert!(!renamed.contains(&5));
-            assert!(renamed.contains(&99), "session 99 renamed guard should survive");
-        }
     }
 
     #[test]
     fn cleanup_is_idempotent() {
         on_output(8, "some output");
-        {
-            let mut counters = TURN_COUNTERS.lock().unwrap();
-            counters.insert(8, 1);
-        }
-        {
-            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
-            renamed.insert(8);
-        }
 
         cleanup(8);
         cleanup(8); // second call must not panic
 
         let buffers = SESSION_BUFFERS.lock().unwrap();
-        let counters = TURN_COUNTERS.lock().unwrap();
-        let renamed = RENAMED_SESSIONS.lock().unwrap();
         assert!(buffers.get(&8).is_none());
-        assert!(counters.get(&8).is_none());
-        assert!(!renamed.contains(&8));
-    }
-
-    #[test]
-    fn on_output_drops_data_after_renamed_gate() {
-        {
-            let mut renamed = RENAMED_SESSIONS.lock().unwrap();
-            renamed.insert(42);
-        }
-
-        on_output(42, "this should be dropped");
-        on_output(42, "and this too");
-
-        let buffers = SESSION_BUFFERS.lock().unwrap();
-        assert!(
-            buffers.get(&42).is_none(),
-            "on_output must drop data for sessions in RENAMED_SESSIONS"
-        );
-    }
-
-    #[test]
-    fn turn_counter_accumulates_from_zero_to_rename() {
-        let node_id = 55;
-
-        {
-            let mut counters = TURN_COUNTERS.lock().unwrap();
-            counters.insert(node_id, 1);
-        }
-        on_output(node_id, "turn 2 output");
-
-        {
-            let mut counters = TURN_COUNTERS.lock().unwrap();
-            let count = counters.entry(node_id).or_insert(0);
-            *count += 1;
-            assert_eq!(
-                *count, 2,
-                "second turn (count=2) should trigger rename"
-            );
-        }
     }
 
     #[test]
@@ -607,5 +408,31 @@ mod tests {
 
         assert!(buf.len() <= MAX_BUFFER_CHARS);
         assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn on_output_always_buffers_for_default_name_nodes() {
+        // on_output should buffer unconditionally — no RENAMED_SESSIONS guard
+        on_output(42, "first output");
+        on_output(42, "second output");
+
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        assert_eq!(
+            buffers.get(&42).unwrap().as_str(),
+            "first outputsecond output",
+            "on_output should accumulate without gate"
+        );
+    }
+
+    #[test]
+    fn reset_buffers_removes_only_target() {
+        on_output(5, "session 5 output");
+        on_output(99, "session 99 output");
+
+        reset_buffers(5);
+
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        assert!(buffers.get(&5).is_none());
+        assert!(buffers.get(&99).is_some());
     }
 }
