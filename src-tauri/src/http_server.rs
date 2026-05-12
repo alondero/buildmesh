@@ -35,17 +35,6 @@ const MOBILE_APP_HTML: &str = include_str!("mobile_app.html");
 
 // --- Server State ---
 
-struct HttpServerState {
-    app: tauri::AppHandle,
-    _broadcast_tx: broadcast::Sender<Vec<u8>>,
-}
-
-static SERVER_STATE: OnceLock<Arc<HttpServerState>> = OnceLock::new();
-
-fn get_server_state() -> Arc<HttpServerState> {
-    SERVER_STATE.get().cloned().expect("HTTP server not started")
-}
-
 // --- Snapshot Request/Response ---
 
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -94,14 +83,7 @@ async fn request_terminal_snapshot(app: &tauri::AppHandle, node_id: i64) -> Opti
 
 /// Start the HTTP server on the given port.
 pub fn start_http_server(port: u16, app: tauri::AppHandle) {
-    let _ = APP_HANDLE.set(app.clone());
-    let (broadcast_tx, _) = broadcast::channel(1024);
-    let state = Arc::new(HttpServerState {
-        app,
-        _broadcast_tx: broadcast_tx,
-    });
-    let _ = SERVER_STATE.set(state.clone());
-    drop(state);
+    let _ = APP_HANDLE.set(app);
 
     tauri::async_runtime::spawn(async move {
         let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -298,14 +280,22 @@ async fn handle_ws_connection(
 ) {
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe before reading history to avoid missing output in the gap
+    // Subscribe before sending initial state to avoid missing output in the gap
     let mut rx = subscribe_pty(node_id);
 
-    // Replay history buffer so the mobile client sees previous terminal output
-    let history = get_pty_history(node_id);
-    if !history.is_empty() {
-        let history_str = String::from_utf8_lossy(&history).into_owned();
-        if write.send(tungstenite::Message::Text(history_str.into())).await.is_err() {
+    // Prefer a clean terminal snapshot over raw history replay, which contains
+    // stale cursor-positioning sequences from TUI redraws.
+    let history_fallback = || {
+        let h = get_pty_history(node_id);
+        String::from_utf8_lossy(&h).into_owned()
+    };
+    let initial_data = match APP_HANDLE.get() {
+        Some(app) => request_terminal_snapshot(app, node_id).await
+            .unwrap_or_else(history_fallback),
+        None => history_fallback(),
+    };
+    if !initial_data.is_empty() {
+        if write.send(tungstenite::Message::Text(initial_data.into())).await.is_err() {
             return;
         }
     }
@@ -322,7 +312,11 @@ async fn handle_ws_connection(
     while let Some(msg) = read.next().await {
         match msg {
             Ok(tungstenite::Message::Text(text)) => {
-                forward_mobile_input(node_id, &text);
+                if let Some(resize) = parse_resize_message(&text) {
+                    handle_mobile_resize(node_id, resize.0, resize.1);
+                } else {
+                    forward_mobile_input(node_id, &text);
+                }
             }
             Ok(tungstenite::Message::Binary(data)) => {
                 let text = String::from_utf8_lossy(&data);
@@ -350,6 +344,26 @@ fn forward_mobile_input(node_id: i64, text: &str) {
         if let Some(app) = APP_HANDLE.get() {
             let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": node_id }));
         }
+    }
+}
+
+fn parse_resize_message(text: &str) -> Option<(u16, u16)> {
+    if !text.starts_with('{') {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    if v.get("type")?.as_str()? != "resize" {
+        return None;
+    }
+    let cols = v.get("cols")?.as_u64()? as u16;
+    let rows = v.get("rows")?.as_u64()? as u16;
+    Some((cols, rows))
+}
+
+fn handle_mobile_resize(node_id: i64, cols: u16, rows: u16) {
+    let registry = PROCESS_REGISTRY.lock().unwrap();
+    if let Err(e) = registry.resize_pty(node_id, cols, rows) {
+        tracing::warn!("Mobile resize failed for node {}: {}", node_id, e);
     }
 }
 

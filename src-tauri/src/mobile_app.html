@@ -240,6 +240,7 @@
     let reconnectAttempts = 0;
     let reconnectTimer = null;
     let offlineCheckTimer = null;
+    let resizeHandler = null;
     const MAX_RECONNECT = 5;
     const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 
@@ -397,19 +398,24 @@
       document.getElementById('header-title').textContent = nodeName;
       document.getElementById('status-dot').className = 'status-dot connected';
 
-      initTerminal();
-      connectWebSocket(nodeId);
+      initTerminal(nodeId);
     }
 
-    function initTerminal() {
+    function initTerminal(nodeId) {
       const container = document.getElementById('terminal-container');
       container.innerHTML = '<div class="xterm" id="xterm"></div>';
-      // Dynamically load xterm.js from CDN
+      // Dynamically load xterm.js + FitAddon from CDN
       if (!document.getElementById('xterm-js')) {
         const script = document.createElement('script');
         script.id = 'xterm-js';
         script.src = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js';
-        script.onload = initXterm;
+        script.onload = () => {
+          const fitScript = document.createElement('script');
+          fitScript.id = 'xterm-fit-js';
+          fitScript.src = 'https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js';
+          fitScript.onload = () => { initXterm(); connectWebSocket(nodeId); };
+          document.head.appendChild(fitScript);
+        };
         document.head.appendChild(script);
 
         const style = document.createElement('link');
@@ -418,6 +424,7 @@
         document.head.appendChild(style);
       } else {
         initXterm();
+        connectWebSocket(nodeId);
       }
     }
 
@@ -438,7 +445,42 @@
         },
         scrollback: 1000,
       });
+
+      // Load FitAddon to match terminal dimensions to viewport
+      if (window.FitAddon) {
+        window.fitAddon = new window.FitAddon.FitAddon();
+        window.term.loadAddon(window.fitAddon);
+      }
+
       window.term.open(document.getElementById('xterm'));
+
+      // Fit terminal to container — onResize will send dimensions once WS connects
+      if (window.fitAddon) {
+        window.fitAddon.fit();
+      }
+
+      // Forward keystrokes to the PTY via WebSocket
+      window.term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(data);
+        }
+      });
+
+      // Re-fit on window resize and notify PTY of new dimensions
+      window.term.onResize(({ cols, rows }) => {
+        sendResize(cols, rows);
+      });
+      if (resizeHandler) {
+        window.removeEventListener('resize', resizeHandler);
+      }
+      resizeHandler = () => { if (window.fitAddon) window.fitAddon.fit(); };
+      window.addEventListener('resize', resizeHandler);
+    }
+
+    function sendResize(cols, rows) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'resize', cols, rows }));
+      }
     }
 
     function connectWebSocket(nodeId) {
@@ -458,6 +500,7 @@
         reconnectAttempts = 0;
         document.getElementById('reconnect-overlay').classList.add('hidden');
         document.getElementById('status-dot').className = 'status-dot connected';
+        if (window.term) sendResize(window.term.cols, window.term.rows);
       };
 
       ws.onmessage = async (event) => {
@@ -543,6 +586,10 @@
       currentNodeId = null;
       currentNodeName = null;
       if (ws) { ws.close(); ws = null; }
+      if (resizeHandler) {
+        window.removeEventListener('resize', resizeHandler);
+        resizeHandler = null;
+      }
       document.getElementById('offline-overlay').classList.add('hidden');
       showNodeList();
     }
