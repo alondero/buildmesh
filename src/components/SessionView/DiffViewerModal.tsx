@@ -66,7 +66,7 @@ export function DiffViewerModal({ file, diff, onClose }: DiffViewerModalProps) {
                             <span className="w-4 text-[#666] select-none">
                               {line.line_type === 'add' ? '+' : line.line_type === 'remove' ? '-' : ' '}
                             </span>
-                            <span>{line.content}</span>
+                            <span className="whitespace-pre">{line.content}</span>
                           </div>
                         ))}
                       </div>
