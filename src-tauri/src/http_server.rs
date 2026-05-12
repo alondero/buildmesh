@@ -220,6 +220,106 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         return;
     }
 
+    // Create node: POST /api/nodes/create?token=xxx
+    if parts[0] == "POST" && path_without_query == "/api/nodes/create" {
+        if !validate_token(token.clone()) {
+            let error = b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n";
+            let mut stream = lines.into_inner();
+            let _ = stream.write_all(error).await;
+            return;
+        }
+
+        let content_length: usize = extract_header_value(&headers, "Content-Length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+
+        if content_length > 64 * 1024 {
+            send_json_error(&mut lines, "413 Content Too Large", "Body too large").await;
+            return;
+        }
+
+        let mut body_bytes = vec![0u8; content_length];
+        if content_length > 0 {
+            use tokio::io::AsyncReadExt;
+            if lines.read_exact(&mut body_bytes).await.is_err() {
+                let error = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                let mut stream = lines.into_inner();
+                let _ = stream.write_all(error).await;
+                return;
+            }
+        }
+
+        #[derive(serde::Deserialize)]
+        struct CreateNodeRequest {
+            mesh_id: i64,
+            provider: String,
+            #[serde(default = "default_rows")]
+            rows: u16,
+            #[serde(default = "default_cols")]
+            cols: u16,
+        }
+        fn default_rows() -> u16 { 24 }
+        fn default_cols() -> u16 { 80 }
+
+        let req: CreateNodeRequest = match serde_json::from_slice(&body_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("Invalid JSON: {}", e);
+                send_json_error(&mut lines, "400 Bad Request", &msg).await;
+                return;
+            }
+        };
+
+        let mesh = match db::get_mesh_by_id(req.mesh_id) {
+            Ok(m) => m,
+            Err(_) => {
+                send_json_error(&mut lines, "400 Bad Request", "Mesh not found").await;
+                return;
+            }
+        };
+
+        let node = match crate::services::agent_node::create(
+            req.mesh_id,
+            &mesh.path,
+            "main",
+            Some(req.provider.as_str()),
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                let msg = format!("Failed to create node: {}", e);
+                send_json_error(&mut lines, "500 Internal Server Error", &msg).await;
+                return;
+            }
+        };
+
+        let Some(app) = APP_HANDLE.get() else {
+            send_json_error(&mut lines, "503 Service Unavailable", "App not ready").await;
+            return;
+        };
+
+        if let Err(e) = crate::commands::agent::spawn_agent_inner(
+            app,
+            node.id,
+            req.provider.clone(),
+            None,
+            req.rows,
+            req.cols,
+        ).await {
+            let msg = format!("Failed to spawn agent: {}", e);
+            send_json_error(&mut lines, "500 Internal Server Error", &msg).await;
+            return;
+        }
+
+        let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(), body
+        );
+        let mut stream = lines.into_inner();
+        let _ = stream.write_all(response.as_bytes()).await;
+        return;
+    }
+
     // API routes — require token
     if parts[0] == "GET" && path_without_query.starts_with("/api/") {
         if !validate_token(token.clone()) {
@@ -271,6 +371,18 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         MOBILE_APP_HTML
     );
     let mut stream = lines.into_inner();
+    let _ = stream.write_all(response.as_bytes()).await;
+}
+
+async fn send_json_error(lines: &mut tokio::io::BufStream<TcpStream>, status: &str, msg: &str) {
+    let body = format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\""));
+    let response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        status,
+        body.len(),
+        body
+    );
+    let stream = lines.get_mut();
     let _ = stream.write_all(response.as_bytes()).await;
 }
 

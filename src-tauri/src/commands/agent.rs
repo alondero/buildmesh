@@ -363,7 +363,7 @@ fn start_reader(app: AppHandle, session_id: i64, reader: Box<dyn std::io::Read +
 // ---------------------------------------------------------------------------
 
 /// Inner implementation shared by spawn_agent command and auto_resume_sessions.
-async fn spawn_agent_inner(
+pub(crate) async fn spawn_agent_inner(
     app: &AppHandle,
     session_id: i64,
     provider: String,
