@@ -186,26 +186,21 @@ fn build_spawn_command(
         c.args(args);
         c
     } else {
-        // Windows: cwrap-wrapped providers (Anthropic, Minimax) use cmd.exe /c for
-        // ConPTY compatibility and console suppression. Non-cwrap providers (gemini,
-        // opencode) are typically Node.js shims that resolve correctly via direct exec.
+        // Node.js shims - wrap via cmd.exe /c so batch scripts (gemini.cmd) resolve.
         if is_cwrap {
             tracing::info!("spawn_agent: building Windows powershell.exe for cwrap provider {}", binary);
-            // Use -NoLogo to suppress banner, -Command to run cwrap directly without cmd.exe layer.
-            // PowerShell has native ConPTY support and provides better compatibility with
-            // modern Claude Code sessions compared to cmd.exe /c wrapping.
             let mut c = CommandBuilder::new("powershell.exe");
-            // Build the command line as a single string: "cwrap --minimax -w foo --session-id bar"
             let combined = format!("{} {}", binary, args.join(" "));
             c.args(["-NoLogo", "-Command", &combined]);
             c
         } else {
-            tracing::info!("spawn_agent: building Windows direct command for {}", binary);
-            let mut c = CommandBuilder::new(binary);
-            c.args(args);
+            tracing::info!("spawn_agent: building Windows cmd.exe /c for non-cwrap provider {}", binary);
+            let mut c = CommandBuilder::new("cmd.exe");
+            c.args(["/c", &format!("{} {}", binary, args.join(" "))]);
             c
         }
     };
+
 
     cmd.cwd(&resolved.spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
