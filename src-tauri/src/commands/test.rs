@@ -169,6 +169,7 @@ fn process_request(request: &str, app: &AppHandle) -> String {
             "update_mesh_field" => handle_update_mesh_field(&rpc_req.args),
             "update_worktree_base_ref" => handle_update_worktree_base_ref(&rpc_req.args),
             "remove_worktree_base_ref" => handle_remove_worktree_base_ref(&rpc_req.args),
+            "update_mesh_in_place" => handle_update_mesh_in_place(&rpc_req.args),
             _ => JsonRpcResponse::error(&format!("Unknown command: {}", rpc_req.cmd)),
         }
     } else if request.starts_with("GET /health") {
@@ -397,6 +398,16 @@ fn handle_remove_worktree_base_ref(args: &serde_json::Value) -> String {
 
     match tauri::async_runtime::block_on(crate::commands::mesh_config::remove_worktree_base_ref(mesh_id)) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
+        Err(e) => JsonRpcResponse::error(&e),
+    }
+}
+
+fn handle_update_mesh_in_place(args: &serde_json::Value) -> String {
+    let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let in_place = args.get("in_place").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    match tauri::async_runtime::block_on(crate::commands::mesh_config::update_mesh_in_place(mesh_id, in_place)) {
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id, "in_place": in_place })),
         Err(e) => JsonRpcResponse::error(&e),
     }
 }

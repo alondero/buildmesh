@@ -412,8 +412,21 @@ async fn spawn_agent_inner(
 
     // Determine the target CWD for spawning.
     // We now always run agents directly in their worktree directory for maximum isolation.
-    // This ensures the backend always handles creation and sanitization before the agent starts.
-    let spawn_worktree_name = node.worktree_name.as_deref();
+    // Read mesh config once for in_place check and model/effort overrides.
+    // Note: node.path == mesh.path, so we use node.path directly to avoid a DB round-trip.
+    let config = crate::commands::build_run::parse_mesh_config_for_spawn(&std::path::PathBuf::from(&node.path));
+    let in_place = config.as_ref().map(|c| c.in_place).unwrap_or(false);
+    let model_override = config.as_ref().and_then(|c| c.model.as_deref());
+    let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
+
+    // If in_place mode, work directly in repo root (ignore worktree_name even if set)
+    // Otherwise, use worktree_name to resolve the worktree path
+    let spawn_worktree_name = if in_place {
+        tracing::info!("spawn_agent_inner: in_place mode, using repo root directly");
+        None
+    } else {
+        node.worktree_name.as_deref()
+    };
 
     // Resolve paths: includes worktree subdirectory (if applicable) + environment-aware spawn path
     let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
@@ -422,34 +435,30 @@ async fn spawn_agent_inner(
         resolved.spawn_path, resolved.host_path, resolved.env_type
     );
 
-    // If a worktree name is set, we ensure the worktree exists and is sanitized before spawning.
+    // If a worktree name is set AND not in_place mode, ensure the worktree exists and is sanitized before spawning.
     if let Some(wt_name) = spawn_worktree_name {
-        let host_path = std::path::Path::new(&resolved.host_path);
-        if !host_path.exists() {
-            tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
-            if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name) {
-                let msg = format!("Failed to create git worktree: {}", e);
-                tracing::error!("spawn_agent_inner: {}", msg);
-                return Err(msg);
+        if !in_place {
+            let host_path = std::path::Path::new(&resolved.host_path);
+            if !host_path.exists() {
+                tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
+                if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name) {
+                    let msg = format!("Failed to create git worktree: {}", e);
+                    tracing::error!("spawn_agent_inner: {}", msg);
+                    return Err(msg);
+                }
             }
-        }
 
-        // Sanitize .git file to ensure proper worktree isolation across environments.
-        // This is crucial for the "first run" success where the worktree was just created.
-        if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
-            tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
+            // Sanitize .git file to ensure proper worktree isolation across environments.
+            // This is crucial for the "first run" success where the worktree was just created.
+            if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+                tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
+            }
         }
     }
 
     // 5. Open PTY
     tracing::debug!("spawn_agent_inner: opening PTY system");
     let pair = open_pty_pair(rows, cols)?;
-
-    // 6. Read mesh config for model/effort overrides
-    let mesh = db::get_mesh_by_id(node.mesh_id).map_err(|e| e.to_string())?;
-    let config = crate::commands::build_run::parse_mesh_config_for_spawn(&std::path::PathBuf::from(&mesh.path));
-    let model_override = config.as_ref().and_then(|c| c.model.as_deref());
-    let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
 
     // 7. Build command
     let cmd = build_spawn_command(&node, &resolved, provider_enum, &session_id_mode, session_id, model_override, effort_override);
