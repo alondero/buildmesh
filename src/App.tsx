@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
 import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshPropertiesPanel';
@@ -48,7 +49,9 @@ function App() {
       for (const { key, action } of shortcuts) {
         try {
           if (!(await isRegistered(key))) {
-            await register(key, () => {
+            await register(key, async () => {
+              const focused = await getCurrentWindow().isFocused();
+              if (!focused) return;
               window.dispatchEvent(new CustomEvent('shortcut-triggered', { detail: action }));
             });
           }
