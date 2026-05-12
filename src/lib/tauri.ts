@@ -157,3 +157,13 @@ export const mergePr = (prUrl: string) =>
 
 export const getCurrentBranch = (sessionId: number) =>
   invoke<string>('get_current_branch', { sessionId });
+
+export const listProviders = () =>
+  invoke<ProviderInfo[]>('list_providers');
+
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  color: string;
+  icon: string;
+}

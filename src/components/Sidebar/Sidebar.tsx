@@ -6,6 +6,7 @@ import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import { isMac } from '../../lib/platform';
+import { listProviders } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import {
@@ -22,17 +23,28 @@ import { CSS } from '@dnd-kit/utilities';
 const ALL_PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
   { id: 'minimax', label: 'Minimax', color: 'bg-indigo-500' },
-  { id: 'gemini', label: 'Gemini', color: 'bg-emerald-500' },
+  { id: 'gemini', label: 'Google Gemini', color: 'bg-emerald-500' },
   { id: 'opencode', label: 'OpenCode', color: 'bg-amber-500' },
 ];
 
-const PROVIDERS = isMac
+const DEFAULT_PROVIDERS = isMac
   ? ALL_PROVIDERS.filter(p => p.id === 'anthropic')
   : ALL_PROVIDERS;
+
+function colorClassForProvider(providerId: string): string {
+  const map: Record<string, string> = {
+    anthropic: 'bg-blue-500',
+    minimax: 'bg-indigo-500',
+    gemini: 'bg-emerald-500',
+    opencode: 'bg-amber-500',
+  };
+  return map[providerId] ?? 'bg-gray-500';
+}
 
 export function Sidebar() {
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizing, setIsResizing] = useState(false);
+  const [providerData, setProviderData] = useState(DEFAULT_PROVIDERS);
   const resizingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(256);
@@ -67,6 +79,23 @@ export function Sidebar() {
       document.removeEventListener('mouseup', handleMouseUp);
     };
   }, [sidebarWidth]);
+
+  // Fetch available providers from the backend. Falls back to DEFAULT_PROVIDERS on error.
+  useEffect(() => {
+    listProviders().then(backendProviders => {
+      if (backendProviders && backendProviders.length > 0) {
+        // Backend returns {id, label, color, icon}. Map to our format with Tailwind color.
+        const mapped = backendProviders.map((p: { id: string; label: string; color: string; icon: string }) => ({
+          id: p.id,
+          label: p.label,
+          color: colorClassForProvider(p.id),
+        }));
+        setProviderData(mapped);
+      }
+    }).catch(() => {
+      // Use default list on error
+    });
+  }, []);
 
   const meshes = useMeshStore(state => state.meshes);
   const addMesh = useMeshStore(state => state.addMesh);
@@ -198,6 +227,7 @@ export function Sidebar() {
                       mesh={mesh}
                       isSelected={selectedMeshId === mesh.id}
                       isDropdownOpen={isDropdownOpen}
+                      providerList={providerData}
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleNewNode}
                       onSelectProvider={handleSelectProvider}
@@ -259,6 +289,7 @@ interface SortableMeshProps {
   mesh: Mesh;
   isSelected: boolean;
   isDropdownOpen: boolean;
+  providerList: Array<{ id: string; label: string; color: string }>;
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string) => void;
@@ -274,6 +305,7 @@ function SortableMesh({
   mesh,
   isSelected,
   isDropdownOpen,
+  providerList,
   onSelectMesh,
   onNewNode,
   onSelectProvider,
@@ -322,7 +354,7 @@ function SortableMesh({
           </button>
           {isDropdownOpen && (
             <div data-dropdown-for={mesh.id} className="absolute left-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[120px]">
-              {PROVIDERS.map(p => (
+              {providerList.map(p => (
                 <button
                   key={p.id}
                   onClick={() => onSelectProvider(mesh, p.id)}
