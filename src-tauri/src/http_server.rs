@@ -13,7 +13,11 @@ use parking_lot::RwLock;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, oneshot};
-use tokio_tungstenite::{accept_async, tungstenite};
+#[cfg(test)]
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::{tungstenite, WebSocketStream};
+use tungstenite::handshake::derive_accept_key;
+use tungstenite::protocol::Role;
 
 use tauri::Emitter;
 use crate::commands::agent::PROCESS_REGISTRY;
@@ -169,16 +173,37 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             return;
         }
 
-        let stream = lines.into_inner();
-        match accept_async(stream).await {
-            Ok(ws_stream) => {
-                tracing::info!("WebSocket connected for node {}", node_id);
-                tauri::async_runtime::spawn(handle_ws_connection(ws_stream, node_id));
+        let ws_key = match extract_header_value(&headers, "Sec-WebSocket-Key") {
+            Some(key) => key,
+            None => {
+                let error = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                let mut stream = lines.into_inner();
+                let _ = stream.write_all(error).await;
+                return;
             }
-            Err(e) => {
-                tracing::error!("WebSocket upgrade failed: {}", e);
-            }
+        };
+
+        let accept_key = derive_accept_key(ws_key.as_bytes());
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Accept: {}\r\n\
+             \r\n",
+            accept_key
+        );
+
+        let mut stream = lines.into_inner();
+        if stream.write_all(response.as_bytes()).await.is_err() {
+            return;
         }
+        if stream.flush().await.is_err() {
+            return;
+        }
+
+        let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
+        tracing::info!("WebSocket connected for node {}", node_id);
+        tauri::async_runtime::spawn(handle_ws_connection(ws_stream, node_id));
         return;
     }
 
@@ -326,6 +351,20 @@ fn forward_mobile_input(node_id: i64, text: &str) {
             let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": node_id }));
         }
     }
+}
+
+// --- Header Helpers ---
+
+fn extract_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+    let name_bytes = name.as_bytes();
+    headers.lines()
+        .find(|line| {
+            let lb = line.as_bytes();
+            lb.len() > name_bytes.len()
+                && lb[name_bytes.len()] == b':'
+                && lb[..name_bytes.len()].eq_ignore_ascii_case(name_bytes)
+        })
+        .map(|line| line[name.len() + 1..].trim())
 }
 
 // --- Token Validation ---
@@ -673,5 +712,45 @@ mod tests {
         clear_scrollback(20022);
         let history = get_pty_history(20022);
         assert!(history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_does_not_hang() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(stream, peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = "GET /ws/terminal/123?token=invalid HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             \r\n";
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read(&mut buf),
+        ).await;
+
+        assert!(result.is_ok(), "handle_connection hung on WebSocket upgrade (regression)");
+    }
+
+    #[test]
+    fn extract_header_value_case_insensitive() {
+        let headers = "Host: localhost\r\nSec-WebSocket-Key: abc123\r\nConnection: Upgrade\r\n";
+        assert_eq!(extract_header_value(headers, "Sec-WebSocket-Key"), Some("abc123"));
+        assert_eq!(extract_header_value(headers, "sec-websocket-key"), Some("abc123"));
+        assert_eq!(extract_header_value(headers, "Host"), Some("localhost"));
+        assert_eq!(extract_header_value(headers, "Missing"), None);
     }
 }
