@@ -58,8 +58,11 @@ export function MeshPropertiesPanel() {
     invoke<MeshConfig>('get_mesh_properties', { meshId: propertiesPanelMeshId })
       .then((config) => {
         setInitialConfig(config);
+        // name: config.name (from DB) → mesh?.name (store) → folderName (derived from path)
+        const folderName = mesh.path.split(/[/\\]/).pop() ?? '';
+        const resolvedName = config.name || mesh?.name || folderName;
         setForm({
-          name: mesh?.name ?? '',
+          name: resolvedName,
           model: config.model ?? '',
           effort: config.effort ?? '',
           baseRef: config.in_place ? 'in-place' : (config.base_ref === 'HEAD' ? 'head' : config.base_ref?.includes('origin') ? 'fresh' : 'fresh'),

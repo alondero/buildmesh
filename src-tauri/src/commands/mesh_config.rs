@@ -19,6 +19,7 @@ const MESH_CONFIG_EMPTY_TEMPLATE: &str = r"# Buildmesh configuration
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MeshConfig {
+    pub name: Option<String>,
     pub build_command: Option<String>,
     pub run_command: Option<String>,
     pub model: Option<String>,
@@ -38,6 +39,7 @@ fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
         .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
 
     Ok(MeshConfig {
+        name: None, // name lives in DB, not mesh.toml
         build_command: extract_toml_value(&content, "build", "command"),
         run_command: extract_toml_value(&content, "run", "command"),
         model: extract_toml_value(&content, "agent", "model"),
@@ -177,6 +179,7 @@ pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
 
     let mut config = parse_mesh_toml(&path)?;
     config.base_ref = read_base_ref(&mesh.path);
+    config.name = Some(mesh.name);
 
     Ok(config)
 }
