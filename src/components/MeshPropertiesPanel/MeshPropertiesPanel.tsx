@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 
 interface MeshConfig {
+  name: string | null;
   build_command: string | null;
   run_command: string | null;
   model: string | null;
@@ -50,8 +51,14 @@ export function MeshPropertiesPanel() {
   const [saving, setSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [loading, setLoading] = useState(true);
+  const mountedRef = useRef(true);
 
   // Load config on mount
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   useEffect(() => {
     if (propertiesPanelMeshId == null) return;
     setLoading(true);
@@ -59,13 +66,13 @@ export function MeshPropertiesPanel() {
       .then((config) => {
         setInitialConfig(config);
         // name: config.name (from DB) → mesh?.name (store) → folderName (derived from path)
-        const folderName = mesh.path.split(/[/\\]/).pop() ?? '';
+        const folderName = mesh?.path.split(/[/\\]/).pop() ?? '';
         const resolvedName = config.name || mesh?.name || folderName;
         setForm({
           name: resolvedName,
           model: config.model ?? '',
           effort: config.effort ?? '',
-          baseRef: config.in_place ? 'in-place' : (config.base_ref === 'HEAD' ? 'head' : config.base_ref?.includes('origin') ? 'fresh' : 'fresh'),
+          baseRef: config.in_place ? 'in-place' : (config.base_ref === 'HEAD' ? 'head' : 'fresh'),
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
           inPlace: config.in_place ?? false,
@@ -121,6 +128,7 @@ export function MeshPropertiesPanel() {
     } catch (e) {
       console.error('Failed to save mesh properties:', e);
     } finally {
+      if (!mountedRef.current) return;
       setSaving(false);
     }
   };
