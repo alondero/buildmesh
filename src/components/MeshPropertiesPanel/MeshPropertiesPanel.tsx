@@ -5,6 +5,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 
 interface MeshConfig {
+  name: string | null;
   build_command: string | null;
   run_command: string | null;
   model: string | null;
@@ -59,7 +60,7 @@ export function MeshPropertiesPanel() {
       .then((config) => {
         setInitialConfig(config);
         // name: config.name (from DB) → mesh?.name (store) → folderName (derived from path)
-        const folderName = mesh.path.split(/[/\\]/).pop() ?? '';
+        const folderName = mesh?.path.split(/[/\\]/).pop() ?? '';
         const resolvedName = config.name || mesh?.name || folderName;
         setForm({
           name: resolvedName,

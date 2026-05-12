@@ -3,9 +3,11 @@ import { create } from 'zustand';
 interface UIState {
   changedFilesOpen: boolean;
   changedFilesNodeId: number | null;
+  changedFilesWidth: number;
   toggleChangedFiles: (nodeId: number) => void;
   setChangedFilesNodeId: (nodeId: number) => void;
   closeChangedFiles: () => void;
+  setChangedFilesWidth: (width: number) => void;
 
   propertiesPanelMeshId: number | null;
   openPropertiesPanel: (meshId: number) => void;
@@ -33,6 +35,12 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   closeChangedFiles: () => {
     set({ changedFilesOpen: false, changedFilesNodeId: null });
+  },
+
+  changedFilesWidth: 280,
+
+  setChangedFilesWidth: (width: number) => {
+    set({ changedFilesWidth: width });
   },
 
   propertiesPanelMeshId: null,
