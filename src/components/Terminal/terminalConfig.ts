@@ -66,3 +66,10 @@ export function createTerminalOptions(): ITerminalOptions {
 }
 
 export const TERMINAL_OPTIONS: ITerminalOptions = BASE_TERMINAL_OPTIONS as ITerminalOptions;
+
+export const SEARCH_DECORATIONS = {
+  matchBackground: '#44403c',
+  matchOverviewRuler: '#00d4ff',
+  activeMatchBackground: '#00d4ff',
+  activeMatchColorOverviewRuler: '#00d4ff',
+} as const;

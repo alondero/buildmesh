@@ -2,22 +2,29 @@ import { useEffect, useRef, useState, useCallback, type WheelEvent as ReactWheel
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
+import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { createTerminalOptions, terminalFontSize, setTerminalFontSize, onTerminalFontSizeChange, TERMINAL_FONT_SIZE_DEFAULT } from './terminalConfig';
+import { createTerminalOptions, terminalFontSize, setTerminalFontSize, onTerminalFontSizeChange, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
+import { resolveKeyAction } from './terminalKeyAction';
+import { isMac } from '../../lib/platform';
 
 interface TerminalInstance {
   term: Terminal;
   fitAddon: FitAddon;
   serializeAddon: SerializeAddon;
+  searchAddon: SearchAddon;
   unlisten: UnlistenFn;
   opened: boolean;
   writeBuffer: string;
   frameRequested: boolean;
   resizeObserver: ResizeObserver | null;
   attachedContainer: HTMLElement | null;
+  onFindRequest: (() => void) | null;
 }
 
 class TerminalManager {
@@ -180,6 +187,12 @@ class TerminalManager {
       term.loadAddon(fitAddon);
       const serializeAddon = new SerializeAddon();
       term.loadAddon(serializeAddon);
+      const searchAddon = new SearchAddon();
+      term.loadAddon(searchAddon);
+      const webLinksAddon = new WebLinksAddon((_event, uri) => {
+        openUrl(uri).catch(console.error);
+      });
+      term.loadAddon(webLinksAddon);
 
       const unlisten = await listen<{ session_id: number; line: string }>('agent-output', (event) => {
         if (event.payload.session_id === nodeId) {
@@ -208,21 +221,45 @@ class TerminalManager {
         invoke('write_to_agent', { sessionId: nodeId, data }).catch(console.error);
       });
 
-      // Use custom key handler to capture Ctrl+V paste. Without ev.preventDefault(),
-      // the browser synthesizes a separate paste event that causes duplicates.
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
-        if (ev.type === 'keydown' && ev.ctrlKey && ev.key === 'v') {
-          ev.preventDefault();
-          navigator.clipboard.readText().then(text => {
-            if (text) {
-              term.paste(text);
-            }
-          }).catch(err => {
-            console.warn('[TerminalManager] Clipboard read failed:', err);
-          });
-          return false;
+        if (ev.type !== 'keydown') return true;
+
+        const action = resolveKeyAction({
+          key: ev.key,
+          ctrlKey: ev.ctrlKey,
+          shiftKey: ev.shiftKey,
+          metaKey: ev.metaKey,
+          isMac,
+          hasSelection: term.hasSelection(),
+        });
+
+        const inst = this.instances.get(nodeId);
+        switch (action) {
+          case 'copy':
+            navigator.clipboard.writeText(term.getSelection()).catch(err => {
+              console.warn('[TerminalManager] Clipboard write failed:', err);
+            });
+            return false;
+          case 'paste':
+            ev.preventDefault();
+            navigator.clipboard.readText().then(text => {
+              if (text) term.paste(text);
+            }).catch(err => {
+              console.warn('[TerminalManager] Clipboard read failed:', err);
+            });
+            return false;
+          case 'selectAll':
+            term.selectAll();
+            return false;
+          case 'find':
+            inst?.onFindRequest?.();
+            return false;
+          case 'clear':
+            term.clear();
+            return false;
+          case 'passthrough':
+            return true;
         }
-        return true;
       });
 
       term.onResize(({ cols, rows }) => {
@@ -239,12 +276,14 @@ class TerminalManager {
         term,
         fitAddon,
         serializeAddon,
+        searchAddon,
         unlisten: combinedUnlisten,
         opened: false,
         writeBuffer: '',
         frameRequested: false,
         resizeObserver: null,
         attachedContainer: null,
+        onFindRequest: null,
       };
       this.instances.set(nodeId, instance);
       this.notify();
@@ -322,6 +361,10 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
@@ -371,6 +414,113 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     }
   }, []);
 
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleCopy = () => {
+    const inst = terminalManager.getInstance(sessionId);
+    if (inst && inst.term.hasSelection()) {
+      navigator.clipboard.writeText(inst.term.getSelection()).catch(console.error);
+    }
+    setContextMenu(null);
+  };
+
+  const handlePaste = () => {
+    const inst = terminalManager.getInstance(sessionId);
+    if (inst) {
+      navigator.clipboard.readText().then(text => {
+        if (text) inst.term.paste(text);
+      }).catch(console.error);
+    }
+    setContextMenu(null);
+  };
+
+  const handleSelectAll = () => {
+    const inst = terminalManager.getInstance(sessionId);
+    if (inst) inst.term.selectAll();
+    setContextMenu(null);
+  };
+
+  const handleFind = () => {
+    setContextMenu(null);
+    setSearchOpen(true);
+  };
+
+  const handleClear = () => {
+    const inst = terminalManager.getInstance(sessionId);
+    if (inst) inst.term.clear();
+    setContextMenu(null);
+  };
+
+  // Dismiss context menu
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => setContextMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
+
+  // Focus search input when opened
+  useEffect(() => {
+    if (searchOpen) {
+      requestAnimationFrame(() => searchInputRef.current?.focus());
+    } else {
+      setSearchQuery('');
+      const inst = terminalManager.getInstance(sessionId);
+      if (inst) inst.searchAddon.clearDecorations();
+    }
+  }, [searchOpen, sessionId]);
+
+  const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const query = e.target.value;
+    setSearchQuery(query);
+    const inst = terminalManager.getInstance(sessionId);
+    if (!inst) return;
+    if (query) {
+      inst.searchAddon.findNext(query, { incremental: true, decorations: SEARCH_DECORATIONS });
+    } else {
+      inst.searchAddon.clearDecorations();
+    }
+  }, [sessionId]);
+
+  const handleSearchNext = useCallback(() => {
+    const inst = terminalManager.getInstance(sessionId);
+    if (inst && searchQuery) {
+      inst.searchAddon.findNext(searchQuery, { decorations: SEARCH_DECORATIONS });
+    }
+  }, [sessionId, searchQuery]);
+
+  const handleSearchPrev = useCallback(() => {
+    const inst = terminalManager.getInstance(sessionId);
+    if (inst && searchQuery) {
+      inst.searchAddon.findPrevious(searchQuery, { decorations: SEARCH_DECORATIONS });
+    }
+  }, [sessionId, searchQuery]);
+
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      setSearchOpen(false);
+      instRef.current?.term.focus();
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        handleSearchPrev();
+      } else {
+        handleSearchNext();
+      }
+    }
+  }, [handleSearchNext, handleSearchPrev]);
+
   // Keyboard shortcuts: Ctrl+0 reset, Ctrl++ zoom in, Ctrl+- zoom out
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -398,6 +548,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     terminalManager.attach(sessionId, container).then(async (inst) => {
       if (cancelled.current || !inst) return;
       instRef.current = inst;
+      inst.onFindRequest = () => setSearchOpen(true);
 
       if (sessionId === activeNodeId) {
         inst.term.focus();
@@ -416,6 +567,8 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
 
     return () => {
       cancelled.current = true;
+      const inst = terminalManager.getInstance(sessionId);
+      if (inst) inst.onFindRequest = null;
       terminalManager.detach(sessionId);
     };
   }, [sessionId, node?.status]);
@@ -433,6 +586,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
           instRef.current?.term.focus();
         }
       }}
+      onContextMenu={handleContextMenu}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -441,6 +595,65 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       {isDragging && (
         <div className="absolute inset-0 bg-cyan-500/10 border-2 border-dashed border-cyan-500 rounded-lg flex items-center justify-center z-50 pointer-events-none">
           <span className="text-cyan-400 text-sm font-medium">Drop file to paste path</span>
+        </div>
+      )}
+
+      {searchOpen && (
+        <div className="absolute top-1 right-1 z-50 flex items-center gap-1 bg-bg-card border border-border-default rounded px-2 py-1 shadow-lg">
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={handleSearchChange}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Find..."
+            className="bg-transparent text-[11px] text-text-primary outline-none w-36 placeholder:text-text-muted"
+          />
+          <button onClick={handleSearchPrev} className="text-text-muted hover:text-accent-cyan text-[11px] px-1" title="Previous (Shift+Enter)">&#9650;</button>
+          <button onClick={handleSearchNext} className="text-text-muted hover:text-accent-cyan text-[11px] px-1" title="Next (Enter)">&#9660;</button>
+          <button onClick={() => { setSearchOpen(false); instRef.current?.term.focus(); }} className="text-text-muted hover:text-accent-cyan text-[11px] px-1" title="Close (Esc)">&#10005;</button>
+        </div>
+      )}
+
+      {contextMenu && (
+        <div
+          className="fixed bg-bg-card border border-border-default rounded shadow-lg z-[100] py-1 min-w-[160px]"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={handleCopy}
+            disabled={!instRef.current?.term.hasSelection()}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
+          >
+            Copy <span className="float-right text-text-muted">{isMac ? '⌘C' : 'Ctrl+C'}</span>
+          </button>
+          <button
+            onClick={handlePaste}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+          >
+            Paste <span className="float-right text-text-muted">{isMac ? '⌘V' : 'Ctrl+V'}</span>
+          </button>
+          <div className="border-t border-border-default my-0.5" />
+          <button
+            onClick={handleSelectAll}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+          >
+            Select All <span className="float-right text-text-muted">{isMac ? '⌘A' : 'Ctrl+Shift+A'}</span>
+          </button>
+          <button
+            onClick={handleFind}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+          >
+            Find... <span className="float-right text-text-muted">{isMac ? '⌘F' : 'Ctrl+Shift+F'}</span>
+          </button>
+          <div className="border-t border-border-default my-0.5" />
+          <button
+            onClick={handleClear}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+          >
+            Clear Terminal <span className="float-right text-text-muted">{isMac ? '⌘K' : 'Ctrl+Shift+K'}</span>
+          </button>
         </div>
       )}
     </div>
