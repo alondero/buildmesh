@@ -50,13 +50,94 @@
     .mesh-section {
       margin-bottom: 4px;
     }
+    .mesh-header {
+      display: flex;
+      align-items: center;
+      padding: 10px 12px 6px;
+      gap: 8px;
+    }
     .mesh-label {
       font-size: 10px;
       font-weight: 600;
       color: #555;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      padding: 8px 12px 4px;
+      flex: 1;
+    }
+    .mesh-add-btn {
+      width: 24px; height: 24px;
+      border-radius: 6px;
+      background: #2a2a2a;
+      border: 1px solid #444;
+      color: #888;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .mesh-add-btn:active { background: #3a3a3a; }
+    .mesh-empty {
+      font-size: 12px;
+      color: #444;
+      padding: 8px 12px 12px;
+      font-style: italic;
+    }
+    .mesh-creating {
+      font-size: 12px;
+      color: #2196f3;
+      padding: 8px 12px 12px;
+    }
+    .provider-picker {
+      position: fixed; inset: 0; z-index: 100;
+      display: flex; align-items: flex-end;
+    }
+    .provider-picker.hidden { display: none; }
+    .picker-backdrop {
+      position: absolute; inset: 0;
+      background: rgba(0,0,0,0.6);
+    }
+    .picker-sheet {
+      position: relative;
+      width: 100%;
+      background: #1a1a1a;
+      border-radius: 16px 16px 0 0;
+      padding: 20px;
+      padding-bottom: max(20px, env(safe-area-inset-bottom));
+      z-index: 1;
+    }
+    .picker-sheet h3 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #fff;
+      margin-bottom: 14px;
+    }
+    .picker-option {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border-radius: 10px;
+      background: #2a2a2a;
+      margin-bottom: 8px;
+      cursor: pointer;
+      border: 1px solid transparent;
+    }
+    .picker-option:active { border-color: #555; }
+    .picker-option .picker-icon {
+      width: 32px; height: 32px;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .picker-option .picker-label {
+      font-size: 15px;
+      color: #e0e0e0;
     }
     .node-list {
       flex: 1;
@@ -229,6 +310,15 @@
       <h2>Desktop app is offline</h2>
       <p>Start buildmesh on your computer to continue.</p>
     </div>
+
+    <!-- Provider picker -->
+    <div class="provider-picker hidden" id="provider-picker">
+      <div class="picker-backdrop" onclick="hideProviderPicker()"></div>
+      <div class="picker-sheet">
+        <h3>New Agent Node</h3>
+        <div id="picker-options"></div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -326,41 +416,98 @@
 
     function renderNodeList(nodes, meshes) {
       const container = document.getElementById('node-list');
-      if (!nodes || nodes.length === 0) {
-        container.innerHTML = '<p style="color:#666;text-align:center;padding:24px;">No agent nodes running. Start an agent on your desktop to see it here.</p>';
+
+      if (!meshes || meshes.length === 0) {
+        container.innerHTML = '<p style="color:#666;text-align:center;padding:24px;">No meshes configured. Add a mesh on your desktop app to get started.</p>';
         return;
       }
 
-      // Build mesh id -> name map
-      const meshMap = {};
-      if (meshes) {
-        meshes.forEach(m => { meshMap[m.id] = m.name; });
-      }
-
-      // Group nodes by mesh
-      const byMesh = {};
-      nodes.forEach(node => {
-        const meshName = meshMap[node.mesh_id] || 'Unknown Mesh';
-        if (!byMesh[meshName]) byMesh[meshName] = [];
-        byMesh[meshName].push(node);
+      const nodesByMesh = {};
+      (nodes || []).forEach(node => {
+        if (!nodesByMesh[node.mesh_id]) nodesByMesh[node.mesh_id] = [];
+        nodesByMesh[node.mesh_id].push(node);
       });
 
       let html = '';
-      Object.keys(byMesh).sort().forEach(meshName => {
-        html += `<div class="mesh-label">${escapeHtml(meshName)}</div>`;
-        byMesh[meshName].forEach(node => {
-          html += `
-          <div class="node-item" onclick="openTerminal(${node.id}, '${escapeHtml(node.name)}', '${node.provider}')">
-            <div class="provider-icon" style="background:${providerColor(node.provider)}">${providerIcon(node.provider)}</div>
-            <div class="info">
-              <div class="name">${escapeHtml(node.name)}</div>
-              <div class="meta">${node.provider} · ${node.status}</div>
-            </div>
-            <div class="status-bar ${node.status}"></div>
-          </div>`;
-        });
+      meshes.forEach(mesh => {
+        const meshNodes = nodesByMesh[mesh.id] || [];
+        html += `<div class="mesh-section">`;
+        html += `<div class="mesh-header">
+          <span class="mesh-label">${escapeHtml(mesh.name)}</span>
+          <button class="mesh-add-btn" onclick="showProviderPicker(${mesh.id})">+</button>
+        </div>`;
+
+        if (meshNodes.length === 0) {
+          html += `<div class="mesh-empty" id="mesh-empty-${mesh.id}">No nodes</div>`;
+        } else {
+          meshNodes.forEach(node => {
+            html += `
+            <div class="node-item" onclick="openTerminal(${node.id}, ${JSON.stringify(node.name)}, ${JSON.stringify(node.provider)})">
+              <div class="provider-icon" style="background:${providerColor(node.provider)}">${providerIcon(node.provider)}</div>
+              <div class="info">
+                <div class="name">${escapeHtml(node.name)}</div>
+                <div class="meta">${node.provider} · ${node.status}</div>
+              </div>
+              <div class="status-bar ${node.status}"></div>
+            </div>`;
+          });
+        }
+        html += `</div>`;
       });
       container.innerHTML = html;
+    }
+
+    function showProviderPicker(meshId) {
+      const providers = [
+        { id: 'anthropic', label: 'Anthropic (Claude)', color: '#1d7cfc', icon: 'A' },
+      ];
+
+      const optionsHtml = providers.map(p => `
+        <div class="picker-option" onclick="createNode(${meshId}, '${p.id}')">
+          <div class="picker-icon" style="background:${p.color}">${p.icon}</div>
+          <div class="picker-label">${p.label}</div>
+        </div>
+      `).join('');
+
+      document.getElementById('picker-options').innerHTML = optionsHtml;
+      document.getElementById('provider-picker').classList.remove('hidden');
+    }
+
+    function hideProviderPicker() {
+      document.getElementById('provider-picker').classList.add('hidden');
+    }
+
+    async function createNode(meshId, provider) {
+      hideProviderPicker();
+
+      const emptyEl = document.getElementById('mesh-empty-' + meshId);
+      if (emptyEl) {
+        emptyEl.className = 'mesh-creating';
+        emptyEl.textContent = 'Creating node...';
+      }
+
+      try {
+        const url = '/api/nodes/create?token=' + encodeURIComponent(meshToken);
+        const resp = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mesh_id: meshId, provider: provider, rows: 24, cols: 80 }),
+        });
+
+        if (!resp.ok) {
+          const err = await resp.text();
+          throw new Error(err || 'Failed to create node');
+        }
+
+        const node = await resp.json();
+        openTerminal(node.id, node.name, node.provider);
+      } catch (e) {
+        if (emptyEl) {
+          emptyEl.className = 'mesh-empty';
+          emptyEl.textContent = 'No nodes';
+        }
+        alert('Failed to create node: ' + e.message);
+      }
     }
 
     function renderOfflineNodeList() {
