@@ -38,26 +38,23 @@ Use `_inner` helper functions that accept `&Connection` to avoid mutex deadlocks
 
 ## Attention System
 
-### TurnDetector — Provider-Specific Prompt Detection
-`src-tauri/src/turn_detector.rs` strips ANSI escape codes, then matches provider-specific prompt regexes:
+### How It Works
+Agents signal they need user input via a Claude Code stop hook configured in `.claude/settings.local.json` (written by `inject_attention_hook` in `agent.rs`). The hook fires on Claude Code's built-in `idle_prompt` matcher and calls a curl command that hits the backend's HTTP server:
 
 ```
-Anthropic/Minimax: r"(?m)^\s*❯\s*$"
-Gemini:           r"(?m)^\s*>>>\s*$"
-OpenCode:         r"(?m)^\s*[>$❯]\s*$"
+Notification: [{ matcher: "idle_prompt", hooks: [{ type: "command", command: "curl -sf -X POST http://localhost:1992/api/attention/$BUILDMESH_SESSION_ID" }] }]
 ```
 
-**`prompts_seen > 1` guard:** The first prompt (on agent spawn) is always skipped — it fires before any user work begins. Only the second and subsequent prompts trigger `attention-needed`. This prevents false attention events on agent node start.
+When the HTTP server receives `POST /api/attention/{session_id}`, it immediately:
+1. Inserts the session ID into `ATTENTION_PENDING` (in-memory `HashSet`)
+2. Updates the DB status to `AwaitingInput`
+3. Emits `attention-needed` Tauri event to the frontend
+4. Calls `session_naming::on_turn()` (triggers async LLM rename)
 
-### Attention Timer Architecture
-Detection and timing are separated into two threads:
-- **Reader thread** (per-session): sets `PENDING_ATTENTION[session_id]` when a prompt is detected, cancels it when non-prompt output arrives (agent still working).
-- **Timer thread** (singleton, polls every 250ms): fires `attention-needed` events when a pending's 1.5s debounce window expires without cancellation.
+**No timer, polling, or debounce** — the event fires synchronously and immediately.
 
-This separation is required because the reader's `read()` call is blocking — the timer can only expire in a dedicated polling thread.
-
-### LAST_INPUT_TIME Suppression
-After user sends input (`\n` or `\r`), `LAST_INPUT_TIME` records the timestamp. For 3 seconds afterward, prompt detection is suppressed to avoid false attention triggers from agent output that immediately follows user typing.
+### `prompts_seen > 1` Guard
+The `idle_prompt` matcher is a Claude Code internal. The first `idle_prompt` (on agent spawn) is skipped — only the second and subsequent prompts trigger the hook. This prevents false attention events on startup.
 
 ### Auto-Spawn Behavior
 `AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.
@@ -68,7 +65,7 @@ After user sends input (`\n` or `\r`), `LAST_INPUT_TIME` records the timestamp. 
 The PTY reader thread sniffs `session-id:` or `session_id:` from agent output and auto-saves it to the DB for `--resume` support. Don't replicate this — it's backend-only.
 
 ### Turn Counting and Node Naming
-`node_namer.rs` captures PTY output, increments turn counters, and auto-names agent nodes (e.g., infers name from working context). It also feeds the TurnDetector.
+`session_naming.rs` captures PTY output, increments turn counters, and auto-names agent nodes via LLM summarization (slug-based, e.g. `fix-auth-flow`). The naming is async — it spawns a background task on turn 1.
 
 ### Crash Recovery on Startup
 `lib.rs:46-54` marks any agent nodes still showing `Running` status as `Suspended` during app startup, since a crash means no live process exists. These are then auto-resumed via `auto_resume_nodes` on the frontend's first draw.
