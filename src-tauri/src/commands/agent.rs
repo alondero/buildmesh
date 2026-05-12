@@ -482,9 +482,11 @@ async fn spawn_agent_inner(
     register_agent(session_id, child, writer, master, reader_alive.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
 
-    // 9. Ensure attention hook exists in project root (idempotent)
+    // 9. Ensure attention hook exists in the agent's working directory (idempotent).
+    // Must target the resolved spawn path (which may be a worktree) because Claude Code
+    // reads .claude/settings.local.json relative to its CWD, not the project root.
     if provider_enum == Provider::Anthropic || provider_enum == Provider::Minimax {
-        inject_attention_hook(std::path::Path::new(&node.path));
+        inject_attention_hook(std::path::Path::new(&resolved.host_path));
     }
 
     // 10. Start reader thread with spawn timestamp for early-exit detection
