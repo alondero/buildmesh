@@ -420,6 +420,9 @@ pub(crate) async fn spawn_agent_inner(
     let in_place = config.as_ref().map(|c| c.in_place).unwrap_or(false);
     let model_override = config.as_ref().and_then(|c| c.model.as_deref());
     let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
+    let worktree_mode = config.as_ref()
+        .and_then(|c| c.worktree_mode.as_deref())
+        .unwrap_or("detached");
 
     // If in_place mode, work directly in repo root (ignore worktree_name even if set)
     // Otherwise, use worktree_name to resolve the worktree path
@@ -440,10 +443,26 @@ pub(crate) async fn spawn_agent_inner(
     // If a worktree name is set AND not in_place mode, ensure the worktree exists and is sanitized before spawning.
     if let Some(wt_name) = spawn_worktree_name {
         if !in_place {
+            // For branched mode, check source branch is clean before creating worktree
+            // (to prevent state pollution when creating actual git branches)
+            if worktree_mode == "branched" {
+                match env::check_source_branch_clean(&node.path) {
+                    Ok(true) => {} // clean, proceed
+                    Ok(false) => {
+                        return Err("Cannot create branched worktree: source branch has uncommitted changes. Commit or discard changes first, or use detached mode.".to_string());
+                    }
+                    Err(e) => {
+                        tracing::warn!("spawn_agent_inner: failed to check source branch cleanliness: {}", e);
+                        // In branched mode, treat errors as "not clean" to be safe
+                        return Err("Cannot create branched worktree: failed to verify source branch is clean. Check that git is available and the repository is valid.".to_string());
+                    }
+                }
+            }
+
             let host_path = std::path::Path::new(&resolved.host_path);
             if !host_path.exists() {
                 tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
-                if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name) {
+                if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode) {
                     let msg = format!("Failed to create git worktree: {}", e);
                     tracing::error!("spawn_agent_inner: {}", msg);
                     return Err(msg);
