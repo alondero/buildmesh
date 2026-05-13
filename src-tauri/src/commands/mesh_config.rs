@@ -69,7 +69,7 @@ fn read_base_ref(mesh_path: &str) -> Option<String> {
 
 /// Update a single key inside an existing [section] in mesh.toml.
 /// If the key exists, replaces it. If the section exists but key doesn't, appends it.
-/// Creates the file with default sections if it doesn't exist yet.
+/// Creates the file with default sections (and the section if needed) if it doesn't exist yet.
 fn write_mesh_toml_field(
     mesh_path: &PathBuf,
     section: &str,
@@ -81,42 +81,49 @@ fn write_mesh_toml_field(
         .unwrap_or_else(|_| MESH_CONFIG_EMPTY_TEMPLATE.to_string());
 
     let section_pattern = format!("[{}]", section);
-    let section_start = content
-        .find(&section_pattern)
-        .ok_or_else(|| format!("[{}] section not found in mesh.toml", section))?;
-
-    let section_end = content[section_start + section_pattern.len()..]
-        .find('[')
-        .map(|i| section_start + section_pattern.len() + i)
-        .unwrap_or(content.len());
-
-    let before = &content[..section_start];
-    let section_content = &content[section_start..section_end];
-    let after = &content[section_end..];
-
-    let key_pattern = format!("{} = ", key);
     let new_line = format!("{} = \"{}\"", key, value);
 
-    let updated_section = if let Some(key_start) = section_content.find(&key_pattern) {
-        let key_line_end = section_content[key_start..]
-            .find('\n')
-            .map(|e| key_start + e)
-            .unwrap_or(section_content.len());
-        let before_key = &section_content[..key_start];
-        let after_key = &section_content[key_line_end..];
-        format!("{}{}{}", before_key, new_line, after_key)
-    } else {
-        let insert_pos = section_content.trim_end().trim_end_matches('\n').len();
-        let mut s = section_content[..insert_pos].to_string();
-        s.push_str(&format!("\n{} = \"{}\"", key, value));
-        if insert_pos < section_content.len() {
-            s.push_str(&section_content[insert_pos..]);
-        }
-        s
-    };
+    if let Some(section_start) = content.find(&section_pattern) {
+        // Section exists — update/add key within it
+        let section_end = content[section_start + section_pattern.len()..]
+            .find('[')
+            .map(|i| section_start + section_pattern.len() + i)
+            .unwrap_or(content.len());
 
-    let updated = format!("{}{}{}", before, updated_section, after);
-    std::fs::write(&config_path, updated).map_err(|e| format!("failed to write mesh.toml: {}", e))?;
+        let before = &content[..section_start];
+        let section_content = &content[section_start..section_end];
+        let after = &content[section_end..];
+
+        let key_pattern = format!("{} = ", key);
+
+        let updated_section = if let Some(key_start) = section_content.find(&key_pattern) {
+            let key_line_end = section_content[key_start..]
+                .find('\n')
+                .map(|e| key_start + e)
+                .unwrap_or(section_content.len());
+            let before_key = &section_content[..key_start];
+            let after_key = &section_content[key_line_end..];
+            format!("{}{}{}", before_key, new_line, after_key)
+        } else {
+            let insert_pos = section_content.trim_end().trim_end_matches('\n').len();
+            let mut s = section_content[..insert_pos].to_string();
+            s.push_str(&format!("\n{} = \"{}\"", key, value));
+            if insert_pos < section_content.len() {
+                s.push_str(&section_content[insert_pos..]);
+            }
+            s
+        };
+
+        let updated = format!("{}{}{}", before, updated_section, after);
+        std::fs::write(&config_path, updated)
+            .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
+    } else {
+        // Section doesn't exist — append it with the key
+        let updated = format!("{}\n[{}]\n{}\n", content.trim_end(), section, new_line);
+        std::fs::write(&config_path, updated)
+            .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
+    }
+
     Ok(())
 }
 
@@ -125,8 +132,8 @@ fn write_base_ref(mesh_path: &str, base_ref: &str) -> Result<(), String> {
     let settings_path = PathBuf::from(mesh_path).join(".claude/settings.json");
 
     let mut settings: serde_json::Value = if settings_path.exists() {
-        let content =
-            std::fs::read_to_string(&settings_path).map_err(|e| format!("failed to read settings.json: {}", e))?;
+        let content = std::fs::read_to_string(&settings_path)
+            .map_err(|e| format!("failed to read settings.json: {}", e))?;
         serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -150,10 +157,10 @@ fn write_base_ref(mesh_path: &str, base_ref: &str) -> Result<(), String> {
 fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
     let settings_path = PathBuf::from(mesh_path).join(".claude/settings.json");
 
-    let content =
-        std::fs::read_to_string(&settings_path).map_err(|e| format!("failed to read settings.json: {}", e))?;
-    let mut settings: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("failed to parse settings.json: {}", e))?;
+    let content = std::fs::read_to_string(&settings_path)
+        .map_err(|e| format!("failed to read settings.json: {}", e))?;
+    let mut settings: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse settings.json: {}", e))?;
 
     if let Some(obj) = settings.get_mut("worktree") {
         if let Some(obj) = obj.as_object_mut() {
@@ -174,12 +181,28 @@ fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let path = PathBuf::from(&mesh.path);
 
-    let mut config = parse_mesh_toml(&path)?;
+    let mut config = match parse_mesh_toml(&path) {
+        Ok(c) => c,
+        Err(_) => MeshConfig {
+            name: None,
+            build_command: None,
+            run_command: None,
+            model: None,
+            effort: None,
+            base_ref: None,
+            in_place: false,
+        },
+    };
     config.base_ref = read_base_ref(&mesh.path);
-    config.name = Some(mesh.name);
+    config.name = if mesh.name.is_empty() {
+        None
+    } else {
+        Some(mesh.name)
+    };
 
     Ok(config)
 }
@@ -202,7 +225,8 @@ pub async fn update_mesh_field(
     key: String,
     value: String,
 ) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let path = PathBuf::from(&mesh.path);
     write_mesh_toml_field(&path, &section, &key, &value)?;
     Ok(())
@@ -210,7 +234,8 @@ pub async fn update_mesh_field(
 
 #[tauri::command]
 pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
     // Map 'fresh' → origin/<default> and 'head' → HEAD
     let resolved = match base_ref.as_str() {
@@ -224,7 +249,8 @@ pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<
 
 #[tauri::command]
 pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     remove_base_ref(&mesh.path)
 }
 
@@ -232,10 +258,11 @@ pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
 /// Unlike write_mesh_toml_field, this writes bare booleans (true/false) not quoted strings.
 #[tauri::command]
 pub async fn update_mesh_in_place(mesh_id: i64, in_place: bool) -> Result<(), String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh =
+        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let config_path = PathBuf::from(&mesh.path).join(MESH_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("mesh.toml not found: {}", e))?;
+    let content =
+        std::fs::read_to_string(&config_path).map_err(|e| format!("mesh.toml not found: {}", e))?;
 
     let bool_str = if in_place { "true" } else { "false" };
     let key = "in_place";
@@ -279,6 +306,7 @@ pub async fn update_mesh_in_place(mesh_id: i64, in_place: bool) -> Result<(), St
     };
 
     let updated = format!("{}{}{}", before, updated_section, after);
-    std::fs::write(&config_path, updated).map_err(|e| format!("failed to write mesh.toml: {}", e))?;
+    std::fs::write(&config_path, updated)
+        .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
     Ok(())
 }
