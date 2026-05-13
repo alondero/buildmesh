@@ -197,6 +197,7 @@ pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
             effort: None,
             base_ref: None,
             in_place: false,
+            worktree_mode: None,
         },
     };
     config.base_ref = read_base_ref(&mesh.path);
