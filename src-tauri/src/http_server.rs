@@ -310,6 +310,11 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             return;
         }
 
+        // Notify desktop frontend so sidebar refreshes to show the new node.
+        // The mobile app creates nodes via HTTP (port 1992) while desktop uses
+        // Tauri invoke — this bridges the gap so both UIs stay in sync.
+        let _ = app.emit("session-created", serde_json::json!({ "id": node.id }));
+
         let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
