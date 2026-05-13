@@ -26,6 +26,7 @@ pub struct MeshConfig {
     pub effort: Option<String>,
     pub base_ref: Option<String>,
     pub in_place: bool,
+    pub worktree_mode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,7 @@ fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
         in_place: extract_toml_value(&content, "agent", "in_place")
             .map(|v| v == "true")
             .unwrap_or(false),
+        worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
     })
 }
 

@@ -4,6 +4,7 @@ use crate::db;
 use crate::env;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
+use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
@@ -67,6 +68,8 @@ pub struct BuildRunConfig {
     pub effort: Option<String>,
     /// If true, agents work directly in the repo root instead of in a worktree
     pub in_place: bool,
+    /// "detached" (default) or "branched" - controls git worktree add behavior
+    pub worktree_mode: Option<String>,
 }
 
 /// Parse [build]command, [run]command, and [agent]model/effort from a mesh.toml file
@@ -91,6 +94,7 @@ fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, Stri
         model,
         effort,
         in_place,
+        worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
     })
 }
 
@@ -108,6 +112,7 @@ pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildR
         in_place: extract_toml_value(&content, "agent", "in_place")
             .map(|v| v == "true")
             .unwrap_or(false),
+        worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
     })
 }
 
@@ -122,13 +127,20 @@ fn validate_worktree_exists(resolved: &env::ResolvedPath, worktree_name: Option<
         "No worktree name set for this agent node. Spawn the agent first to create a worktree.".to_string()
     })?;
 
-    let host_path = std::path::Path::new(&resolved.host_path);
-    if host_path.exists() {
+    // Use git worktree list to verify the worktree is registered in git metadata,
+    // not just the directory exists on disk. This catches broken/corrupted worktrees.
+    let output = Command::new("git")
+        .args(["-C", &resolved.host_path, "worktree", "list", "--porcelain"])
+        .output()
+        .map_err(|e| format!("Failed to list worktrees: {}", e))?;
+
+    let list = String::from_utf8_lossy(&output.stdout);
+    if list.contains(&resolved.host_path) {
         return Ok(());
     }
 
     Err(format!(
-        "Worktree directory not found for '{}'. Spawn the agent first to create the worktree.",
+        "Worktree '{}' not found in git worktree list. Spawn the agent first to create the worktree.",
         wt_name
     ))
 }

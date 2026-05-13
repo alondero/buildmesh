@@ -333,11 +333,16 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
 }
 
 /// Create a new Git worktree at the specified path and honor .worktreeinclude.
-pub fn create_git_worktree(project_root: &str, worktree_host_path: &str, branch_name: &str) -> Result<(), String> {
+pub fn create_git_worktree(
+    project_root: &str,
+    worktree_host_path: &str,
+    branch_name: &str,
+    worktree_mode: &str,
+) -> Result<(), String> {
     let host_path = std::path::Path::new(worktree_host_path);
 
     if host_path.exists() {
-        return Ok(()); 
+        return Ok(());
     }
 
     // Ensure parent directory exists
@@ -345,12 +350,22 @@ pub fn create_git_worktree(project_root: &str, worktree_host_path: &str, branch_
         std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create worktrees directory: {}", e))?;
     }
 
-    tracing::info!("Creating git worktree: {} at {}", branch_name, worktree_host_path);
+    tracing::info!("Creating git worktree: {} at {} (mode: {})", branch_name, worktree_host_path, worktree_mode);
 
-    // Use git worktree add --detach <path>
-    let output = Command::new("git")
-        .args(["-C", project_root, "worktree", "add", "--detach", worktree_host_path])
-        .output()
+    // Build git worktree add command based on worktree_mode
+    // "detached" = --detach (default), "branched" = -b {branch_name}
+    let use_branched = worktree_mode == "branched";
+
+    let mut args = vec!["-C", project_root, "worktree", "add"];
+    if use_branched {
+        args.push("-b");
+        args.push(branch_name);
+    } else {
+        args.push("--detach");
+    }
+    args.push(worktree_host_path);
+
+    let output = Command::new("git").args(&args).output()
         .map_err(|e| format!("Failed to execute git worktree add: {}", e))?;
 
     if !output.status.success() {
@@ -358,11 +373,20 @@ pub fn create_git_worktree(project_root: &str, worktree_host_path: &str, branch_
         if stderr.contains("already checked out") || stderr.contains("already exists") {
             tracing::warn!("Worktree already exists in git metadata, attempting to repair...");
             let _ = Command::new("git").args(["-C", project_root, "worktree", "prune"]).output();
-            let retry = Command::new("git")
-                .args(["-C", project_root, "worktree", "add", "--detach", worktree_host_path])
-                .output()
+
+            // Retry with same mode
+            let mut retry_args = vec!["-C", project_root, "worktree", "add"];
+            if use_branched {
+                retry_args.push("-b");
+                retry_args.push(branch_name);
+            } else {
+                retry_args.push("--detach");
+            }
+            retry_args.push(worktree_host_path);
+
+            let retry = Command::new("git").args(&retry_args).output()
                 .map_err(|e| format!("Retry failed to execute git worktree add: {}", e))?;
-            
+
             if !retry.status.success() {
                 return Err(format!("Git worktree add failed after retry: {}", String::from_utf8_lossy(&retry.stderr)));
             }
@@ -405,6 +429,16 @@ pub fn create_git_worktree(project_root: &str, worktree_host_path: &str, branch_
     }
 
     Ok(())
+}
+
+/// Check if the source branch is clean (no uncommitted changes).
+/// Used before creating branched worktrees to prevent state pollution.
+pub fn check_source_branch_clean(project_root: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["-C", project_root, "status", "--porcelain"])
+        .output()
+        .map_err(|e| format!("Failed to check git status: {}", e))?;
+    Ok(output.stdout.is_empty())
 }
 
 /// Get the .claude directory for session storage in the correct environment
