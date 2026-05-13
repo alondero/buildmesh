@@ -12,6 +12,7 @@ interface MeshConfig {
   effort: string | null;
   base_ref: string | null;
   in_place: boolean;
+  worktree_mode: string | null;
 }
 
 const EFFORT_OPTIONS = [
@@ -26,7 +27,11 @@ const EFFORT_OPTIONS = [
 const BASEREF_OPTIONS = [
   { value: 'fresh', label: 'Fresh — start new session (origin/<default>)' },
   { value: 'head', label: 'Head — resume last session (HEAD)' },
-  { value: 'in-place', label: 'In-place — work directly in repo (no worktree)' },
+];
+
+const WORKTREE_MODE_OPTIONS = [
+  { value: 'detached', label: 'Detached — detached HEAD worktree (default)' },
+  { value: 'branched', label: 'Branched — actual git branch per worktree' },
 ];
 
 export function MeshPropertiesPanel() {
@@ -43,10 +48,11 @@ export function MeshPropertiesPanel() {
     name: '',
     model: '',
     effort: '',
+    useWorktree: true,
     baseRef: 'fresh',
+    worktreeMode: 'detached',
     buildCommand: '',
     runCommand: '',
-    inPlace: false,
   });
   const [saving, setSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -72,10 +78,11 @@ export function MeshPropertiesPanel() {
           name: resolvedName,
           model: config.model ?? '',
           effort: config.effort ?? '',
-          baseRef: config.in_place ? 'in-place' : (config.base_ref === 'HEAD' ? 'head' : 'fresh'),
+          useWorktree: !config.in_place,
+          baseRef: config.base_ref === 'HEAD' ? 'head' : 'fresh',
+          worktreeMode: config.worktree_mode ?? 'detached',
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
-          inPlace: config.in_place ?? false,
         });
         setLoading(false);
       })
@@ -103,16 +110,28 @@ export function MeshPropertiesPanel() {
         await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'effort', value: form.effort });
       }
 
-      // Handle baseRef and in_place: in-place is a third option, not part of baseRef
-      if (form.baseRef === 'in-place') {
-        await invoke('update_mesh_in_place', { meshId: propertiesPanelMeshId, inPlace: true });
+      // useWorktree is stored as in_place (inverted)
+      const initialUseWorktree = initialConfig ? !initialConfig.in_place : true;
+      if (form.useWorktree !== initialUseWorktree) {
+        await invoke('update_mesh_in_place', { meshId: propertiesPanelMeshId, inPlace: !form.useWorktree });
+      }
+
+      if (form.useWorktree) {
+        // baseRef → .claude/settings.json
+        const initialBaseRef = initialConfig?.base_ref === 'HEAD' ? 'head' : 'fresh';
+        if (form.baseRef !== initialBaseRef) {
+          await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: form.baseRef });
+        }
+        // worktree_mode → mesh.toml [agent]
+        const initialWorktreeMode = initialConfig?.worktree_mode ?? 'detached';
+        if (form.worktreeMode !== initialWorktreeMode) {
+          await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'worktree_mode', value: form.worktreeMode });
+        }
       } else {
-        // Not in-place: save in_place=false and baseRef as usual
-        await invoke('update_mesh_in_place', { meshId: propertiesPanelMeshId, inPlace: false });
-        if (form.baseRef === 'fresh') {
-          await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: 'fresh' });
-        } else {
-          await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: 'head' });
+        // Reset worktree_mode to detached when worktree is disabled
+        const initialWorktreeMode = initialConfig?.worktree_mode ?? 'detached';
+        if (initialWorktreeMode !== 'detached') {
+          await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'worktree_mode', value: 'detached' });
         }
       }
 
@@ -220,24 +239,59 @@ export function MeshPropertiesPanel() {
                 </select>
               </div>
 
-              {/* baseRef */}
+              {/* Use Worktree */}
               <div>
-                <label className="block text-xs text-[#9ca3af] mb-2">baseRef</label>
-                <div className="space-y-2">
-                  {BASEREF_OPTIONS.map((o) => (
-                    <label key={o.value} className="flex items-start gap-2 text-xs text-[#e0e0e0] cursor-pointer">
-                      <input
-                        type="radio"
-                        name="baseRef"
-                        value={o.value}
-                        checked={form.baseRef === o.value}
-                        onChange={(e) => setForm((p) => ({ ...p, baseRef: e.target.value }))}
-                        className="mt-0.5 accent-[#00d4ff]"
-                      />
-                      <span>{o.label}</span>
-                    </label>
-                  ))}
-                </div>
+                <label className="flex items-center gap-2 text-xs text-[#e0e0e0] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.useWorktree}
+                    onChange={(e) => setForm((p) => ({ ...p, useWorktree: e.target.checked }))}
+                    className="accent-[#00d4ff]"
+                  />
+                  <span>Use worktree</span>
+                </label>
+                {form.useWorktree && (
+                  <div className="mt-2 pl-4 space-y-3 border-l border-[#2a2a2a]">
+                    {/* Starting point */}
+                    <div>
+                      <label className="block text-xs text-[#9ca3af] mb-2">Starting point</label>
+                      <div className="space-y-2">
+                        {BASEREF_OPTIONS.map((o) => (
+                          <label key={o.value} className="flex items-start gap-2 text-xs text-[#e0e0e0] cursor-pointer">
+                            <input
+                              type="radio"
+                              name="baseRef"
+                              value={o.value}
+                              checked={form.baseRef === o.value}
+                              onChange={(e) => setForm((p) => ({ ...p, baseRef: e.target.value }))}
+                              className="mt-0.5 accent-[#00d4ff]"
+                            />
+                            <span>{o.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                    {/* Worktree mode */}
+                    <div>
+                      <label className="block text-xs text-[#9ca3af] mb-2">Worktree mode</label>
+                      <div className="space-y-2">
+                        {WORKTREE_MODE_OPTIONS.map((o) => (
+                          <label key={o.value} className="flex items-start gap-2 text-xs text-[#e0e0e0] cursor-pointer">
+                            <input
+                              type="radio"
+                              name="worktreeMode"
+                              value={o.value}
+                              checked={form.worktreeMode === o.value}
+                              onChange={(e) => setForm((p) => ({ ...p, worktreeMode: e.target.value }))}
+                              className="mt-0.5 accent-[#00d4ff]"
+                            />
+                            <span>{o.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Build command */}
