@@ -5,6 +5,19 @@ use crate::models::EnvType;
 use std::process::Command;
 use tauri::command;
 
+/// Check whether the user is authenticated with GitHub via `gh`.
+#[command]
+pub fn check_gh_auth() -> bool {
+    let output = Command::new("gh")
+        .args(["auth", "status"])
+        .output();
+
+    match output {
+        Ok(o) => o.status.success(),
+        Err(_) => false,
+    }
+}
+
 /// Create a PR for the node
 #[command]
 pub fn create_pr(
@@ -39,6 +52,45 @@ pub fn create_pr(
         }
         Err(e) => Err(format!("error: {}", e)),
     }
+}
+
+/// Create a PR directly from a mesh directory path (no node required).
+/// Detects the current branch via `git branch --show-current`, then runs
+/// `gh pr create` targeting `base_branch`.
+#[command]
+pub fn create_pr_for_mesh(
+    mesh_path: String,
+    title: String,
+    body: String,
+    base_branch: String,
+) -> Result<String, String> {
+    // Detect the current branch
+    let branch = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&mesh_path)
+        .output()
+        .map_err(|e| format!("git error: {}", e))?
+        .stdout;
+    let branch = String::from_utf8_lossy(&branch).trim().to_string();
+
+    let output = Command::new("cmd.exe")
+        .args(["/c", "cd", &mesh_path, "&&", "gh", "pr", "create",
+               "--title", &title, "--body", &body, "--base", &base_branch])
+        .output()
+        .map_err(|e| format!("gh error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(stderr.trim().to_string());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let url = stdout
+        .lines()
+        .find(|l| l.starts_with("https://github.com"))
+        .unwrap_or_default()
+        .to_string();
+    Ok(url)
 }
 
 /// Merge a PR
