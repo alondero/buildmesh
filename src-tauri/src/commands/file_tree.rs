@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use tauri::command;
 use crate::env;
 
@@ -83,6 +84,36 @@ pub fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode
 #[command]
 pub fn to_host_path(path: String) -> String {
     env::to_host_path(&path)
+}
+
+/// Open a file in the system default editor (VS Code)
+#[command]
+pub fn open_in_editor(path: String) -> Result<(), String> {
+    let host_path = env::to_host_path(&path);
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd.exe")
+            .args(["/c", "start", "code", &host_path])
+            .spawn()
+            .map_err(|e| format!("Failed to open editor: {}", e))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("code")
+            .arg(&host_path)
+            .spawn()
+            .map_err(|e| format!("Failed to open editor: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Get the platform-specific ~/.claude directory path
+#[command]
+pub fn get_user_config_dir() -> String {
+    env::claude_dir().to_string_lossy().to_string()
 }
 
 #[cfg(test)]

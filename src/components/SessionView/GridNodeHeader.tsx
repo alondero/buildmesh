@@ -9,12 +9,12 @@ import { getStatusConfig } from '../../lib/status';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
-  changedFilesNodeId: number | null;
   onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
 }
 
-export function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: GridNodeHeaderProps) {
-  const toggleChangedFiles = useUIStore(state => state.toggleChangedFiles);
+export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
+  const toggleFileExplorer = useUIStore(state => state.toggleFileExplorer);
+  const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   const meshesById = useMeshStore(state => state.meshesById);
 
@@ -26,7 +26,8 @@ export function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: GridNod
   const gitPath = getNodeGitPath(node);
   const { summary } = useGitSummary(gitPath || null);
 
-  const isPanelNode = changedFilesNodeId === node.id;
+  const isPanelNode =
+    fileExplorerContext?.type === 'agent' && fileExplorerContext.nodeId === node.id;
 
   const meshLabel = useMemo(() => {
     const m = meshesById.get(node.mesh_id);
@@ -42,7 +43,7 @@ export function GridNodeHeader({ node, changedFilesNodeId, onBuildRun }: GridNod
         </span>
         {summary && (
           <span
-            onClick={(e) => { e.stopPropagation(); toggleChangedFiles(node.id); }}
+            onClick={(e) => { e.stopPropagation(); toggleFileExplorer({ type: 'agent', nodeId: node.id, path: gitPath }); }}
             className={`text-[10px] font-mono cursor-pointer hover:text-accent-cyan ${isPanelNode ? 'text-accent-cyan' : 'text-text-muted'}`}
             title="Click to see changes"
           >

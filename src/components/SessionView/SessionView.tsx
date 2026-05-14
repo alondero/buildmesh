@@ -4,14 +4,11 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
-import { ChangedFilesPanel } from '../ChangedFilesPanel/ChangedFilesPanel';
+import { FileExplorerPanel } from '../FileTree/FileExplorerPanel';
 import { watchSession, unwatchSession } from '../../lib/tauri';
 import { terminalManager } from '../Terminal/Terminal';
-import { getNodeGitPath } from '../../lib/paths';
 import { useGridLayout } from '../../hooks/useGridLayout';
-import { DiffViewerModal } from './DiffViewerModal';
 import { GridNodeHeader } from './GridNodeHeader';
-import type { GitStatus, DiffResult } from '../../lib/tauri';
 
 export function SessionView() {
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
@@ -23,13 +20,11 @@ export function SessionView() {
 
   const activeNode = getActiveNode();
 
-  const changedFilesOpen = useUIStore(state => state.changedFilesOpen);
-  const changedFilesNodeId = useUIStore(state => state.changedFilesNodeId);
-  const changedFilesWidth = useUIStore(state => state.changedFilesWidth);
-  const setChangedFilesWidth = useUIStore(state => state.setChangedFilesWidth);
-  const [selectedDiff, setSelectedDiff] = useState<{ file: GitStatus; diff: DiffResult } | null>(null);
-  const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' } | null>(null);
+  const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
+  const closeFileExplorer = useUIStore(state => state.closeFileExplorer);
 
+  const [fileExplorerWidth, setFileExplorerWidth] = useState(360);
+  const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' } | null>(null);
 
   const filteredNodes = useMemo(() => {
     if (selectedMeshId === null) {
@@ -38,13 +33,11 @@ export function SessionView() {
     return agentNodes.filter(s => s.mesh_id === selectedMeshId);
   }, [agentNodes, selectedMeshId]);
 
-  // Get node path for git status -- from the node whose changes are shown in panel
-  const changedFilesNode = changedFilesNodeId
-    ? agentNodes.find(n => n.id === changedFilesNodeId)
-    : activeNode;
-  const nodePath = changedFilesNode ? getNodeGitPath(changedFilesNode) : '';
-
-  const closeChangedFiles = useUIStore(state => state.closeChangedFiles);
+  // Get node for file explorer context
+  const fileExplorerNode = useMemo(() => {
+    if (!fileExplorerContext || fileExplorerContext.type !== 'agent') return null;
+    return agentNodes.find(n => n.id === fileExplorerContext.nodeId) ?? null;
+  }, [fileExplorerContext, agentNodes]);
 
   useEffect(() => {
     if (!activeNode) return;
@@ -56,15 +49,9 @@ export function SessionView() {
 
   useEffect(() => {
     if (selectedMeshId !== null) {
-      closeChangedFiles();
+      closeFileExplorer();
     }
-  }, [selectedMeshId, closeChangedFiles]);
-
-  useEffect(() => {
-    if (activeNode && changedFilesOpen && changedFilesNodeId !== activeNode.id) {
-      useUIStore.getState().setChangedFilesNodeId(activeNode.id);
-    }
-  }, [activeNode?.id, changedFilesOpen, changedFilesNodeId]);
+  }, [selectedMeshId, closeFileExplorer]);
 
   // Auto-select first node when switching to a mesh that doesn't include the active node
   useEffect(() => {
@@ -99,36 +86,27 @@ export function SessionView() {
       <div className="flex-1 flex overflow-hidden">
         <GridLayout
           nodes={filteredNodes}
-          changedFilesNodeId={changedFilesNodeId}
           onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
           buildRunOpen={openBuildRun}
           setBuildRunOpen={setOpenBuildRun}
         />
 
-        <ChangedFilesPanel
-          projectPath={nodePath}
-          isOpen={changedFilesOpen}
-          width={changedFilesWidth}
-          onWidthChange={setChangedFilesWidth}
-          onFileSelect={(file, diff) => setSelectedDiff({ file, diff })}
-          onClose={closeChangedFiles}
-        />
+        {fileExplorerContext && (
+          <FileExplorerPanel
+            context={fileExplorerContext}
+            width={fileExplorerWidth}
+            onWidthChange={setFileExplorerWidth}
+            onClose={closeFileExplorer}
+            nodeName={fileExplorerNode?.name}
+          />
+        )}
       </div>
-
-      {selectedDiff && (
-        <DiffViewerModal
-          file={selectedDiff.file}
-          diff={selectedDiff.diff}
-          onClose={() => setSelectedDiff(null)}
-        />
-      )}
     </div>
   );
 }
 
-function GridLayout({ nodes, changedFilesNodeId, onBuildRun, buildRunOpen, setBuildRunOpen }: {
+function GridLayout({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: {
   nodes: AgentNode[];
-  changedFilesNodeId: number | null;
   onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
   buildRunOpen: { nodeId: number; mode: 'build' | 'run' } | null;
   setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' } | null) => void;
@@ -147,7 +125,7 @@ function GridLayout({ nodes, changedFilesNodeId, onBuildRun, buildRunOpen, setBu
           : isActive ? 'border-accent-cyan/60' : 'border-border-default hover:border-accent-cyan/50';
         return (
           <div key={node.id} onClick={() => { if (!isActive) setActiveNode(node.id); }} className={`flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${borderClass}`}>
-            <GridNodeHeader node={node} changedFilesNodeId={changedFilesNodeId} onBuildRun={onBuildRun} />
+            <GridNodeHeader node={node} onBuildRun={onBuildRun} />
             <div className="flex-1 flex flex-col overflow-hidden bg-black">
               <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
                 <AgentTerminal sessionId={node.id} />

@@ -1,5 +1,10 @@
 import { create } from 'zustand';
 
+export type FileExplorerContext =
+  | { type: 'agent'; nodeId: number; path: string }
+  | { type: 'mesh'; meshId: number; path: string }
+  | { type: 'userConfig'; path: string };
+
 interface UIState {
   changedFilesOpen: boolean;
   changedFilesNodeId: number | null;
@@ -8,6 +13,10 @@ interface UIState {
   setChangedFilesNodeId: (nodeId: number) => void;
   closeChangedFiles: () => void;
   setChangedFilesWidth: (width: number) => void;
+
+  fileExplorerContext: FileExplorerContext | null;
+  toggleFileExplorer: (context: FileExplorerContext) => void;
+  closeFileExplorer: () => void;
 
   propertiesPanelMeshId: number | null;
   openPropertiesPanel: (meshId: number) => void;
@@ -41,6 +50,27 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   setChangedFilesWidth: (width: number) => {
     set({ changedFilesWidth: width });
+  },
+
+  fileExplorerContext: null,
+
+  toggleFileExplorer: (context: FileExplorerContext) => {
+    const { fileExplorerContext } = get();
+    if (
+      fileExplorerContext &&
+      fileExplorerContext.type === context.type &&
+      'nodeId' in context &&
+      'nodeId' in fileExplorerContext &&
+      fileExplorerContext.nodeId === context.nodeId
+    ) {
+      set({ fileExplorerContext: null });
+    } else {
+      set({ fileExplorerContext: context });
+    }
+  },
+
+  closeFileExplorer: () => {
+    set({ fileExplorerContext: null });
   },
 
   propertiesPanelMeshId: null,
