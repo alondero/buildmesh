@@ -413,7 +413,10 @@ async fn handle_ws_connection(
 ) {
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe before sending initial state to avoid missing output in the gap
+    // Subscribe before sending initial state to avoid missing output in the gap.
+    // IMPORTANT: call ensure_pty_channel first so we don't accidentally create a new
+    // empty channel and lose the history that send_pty_output has been accumulating.
+    ensure_pty_channel(node_id);
     let mut rx = subscribe_pty(node_id);
 
     // Prefer a clean terminal snapshot over raw history replay, which contains
