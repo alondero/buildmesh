@@ -1,0 +1,58 @@
+# Buildmesh configuration
+#
+# This file lives in the root of each mesh directory. It controls how agents
+# are spawned, how worktrees are created, and what build/run commands are used.
+#
+# Copy this file to mesh.toml and edit the values for your project.
+# All fields are optional — defaults are used when fields are omitted.
+
+# ---------------------------------------------------------------------------
+# [build] — Build command for this mesh
+# ---------------------------------------------------------------------------
+[build]
+# The command to run when building this project.
+# Used by the Build & Run panel.
+command = "cargo build --release"
+
+# ---------------------------------------------------------------------------
+# [run] — Run command for this mesh
+# ---------------------------------------------------------------------------
+[run]
+# The command to run when executing this project.
+# Used by the Build & Run panel.
+command = "cargo run"
+
+# ---------------------------------------------------------------------------
+# [agent] — Agent defaults for this mesh
+# ---------------------------------------------------------------------------
+[agent]
+
+# Model to use when spawning agents (cwrap only).
+# Examples: opus-4, sonnet-4, sonnet-4-7, haiku-4
+# If unset, the agent uses its default model.
+# model = "opus-4"
+
+# Effort level for agent reasoning (cwrap only).
+# Options: low, medium, high, xhigh, max
+# If unset, the agent uses its default effort.
+# effort = "medium"
+
+# Work directly in the mesh root directory instead of using a git worktree.
+# When true: agents operate directly in mesh_path/ (no worktree isolation).
+# When false (default): each agent gets its own git worktree.
+use_worktree = true
+
+# How git worktrees are created for new agent nodes.
+# Options:
+#   "detached" (default) — detached HEAD worktree, no branch tracking
+#   "branched"          — actual git branch per worktree (e.g. worktree-agent-1)
+worktree_mode = "detached"
+
+# ---------------------------------------------------------------------------
+# Worktree starting point (stored in .claude/settings.json, not mesh.toml)
+# ---------------------------------------------------------------------------
+# Controls where new worktrees branch from:
+#   "fresh" — origin/<default> (typically origin/main)
+#   "head"  — current HEAD (resume last session state)
+#
+# This is set via the UI and stored in .claude/settings.json, not here.

@@ -25,7 +25,7 @@ pub struct MeshConfig {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub base_ref: Option<String>,
-    pub in_place: bool,
+    pub use_worktree: bool,
     pub worktree_mode: Option<String>,
 }
 
@@ -46,9 +46,9 @@ fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
         model: extract_toml_value(&content, "agent", "model"),
         effort: extract_toml_value(&content, "agent", "effort"),
         base_ref: None, // baseRef lives in settings.json, not mesh.toml
-        in_place: extract_toml_value(&content, "agent", "in_place")
+        use_worktree: extract_toml_value(&content, "agent", "use_worktree")
             .map(|v| v == "true")
-            .unwrap_or(false),
+            .unwrap_or(true),
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
     })
 }
@@ -196,7 +196,7 @@ pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
             model: None,
             effort: None,
             base_ref: None,
-            in_place: false,
+            use_worktree: true,
             worktree_mode: None,
         },
     };
@@ -257,19 +257,18 @@ pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
     remove_base_ref(&mesh.path)
 }
 
-/// Write in_place setting to mesh.toml [agent] section.
-/// Unlike write_mesh_toml_field, this writes bare booleans (true/false) not quoted strings.
+/// Write use_worktree setting to mesh.toml [agent] section.
 /// Creates [agent] section if it doesn't exist.
 #[tauri::command]
-pub async fn update_mesh_in_place(mesh_id: i64, in_place: bool) -> Result<(), String> {
+pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
     let mesh =
         db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let config_path = PathBuf::from(&mesh.path).join(MESH_CONFIG_FILENAME);
     let content =
         std::fs::read_to_string(&config_path).unwrap_or_else(|_| MESH_CONFIG_EMPTY_TEMPLATE.to_string());
 
-    let bool_str = if in_place { "true" } else { "false" };
-    let key = "in_place";
+    let bool_str = if use_worktree { "true" } else { "false" };
+    let key = "use_worktree";
 
     let section_pattern = "[agent]";
 
@@ -284,7 +283,7 @@ pub async fn update_mesh_in_place(mesh_id: i64, in_place: bool) -> Result<(), St
         let section_content = &content[section_start..section_end];
         let after = &content[section_end..];
 
-        // For booleans, write without quotes: in_place = true
+        // For booleans, write without quotes: use_worktree = true
         let key_pattern = format!("{} = ", key);
         let new_line = format!("{} = {}", key, bool_str);
 

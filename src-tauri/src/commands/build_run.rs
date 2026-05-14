@@ -66,8 +66,8 @@ pub struct BuildRunConfig {
     pub run_command: String,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// If true, agents work directly in the repo root instead of in a worktree
-    pub in_place: bool,
+    /// If false, agents work directly in the repo root instead of in a worktree
+    pub use_worktree: bool,
     /// "detached" (default) or "branched" - controls git worktree add behavior
     pub worktree_mode: Option<String>,
 }
@@ -84,16 +84,16 @@ fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, Stri
         .ok_or_else(|| "run command not configured in mesh.toml".to_string())?;
     let model = extract_toml_value(&content, "agent", "model");
     let effort = extract_toml_value(&content, "agent", "effort");
-    let in_place = extract_toml_value(&content, "agent", "in_place")
+    let use_worktree = extract_toml_value(&content, "agent", "use_worktree")
         .map(|v| v == "true")
-        .unwrap_or(false);
+        .unwrap_or(true);
 
     Ok(BuildRunConfig {
         build_command,
         run_command,
         model,
         effort,
-        in_place,
+        use_worktree,
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
     })
 }
@@ -109,9 +109,9 @@ pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildR
         run_command: extract_toml_value(&content, "run", "command").unwrap_or_default(),
         model: extract_toml_value(&content, "agent", "model"),
         effort: extract_toml_value(&content, "agent", "effort"),
-        in_place: extract_toml_value(&content, "agent", "in_place")
+        use_worktree: extract_toml_value(&content, "agent", "use_worktree")
             .map(|v| v == "true")
-            .unwrap_or(false),
+            .unwrap_or(true),
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
     })
 }
@@ -202,19 +202,19 @@ pub async fn build_run(
     // 2. Parse mesh.toml
     let config = parse_mesh_config(&std::path::PathBuf::from(&node.path))?;
 
-    // 3. If in_place mode, work directly in repo root
-    let in_place = config.in_place;
-    let spawn_worktree_name = if in_place {
-        None
-    } else {
+    // 3. If use_worktree is false, work directly in repo root
+    let use_worktree = config.use_worktree;
+    let spawn_worktree_name = if use_worktree {
         node.worktree_name.as_deref()
+    } else {
+        None
     };
 
     // 4. Resolve worktree path via centralized env module
     let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
 
-    // Only validate worktree exists if not in_place mode
-    if !in_place {
+    // Only validate worktree exists if use_worktree is true
+    if use_worktree {
         validate_worktree_exists(&resolved, spawn_worktree_name)?;
 
         // Sanitize .git file to ensure proper worktree isolation across environments
@@ -372,27 +372,27 @@ pub async fn ensure_mesh_config(mesh_id: i64) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// Test: BuildRunConfig should have in_place field
+    /// Test: BuildRunConfig should have use_worktree field
     #[test]
-    fn build_run_config_has_in_place_field() {
+    fn build_run_config_has_use_worktree_field() {
         let config = BuildRunConfig {
             build_command: "npm run build".to_string(),
             run_command: "npm run dev".to_string(),
             model: None,
             effort: None,
-            in_place: true,
+            use_worktree: true,
         };
-        assert!(config.in_place);
+        assert!(config.use_worktree);
     }
 
-    /// Test: extract_toml_value can extract in_place boolean
+    /// Test: extract_toml_value can extract use_worktree boolean
     #[test]
-    fn extract_toml_value_extracts_in_place_bool() {
+    fn extract_toml_value_extracts_use_worktree_bool() {
         let content = r#"
 [agent]
-in_place = true
+use_worktree = true
 "#;
-        let value = extract_toml_value(content, "agent", "in_place");
+        let value = extract_toml_value(content, "agent", "use_worktree");
         assert_eq!(value, Some("true".to_string()));
     }
 
@@ -403,7 +403,7 @@ in_place = true
 [build]
 command = "npm run build"
 "#;
-        let value = extract_toml_value(content, "build", "in_place");
+        let value = extract_toml_value(content, "build", "use_worktree");
         assert_eq!(value, None);
     }
 
@@ -414,10 +414,10 @@ command = "npm run build"
 [agent]
 model = "opus-4"
 effort = "medium"
-in_place = true
+use_worktree = true
 "#;
         assert_eq!(extract_toml_value(content, "agent", "model"), Some("opus-4".to_string()));
         assert_eq!(extract_toml_value(content, "agent", "effort"), Some("medium".to_string()));
-        assert_eq!(extract_toml_value(content, "agent", "in_place"), Some("true".to_string()));
+        assert_eq!(extract_toml_value(content, "agent", "use_worktree"), Some("true".to_string()));
     }
 }
