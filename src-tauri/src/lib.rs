@@ -159,6 +159,8 @@ pub fn run() {
             commands::diff::diff_file_against_head,
             // File tree
             commands::file_tree::list_directory,
+            commands::file_tree::open_in_editor,
+            commands::file_tree::get_user_config_dir,
             // Git
             commands::git::get_git_status,
             commands::git::get_git_summary,

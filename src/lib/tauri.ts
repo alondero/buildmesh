@@ -115,6 +115,12 @@ export interface FileNode {
 export const listDirectory = (path: string, maxDepth?: number) =>
   invoke<FileNode>('list_directory', { path, maxDepth });
 
+export const openInEditor = (path: string) =>
+  invoke('open_in_editor', { path });
+
+export const getUserConfigDir = () =>
+  invoke<string>('get_user_config_dir');
+
 // Git
 export interface GitStatus {
   path: string;
