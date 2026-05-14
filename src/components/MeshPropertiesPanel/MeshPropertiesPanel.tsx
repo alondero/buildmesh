@@ -11,8 +11,7 @@ interface MeshConfig {
   model: string | null;
   effort: string | null;
   base_ref: string | null;
-  in_place: boolean;
-  worktree_mode: string | null;
+  use_worktree: boolean;
 }
 
 const EFFORT_OPTIONS = [
@@ -78,7 +77,7 @@ export function MeshPropertiesPanel() {
           name: resolvedName,
           model: config.model ?? '',
           effort: config.effort ?? '',
-          useWorktree: !config.in_place,
+          useWorktree: config.use_worktree,
           baseRef: config.base_ref === 'HEAD' ? 'head' : 'fresh',
           worktreeMode: config.worktree_mode ?? 'detached',
           buildCommand: config.build_command ?? '',
@@ -110,10 +109,10 @@ export function MeshPropertiesPanel() {
         await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'effort', value: form.effort });
       }
 
-      // useWorktree is stored as in_place (inverted)
-      const initialUseWorktree = initialConfig ? !initialConfig.in_place : true;
+      // use_worktree maps directly to useWorktree (no inversion needed)
+      const initialUseWorktree = initialConfig ? initialConfig.use_worktree : true;
       if (form.useWorktree !== initialUseWorktree) {
-        await invoke('update_mesh_in_place', { meshId: propertiesPanelMeshId, inPlace: !form.useWorktree });
+        await invoke('update_mesh_use_worktree', { meshId: propertiesPanelMeshId, useWorktree: form.useWorktree });
       }
 
       if (form.useWorktree) {
