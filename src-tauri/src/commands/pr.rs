@@ -56,7 +56,8 @@ pub fn create_pr(
 
 /// Create a PR directly from a mesh directory path (no node required).
 /// Detects the current branch via `git branch --show-current`, then runs
-/// `gh pr create` targeting `base_branch`.
+/// `gh pr create` targeting `base_branch`. On detached HEAD (empty branch)
+/// the `--head` flag is added so gh uses the commit directly.
 #[command]
 pub fn create_pr_for_mesh(
     mesh_path: String,
@@ -73,9 +74,15 @@ pub fn create_pr_for_mesh(
         .stdout;
     let branch = String::from_utf8_lossy(&branch).trim().to_string();
 
-    let output = Command::new("cmd.exe")
-        .args(["/c", "cd", &mesh_path, "&&", "gh", "pr", "create",
-               "--title", &title, "--body", &body, "--base", &base_branch])
+    let mut gh_args = vec!["pr", "create",
+               "--title", &title, "--body", &body, "--base", &base_branch];
+    if !branch.is_empty() {
+        gh_args.extend(["--head", &branch]);
+    }
+
+    let output = Command::new("gh")
+        .args(&gh_args)
+        .current_dir(&mesh_path)
         .output()
         .map_err(|e| format!("gh error: {}", e))?;
 
