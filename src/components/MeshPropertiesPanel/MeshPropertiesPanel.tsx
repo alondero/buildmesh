@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
+import { UncommittedChangesSection } from './UncommittedChangesSection';
+import { useMeshGitStatus } from '../../hooks/useMeshGitStatus';
 
 interface MeshConfig {
   name: string | null;
@@ -12,6 +14,7 @@ interface MeshConfig {
   effort: string | null;
   base_ref: string | null;
   use_worktree: boolean;
+  worktree_mode?: string | null;
 }
 
 const EFFORT_OPTIONS = [
@@ -36,13 +39,14 @@ const WORKTREE_MODE_OPTIONS = [
 export function MeshPropertiesPanel() {
   const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
   const closePropertiesPanel = useUIStore((s) => s.closePropertiesPanel);
+  const openMeshDiff = useUIStore((s) => s.openMeshDiff);
   const mesh = useMeshStore((s) =>
     propertiesPanelMeshId != null ? s.meshesById.get(propertiesPanelMeshId) : undefined
   );
   const updateMeshName = useMeshStore((s) => s.updateMeshName);
   const deleteMesh = useMeshStore((s) => s.deleteMesh);
 
-  const [initialConfig, setInitialConfig] = useState<MeshConfig | null>(null);
+  const [, setInitialConfig] = useState<MeshConfig | null>(null);
   const [form, setForm] = useState({
     name: '',
     model: '',
@@ -53,10 +57,11 @@ export function MeshPropertiesPanel() {
     buildCommand: '',
     runCommand: '',
   });
-  const [saving, setSaving] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
+
+  const git = useMeshGitStatus(mesh?.path ?? null);
 
   // Load config on mount
   useEffect(() => {
@@ -70,7 +75,6 @@ export function MeshPropertiesPanel() {
     invoke<MeshConfig>('get_mesh_properties', { meshId: propertiesPanelMeshId })
       .then((config) => {
         setInitialConfig(config);
-        // name: config.name (from DB) → mesh?.name (store) → folderName (derived from path)
         const folderName = mesh?.path.split(/[/\\]/).pop() ?? '';
         const resolvedName = config.name || mesh?.name || folderName;
         setForm({
@@ -86,79 +90,92 @@ export function MeshPropertiesPanel() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [propertiesPanelMeshId]);
+  }, [propertiesPanelMeshId, mesh?.name, mesh?.path]);
 
-  if (propertiesPanelMeshId == null || !mesh) return null;
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      if (form.name !== mesh.name) {
-        await updateMeshName(propertiesPanelMeshId, form.name);
-      }
-
-      if (form.model !== (initialConfig?.model ?? '')) {
-        if (form.model) {
-          await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'model', value: form.model });
-        } else {
-          await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'model', value: '' });
-        }
-      }
-
-      if (form.effort) {
-        await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'effort', value: form.effort });
-      }
-
-      // use_worktree maps directly to useWorktree (no inversion needed)
-      const initialUseWorktree = initialConfig ? initialConfig.use_worktree : true;
-      if (form.useWorktree !== initialUseWorktree) {
-        await invoke('update_mesh_use_worktree', { meshId: propertiesPanelMeshId, useWorktree: form.useWorktree });
-      }
-
-      if (form.useWorktree) {
-        // baseRef → .claude/settings.json
-        const initialBaseRef = initialConfig?.base_ref === 'HEAD' ? 'head' : 'fresh';
-        if (form.baseRef !== initialBaseRef) {
-          await invoke('update_worktree_base_ref', { meshId: propertiesPanelMeshId, baseRef: form.baseRef });
-        }
-        // worktree_mode → mesh.toml [agent]
-        const initialWorktreeMode = initialConfig?.worktree_mode ?? 'detached';
-        if (form.worktreeMode !== initialWorktreeMode) {
-          await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'worktree_mode', value: form.worktreeMode });
-        }
-      } else {
-        // Reset worktree_mode to detached when worktree is disabled
-        const initialWorktreeMode = initialConfig?.worktree_mode ?? 'detached';
-        if (initialWorktreeMode !== 'detached') {
-          await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'agent', key: 'worktree_mode', value: 'detached' });
-        }
-      }
-
-      if (form.buildCommand !== (initialConfig?.build_command ?? '')) {
-        await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'build', key: 'command', value: form.buildCommand });
-      }
-
-      if (form.runCommand !== (initialConfig?.run_command ?? '')) {
-        await invoke('update_mesh_field', { meshId: propertiesPanelMeshId, section: 'run', key: 'command', value: form.runCommand });
-      }
-
-      closePropertiesPanel();
-    } catch (e) {
-      console.error('Failed to save mesh properties:', e);
-    } finally {
-      if (!mountedRef.current) return;
-      setSaving(false);
+  // Auto-save helpers — each returns a promise so callers can await then refetch
+  const saveName = async (name: string) => {
+    if (name !== mesh?.name) {
+      await updateMeshName(propertiesPanelMeshId!, name);
     }
+  };
+
+  const saveModel = async (value: string) => {
+    await invoke('update_mesh_field', {
+      meshId: propertiesPanelMeshId,
+      section: 'agent',
+      key: 'model',
+      value: value || '',
+    });
+  };
+
+  const saveEffort = async (value: string) => {
+    if (value) {
+      await invoke('update_mesh_field', {
+        meshId: propertiesPanelMeshId,
+        section: 'agent',
+        key: 'effort',
+        value,
+      });
+    }
+  };
+
+  const saveUseWorktree = async (value: boolean) => {
+    await invoke('update_mesh_use_worktree', {
+      meshId: propertiesPanelMeshId,
+      useWorktree: value,
+    });
+  };
+
+  const saveBaseRef = async (value: string) => {
+    await invoke('update_worktree_base_ref', {
+      meshId: propertiesPanelMeshId,
+      baseRef: value,
+    });
+  };
+
+  const saveWorktreeMode = async (value: string) => {
+    await invoke('update_mesh_field', {
+      meshId: propertiesPanelMeshId,
+      section: 'agent',
+      key: 'worktree_mode',
+      value,
+    });
+  };
+
+  const saveBuildCommand = async (value: string) => {
+    await invoke('update_mesh_field', {
+      meshId: propertiesPanelMeshId,
+      section: 'build',
+      key: 'command',
+      value,
+    });
+  };
+
+  const saveRunCommand = async (value: string) => {
+    await invoke('update_mesh_field', {
+      meshId: propertiesPanelMeshId,
+      section: 'run',
+      key: 'command',
+      value,
+    });
   };
 
   const handleDelete = async () => {
     try {
-      await deleteMesh(propertiesPanelMeshId);
+      await deleteMesh(propertiesPanelMeshId!);
       closePropertiesPanel();
     } catch (e) {
       console.error('Failed to delete mesh:', e);
     }
   };
+
+  const handleViewDiff = () => {
+    if (mesh) {
+      openMeshDiff(mesh.path);
+    }
+  };
+
+  if (propertiesPanelMeshId == null || !mesh) return null;
 
   return (
     <>
@@ -174,9 +191,13 @@ export function MeshPropertiesPanel() {
           </div>
           <button
             onClick={closePropertiesPanel}
-            className="text-[#6b7280] hover:text-[#e0e0e0] text-lg leading-none ml-2 shrink-0"
+            className="text-[#6b7280] hover:text-[#e0e0e0] transition-colors shrink-0"
+            title="Close"
           >
-            ×
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
           </button>
         </div>
 
@@ -193,6 +214,11 @@ export function MeshPropertiesPanel() {
                   type="text"
                   value={form.name}
                   onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                  onBlur={async (e) => {
+                    if (!mountedRef.current) return;
+                    await saveName(e.target.value);
+                    git?.refresh();
+                  }}
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
                 />
               </div>
@@ -208,6 +234,19 @@ export function MeshPropertiesPanel() {
                 />
               </div>
 
+              {/* Uncommitted Changes */}
+              {git && git.files.length > 0 && (
+                <UncommittedChangesSection
+                  meshPath={mesh.path}
+                  meshName={mesh.name}
+                  files={git.files}
+                  isAuthenticated={git.isAuthenticated}
+                  defaultBranch={git.defaultBranch}
+                  onViewDiff={handleViewDiff}
+                  onRefresh={() => git.refresh()}
+                />
+              )}
+
               {/* Model */}
               <div>
                 <label className="block text-xs text-[#9ca3af] mb-1">
@@ -217,6 +256,11 @@ export function MeshPropertiesPanel() {
                   type="text"
                   value={form.model}
                   onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
+                  onBlur={async (e) => {
+                    if (!mountedRef.current) return;
+                    await saveModel(e.target.value);
+                    git?.refresh();
+                  }}
                   placeholder="e.g., opus-4, sonnet-4"
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
                 />
@@ -229,7 +273,11 @@ export function MeshPropertiesPanel() {
                 </label>
                 <select
                   value={form.effort}
-                  onChange={(e) => setForm((p) => ({ ...p, effort: e.target.value }))}
+                  onChange={async (e) => {
+                    setForm((p) => ({ ...p, effort: e.target.value }));
+                    await saveEffort(e.target.value);
+                    git?.refresh();
+                  }}
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
                 >
                   {EFFORT_OPTIONS.map((o) => (
@@ -244,7 +292,11 @@ export function MeshPropertiesPanel() {
                   <input
                     type="checkbox"
                     checked={form.useWorktree}
-                    onChange={(e) => setForm((p) => ({ ...p, useWorktree: e.target.checked }))}
+                    onChange={async (e) => {
+                      setForm((p) => ({ ...p, useWorktree: e.target.checked }));
+                      await saveUseWorktree(e.target.checked);
+                      git?.refresh();
+                    }}
                     className="accent-[#00d4ff]"
                   />
                   <span>Use worktree</span>
@@ -262,7 +314,11 @@ export function MeshPropertiesPanel() {
                               name="baseRef"
                               value={o.value}
                               checked={form.baseRef === o.value}
-                              onChange={(e) => setForm((p) => ({ ...p, baseRef: e.target.value }))}
+                              onChange={async (e) => {
+                                setForm((p) => ({ ...p, baseRef: e.target.value }));
+                                await saveBaseRef(e.target.value);
+                                git?.refresh();
+                              }}
                               className="mt-0.5 accent-[#00d4ff]"
                             />
                             <span>{o.label}</span>
@@ -281,7 +337,11 @@ export function MeshPropertiesPanel() {
                               name="worktreeMode"
                               value={o.value}
                               checked={form.worktreeMode === o.value}
-                              onChange={(e) => setForm((p) => ({ ...p, worktreeMode: e.target.value }))}
+                              onChange={async (e) => {
+                                setForm((p) => ({ ...p, worktreeMode: e.target.value }));
+                                await saveWorktreeMode(e.target.value);
+                                git?.refresh();
+                              }}
                               className="mt-0.5 accent-[#00d4ff]"
                             />
                             <span>{o.label}</span>
@@ -300,6 +360,11 @@ export function MeshPropertiesPanel() {
                   type="text"
                   value={form.buildCommand}
                   onChange={(e) => setForm((p) => ({ ...p, buildCommand: e.target.value }))}
+                  onBlur={async (e) => {
+                    if (!mountedRef.current) return;
+                    await saveBuildCommand(e.target.value);
+                    git?.refresh();
+                  }}
                   placeholder="npm run build"
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
                 />
@@ -312,6 +377,11 @@ export function MeshPropertiesPanel() {
                   type="text"
                   value={form.runCommand}
                   onChange={(e) => setForm((p) => ({ ...p, runCommand: e.target.value }))}
+                  onBlur={async (e) => {
+                    if (!mountedRef.current) return;
+                    await saveRunCommand(e.target.value);
+                    git?.refresh();
+                  }}
                   placeholder="npm run dev"
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
                 />
@@ -321,14 +391,7 @@ export function MeshPropertiesPanel() {
         </div>
 
         {/* Footer */}
-        <div className="px-4 py-3 border-t border-[#2a2a2a] space-y-2 shrink-0">
-          <button
-            onClick={handleSave}
-            disabled={saving || loading}
-            className="w-full bg-[#00d4ff]/10 hover:bg-[#00d4ff]/20 text-[#00d4ff] text-xs font-medium py-2 rounded transition-colors disabled:opacity-50"
-          >
-            {saving ? 'Saving...' : 'Save & Close'}
-          </button>
+        <div className="px-4 py-3 border-t border-[#2a2a2a] shrink-0">
           <button
             onClick={() => setShowDeleteConfirm(true)}
             className="w-full bg-[#ef4444]/10 hover:bg-[#ef4444]/20 text-[#ef4444] text-xs font-medium py-2 rounded transition-colors"

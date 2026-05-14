@@ -140,6 +140,12 @@ export interface GitSummary {
 export const getGitSummary = (path: string) =>
   invoke<GitSummary>('get_git_summary', { path });
 
+export const checkIsGitRepo = (path: string) =>
+  invoke<boolean>('check_is_git_repo', { path });
+
+export const getDefaultBranch = (path: string) =>
+  invoke<string>('get_default_branch', { path });
+
 // MCP
 export const listMcpServers = (sessionId: number) =>
   invoke('list_mcp_servers', { sessionId });
@@ -163,6 +169,12 @@ export const mergePr = (prUrl: string) =>
 
 export const getCurrentBranch = (sessionId: number) =>
   invoke<string>('get_current_branch', { sessionId });
+
+export const checkGhAuth = () =>
+  invoke<boolean>('check_gh_auth');
+
+export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
+  invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 
 export const listProviders = () =>
   invoke<ProviderInfo[]>('list_providers');

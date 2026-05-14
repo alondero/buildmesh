@@ -164,6 +164,8 @@ pub fn run() {
             // Git
             commands::git::get_git_status,
             commands::git::get_git_summary,
+            commands::git::check_is_git_repo,
+            commands::git::get_default_branch,
             // Terminal
             commands::terminal::spawn_pty,
             commands::terminal::resize_pty,
@@ -183,6 +185,8 @@ pub fn run() {
             commands::pr::create_pr,
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
+            commands::pr::check_gh_auth,
+            commands::pr::create_pr_for_mesh,
             // Remote
             commands::remote::submit_terminal_snapshot,
         ])

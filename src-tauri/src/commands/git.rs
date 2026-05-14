@@ -103,3 +103,32 @@ pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
         deleted,
     })
 }
+
+/// Check whether a path is a valid git repository
+#[command]
+pub fn check_is_git_repo(path: String) -> bool {
+    git2::Repository::open(&path).is_ok()
+}
+
+/// Get the default branch name for the remote named "origin".
+/// Falls back to "main" if no remote is configured or the command fails.
+#[command]
+pub fn get_default_branch(path: String) -> String {
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .current_dir(&path)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            // "refs/remotes/origin/main\n" → "main"
+            stdout
+                .trim()
+                .strip_prefix("refs/remotes/origin/")
+                .map(String::from)
+                .unwrap_or_else(|| "main".to_string())
+        }
+        _ => "main".to_string(),
+    }
+}
