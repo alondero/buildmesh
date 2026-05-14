@@ -111,21 +111,25 @@ pub fn check_is_git_repo(path: String) -> bool {
 }
 
 /// Get the default branch name for the remote named "origin".
+/// Uses `git ls-remote --symbolic origin HEAD` which resolves the symbolic ref
+/// and returns the actual branch name (e.g. `refs/remotes/origin/main`).
 /// Falls back to "main" if no remote is configured or the command fails.
 #[command]
 pub fn get_default_branch(path: String) -> String {
     let output = std::process::Command::new("git")
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+        .args(["ls-remote", "--symbolic", "origin", "HEAD"])
         .current_dir(&path)
         .output();
 
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            // "refs/remotes/origin/main\n" → "main"
+            // Output line: "<sha>\trefs/remotes/origin/main\n" — last field is the resolved ref
             stdout
-                .trim()
-                .strip_prefix("refs/remotes/origin/")
+                .lines()
+                .next()
+                .and_then(|l| l.split('\t').last())
+                .and_then(|refpart| refpart.strip_prefix("refs/remotes/origin/"))
                 .map(String::from)
                 .unwrap_or_else(|| "main".to_string())
         }
