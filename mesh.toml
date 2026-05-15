@@ -3,3 +3,6 @@ command = "cargo build --release"
 
 [run]
 command = "cargo run"
+
+[agent]
+worktree_mode = "detached"

@@ -165,12 +165,16 @@ fn build_spawn_command(
     // Add --model and --effort for cwrap providers when configured
     if is_cwrap {
         if let Some(model) = model_override {
-            args.push("--model".to_string());
-            args.push(model.to_string());
+            if !model.is_empty() {
+                args.push("--model".to_string());
+                args.push(model.to_string());
+            }
         }
         if let Some(effort) = effort_override {
-            args.push("--effort".to_string());
-            args.push(effort.to_string());
+            if !effort.is_empty() {
+                args.push("--effort".to_string());
+                args.push(effort.to_string());
+            }
         }
     }
 
