@@ -56,8 +56,9 @@ pub fn create_pr(
 
 /// Create a PR directly from a mesh directory path (no node required).
 /// Detects the current branch via `git branch --show-current`, then runs
-/// `gh pr create` targeting `base_branch`. On detached HEAD (empty branch)
-/// the `--head` flag is added so gh uses the commit directly.
+/// `gh pr create` targeting `base_branch`. The `--head` flag is only needed
+/// when the current branch differs from `base_branch` — if they are the same,
+/// gh compares the branch to itself and returns "No commits between".
 #[command]
 pub fn create_pr_for_mesh(
     mesh_path: String,
@@ -76,7 +77,9 @@ pub fn create_pr_for_mesh(
 
     let mut gh_args = vec!["pr", "create",
                "--title", &title, "--body", &body, "--base", &base_branch];
-    if !branch.is_empty() {
+    // Only use --head if the current branch differs from base.
+    // When they're identical, --head causes "No commits between X and X".
+    if !branch.is_empty() && branch != base_branch {
         gh_args.extend(["--head", &branch]);
     }
 
