@@ -10,6 +10,16 @@ use tauri::{AppHandle, Emitter};
 
 pub const MESH_CONFIG_FILENAME: &str = "mesh.toml";
 
+/// Cache entry for mtime-gated mesh.toml parsing.
+/// Keyed by config path; invalidated when file mtime changes.
+struct MeshConfigCacheEntry {
+    config: BuildRunConfig,
+    mtime: std::time::SystemTime,
+}
+
+static MESH_CONFIG_CACHE: once_cell::sync::Lazy<Mutex<Option<(std::path::PathBuf, MeshConfigCacheEntry)>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(None));
+
 // ---------------------------------------------------------------------------
 // Config parsing
 // ---------------------------------------------------------------------------
@@ -99,12 +109,23 @@ fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, Stri
 }
 
 /// Parse mesh config returning an Option (used by agent.rs for spawn-time reading).
-/// Unlike parse_mesh_config, this does NOT fail if the file is missing or fields are absent.
+/// Uses an mtime-gated in-memory cache to avoid repeated file reads.
 pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildRunConfig> {
     let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path).ok()?;
 
-    Some(BuildRunConfig {
+    // Check cache using mtime invalidation
+    if let Ok(file_mtime) = std::fs::metadata(&config_path).and_then(|m| m.modified()) {
+        let cache = MESH_CONFIG_CACHE.lock().unwrap();
+        if let Some((ref cached_path, ref cached)) = *cache {
+            if cached_path == &config_path && file_mtime <= cached.mtime {
+                return Some(cached.config.clone());
+            }
+        }
+    }
+
+    // Cache miss — read from disk
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config = BuildRunConfig {
         build_command: extract_toml_value(&content, "build", "command").unwrap_or_default(),
         run_command: extract_toml_value(&content, "run", "command").unwrap_or_default(),
         model: extract_toml_value(&content, "agent", "model"),
@@ -113,7 +134,15 @@ pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildR
             .map(|v| v == "true")
             .unwrap_or(true),
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
-    })
+    };
+
+    // Update cache
+    if let Ok(mtime) = std::fs::metadata(&config_path).and_then(|m| m.modified()) {
+        let mut cache = MESH_CONFIG_CACHE.lock().unwrap();
+        *cache = Some((config_path, MeshConfigCacheEntry { config: config.clone(), mtime }));
+    }
+
+    Some(config)
 }
 
 // ---------------------------------------------------------------------------

@@ -618,7 +618,7 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     Ok(resumed)

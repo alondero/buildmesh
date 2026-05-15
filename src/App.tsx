@@ -203,7 +203,7 @@ function App() {
           } catch (e) {
             console.error('[App] Auto-resume failed:', e);
           }
-        }, 1000);
+        }, 500);
       } catch (e) {
         console.error('[App] Init failed:', e);
       }
