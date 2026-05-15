@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
@@ -29,8 +29,12 @@ function App() {
   const [isReady, setIsReady] = useState(false);
   const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
 
+  // Track window focus state for conditional shortcut handling
+  const isFocusedRef = useRef(false);
+
   // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
-  // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events)
+  // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
+  // Only register shortcuts when the window is focused so they don't steal from other apps.
   useEffect(() => {
     const shortcuts = [
       { key: 'CommandOrControl+T', action: 'new-agent' },
@@ -44,26 +48,64 @@ function App() {
       { key: 'CommandOrControl+8', action: 'switch-8' },
       { key: 'CommandOrControl+9', action: 'switch-9' },
     ];
+    const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
+
+    const handleShortcut = (action: string) => {
+      window.dispatchEvent(new CustomEvent('shortcut-triggered', { detail: action }));
+    };
+
+    let unlistenFocus: (() => void) | null = null;
+
+    const setupWindowTracking = async () => {
+      const win = getCurrentWindow();
+      isFocusedRef.current = await win.isFocused();
+
+      unlistenFocus = await win.onFocusChanged(async ({ payload: focused }) => {
+        isFocusedRef.current = focused;
+
+        const ops = shortcuts.map(async ({ key }) => {
+          try {
+            if (focused) {
+              if (!(await isRegistered(key))) {
+                const action = shortcutByKey.get(key);
+                await register(key, () => {
+                  if (!isFocusedRef.current) return;
+                  if (action) handleShortcut(action);
+                });
+              }
+            } else {
+              await unregister(key);
+            }
+          } catch (e) {
+            console.warn(`Failed to update shortcut ${key} on focus change:`, e);
+          }
+        });
+        await Promise.all(ops);
+      });
+    };
 
     const registerShortcuts = async () => {
-      for (const { key, action } of shortcuts) {
+      const ops = shortcuts.map(async ({ key }) => {
         try {
           if (!(await isRegistered(key))) {
-            await register(key, async () => {
-              const focused = await getCurrentWindow().isFocused();
-              if (!focused) return;
-              window.dispatchEvent(new CustomEvent('shortcut-triggered', { detail: action }));
+            const action = shortcutByKey.get(key);
+            await register(key, () => {
+              if (!isFocusedRef.current) return;
+              if (action) handleShortcut(action);
             });
           }
         } catch (e) {
           console.warn(`Failed to register shortcut ${key}:`, e);
         }
-      }
+      });
+      await Promise.all(ops);
     };
 
+    setupWindowTracking();
     registerShortcuts();
 
     return () => {
+      if (unlistenFocus) unlistenFocus();
       for (const { key } of shortcuts) {
         unregister(key).catch(() => {});
       }
