@@ -60,13 +60,13 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
             onClick={handleBuild}
             className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
-            Build from worktree
+            {node.use_worktree ? 'Build from worktree' : 'Build'}
           </button>
           <button
             onClick={handleRun}
             className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
-            Run from worktree
+            {node.use_worktree ? 'Run from worktree' : 'Run'}
           </button>
           <div className="border-t border-border-default" />
           <button

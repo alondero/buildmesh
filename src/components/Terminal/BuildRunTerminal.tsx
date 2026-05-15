@@ -9,10 +9,11 @@ import { TERMINAL_OPTIONS } from './terminalConfig';
 interface BuildRunTerminalProps {
   sessionId: number;
   mode?: 'build' | 'run';
+  useWorktree?: boolean;
   onClose?: () => void;
 }
 
-export function BuildRunTerminal({ sessionId, mode = 'build', onClose }: BuildRunTerminalProps) {
+export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true, onClose }: BuildRunTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -48,7 +49,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', onClose }: BuildRu
         return;
       }
       unlistenRef.current = unlisten;
-      term.write(`${mode === 'build' ? 'Building' : 'Running'} from worktree...\r\n`);
+      term.write(`${mode === 'build' ? 'Building' : 'Running'}${useWorktree ? ' from worktree' : ''}...\r\n`);
       invoke('build_run', { nodeId: sessionId, mode }).catch(err => {
         term.write(`\r\nError: ${String(err)}\r\n`);
       });
@@ -67,7 +68,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', onClose }: BuildRu
     <div className="flex flex-col flex-1 overflow-hidden bg-bg-overlay border-t border-border-default">
       <div className="flex items-center justify-between px-2 py-1 bg-bg-base border-b border-border-default">
         <span className="text-[10px] font-mono text-text-muted">
-          {mode === 'build' ? 'Build' : 'Run'}: worktree
+          {mode === 'build' ? 'Build' : 'Run'}{useWorktree ? ': worktree' : ''}
         </span>
         <button
           onClick={onClose}
