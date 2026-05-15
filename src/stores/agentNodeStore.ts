@@ -14,6 +14,7 @@ export interface AgentNode {
   status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
   cli_session_id?: string;
   worktree_name?: string;
+  use_worktree: boolean;
   created_at: string;
 }
 

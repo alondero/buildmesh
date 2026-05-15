@@ -134,6 +134,7 @@ function GridLayout({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: {
                 <BuildRunTerminal
                   sessionId={node.id}
                   mode={isBuildRunOpen}
+                  useWorktree={node.use_worktree}
                   onClose={() => setBuildRunOpen(null)}
                 />
               )}

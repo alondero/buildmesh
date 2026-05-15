@@ -382,7 +382,7 @@ fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode
          FROM agent_nodes WHERE id = ?1"
     )?;
     stmt.query_row(params![id], |row| {
-        Ok(AgentNode {
+        let mut node = AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -401,10 +401,16 @@ fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
             worktree_name: row.get(9)?,
+            use_worktree: true, // default; overridden below if mesh.toml exists
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        })
+        };
+        // Derive use_worktree from mesh.toml (node.path == mesh.path)
+        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
+            node.use_worktree = config.use_worktree;
+        }
+        Ok(node)
     })
 }
 
@@ -532,7 +538,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
          FROM agent_nodes WHERE status != 'archived' ORDER BY created_at ASC"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(AgentNode {
+        let mut node = AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -551,10 +557,15 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
             worktree_name: row.get(9)?,
+            use_worktree: true,
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        })
+        };
+        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
+            node.use_worktree = config.use_worktree;
+        }
+        Ok(node)
     })?;
     rows.collect()
 }
@@ -566,7 +577,7 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
          FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at ASC"
     )?;
     let rows = stmt.query_map(params![mesh_id], |row| {
-        Ok(AgentNode {
+        let mut node = AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -585,10 +596,15 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
             worktree_name: row.get(9)?,
+            use_worktree: true,
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        })
+        };
+        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
+            node.use_worktree = config.use_worktree;
+        }
+        Ok(node)
     })?;
     rows.collect()
 }
@@ -635,7 +651,7 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
          FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL"
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(AgentNode {
+        let mut node = AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -654,10 +670,15 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
             worktree_name: row.get(9)?,
+            use_worktree: true,
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        })
+        };
+        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
+            node.use_worktree = config.use_worktree;
+        }
+        Ok(node)
     })?;
     rows.collect()
 }
