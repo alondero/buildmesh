@@ -56,14 +56,24 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   toggleFileExplorer: (context: FileExplorerContext) => {
     const { fileExplorerContext } = get();
-    if (
-      fileExplorerContext &&
-      fileExplorerContext.type === context.type &&
-      'nodeId' in context &&
-      'nodeId' in fileExplorerContext &&
-      fileExplorerContext.nodeId === context.nodeId
-    ) {
-      set({ fileExplorerContext: null });
+    if (!fileExplorerContext || fileExplorerContext.type !== context.type) {
+      set({ fileExplorerContext: context });
+      return;
+    }
+    if (context.type === 'agent') {
+      const existing = fileExplorerContext as { type: 'agent'; nodeId: number; path: string };
+      if (existing.nodeId === context.nodeId) {
+        set({ fileExplorerContext: null });
+      } else {
+        set({ fileExplorerContext: context });
+      }
+    } else if (context.type === 'mesh') {
+      const existing = fileExplorerContext as { type: 'mesh'; meshId: number; path: string };
+      if (existing.meshId === context.meshId) {
+        set({ fileExplorerContext: null });
+      } else {
+        set({ fileExplorerContext: context });
+      }
     } else {
       set({ fileExplorerContext: context });
     }

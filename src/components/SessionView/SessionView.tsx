@@ -12,6 +12,7 @@ import { GridNodeHeader } from './GridNodeHeader';
 
 export function SessionView() {
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
+  const meshesById = useMeshStore(state => state.meshesById);
   const {
     agentNodes,
     getActiveNode,
@@ -38,6 +39,12 @@ export function SessionView() {
     if (!fileExplorerContext || fileExplorerContext.type !== 'agent') return null;
     return agentNodes.find(n => n.id === fileExplorerContext.nodeId) ?? null;
   }, [fileExplorerContext, agentNodes]);
+
+  // Get mesh name for file explorer mesh context
+  const fileExplorerMeshName = useMemo(() => {
+    if (!fileExplorerContext || fileExplorerContext.type !== 'mesh') return null;
+    return meshesById.get(fileExplorerContext.meshId)?.name ?? null;
+  }, [fileExplorerContext, meshesById]);
 
   useEffect(() => {
     if (!activeNode) return;
@@ -98,6 +105,7 @@ export function SessionView() {
             onWidthChange={setFileExplorerWidth}
             onClose={closeFileExplorer}
             nodeName={fileExplorerNode?.name}
+            meshName={fileExplorerMeshName ?? undefined}
           />
         )}
       </div>
