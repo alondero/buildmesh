@@ -340,7 +340,6 @@
       const params = new URLSearchParams(window.location.search);
       const urlToken = params.get('token');
       const storedToken = localStorage.getItem('buildmesh_token');
-
       if (urlToken) {
         meshToken = urlToken;
         localStorage.setItem('buildmesh_token', urlToken);
@@ -444,7 +443,7 @@
         } else {
           meshNodes.forEach(node => {
             html += `
-            <div class="node-item" onclick="openTerminal(${node.id}, ${JSON.stringify(node.name)}, ${JSON.stringify(node.provider)})">
+            <div class="node-item" onclick="openTerminal(${node.id}, '${node.name.replace(/'/g, "\\'")}', '${node.provider}')">
               <div class="provider-icon" style="background:${providerColor(node.provider)}">${providerIcon(node.provider)}</div>
               <div class="info">
                 <div class="name">${escapeHtml(node.name)}</div>
