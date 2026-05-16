@@ -331,6 +331,7 @@
     let reconnectTimer = null;
     let offlineCheckTimer = null;
     let resizeHandler = null;
+    let countdownInterval = null;
     const MAX_RECONNECT = 5;
     const RECONNECT_DELAYS = [1000, 2000, 4000, 8000, 16000];
 
@@ -584,8 +585,17 @@
         style.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css';
         document.head.appendChild(style);
       } else {
-        initXterm();
-        connectWebSocket(nodeId);
+        // Scripts already loaded (e.g. returning to a node or on mobile refresh).
+        // Wait one tick for DOM to settle, then init terminal and connect.
+        // Also re-add the stylesheet since it was only appended in the first-load branch.
+        if (!document.getElementById('xterm-css')) {
+          const style = document.createElement('link');
+          style.id = 'xterm-css';
+          style.rel = 'stylesheet';
+          style.href = 'https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css';
+          document.head.appendChild(style);
+        }
+        setTimeout(() => { initXterm(); connectWebSocket(nodeId); }, 0);
       }
     }
 
@@ -702,7 +712,8 @@
       document.getElementById('reconnect-overlay').classList.remove('hidden');
 
       let remaining = Math.ceil(delay / 1000);
-      const countdownInterval = setInterval(() => {
+      if (countdownInterval) clearInterval(countdownInterval);
+      countdownInterval = setInterval(() => {
         remaining--;
         const el = document.getElementById('retry-countdown');
         if (el) el.textContent = remaining;
@@ -711,6 +722,7 @@
 
       reconnectTimer = setTimeout(() => {
         clearInterval(countdownInterval);
+        countdownInterval = null;
         document.getElementById('reconnect-overlay').classList.add('hidden');
         connectWebSocket(nodeId);
       }, delay);
@@ -744,6 +756,7 @@
 
     function goBack() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (countdownInterval) clearInterval(countdownInterval);
       currentNodeId = null;
       currentNodeName = null;
       if (ws) { ws.close(); ws = null; }
@@ -758,6 +771,7 @@
     function closeApp() {
       if (ws) { ws.close(); ws = null; }
       if (offlineCheckTimer) clearInterval(offlineCheckTimer);
+      if (countdownInterval) clearInterval(countdownInterval);
       window.location.href = window.location.pathname + '?token=' + encodeURIComponent(meshToken);
     }
 
