@@ -13,6 +13,7 @@ interface FileExplorerPanelProps {
   onWidthChange: (width: number) => void;
   onClose: () => void;
   nodeName?: string;
+  meshName?: string;
   changedCount?: number;
 }
 
@@ -22,6 +23,7 @@ export function FileExplorerPanel({
   onWidthChange,
   onClose,
   nodeName,
+  meshName,
   changedCount,
 }: FileExplorerPanelProps) {
   const resizingRef = useRef(false);
@@ -97,7 +99,7 @@ export function FileExplorerPanel({
       case 'agent':
         return nodeName ? `Agent: ${nodeName} · ${changedCount ?? 0} changed` : 'Agent';
       case 'mesh':
-        return 'Mesh';
+        return meshName ? `Mesh: ${meshName}` : 'Mesh';
       case 'userConfig':
         return 'User Config';
     }
