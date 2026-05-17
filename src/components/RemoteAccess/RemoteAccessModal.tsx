@@ -19,6 +19,8 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [ip, setIp] = useState<string>('discovering...');
   const [error, setError] = useState<string | null>(null);
+  // Port 1992 is the default; if the server falls back to 1993/1994, the
+  // QR will be stale but the URL in the log will show the correct port.
   const PORT = 1992;
 
   useEffect(() => {

@@ -93,18 +93,23 @@ pub async fn get_root_token() -> Result<String, String> {
 /// Get the local machine's LAN IP address.
 #[command]
 pub async fn get_local_ip() -> Result<String, String> {
-    let interfaces = local_ip_address::list_afinet_netifas()
-        .map_err(|e| format!("failed to list interfaces: {}", e))?;
+    // Use a timeout because network interface enumeration can hang for 10+ seconds
+    // on Windows machines with VPNs, Docker, Hyper-V, or corporate networking software.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        async {
+            let interfaces = local_ip_address::list_afinet_netifas()
+                .map_err(|e| format!("failed to list interfaces: {}", e))?;
 
-    // Prefer 192.168.x.x (common LAN) over 10.x.x.x (VPN/corporate range)
-    if let Some(ip) = find_first_lan_ip(&interfaces, &[0xC0, 0xA8]) { // 192, 168
-        return Ok(ip);
-    }
-    if let Some(ip) = find_first_lan_ip(&interfaces, &[0x0A]) { // 10
-        return Ok(ip);
-    }
+            if let Some(ip) = find_first_lan_ip(&interfaces, &[0xC0, 0xA8, 0x0A]) {
+                return Ok(ip);
+            }
 
-    Err("no suitable LAN interface found".to_string())
+            Err("no suitable LAN interface found".to_string())
+        }
+    )
+    .await
+    .map_err(|_| "timeout detecting network interfaces (5s exceeded)".to_string())?
 }
 
 /// Find the first IP matching one of the given /8 prefixes (big-endian octets).

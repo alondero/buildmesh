@@ -27,7 +27,13 @@ use crate::db;
 
 static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
-pub const HTTP_PORT: u16 = 1992;
+const HTTP_PORT_START: u16 = 1992;
+const HTTP_PORT_END: u16 = 1994;
+
+/// Default/expected port for the attention webhook hook.
+/// The actual server may bind 1993 or 1994 if 1992 is taken; the hook will
+/// silently no-op on the wrong port since `|| true` is appended.
+pub const HTTP_PORT_DEFAULT: u16 = HTTP_PORT_START;
 
 // --- Mobile Web App HTML (served as root) ---
 
@@ -81,33 +87,49 @@ async fn request_terminal_snapshot(app: &tauri::AppHandle, node_id: i64) -> Opti
     }
 }
 
-/// Start the HTTP server on the given port.
-pub fn start_http_server(port: u16, app: tauri::AppHandle) {
-    let _ = APP_HANDLE.set(app);
+/// Start the HTTP server, trying ports 1992→1993→1994 until one binds.
+/// Emits a `remote-access-port` event with the actual port used so the
+/// QR code modal can update without recompiling.
+pub fn start_http_server(app: tauri::AppHandle) {
+    let _ = APP_HANDLE.set(app.clone());
 
     tauri::async_runtime::spawn(async move {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        let listener = match TcpListener::bind(&addr).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::error!("Failed to bind HTTP server on port {}: {}", port, e);
-                return;
-            }
-        };
-        tracing::info!("HTTP server listening on http://0.0.0.0:{}", port);
+        let port = try_bind_ports(HTTP_PORT_START, HTTP_PORT_END).await;
 
-        loop {
-            match listener.accept().await {
-                Ok((stream, addr)) => {
-                    tracing::debug!("HTTP connection from {}", addr);
-                    tauri::async_runtime::spawn(handle_connection(stream, addr));
-                }
-                Err(e) => {
-                    tracing::error!("HTTP accept error: {}", e);
-                }
-            }
+        if let Some(port) = port {
+            tracing::info!("HTTP server listening on http://0.0.0.0:{}", port);
+            let _ = app.emit("remote-access-port", serde_json::json!({ "port": port }));
+        } else {
+            tracing::error!("Failed to bind HTTP server on any port {}–{}", HTTP_PORT_START, HTTP_PORT_END);
         }
     });
+}
+
+/// Try binding successive ports until one succeeds.
+async fn try_bind_ports(start: u16, end: u16) -> Option<u16> {
+    for port in start..=end {
+        let addr = SocketAddr::from(([0, 0, 0, 0], port));
+        if let Ok(listener) = TcpListener::bind(&addr).await {
+            let port = addr.port();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match listener.accept().await {
+                        Ok((stream, addr)) => {
+                            tracing::debug!("HTTP connection from {}", addr);
+                            tauri::async_runtime::spawn(handle_connection(stream, addr));
+                        }
+                        Err(e) => {
+                            tracing::error!("HTTP accept error: {}", e);
+                        }
+                    }
+                }
+            });
+            return Some(port);
+        } else {
+            tracing::debug!("Port {} already in use, trying next", port);
+        }
+    }
+    None
 }
 
 async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
