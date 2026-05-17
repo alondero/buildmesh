@@ -1,137 +1,14 @@
-//! Mesh configuration — reads/writes mesh.toml and worktree settings.json
-//!
-//! Uses build_run::extract_toml_value for TOML parsing (shared implementation).
+//! Mesh configuration — all stored in SQLite `meshes` table.
+//! Worktree.baseRef is also written to .claude/settings.json for Claude Code.
 
-use crate::commands::build_run::extract_toml_value;
-use crate::commands::build_run::MESH_CONFIG_FILENAME;
 use crate::db;
+use crate::models::MeshConfig;
 use std::path::PathBuf;
 
-const MESH_CONFIG_EMPTY_TEMPLATE: &str = r"# Buildmesh configuration
-[build]
-[run]
-[agent]
-";
-
 // ---------------------------------------------------------------------------
-// Types
+// Settings.json helpers (for base_ref only)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct MeshConfig {
-    pub name: Option<String>,
-    pub build_command: Option<String>,
-    pub run_command: Option<String>,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub base_ref: Option<String>,
-    pub use_worktree: bool,
-    pub worktree_mode: Option<String>,
-    pub default_provider: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// mesh.toml helpers
-// ---------------------------------------------------------------------------
-
-/// Read all fields from mesh.toml
-fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
-    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
-
-    Ok(MeshConfig {
-        name: None, // name lives in DB, not mesh.toml
-        build_command: extract_toml_value(&content, "build", "command"),
-        run_command: extract_toml_value(&content, "run", "command"),
-        model: extract_toml_value(&content, "agent", "model"),
-        effort: extract_toml_value(&content, "agent", "effort"),
-        base_ref: None, // baseRef lives in settings.json, not mesh.toml
-        use_worktree: extract_toml_value(&content, "agent", "use_worktree")
-            .map(|v| v == "true")
-            .unwrap_or(true),
-        worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
-        default_provider: extract_toml_value(&content, "agent", "default_provider"),
-    })
-}
-
-/// Read worktree.baseRef from {mesh_path}/.claude/settings.json
-fn read_base_ref(mesh_path: &str) -> Option<String> {
-    let settings_path = PathBuf::from(mesh_path).join(".claude/settings.json");
-    let content = std::fs::read_to_string(&settings_path).ok()?;
-    let settings: serde_json::Value = serde_json::from_str(&content).ok()?;
-    settings
-        .get("worktree")?
-        .get("baseRef")?
-        .as_str()
-        .map(|s| s.to_string())
-}
-
-// ---------------------------------------------------------------------------
-// mesh.toml write helpers
-// ---------------------------------------------------------------------------
-
-/// Update a single key inside an existing [section] in mesh.toml.
-/// If the key exists, replaces it. If the section exists but key doesn't, appends it.
-/// Creates the file with default sections (and the section if needed) if it doesn't exist yet.
-fn write_mesh_toml_field(
-    mesh_path: &PathBuf,
-    section: &str,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
-    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path)
-        .unwrap_or_else(|_| MESH_CONFIG_EMPTY_TEMPLATE.to_string());
-
-    let section_pattern = format!("[{}]", section);
-    let new_line = format!("{} = \"{}\"", key, value);
-
-    if let Some(section_start) = content.find(&section_pattern) {
-        // Section exists — update/add key within it
-        let section_end = content[section_start + section_pattern.len()..]
-            .find('[')
-            .map(|i| section_start + section_pattern.len() + i)
-            .unwrap_or(content.len());
-
-        let before = &content[..section_start];
-        let section_content = &content[section_start..section_end];
-        let after = &content[section_end..];
-
-        let key_pattern = format!("{} = ", key);
-
-        let updated_section = if let Some(key_start) = section_content.find(&key_pattern) {
-            let key_line_end = section_content[key_start..]
-                .find('\n')
-                .map(|e| key_start + e)
-                .unwrap_or(section_content.len());
-            let before_key = &section_content[..key_start];
-            let after_key = &section_content[key_line_end..];
-            format!("{}{}{}", before_key, new_line, after_key)
-        } else {
-            let insert_pos = section_content.trim_end().trim_end_matches('\n').len();
-            let mut s = section_content[..insert_pos].to_string();
-            s.push_str(&format!("\n{} = \"{}\"", key, value));
-            if insert_pos < section_content.len() {
-                s.push_str(&section_content[insert_pos..]);
-            }
-            s
-        };
-
-        let updated = format!("{}{}{}", before, updated_section, after);
-        std::fs::write(&config_path, updated)
-            .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
-    } else {
-        // Section doesn't exist — append it with the key
-        let updated = format!("{}\n[{}]\n{}\n", content.trim_end(), section, new_line);
-        std::fs::write(&config_path, updated)
-            .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
-    }
-
-    Ok(())
-}
-
-/// Write worktree.baseRef to {mesh_path}/.claude/settings.json
 fn write_base_ref(mesh_path: &str, base_ref: &str) -> Result<(), String> {
     let settings_path = PathBuf::from(mesh_path).join(".claude/settings.json");
 
@@ -157,7 +34,6 @@ fn write_base_ref(mesh_path: &str, base_ref: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove worktree.baseRef key from {mesh_path}/.claude/settings.json
 fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
     let settings_path = PathBuf::from(mesh_path).join(".claude/settings.json");
 
@@ -185,32 +61,20 @@ fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
-    let mesh =
-        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let path = PathBuf::from(&mesh.path);
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    let mut config = match parse_mesh_toml(&path) {
-        Ok(c) => c,
-        Err(_) => MeshConfig {
-            name: None,
-            build_command: None,
-            run_command: None,
-            model: None,
-            effort: None,
-            base_ref: None,
-            use_worktree: true,
-            worktree_mode: None,
-            default_provider: None,
-        },
-    };
-    config.base_ref = read_base_ref(&mesh.path);
-    config.name = if mesh.name.is_empty() {
-        None
-    } else {
-        Some(mesh.name)
-    };
-
-    Ok(config)
+    Ok(MeshConfig {
+        name: if mesh.name.is_empty() { None } else { Some(mesh.name) },
+        build_command: mesh.build_command,
+        run_command: mesh.run_command,
+        model: mesh.model,
+        effort: mesh.effort,
+        base_ref: Some(mesh.base_ref),
+        use_worktree: mesh.use_worktree,
+        worktree_mode: mesh.worktree_mode,
+        default_provider: mesh.default_provider,
+    })
 }
 
 #[tauri::command]
@@ -231,93 +95,75 @@ pub async fn update_mesh_field(
     key: String,
     value: String,
 ) -> Result<(), String> {
-    let mesh =
-        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let path = PathBuf::from(&mesh.path);
-    write_mesh_toml_field(&path, &section, &key, &value)?;
+    let col_name = match (section.as_str(), key.as_str()) {
+        ("build", "command") => "build_command",
+        ("run", "command") => "run_command",
+        ("agent", "model") => "model",
+        ("agent", "effort") => "effort",
+        ("agent", "worktree_mode") => "worktree_mode",
+        ("agent", "default_provider") => "default_provider",
+        _ => return Err(format!("unknown field {}.{}", section, key)),
+    };
+
+    let db = db::get().lock().unwrap();
+    db.execute(
+        &format!("UPDATE meshes SET {} = ?1 WHERE id = ?2", col_name),
+        rusqlite::params![value, mesh_id],
+    )
+    .map_err(|e| format!("failed to update mesh field: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
+    let db = db::get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET use_worktree = ?1 WHERE id = ?2",
+        rusqlite::params![use_worktree as i32, mesh_id],
+    )
+    .map_err(|e| format!("failed to update use_worktree: {}", e))?;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
-    let mesh =
-        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    // Map 'fresh' → origin/<default> and 'head' → HEAD
+    // Map 'fresh' → origin/main and 'head' → HEAD
     let resolved = match base_ref.as_str() {
         "fresh" => "origin/main".to_string(),
         "head" => "HEAD".to_string(),
         other => other.to_string(),
     };
 
+    // Write to both DB and settings.json
+    {
+        let db = db::get().lock().unwrap();
+        db.execute(
+            "UPDATE meshes SET base_ref = ?1 WHERE id = ?2",
+            rusqlite::params![resolved, mesh_id],
+        )
+        .map_err(|e| format!("failed to update base_ref in DB: {}", e))?;
+    }
+
     write_base_ref(&mesh.path, &resolved)
 }
 
 #[tauri::command]
 pub async fn remove_worktree_base_ref(mesh_id: i64) -> Result<(), String> {
-    let mesh =
-        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    remove_base_ref(&mesh.path)
-}
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-/// Write use_worktree setting to mesh.toml [agent] section.
-/// Creates [agent] section if it doesn't exist.
-#[tauri::command]
-pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Result<(), String> {
-    let mesh =
-        db::get_mesh_by_id(mesh_id).map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let config_path = PathBuf::from(&mesh.path).join(MESH_CONFIG_FILENAME);
-    let content =
-        std::fs::read_to_string(&config_path).unwrap_or_else(|_| MESH_CONFIG_EMPTY_TEMPLATE.to_string());
-
-    let bool_str = if use_worktree { "true" } else { "false" };
-    let key = "use_worktree";
-
-    let section_pattern = "[agent]";
-
-    if let Some(section_start) = content.find(section_pattern) {
-        // Section exists — update/add key within it
-        let section_end = content[section_start + section_pattern.len()..]
-            .find('[')
-            .map(|i| section_start + section_pattern.len() + i)
-            .unwrap_or(content.len());
-
-        let before = &content[..section_start];
-        let section_content = &content[section_start..section_end];
-        let after = &content[section_end..];
-
-        // For booleans, write without quotes: use_worktree = true
-        let key_pattern = format!("{} = ", key);
-        let new_line = format!("{} = {}", key, bool_str);
-
-        let updated_section = if let Some(key_start) = section_content.find(&key_pattern) {
-            let key_line_end = section_content[key_start..]
-                .find('\n')
-                .map(|e| key_start + e)
-                .unwrap_or(section_content.len());
-            let before_key = &section_content[..key_start];
-            let after_key = &section_content[key_line_end..];
-            format!("{}{}{}", before_key, new_line, after_key)
-        } else {
-            let insert_pos = section_content.trim_end().trim_end_matches('\n').len();
-            let mut s = section_content[..insert_pos].to_string();
-            s.push_str(&format!("\n{} = {}", key, bool_str));
-            if insert_pos < section_content.len() {
-                s.push_str(&section_content[insert_pos..]);
-            }
-            s
-        };
-
-        let updated = format!("{}{}{}", before, updated_section, after);
-        std::fs::write(&config_path, updated)
-            .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
-    } else {
-        // Section doesn't exist — append it
-        let new_section = format!("\n[agent]\n{} = {}\n", key, bool_str);
-        let updated = format!("{}{}", content.trim_end(), new_section);
-        std::fs::write(&config_path, updated)
-            .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
+    // Write default to DB and remove from settings.json
+    {
+        let db = db::get().lock().unwrap();
+        db.execute(
+            "UPDATE meshes SET base_ref = 'origin/main' WHERE id = ?1",
+            rusqlite::params![mesh_id],
+        )
+        .map_err(|e| format!("failed to reset base_ref in DB: {}", e))?;
     }
 
-    Ok(())
+    remove_base_ref(&mesh.path)
 }

@@ -121,6 +121,15 @@ pub struct Mesh {
     pub layout: String, // 'grid' or 'single'
     pub position: i64, // sort order in sidebar
     pub created_at: DateTime<Utc>,
+    // Mesh-level config (moved from mesh.toml)
+    pub build_command: Option<String>,
+    pub run_command: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub use_worktree: bool, // default true
+    pub worktree_mode: Option<String>,
+    pub default_provider: Option<String>,
+    pub base_ref: String, // default "origin/main"
 }
 
 /// An agent node — isolated agent working directory
@@ -228,6 +237,20 @@ pub struct AppSettings {
     pub default_projects_root: String,
     pub windows_cli_path: String,
     pub wsl_cli_path: String,
+}
+
+/// Mesh configuration (mesh-level, from meshes table)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MeshConfig {
+    pub name: Option<String>,
+    pub build_command: Option<String>,
+    pub run_command: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub base_ref: Option<String>,
+    pub use_worktree: bool,
+    pub worktree_mode: Option<String>,
+    pub default_provider: Option<String>,
 }
 
 impl Default for AppSettings {

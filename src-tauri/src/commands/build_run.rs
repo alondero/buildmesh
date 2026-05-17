@@ -8,58 +8,11 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
-pub const MESH_CONFIG_FILENAME: &str = "mesh.toml";
-
 // ---------------------------------------------------------------------------
-// Config parsing
+// Config (read from DB)
 // ---------------------------------------------------------------------------
 
-/// Extract a value from a TOML table: [section] key = "value"
-/// Also handles bare booleans: key = true or key = false
-pub fn extract_toml_value(content: &str, section: &str, key: &str) -> Option<String> {
-    let section_pattern = format!("[{}]", section);
-    let section_start = content.find(&section_pattern)?;
-
-    // Find the next [section] or end of file
-    let section_content = if let Some(next_section_idx) = content[section_start + section_pattern.len()..]
-        .find('[')
-    {
-        &content[section_start..section_start + section_pattern.len() + next_section_idx]
-    } else {
-        &content[section_start..]
-    };
-
-    let key_pattern = format!("{} = ", key);
-    let key_start = section_content.find(&key_pattern)?;
-
-    // Get the rest of the line after "key = "
-    let rest = &section_content[key_start + key_pattern.len()..];
-
-    // Try quoted string first
-    if let Some(quote_start) = rest.find('"') {
-        let after_quote = &rest[quote_start + 1..];
-        if let Some(quote_end) = after_quote.find('"') {
-            return Some(after_quote[..quote_end].to_string());
-        }
-    }
-
-    // Try bare boolean or identifier (true, false, or unquoted string)
-    let trimmed = rest.trim_start();
-    if trimmed.starts_with("true") || trimmed.starts_with("false") {
-        let bool_str = if trimmed.starts_with("true") { "true" } else { "false" };
-        return Some(bool_str.to_string());
-    }
-
-    // Try unquoted value until whitespace or end
-    let end = trimmed.find(|c: char| c.is_ascii_whitespace()).unwrap_or(trimmed.len());
-    if end > 0 {
-        return Some(trimmed[..end].to_string());
-    }
-
-    None
-}
-
-/// Represents the parsed mesh.toml build/run configuration
+/// Represents the mesh build/run configuration (read from SQLite)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct BuildRunConfig {
     pub build_command: String,
@@ -74,49 +27,21 @@ pub struct BuildRunConfig {
     pub default_provider: Option<String>,
 }
 
-/// Parse [build]command, [run]command, and [agent]model/effort from a mesh.toml file
-fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, String> {
-    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("mesh.toml not found at {:?}: {}", config_path, e))?;
-
-    let build_command = extract_toml_value(&content, "build", "command")
-        .ok_or_else(|| "build command not configured in mesh.toml".to_string())?;
-    let run_command = extract_toml_value(&content, "run", "command")
-        .ok_or_else(|| "run command not configured in mesh.toml".to_string())?;
-    let model = extract_toml_value(&content, "agent", "model");
-    let effort = extract_toml_value(&content, "agent", "effort");
-    let use_worktree = extract_toml_value(&content, "agent", "use_worktree")
-        .map(|v| v == "true")
-        .unwrap_or(true);
+/// Parse build/run config from the database for a mesh at the given path.
+fn build_run_config_from_mesh(mesh: &crate::models::Mesh) -> Result<BuildRunConfig, String> {
+    let build_command = mesh.build_command.clone()
+        .ok_or_else(|| "build command not configured".to_string())?;
+    let run_command = mesh.run_command.clone()
+        .ok_or_else(|| "run command not configured".to_string())?;
 
     Ok(BuildRunConfig {
         build_command,
         run_command,
-        model,
-        effort,
-        use_worktree,
-        worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
-        default_provider: extract_toml_value(&content, "agent", "default_provider"),
-    })
-}
-
-/// Parse mesh config returning an Option (used by agent.rs for spawn-time reading).
-/// Unlike parse_mesh_config, this does NOT fail if the file is missing or fields are absent.
-pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildRunConfig> {
-    let config_path = mesh_path.join(MESH_CONFIG_FILENAME);
-    let content = std::fs::read_to_string(&config_path).ok()?;
-
-    Some(BuildRunConfig {
-        build_command: extract_toml_value(&content, "build", "command").unwrap_or_default(),
-        run_command: extract_toml_value(&content, "run", "command").unwrap_or_default(),
-        model: extract_toml_value(&content, "agent", "model"),
-        effort: extract_toml_value(&content, "agent", "effort"),
-        use_worktree: extract_toml_value(&content, "agent", "use_worktree")
-            .map(|v| v == "true")
-            .unwrap_or(true),
-        worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
-        default_provider: extract_toml_value(&content, "agent", "default_provider"),
+        model: mesh.model.clone(),
+        effort: mesh.effort.clone(),
+        use_worktree: mesh.use_worktree,
+        worktree_mode: mesh.worktree_mode.clone(),
+        default_provider: mesh.default_provider.clone(),
     })
 }
 
@@ -203,8 +128,10 @@ pub async fn build_run(
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;
 
-    // 2. Parse mesh.toml
-    let config = parse_mesh_config(&std::path::PathBuf::from(&node.path))?;
+    // 2. Parse mesh config from DB
+    let mesh = db::get_mesh_by_path(&node.path)
+        .map_err(|e| format!("failed to get mesh for path {}: {}", node.path, e))?;
+    let config = build_run_config_from_mesh(&mesh)?;
 
     // 3. If use_worktree is false, work directly in repo root
     let use_worktree = config.use_worktree;
@@ -321,7 +248,7 @@ pub async fn build_run(
 pub async fn get_mesh_config(mesh_id: i64) -> Result<BuildRunConfig, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("failed to get mesh {}: {}", mesh_id, e))?;
-    parse_mesh_config(&std::path::PathBuf::from(&mesh.path))
+    build_run_config_from_mesh(&mesh)
 }
 
 /// Close a build/run terminal for a node
@@ -336,47 +263,15 @@ pub async fn close_build_run(node_id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn ensure_mesh_config(mesh_id: i64) -> Result<String, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| format!("failed to get mesh {}: {}", mesh_id, e))?;
-
-    let config_path = std::path::PathBuf::from(&mesh.path).join(MESH_CONFIG_FILENAME);
-
-    let template = r#"# Buildmesh configuration
-# Commands are executed in the agent's worktree directory.
-
-[build]
-# command = "npm run build"
-
-[run]
-# command = "npm run dev"
-
-[agent]
-# model = "claude-opus-4-7"
-# effort = "medium"
-"#;
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&config_path)
-    {
-        Ok(mut file) => {
-            use std::io::Write;
-            file.write_all(template.as_bytes())
-                .map_err(|e| format!("failed to write mesh.toml: {}", e))?;
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(format!("failed to create mesh.toml: {}", e)),
-    }
-
-    Ok(config_path.to_string_lossy().to_string())
+pub async fn ensure_mesh_config(_mesh_id: i64) -> Result<String, String> {
+    // Config is now in the DB from mesh creation time — nothing to create
+    Ok(String::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Test: BuildRunConfig should have use_worktree field
     #[test]
     fn build_run_config_has_use_worktree_field() {
         let config = BuildRunConfig {
@@ -386,43 +281,8 @@ mod tests {
             effort: None,
             use_worktree: true,
             worktree_mode: None,
+            default_provider: None,
         };
         assert!(config.use_worktree);
-    }
-
-    /// Test: extract_toml_value can extract use_worktree boolean
-    #[test]
-    fn extract_toml_value_extracts_use_worktree_bool() {
-        let content = r#"
-[agent]
-use_worktree = true
-"#;
-        let value = extract_toml_value(content, "agent", "use_worktree");
-        assert_eq!(value, Some("true".to_string()));
-    }
-
-    /// Test: extract_toml_value returns None for missing key
-    #[test]
-    fn extract_toml_value_returns_none_for_missing_key() {
-        let content = r#"
-[build]
-command = "npm run build"
-"#;
-        let value = extract_toml_value(content, "build", "use_worktree");
-        assert_eq!(value, None);
-    }
-
-    /// Test: extract_toml_value handles section with multiple keys
-    #[test]
-    fn extract_toml_value_handles_multiple_keys() {
-        let content = r#"
-[agent]
-model = "opus-4"
-effort = "medium"
-use_worktree = true
-"#;
-        assert_eq!(extract_toml_value(content, "agent", "model"), Some("opus-4".to_string()));
-        assert_eq!(extract_toml_value(content, "agent", "effort"), Some("medium".to_string()));
-        assert_eq!(extract_toml_value(content, "agent", "use_worktree"), Some("true".to_string()));
     }
 }

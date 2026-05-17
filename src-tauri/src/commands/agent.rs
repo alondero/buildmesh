@@ -419,8 +419,7 @@ pub(crate) async fn spawn_agent_inner(
     // Determine the target CWD for spawning.
     // We now always run agents directly in their worktree directory for maximum isolation.
     // Read mesh config once for use_worktree check and model/effort overrides.
-    // Note: node.path == mesh.path, so we use node.path directly to avoid a DB round-trip.
-    let config = crate::commands::build_run::parse_mesh_config_for_spawn(&std::path::PathBuf::from(&node.path));
+    let config = crate::env::read_mesh_spawn_config(&std::path::PathBuf::from(&node.path));
     let use_worktree = config.as_ref().map(|c| c.use_worktree).unwrap_or(true);
     let model_override = config.as_ref().and_then(|c| c.model.as_deref());
     let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
