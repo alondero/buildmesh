@@ -5,6 +5,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { UncommittedChangesSection } from './UncommittedChangesSection';
 import { useMeshGitStatus } from '../../hooks/useMeshGitStatus';
+import { listProviders, ProviderInfo } from '../../lib/tauri';
 
 interface MeshConfig {
   name: string | null;
@@ -15,6 +16,7 @@ interface MeshConfig {
   base_ref: string | null;
   use_worktree: boolean;
   worktree_mode?: string | null;
+  default_provider: string | null;
 }
 
 const EFFORT_OPTIONS = [
@@ -55,7 +57,9 @@ export function MeshPropertiesPanel() {
     worktreeMode: 'detached',
     buildCommand: '',
     runCommand: '',
+    defaultProvider: '',
   });
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
@@ -66,6 +70,10 @@ export function MeshPropertiesPanel() {
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    listProviders().then(setProviders).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -85,6 +93,7 @@ export function MeshPropertiesPanel() {
           worktreeMode: config.worktree_mode ?? 'detached',
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
+          defaultProvider: config.default_provider ?? '',
         });
         setLoading(false);
       })
@@ -155,6 +164,15 @@ export function MeshPropertiesPanel() {
       meshId: propertiesPanelMeshId,
       section: 'run',
       key: 'command',
+      value,
+    });
+  };
+
+  const saveDefaultProvider = async (value: string) => {
+    await invoke('update_mesh_field', {
+      meshId: propertiesPanelMeshId,
+      section: 'agent',
+      key: 'default_provider',
       value,
     });
   };
@@ -280,6 +298,24 @@ export function MeshPropertiesPanel() {
                 >
                   {EFFORT_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Default provider */}
+              <div>
+                <label className="block text-xs text-[#9ca3af] mb-1">Default provider</label>
+                <select
+                  value={form.defaultProvider}
+                  onChange={async (e) => {
+                    setForm((p) => ({ ...p, defaultProvider: e.target.value }));
+                    await saveDefaultProvider(e.target.value);
+                  }}
+                  className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
+                >
+                  <option value="">&lt;Default&gt; (Anthropic)</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>{p.label}</option>
                   ))}
                 </select>
               </div>

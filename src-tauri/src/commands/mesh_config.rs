@@ -27,6 +27,7 @@ pub struct MeshConfig {
     pub base_ref: Option<String>,
     pub use_worktree: bool,
     pub worktree_mode: Option<String>,
+    pub default_provider: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -50,6 +51,7 @@ fn parse_mesh_toml(mesh_path: &PathBuf) -> Result<MeshConfig, String> {
             .map(|v| v == "true")
             .unwrap_or(true),
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
+        default_provider: extract_toml_value(&content, "agent", "default_provider"),
     })
 }
 
@@ -198,6 +200,7 @@ pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
             base_ref: None,
             use_worktree: true,
             worktree_mode: None,
+            default_provider: None,
         },
     };
     config.base_ref = read_base_ref(&mesh.path);

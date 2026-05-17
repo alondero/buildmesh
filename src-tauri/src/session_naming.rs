@@ -10,7 +10,7 @@
 //! The buffer presence IS the renamed state. No separate guard map needed.
 
 use rand::seq::IndexedRandom;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
@@ -60,6 +60,11 @@ static NOUNS: &[&str] = &[
 
 static SESSION_BUFFERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+/// Set of node IDs that have a rename task currently in-flight.
+/// Prevents duplicate concurrent LLM calls for the same node.
+static RENAMING_IN_PROGRESS: once_cell::sync::Lazy<Arc<Mutex<HashSet<i64>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
 
 static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-z][a-z0-9-]{2,50}$").unwrap());
@@ -125,34 +130,50 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
         return; // Not enough content for meaningful rename — keep buffering
     }
 
-    // Capture and remove buffer synchronously — the async task owns the content.
-    let buffer_snapshot = {
-        let mut buffers = SESSION_BUFFERS.lock().unwrap();
-        buffers.remove(&node_id)
+    // Read buffer content (keep it in SESSION_BUFFERS until rename succeeds)
+    let buffer_content = {
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        buffers.get(&node_id).cloned()
     };
 
-    let Some(buffer) = buffer_snapshot else {
+    let Some(buffer) = buffer_content else {
         return;
     };
 
+    // Skip if a rename is already in-flight for this node
+    {
+        let mut in_progress = RENAMING_IN_PROGRESS.lock().unwrap();
+        if in_progress.contains(&node_id) {
+            tracing::debug!("on_turn({}): rename already in progress, skipping", node_id);
+            return;
+        }
+        in_progress.insert(node_id);
+    }
+
     tracing::info!("session_naming: triggering rename for node {} ({} chars)", node_id, buffer.len());
 
+    let node_id_for_task = node_id;
+    let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
-        match summarize_and_rename(node_id, &buffer).await {
+        match summarize_and_rename(node_id_for_task, &buffer).await {
             Ok(slug) => {
-                let _ = app.emit(
+                // Only remove buffer from SESSION_BUFFERS after successful rename
+                SESSION_BUFFERS.lock().unwrap().remove(&node_id_for_task);
+                let _ = app_for_task.emit(
                     "session-renamed",
                     serde_json::json!({
-                        "session_id": node_id,
+                        "session_id": node_id_for_task,
                         "name": slug
                     }),
                 );
-                tracing::info!("Node {} renamed to '{}'", node_id, slug);
+                tracing::info!("Node {} renamed to '{}'", node_id_for_task, slug);
             }
             Err(e) => {
-                tracing::warn!("Node {} rename failed: {}", node_id, e);
+                tracing::warn!("Node {} rename failed (buffer preserved for retry): {}", node_id_for_task, e);
             }
         }
+        // Clear in-progress flag whether rename succeeded or failed
+        RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id_for_task);
     });
 }
 
@@ -235,7 +256,7 @@ async fn summarize_and_rename(node_id: i64, buffer: &str) -> Result<String, Stri
             .map_err(|e| format!("failed to run CLI: {}", e))
     })
     .await
-    .map_err(|_| "CLI timed out after 15s".to_string())??;
+    .map_err(|_| "CLI timed out after 30s".to_string())??;
 
     if !output.status.success() {
         return Err(format!(
