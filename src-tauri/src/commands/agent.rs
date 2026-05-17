@@ -208,7 +208,7 @@ fn build_spawn_command(
 
     cmd.cwd(&resolved.spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
-    cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT.to_string());
+    cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT_DEFAULT.to_string());
 
     // Ensure clean worktree isolation by removing any inherited Git environment variables
     // that might point to the main repository or other worktrees.
@@ -238,7 +238,7 @@ pub fn inject_attention_hook(project_path: &std::path::Path) {
 
     let hook_command = format!(
         "curl -sf -X POST http://localhost:{}/api/attention/$BUILDMESH_SESSION_ID || true",
-        crate::http_server::HTTP_PORT,
+        crate::http_server::HTTP_PORT_DEFAULT,
     );
 
     let expected_hooks = serde_json::json!({
