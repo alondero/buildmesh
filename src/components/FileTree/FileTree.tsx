@@ -138,7 +138,7 @@ function TreeNode({
   selectedFile,
   onFileClick,
 }: TreeNodeProps) {
-  const [expanded, setExpanded] = useState(depth === 0);
+  const [expanded, setExpanded] = useState(false);
 
   const status = gitStatusMap.get(node.path);
   const isChanged = status !== undefined;
