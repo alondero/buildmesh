@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   listDirectory,
   type FileNode,
@@ -30,31 +30,35 @@ export function FileTree({
   selectedFile,
   onFileSelect,
 }: FileTreeProps) {
-  const [tree, setTree] = useState<FileNode | null>(null);
-  const [gitStatus, setGitStatus] = useState<GitStatus[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [treeState, setTreeState] = useState<FileNode | null>(null);
+  const [gitStatusState, setGitStatusState] = useState<GitStatus[]>([]);
+  const [loadingState, setLoadingState] = useState(true);
+  const [errorState, setErrorState] = useState<string | null>(null);
 
   useEffect(() => {
     if (!rootPath) return;
-    setLoading(true);
-    setError(null);
+    setLoadingState(true);
+    setErrorState(null);
+    setTreeState(null);
+    setGitStatusState([]);
 
+    let cancelled = false;
     Promise.all([
       listDirectory(rootPath, 4),
       showGitStatus ? getGitStatus(rootPath) : Promise.resolve(null),
     ])
       .then(([treeData, status]) => {
-        setTree(treeData);
-        if (status) {
-          setGitStatus(status);
-        }
-        setLoading(false);
+        if (cancelled) return;
+        setTreeState(treeData);
+        if (status) setGitStatusState(status);
+        setLoadingState(false);
       })
       .catch((e) => {
-        setError(String(e));
-        setLoading(false);
+        if (cancelled) return;
+        setErrorState(String(e));
+        setLoadingState(false);
       });
+    return () => { cancelled = true; };
   }, [rootPath, showGitStatus]);
 
   const handleFileClick = useCallback(
@@ -74,7 +78,7 @@ export function FileTree({
     [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect]
   );
 
-  if (loading) {
+  if (loadingState) {
     return (
       <div className="flex items-center justify-center h-20 text-text-muted text-xs">
         Loading...
@@ -82,15 +86,15 @@ export function FileTree({
     );
   }
 
-  if (error) {
+  if (errorState) {
     return (
       <div className="flex items-center justify-center h-20 text-accent-red text-xs">
-        {error}
+        Error: {errorState}
       </div>
     );
   }
 
-  if (!tree) {
+  if (!treeState) {
     return (
       <div className="flex items-center justify-center h-20 text-text-muted text-xs">
         No files found
@@ -98,14 +102,11 @@ export function FileTree({
     );
   }
 
-  const gitStatusMap = useMemo(
-    () => new Map(gitStatus.map((s) => [s.path, s.status])),
-    [gitStatus]
-  );
+  const gitStatusMap = new Map(gitStatusState.map((s) => [s.path, s.status]));
 
   return (
     <div className="text-xs font-mono">
-      {tree.children.map((child) => (
+      {treeState.children.map((child) => (
         <TreeNode
           key={child.path}
           node={child}

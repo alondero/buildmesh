@@ -113,6 +113,7 @@ export function Sidebar() {
   const [remoteAccessMeshId, setRemoteAccessMeshId] = useState<boolean>(false);
   const openPropertiesPanel = useUIStore((s) => s.openPropertiesPanel);
   const toggleFileExplorer = useUIStore((s) => s.toggleFileExplorer);
+  const fileExplorerContext = useUIStore(s => s.fileExplorerContext);
 
   const handleSelectMesh = (meshId: number) => {
     if (selectedMeshId === meshId) {
@@ -235,6 +236,7 @@ export function Sidebar() {
                       onSelectProvider={handleSelectProvider}
                       onOpenProperties={openPropertiesPanel}
                       onToggleFileExplorer={toggleFileExplorer}
+                      fileExplorerContext={fileExplorerContext}
                       meshNodes={meshNodes}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}
@@ -298,6 +300,7 @@ interface SortableMeshProps {
   onSelectProvider: (mesh: Mesh, providerId: string) => void;
   onOpenProperties: (meshId: number) => void;
   onToggleFileExplorer: (context: FileExplorerContext) => void;
+  fileExplorerContext: FileExplorerContext | null;
   meshNodes: AgentNode[];
   activeNodeId: number | null;
   setActiveNode: (id: number) => void;
@@ -315,12 +318,14 @@ function SortableMesh({
   onSelectProvider,
   onOpenProperties,
   onToggleFileExplorer,
+  fileExplorerContext,
   meshNodes,
   activeNodeId,
   setActiveNode,
   selectMesh,
   onDeleteNode,
 }: SortableMeshProps) {
+  const isThisMeshOpen = fileExplorerContext?.type === 'mesh' && fileExplorerContext.meshId === mesh.id;
   const {
     attributes,
     listeners,
@@ -373,7 +378,7 @@ function SortableMesh({
           )}
         </div>
         <div
-          onClick={() => onSelectMesh(mesh.id)}
+          onClick={() => { onSelectMesh(mesh.id); }}
           className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-bg-card flex items-center ${
             isSelected ? 'text-accent-cyan font-semibold' : 'text-text-secondary'
           }`}
@@ -391,7 +396,7 @@ function SortableMesh({
           </button>
           <button
             onClick={(e) => { e.stopPropagation(); onToggleFileExplorer({ type: 'mesh', meshId: mesh.id, path: mesh.path }); }}
-            className="opacity-0 group-hover/mesh:opacity-100 text-text-muted hover:text-accent-cyan text-xs px-1 transition-all"
+            className={`${isThisMeshOpen ? 'opacity-100 bg-accent-green' : 'opacity-100 bg-accent-amber'} text-white text-xs px-1 transition-all`}
             title="Open file explorer"
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

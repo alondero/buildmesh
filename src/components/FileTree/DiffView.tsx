@@ -24,7 +24,7 @@ export function DiffView({ diff }: DiffViewProps) {
           </div>
           <div className="py-1">
             {file.hunks.map((hunk, hi) => (
-              <div key={hi} className="py-0.5">
+              <div key={hi} className="py-0.5" data-hunk={hi}>
                 {hunk.lines.map((line, li) => (
                   <div
                     key={li}
