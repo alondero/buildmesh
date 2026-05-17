@@ -28,6 +28,7 @@ user-research-grillme-*.md
 
 # Test artifacts
 test-results/
+.playwright-cli/
 
 # Claude worktrees and local settings (local only)
 .claude/worktrees/
