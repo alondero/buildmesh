@@ -138,6 +138,7 @@ pub fn run() {
             commands::agent::write_to_agent,
             commands::agent::auto_resume_sessions,
             commands::agent::debug_crash_snapshot,
+            commands::agent::list_providers,
             // Checkpoint
             commands::checkpoint::create_checkpoint,
             // Build/Run
