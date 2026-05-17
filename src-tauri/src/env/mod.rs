@@ -2,7 +2,7 @@
 
 mod mesh_config;
 
-pub use mesh_config::{read_mesh_spawn_config, MeshSpawnConfig, MESH_CONFIG_FILENAME};
+pub use mesh_config::{read_mesh_spawn_config, MeshSpawnConfig};
 
 use std::path::PathBuf;
 use once_cell::sync::Lazy;

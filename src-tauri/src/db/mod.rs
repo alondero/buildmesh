@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -109,11 +109,11 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             migrate_projects_layout(conn)?;
             migrate_projects_position(conn)?;
             migrate_sessions_worktree_name(conn)?;
-            if current_version < 6 {
-                migrate_mesh_rename(conn)?;
-            }
             if current_version < 7 {
                 migrate_remote_access_token(conn)?;
+            }
+            if current_version < 8 {
+                migrate_mesh_config_columns(conn)?;
             }
         }
 
@@ -121,6 +121,33 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
+    }
+    Ok(())
+}
+
+fn migrate_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
+    let columns = [
+        ("build_command", "TEXT"),
+        ("run_command", "TEXT"),
+        ("model", "TEXT"),
+        ("effort", "TEXT"),
+        ("use_worktree", "INTEGER NOT NULL DEFAULT 1"),
+        ("worktree_mode", "TEXT"),
+        ("default_provider", "TEXT"),
+        ("base_ref", "TEXT NOT NULL DEFAULT 'origin/main'"),
+    ];
+
+    for (name, ty) in columns {
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            ).unwrap_or(false);
+        if !has_col {
+            conn.execute(&format!("ALTER TABLE meshes ADD COLUMN {} {}", name, ty), [])?;
+            tracing::info!("Added {} column to meshes table", name);
+        }
     }
     Ok(())
 }
@@ -336,6 +363,9 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
         if current_version < 7 {
             migrate_remote_access_token(conn)?;
         }
+        if current_version < 8 {
+            migrate_mesh_config_columns(conn)?;
+        }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -361,7 +391,14 @@ pub(crate) fn reset_for_testing() {
 // --- Internal Helpers (no locking) ---
 
 fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
-    let mut stmt = conn.prepare("SELECT id, name, path, layout, position, created_at FROM meshes WHERE id = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, path, layout, position, created_at,
+                COALESCE(build_command, ''), COALESCE(run_command, ''),
+                COALESCE(model, ''), COALESCE(effort, ''),
+                COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''),
+                COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')
+         FROM meshes WHERE id = ?1"
+    )?;
     stmt.query_row(params![id], |row| {
         Ok(Mesh {
             id: row.get(0)?,
@@ -372,8 +409,20 @@ fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
+            build_command: parse_str(row.get::<_, String>(6)?),
+            run_command: parse_str(row.get::<_, String>(7)?),
+            model: parse_str(row.get::<_, String>(8)?),
+            effort: parse_str(row.get::<_, String>(9)?),
+            use_worktree: row.get::<_, i32>(10)? != 0,
+            worktree_mode: parse_str(row.get::<_, String>(11)?),
+            default_provider: parse_str(row.get::<_, String>(12)?),
+            base_ref: row.get::<_, String>(13)?,
         })
     })
+}
+
+fn parse_str(s: String) -> Option<String> {
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
@@ -382,7 +431,7 @@ fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode
          FROM agent_nodes WHERE id = ?1"
     )?;
     stmt.query_row(params![id], |row| {
-        let mut node = AgentNode {
+        Ok(AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -401,16 +450,11 @@ fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode
             status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
             cli_session_id: row.get(8)?,
             worktree_name: row.get(9)?,
-            use_worktree: true, // default; overridden below if mesh.toml exists
+            use_worktree: true,
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        };
-        // Derive use_worktree from mesh.toml (node.path == mesh.path)
-        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
-            node.use_worktree = config.use_worktree;
-        }
-        Ok(node)
+        })
     })
 }
 
@@ -438,7 +482,8 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
     )?;
 
     db.execute(
-        "INSERT INTO meshes (name, path, layout, position) VALUES (?1, ?2, 'grid', ?3)",
+        "INSERT INTO meshes (name, path, layout, position, use_worktree, base_ref)
+         VALUES (?1, ?2, 'grid', ?3, 1, 'origin/main')",
         params![name, path, next_position],
     )?;
     let id = db.last_insert_rowid();
@@ -473,7 +518,14 @@ pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
 
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
     let db = get().lock().unwrap();
-    let mut stmt = db.prepare("SELECT id, name, path, layout, position, created_at FROM meshes ORDER BY position ASC, name ASC")?;
+    let mut stmt = db.prepare(
+        "SELECT id, name, path, layout, position, created_at,
+                COALESCE(build_command, ''), COALESCE(run_command, ''),
+                COALESCE(model, ''), COALESCE(effort, ''),
+                COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''),
+                COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')
+         FROM meshes ORDER BY position ASC, name ASC"
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok(Mesh {
             id: row.get(0)?,
@@ -484,9 +536,50 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
+            build_command: parse_str(row.get::<_, String>(6)?),
+            run_command: parse_str(row.get::<_, String>(7)?),
+            model: parse_str(row.get::<_, String>(8)?),
+            effort: parse_str(row.get::<_, String>(9)?),
+            use_worktree: row.get::<_, i32>(10)? != 0,
+            worktree_mode: parse_str(row.get::<_, String>(11)?),
+            default_provider: parse_str(row.get::<_, String>(12)?),
+            base_ref: row.get::<_, String>(13)?,
         })
     })?;
     rows.collect()
+}
+
+/// Look up a mesh by its path.
+pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT id, name, path, layout, position, created_at,
+                COALESCE(build_command, ''), COALESCE(run_command, ''),
+                COALESCE(model, ''), COALESCE(effort, ''),
+                COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''),
+                COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')
+         FROM meshes WHERE path = ?1"
+    )?;
+    stmt.query_row(params![path], |row| {
+        Ok(Mesh {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            path: row.get(2)?,
+            layout: row.get::<_, String>(3)?,
+            position: row.get(4)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now()),
+            build_command: parse_str(row.get::<_, String>(6)?),
+            run_command: parse_str(row.get::<_, String>(7)?),
+            model: parse_str(row.get::<_, String>(8)?),
+            effort: parse_str(row.get::<_, String>(9)?),
+            use_worktree: row.get::<_, i32>(10)? != 0,
+            worktree_mode: parse_str(row.get::<_, String>(11)?),
+            default_provider: parse_str(row.get::<_, String>(12)?),
+            base_ref: row.get::<_, String>(13)?,
+        })
+    })
 }
 
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
@@ -538,7 +631,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
          FROM agent_nodes WHERE status != 'archived' ORDER BY created_at ASC"
     )?;
     let rows = stmt.query_map([], |row| {
-        let mut node = AgentNode {
+        Ok(AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -561,11 +654,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        };
-        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
-            node.use_worktree = config.use_worktree;
-        }
-        Ok(node)
+        })
     })?;
     rows.collect()
 }
@@ -577,7 +666,7 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
          FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at ASC"
     )?;
     let rows = stmt.query_map(params![mesh_id], |row| {
-        let mut node = AgentNode {
+        Ok(AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -600,11 +689,7 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        };
-        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
-            node.use_worktree = config.use_worktree;
-        }
-        Ok(node)
+        })
     })?;
     rows.collect()
 }
@@ -651,7 +736,7 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
          FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL"
     )?;
     let rows = stmt.query_map([], |row| {
-        let mut node = AgentNode {
+        Ok(AgentNode {
             id: row.get(0)?,
             mesh_id: row.get(1)?,
             name: row.get(2)?,
@@ -674,11 +759,7 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
             created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or_else(|_| chrono::Utc::now()),
-        };
-        if let Some(config) = crate::commands::build_run::parse_mesh_config_for_spawn(std::path::Path::new(&node.path)) {
-            node.use_worktree = config.use_worktree;
-        }
-        Ok(node)
+        })
     })?;
     rows.collect()
 }
