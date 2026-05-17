@@ -552,7 +552,8 @@ pub async fn spawn_agent(
 }
 
 /// Returns the list of available agent providers from the backend.
-/// Currently static — future work will detect installed binaries via which/where.
+/// Platform-based filtering — on macOS only Anthropic is supported;
+/// on Windows/Linux all providers are available (gemini/opencode via cmd.exe wrapping).
 #[derive(serde::Serialize)]
 pub struct ProviderInfo {
     pub id: String,
@@ -561,14 +562,27 @@ pub struct ProviderInfo {
     pub icon: String,
 }
 
-#[command]
-pub async fn list_providers() -> Vec<ProviderInfo> {
+/// Returns a static list of available providers (no heap allocation per call).
+#[cfg(target_os = "macos")]
+pub(crate) fn available_providers() -> Vec<ProviderInfo> {
+    vec![
+        ProviderInfo { id: "anthropic".into(), label: "Anthropic (Claude)".into(), color: "#1d7cfc".into(), icon: "A".into() },
+    ]
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     vec![
         ProviderInfo { id: "anthropic".into(), label: "Anthropic (Claude)".into(), color: "#1d7cfc".into(), icon: "A".into() },
         ProviderInfo { id: "minimax".into(), label: "MiniMax".into(), color: "#6366f1".into(), icon: "M".into() },
         ProviderInfo { id: "gemini".into(), label: "Google Gemini".into(), color: "#10b981".into(), icon: "G".into() },
         ProviderInfo { id: "opencode".into(), label: "OpenCode".into(), color: "#f59e0b".into(), icon: "O".into() },
     ]
+}
+
+#[command]
+pub async fn list_providers() -> Vec<ProviderInfo> {
+    available_providers()
 }
 
 /// Auto-resume all suspended sessions that have a stored CLI session ID.
