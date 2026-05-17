@@ -173,6 +173,16 @@ export const getCurrentBranch = (sessionId: number) =>
 export const checkGhAuth = () =>
   invoke<boolean>('check_gh_auth');
 
+// GitHub Issues
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  body: string;
+}
+
+export const getRepoIssues = (meshId: number) =>
+  invoke<GitHubIssue[]>('get_repo_issues', { meshId });
+
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
   invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 

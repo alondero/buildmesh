@@ -10,6 +10,7 @@ import { isMac } from '../../lib/platform';
 import { listProviders } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
+import { GitHubIssuesModal } from '../GitHubIssues/GitHubIssuesModal';
 import {
   DndContext,
   type DragEndEvent,
@@ -111,6 +112,7 @@ export function Sidebar() {
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessMeshId, setRemoteAccessMeshId] = useState<boolean>(false);
+  const [githubIssuesModal, setGithubIssuesModal] = useState<{ meshId: number; meshPath: string } | null>(null);
   const openPropertiesPanel = useUIStore((s) => s.openPropertiesPanel);
   const toggleFileExplorer = useUIStore((s) => s.toggleFileExplorer);
   const fileExplorerContext = useUIStore(s => s.fileExplorerContext);
@@ -152,6 +154,13 @@ export function Sidebar() {
       selectMesh(mesh.id);
     } catch (e) {
       console.error('Failed to create node:', e);
+    }
+  };
+
+  const handleOpenGitHubIssues = (meshId: number) => {
+    const mesh = meshes.find(m => m.id === meshId);
+    if (mesh) {
+      setGithubIssuesModal({ meshId, meshPath: mesh.path });
     }
   };
 
@@ -201,6 +210,15 @@ export function Sidebar() {
         />
       )}
 
+      {/* GitHub Issues Modal */}
+      {githubIssuesModal && (
+        <GitHubIssuesModal
+          meshId={githubIssuesModal.meshId}
+          meshPath={githubIssuesModal.meshPath}
+          onClose={() => setGithubIssuesModal(null)}
+        />
+      )}
+
       {/* Meshes list */}
       <div className="flex-1 overflow-y-auto">
         <div className="p-2">
@@ -242,6 +260,7 @@ export function Sidebar() {
                       setActiveNode={setActiveNode}
                       selectMesh={selectMesh}
                       onDeleteNode={handleDeleteNode}
+                      onOpenGitHubIssues={handleOpenGitHubIssues}
                       getDefaultProvider={useMeshStore(state => state.getDefaultProvider)}
                     />
                   );
@@ -307,6 +326,7 @@ interface SortableMeshProps {
   setActiveNode: (id: number) => void;
   selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
+  onOpenGitHubIssues: (meshId: number) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
@@ -326,6 +346,7 @@ function SortableMesh({
   setActiveNode,
   selectMesh,
   onDeleteNode,
+  onOpenGitHubIssues,
   getDefaultProvider,
 }: SortableMeshProps) {
   const isThisMeshOpen = fileExplorerContext?.type === 'mesh' && fileExplorerContext.meshId === mesh.id;
@@ -339,6 +360,7 @@ function SortableMesh({
   } = useSortable({ id: mesh.id });
 
   const [isArrowHovered, setIsArrowHovered] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -350,6 +372,21 @@ function SortableMesh({
     const defaultProvider = await getDefaultProvider(mesh.id);
     onSelectProvider(mesh, defaultProvider);
   };
+
+  // Dismiss context menu on click outside or Escape
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => setContextMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
 
   return (
     <div ref={setNodeRef} style={style} className="mb-2 group/mesh">
@@ -405,7 +442,11 @@ function SortableMesh({
             isSelected ? 'text-accent-cyan font-semibold' : 'text-text-secondary'
           }`}
         >
-          <span className="flex-1 truncate">{mesh.name}</span>
+          <span className="flex-1 truncate" onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setContextMenu({ x: e.clientX, y: e.clientY });
+          }}>{mesh.name}</span>
           <button
             onClick={(e) => { e.stopPropagation(); onOpenProperties(mesh.id); }}
             className="opacity-0 group-hover/mesh:opacity-100 text-text-muted hover:text-accent-cyan text-xs px-1 transition-all"
@@ -439,6 +480,29 @@ function SortableMesh({
           onDelete={(e) => onDeleteNode(e, node.id)}
         />
       ))}
+      {/* Context menu */}
+      {contextMenu && (
+        <div
+          className="fixed bg-bg-overlay border border-border-default rounded shadow-lg z-[100] py-1 min-w-[160px]"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              setContextMenu(null);
+              onOpenGitHubIssues(mesh.id);
+            }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="16"/>
+              <line x1="8" y1="12" x2="16" y2="12"/>
+            </svg>
+            GitHub Issues
+          </button>
+        </div>
+      )}
     </div>
   );
 }
