@@ -70,6 +70,8 @@ pub struct BuildRunConfig {
     pub use_worktree: bool,
     /// "detached" (default) or "branched" - controls git worktree add behavior
     pub worktree_mode: Option<String>,
+    /// Default provider for the + button in the mesh list (e.g. "minimax")
+    pub default_provider: Option<String>,
 }
 
 /// Parse [build]command, [run]command, and [agent]model/effort from a mesh.toml file
@@ -95,6 +97,7 @@ fn parse_mesh_config(mesh_path: &std::path::Path) -> Result<BuildRunConfig, Stri
         effort,
         use_worktree,
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
+        default_provider: extract_toml_value(&content, "agent", "default_provider"),
     })
 }
 
@@ -113,6 +116,7 @@ pub fn parse_mesh_config_for_spawn(mesh_path: &std::path::Path) -> Option<BuildR
             .map(|v| v == "true")
             .unwrap_or(true),
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
+        default_provider: extract_toml_value(&content, "agent", "default_provider"),
     })
 }
 

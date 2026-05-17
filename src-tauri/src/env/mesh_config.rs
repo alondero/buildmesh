@@ -12,6 +12,7 @@ pub struct MeshSpawnConfig {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub worktree_mode: Option<String>,
+    pub default_provider: Option<String>,
 }
 
 impl Default for MeshSpawnConfig {
@@ -22,6 +23,7 @@ impl Default for MeshSpawnConfig {
             model: None,
             effort: None,
             worktree_mode: None,
+            default_provider: None,
         }
     }
 }
@@ -38,6 +40,7 @@ pub fn read_mesh_spawn_config(mesh_path: &Path) -> Option<MeshSpawnConfig> {
         model: extract_toml_value(&content, "agent", "model"),
         effort: extract_toml_value(&content, "agent", "effort"),
         worktree_mode: extract_toml_value(&content, "agent", "worktree_mode"),
+        default_provider: extract_toml_value(&content, "agent", "default_provider"),
     })
 }
 
