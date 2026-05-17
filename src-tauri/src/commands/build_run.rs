@@ -381,6 +381,7 @@ mod tests {
             model: None,
             effort: None,
             use_worktree: true,
+            worktree_mode: None,
         };
         assert!(config.use_worktree);
     }

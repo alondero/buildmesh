@@ -1,5 +1,9 @@
 //! Environment detection and path handling for Windows + WSL hybrid setup
 
+mod mesh_config;
+
+pub use mesh_config::{read_mesh_spawn_config, MeshSpawnConfig, MESH_CONFIG_FILENAME};
+
 use std::path::PathBuf;
 use once_cell::sync::Lazy;
 use std::process::Command;

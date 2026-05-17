@@ -70,7 +70,7 @@ pub fn run() {
             commands::test::start_test_server(app.handle().clone());
 
             // Start embedded HTTP/WebSocket server for mobile remote access
-            http_server::start_http_server(app.handle().clone());
+            http_server::start_http_server(http_server::HTTP_PORT, app.handle().clone());
 
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
