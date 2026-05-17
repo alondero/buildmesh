@@ -40,6 +40,11 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     migrate_if_needed(&conn)?;
 
     // Create schema (all tables + indexes, IF NOT EXISTS so they're idempotent)
+    // After migrations run, ensure the meshes table has all v8+ columns.
+    // migrate_mesh_config_columns uses IF NOT EXISTS (via pragma_table_info checks)
+    // so it's safe to call here unconditionally as a safety net for DBs that skipped
+    // migrations due to the projects-table guard.
+    ensure_mesh_config_columns(&conn)?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS meshes (
@@ -147,6 +152,37 @@ fn migrate_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
         if !has_col {
             conn.execute(&format!("ALTER TABLE meshes ADD COLUMN {} {}", name, ty), [])?;
             tracing::info!("Added {} column to meshes table", name);
+        }
+    }
+    Ok(())
+}
+
+/// Safety net: ensure all v8 config columns exist on the meshes table.
+/// Called after migrate_if_needed to fix DBs that skipped migration due to
+/// the projects-table guard (existing DBs that already had schema_version=8
+/// but whose meshes table lacked the config columns).
+fn ensure_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
+    let columns = [
+        ("build_command", "TEXT"),
+        ("run_command", "TEXT"),
+        ("model", "TEXT"),
+        ("effort", "TEXT"),
+        ("use_worktree", "INTEGER NOT NULL DEFAULT 1"),
+        ("worktree_mode", "TEXT"),
+        ("default_provider", "TEXT"),
+        ("base_ref", "TEXT NOT NULL DEFAULT 'origin/main'"),
+    ];
+    for (name, ty) in columns {
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_col {
+            conn.execute(&format!("ALTER TABLE meshes ADD COLUMN {} {}", name, ty), [])?;
+            tracing::warn!("ensure_mesh_config_columns: added missing column {}", name);
         }
     }
     Ok(())
