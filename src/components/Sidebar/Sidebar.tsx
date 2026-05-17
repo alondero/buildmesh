@@ -242,6 +242,7 @@ export function Sidebar() {
                       setActiveNode={setActiveNode}
                       selectMesh={selectMesh}
                       onDeleteNode={handleDeleteNode}
+                      getDefaultProvider={useMeshStore(state => state.getDefaultProvider)}
                     />
                   );
                 })}
@@ -306,6 +307,7 @@ interface SortableMeshProps {
   setActiveNode: (id: number) => void;
   selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
+  getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
 function SortableMesh({
@@ -324,6 +326,7 @@ function SortableMesh({
   setActiveNode,
   selectMesh,
   onDeleteNode,
+  getDefaultProvider,
 }: SortableMeshProps) {
   const isThisMeshOpen = fileExplorerContext?.type === 'mesh' && fileExplorerContext.meshId === mesh.id;
   const {
@@ -335,10 +338,17 @@ function SortableMesh({
     isDragging,
   } = useSortable({ id: mesh.id });
 
+  const [isArrowHovered, setIsArrowHovered] = useState(false);
+
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
     opacity: isDragging ? 0.5 : 1,
+  };
+
+  const handleMainClick = async () => {
+    const defaultProvider = await getDefaultProvider(mesh.id);
+    onSelectProvider(mesh, defaultProvider);
   };
 
   return (
@@ -354,13 +364,25 @@ function SortableMesh({
           ⋮⋮
         </button>
 
-        <div className="relative">
+        {/* Split button: main + for default provider, arrow for dropdown */}
+        <div className="relative flex">
+          {/* Main + button — spawns with default provider */}
           <button
-            onClick={() => onNewNode(mesh)}
+            onClick={handleMainClick}
             className={`text-xs px-1 ${isDropdownOpen ? 'text-accent-blue' : 'text-accent-cyan hover:text-accent-blue'}`}
-            title="New node"
+            title="New node with default provider"
           >
             +
+          </button>
+          {/* Arrow button — shows provider dropdown */}
+          <button
+            onClick={() => onNewNode(mesh)}
+            onMouseEnter={() => setIsArrowHovered(true)}
+            onMouseLeave={() => setIsArrowHovered(false)}
+            className={`text-xs px-0.5 ${isArrowHovered || isDropdownOpen ? 'text-accent-blue' : 'text-text-muted hover:text-accent-cyan'}`}
+            title="Choose provider"
+          >
+            ▾
           </button>
           {isDropdownOpen && (
             <div data-dropdown-for={mesh.id} className="absolute left-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[120px]">

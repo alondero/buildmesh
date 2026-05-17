@@ -112,6 +112,21 @@ pub async fn get_local_ip() -> Result<String, String> {
     .map_err(|_| "timeout detecting network interfaces (5s exceeded)".to_string())?
 }
 
+/// Get the default provider for a mesh, from its mesh.toml [agent] default_provider field.
+/// Returns "anthropic" if the field is absent or invalid.
+#[command]
+pub async fn get_default_provider(mesh_id: i64) -> Result<String, String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("{}", e))?;
+    let node_path = &mesh.path;
+
+    let config = crate::commands::build_run::parse_mesh_config_for_spawn(&std::path::PathBuf::from(node_path));
+    Ok(config
+        .and_then(|c| c.default_provider)
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "anthropic".to_string()))
+}
+
 /// Find the first IP matching one of the given /8 prefixes (big-endian octets).
 fn find_first_lan_ip(
     interfaces: &[(String, std::net::IpAddr)],

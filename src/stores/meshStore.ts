@@ -25,6 +25,7 @@ interface MeshState {
   updateMeshLayout: (id: number, layout: 'grid' | 'single') => Promise<void>;
   reorderMeshes: (meshId: number, newPosition: number) => Promise<void>;
   updateMeshName: (id: number, name: string) => Promise<void>;
+  getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
 export const useMeshStore = create<MeshState>((set) => ({
@@ -145,6 +146,15 @@ export const useMeshStore = create<MeshState>((set) => ({
       });
     } catch (e) {
       set({ error: String(e) });
+    }
+  },
+
+  getDefaultProvider: async (meshId) => {
+    try {
+      return await invoke<string>('get_default_provider', { meshId });
+    } catch (e) {
+      set({ error: String(e) });
+      return 'anthropic';
     }
   },
 }));
