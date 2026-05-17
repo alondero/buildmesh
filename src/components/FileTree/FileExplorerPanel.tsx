@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   openInEditor,
   type DiffResult,
@@ -33,17 +33,17 @@ export function FileExplorerPanel({
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [currentDiff, setCurrentDiff] = useState<DiffResult | null>(null);
   const [isResizing, setIsResizing] = useState(false);
+  const [widthRef, setWidthRef] = useState(width);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      resizingRef.current = true;
-      startXRef.current = e.clientX;
-      startWidthRef.current = width;
-      setIsResizing(true);
-    },
-    [width]
-  );
+  useEffect(() => { setWidthRef(width); }, [width]);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    resizingRef.current = true;
+    startXRef.current = e.clientX;
+    startWidthRef.current = widthRef;
+    setIsResizing(true);
+  };
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -53,10 +53,10 @@ export function FileExplorerPanel({
       onWidthChange(newWidth);
     };
 
-    const handleMouseUp = useCallback(() => {
+    const handleMouseUp = () => {
       resizingRef.current = false;
       setIsResizing(false);
-    }, []);
+    };
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
@@ -64,28 +64,25 @@ export function FileExplorerPanel({
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [onWidthChange]);
+  }, [onWidthChange, widthRef]);
 
-  const handleBack = useCallback(() => {
+  const handleBack = () => {
     setSelectedFile(null);
     setCurrentDiff(null);
-  }, []);
+  };
 
-  const handleChangedFileSelect = useCallback(
-    async (path: string, diff: DiffResult) => {
-      setSelectedFile(path);
-      setCurrentDiff(diff);
-    },
-    []
-  );
+  const handleChangedFileSelect = (path: string, diff: DiffResult) => {
+    setSelectedFile(path);
+    setCurrentDiff(diff);
+  };
 
-  const handleUnchangedFileSelect = useCallback(async (path: string) => {
+  const handleUnchangedFileSelect = async (path: string) => {
     try {
       await openInEditor(path);
     } catch (e) {
       console.error('Failed to open file in editor:', e);
     }
-  }, []);
+  };
 
   // Reset state when context changes
   useEffect(() => {

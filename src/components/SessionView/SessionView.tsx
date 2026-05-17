@@ -23,7 +23,6 @@ export function SessionView() {
 
   const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
   const closeFileExplorer = useUIStore(state => state.closeFileExplorer);
-
   const [fileExplorerWidth, setFileExplorerWidth] = useState(360);
   const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' } | null>(null);
 
@@ -55,10 +54,14 @@ export function SessionView() {
   }, [activeNode?.id]);
 
   useEffect(() => {
-    if (selectedMeshId !== null) {
-      closeFileExplorer();
-    }
-  }, [selectedMeshId, closeFileExplorer]);
+    if (selectedMeshId === null) return;
+    const ctx = fileExplorerContext;
+    const shouldClose = ctx && (
+      (ctx.type === 'mesh' && ctx.meshId !== selectedMeshId) ||
+      ctx.type === 'agent'
+    );
+    if (shouldClose) closeFileExplorer();
+  }, [selectedMeshId, fileExplorerContext, closeFileExplorer]);
 
   // Auto-select first node when switching to a mesh that doesn't include the active node
   useEffect(() => {
@@ -75,29 +78,9 @@ export function SessionView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNode?.id]);
 
-  if (filteredNodes.length === 0) {
-    return (
-      <div className="flex-1 flex flex-col bg-bg-base">
-        <div className="flex-1 flex items-center justify-center text-text-muted">
-          <div className="text-center">
-            <p className="text-lg mb-2 text-text-secondary">Buildmesh Orchestrator</p>
-            <p className="text-sm">Select a node to start managing your agents</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
       <div className="flex-1 flex overflow-hidden">
-        <GridLayout
-          nodes={filteredNodes}
-          onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
-          buildRunOpen={openBuildRun}
-          setBuildRunOpen={setOpenBuildRun}
-        />
-
         {fileExplorerContext && (
           <FileExplorerPanel
             context={fileExplorerContext}
@@ -108,6 +91,24 @@ export function SessionView() {
             meshName={fileExplorerMeshName ?? undefined}
           />
         )}
+
+        <div className="flex-1 flex overflow-hidden">
+          {filteredNodes.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center text-text-muted">
+              <div className="text-center">
+                <p className="text-lg mb-2 text-text-secondary">Buildmesh Orchestrator</p>
+                <p className="text-sm">Select a node to start managing your agents</p>
+              </div>
+            </div>
+          ) : (
+            <GridLayout
+              nodes={filteredNodes}
+              onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
+              buildRunOpen={openBuildRun}
+              setBuildRunOpen={setOpenBuildRun}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
