@@ -179,6 +179,9 @@ export interface GitHubIssue {
 export const getRepoIssues = (meshId: number) =>
   invoke<GitHubIssue[]>('get_repo_issues', { meshId });
 
+export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, issueBody: string, provider?: string) =>
+  invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, issueBody, provider });
+
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
   invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 

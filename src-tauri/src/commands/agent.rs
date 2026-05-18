@@ -125,6 +125,7 @@ fn build_spawn_command(
     session_id: i64,
     model_override: Option<&str>,
     effort_override: Option<&str>,
+    prefill: Option<&str>,
 ) -> CommandBuilder {
     let is_macos = cfg!(target_os = "macos");
     let is_wsl = resolved.env_type == EnvType::Wsl;
@@ -175,6 +176,10 @@ fn build_spawn_command(
                 args.push("--effort".to_string());
                 args.push(effort.to_string());
             }
+        }
+        if let Some(text) = prefill {
+            args.push("--prefill".to_string());
+            args.push(text.to_string());
         }
     }
 
@@ -369,6 +374,7 @@ pub(crate) async fn spawn_agent_inner(
     resume: Option<String>,
     rows: u16,
     cols: u16,
+    prefill: Option<String>,
 ) -> Result<(), String> {
     tracing::info!(
         "spawn_agent_inner: session_id={}, provider={}, resume={:?}, size={}x{}",
@@ -483,7 +489,7 @@ pub(crate) async fn spawn_agent_inner(
     let pair = open_pty_pair(rows, cols)?;
 
     // 7. Build command
-    let cmd = build_spawn_command(&node, &resolved, provider_enum, &session_id_mode, session_id, model_override, effort_override);
+    let cmd = build_spawn_command(&node, &resolved, provider_enum, &session_id_mode, session_id, model_override, effort_override, prefill.as_deref());
 
     let child = spawn_child(&pair, cmd).map_err(|e| {
         let err_msg = e.clone();
@@ -547,7 +553,47 @@ pub async fn spawn_agent(
 ) -> Result<(), String> {
     let r = rows.unwrap_or(24);
     let c = cols.unwrap_or(80);
-    spawn_agent_inner(&app, session_id, provider, resume, r, c).await
+    spawn_agent_inner(&app, session_id, provider, resume, r, c, None).await
+}
+
+/// Spawn an agent pre-filled with a GitHub issue's title and body.
+#[command]
+pub async fn spawn_issue_agent(
+    app: AppHandle,
+    mesh_id: i64,
+    issue_number: i64,
+    issue_title: String,
+    issue_body: String,
+    provider: Option<String>,
+) -> Result<crate::models::AgentNode, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+
+    let effective_provider = provider
+        .or(mesh.default_provider)
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "anthropic".to_string());
+
+    let branch = crate::commands::git::get_default_branch(mesh.path.clone());
+
+    let node = crate::services::agent_node::create(
+        mesh_id,
+        &mesh.path,
+        &branch,
+        Some(&effective_provider),
+    ).map_err(|e| e.to_string())?;
+
+    let is_cwrap = matches!(parse_provider(&effective_provider), Provider::Anthropic | Provider::Minimax);
+    let prefill = if is_cwrap {
+        Some(format!("{}\n\n{}", issue_title, issue_body))
+    } else {
+        tracing::warn!("spawn_issue_agent: --prefill not supported for provider '{}', skipping", effective_provider);
+        None
+    };
+
+    spawn_agent_inner(&app, node.id, effective_provider, None, 24, 80, prefill).await?;
+
+    tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node.id, issue_number);
+    Ok(node)
 }
 
 /// Returns the list of available agent providers from the backend.
@@ -616,7 +662,7 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
 
         let provider_str = node.provider.to_string();
         // Default to 80x24 for auto-resume since we don't know the size yet
-        match spawn_agent_inner(&app, node.id, provider_str, Some(cli_id), 24, 80).await {
+        match spawn_agent_inner(&app, node.id, provider_str, Some(cli_id), 24, 80, None).await {
             Ok(()) => {
                 resumed.push(node.id);
                 tracing::info!("auto_resume_sessions: resumed node {}", node.id);
