@@ -6,8 +6,9 @@ pub use mesh_config::{read_mesh_spawn_config, MeshSpawnConfig};
 
 use std::path::PathBuf;
 use once_cell::sync::Lazy;
-use std::process::Command;
 use std::env;
+
+use crate::process_util::command_no_window;
 
 /// The default WSL distro name (e.g., "Ubuntu"), cached after first detection
 static DETECTED_DISTRO: Lazy<Option<String>> = Lazy::new(get_default_wsl_distro_impl);
@@ -18,7 +19,7 @@ static WINDOWS_USERNAME: Lazy<Option<String>> = Lazy::new(get_windows_username_i
 /// Get the default WSL distro name by parsing `wsl.exe -l -v` output.
 /// Returns the distro marked as (default) or the first one if none marked.
 fn get_default_wsl_distro_impl() -> Option<String> {
-    let output = Command::new("wsl.exe")
+    let output = command_no_window("wsl.exe")
         .args(["-l", "-v"])
         .output()
         .ok()?;
@@ -75,7 +76,7 @@ impl Environment {
                 }
             }
             // Check via wsl.exe detection
-            if let Ok(output) = Command::new("wsl.exe")
+            if let Ok(output) = command_no_window("wsl.exe")
                 .args(["--detect-nested"])
                 .output()
             {
@@ -143,7 +144,7 @@ pub fn cc_path() -> PathBuf {
         Environment::Wsl => PathBuf::from("/mnt/c/Users/alond/.local/bin/cc"),
         Environment::Windows => {
             // Try to find cc in PATH
-            if let Ok(output) = Command::new("where")
+            if let Ok(output) = command_no_window("where")
                 .arg("cc")
                 .output()
             {
@@ -163,7 +164,7 @@ pub fn git_path() -> PathBuf {
     match current_env() {
         Environment::Wsl => PathBuf::from("git"),
         Environment::Windows => {
-            if let Ok(output) = Command::new("where")
+            if let Ok(output) = command_no_window("where")
                 .arg("git")
                 .output()
             {
@@ -336,6 +337,62 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
     Ok(())
 }
 
+/// Add a worktree to the repo — branched (new branch from HEAD) or detached.
+fn add_worktree_impl(
+    repo: &git2::Repository,
+    branch_name: &str,
+    host_path: &std::path::Path,
+    use_branched: bool,
+) -> Result<(), String> {
+    if use_branched {
+        let head_commit = repo.head()
+            .and_then(|h| h.peel_to_commit())
+            .map_err(|e| format!("Failed to resolve HEAD commit: {}", e))?;
+        let branch = repo.branch(branch_name, &head_commit, false)
+            .map_err(|e| format!("Failed to create branch '{}': {}", branch_name, e))?;
+        let reference = branch.into_reference();
+        let mut opts = git2::WorktreeAddOptions::new();
+        opts.reference(Some(&reference));
+        repo.worktree(branch_name, host_path, Some(&opts))
+            .map_err(|e| format!("Git worktree add failed: {}", e))?;
+    } else {
+        // git2 worktree add without a reference auto-creates a branch; detach HEAD after.
+        repo.worktree(branch_name, host_path, None)
+            .map_err(|e| format!("Git worktree add failed: {}", e))?;
+
+        let wt_repo = git2::Repository::open(host_path)
+            .map_err(|e| format!("Failed to open worktree repo: {}", e))?;
+        let head_oid = wt_repo.head()
+            .and_then(|h| h.peel_to_commit())
+            .map_err(|e| format!("Failed to resolve worktree HEAD: {}", e))?
+            .id();
+        wt_repo.set_head_detached(head_oid)
+            .map_err(|e| format!("Failed to detach HEAD in worktree: {}", e))?;
+
+        if let Ok(mut branch) = repo.find_branch(branch_name, git2::BranchType::Local) {
+            let _ = branch.delete();
+        }
+    }
+    Ok(())
+}
+
+/// Remove worktrees whose on-disk path no longer exists.
+fn prune_stale_worktrees(repo: &git2::Repository) {
+    if let Ok(worktree_names) = repo.worktrees() {
+        for i in 0..worktree_names.len() {
+            if let Some(name) = worktree_names.get(i) {
+                if let Ok(wt) = repo.find_worktree(name) {
+                    if wt.validate().is_err() {
+                        let mut prune_opts = git2::WorktreePruneOptions::new();
+                        prune_opts.valid(false);
+                        let _ = wt.prune(Some(&mut prune_opts));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Create a new Git worktree at the specified path and honor .worktreeinclude.
 pub fn create_git_worktree(
     project_root: &str,
@@ -356,47 +413,19 @@ pub fn create_git_worktree(
 
     tracing::info!("Creating git worktree: {} at {} (mode: {})", branch_name, worktree_host_path, worktree_mode);
 
-    // Build git worktree add command based on worktree_mode
-    // "detached" = --detach (default), "branched" = -b {branch_name}
+    let repo = git2::Repository::open(project_root)
+        .map_err(|e| format!("Failed to open repository at {}: {}", project_root, e))?;
+
     let use_branched = worktree_mode == "branched";
 
-    let mut args = vec!["-C", project_root, "worktree", "add"];
-    if use_branched {
-        args.push("-b");
-        args.push(branch_name);
-    } else {
-        args.push("--detach");
-    }
-    args.push(worktree_host_path);
-
-    let output = Command::new("git").args(&args).output()
-        .map_err(|e| format!("Failed to execute git worktree add: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("already checked out") || stderr.contains("already exists") {
+    match add_worktree_impl(&repo, branch_name, host_path, use_branched) {
+        Ok(()) => {}
+        Err(err) if err.contains("already exists") || err.contains("already checked out") => {
             tracing::warn!("Worktree already exists in git metadata, attempting to repair...");
-            let _ = Command::new("git").args(["-C", project_root, "worktree", "prune"]).output();
-
-            // Retry with same mode
-            let mut retry_args = vec!["-C", project_root, "worktree", "add"];
-            if use_branched {
-                retry_args.push("-b");
-                retry_args.push(branch_name);
-            } else {
-                retry_args.push("--detach");
-            }
-            retry_args.push(worktree_host_path);
-
-            let retry = Command::new("git").args(&retry_args).output()
-                .map_err(|e| format!("Retry failed to execute git worktree add: {}", e))?;
-
-            if !retry.status.success() {
-                return Err(format!("Git worktree add failed after retry: {}", String::from_utf8_lossy(&retry.stderr)));
-            }
-        } else {
-            return Err(format!("Git worktree add failed: {}", stderr));
+            prune_stale_worktrees(&repo);
+            add_worktree_impl(&repo, branch_name, host_path, use_branched)?;
         }
+        Err(err) => return Err(err),
     }
 
     // Honor .worktreeinclude if it exists in the project root
@@ -438,11 +467,19 @@ pub fn create_git_worktree(
 /// Check if the source branch is clean (no uncommitted changes).
 /// Used before creating branched worktrees to prevent state pollution.
 pub fn check_source_branch_clean(project_root: &str) -> Result<bool, String> {
-    let output = Command::new("git")
-        .args(["-C", project_root, "status", "--porcelain"])
-        .output()
+    let repo = git2::Repository::open(project_root)
+        .map_err(|e| format!("Failed to open repository at {}: {}", project_root, e))?;
+
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true);
+
+    let statuses = repo.statuses(Some(&mut opts))
         .map_err(|e| format!("Failed to check git status: {}", e))?;
-    Ok(output.stdout.is_empty())
+
+    // Clean means no entries (ignoring ignored files)
+    let has_changes = statuses.iter().any(|entry| !entry.status().is_ignored());
+    Ok(!has_changes)
 }
 
 /// Get the .claude directory for session storage in the correct environment

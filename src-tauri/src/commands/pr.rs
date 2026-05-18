@@ -1,9 +1,9 @@
-//! GitHub workflow via GitHub CLI (gh)
+//! GitHub workflow via direct REST API calls (no `gh` CLI dependency)
 
 use crate::db;
-use crate::models::EnvType;
+use crate::services::github::{self, GitHubClient};
+use git2::Repository;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use tauri::command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,83 +13,38 @@ pub struct GitHubIssue {
     pub body: String,
 }
 
-/// Check whether the user is authenticated with GitHub via `gh`.
+/// Check whether the user has a valid GitHub token (env var or gh config).
 #[command]
 pub fn check_gh_auth() -> bool {
-    let output = Command::new("gh")
-        .args(["auth", "status"])
-        .output();
-
-    match output {
-        Ok(o) => o.status.success(),
+    match GitHubClient::new() {
+        Ok(client) => client.check_auth(),
         Err(_) => false,
     }
 }
 
-/// Get open GitHub issues for a mesh via `gh issue list` + `gh issue view`.
+/// Get open GitHub issues for a mesh.
 /// Returns an empty list if no `origin` remote is configured.
 #[command]
 pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
 
-    // Get origin remote URL via git
-    let output = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&mesh.path)
-        .output()
-        .map_err(|e| format!("git error: {}", e))?;
-
-    if !output.status.success() {
-        // No origin remote or not a git repo — return empty list
-        tracing::warn!("get_repo_issues: no origin remote for mesh at {}", mesh.path);
-        return Ok(Vec::new());
-    }
-
-    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let owner_repo = parse_owner_repo(&remote_url).ok_or_else(|| format!("unrecognized remote URL: {}", remote_url))?;
-
-    // Get list of open issues with body included in a single call
-    let list_output = Command::new("gh")
-        .args(["issue", "list", "--repo", &owner_repo, "--state", "open", "--json", "number,title,body"])
-        .current_dir(&mesh.path)
-        .output()
-        .map_err(|e| format!("gh issue list error: {}", e))?;
-
-    if !list_output.status.success() {
-        return Ok(Vec::new());
-    }
-
-    #[derive(Deserialize)]
-    struct IssueListItem { number: i64, title: String, body: String }
-
-    let items: Vec<IssueListItem> = serde_json::from_str(&String::from_utf8_lossy(&list_output.stdout))
-        .map_err(|e| format!("failed to parse issue list: {}", e))?;
-
-    Ok(items.into_iter().map(|item| GitHubIssue {
-        number: item.number,
-        title: item.title,
-        body: item.body,
-    }).collect())
-}
-
-/// Parse owner/repo from a GitHub URL.
-/// Handles both HTTPS (https://github.com/owner/repo) and SSH (git@github.com:owner/repo) formats.
-fn parse_owner_repo(url: &str) -> Option<String> {
-    let rest = if url.starts_with("https://github.com/") {
-        &url["https://github.com/".len()..]
-    } else if url.starts_with("git@github.com:") {
-        &url["git@github.com:".len()..]
-    } else {
-        return None;
+    let (owner, repo) = match resolve_owner_repo(&mesh.path)? {
+        Some(pair) => pair,
+        None => {
+            tracing::warn!("get_repo_issues: no origin remote for mesh at {}", mesh.path);
+            return Ok(Vec::new());
+        }
     };
 
-    let parts: Vec<&str> = rest.split('/').collect();
-    if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-        Some(format!("{}/{}", parts[0], parts[1]))
-    } else {
-        None
-    }
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    let issues = client.list_issues_only(&owner, &repo).map_err(|e| e.to_string())?;
+
+    Ok(issues.into_iter().map(|issue| GitHubIssue {
+        number: issue.number,
+        title: issue.title,
+        body: issue.body,
+    }).collect())
 }
 
 /// Create a PR for the node
@@ -102,37 +57,22 @@ pub fn create_pr(
     let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let branch = &node.branch;
+    let base_branch = &node.branch;
     let path = &node.path;
 
-    let output = if node.env == EnvType::Wsl {
-        Command::new("wsl.exe")
-            .args(["--cd", path, "--", "gh", "pr", "create",
-                   "--title", &title, "--body", &body, "--base", branch])
-            .output()
-    } else {
-        Command::new("gh")
-            .args(["pr", "create", "--title", &title, "--body", &body, "--base", branch])
-            .output()
-    };
-
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            let url = stdout.lines().find(|l| l.starts_with("https://github.com"))
-                .unwrap_or_default()
-                .to_string();
-            Ok(url)
-        }
-        Err(e) => Err(format!("error: {}", e)),
+    let info = repo_info(path)?;
+    if info.branch.is_empty() {
+        return Err("Could not determine current branch".to_string());
     }
+
+    let (owner, repo) = info.owner_repo()?;
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    client.create_pull_request(&owner, &repo, &title, &body, &info.branch, base_branch)
+        .map_err(|e| e.to_string())
 }
 
 /// Create a PR directly from a mesh directory path (no node required).
-/// Detects the current branch via `git branch --show-current`, then runs
-/// `gh pr create` targeting `base_branch`. The `--head` flag is only needed
-/// when the current branch differs from `base_branch` — if they are the same,
-/// gh compares the branch to itself and returns "No commits between".
+/// Detects the current branch via git2, then creates a PR targeting `base_branch`.
 #[command]
 pub fn create_pr_for_mesh(
     mesh_path: String,
@@ -140,57 +80,30 @@ pub fn create_pr_for_mesh(
     body: String,
     base_branch: String,
 ) -> Result<String, String> {
-    // Detect the current branch
-    let branch = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(&mesh_path)
-        .output()
-        .map_err(|e| format!("git error: {}", e))?
-        .stdout;
-    let branch = String::from_utf8_lossy(&branch).trim().to_string();
-
-    let mut gh_args = vec!["pr", "create",
-               "--title", &title, "--body", &body, "--base", &base_branch];
-    // Only use --head if the current branch differs from base.
-    // When they're identical, --head causes "No commits between X and X".
-    if !branch.is_empty() && branch != base_branch {
-        gh_args.extend(["--head", &branch]);
+    let info = repo_info(&mesh_path)?;
+    if info.branch.is_empty() || info.branch == base_branch {
+        return Err(format!(
+            "Current branch '{}' is the same as base branch '{}' — nothing to compare",
+            info.branch, base_branch
+        ));
     }
 
-    let output = Command::new("gh")
-        .args(&gh_args)
-        .current_dir(&mesh_path)
-        .output()
-        .map_err(|e| format!("gh error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(stderr.trim().to_string());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let url = stdout
-        .lines()
-        .find(|l| l.starts_with("https://github.com"))
-        .unwrap_or_default()
-        .to_string();
-    Ok(url)
+    let (owner, repo) = info.owner_repo()?;
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    client.create_pull_request(&owner, &repo, &title, &body, &info.branch, &base_branch)
+        .map_err(|e| e.to_string())
 }
 
-/// Merge a PR
+/// Merge a PR (squash + delete branch).
+/// Accepts a full GitHub PR URL like `https://github.com/owner/repo/pull/123`.
 #[command]
 pub fn merge_pr(pr_url: String) -> Result<String, String> {
-    let output = Command::new("gh")
-        .args(["pr", "merge", &pr_url, "--squash", "--delete-branch"])
-        .output();
+    let (owner, repo, pr_number) = parse_pr_url(&pr_url)
+        .ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
 
-    match output {
-        Ok(o) => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            Ok(stdout.to_string())
-        }
-        Err(e) => Err(format!("error: {}", e)),
-    }
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    client.merge_pull_request(&owner, &repo, pr_number)
+        .map_err(|e| e.to_string())
 }
 
 /// Get the current branch for a node
@@ -199,18 +112,74 @@ pub fn get_current_branch(session_id: i64) -> Result<String, String> {
     let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    let output = if node.env == EnvType::Wsl {
-        Command::new("wsl.exe")
-            .args(["--cd", &node.path, "--", "git", "branch", "--show-current"])
-            .output()
-    } else {
-        Command::new("git")
-            .args(["branch", "--show-current"])
-            .output()
+    Ok(repo_info(&node.path)?.branch)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+struct RepoInfo {
+    branch: String,
+    remote_url: Option<String>,
+}
+
+impl RepoInfo {
+    fn owner_repo(&self) -> Result<(String, String), String> {
+        let url = self.remote_url.as_deref()
+            .ok_or_else(|| "No origin remote configured".to_string())?;
+        github::parse_owner_repo(url)
+            .ok_or_else(|| format!("unrecognized remote URL: {}", url))
+    }
+}
+
+/// Open the repo once and extract both the current branch and origin URL.
+fn repo_info(path: &str) -> Result<RepoInfo, String> {
+    let repo = Repository::open(path).map_err(|e| format!("git error: {}", e))?;
+
+    let branch = match repo.head() {
+        Ok(head) => {
+            if head.is_branch() {
+                head.shorthand().unwrap_or("").to_string()
+            } else {
+                head.target()
+                    .map(|oid| oid.to_string()[..8].to_string())
+                    .unwrap_or_default()
+            }
+        }
+        Err(_) => String::new(),
     };
 
-    match output {
-        Ok(o) => Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()),
-        Err(e) => Err(format!("error: {}", e)),
+    let remote_url = repo.find_remote("origin")
+        .ok()
+        .and_then(|r| r.url().map(|u| u.to_string()));
+
+    Ok(RepoInfo { branch, remote_url })
+}
+
+/// Resolve owner/repo from a path, returning None if no origin remote.
+fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>, String> {
+    let repo = Repository::open(path).map_err(|e| format!("git error: {}", e))?;
+    let url = match repo.find_remote("origin") {
+        Ok(remote) => remote.url().map(|u| u.to_string()),
+        Err(_) => return Ok(None),
+    };
+    match url {
+        Some(u) => Ok(github::parse_owner_repo(&u)),
+        None => Ok(None),
+    }
+}
+
+/// Parse a GitHub PR URL into (owner, repo, pr_number).
+fn parse_pr_url(url: &str) -> Option<(String, String, i64)> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts.len() >= 4 && parts[2] == "pull" {
+        let owner = parts[0].to_string();
+        let repo = parts[1].to_string();
+        let number: i64 = parts[3].parse().ok()?;
+        Some((owner, repo, number))
+    } else {
+        None
     }
 }

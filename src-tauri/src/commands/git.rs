@@ -111,28 +111,23 @@ pub fn check_is_git_repo(path: String) -> bool {
 }
 
 /// Get the default branch name for the remote named "origin".
-/// Uses `git ls-remote --symbolic origin HEAD` which resolves the symbolic ref
-/// and returns the actual branch name (e.g. `refs/remotes/origin/main`).
-/// Falls back to "main" if no remote is configured or the command fails.
+/// Reads the local symbolic ref (populated by clone/fetch) to avoid a network round-trip.
+/// Falls back to "main" if no remote is configured or HEAD ref is missing.
 #[command]
 pub fn get_default_branch(path: String) -> String {
-    let output = std::process::Command::new("git")
-        .args(["ls-remote", "--symbolic", "origin", "HEAD"])
-        .current_dir(&path)
-        .output();
+    let repo = match Repository::open(&path) {
+        Ok(r) => r,
+        Err(_) => return "main".to_string(),
+    };
 
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            // Output line: "<sha>\trefs/remotes/origin/main\n" — last field is the resolved ref
-            stdout
-                .lines()
-                .next()
-                .and_then(|l| l.split('\t').last())
-                .and_then(|refpart| refpart.strip_prefix("refs/remotes/origin/"))
-                .map(String::from)
-                .unwrap_or_else(|| "main".to_string())
+    // Try the local symbolic ref first (no network needed)
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Some(target) = reference.symbolic_target() {
+            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
+                return branch.to_string();
+            }
         }
-        _ => "main".to_string(),
     }
+
+    "main".to_string()
 }

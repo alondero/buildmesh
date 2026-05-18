@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
 use tauri::command;
 use crate::env;
+use crate::process_util::command_no_window;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
@@ -93,7 +93,7 @@ pub fn open_in_editor(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd.exe")
+        command_no_window("cmd.exe")
             .args(["/c", "start", "code", &host_path])
             .spawn()
             .map_err(|e| format!("Failed to open editor: {}", e))?;
@@ -101,7 +101,7 @@ pub fn open_in_editor(path: String) -> Result<(), String> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("code")
+        command_no_window("code")
             .arg(&host_path)
             .spawn()
             .map_err(|e| format!("Failed to open editor: {}", e))?;

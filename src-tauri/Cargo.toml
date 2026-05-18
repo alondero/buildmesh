@@ -42,6 +42,7 @@ tokio-tungstenite = "0.26"
 futures-util = "0.3"
 parking_lot = "0.12"
 local-ip-address = "0.6"
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"
