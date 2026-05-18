@@ -1,25 +1,23 @@
-//! Agent spawning — the `spawn_agent_inner` function and its pure helpers.
+//! Agent spawning — the `spawn_agent_inner` function and its helpers.
 //!
+//! Provider-specific recipe lives behind `Provider::adapter()` (see `agent/provider`).
+//! OS-specific wrapping lives in `spawn_environment`.
 //! PTY-specific helpers (open_pty_pair, spawn_child) live in `process.rs`.
 
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
+use crate::agent::provider::Platform;
+use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
-use crate::models::{EnvType, Provider, SessionStatus};
+use crate::models::{Provider, SessionStatus};
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
-use std::io::Write as StdWrite;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
 /// Parse provider string into Provider enum.
 pub fn parse_provider(provider: &str) -> Provider {
-    match provider {
-        "minimax" => Provider::Minimax,
-        "gemini" => Provider::Gemini,
-        "opencode" => Provider::OpenCode,
-        _ => Provider::Anthropic,
-    }
+    Provider::from_db_str(provider)
 }
 
 /// Open a PTY pair using the native PTY system.
@@ -42,9 +40,8 @@ pub enum SessionIdMode {
     None,
 }
 
-/// Build the spawn command based on provider and environment.
+/// Build the spawn command by composing the provider's recipe with the runtime environment.
 pub fn build_spawn_command(
-    node: &crate::models::AgentNode,
     resolved: &env::ResolvedPath,
     provider_enum: Provider,
     session_id_mode: &SessionIdMode,
@@ -53,101 +50,42 @@ pub fn build_spawn_command(
     effort_override: Option<&str>,
     prefill: Option<&str>,
 ) -> CommandBuilder {
-    let is_macos = cfg!(target_os = "macos");
-    let is_wsl = resolved.env_type == EnvType::Wsl;
+    let adapter = provider_enum.adapter();
+    let mut recipe = adapter.spawn_recipe(Platform::current());
 
-    let (binary, mut args): (&str, Vec<String>) = if is_macos {
-        match provider_enum {
-            Provider::Anthropic => ("claude", vec!["--dangerously-skip-permissions".to_string()]),
-            Provider::Gemini => (provider_enum.binary(), vec!["--yolo".to_string()]),
-            _ => (provider_enum.binary(), vec![]),
-        }
-    } else {
-        match provider_enum {
-            Provider::Anthropic | Provider::Minimax => {
-                ("cwrap", vec![provider_enum.cli_flag().to_string()])
-            }
-            Provider::Gemini => (provider_enum.binary(), vec!["--yolo".to_string()]),
-            _ => (provider_enum.binary(), vec![]),
-        }
-    };
-
-    let is_cwrap = matches!(provider_enum, Provider::Anthropic | Provider::Minimax);
-
-    // Add --session-id or --resume for cwrap providers
     match session_id_mode {
         SessionIdMode::Assign(id) => {
             tracing::info!("spawn_agent: assigning session-id {}", id);
-            args.push("--session-id".to_string());
-            args.push(id.clone());
+            recipe.base_args.push("--session-id".to_string());
+            recipe.base_args.push(id.clone());
         }
         SessionIdMode::Resume(id) => {
             tracing::info!("spawn_agent: resuming session {}", id);
-            args.push("--resume".to_string());
-            args.push(id.clone());
+            recipe.base_args.push("--resume".to_string());
+            recipe.base_args.push(id.clone());
         }
         SessionIdMode::None => {}
     }
 
-    // Add --model and --effort for cwrap providers when configured
-    if is_cwrap {
-        if let Some(model) = model_override {
-            if !model.is_empty() {
-                args.push("--model".to_string());
-                args.push(model.to_string());
-            }
+    if adapter.supports_model_override() {
+        if let Some(model) = model_override.filter(|s| !s.is_empty()) {
+            recipe.base_args.push("--model".to_string());
+            recipe.base_args.push(model.to_string());
         }
-        if let Some(effort) = effort_override {
-            if !effort.is_empty() {
-                args.push("--effort".to_string());
-                args.push(effort.to_string());
-            }
-        }
-        if let Some(text) = prefill {
-            args.push("--prefill".to_string());
-            args.push(text.to_string());
+        if let Some(effort) = effort_override.filter(|s| !s.is_empty()) {
+            recipe.base_args.push("--effort".to_string());
+            recipe.base_args.push(effort.to_string());
         }
     }
 
-    let mut cmd = if is_wsl {
-        tracing::info!("spawn_agent: building WSL command via wsl.exe");
-        let mut c = CommandBuilder::new("wsl.exe");
-        c.args(["--cd", &resolved.spawn_path, "--", binary]);
-        c.args(args);
-        c
-    } else if is_macos {
-        tracing::info!("spawn_agent: building macOS command for {}", binary);
-        let mut c = CommandBuilder::new(binary);
-        c.args(args);
-        c
-    } else {
-        // Node.js shims - wrap via cmd.exe /c so batch scripts (gemini.cmd) resolve.
-        if is_cwrap {
-            tracing::info!("spawn_agent: building Windows powershell.exe for cwrap provider {}", binary);
-            let mut c = CommandBuilder::new("powershell.exe");
-            let combined = format!("{} {}", binary, args.join(" "));
-            c.args(["-NoLogo", "-Command", &combined]);
-            c
-        } else {
-            tracing::info!("spawn_agent: building Windows cmd.exe /c for non-cwrap provider {}", binary);
-            let mut c = CommandBuilder::new("cmd.exe");
-            c.args(["/c", &format!("{} {}", binary, args.join(" "))]);
-            c
+    if adapter.supports_prefill() {
+        if let Some(text) = prefill.filter(|s| !s.is_empty()) {
+            recipe.base_args.push("--prefill".to_string());
+            recipe.base_args.push(text.to_string());
         }
-    };
+    }
 
-    cmd.cwd(&resolved.spawn_path);
-    cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
-    cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT_DEFAULT.to_string());
-
-    // Ensure clean worktree isolation by removing any inherited Git environment variables
-    cmd.env_remove("GIT_DIR");
-    cmd.env_remove("GIT_WORK_TREE");
-    cmd.env_remove("GIT_INDEX_FILE");
-    cmd.env_remove("GIT_OBJECT_DIRECTORY");
-    cmd.env_remove("GIT_COMMON_DIR");
-
-    cmd
+    spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id)
 }
 
 /// Spawn the child process.
@@ -349,9 +287,10 @@ pub async fn spawn_agent_inner(
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
 
     let provider_enum = parse_provider(&provider);
+    let adapter = provider_enum.adapter();
 
     // 4. Determine session ID mode
-    let session_id_mode = if provider_enum == Provider::Anthropic || provider_enum == Provider::Minimax {
+    let session_id_mode = if adapter.supports_resume() {
         match resume {
             Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
             _ => {
@@ -428,7 +367,6 @@ pub async fn spawn_agent_inner(
 
     // 9. Build and spawn command
     let cmd = build_spawn_command(
-        &node,
         &resolved,
         provider_enum,
         &session_id_mode,
@@ -464,7 +402,7 @@ pub async fn spawn_agent_inner(
     tracing::info!("spawn_agent_inner: stored agent process");
 
     // 11. Inject attention hook
-    if provider_enum == Provider::Anthropic || provider_enum == Provider::Minimax {
+    if adapter.requires_attention_hook() {
         inject_attention_hook(std::path::Path::new(&resolved.host_path));
     }
 

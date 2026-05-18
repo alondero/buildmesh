@@ -6,7 +6,7 @@ use crate::services;
 use tauri::command;
 use tauri_plugin_dialog::DialogExt;
 
-use super::agent::inject_attention_hook;
+use crate::agent::spawn::inject_attention_hook;
 
 /// Add a mesh by opening a folder picker dialog
 #[command]
