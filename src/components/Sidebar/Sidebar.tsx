@@ -6,7 +6,6 @@ import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import type { FileExplorerContext } from '../../stores/uiStore';
 import { getStatusConfig } from '../../lib/status';
-import { isMac } from '../../lib/platform';
 import { listProviders } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
@@ -22,17 +21,9 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 
-const ALL_PROVIDERS = [
-  { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
-  { id: 'minimax', label: 'Minimax', color: 'bg-indigo-500' },
-  { id: 'gemini', label: 'Google Gemini', color: 'bg-emerald-500' },
-  { id: 'opencode', label: 'OpenCode', color: 'bg-amber-500' },
-];
-
-const DEFAULT_PROVIDERS = isMac
-  ? ALL_PROVIDERS.filter(p => p.id === 'anthropic')
-  : ALL_PROVIDERS;
-
+// Tailwind class map for provider badges. Stays in the frontend because Tailwind's
+// purge tool needs static class strings — backend can't emit these dynamically.
+// Backend ProviderInfo.color (hex) is not used here for the same reason.
 function colorClassForProvider(providerId: string): string {
   const map: Record<string, string> = {
     anthropic: 'bg-blue-500',
@@ -43,10 +34,12 @@ function colorClassForProvider(providerId: string): string {
   return map[providerId] ?? 'bg-gray-500';
 }
 
+type ProviderEntry = { id: string; label: string; color: string };
+
 export function Sidebar() {
   const [sidebarWidth, setSidebarWidth] = useState(256);
   const [isResizing, setIsResizing] = useState(false);
-  const [providerData, setProviderData] = useState(DEFAULT_PROVIDERS);
+  const [providerData, setProviderData] = useState<ProviderEntry[]>([]);
   const resizingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(256);
@@ -82,20 +75,18 @@ export function Sidebar() {
     };
   }, [sidebarWidth]);
 
-  // Fetch available providers from the backend. Falls back to DEFAULT_PROVIDERS on error.
+  // Fetch available providers from the backend. Platform filtering (e.g. macOS-only
+  // Anthropic) is decided server-side via AgentProvider::available_on().
   useEffect(() => {
     listProviders().then(backendProviders => {
-      if (backendProviders && backendProviders.length > 0) {
-        // Backend returns {id, label, color, icon}. Map to our format with Tailwind color.
-        const mapped = backendProviders.map((p: { id: string; label: string; color: string; icon: string }) => ({
-          id: p.id,
-          label: p.label,
-          color: colorClassForProvider(p.id),
-        }));
-        setProviderData(mapped);
-      }
-    }).catch(() => {
-      // Use default list on error
+      const mapped = backendProviders.map(p => ({
+        id: p.id,
+        label: p.label,
+        color: colorClassForProvider(p.id),
+      }));
+      setProviderData(mapped);
+    }).catch(err => {
+      console.error('listProviders failed:', err);
     });
   }, []);
 

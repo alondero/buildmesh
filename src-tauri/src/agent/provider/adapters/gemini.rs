@@ -42,6 +42,9 @@ impl AgentProvider for GeminiAdapter {
     }
 
     fn available_on(&self) -> &'static [Platform] {
-        &[Platform::Windows, Platform::Macos, Platform::Linux]
+        // Pre-refactor `available_providers()` showed only Anthropic on macOS, even
+        // though the spawn code has a macOS branch for Gemini (--yolo). Keep the
+        // historical UI behaviour: Windows/Linux only.
+        &[Platform::Windows, Platform::Linux]
     }
 }
