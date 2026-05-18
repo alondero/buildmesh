@@ -20,7 +20,7 @@ use tungstenite::handshake::derive_accept_key;
 use tungstenite::protocol::Role;
 
 use tauri::Emitter;
-use crate::commands::agent::PROCESS_REGISTRY;
+use crate::agent::process::PROCESS_REGISTRY;
 use crate::db;
 
 // --- App Handle for emitting Tauri events from HTTP handlers ---
@@ -319,7 +319,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             return;
         };
 
-        if let Err(e) = crate::commands::agent::spawn_agent_inner(
+        if let Err(e) = crate::agent::spawn::spawn_agent_inner(
             app,
             node.id,
             req.provider.clone(),
@@ -478,12 +478,10 @@ async fn handle_ws_connection(
 }
 
 fn forward_mobile_input(node_id: i64, text: &str) {
-    let registry = PROCESS_REGISTRY.lock().unwrap();
-    if let Err(e) = registry.write_bytes(node_id, text.as_bytes()) {
+    if let Err(e) = PROCESS_REGISTRY.write_bytes(node_id, text.as_bytes()) {
         tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
         return;
     }
-    drop(registry);
     if text.bytes().any(|b| b == b'\n' || b == b'\r') {
         let _ = db::update_agent_node_status(node_id, crate::models::SessionStatus::Running);
         if let Some(app) = APP_HANDLE.get() {
@@ -506,8 +504,7 @@ fn parse_resize_message(text: &str) -> Option<(u16, u16)> {
 }
 
 fn handle_mobile_resize(node_id: i64, cols: u16, rows: u16) {
-    let registry = PROCESS_REGISTRY.lock().unwrap();
-    if let Err(e) = registry.resize_pty(node_id, cols, rows) {
+    if let Err(e) = PROCESS_REGISTRY.resize_pty(node_id, cols, rows) {
         tracing::warn!("Mobile resize failed for node {}: {}", node_id, e);
     }
 }

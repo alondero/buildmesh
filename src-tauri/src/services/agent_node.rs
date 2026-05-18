@@ -1,5 +1,6 @@
 //! Agent Node service — creation, deletion, and lifecycle orchestration
 
+use crate::agent::spawn::parse_provider;
 use crate::db;
 use crate::env;
 use crate::models::{AgentNode, Provider, SessionStatus};
@@ -24,16 +25,6 @@ impl From<rusqlite::Error> for AgentNodeError {
     }
 }
 
-/// Parse a provider string into the Provider enum, defaulting to Anthropic.
-pub fn parse_provider(provider: Option<&str>) -> Provider {
-    match provider {
-        Some("minimax") => Provider::Minimax,
-        Some("gemini") => Provider::Gemini,
-        Some("opencode") => Provider::OpenCode,
-        _ => Provider::Anthropic,
-    }
-}
-
 /// Create a new agent node with auto-generated name, environment detection,
 /// and provider resolution.
 pub fn create(
@@ -50,7 +41,9 @@ pub fn create(
 
     let resolved = env::resolve_agent_path(path, None);
     let env_type = resolved.env_type;
-    let provider_enum = parse_provider(provider);
+    let provider_enum = provider
+        .map(parse_provider)
+        .unwrap_or(Provider::Anthropic);
 
     let node = db::create_agent_node(
         mesh_id,
