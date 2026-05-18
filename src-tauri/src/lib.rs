@@ -7,6 +7,7 @@ mod db;
 mod env;
 mod http_server;
 mod models;
+pub mod process_util;
 mod pty;
 mod services;
 mod session_naming;
@@ -178,8 +179,6 @@ pub fn run() {
             // File watcher
             commands::file_watcher::watch_session,
             commands::file_watcher::unwatch_session,
-            // MCP
-            commands::mcp::list_mcp_servers,
             // Attention
             commands::attention::register_attention_session,
             commands::attention::clear_attention_session,
