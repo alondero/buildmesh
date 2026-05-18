@@ -4,7 +4,6 @@ use crate::db;
 use crate::env;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
@@ -56,15 +55,26 @@ fn validate_worktree_exists(resolved: &env::ResolvedPath, worktree_name: Option<
         "No worktree name set for this agent node. Spawn the agent first to create a worktree.".to_string()
     })?;
 
-    // Use git worktree list to verify the worktree is registered in git metadata,
+    // Use git2 to verify the worktree is registered in git metadata,
     // not just the directory exists on disk. This catches broken/corrupted worktrees.
-    let output = Command::new("git")
-        .args(["-C", &resolved.host_path, "worktree", "list", "--porcelain"])
-        .output()
+    let repo = git2::Repository::open(&resolved.host_path)
+        .or_else(|_| git2::Repository::discover(&resolved.host_path))
+        .map_err(|e| format!("Failed to open repository: {}", e))?;
+
+    let worktrees = repo.worktrees()
         .map_err(|e| format!("Failed to list worktrees: {}", e))?;
 
-    let list = String::from_utf8_lossy(&output.stdout);
-    if list.contains(&resolved.host_path) {
+    // Check if our worktree name is in the list
+    for i in 0..worktrees.len() {
+        if let Some(name) = worktrees.get(i) {
+            if name == wt_name {
+                return Ok(());
+            }
+        }
+    }
+
+    // Also check if the path itself is a valid git worktree (it could be the main worktree)
+    if std::path::Path::new(&resolved.host_path).join(".git").exists() {
         return Ok(());
     }
 

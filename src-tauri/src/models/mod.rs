@@ -180,14 +180,6 @@ pub struct SessionScript {
     pub content: String,
 }
 
-/// MCP server configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServer {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-}
-
 /// File change event from the watcher
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {

@@ -146,10 +146,6 @@ export const checkIsGitRepo = (path: string) =>
 export const getDefaultBranch = (path: string) =>
   invoke<string>('get_default_branch', { path });
 
-// MCP
-export const listMcpServers = (sessionId: number) =>
-  invoke('list_mcp_servers', { sessionId });
-
 // Attention
 export const registerAttentionSession = (sessionId: number) =>
   invoke('register_attention_session', { sessionId });

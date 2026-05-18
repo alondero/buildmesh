@@ -2,4 +2,5 @@
 
 pub mod agent_node;
 pub mod checkpoint;
+pub mod github;
 pub mod mesh;
