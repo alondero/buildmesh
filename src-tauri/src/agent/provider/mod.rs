@@ -99,6 +99,10 @@ pub trait AgentProvider: Send + Sync {
     /// Whether `--model <name>` / `--effort <level>` args from mesh config apply.
     fn supports_model_override(&self) -> bool;
 
+    /// Whether `--prefill <text>` is accepted (used by `spawn_issue_agent` to seed
+    /// the agent with a GitHub issue's title + body on first turn).
+    fn supports_prefill(&self) -> bool;
+
     /// Platforms where this provider is available. Used to filter `list_providers`.
     fn available_on(&self) -> &'static [Platform];
 }

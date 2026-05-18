@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { getRepoIssues, type GitHubIssue } from '../../lib/tauri';
+import { getRepoIssues, spawnIssueAgent, type GitHubIssue } from '../../lib/tauri';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
 
 interface GitHubIssuesModalProps {
   meshId: number;
@@ -11,6 +12,7 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
   const [issues, setIssues] = useState<GitHubIssue[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [spawning, setSpawning] = useState<number | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -27,7 +29,6 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
     load();
   }, [meshId]);
 
-  // Close on Escape
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -35,6 +36,18 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
+
+  const handleSpawn = async (issue: GitHubIssue) => {
+    setSpawning(issue.number);
+    try {
+      await spawnIssueAgent(meshId, issue.number, issue.title, issue.body);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      onClose();
+    } catch (e) {
+      console.error('Failed to spawn issue agent:', e);
+      setSpawning(null);
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
@@ -91,13 +104,24 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
               {issues.map(issue => (
                 <div
                   key={issue.number}
-                  className="px-3 py-2 rounded hover:bg-bg-card cursor-pointer transition-colors"
+                  className="flex items-center gap-2 px-3 py-2 rounded hover:bg-bg-card transition-colors"
                 >
-                  <span className="text-xs text-accent-cyan font-mono">#{issue.number}</span>
-                  <span className="text-sm text-text-primary ml-2">{issue.title}</span>
-                  {issue.body && (
-                    <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{issue.body}</p>
-                  )}
+                  <div className="flex-1 min-w-0">
+                    <div>
+                      <span className="text-xs text-accent-cyan font-mono">#{issue.number}</span>
+                      <span className="text-sm text-text-primary ml-2">{issue.title}</span>
+                    </div>
+                    {issue.body && (
+                      <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{issue.body}</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleSpawn(issue)}
+                    disabled={spawning !== null}
+                    className="shrink-0 px-2.5 py-1 text-xs font-medium rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {spawning === issue.number ? 'Spawning...' : 'Spawn'}
+                  </button>
                 </div>
               ))}
             </div>

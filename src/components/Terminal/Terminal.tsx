@@ -113,8 +113,9 @@ class TerminalManager {
   }
 
   /**
-   * Detach a terminal from its visible container. Disconnects the ResizeObserver
-   * but preserves the terminal instance for later reattachment.
+   * Inverse of attach: disconnects the ResizeObserver and removes the terminal's
+   * DOM element from its parent. The element removal is what prevents stacking
+   * when the same container node is reused for a different sessionId.
    */
   detach(nodeId: number): void {
     const inst = this.instances.get(nodeId);
@@ -124,6 +125,7 @@ class TerminalManager {
       inst.resizeObserver.disconnect();
       inst.resizeObserver = null;
     }
+    inst.term.element?.remove();
     inst.attachedContainer = null;
   }
 

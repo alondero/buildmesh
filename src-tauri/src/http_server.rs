@@ -326,6 +326,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             None,
             req.rows,
             req.cols,
+            None,
         ).await {
             let msg = format!("Failed to spawn agent: {}", e);
             send_json_error(&mut lines, "500 Internal Server Error", &msg).await;

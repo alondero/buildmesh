@@ -40,6 +40,10 @@ impl AgentProvider for MinimaxAdapter {
         true
     }
 
+    fn supports_prefill(&self) -> bool {
+        true
+    }
+
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Linux]
     }

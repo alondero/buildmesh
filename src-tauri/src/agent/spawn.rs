@@ -48,6 +48,7 @@ pub fn build_spawn_command(
     session_id: i64,
     model_override: Option<&str>,
     effort_override: Option<&str>,
+    prefill: Option<&str>,
 ) -> CommandBuilder {
     let adapter = provider_enum.adapter();
     let mut recipe = adapter.spawn_recipe(Platform::current());
@@ -74,6 +75,13 @@ pub fn build_spawn_command(
         if let Some(effort) = effort_override.filter(|s| !s.is_empty()) {
             recipe.base_args.push("--effort".to_string());
             recipe.base_args.push(effort.to_string());
+        }
+    }
+
+    if adapter.supports_prefill() {
+        if let Some(text) = prefill.filter(|s| !s.is_empty()) {
+            recipe.base_args.push("--prefill".to_string());
+            recipe.base_args.push(text.to_string());
         }
     }
 
@@ -250,6 +258,7 @@ pub async fn spawn_agent_inner(
     resume: Option<String>,
     rows: u16,
     cols: u16,
+    prefill: Option<String>,
 ) -> Result<(), String> {
     tracing::info!(
         "spawn_agent_inner: session_id={}, provider={}, resume={:?}, size={}x{}",
@@ -364,6 +373,7 @@ pub async fn spawn_agent_inner(
         session_id,
         model_override,
         effort_override,
+        prefill.as_deref(),
     );
 
     let child = spawn_child(&pair, cmd).map_err(|e| {

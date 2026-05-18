@@ -40,6 +40,10 @@ impl AgentProvider for OpenCodeAdapter {
         false
     }
 
+    fn supports_prefill(&self) -> bool {
+        false
+    }
+
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Linux]
     }

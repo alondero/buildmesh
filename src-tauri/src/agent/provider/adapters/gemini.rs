@@ -40,6 +40,10 @@ impl AgentProvider for GeminiAdapter {
         false
     }
 
+    fn supports_prefill(&self) -> bool {
+        false
+    }
+
     fn available_on(&self) -> &'static [Platform] {
         // Pre-refactor `available_providers()` showed only Anthropic on macOS, even
         // though the spawn code has a macOS branch for Gemini (--yolo). Keep the
