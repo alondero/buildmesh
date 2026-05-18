@@ -23,7 +23,15 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         .iter()
         .map(|p| p.adapter())
         .filter(|adapter| adapter.available_on().contains(&host))
-        .map(|adapter| adapter.ui())
+        .map(|adapter| {
+            let ui = adapter.ui();
+            ProviderInfo {
+                id: adapter.id().into(),
+                label: ui.label,
+                color: ui.color,
+                icon: ui.icon,
+            }
+        })
         .collect()
 }
 

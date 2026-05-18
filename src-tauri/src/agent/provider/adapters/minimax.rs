@@ -1,4 +1,4 @@
-use crate::agent::provider::{AgentProvider, Platform, ProviderInfo, SpawnRecipe, WindowsShell};
+use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 
 pub struct MinimaxAdapter;
 pub static MINIMAX: MinimaxAdapter = MinimaxAdapter;
@@ -8,9 +8,8 @@ impl AgentProvider for MinimaxAdapter {
         "minimax"
     }
 
-    fn ui(&self) -> ProviderInfo {
-        ProviderInfo {
-            id: "minimax".into(),
+    fn ui(&self) -> UiMeta {
+        UiMeta {
             label: "MiniMax".into(),
             color: "#6366f1".into(),
             icon: "M".into(),

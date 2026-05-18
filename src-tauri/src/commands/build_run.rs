@@ -199,13 +199,7 @@ pub async fn build_run(
         c
     };
     cmd.cwd(shell_cwd);
-
-    // Ensure clean worktree isolation by removing any inherited Git environment variables
-    cmd.env_remove("GIT_DIR");
-    cmd.env_remove("GIT_WORK_TREE");
-    cmd.env_remove("GIT_INDEX_FILE");
-    cmd.env_remove("GIT_OBJECT_DIRECTORY");
-    cmd.env_remove("GIT_COMMON_DIR");
+    crate::pty::strip_git_env_vars(&mut cmd);
 
     let child = pair.slave.spawn_command(cmd)
         .map_err(|e| format!("failed to spawn shell: {}", e))?;

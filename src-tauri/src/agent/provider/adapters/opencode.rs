@@ -1,4 +1,4 @@
-use crate::agent::provider::{AgentProvider, Platform, ProviderInfo, SpawnRecipe, WindowsShell};
+use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 
 pub struct OpenCodeAdapter;
 pub static OPENCODE: OpenCodeAdapter = OpenCodeAdapter;
@@ -8,9 +8,8 @@ impl AgentProvider for OpenCodeAdapter {
         "opencode"
     }
 
-    fn ui(&self) -> ProviderInfo {
-        ProviderInfo {
-            id: "opencode".into(),
+    fn ui(&self) -> UiMeta {
+        UiMeta {
             label: "OpenCode".into(),
             color: "#f59e0b".into(),
             icon: "O".into(),

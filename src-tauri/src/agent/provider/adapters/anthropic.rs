@@ -1,4 +1,4 @@
-use crate::agent::provider::{AgentProvider, Platform, ProviderInfo, SpawnRecipe, WindowsShell};
+use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 
 pub struct AnthropicAdapter;
 pub static ANTHROPIC: AnthropicAdapter = AnthropicAdapter;
@@ -8,9 +8,8 @@ impl AgentProvider for AnthropicAdapter {
         "anthropic"
     }
 
-    fn ui(&self) -> ProviderInfo {
-        ProviderInfo {
-            id: "anthropic".into(),
+    fn ui(&self) -> UiMeta {
+        UiMeta {
             label: "Anthropic (Claude)".into(),
             color: "#1d7cfc".into(),
             icon: "A".into(),

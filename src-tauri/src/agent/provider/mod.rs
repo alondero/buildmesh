@@ -51,7 +51,17 @@ pub struct SpawnRecipe {
     pub windows_shell: WindowsShell,
 }
 
-/// UI metadata for a provider — used by `list_providers` and the frontend.
+/// UI metadata declared by an adapter. The `id` is supplied separately via
+/// `AgentProvider::id()` so the two can't diverge.
+#[derive(Debug, Clone)]
+pub struct UiMeta {
+    pub label: String,
+    pub color: String,
+    pub icon: String,
+}
+
+/// Frontend-facing provider listing. Composed by `commands::agent::available_providers`
+/// from each adapter's `id()` + `ui()`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProviderInfo {
     pub id: String,
@@ -68,8 +78,9 @@ pub trait AgentProvider: Send + Sync {
     /// Stable identifier matching the DB `provider` column ("anthropic", "minimax", etc.).
     fn id(&self) -> &'static str;
 
-    /// UI metadata shown in the frontend provider list.
-    fn ui(&self) -> ProviderInfo;
+    /// UI metadata shown in the frontend provider list. The `id` is *not* part
+    /// of this — it comes from `id()` to avoid stringly-typed duplication.
+    fn ui(&self) -> UiMeta;
 
     /// How to invoke this provider on the given host platform.
     fn spawn_recipe(&self, platform: Platform) -> SpawnRecipe;

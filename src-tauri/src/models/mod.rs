@@ -29,6 +29,17 @@ impl From<super::env::Environment> for EnvType {
     }
 }
 
+impl EnvType {
+    /// Parse the DB string column. Unknown strings fall back to Windows
+    /// (matches the prior inline `match` behaviour scattered across db/mod.rs).
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "wsl" => EnvType::Wsl,
+            _ => EnvType::Windows,
+        }
+    }
+}
+
 /// Agent provider type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -317,12 +328,22 @@ mod tests {
     }
 
     #[test]
-    fn provider_from_db_str_round_trip() {
+    fn provider_from_db_str_round_trip_for_known_values() {
         for &p in Provider::all() {
             let s = p.to_string();
             assert_eq!(Provider::from_db_str(&s), p);
         }
+    }
+
+    /// Documents the intentional silent fallback: unknown DB values default to
+    /// Anthropic rather than erroring. This preserves pre-refactor behaviour
+    /// where the inline `match` in db/mod.rs had a `_ => Provider::Anthropic` arm.
+    /// If this fallback ever becomes a real correctness concern, consider
+    /// changing `from_db_str` to return `Result<Provider, _>`.
+    #[test]
+    fn provider_from_db_str_unknown_falls_back_to_anthropic() {
         assert_eq!(Provider::from_db_str("garbage"), Provider::Anthropic);
+        assert_eq!(Provider::from_db_str(""), Provider::Anthropic);
     }
 
     #[test]

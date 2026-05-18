@@ -1,4 +1,4 @@
-use crate::agent::provider::{AgentProvider, Platform, ProviderInfo, SpawnRecipe, WindowsShell};
+use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 
 pub struct GeminiAdapter;
 pub static GEMINI: GeminiAdapter = GeminiAdapter;
@@ -8,9 +8,8 @@ impl AgentProvider for GeminiAdapter {
         "gemini"
     }
 
-    fn ui(&self) -> ProviderInfo {
-        ProviderInfo {
-            id: "gemini".into(),
+    fn ui(&self) -> UiMeta {
+        UiMeta {
             label: "Google Gemini".into(),
             color: "#10b981".into(),
             icon: "G".into(),

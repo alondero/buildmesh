@@ -11,6 +11,7 @@
 
 use crate::agent::provider::{SpawnRecipe, WindowsShell};
 use crate::models::EnvType;
+use crate::pty;
 use portable_pty::CommandBuilder;
 
 pub fn wrap(
@@ -37,9 +38,9 @@ pub fn wrap(
                     "spawn_environment: building Windows powershell.exe for {}",
                     recipe.binary
                 );
-                let combined = format!("{} {}", recipe.binary, recipe.base_args.join(" "));
                 let mut c = CommandBuilder::new("powershell.exe");
-                c.args(["-NoLogo", "-Command", &combined]);
+                c.args(["-NoLogo", "-Command", recipe.binary]);
+                c.args(recipe.base_args);
                 c
             }
             WindowsShell::Cmd => {
@@ -47,9 +48,9 @@ pub fn wrap(
                     "spawn_environment: building Windows cmd.exe /c for {}",
                     recipe.binary
                 );
-                let combined = format!("{} {}", recipe.binary, recipe.base_args.join(" "));
                 let mut c = CommandBuilder::new("cmd.exe");
-                c.args(["/c", &combined]);
+                c.args(["/c", recipe.binary]);
+                c.args(recipe.base_args);
                 c
             }
             WindowsShell::Direct => {
@@ -64,14 +65,7 @@ pub fn wrap(
     cmd.cwd(spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
     cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT_DEFAULT.to_string());
-
-    // Ensure clean worktree isolation by removing any inherited Git environment variables
-    // that might point to the main repository or other worktrees.
-    cmd.env_remove("GIT_DIR");
-    cmd.env_remove("GIT_WORK_TREE");
-    cmd.env_remove("GIT_INDEX_FILE");
-    cmd.env_remove("GIT_OBJECT_DIRECTORY");
-    cmd.env_remove("GIT_COMMON_DIR");
+    pty::strip_git_env_vars(&mut cmd);
 
     cmd
 }
