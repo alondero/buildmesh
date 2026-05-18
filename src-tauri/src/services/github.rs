@@ -5,6 +5,8 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::process_util::command_no_window;
+
 /// Error type for GitHub API operations
 #[derive(Debug)]
 pub enum GitHubError {
@@ -252,7 +254,31 @@ fn resolve_token() -> Result<String, GitHubError> {
         return Ok(token);
     }
 
+    // 4. Fall back to `gh auth token` which retrieves from secure storage (keyring/credential manager)
+    if let Some(token) = run_gh_auth_token() {
+        return Ok(token);
+    }
+
     Err(GitHubError::NoToken)
+}
+
+/// Retrieve token via `gh auth token` (works when token is in secure storage).
+fn run_gh_auth_token() -> Option<String> {
+    let output = command_no_window("gh")
+        .args(["auth", "token"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
 }
 
 /// Read the oauth_token from gh CLI's hosts.yml config file.
