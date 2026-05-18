@@ -1,8 +1,10 @@
 //! GitHub workflow via GitHub CLI (gh)
 
 use crate::db;
+use crate::env;
 use crate::models::EnvType;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::process::Command;
 use tauri::command;
 
@@ -33,15 +35,21 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
 
+    let is_wsl = env::env_for_path(&PathBuf::from(&mesh.path)) == env::Environment::Wsl;
+
     // Get origin remote URL via git
-    let output = Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(&mesh.path)
-        .output()
-        .map_err(|e| format!("git error: {}", e))?;
+    let output = if is_wsl {
+        Command::new("wsl.exe")
+            .args(["--cd", &mesh.path, "--", "git", "remote", "get-url", "origin"])
+            .output()
+    } else {
+        Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(&mesh.path)
+            .output()
+    }.map_err(|e| format!("git error: {}", e))?;
 
     if !output.status.success() {
-        // No origin remote or not a git repo — return empty list
         tracing::warn!("get_repo_issues: no origin remote for mesh at {}", mesh.path);
         return Ok(Vec::new());
     }
@@ -50,13 +58,20 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let owner_repo = parse_owner_repo(&remote_url).ok_or_else(|| format!("unrecognized remote URL: {}", remote_url))?;
 
     // Get list of open issues with body included in a single call
-    let list_output = Command::new("gh")
-        .args(["issue", "list", "--repo", &owner_repo, "--state", "open", "--json", "number,title,body"])
-        .current_dir(&mesh.path)
-        .output()
-        .map_err(|e| format!("gh issue list error: {}", e))?;
+    let list_output = if is_wsl {
+        Command::new("wsl.exe")
+            .args(["--cd", &mesh.path, "--", "gh", "issue", "list", "--repo", &owner_repo, "--state", "open", "--json", "number,title,body"])
+            .output()
+    } else {
+        Command::new("gh")
+            .args(["issue", "list", "--repo", &owner_repo, "--state", "open", "--json", "number,title,body"])
+            .current_dir(&mesh.path)
+            .output()
+    }.map_err(|e| format!("gh issue list error: {}", e))?;
 
     if !list_output.status.success() {
+        let stderr = String::from_utf8_lossy(&list_output.stderr);
+        tracing::warn!("get_repo_issues: gh issue list failed: {}", stderr.trim());
         return Ok(Vec::new());
     }
 
@@ -86,7 +101,8 @@ fn parse_owner_repo(url: &str) -> Option<String> {
 
     let parts: Vec<&str> = rest.split('/').collect();
     if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-        Some(format!("{}/{}", parts[0], parts[1]))
+        let repo = parts[1].trim_end_matches(".git");
+        Some(format!("{}/{}", parts[0], repo))
     } else {
         None
     }

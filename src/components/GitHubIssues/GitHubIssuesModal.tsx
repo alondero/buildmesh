@@ -10,6 +10,7 @@ interface GitHubIssuesModalProps {
 export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesModalProps) {
   const [issues, setIssues] = useState<GitHubIssue[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -18,7 +19,7 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
         setIssues(result);
       } catch (e) {
         console.error('Failed to load issues:', e);
-        setIssues([]);
+        setError(e instanceof Error ? e.message : String(e));
       } finally {
         setLoading(false);
       }
@@ -42,7 +43,7 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
 
       {/* Modal */}
       <div
-        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl w-full max-w-md max-h-[70vh] flex flex-col"
+        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl w-full max-w-2xl max-h-[70vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -65,6 +66,16 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
             <div className="flex flex-col items-center justify-center py-8 gap-3">
               <div className="animate-spin w-5 h-5 border border-accent-cyan border-t-transparent rounded-full" />
               <span className="text-xs text-text-muted">Loading issues...</span>
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center py-8">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 mb-2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="15" y1="9" x2="9" y2="15"/>
+                <line x1="9" y1="9" x2="15" y2="15"/>
+              </svg>
+              <span className="text-xs text-red-400">Failed to load issues</span>
+              <span className="text-[10px] text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
             </div>
           ) : issues.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8">
