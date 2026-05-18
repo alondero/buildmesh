@@ -40,27 +40,37 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// Returns just the binary name (without args)
-    pub fn binary(&self) -> &'static str {
-        match self {
-            Provider::Anthropic | Provider::Minimax => "cwrap",
-            Provider::Gemini => "gemini",
-            Provider::OpenCode => "opencode",
+    /// All known providers, in stable order. Used to enumerate UI listings.
+    pub fn all() -> &'static [Provider] {
+        &[
+            Provider::Anthropic,
+            Provider::Minimax,
+            Provider::Gemini,
+            Provider::OpenCode,
+        ]
+    }
+
+    /// Parse the DB string column / Tauri arg into a typed `Provider`.
+    /// Unknown strings fall back to `Anthropic` (matches previous behaviour).
+    pub fn from_db_str(s: &str) -> Provider {
+        match s {
+            "minimax" => Provider::Minimax,
+            "gemini" => Provider::Gemini,
+            "opencode" => Provider::OpenCode,
+            _ => Provider::Anthropic,
         }
     }
 
-    /// Returns the argument flag for this provider
-    pub fn cli_flag(&self) -> &'static str {
+    /// Look up the behaviour adapter for this provider.
+    /// All provider-specific logic (binary, args, capabilities) lives behind this seam.
+    pub fn adapter(&self) -> &'static dyn crate::agent::provider::AgentProvider {
+        use crate::agent::provider::adapters;
         match self {
-            Provider::Anthropic => "--anthropic",
-            Provider::Minimax => "--minimax",
-            Provider::Gemini | Provider::OpenCode => "",
+            Provider::Anthropic => &adapters::ANTHROPIC,
+            Provider::Minimax => &adapters::MINIMAX,
+            Provider::Gemini => &adapters::GEMINI,
+            Provider::OpenCode => &adapters::OPENCODE,
         }
-    }
-
-    /// Returns true if this provider uses cwrap (Anthropic or Minimax)
-    pub fn is_cwrap(&self) -> bool {
-        matches!(self, Provider::Anthropic | Provider::Minimax)
     }
 }
 
@@ -284,23 +294,35 @@ mod tests {
     }
 
     #[test]
-    fn provider_binary_cwrap_for_anthropic_minimax() {
-        assert_eq!(Provider::Anthropic.binary(), "cwrap");
-        assert_eq!(Provider::Minimax.binary(), "cwrap");
+    fn provider_adapter_recipe_windows() {
+        use crate::agent::provider::Platform;
+        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
+        assert_eq!(Provider::Minimax.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
+        assert_eq!(Provider::Gemini.adapter().spawn_recipe(Platform::Windows).binary, "gemini");
+        assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
     }
 
     #[test]
-    fn provider_binary_direct_for_gemini_opencode() {
-        assert_eq!(Provider::Gemini.binary(), "gemini");
-        assert_eq!(Provider::OpenCode.binary(), "opencode");
+    fn provider_adapter_recipe_macos_anthropic_uses_claude() {
+        use crate::agent::provider::Platform;
+        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Macos).binary, "claude");
     }
 
     #[test]
-    fn provider_cli_flag_correct() {
-        assert_eq!(Provider::Anthropic.cli_flag(), "--anthropic");
-        assert_eq!(Provider::Minimax.cli_flag(), "--minimax");
-        assert_eq!(Provider::Gemini.cli_flag(), "");
-        assert_eq!(Provider::OpenCode.cli_flag(), "");
+    fn provider_capabilities_split_correctly() {
+        assert!(Provider::Anthropic.adapter().supports_resume());
+        assert!(Provider::Minimax.adapter().supports_resume());
+        assert!(!Provider::Gemini.adapter().supports_resume());
+        assert!(!Provider::OpenCode.adapter().supports_resume());
+    }
+
+    #[test]
+    fn provider_from_db_str_round_trip() {
+        for &p in Provider::all() {
+            let s = p.to_string();
+            assert_eq!(Provider::from_db_str(&s), p);
+        }
+        assert_eq!(Provider::from_db_str("garbage"), Provider::Anthropic);
     }
 
     #[test]

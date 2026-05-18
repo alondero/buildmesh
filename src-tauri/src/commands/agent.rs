@@ -6,6 +6,7 @@
 //! attention events) that surround them.
 
 use crate::agent::process::PROCESS_REGISTRY;
+use crate::agent::provider::{Platform, ProviderInfo};
 use crate::db;
 use crate::models::{Provider, SessionStatus};
 use tauri::{command, AppHandle, Emitter};
@@ -14,32 +15,16 @@ use tauri::{command, AppHandle, Emitter};
 // Provider listing
 // ---------------------------------------------------------------------------
 
-/// Returns the list of available agent providers from the backend.
-/// Platform-based filtering — on macOS only Anthropic is supported;
-/// on Windows/Linux all providers are available (gemini/opencode via cmd.exe wrapping).
-#[derive(serde::Serialize)]
-pub struct ProviderInfo {
-    pub id: String,
-    pub label: String,
-    pub color: String,
-    pub icon: String,
-}
-
-#[cfg(target_os = "macos")]
+/// Returns the list of agent providers available on this host platform.
+/// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
-    vec![
-        ProviderInfo { id: "anthropic".into(), label: "Anthropic (Claude)".into(), color: "#1d7cfc".into(), icon: "A".into() },
-    ]
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn available_providers() -> Vec<ProviderInfo> {
-    vec![
-        ProviderInfo { id: "anthropic".into(), label: "Anthropic (Claude)".into(), color: "#1d7cfc".into(), icon: "A".into() },
-        ProviderInfo { id: "minimax".into(), label: "MiniMax".into(), color: "#6366f1".into(), icon: "M".into() },
-        ProviderInfo { id: "gemini".into(), label: "Google Gemini".into(), color: "#10b981".into(), icon: "G".into() },
-        ProviderInfo { id: "opencode".into(), label: "OpenCode".into(), color: "#f59e0b".into(), icon: "O".into() },
-    ]
+    let host = Platform::current();
+    Provider::all()
+        .iter()
+        .map(|p| p.adapter())
+        .filter(|adapter| adapter.available_on().contains(&host))
+        .map(|adapter| adapter.ui())
+        .collect()
 }
 
 #[command]
@@ -90,8 +75,8 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
             }
         };
 
-        if node.provider != Provider::Anthropic && node.provider != Provider::Minimax {
-            tracing::info!("auto_resume_sessions: skipping non-cwrap node {} ({:?})", node.id, node.provider);
+        if !node.provider.adapter().auto_resume_on_startup() {
+            tracing::info!("auto_resume_sessions: skipping non-resumable node {} ({:?})", node.id, node.provider);
             db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
             continue;
         }
