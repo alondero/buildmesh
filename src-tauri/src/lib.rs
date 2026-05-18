@@ -128,6 +128,7 @@ pub fn run() {
             commands::mesh::update_project_positions,
             commands::mesh::get_root_token,
             commands::mesh::get_local_ip,
+            commands::mesh::get_default_provider,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,
