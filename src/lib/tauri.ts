@@ -194,3 +194,28 @@ export interface ProviderInfo {
   color: string;
   icon: string;
 }
+
+// Session Discovery
+export interface DiscoveredSession {
+  session_id: string;
+  first_message: string;
+  branch: string | null;
+  cwd: string | null;
+  timestamp: string | null;
+  worktree_name: string | null;
+}
+
+export const discoverSessions = (meshId: number, meshPath: string) =>
+  invoke<DiscoveredSession[]>('discover_sessions', { meshId, meshPath });
+
+export const importDiscoveredSession = (
+  meshId: number,
+  meshPath: string,
+  cliSessionId: string,
+  branch: string,
+  worktreeName: string | null,
+  provider?: string,
+) =>
+  invoke<AgentNode>('import_discovered_session', {
+    meshId, meshPath, cliSessionId, branch, worktreeName, provider
+  });
