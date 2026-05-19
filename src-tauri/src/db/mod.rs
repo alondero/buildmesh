@@ -45,6 +45,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     // so it's safe to call here unconditionally as a safety net for DBs that skipped
     // migrations due to the projects-table guard.
     ensure_mesh_config_columns(&conn)?;
+    ensure_agent_node_source_issue(&conn)?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS meshes (
@@ -97,7 +98,12 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
     if current_version < SCHEMA_VERSION {
         tracing::info!("Migrating database from version {} to {}", current_version, SCHEMA_VERSION);
 
-        // Check if projects table exists yet (fresh install vs. upgrade)
+        // NOTE: this branch is gated on the pre-v6 `projects` table existing,
+        // so it does NOT run for users upgrading from v6+. Those upgrades are
+        // handled by the `ensure_*` safety nets in init() — add one per new
+        // column. Do not "fix" this guard without first refactoring the inner
+        // migrate_projects_* helpers, which still reference the renamed-away
+        // `projects` table and would crash on a v6+ schema.
         let table_exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='projects'",
@@ -156,6 +162,36 @@ fn migrate_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
             conn.execute(&format!("ALTER TABLE meshes ADD COLUMN {} {}", name, ty), [])?;
             tracing::info!("Added {} column to meshes table", name);
         }
+    }
+    Ok(())
+}
+
+/// Safety net: ensure the v9 source_issue column exists on agent_nodes.
+/// Same shape as ensure_mesh_config_columns — fixes DBs whose schema_version
+/// was bumped past 9 without the column being added because the migration
+/// guard skipped them (see ensure_mesh_config_columns for the same bug class).
+pub(crate) fn ensure_agent_node_source_issue(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_issue INTEGER", [])?;
+        tracing::warn!("ensure_agent_node_source_issue: added missing source_issue column");
     }
     Ok(())
 }
