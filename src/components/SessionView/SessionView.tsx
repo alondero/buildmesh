@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef, type MouseEvent as ReactMouseEvent } from 'react';
+import { Fragment, useEffect, useMemo, useState, useRef, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -16,17 +16,6 @@ function equalWidths(n: number): number[] {
   return Array.from({ length: n }, () => 100 / n);
 }
 
-function clampWidths(widths: number[], min = MIN_PANE_PERCENT): number[] {
-  let excess = widths.reduce((s, w) => s + w, 0) - 100;
-  if (excess <= 0) {
-    const ok = widths.every(w => w >= min);
-    if (ok) return widths;
-  }
-  const capped = widths.map(w => Math.max(min, w));
-  const total = capped.reduce((s, w) => s + w, 0);
-  return capped.map(w => (w / total) * 100);
-}
-
 interface ResizablePanesProps {
   nodes: AgentNode[];
   onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
@@ -40,8 +29,8 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
   const startXRef = useRef(0);
   const startWidthsRef = useRef<number[]>([]);
   const dragIndexRef = useRef<number>(0);
+  const containerRef = useRef<HTMLElement | null>(null);
 
-  // Reset to equal widths when node count changes
   useEffect(() => {
     setWidths(equalWidths(nodes.length));
   }, [nodes.length]);
@@ -52,30 +41,41 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
     dragIndexRef.current = index;
     startXRef.current = e.clientX;
     startWidthsRef.current = [...widths];
+    containerRef.current = document.getElementById('grid-panes-container');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
   };
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (!resizingRef.current) return;
-      const container = document.getElementById('grid-panes-container');
+      const container = containerRef.current;
       if (!container) return;
       const containerWidth = container.getBoundingClientRect().width;
       const deltaPercent = ((e.clientX - startXRef.current) / containerWidth) * 100;
 
-      const newWidths = [...startWidthsRef.current];
       const i = dragIndexRef.current;
-      const leftDelta = Math.min(deltaPercent, newWidths[i] - MIN_PANE_PERCENT);
-      const rightDelta = Math.min(-deltaPercent, newWidths[i + 1] - MIN_PANE_PERCENT);
-      const actualDelta = Math.max(leftDelta, -rightDelta);
+      const leftOrig = startWidthsRef.current[i];
+      const rightOrig = startWidthsRef.current[i + 1];
+      const clamped = Math.max(MIN_PANE_PERCENT - leftOrig, Math.min(deltaPercent, rightOrig - MIN_PANE_PERCENT));
 
-      newWidths[i] += actualDelta;
-      newWidths[i + 1] -= actualDelta;
-      setWidths(clampWidths(newWidths));
+      const newLeft = leftOrig + clamped;
+      const newRight = rightOrig - clamped;
+      setWidths(prev => {
+        if (prev[i] === newLeft) return prev;
+        const next = [...startWidthsRef.current];
+        next[i] = newLeft;
+        next[i + 1] = newRight;
+        return next;
+      });
     };
 
     const handleMouseUp = () => {
       if (resizingRef.current) {
         resizingRef.current = false;
+        containerRef.current = null;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
         terminalManager.fitAll();
       }
     };
@@ -90,41 +90,13 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
 
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
-
-  if (nodes.length === 1) {
-    const node = nodes[0];
-    const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
-    const isActive = node.id === activeNodeId;
-    const borderClass = node.status === 'awaiting_input'
-      ? 'border-status-warning animate-border-pulse'
-      : isActive ? 'border-accent-cyan/60' : 'border-border-default hover:border-accent-cyan/50';
-    return (
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <div
-          onClick={() => { if (!isActive) setActiveNode(node.id); }}
-          className={`flex-1 flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${borderClass}`}
-        >
-          <GridNodeHeader node={node} onBuildRun={onBuildRun} />
-          <div className="flex-1 flex flex-col overflow-hidden bg-black">
-            <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
-              <AgentTerminal sessionId={node.id} />
-            </div>
-            {isBuildRunOpen && (
-              <BuildRunTerminal
-                sessionId={node.id}
-                mode={isBuildRunOpen}
-                useWorktree={node.use_worktree}
-                onClose={() => setBuildRunOpen(null)}
-              />
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const isMultiPane = nodes.length > 1;
 
   return (
-    <div id="grid-panes-container" className="flex-1 flex gap-0.5 p-1 bg-bg-surface overflow-hidden">
+    <div
+      id="grid-panes-container"
+      className={`flex-1 flex overflow-hidden ${isMultiPane ? 'p-1 bg-bg-surface' : 'flex-col'}`}
+    >
       {nodes.map((node, idx) => {
         const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
         const isActive = node.id === activeNodeId;
@@ -132,34 +104,39 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
           ? 'border-status-warning animate-border-pulse'
           : isActive ? 'border-accent-cyan/60' : 'border-border-default hover:border-accent-cyan/50';
         return (
-          <div key={node.id} className="flex flex-col overflow-hidden" style={{ width: `${widths[idx]}%`, flex: '0 0 auto' }}>
+          <Fragment key={node.id}>
             <div
-              onClick={() => { if (!isActive) setActiveNode(node.id); }}
-              className={`flex-1 flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${borderClass}`}
+              className="flex flex-col overflow-hidden"
+              style={isMultiPane ? { width: `${widths[idx]}%`, flex: '0 0 auto' } : { flex: '1 1 0%' }}
             >
-              <GridNodeHeader node={node} onBuildRun={onBuildRun} />
-              <div className="flex-1 flex flex-col overflow-hidden bg-black">
-                <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
-                  <AgentTerminal sessionId={node.id} />
+              <div
+                onClick={() => { if (!isActive) setActiveNode(node.id); }}
+                className={`flex-1 flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${borderClass}`}
+              >
+                <GridNodeHeader node={node} onBuildRun={onBuildRun} />
+                <div className="flex-1 flex flex-col overflow-hidden bg-black">
+                  <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
+                    <AgentTerminal sessionId={node.id} />
+                  </div>
+                  {isBuildRunOpen && (
+                    <BuildRunTerminal
+                      sessionId={node.id}
+                      mode={isBuildRunOpen}
+                      useWorktree={node.use_worktree}
+                      onClose={() => setBuildRunOpen(null)}
+                    />
+                  )}
                 </div>
-                {isBuildRunOpen && (
-                  <BuildRunTerminal
-                    sessionId={node.id}
-                    mode={isBuildRunOpen}
-                    useWorktree={node.use_worktree}
-                    onClose={() => setBuildRunOpen(null)}
-                  />
-                )}
               </div>
             </div>
-            {idx < nodes.length - 1 && (
+            {isMultiPane && idx < nodes.length - 1 && (
               <div
                 onMouseDown={(e) => handleResizeMouseDown(e, idx)}
-                className="w-1 cursor-col-resize hover:bg-accent-cyan/30 active:bg-accent-cyan/50 transition-colors shrink-0 my-1.5 rounded-sm"
-                style={{ minWidth: RESIZE_HANDLE_WIDTH }}
+                className="cursor-col-resize hover:bg-accent-cyan/30 active:bg-accent-cyan/50 transition-colors shrink-0 self-stretch rounded-sm"
+                style={{ width: RESIZE_HANDLE_WIDTH }}
               />
             )}
-          </div>
+          </Fragment>
         );
       })}
     </div>
