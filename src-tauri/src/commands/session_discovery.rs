@@ -1,6 +1,5 @@
 //! Session discovery commands — find resumable Claude Code sessions on disk
 
-use crate::agent::spawn::parse_provider;
 use crate::db;
 use crate::env;
 use crate::models::{AgentNode, Provider};
@@ -28,7 +27,7 @@ pub async fn import_discovered_session(
     let env_type = resolved.env_type;
     let provider_enum = provider
         .as_deref()
-        .map(parse_provider)
+        .map(Provider::from_db_str)
         .unwrap_or(Provider::Anthropic);
 
     let node = db::create_agent_node(
@@ -39,6 +38,7 @@ pub async fn import_discovered_session(
         env_type,
         provider_enum,
         worktree_name.as_deref(),
+        None,
     ).map_err(|e| e.to_string())?;
 
     db::update_cli_session_id(node.id, &cli_session_id)
