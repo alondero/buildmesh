@@ -7,6 +7,7 @@
 
 use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::provider::{Platform, ProviderInfo};
+use crate::agent::spawn::SpawnOptions;
 use crate::db;
 use crate::models::{Provider, SessionStatus};
 use tauri::{command, AppHandle, Emitter};
@@ -54,9 +55,15 @@ pub async fn spawn_agent(
     rows: Option<u16>,
     cols: Option<u16>,
 ) -> Result<(), String> {
-    let r = rows.unwrap_or(24);
-    let c = cols.unwrap_or(80);
-    crate::agent::spawn::spawn_agent_inner(&app, session_id, provider, resume, r, c, None).await
+    crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
+        session_id,
+        provider: Provider::from_db_str(&provider),
+        resume,
+        rows: rows.unwrap_or(24),
+        cols: cols.unwrap_or(80),
+        prefill: None,
+        node: None,
+    }).await
 }
 
 /// Spawn an agent pre-filled with a GitHub issue's title and body.
@@ -85,6 +92,7 @@ pub async fn spawn_issue_agent(
         &mesh.path,
         &branch,
         Some(&effective_provider),
+        Some(issue_number),
     ).map_err(|e| e.to_string())?;
 
     let prefill = if Provider::from_db_str(&effective_provider).adapter().supports_prefill() {
@@ -94,10 +102,19 @@ pub async fn spawn_issue_agent(
         None
     };
 
-    crate::agent::spawn::spawn_agent_inner(&app, node.id, effective_provider, None, 24, 80, prefill).await?;
+    let node_id = node.id;
+    crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
+        session_id: node_id,
+        provider: Provider::from_db_str(&effective_provider),
+        resume: None,
+        rows: 24,
+        cols: 80,
+        prefill,
+        node: Some(node),
+    }).await?;
 
-    tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node.id, issue_number);
-    Ok(node)
+    tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node_id, issue_number);
+    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
 }
 
 /// Auto-resume all suspended sessions that have a stored CLI session ID.
@@ -130,8 +147,15 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
             continue;
         }
 
-        let provider_str = node.provider.to_string();
-        match crate::agent::spawn::spawn_agent_inner(&app, node.id, provider_str, Some(cli_id), 24, 80, None).await {
+        match crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
+            session_id: node.id,
+            provider: node.provider,
+            resume: Some(cli_id),
+            rows: 24,
+            cols: 80,
+            prefill: None,
+            node: Some(node.clone()),
+        }).await {
             Ok(()) => {
                 resumed.push(node.id);
                 tracing::info!("auto_resume_sessions: resumed node {}", node.id);

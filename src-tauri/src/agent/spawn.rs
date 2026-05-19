@@ -9,15 +9,22 @@ use crate::agent::provider::Platform;
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
-use crate::models::{Provider, SessionStatus};
+use crate::models::{AgentNode, Provider, SessionStatus};
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
-/// Parse provider string into Provider enum.
-pub fn parse_provider(provider: &str) -> Provider {
-    Provider::from_db_str(provider)
+/// Options for spawning or resuming an agent process.
+pub struct SpawnOptions {
+    pub session_id: i64,
+    pub provider: Provider,
+    pub resume: Option<String>,
+    pub rows: u16,
+    pub cols: u16,
+    pub prefill: Option<String>,
+    /// Pre-fetched node to avoid a redundant DB read when the caller already has it.
+    pub node: Option<AgentNode>,
 }
 
 /// Open a PTY pair using the native PTY system.
@@ -253,15 +260,12 @@ fn start_reader(
 /// Inner implementation shared by spawn_agent command and auto_resume_sessions.
 pub async fn spawn_agent_inner(
     app: &tauri::AppHandle,
-    session_id: i64,
-    provider: String,
-    resume: Option<String>,
-    rows: u16,
-    cols: u16,
-    prefill: Option<String>,
+    opts: SpawnOptions,
 ) -> Result<(), String> {
+    let SpawnOptions { session_id, provider, resume, rows, cols, prefill, node: preloaded_node } = opts;
+
     tracing::info!(
-        "spawn_agent_inner: session_id={}, provider={}, resume={:?}, size={}x{}",
+        "spawn_agent_inner: session_id={}, provider={:?}, resume={:?}, size={}x{}",
         session_id,
         provider,
         resume,
@@ -278,16 +282,18 @@ pub async fn spawn_agent_inner(
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
     crate::commands::agent::kill_agent(session_id).await.ok();
 
-    // 3. Get node and resolve paths
-    let node = db::get_agent_node_by_id(session_id).map_err(|e| {
-        let err = format!("spawn_agent: failed to get agent node {}: {}", session_id, e);
-        tracing::error!("{}", err);
-        err
-    })?;
+    // 3. Get node and resolve paths (skip DB read if caller provided the node)
+    let node = match preloaded_node {
+        Some(n) => n,
+        None => db::get_agent_node_by_id(session_id).map_err(|e| {
+            let err = format!("spawn_agent: failed to get agent node {}: {}", session_id, e);
+            tracing::error!("{}", err);
+            err
+        })?,
+    };
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
 
-    let provider_enum = parse_provider(&provider);
-    let adapter = provider_enum.adapter();
+    let adapter = provider.adapter();
 
     // 4. Determine session ID mode
     let session_id_mode = if adapter.supports_resume() {
@@ -368,7 +374,7 @@ pub async fn spawn_agent_inner(
     // 9. Build and spawn command
     let cmd = build_spawn_command(
         &resolved,
-        provider_enum,
+        provider,
         &session_id_mode,
         session_id,
         model_override,

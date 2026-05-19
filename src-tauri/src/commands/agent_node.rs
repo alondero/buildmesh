@@ -14,7 +14,7 @@ pub async fn create_session(
     branch: String,
     provider: Option<String>,
 ) -> Result<AgentNode, String> {
-    services::agent_node::create(mesh_id, &path, &branch, provider.as_deref())
+    services::agent_node::create(mesh_id, &path, &branch, provider.as_deref(), None)
         .map_err(|e| {
             tracing::error!("create_session failed: {}", e);
             e.to_string()

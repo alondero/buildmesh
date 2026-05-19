@@ -167,6 +167,7 @@ pub struct AgentNode {
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
     pub worktree_name: Option<String>,   // git worktree name (same as name for cwrap providers)
     pub use_worktree: bool,  // true = commands run in worktree, false = repo root
+    pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
     pub created_at: DateTime<Utc>,
 }
 
