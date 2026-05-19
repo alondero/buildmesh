@@ -118,6 +118,7 @@ pub fn run() {
             commands::agent_node::restore_session,
             commands::agent_node::update_session_status,
             commands::agent_node::delete_session,
+            commands::agent_node::set_cli_session_id,
             commands::agent_node::set_active_session,
             // Mesh
             commands::mesh::add_project,
@@ -194,6 +195,9 @@ pub fn run() {
             commands::pr::get_repo_issues,
             // Remote
             commands::remote::submit_terminal_snapshot,
+            // Session Discovery
+            commands::session_discovery::discover_sessions,
+            commands::session_discovery::import_discovered_session,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

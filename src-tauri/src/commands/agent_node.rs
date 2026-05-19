@@ -75,6 +75,12 @@ pub async fn delete_session(session_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Set the CLI session ID on an agent node (used when importing external sessions)
+#[command]
+pub async fn set_cli_session_id(session_id: i64, cli_session_id: String) -> Result<(), String> {
+    db::update_cli_session_id(session_id, &cli_session_id).map_err(|e| e.to_string())
+}
+
 /// Set the active session (emits event for frontend to handle)
 #[command]
 pub async fn set_active_session(session_id: i64, app: tauri::AppHandle) -> Result<(), String> {

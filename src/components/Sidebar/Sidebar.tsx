@@ -10,6 +10,7 @@ import { listProviders } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { GitHubIssuesModal } from '../GitHubIssues/GitHubIssuesModal';
+import { SessionBrowserModal } from '../SessionBrowser/SessionBrowserModal';
 import {
   DndContext,
   type DragEndEvent,
@@ -95,6 +96,7 @@ export function Sidebar() {
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   const selectMesh = useMeshStore(state => state.selectMesh);
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
+  const getDefaultProvider = useMeshStore(state => state.getDefaultProvider);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
@@ -104,6 +106,7 @@ export function Sidebar() {
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessMeshId, setRemoteAccessMeshId] = useState<boolean>(false);
   const [githubIssuesModal, setGithubIssuesModal] = useState<{ meshId: number; meshPath: string } | null>(null);
+  const [sessionBrowserModal, setSessionBrowserModal] = useState<{ meshId: number; meshPath: string } | null>(null);
   const openPropertiesPanel = useUIStore((s) => s.openPropertiesPanel);
   const toggleFileExplorer = useUIStore((s) => s.toggleFileExplorer);
   const fileExplorerContext = useUIStore(s => s.fileExplorerContext);
@@ -152,6 +155,13 @@ export function Sidebar() {
     const mesh = meshes.find(m => m.id === meshId);
     if (mesh) {
       setGithubIssuesModal({ meshId, meshPath: mesh.path });
+    }
+  };
+
+  const handleOpenSessionBrowser = (meshId: number) => {
+    const mesh = meshes.find(m => m.id === meshId);
+    if (mesh) {
+      setSessionBrowserModal({ meshId, meshPath: mesh.path });
     }
   };
 
@@ -210,6 +220,16 @@ export function Sidebar() {
         />
       )}
 
+      {/* Session Browser Modal */}
+      {sessionBrowserModal && (
+        <SessionBrowserModal
+          meshId={sessionBrowserModal.meshId}
+          meshPath={sessionBrowserModal.meshPath}
+          providerList={providerData}
+          onClose={() => setSessionBrowserModal(null)}
+        />
+      )}
+
       {/* Meshes list */}
       <div className="flex-1 overflow-y-auto">
         <div className="p-2">
@@ -252,7 +272,8 @@ export function Sidebar() {
                       selectMesh={selectMesh}
                       onDeleteNode={handleDeleteNode}
                       onOpenGitHubIssues={handleOpenGitHubIssues}
-                      getDefaultProvider={useMeshStore(state => state.getDefaultProvider)}
+                      onOpenSessionBrowser={handleOpenSessionBrowser}
+                      getDefaultProvider={getDefaultProvider}
                     />
                   );
                 })}
@@ -318,6 +339,7 @@ interface SortableMeshProps {
   selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
   onOpenGitHubIssues: (meshId: number) => void;
+  onOpenSessionBrowser: (meshId: number) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
@@ -338,6 +360,7 @@ function SortableMesh({
   selectMesh,
   onDeleteNode,
   onOpenGitHubIssues,
+  onOpenSessionBrowser,
   getDefaultProvider,
 }: SortableMeshProps) {
   const isThisMeshOpen = fileExplorerContext?.type === 'mesh' && fileExplorerContext.meshId === mesh.id;
@@ -390,6 +413,18 @@ function SortableMesh({
           title="Drag to reorder"
         >
           ⋮⋮
+        </button>
+
+        {/* History button — browse previous sessions */}
+        <button
+          onClick={() => onOpenSessionBrowser(mesh.id)}
+          className="text-xs px-1 text-text-muted hover:text-accent-cyan transition-colors"
+          title="Browse previous sessions"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <polyline points="12 6 12 12 16 14"/>
+          </svg>
         </button>
 
         {/* Split button: main + for default provider, arrow for dropdown */}
@@ -478,6 +513,19 @@ function SortableMesh({
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          <button
+            onClick={() => {
+              setContextMenu(null);
+              onOpenSessionBrowser(mesh.id);
+            }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <polyline points="12 6 12 12 16 14"/>
+            </svg>
+            Previous Sessions
+          </button>
           <button
             onClick={() => {
               setContextMenu(null);
