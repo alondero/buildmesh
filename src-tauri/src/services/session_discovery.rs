@@ -18,10 +18,16 @@ pub struct DiscoveredSession {
     pub worktree_name: Option<String>,
 }
 
-/// Encode a filesystem path the same way Claude Code does: replace path
-/// separators with `-`. On Windows `\` is also replaced.
+/// Encode a filesystem path the same way Claude Code does: replace every
+/// non-alphanumeric character with `-`. On Windows this includes the drive
+/// colon (`:`) and `\` separators; on Unix it covers `/`. It also matches
+/// Claude Code's handling of `.` in worktree paths (e.g. `.claude` →
+/// `-claude`), so `X:\src\buildmesh\.claude\worktrees\foo` round-trips to
+/// `X--src-buildmesh--claude-worktrees-foo`.
 fn encode_path(path: &str) -> String {
-    path.replace(['/', '\\'], "-")
+    path.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Extract the worktree name from an encoded project directory name.
@@ -215,9 +221,28 @@ mod tests {
             encode_path("/Users/adam/src/buildmesh"),
             "-Users-adam-src-buildmesh"
         );
+    }
+
+    #[test]
+    fn encode_path_replaces_windows_drive_colon() {
+        // Matches Claude Code's on-disk form: ~/.claude/projects/X--src-buildmesh
+        // The drive colon and every backslash both collapse to `-`.
+        assert_eq!(
+            encode_path("X:\\src\\buildmesh"),
+            "X--src-buildmesh"
+        );
         assert_eq!(
             encode_path("C:\\Users\\adam\\src\\buildmesh"),
-            "C:-Users-adam-src-buildmesh"
+            "C--Users-adam-src-buildmesh"
+        );
+    }
+
+    #[test]
+    fn encode_path_replaces_dot_for_worktrees() {
+        // `.claude\worktrees\foo` → `--claude-worktrees-foo` on Windows.
+        assert_eq!(
+            encode_path("X:\\src\\buildmesh\\.claude\\worktrees\\foo"),
+            "X--src-buildmesh--claude-worktrees-foo"
         );
     }
 
@@ -233,6 +258,16 @@ mod tests {
             extract_worktree_name("-Users-adam-src-buildmesh-src-tauri", base),
             None
         );
+    }
+
+    #[test]
+    fn extract_worktree_name_works_on_windows_encoded_base() {
+        let base = "X--src-buildmesh";
+        assert_eq!(
+            extract_worktree_name("X--src-buildmesh--claude-worktrees-bold-live-plume", base),
+            Some("bold-live-plume".to_string())
+        );
+        assert_eq!(extract_worktree_name("X--src-buildmesh", base), None);
     }
 
     #[test]
