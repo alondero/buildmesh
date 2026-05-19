@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -119,6 +119,9 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             }
             if current_version < 8 {
                 migrate_mesh_config_columns(conn)?;
+            }
+            if current_version < 9 {
+                migrate_agent_node_source_issue(conn)?;
             }
         }
 
@@ -335,6 +338,34 @@ fn migrate_remote_access_token(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+fn migrate_agent_node_source_issue(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if !has_col {
+        conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_issue INTEGER", [])?;
+        tracing::info!("Added source_issue column to agent_nodes table");
+    }
+    Ok(())
+}
+
 /// Generate a random 32-character hex token (16 bytes of random data).
 fn generate_token() -> String {
     use rand::Rng;
@@ -402,6 +433,9 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
         if current_version < 8 {
             migrate_mesh_config_columns(conn)?;
         }
+        if current_version < 9 {
+            migrate_agent_node_source_issue(conn)?;
+        }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
@@ -461,29 +495,34 @@ fn parse_str(s: String) -> Option<String> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+const AGENT_NODE_COLUMNS: &str =
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue";
+
+fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
+    Ok(AgentNode {
+        id: row.get(0)?,
+        mesh_id: row.get(1)?,
+        name: row.get(2)?,
+        path: row.get(3)?,
+        branch: row.get(4)?,
+        env: EnvType::from_db_str(&row.get::<_, String>(5)?),
+        provider: Provider::from_db_str(&row.get::<_, String>(6)?),
+        status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
+        cli_session_id: row.get(8)?,
+        worktree_name: row.get(9)?,
+        use_worktree: true,
+        source_issue: row.get(11)?,
+        created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now()),
+    })
+}
+
 fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
     let mut stmt = conn.prepare(
-        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM agent_nodes WHERE id = ?1"
+        &format!("SELECT {} FROM agent_nodes WHERE id = ?1", AGENT_NODE_COLUMNS)
     )?;
-    stmt.query_row(params![id], |row| {
-        Ok(AgentNode {
-            id: row.get(0)?,
-            mesh_id: row.get(1)?,
-            name: row.get(2)?,
-            path: row.get(3)?,
-            branch: row.get(4)?,
-            env: EnvType::from_db_str(&row.get::<_, String>(5)?),
-            provider: Provider::from_db_str(&row.get::<_, String>(6)?),
-            status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
-            cli_session_id: row.get(8)?,
-            worktree_name: row.get(9)?,
-            use_worktree: true,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        })
-    })
+    stmt.query_row(params![id], map_agent_node_row)
 }
 
 // --- Mesh operations ---
@@ -627,12 +666,13 @@ pub fn create_agent_node(
     env: EnvType,
     provider: Provider,
     worktree_name: Option<&str>,
+    source_issue: Option<i64>,
 ) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7)",
-        params![mesh_id, name, path, branch, env.to_string(), provider.to_string(), worktree_name],
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8)",
+        params![mesh_id, name, path, branch, env.to_string(), provider.to_string(), worktree_name, source_issue],
     )?;
     let id = db.last_insert_rowid();
     get_agent_node_by_id_inner(&db, id)
@@ -655,54 +695,18 @@ pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {
 pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM agent_nodes WHERE status != 'archived' ORDER BY created_at ASC"
+        &format!("SELECT {} FROM agent_nodes WHERE status != 'archived' ORDER BY created_at ASC", AGENT_NODE_COLUMNS)
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(AgentNode {
-            id: row.get(0)?,
-            mesh_id: row.get(1)?,
-            name: row.get(2)?,
-            path: row.get(3)?,
-            branch: row.get(4)?,
-            env: EnvType::from_db_str(&row.get::<_, String>(5)?),
-            provider: Provider::from_db_str(&row.get::<_, String>(6)?),
-            status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
-            cli_session_id: row.get(8)?,
-            worktree_name: row.get(9)?,
-            use_worktree: true,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        })
-    })?;
+    let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
 }
 
 pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at ASC"
+        &format!("SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at ASC", AGENT_NODE_COLUMNS)
     )?;
-    let rows = stmt.query_map(params![mesh_id], |row| {
-        Ok(AgentNode {
-            id: row.get(0)?,
-            mesh_id: row.get(1)?,
-            name: row.get(2)?,
-            path: row.get(3)?,
-            branch: row.get(4)?,
-            env: EnvType::from_db_str(&row.get::<_, String>(5)?),
-            provider: Provider::from_db_str(&row.get::<_, String>(6)?),
-            status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
-            cli_session_id: row.get(8)?,
-            worktree_name: row.get(9)?,
-            use_worktree: true,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        })
-    })?;
+    let rows = stmt.query_map(params![mesh_id], map_agent_node_row)?;
     rows.collect()
 }
 
@@ -744,27 +748,9 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
 pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at
-         FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL"
+        &format!("SELECT {} FROM agent_nodes WHERE status = 'suspended' AND cli_session_id IS NOT NULL", AGENT_NODE_COLUMNS)
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(AgentNode {
-            id: row.get(0)?,
-            mesh_id: row.get(1)?,
-            name: row.get(2)?,
-            path: row.get(3)?,
-            branch: row.get(4)?,
-            env: EnvType::from_db_str(&row.get::<_, String>(5)?),
-            provider: Provider::from_db_str(&row.get::<_, String>(6)?),
-            status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
-            cli_session_id: row.get(8)?,
-            worktree_name: row.get(9)?,
-            use_worktree: true,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        })
-    })?;
+    let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
 }
 
