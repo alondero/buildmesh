@@ -1,13 +1,15 @@
 //! Unified session naming module.
 //!
-//! Simplified single-map state machine:
-//! - `SESSION_BUFFERS` is the only state — buffer exists = hasn't been renamed yet
+//! State maps:
+//! - `SESSION_BUFFERS` — PTY output accumulator; entry exists = hasn't been renamed yet
+//! - `RENAMING_IN_PROGRESS` — guards against duplicate concurrent LLM calls
+//! - `RENAME_ATTEMPTS` — per-node failure counter; caps retries at MAX_RENAME_ATTEMPTS
+//!
+//! Lifecycle:
 //! - `on_spawn()` generates an initial random name
 //! - `on_output(node_id, data)` buffers PTY output
 //! - `on_turn(node_id, app)` triggers LLM rename when buffer is sufficient
-//! - `cleanup(node_id)` removes buffer entry
-//!
-//! The buffer presence IS the renamed state. No separate guard map needed.
+//! - `cleanup(node_id)` removes all state for a node
 
 use rand::seq::IndexedRandom;
 use std::collections::{HashMap, HashSet};
@@ -66,6 +68,12 @@ static SESSION_BUFFERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, String>>>> 
 static RENAMING_IN_PROGRESS: once_cell::sync::Lazy<Arc<Mutex<HashSet<i64>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
 
+/// Per-node rename attempt counter. After MAX_RENAME_ATTEMPTS, stop retrying.
+static RENAME_ATTEMPTS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, u8>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+const MAX_RENAME_ATTEMPTS: u8 = 3;
+
 static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-z][a-z0-9-]{2,50}$").unwrap());
 
@@ -116,6 +124,16 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
         }
     }
 
+    // Skip if max attempts exhausted for this node (check before buffer work)
+    {
+        let attempts = RENAME_ATTEMPTS.lock().unwrap();
+        if attempts.get(&node_id).copied().unwrap_or(0) >= MAX_RENAME_ATTEMPTS {
+            tracing::debug!("on_turn({}): max rename attempts reached, giving up", node_id);
+            clear_node_state(node_id);
+            return;
+        }
+    }
+
     // Check buffer existence and sufficiency BEFORE removing (avoid unnecessary I/O).
     let buffer_len = {
         let buffers = SESSION_BUFFERS.lock().unwrap();
@@ -123,14 +141,13 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
     };
 
     if buffer_len == 0 {
-        return; // No buffer = already renamed or no output received yet
+        return;
     }
 
     if buffer_len < SUMMARIZE_BUFFER_CHARS / 2 {
-        return; // Not enough content for meaningful rename — keep buffering
+        return;
     }
 
-    // Read buffer content (keep it in SESSION_BUFFERS until rename succeeds)
     let buffer_content = {
         let buffers = SESSION_BUFFERS.lock().unwrap();
         buffers.get(&node_id).cloned()
@@ -157,8 +174,7 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         match summarize_and_rename(node_id_for_task, &buffer).await {
             Ok(slug) => {
-                // Only remove buffer from SESSION_BUFFERS after successful rename
-                SESSION_BUFFERS.lock().unwrap().remove(&node_id_for_task);
+                clear_node_state(node_id_for_task);
                 let _ = app_for_task.emit(
                     "session-renamed",
                     serde_json::json!({
@@ -169,10 +185,26 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
                 tracing::info!("Node {} renamed to '{}'", node_id_for_task, slug);
             }
             Err(e) => {
-                tracing::warn!("Node {} rename failed (buffer preserved for retry): {}", node_id_for_task, e);
+                let attempt = {
+                    let mut attempts = RENAME_ATTEMPTS.lock().unwrap();
+                    let count = attempts.entry(node_id_for_task).or_insert(0);
+                    *count += 1;
+                    *count
+                };
+                if attempt >= MAX_RENAME_ATTEMPTS {
+                    tracing::warn!(
+                        "Node {} giving up on rename after {} attempts (last error: {})",
+                        node_id_for_task, attempt, e
+                    );
+                    SESSION_BUFFERS.lock().unwrap().remove(&node_id_for_task);
+                } else {
+                    tracing::warn!(
+                        "Node {} rename attempt {}/{} failed (buffer preserved for retry): {}",
+                        node_id_for_task, attempt, MAX_RENAME_ATTEMPTS, e
+                    );
+                }
             }
         }
-        // Clear in-progress flag whether rename succeeded or failed
         RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id_for_task);
     });
 }
@@ -190,12 +222,17 @@ pub fn is_default_name(name: &str) -> bool {
 
 /// Clear the buffer for a node. Called on kill so the node can resume fresh.
 pub fn reset_buffers(node_id: i64) {
-    SESSION_BUFFERS.lock().unwrap().remove(&node_id);
+    clear_node_state(node_id);
 }
 
-/// Clear the buffer for a node. Called on delete/archive.
+/// Clear all state for a node. Called on delete/archive.
 pub fn cleanup(node_id: i64) {
+    clear_node_state(node_id);
+}
+
+fn clear_node_state(node_id: i64) {
     SESSION_BUFFERS.lock().unwrap().remove(&node_id);
+    RENAME_ATTEMPTS.lock().unwrap().remove(&node_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -242,7 +279,7 @@ async fn summarize_and_rename(node_id: i64, buffer: &str) -> Result<String, Stri
         .spawn()
         .map_err(|e| format!("failed to spawn CLI: {}", e))?;
 
-    let output = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             stdin
@@ -272,7 +309,33 @@ async fn summarize_and_rename(node_id: i64, buffer: &str) -> Result<String, Stri
     Ok(slug)
 }
 
+fn is_conversational_response(s: &str) -> bool {
+    if s.contains('?') {
+        return true;
+    }
+    let lower = s.to_lowercase();
+    let conversational_prefixes = [
+        "it looks like",
+        "i'm not sure",
+        "what can i",
+        "how can i",
+        "that looks like",
+        "i don't",
+        "this looks like",
+        "it seems like",
+        "i can help",
+        "let me help",
+    ];
+    conversational_prefixes.iter().any(|p| lower.starts_with(p))
+}
+
 fn slug_with_retry(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('`');
+    if trimmed.split_whitespace().nth(5).is_some() && is_conversational_response(trimmed) {
+        let preview = trimmed.char_indices().nth(80).map_or(trimmed, |(i, _)| &trimmed[..i]);
+        return Err(format!("naming LLM returned conversational response: '{}'", preview));
+    }
+
     // Extract just the first hyphenated slug-like line
     let candidate = raw
         .lines()
@@ -281,8 +344,15 @@ fn slug_with_retry(raw: &str) -> Result<String, String> {
         .map(|l| l.trim().trim_matches('"').trim_matches('`').to_lowercase())
         .unwrap_or_else(|| raw.trim().trim_matches('"').trim_matches('`').to_lowercase());
 
-    let word_count = candidate.split('-').count();
-    if word_count >= 3 && word_count <= 5 && SLUG_REGEX.is_match(&candidate) {
+    // Normalise space-separated words to hyphens when no hyphens present
+    let candidate = if !candidate.contains('-') {
+        candidate.split_whitespace().collect::<Vec<_>>().join("-")
+    } else {
+        candidate
+    };
+
+    let token_count = candidate.split('-').count();
+    if token_count >= 3 && token_count <= 5 && SLUG_REGEX.is_match(&candidate) {
         return Ok(candidate);
     }
 
@@ -299,8 +369,8 @@ fn slug_with_retry(raw: &str) -> Result<String, String> {
     }
 
     Err(format!(
-        "slug has {} words (expected 3-5): '{}'",
-        fallback_count.max(word_count),
+        "slug has {} dash-separated tokens (expected 3-5): '{}'",
+        fallback_count.max(token_count),
         candidate
     ))
 }
@@ -349,12 +419,52 @@ mod tests {
 
     #[test]
     fn slug_with_retry_rejects_too_short() {
-        assert!(slug_with_retry("fix-it").is_err());
+        let err = slug_with_retry("fix-it").unwrap_err();
+        assert!(err.contains("dash-separated tokens"));
     }
 
     #[test]
     fn slug_with_retry_rejects_too_long() {
-        assert!(slug_with_retry("one-two-three-four-five-six").is_err());
+        let err = slug_with_retry("one-two-three-four-five-six").unwrap_err();
+        assert!(err.contains("dash-separated tokens"));
+    }
+
+    #[test]
+    fn slug_with_retry_normalises_space_separated_words() {
+        assert_eq!(
+            slug_with_retry("not skip audit kirby tests").unwrap(),
+            "not-skip-audit-kirby-tests"
+        );
+        assert_eq!(
+            slug_with_retry("fix auth token flow").unwrap(),
+            "fix-auth-token-flow"
+        );
+    }
+
+    #[test]
+    fn slug_with_retry_detects_conversational_response() {
+        let cases = [
+            "it looks like there might be a terminal issue with repeated commands. how can i help you?",
+            "i'm not sure what you're trying to do with that terminal output",
+            "what can i help you with in the buildmesh project?",
+            "that looks like terminal output from a different project. what task can i assist you with?",
+        ];
+        for case in &cases {
+            let err = slug_with_retry(case).unwrap_err();
+            assert!(
+                err.contains("conversational response"),
+                "expected conversational detection for: '{}', got: {}",
+                case,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn slug_with_retry_does_not_flag_short_non_slug_as_conversational() {
+        // Short responses without conversational markers should get the token count error
+        let err = slug_with_retry("pond").unwrap_err();
+        assert!(err.contains("dash-separated tokens"));
     }
 
     #[test]
