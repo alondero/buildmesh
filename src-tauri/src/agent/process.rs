@@ -14,6 +14,12 @@ pub struct AgentProcess {
     pub reader_alive: Arc<AtomicBool>,
 }
 
+/// Trait abstracting the process registry methods needed by http_server.
+pub trait ProcessRegistryApi: Send + Sync {
+    fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String>;
+    fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String>;
+}
+
 /// Thread-safe registry for agent processes.
 /// Wraps `PtyRegistry<i64, AgentProcess>` and exposes typed methods
 /// for write/resize that return Result instead of Option.
@@ -100,6 +106,15 @@ impl AgentProcessRegistry {
 impl Default for AgentProcessRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ProcessRegistryApi for AgentProcessRegistry {
+    fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
+        AgentProcessRegistry::write_bytes(self, session_id, data)
+    }
+    fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+        AgentProcessRegistry::resize_pty(self, session_id, cols, rows)
     }
 }
 

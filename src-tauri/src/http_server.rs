@@ -20,7 +20,7 @@ use tungstenite::handshake::derive_accept_key;
 use tungstenite::protocol::Role;
 
 use tauri::Emitter;
-use crate::agent::process::PROCESS_REGISTRY;
+use crate::agent::process::{PROCESS_REGISTRY, ProcessRegistryApi};
 use crate::db;
 
 // --- App Handle for emitting Tauri events from HTTP handlers ---
@@ -480,8 +480,8 @@ async fn handle_ws_connection(
     tracing::debug!("WS connection closed for node {}", node_id);
 }
 
-fn forward_mobile_input(node_id: i64, text: &str) {
-    if let Err(e) = PROCESS_REGISTRY.write_bytes(node_id, text.as_bytes()) {
+fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, text: &str) {
+    if let Err(e) = registry.write_bytes(node_id, text.as_bytes()) {
         tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
         return;
     }
@@ -491,6 +491,10 @@ fn forward_mobile_input(node_id: i64, text: &str) {
             let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": node_id }));
         }
     }
+}
+
+fn forward_mobile_input(node_id: i64, text: &str) {
+    forward_mobile_input_with(&**PROCESS_REGISTRY, node_id, text);
 }
 
 fn parse_resize_message(text: &str) -> Option<(u16, u16)> {
@@ -506,10 +510,14 @@ fn parse_resize_message(text: &str) -> Option<(u16, u16)> {
     Some((cols, rows))
 }
 
-fn handle_mobile_resize(node_id: i64, cols: u16, rows: u16) {
-    if let Err(e) = PROCESS_REGISTRY.resize_pty(node_id, cols, rows) {
+fn handle_mobile_resize_with(registry: &dyn ProcessRegistryApi, node_id: i64, cols: u16, rows: u16) {
+    if let Err(e) = registry.resize_pty(node_id, cols, rows) {
         tracing::warn!("Mobile resize failed for node {}: {}", node_id, e);
     }
+}
+
+fn handle_mobile_resize(node_id: i64, cols: u16, rows: u16) {
+    handle_mobile_resize_with(&**PROCESS_REGISTRY, node_id, cols, rows);
 }
 
 // --- Header Helpers ---
@@ -626,6 +634,7 @@ pub fn clear_scrollback(node_id: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use tokio_tungstenite::connect_async;
 
     #[tokio::test]
@@ -911,5 +920,75 @@ mod tests {
         assert_eq!(extract_header_value(headers, "sec-websocket-key"), Some("abc123"));
         assert_eq!(extract_header_value(headers, "Host"), Some("localhost"));
         assert_eq!(extract_header_value(headers, "Missing"), None);
+    }
+
+    // --- ProcessRegistryApi mock tests ---
+
+    struct MockRegistry {
+        write_called: AtomicBool,
+        resize_called: AtomicBool,
+        last_write_data: std::sync::Mutex<Vec<u8>>,
+        last_resize: std::sync::Mutex<(u16, u16)>,
+        should_fail: bool,
+    }
+
+    impl MockRegistry {
+        fn new() -> Self {
+            Self {
+                write_called: AtomicBool::new(false),
+                resize_called: AtomicBool::new(false),
+                last_write_data: std::sync::Mutex::new(vec![]),
+                last_resize: std::sync::Mutex::new((0, 0)),
+                should_fail: false,
+            }
+        }
+        fn failing() -> Self {
+            Self { should_fail: true, ..Self::new() }
+        }
+    }
+
+    impl ProcessRegistryApi for MockRegistry {
+        fn write_bytes(&self, _session_id: i64, data: &[u8]) -> Result<(), String> {
+            if self.should_fail { return Err("mock error".into()); }
+            self.write_called.store(true, AtomicOrdering::SeqCst);
+            *self.last_write_data.lock().unwrap() = data.to_vec();
+            Ok(())
+        }
+        fn resize_pty(&self, _session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+            if self.should_fail { return Err("mock error".into()); }
+            self.resize_called.store(true, AtomicOrdering::SeqCst);
+            *self.last_resize.lock().unwrap() = (cols, rows);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn forward_mobile_input_writes_to_registry() {
+        let mock = MockRegistry::new();
+        forward_mobile_input_with(&mock, 1, "hello");
+        assert!(mock.write_called.load(AtomicOrdering::SeqCst));
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"hello");
+    }
+
+    #[test]
+    fn forward_mobile_input_handles_registry_error() {
+        let mock = MockRegistry::failing();
+        forward_mobile_input_with(&mock, 1, "hello");
+        assert!(!mock.write_called.load(AtomicOrdering::SeqCst));
+    }
+
+    #[test]
+    fn handle_mobile_resize_calls_registry() {
+        let mock = MockRegistry::new();
+        handle_mobile_resize_with(&mock, 1, 120, 40);
+        assert!(mock.resize_called.load(AtomicOrdering::SeqCst));
+        assert_eq!(*mock.last_resize.lock().unwrap(), (120, 40));
+    }
+
+    #[test]
+    fn handle_mobile_resize_handles_registry_error() {
+        let mock = MockRegistry::failing();
+        handle_mobile_resize_with(&mock, 1, 80, 24);
+        assert!(!mock.resize_called.load(AtomicOrdering::SeqCst));
     }
 }
