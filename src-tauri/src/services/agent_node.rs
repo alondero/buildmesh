@@ -1,6 +1,5 @@
 //! Agent Node service — creation, deletion, and lifecycle orchestration
 
-use crate::agent::spawn::parse_provider;
 use crate::db;
 use crate::env;
 use crate::models::{AgentNode, Provider, SessionStatus};
@@ -32,6 +31,7 @@ pub fn create(
     path: &str,
     branch: &str,
     provider: Option<&str>,
+    source_issue: Option<i64>,
 ) -> Result<AgentNode, AgentNodeError> {
     let session_name = crate::session_naming::on_spawn();
     tracing::debug!(
@@ -42,7 +42,7 @@ pub fn create(
     let resolved = env::resolve_agent_path(path, None);
     let env_type = resolved.env_type;
     let provider_enum = provider
-        .map(parse_provider)
+        .map(Provider::from_db_str)
         .unwrap_or(Provider::Anthropic);
 
     let node = db::create_agent_node(
@@ -53,6 +53,7 @@ pub fn create(
         env_type,
         provider_enum,
         Some(&session_name),
+        source_issue,
     )?;
 
     Ok(node)

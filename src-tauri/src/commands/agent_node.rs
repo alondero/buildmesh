@@ -14,7 +14,7 @@ pub async fn create_session(
     branch: String,
     provider: Option<String>,
 ) -> Result<AgentNode, String> {
-    services::agent_node::create(mesh_id, &path, &branch, provider.as_deref())
+    services::agent_node::create(mesh_id, &path, &branch, provider.as_deref(), None)
         .map_err(|e| {
             tracing::error!("create_session failed: {}", e);
             e.to_string()
@@ -73,6 +73,12 @@ pub async fn update_session_status(
 pub async fn delete_session(session_id: i64) -> Result<(), String> {
     services::agent_node::delete(session_id)
         .map_err(|e| e.to_string())
+}
+
+/// Set the CLI session ID on an agent node (used when importing external sessions)
+#[command]
+pub async fn set_cli_session_id(session_id: i64, cli_session_id: String) -> Result<(), String> {
+    db::update_cli_session_id(session_id, &cli_session_id).map_err(|e| e.to_string())
 }
 
 /// Set the active session (emits event for frontend to handle)

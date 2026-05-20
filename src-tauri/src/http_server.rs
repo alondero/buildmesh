@@ -305,6 +305,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             &mesh.path,
             "main",
             Some(req.provider.as_str()),
+            None,
         ) {
             Ok(n) => n,
             Err(e) => {
@@ -319,26 +320,27 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             return;
         };
 
+        let node_id = node.id;
+        let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
+
         if let Err(e) = crate::agent::spawn::spawn_agent_inner(
             app,
-            node.id,
-            req.provider.clone(),
-            None,
-            req.rows,
-            req.cols,
-            None,
+            crate::agent::spawn::SpawnOptions {
+                session_id: node_id,
+                provider: crate::models::Provider::from_db_str(&req.provider),
+                resume: None,
+                rows: req.rows,
+                cols: req.cols,
+                prefill: None,
+                node: Some(node),
+            },
         ).await {
             let msg = format!("Failed to spawn agent: {}", e);
             send_json_error(&mut lines, "500 Internal Server Error", &msg).await;
             return;
         }
 
-        // Notify desktop frontend so sidebar refreshes to show the new node.
-        // The mobile app creates nodes via HTTP (port 1992) while desktop uses
-        // Tauri invoke — this bridges the gap so both UIs stay in sync.
-        let _ = app.emit("session-created", serde_json::json!({ "id": node.id }));
-
-        let body = serde_json::to_string(&node).unwrap_or_else(|_| "{}".to_string());
+        let _ = app.emit("session-created", serde_json::json!({ "id": node_id }));
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
             body.len(), body
