@@ -10,6 +10,7 @@ mod models;
 pub mod process_util;
 mod pty;
 mod services;
+mod session_capture;
 mod session_naming;
 
 use tauri::Manager;

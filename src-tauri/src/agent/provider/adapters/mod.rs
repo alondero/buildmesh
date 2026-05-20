@@ -7,11 +7,13 @@
 //! 4. Add the `Provider::<Name> => &adapters::<NAME>` arm in `Provider::adapter()`.
 
 pub mod anthropic;
+pub mod codex;
 pub mod gemini;
 pub mod minimax;
 pub mod opencode;
 
 pub use anthropic::ANTHROPIC;
+pub use codex::CODEX;
 pub use gemini::GEMINI;
 pub use minimax::MINIMAX;
 pub use opencode::OPENCODE;

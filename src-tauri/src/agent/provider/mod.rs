@@ -105,4 +105,41 @@ pub trait AgentProvider: Send + Sync {
 
     /// Platforms where this provider is available. Used to filter `list_providers`.
     fn available_on(&self) -> &'static [Platform];
+
+    /// Whether this provider auto-assigns session IDs (captured from PTY output)
+    /// rather than accepting one via CLI flag.
+    fn self_assigns_session_id(&self) -> bool {
+        false
+    }
+
+    /// Alternative recipe for resume (subcommand-style providers like Codex).
+    /// If Some, `build_spawn_command()` uses this instead of `spawn_recipe()` + `resume_args()`.
+    fn spawn_recipe_for_resume(&self, _platform: Platform, _session_id: &str) -> Option<SpawnRecipe> {
+        None
+    }
+
+    /// Args appended when assigning a fresh session ID.
+    fn session_assign_args(&self, id: &str) -> Vec<String> {
+        vec!["--session-id".into(), id.into()]
+    }
+
+    /// Args appended when resuming an existing session.
+    fn resume_args(&self, id: &str) -> Vec<String> {
+        vec!["--resume".into(), id.into()]
+    }
+
+    /// Args for model override.
+    fn model_args(&self, model: &str) -> Vec<String> {
+        vec!["--model".into(), model.into()]
+    }
+
+    /// Args for effort override.
+    fn effort_args(&self, effort: &str) -> Vec<String> {
+        vec!["--effort".into(), effort.into()]
+    }
+
+    /// Args for prefill/prompt text.
+    fn prefill_args(&self, text: &str) -> Vec<String> {
+        vec!["--prefill".into(), text.into()]
+    }
 }

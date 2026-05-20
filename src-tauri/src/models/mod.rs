@@ -48,6 +48,7 @@ pub enum Provider {
     Minimax,
     Gemini,
     OpenCode,
+    Codex,
 }
 
 impl Provider {
@@ -58,6 +59,7 @@ impl Provider {
             Provider::Minimax,
             Provider::Gemini,
             Provider::OpenCode,
+            Provider::Codex,
         ]
     }
 
@@ -68,6 +70,7 @@ impl Provider {
             "minimax" => Provider::Minimax,
             "gemini" => Provider::Gemini,
             "opencode" => Provider::OpenCode,
+            "codex" => Provider::Codex,
             _ => Provider::Anthropic,
         }
     }
@@ -81,6 +84,7 @@ impl Provider {
             Provider::Minimax => &adapters::MINIMAX,
             Provider::Gemini => &adapters::GEMINI,
             Provider::OpenCode => &adapters::OPENCODE,
+            Provider::Codex => &adapters::CODEX,
         }
     }
 }
@@ -92,6 +96,7 @@ impl std::fmt::Display for Provider {
             Provider::Minimax => write!(f, "minimax"),
             Provider::Gemini => write!(f, "gemini"),
             Provider::OpenCode => write!(f, "opencode"),
+            Provider::Codex => write!(f, "codex"),
         }
     }
 }
@@ -312,6 +317,7 @@ mod tests {
         assert_eq!(Provider::Minimax.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
         assert_eq!(Provider::Gemini.adapter().spawn_recipe(Platform::Windows).binary, "gemini");
         assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
+        assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows).binary, "codex");
     }
 
     #[test]
@@ -326,6 +332,7 @@ mod tests {
         assert!(Provider::Minimax.adapter().supports_resume());
         assert!(!Provider::Gemini.adapter().supports_resume());
         assert!(!Provider::OpenCode.adapter().supports_resume());
+        assert!(Provider::Codex.adapter().supports_resume());
     }
 
     #[test]
@@ -353,6 +360,40 @@ mod tests {
         assert_eq!(format!("{}", Provider::Minimax), "minimax");
         assert_eq!(format!("{}", Provider::Gemini), "gemini");
         assert_eq!(format!("{}", Provider::OpenCode), "opencode");
+        assert_eq!(format!("{}", Provider::Codex), "codex");
+    }
+
+    #[test]
+    fn codex_uses_subcommand_resume_recipe() {
+        use crate::agent::provider::Platform;
+        let adapter = Provider::Codex.adapter();
+        let resume = adapter.spawn_recipe_for_resume(Platform::Macos, "abc-123");
+        assert!(resume.is_some());
+        let recipe = resume.unwrap();
+        assert_eq!(recipe.binary, "codex");
+        assert_eq!(recipe.base_args[0], "resume");
+        assert_eq!(recipe.base_args[1], "abc-123");
+    }
+
+    #[test]
+    fn codex_self_assigns_session_ids() {
+        let adapter = Provider::Codex.adapter();
+        assert!(adapter.self_assigns_session_id());
+        assert!(adapter.session_assign_args("test-id").is_empty());
+        assert!(adapter.resume_args("test-id").is_empty());
+    }
+
+    #[test]
+    fn other_providers_do_not_self_assign() {
+        assert!(!Provider::Anthropic.adapter().self_assigns_session_id());
+        assert!(!Provider::Minimax.adapter().self_assigns_session_id());
+    }
+
+    #[test]
+    fn codex_prefill_is_positional() {
+        let adapter = Provider::Codex.adapter();
+        let args = adapter.prefill_args("fix the auth bug");
+        assert_eq!(args, vec!["fix the auth bug"]);
     }
 
     #[test]
