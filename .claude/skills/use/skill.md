@@ -7,27 +7,25 @@ description: Launch Buildmesh exe and monitor its debug log output in this sessi
 
 ## When to use
 
-The user says "run /use" — activate this skill.
+The user says "run /use" — activate this skill. This is the **human-in-the-loop** launch-and-watch path; for autonomous pass/fail verification of a change, use `/verify` instead.
 
 ## What to do
 
 ### Step 1: Build and launch
 
-Run the deterministic script:
+Run the deterministic launch script for the host platform:
 
-```bash
-./scripts/run.sh
-```
+- **Windows (default for this project):** `pwsh -File scripts\run.ps1` (or `powershell.exe -File scripts\run.ps1`)
+- **macOS / Linux:** `./scripts/run.sh`
 
-This handles: kill existing → build → launch raw binary → verify startup. If it exits non-zero, report the error and stop.
+Each script handles: kill existing → build → launch raw binary → verify startup. If it exits non-zero, report the error and stop.
 
 ### Step 2: Start log monitor
 
-Once the script confirms success, tail the log:
+Once the script confirms success, tail the log for the host platform:
 
-```bash
-tail -f "$HOME/Library/Application Support/com.alond.buildmesh/logs/buildmesh.log"
-```
+- **Windows:** `Get-Content "$env:APPDATA\com.alond.buildmesh\logs\buildmesh.log" -Wait -Tail 0`
+- **macOS:** `tail -f "$HOME/Library/Application Support/com.alond.buildmesh/logs/buildmesh.log"`
 
 Run this as a background task. Filter for: `ERROR`, `error`, `failed`, `Failed`, `WARN`, `warn`.
 
@@ -37,8 +35,8 @@ Show PID and confirm log monitor is active.
 
 ## Log file location
 
-- **macOS:** `~/Library/Application Support/com.alond.buildmesh/logs/buildmesh.log`
 - **Windows:** `%APPDATA%\com.alond.buildmesh\logs\buildmesh.log`
+- **macOS:** `~/Library/Application Support/com.alond.buildmesh/logs/buildmesh.log`
 
 ## Important
 

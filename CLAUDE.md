@@ -34,6 +34,10 @@ Single-window desktop app with a **sidebar** for navigation and a **Session View
 
 ## Agent skills
 
+### Verification
+
+Autonomous pass/fail check for code changes — tiered build/lint/test/launch/log-scan loop with self-improving recipes. Invoke with `/verify` (default `standard`), `/verify quick`, `/verify full`, or `/verify --escalate`. Distinct from `/use`, which is a human-in-the-loop launch-and-watch. See `.claude/skills/verify/skill.md`.
+
 ### Issue tracker
 
 GitHub Issues in `alondero/buildmesh`. See `docs/agents/issue-tracker.md`.
