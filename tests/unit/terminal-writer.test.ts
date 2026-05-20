@@ -136,6 +136,30 @@ describe('TerminalWriter', () => {
     });
   });
 
+  describe('default scheduler', () => {
+    it('default scheduler does not throw when invoked through a method call', () => {
+      // Regression: the default scheduler used to be `requestAnimationFrame` directly,
+      // which in Chromium/WebView2 throws "Illegal invocation" when called as
+      // `this.scheduler(cb)` because `this` is no longer `window`. The default must
+      // therefore be a wrapper that calls requestAnimationFrame with the correct
+      // receiver — exercising the default here would have caught the production bug
+      // that silently dropped all PTY output.
+      const fakeRaf = vi.fn((cb: () => void) => { cb(); return 0; });
+      vi.stubGlobal('requestAnimationFrame', fakeRaf);
+      try {
+        const defaultWriter = new TerminalWriter();
+        const writeFn = vi.fn();
+        defaultWriter.register(1, writeFn);
+        expect(() => defaultWriter.append(1, 'x')).not.toThrow();
+        expect(fakeRaf).toHaveBeenCalledTimes(1);
+        // The fake raf invoked the callback synchronously, so the write should have flushed.
+        expect(writeFn).toHaveBeenCalledWith('x');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
   describe('pendingBytes', () => {
     it('returns 0 for unknown node', () => {
       expect(writer.pendingBytes(999)).toBe(0);
