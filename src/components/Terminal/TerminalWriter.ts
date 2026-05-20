@@ -11,7 +11,7 @@ export class TerminalWriter {
   private writeFns = new Map<number, WriteFn>();
   private scheduler: SchedulerFn;
 
-  constructor(scheduler: SchedulerFn = requestAnimationFrame) {
+  constructor(scheduler: SchedulerFn = (cb) => requestAnimationFrame(cb)) {
     this.scheduler = scheduler;
   }
 
