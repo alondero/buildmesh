@@ -377,6 +377,9 @@ pub async fn spawn_agent_inner(
 
         let host_path = std::path::Path::new(&resolved.host_path);
         if !host_path.exists() {
+            let root = node.path.clone();
+            tokio::task::spawn_blocking(move || env::fetch_origin(&root)).await.ok();
+
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
             if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode)
             {
