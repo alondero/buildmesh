@@ -21,13 +21,11 @@ use portable_pty::CommandBuilder;
 /// through unchanged, which is essential when prefill text from GitHub issues
 /// contains code snippets with these characters.
 fn encode_for_powershell(cmd: &str) -> String {
-    use std::io::Write;
-    // PowerShell expects UTF-16LE with a BOM (byte order mark)
-    let mut le_bytes = Vec::with_capacity(cmd.len() * 2 + 2);
-    // UTF-16LE BOM
-    le_bytes.write_all(&[0xFE, 0xFF]).unwrap();
+    // PowerShell -EncodedCommand expects Base64 of raw UTF-16LE bytes, no BOM.
+    // A BOM gets decoded as a leading U+FEFF/U+FFFE code unit and breaks parsing.
+    let mut le_bytes = Vec::with_capacity(cmd.len() * 2);
     for c in cmd.encode_utf16() {
-        le_bytes.write_all(&c.to_le_bytes()).unwrap();
+        le_bytes.extend_from_slice(&c.to_le_bytes());
     }
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(&le_bytes)
@@ -93,4 +91,32 @@ pub fn wrap(
     pty::strip_git_env_vars(&mut cmd);
 
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_for_powershell;
+    use base64::Engine;
+
+    /// PowerShell's -EncodedCommand expects Base64 of UTF-16LE bytes with NO BOM.
+    /// A BOM (or worse, the wrong-endian BOM) prepends a U+FEFF/U+FFFE code unit to
+    /// the decoded command and breaks every Windows PowerShell spawn.
+    #[test]
+    fn encode_for_powershell_produces_no_bom_utf16le() {
+        let encoded = encode_for_powershell("echo hi");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("valid base64");
+
+        // First two bytes must be the UTF-16LE encoding of 'e' (0x65 0x00), not a BOM.
+        assert_eq!(&bytes[..2], &[0x65, 0x00], "leading bytes should be 'e' as UTF-16LE, not a BOM");
+
+        // Round-trip: decode the UTF-16LE bytes back to a string.
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let decoded = String::from_utf16(&units).expect("valid utf-16");
+        assert_eq!(decoded, "echo hi");
+    }
 }
