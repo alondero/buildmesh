@@ -393,6 +393,27 @@ fn prune_stale_worktrees(repo: &git2::Repository) {
     }
 }
 
+/// Fetch from `origin` so remote-tracking refs (e.g. origin/main) are current.
+/// Best-effort: logs a warning on failure but never propagates errors.
+pub fn fetch_origin(project_root: &str) {
+    let host_root = to_host_path(project_root);
+    tracing::info!("fetch_origin: running git fetch origin in {}", host_root);
+    match command_no_window("git")
+        .args(["fetch", "origin"])
+        .current_dir(&host_root)
+        .output()
+    {
+        Ok(output) if !output.status.success() => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("fetch_origin: git fetch origin failed (non-fatal): {}", stderr);
+        }
+        Err(e) => {
+            tracing::warn!("fetch_origin: failed to run git fetch (non-fatal): {}", e);
+        }
+        _ => {}
+    }
+}
+
 /// Create a new Git worktree at the specified path and honor .worktreeinclude.
 pub fn create_git_worktree(
     project_root: &str,
