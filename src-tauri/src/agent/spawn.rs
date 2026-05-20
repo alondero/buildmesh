@@ -58,37 +58,47 @@ pub fn build_spawn_command(
     prefill: Option<&str>,
 ) -> CommandBuilder {
     let adapter = provider_enum.adapter();
-    let mut recipe = adapter.spawn_recipe(Platform::current());
+    let platform = Platform::current();
 
-    match session_id_mode {
-        SessionIdMode::Assign(id) => {
-            tracing::info!("spawn_agent: assigning session-id {}", id);
-            recipe.base_args.push("--session-id".to_string());
-            recipe.base_args.push(id.clone());
-        }
+    let mut recipe = match session_id_mode {
         SessionIdMode::Resume(id) => {
-            tracing::info!("spawn_agent: resuming session {}", id);
-            recipe.base_args.push("--resume".to_string());
-            recipe.base_args.push(id.clone());
+            if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(platform, id) {
+                tracing::info!("spawn_agent: using resume recipe for session {}", id);
+                resume_recipe
+            } else {
+                let mut r = adapter.spawn_recipe(platform);
+                let args = adapter.resume_args(id);
+                if !args.is_empty() {
+                    tracing::info!("spawn_agent: resuming session {}", id);
+                    r.base_args.extend(args);
+                }
+                r
+            }
         }
-        SessionIdMode::None => {}
-    }
+        SessionIdMode::Assign(id) => {
+            let mut r = adapter.spawn_recipe(platform);
+            let args = adapter.session_assign_args(id);
+            if !args.is_empty() {
+                tracing::info!("spawn_agent: assigning session-id {}", id);
+                r.base_args.extend(args);
+            }
+            r
+        }
+        SessionIdMode::None => adapter.spawn_recipe(platform),
+    };
 
     if adapter.supports_model_override() {
         if let Some(model) = model_override.filter(|s| !s.is_empty()) {
-            recipe.base_args.push("--model".to_string());
-            recipe.base_args.push(model.to_string());
+            recipe.base_args.extend(adapter.model_args(model));
         }
         if let Some(effort) = effort_override.filter(|s| !s.is_empty()) {
-            recipe.base_args.push("--effort".to_string());
-            recipe.base_args.push(effort.to_string());
+            recipe.base_args.extend(adapter.effort_args(effort));
         }
     }
 
     if adapter.supports_prefill() {
         if let Some(text) = prefill.filter(|s| !s.is_empty()) {
-            recipe.base_args.push("--prefill".to_string());
-            recipe.base_args.push(text.to_string());
+            recipe.base_args.extend(adapter.prefill_args(text));
         }
     }
 
@@ -189,12 +199,14 @@ fn register_agent(
 fn start_reader(
     app: tauri::AppHandle,
     session_id: i64,
+    needs_session_capture: bool,
     reader: Box<dyn std::io::Read + Send>,
     spawned_at: std::time::Instant,
     reader_alive: Arc<AtomicBool>,
 ) {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
+    let session_captured = AtomicBool::new(!needs_session_capture);
 
     std::thread::spawn(move || {
         let mut r = reader;
@@ -209,6 +221,14 @@ fn start_reader(
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
 
                     crate::session_naming::on_output(session_id, &data);
+
+                    if !session_captured.load(Ordering::Relaxed) {
+                        if let Some(uuid) = crate::session_capture::try_extract_session_id(&data) {
+                            let _ = db::update_cli_session_id(session_id, uuid);
+                            session_captured.store(true, Ordering::Relaxed);
+                            tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
+                        }
+                    }
 
                     let _ = app_clone.emit(
                         "agent-output",
@@ -300,10 +320,14 @@ pub async fn spawn_agent_inner(
         match resume {
             Some(ref id) if !id.is_empty() => SessionIdMode::Resume(id.clone()),
             _ => {
-                let cli_uuid = uuid::Uuid::new_v4().to_string();
-                db::update_cli_session_id(session_id, &cli_uuid).map_err(|e| e.to_string())?;
-                tracing::info!("spawn_agent_inner: assigned cli_session_id={}", cli_uuid);
-                SessionIdMode::Assign(cli_uuid)
+                if adapter.self_assigns_session_id() {
+                    SessionIdMode::None
+                } else {
+                    let cli_uuid = uuid::Uuid::new_v4().to_string();
+                    db::update_cli_session_id(session_id, &cli_uuid).map_err(|e| e.to_string())?;
+                    tracing::info!("spawn_agent_inner: assigned cli_session_id={}", cli_uuid);
+                    SessionIdMode::Assign(cli_uuid)
+                }
             }
         }
     } else {
@@ -416,7 +440,8 @@ pub async fn spawn_agent_inner(
     let spawned_at = std::time::Instant::now();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     crate::http_server::ensure_pty_channel(session_id);
-    start_reader(app.clone(), session_id, reader, spawned_at, reader_alive);
+    let needs_session_capture = adapter.self_assigns_session_id() && node.cli_session_id.is_none();
+    start_reader(app.clone(), session_id, needs_session_capture, reader, spawned_at, reader_alive);
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
