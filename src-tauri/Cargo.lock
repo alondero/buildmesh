@@ -363,6 +363,7 @@ name = "buildmesh"
 version = "0.1.0"
 dependencies = [
  "backtrace",
+ "base64 0.22.1",
  "chrono",
  "difference-rs",
  "futures-util",
