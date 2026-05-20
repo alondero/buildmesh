@@ -16,6 +16,28 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
+use crate::models::AgentNode;
+
+// ---------------------------------------------------------------------------
+// Repository trait — abstracts DB calls for testability
+// ---------------------------------------------------------------------------
+
+pub(crate) trait SessionNamingRepository: Send + Sync {
+    fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String>;
+    fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String>;
+}
+
+pub(crate) struct DbSessionNamingRepository;
+
+impl SessionNamingRepository for DbSessionNamingRepository {
+    fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String> {
+        crate::db::get_agent_node_by_id(id).map_err(|e| e.to_string())
+    }
+    fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String> {
+        crate::db::update_agent_node_name(id, name).map_err(|e| e.to_string())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Random name generation (word lists + combinatorics)
 // ---------------------------------------------------------------------------
@@ -113,99 +135,96 @@ pub fn on_output(node_id: i64, data: &str) {
     }
 }
 
-/// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
-pub fn on_turn(node_id: i64, app: AppHandle) {
-    // Check DB: if node already has a non-default name, skip entirely.
-    // This handles nodes renamed in a previous app run (cross-process detection).
-    if let Ok(node) = crate::db::get_agent_node_by_id(node_id) {
+/// Testable core: checks whether rename should trigger, returns the buffer if so.
+fn should_trigger_rename(
+    repo: &dyn SessionNamingRepository,
+    node_id: i64,
+) -> Option<String> {
+    if let Ok(node) = repo.get_agent_node_by_id(node_id) {
         if !is_default_name(&node.name) {
             SESSION_BUFFERS.lock().unwrap().remove(&node_id);
-            return;
+            return None;
         }
     }
 
-    // Skip if max attempts exhausted for this node (check before buffer work)
     {
         let attempts = RENAME_ATTEMPTS.lock().unwrap();
         if attempts.get(&node_id).copied().unwrap_or(0) >= MAX_RENAME_ATTEMPTS {
             tracing::debug!("on_turn({}): max rename attempts reached, giving up", node_id);
             clear_node_state(node_id);
-            return;
+            return None;
         }
     }
 
-    // Check buffer existence and sufficiency BEFORE removing (avoid unnecessary I/O).
-    let buffer_len = {
+    let buffer = {
         let buffers = SESSION_BUFFERS.lock().unwrap();
-        buffers.get(&node_id).map(|b| b.len()).unwrap_or(0)
+        let b = buffers.get(&node_id)?;
+        if b.len() < SUMMARIZE_BUFFER_CHARS / 2 {
+            return None;
+        }
+        b.clone()
     };
 
-    if buffer_len == 0 {
-        return;
-    }
-
-    if buffer_len < SUMMARIZE_BUFFER_CHARS / 2 {
-        return;
-    }
-
-    let buffer_content = {
-        let buffers = SESSION_BUFFERS.lock().unwrap();
-        buffers.get(&node_id).cloned()
-    };
-
-    let Some(buffer) = buffer_content else {
-        return;
-    };
-
-    // Skip if a rename is already in-flight for this node
     {
         let mut in_progress = RENAMING_IN_PROGRESS.lock().unwrap();
         if in_progress.contains(&node_id) {
             tracing::debug!("on_turn({}): rename already in progress, skipping", node_id);
-            return;
+            return None;
         }
         in_progress.insert(node_id);
     }
 
+    Some(buffer)
+}
+
+/// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
+pub fn on_turn(node_id: i64, app: AppHandle) {
+    on_turn_with(&DbSessionNamingRepository, node_id, app);
+}
+
+fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle) {
+    let Some(buffer) = should_trigger_rename(repo, node_id) else {
+        return;
+    };
+
     tracing::info!("session_naming: triggering rename for node {} ({} chars)", node_id, buffer.len());
 
-    let node_id_for_task = node_id;
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
-        match summarize_and_rename(node_id_for_task, &buffer).await {
+        match summarize_and_rename_with(&DbSessionNamingRepository, node_id, &buffer).await {
             Ok(slug) => {
-                clear_node_state(node_id_for_task);
+                clear_node_state(node_id);
                 let _ = app_for_task.emit(
                     "session-renamed",
                     serde_json::json!({
-                        "session_id": node_id_for_task,
+                        "session_id": node_id,
                         "name": slug
                     }),
                 );
-                tracing::info!("Node {} renamed to '{}'", node_id_for_task, slug);
+                tracing::info!("Node {} renamed to '{}'", node_id, slug);
             }
             Err(e) => {
                 let attempt = {
                     let mut attempts = RENAME_ATTEMPTS.lock().unwrap();
-                    let count = attempts.entry(node_id_for_task).or_insert(0);
+                    let count = attempts.entry(node_id).or_insert(0);
                     *count += 1;
                     *count
                 };
                 if attempt >= MAX_RENAME_ATTEMPTS {
                     tracing::warn!(
                         "Node {} giving up on rename after {} attempts (last error: {})",
-                        node_id_for_task, attempt, e
+                        node_id, attempt, e
                     );
-                    SESSION_BUFFERS.lock().unwrap().remove(&node_id_for_task);
+                    SESSION_BUFFERS.lock().unwrap().remove(&node_id);
                 } else {
                     tracing::warn!(
                         "Node {} rename attempt {}/{} failed (buffer preserved for retry): {}",
-                        node_id_for_task, attempt, MAX_RENAME_ATTEMPTS, e
+                        node_id, attempt, MAX_RENAME_ATTEMPTS, e
                     );
                 }
             }
         }
-        RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id_for_task);
+        RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id);
     });
 }
 
@@ -248,7 +267,11 @@ pub fn buffers_size_bytes() -> usize {
 // Internal: LLM-based summarization
 // ---------------------------------------------------------------------------
 
-async fn summarize_and_rename(node_id: i64, buffer: &str) -> Result<String, String> {
+async fn summarize_and_rename_with(
+    repo: &dyn SessionNamingRepository,
+    node_id: i64,
+    buffer: &str,
+) -> Result<String, String> {
     let clean_buffer = ANSI_ESCAPE.replace_all(buffer, "").to_string();
 
     let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.";
@@ -305,7 +328,7 @@ async fn summarize_and_rename(node_id: i64, buffer: &str) -> Result<String, Stri
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let slug = slug_with_retry(&raw)?;
-    crate::db::update_agent_node_name(node_id, &slug).map_err(|e| e.to_string())?;
+    repo.update_agent_node_name(node_id, &slug)?;
     Ok(slug)
 }
 
@@ -462,7 +485,6 @@ mod tests {
 
     #[test]
     fn slug_with_retry_does_not_flag_short_non_slug_as_conversational() {
-        // Short responses without conversational markers should get the token count error
         let err = slug_with_retry("pond").unwrap_err();
         assert!(err.contains("dash-separated tokens"));
     }
@@ -543,7 +565,6 @@ mod tests {
 
     #[test]
     fn on_output_always_buffers_for_default_name_nodes() {
-        // on_output should buffer unconditionally — no RENAMED_SESSIONS guard
         on_output(42, "first output");
         on_output(42, "second output");
 
@@ -565,5 +586,120 @@ mod tests {
         let buffers = SESSION_BUFFERS.lock().unwrap();
         assert!(buffers.get(&5).is_none());
         assert!(buffers.get(&99).is_some());
+    }
+
+    // --- SessionNamingRepository mock tests ---
+
+    struct MockRepo {
+        node_name: String,
+        should_fail: bool,
+        updates: std::sync::Mutex<Vec<(i64, String)>>,
+    }
+
+    impl MockRepo {
+        fn with_name(name: &str) -> Self {
+            Self {
+                node_name: name.to_string(),
+                should_fail: false,
+                updates: std::sync::Mutex::new(vec![]),
+            }
+        }
+    }
+
+    impl SessionNamingRepository for MockRepo {
+        fn get_agent_node_by_id(&self, id: i64) -> Result<AgentNode, String> {
+            if self.should_fail {
+                return Err("mock db error".into());
+            }
+            Ok(AgentNode {
+                id,
+                mesh_id: 1,
+                name: self.node_name.clone(),
+                path: "/tmp/test".to_string(),
+                branch: "main".to_string(),
+                env: crate::models::EnvType::Windows,
+                provider: crate::models::Provider::Anthropic,
+                status: crate::models::SessionStatus::Running,
+                cli_session_id: None,
+                worktree_name: None,
+                use_worktree: false,
+                source_issue: None,
+                created_at: chrono::Utc::now(),
+            })
+        }
+        fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String> {
+            self.updates.lock().unwrap().push((id, name.to_string()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn should_trigger_rename_skips_already_renamed_node() {
+        let node_id = 70001;
+        on_output(node_id, &"x".repeat(2000));
+
+        let repo = MockRepo::with_name("fix-auth-token-refresh");
+        let result = should_trigger_rename(&repo, node_id);
+        assert!(result.is_none(), "should skip node with custom name");
+
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        assert!(buffers.get(&node_id).is_none(), "buffer should be cleared");
+    }
+
+    #[test]
+    fn should_trigger_rename_returns_buffer_for_default_name() {
+        let node_id = 70002;
+        on_output(node_id, &"x".repeat(2000));
+
+        let repo = MockRepo::with_name("bold-keen-brook");
+        let result = should_trigger_rename(&repo, node_id);
+        assert!(result.is_some(), "should trigger for default-named node");
+        assert_eq!(result.unwrap().len(), 2000);
+
+        RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id);
+    }
+
+    #[test]
+    fn should_trigger_rename_skips_insufficient_buffer() {
+        let node_id = 70003;
+        on_output(node_id, "short");
+
+        let repo = MockRepo::with_name("bold-keen-brook");
+        let result = should_trigger_rename(&repo, node_id);
+        assert!(result.is_none(), "should skip when buffer too small");
+    }
+
+    #[test]
+    fn should_trigger_rename_skips_when_already_in_progress() {
+        let node_id = 70004;
+        on_output(node_id, &"x".repeat(2000));
+        RENAMING_IN_PROGRESS.lock().unwrap().insert(node_id);
+
+        let repo = MockRepo::with_name("bold-keen-brook");
+        let result = should_trigger_rename(&repo, node_id);
+        assert!(result.is_none(), "should skip when rename in progress");
+
+        RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id);
+    }
+
+    #[test]
+    fn should_trigger_rename_skips_when_max_attempts_reached() {
+        let node_id = 70005;
+        on_output(node_id, &"x".repeat(2000));
+        RENAME_ATTEMPTS.lock().unwrap().insert(node_id, MAX_RENAME_ATTEMPTS);
+
+        let repo = MockRepo::with_name("bold-keen-brook");
+        let result = should_trigger_rename(&repo, node_id);
+        assert!(result.is_none(), "should skip when max attempts reached");
+
+        RENAME_ATTEMPTS.lock().unwrap().remove(&node_id);
+    }
+
+    #[test]
+    fn mock_repo_update_records_calls() {
+        let repo = MockRepo::with_name("bold-keen-brook");
+        repo.update_agent_node_name(42, "test-slug-name").unwrap();
+        let calls = repo.updates.lock().unwrap();
+        assert_eq!(calls[0], (42, "test-slug-name".to_string()));
     }
 }
