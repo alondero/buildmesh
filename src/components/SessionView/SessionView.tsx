@@ -2,19 +2,16 @@ import { Fragment, useEffect, useMemo, useState, useRef, type MouseEvent as Reac
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
-import { AgentTerminal } from '../Terminal/Terminal';
+import { AgentTerminal, terminalManager } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { FileExplorerPanel } from '../FileTree/FileExplorerPanel';
 import { watchSession, unwatchSession } from '../../lib/tauri';
-import { terminalManager } from '../Terminal/Terminal';
 import { GridNodeHeader } from './GridNodeHeader';
+import { GridSplitter } from './GridSplitter';
+import { equalSizes } from '../../hooks/useGridLayout';
 
 const MIN_PANE_PERCENT = 15;
 const RESIZE_HANDLE_WIDTH = 4;
-
-function equalWidths(n: number): number[] {
-  return Array.from({ length: n }, () => 100 / n);
-}
 
 interface ResizablePanesProps {
   nodes: AgentNode[];
@@ -24,7 +21,7 @@ interface ResizablePanesProps {
 }
 
 function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: ResizablePanesProps) {
-  const [widths, setWidths] = useState(() => equalWidths(nodes.length));
+  const [widths, setWidths] = useState(() => equalSizes(nodes.length));
   const resizingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthsRef = useRef<number[]>([]);
@@ -32,7 +29,7 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
   const containerRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    setWidths(equalWidths(nodes.length));
+    setWidths(equalSizes(nodes.length));
   }, [nodes.length]);
 
   const handleResizeMouseDown = (e: ReactMouseEvent, index: number) => {
@@ -233,8 +230,15 @@ export function SessionView() {
                 <p className="text-sm">Select a node to start managing your agents</p>
               </div>
             </div>
-          ) : (
+          ) : filteredNodes.length <= 2 ? (
             <ResizablePanes
+              nodes={filteredNodes}
+              onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
+              buildRunOpen={openBuildRun}
+              setBuildRunOpen={setOpenBuildRun}
+            />
+          ) : (
+            <GridSplitter
               nodes={filteredNodes}
               onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
               buildRunOpen={openBuildRun}
