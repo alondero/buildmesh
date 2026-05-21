@@ -5,6 +5,7 @@ mod agent;
 mod commands;
 mod db;
 mod env;
+mod http;
 mod http_server;
 mod models;
 pub mod process_util;
