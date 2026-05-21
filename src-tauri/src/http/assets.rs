@@ -31,9 +31,14 @@ pub async fn serve_mobile_root(
 /// Serve the new mobile SPA at `/v2`. `path_without_query` is the full request
 /// path (e.g. `/v2`, `/v2/`, `/v2/assets/foo.js`); we strip the prefix and
 /// look it up against the embedded asset list. Empty path → `index.html`.
+///
+/// `extra_header` lets the dispatcher inject a `Set-Cookie` line when the
+/// caller authenticated via `?token=` so subsequent fetches use the cookie.
+/// Each extra line MUST end with `\r\n`.
 pub async fn serve_v2(
     lines: &mut tokio::io::BufStream<TcpStream>,
     path_without_query: &str,
+    extra_header: Option<&str>,
 ) -> std::io::Result<()> {
     let relative = path_without_query
         .strip_prefix("/v2")
@@ -56,10 +61,12 @@ pub async fn serve_v2(
     };
 
     let mime = mime_for(asset_path);
+    let extra = extra_header.unwrap_or("");
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{}\r\n",
         mime,
-        file.data.len()
+        file.data.len(),
+        extra
     );
     let stream = lines.get_mut();
     stream.write_all(headers.as_bytes()).await?;

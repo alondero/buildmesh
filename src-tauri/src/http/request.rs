@@ -23,6 +23,43 @@ pub fn validate_token(token: Option<String>) -> bool {
     }
 }
 
+/// Extract `bm_session=<token>` from the `Cookie:` header. The cookie is
+/// set on the initial `/v2?token=...` load so subsequent fetches and the
+/// WebSocket upgrade can authenticate without keeping the token in URLs.
+pub fn extract_token_from_cookies(headers: &str) -> Option<String> {
+    let header = extract_header_value(headers, "Cookie")?;
+    for pair in header.split(';') {
+        let pair = pair.trim();
+        if let Some(value) = pair.strip_prefix("bm_session=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Authenticate a request via either the `bm_session` cookie or the
+/// `?token=` URL parameter. The cookie wins when both are present so a
+/// stale URL token can't override a fresh session.
+pub fn authenticate(headers: &str, url_token: Option<String>) -> bool {
+    if validate_token(extract_token_from_cookies(headers)) {
+        return true;
+    }
+    validate_token(url_token)
+}
+
+/// Header value attached to the initial `/v2` response after a successful
+/// `?token=` validation. HttpOnly so JS can't read it; SameSite=Lax for the
+/// cross-origin POSTs we don't make. Path=/ so it travels with API calls and
+/// the WebSocket upgrade.
+pub fn session_cookie_header(token: &str) -> String {
+    // Cookie value is just the raw token — the server validates it the same
+    // way as a `?token=` URL param. No `Secure` flag: this is HTTP only.
+    format!(
+        "Set-Cookie: bm_session={}; HttpOnly; SameSite=Lax; Path=/",
+        token
+    )
+}
+
 pub fn extract_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
     let name_bytes = name.as_bytes();
     headers
@@ -110,6 +147,40 @@ mod tests {
     #[test]
     fn validate_token_rejects_none() {
         assert!(!validate_token(None));
+    }
+
+    #[test]
+    fn extract_token_from_single_cookie() {
+        let headers = "Host: localhost\r\nCookie: bm_session=abc123\r\n";
+        assert_eq!(extract_token_from_cookies(headers), Some("abc123".into()));
+    }
+
+    #[test]
+    fn extract_token_from_cookie_with_others() {
+        let headers =
+            "Host: localhost\r\nCookie: foo=bar; bm_session=secret; baz=qux\r\n";
+        assert_eq!(extract_token_from_cookies(headers), Some("secret".into()));
+    }
+
+    #[test]
+    fn extract_token_from_cookies_returns_none_when_missing() {
+        let headers = "Host: localhost\r\nCookie: foo=bar\r\n";
+        assert_eq!(extract_token_from_cookies(headers), None);
+    }
+
+    #[test]
+    fn extract_token_from_cookies_returns_none_when_no_cookie_header() {
+        let headers = "Host: localhost\r\n";
+        assert_eq!(extract_token_from_cookies(headers), None);
+    }
+
+    #[test]
+    fn session_cookie_header_is_set_cookie() {
+        let header = session_cookie_header("deadbeef");
+        assert!(header.starts_with("Set-Cookie: bm_session=deadbeef"));
+        assert!(header.contains("HttpOnly"));
+        assert!(header.contains("SameSite=Lax"));
+        assert!(header.contains("Path=/"));
     }
 
     #[test]

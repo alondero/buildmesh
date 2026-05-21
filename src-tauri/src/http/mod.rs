@@ -173,6 +173,9 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
     }
 
     // WebSocket upgrade: GET /ws/terminal/{nodeId}?token=xxx
+    // Accepts either the bm_session cookie or the ?token= URL param —
+    // some proxies strip cookies on the WS handshake, so URL tokens stay
+    // a supported fallback even after stage 3's cookie migration.
     if method == "GET" && path_with_query.starts_with("/ws/terminal/") {
         let node_id: Option<i64> = path_with_query
             .split('/')
@@ -184,7 +187,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             return;
         };
 
-        if !request::validate_token(token) {
+        if !request::authenticate(&headers, token) {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
         }
@@ -233,7 +236,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
 
     // POST /api/nodes/create
     if method == "POST" && path_without_query == "/api/nodes/create" {
-        if !request::validate_token(token) {
+        if !request::authenticate(&headers, token) {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
         }
@@ -245,20 +248,32 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
     }
 
     // GET /v2[/...] — new mobile SPA served from the rust-embed bundle.
-    // Same auth as the legacy `/` for now (root token); cookie migration
-    // lands in stage 3.
+    // On the initial load with a valid `?token=`, we issue an HttpOnly
+    // bm_session cookie so subsequent fetches and the WebSocket upgrade
+    // authenticate without keeping the token in URLs.
     if method == "GET" && (path_without_query == "/v2" || path_without_query.starts_with("/v2/")) {
-        if !request::validate_token(token) {
+        let cookie_valid = request::validate_token(request::extract_token_from_cookies(&headers));
+        let url_token_valid = request::validate_token(token.clone());
+        if !cookie_valid && !url_token_valid {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
         }
-        let _ = assets::serve_v2(&mut lines, &path_without_query).await;
+        let set_cookie = if url_token_valid && !cookie_valid {
+            token.as_deref().map(request::session_cookie_header)
+        } else {
+            None
+        };
+        let extra = set_cookie.as_ref().map(|h| {
+            // assets::serve_v2 expects each extra header line to end with \r\n
+            format!("{}\r\n", h)
+        });
+        let _ = assets::serve_v2(&mut lines, &path_without_query, extra.as_deref()).await;
         return;
     }
 
     // GET /api/*
     if method == "GET" && path_without_query.starts_with("/api/") {
-        if !request::validate_token(token) {
+        if !request::authenticate(&headers, token) {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
         }
@@ -272,8 +287,8 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         return;
     }
 
-    // Default: serve the mobile HTML root.
-    if !request::validate_token(token) {
+    // Default: serve the legacy mobile HTML root.
+    if !request::authenticate(&headers, token) {
         let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
         return;
     }
