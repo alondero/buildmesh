@@ -9,6 +9,15 @@ fn main() {
 
     println!("cargo:rustc-env=GIT_SHA={}", git_sha);
 
+    // rust-embed for the mobile bundle resolves its `folder` path at
+    // compile time. Make sure the directory exists even on a fresh
+    // checkout where `npm run build` has not yet run, so cargo build
+    // never fails on a missing path.
+    let mobile_dist = std::path::Path::new("../dist/mobile");
+    if !mobile_dist.exists() {
+        let _ = std::fs::create_dir_all(mobile_dist);
+    }
+
     // Windows test binary lacks the comctl32 v6 manifest that tauri-build
     // embeds into [[bin]] targets, so cargo test --lib exits with
     // STATUS_ENTRYPOINT_NOT_FOUND when the loader can't find

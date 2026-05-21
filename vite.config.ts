@@ -5,29 +5,42 @@ import tailwindcss from "@tailwindcss/vite";
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
-// https://vite.dev/config/
-export default defineConfig(async () => ({
-  plugins: [react(), tailwindcss()],
+// Build modes:
+//   default — desktop Tauri webview entry (index.html, base "/")
+//   mobile  — remote-access SPA served at /v2 by the embedded HTTP server
+//             (mobile/index.html, base "/v2/", output dist/mobile/)
+//
+// `npm run build` runs both back-to-back so a single build pass produces
+// everything tauri-build needs to embed.
+export default defineConfig(async ({ mode }) => {
+  const isMobile = mode === "mobile";
 
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
-  //
-  // 1. prevent Vite from obscuring rust errors
-  clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
-  server: {
-    port: 1420,
-    strictPort: true,
-    host: host || false,
-    hmr: host
+  return {
+    plugins: [react(), tailwindcss()],
+    root: isMobile ? "mobile" : undefined,
+    base: isMobile ? "/v2/" : "/",
+    build: isMobile
       ? {
-          protocol: "ws",
-          host,
-          port: 1421,
+          outDir: "../dist/mobile",
+          emptyOutDir: true,
         }
       : undefined,
-    watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+
+    clearScreen: false,
+    server: {
+      port: 1420,
+      strictPort: true,
+      host: host || false,
+      hmr: host
+        ? {
+            protocol: "ws",
+            host,
+            port: 1421,
+          }
+        : undefined,
+      watch: {
+        ignored: ["**/src-tauri/**"],
+      },
     },
-  },
-}));
+  };
+});

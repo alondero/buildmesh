@@ -244,6 +244,18 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         return;
     }
 
+    // GET /v2[/...] — new mobile SPA served from the rust-embed bundle.
+    // Same auth as the legacy `/` for now (root token); cookie migration
+    // lands in stage 3.
+    if method == "GET" && (path_without_query == "/v2" || path_without_query.starts_with("/v2/")) {
+        if !request::validate_token(token) {
+            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            return;
+        }
+        let _ = assets::serve_v2(&mut lines, &path_without_query).await;
+        return;
+    }
+
     // GET /api/*
     if method == "GET" && path_without_query.starts_with("/api/") {
         if !request::validate_token(token) {
@@ -323,6 +335,50 @@ mod tests {
     async fn attention_webhook_returns_400_for_unparseable_session_id() {
         let status = attention_post("/api/attention/not-an-int").await;
         assert_eq!(status, 400, "expected 400 for non-integer session id");
+    }
+
+    async fn get_request(path: &str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(stream, peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            path
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read(&mut buf),
+        )
+        .await
+        .expect("request hung")
+        .expect("read failed");
+
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn v2_root_returns_401_without_token() {
+        assert_eq!(get_request("/v2").await, 401);
+    }
+
+    #[tokio::test]
+    async fn v2_asset_returns_401_without_token() {
+        assert_eq!(get_request("/v2/assets/index.js").await, 401);
     }
 
     #[tokio::test]
