@@ -29,9 +29,6 @@ export const createSession = (meshId: number, name: string, path: string, branch
 export const listSessions = () =>
   invoke<AgentNode[]>('list_sessions');
 
-export const listSessionsByMesh = (meshId: number) =>
-  invoke<AgentNode[]>('list_sessions_by_mesh', { meshId });
-
 export const getSession = (sessionId: number) =>
   invoke<AgentNode>('get_session', { sessionId });
 
