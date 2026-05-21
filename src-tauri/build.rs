@@ -9,11 +9,20 @@ fn main() {
 
     println!("cargo:rustc-env=GIT_SHA={}", git_sha);
 
-    // Without this, `cargo test --lib` on Windows crashes at startup with
-    // STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) because the test binary lacks
-    // the comctl32 v6 manifest that the production exe gets from resource.lib.
-    // Delay-loading comctl32 keeps the OS loader from resolving the missing
-    // import until first use — and the lib code never actually calls it.
+    // rust-embed for the mobile bundle resolves its `folder` path at
+    // compile time. Make sure the directory exists even on a fresh
+    // checkout where `npm run build` has not yet run, so cargo build
+    // never fails on a missing path.
+    let mobile_dist = std::path::Path::new("../dist/mobile");
+    if !mobile_dist.exists() {
+        let _ = std::fs::create_dir_all(mobile_dist);
+    }
+
+    // Windows test binary lacks the comctl32 v6 manifest that tauri-build
+    // embeds into [[bin]] targets, so cargo test --lib exits with
+    // STATUS_ENTRYPOINT_NOT_FOUND when the loader can't find
+    // TaskDialogIndirect in System32's v5 comctl32. Delay-loading defers
+    // the resolution; test code never calls these APIs so the DLL never loads.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
         println!("cargo:rustc-link-lib=delayimp");
