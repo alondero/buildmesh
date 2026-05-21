@@ -25,6 +25,7 @@ pub async fn handle_post(
     };
 
     crate::commands::attention::mark_attention(session_id, app);
+    crate::http::events::emit(crate::http::events::EventMsg::AttentionNeeded { session_id });
 
     let _ = request::write_status_only(lines, "200 OK").await;
 }

@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AgentNode,
+  EventMsg,
   Mesh,
   NodeStatus,
   Provider,
   createNode,
+  eventsWsUrl,
   listMeshes,
   listNodes,
   listProviders,
@@ -62,6 +64,11 @@ export default function NodeList({
     return () => clearInterval(id);
   }, [refresh]);
 
+  // Live attention events via /ws/events. On any event, refetch so the
+  // list reflects the new status immediately rather than waiting for the
+  // 5-second poll. WS drop falls back to polling silently.
+  useWsEvents(refresh);
+
   // Lazy-load the provider list; fallback gives the user something to tap
   // even if the request 401s or the server hasn't woken up yet.
   useEffect(() => {
@@ -108,11 +115,52 @@ export default function NodeList({
     nodesByMesh.get(node.mesh_id)!.push(node);
   }
 
+  // Mobile-only QoL: pin awaiting-input nodes at the top so attention
+  // is one tap away no matter how many meshes you have configured.
+  const attentionNodes = (nodes ?? [])
+    .filter((n) => n.status === "awaiting_input")
+    .sort((a, b) => a.id - b.id);
+
   return (
     <div
       data-testid="node-list"
       style={{ flex: 1, overflowY: "auto", padding: "0 8px 8px" }}
     >
+      {attentionNodes.length > 0 && (
+        <section
+          data-testid="attention-section"
+          style={{ marginBottom: 8 }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              padding: "10px 12px 6px",
+              gap: 8,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                color: "#ff9800",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                flex: 1,
+              }}
+            >
+              Needs attention
+            </span>
+          </div>
+          {attentionNodes.map((node) => (
+            <NodeRow
+              key={`attn-${node.id}`}
+              node={node}
+              onClick={() => onOpenNode(node)}
+            />
+          ))}
+        </section>
+      )}
       {meshes.map((mesh) => {
         const meshNodes = nodesByMesh.get(mesh.id) ?? [];
         return (
@@ -513,6 +561,69 @@ function ProviderPicker({
       </div>
     </div>
   );
+}
+
+/// Open a /ws/events WebSocket and call `onEvent` for every message.
+/// Auto-reconnects with simple backoff (1/2/4/8s) — losing the events
+/// stream falls back to the 5-second poll, so an outage is invisible
+/// beyond a brief lag.
+function useWsEvents(onEvent: () => void) {
+  const onEventRef = useRef(onEvent);
+  onEventRef.current = onEvent;
+
+  useEffect(() => {
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let attempt = 0;
+
+    const connect = () => {
+      if (cancelled) return;
+      try {
+        ws = new WebSocket(eventsWsUrl());
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      ws.onopen = () => {
+        attempt = 0;
+      };
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(typeof e.data === "string" ? e.data : "") as EventMsg;
+          if (msg && (msg.type === "attention-needed" || msg.type === "attention-cleared")) {
+            onEventRef.current();
+          }
+        } catch {
+          // Ignore non-JSON frames silently.
+        }
+      };
+      ws.onclose = () => {
+        if (!cancelled) scheduleReconnect();
+      };
+      ws.onerror = () => {
+        if (!cancelled) scheduleReconnect();
+      };
+    };
+
+    const scheduleReconnect = () => {
+      const delays = [1000, 2000, 4000, 8000];
+      const delay = delays[Math.min(attempt, delays.length - 1)];
+      attempt++;
+      reconnectTimer = window.setTimeout(connect, delay);
+    };
+
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (ws) {
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
+      }
+    };
+  }, []);
 }
 
 function providerIcon(provider: string): string {

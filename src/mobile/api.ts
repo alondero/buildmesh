@@ -286,4 +286,15 @@ export function terminalWsUrl(nodeId: number): string {
   return `${proto}//${host}/ws/terminal/${nodeId}?token=${encodeURIComponent(token)}`;
 }
 
+export function eventsWsUrl(): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = window.location.host;
+  const token = readStoredToken() ?? "";
+  return `${proto}//${host}/ws/events?token=${encodeURIComponent(token)}`;
+}
+
+export type EventMsg =
+  | { type: "attention-needed"; session_id: number }
+  | { type: "attention-cleared"; session_id: number };
+
 export { ApiError };

@@ -4,6 +4,7 @@
 //! for remote access from a phone on the same network.
 
 pub mod assets;
+pub mod events;
 pub mod request;
 pub mod routes;
 pub mod ws;
@@ -230,6 +231,40 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         if headers.trim().is_empty() {
             break;
         }
+    }
+
+    // WebSocket upgrade: GET /ws/events?token=xxx — mobile event push.
+    if method == "GET"
+        && (path_with_query == "/ws/events" || path_with_query.starts_with("/ws/events?"))
+    {
+        if !request::authenticate(&headers, token) {
+            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            return;
+        }
+        let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
+            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+            return;
+        };
+        let accept_key = derive_accept_key(ws_key.as_bytes());
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Accept: {}\r\n\
+             \r\n",
+            accept_key
+        );
+        let mut stream = lines.into_inner();
+        if stream.write_all(response.as_bytes()).await.is_err() {
+            return;
+        }
+        if stream.flush().await.is_err() {
+            return;
+        }
+        let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
+        tracing::info!("/ws/events client connected");
+        tauri::async_runtime::spawn(ws::handle_events_ws_connection(ws_stream));
+        return;
     }
 
     // WebSocket upgrade: GET /ws/terminal/{nodeId}?token=xxx

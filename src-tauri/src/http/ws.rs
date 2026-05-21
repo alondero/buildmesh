@@ -18,6 +18,48 @@ use tokio_tungstenite::{tungstenite, WebSocketStream};
 use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
 use crate::db;
 
+/// Server-pushes [`super::events::EventMsg`] JSON to a connected mobile
+/// client. The client never sends anything; we ignore inbound frames
+/// other than Close.
+pub(crate) async fn handle_events_ws_connection(ws_stream: WebSocketStream<TcpStream>) {
+    let (mut write, mut read) = ws_stream.split();
+    let mut rx = super::events::subscribe();
+
+    let push_task = tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    let text = match serde_json::to_string(&msg) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if write
+                        .send(tungstenite::Message::Text(text.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // Client fell behind; drop the gap and keep going.
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(tungstenite::Message::Close(_)) | Err(_) => break,
+            _ => {}
+        }
+    }
+    push_task.abort();
+    tracing::debug!("/ws/events client disconnected");
+}
+
 pub(crate) async fn handle_ws_connection(
     ws_stream: WebSocketStream<TcpStream>,
     node_id: i64,
@@ -100,6 +142,11 @@ fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, te
                 serde_json::json!({ "session_id": node_id }),
             );
         }
+        // Also fan out to mobile event subscribers — the desktop Tauri
+        // event above only reaches the webview.
+        super::events::emit(super::events::EventMsg::AttentionCleared {
+            session_id: node_id,
+        });
     }
 }
 
