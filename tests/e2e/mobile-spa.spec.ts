@@ -1,8 +1,8 @@
 /**
- * Mobile SPA (/v2) end-to-end smoke tests.
+ * Mobile SPA end-to-end smoke tests.
  *
  * Launches the built buildmesh.exe, asks it for the root token via the
- * test server (port 1991), then loads /v2?token=... in Chromium at a
+ * test server (port 1991), then loads /?token=... in Chromium at a
  * phone-sized viewport and asserts that the Connect screen redirects
  * straight to the node list (since the URL token validates and the
  * server sets the bm_session cookie).
@@ -106,11 +106,11 @@ test.describe('mobile /v2 SPA', () => {
     expect(token).toMatch(/^[0-9a-f]{32}$/);
 
     await page.goto(
-      `http://127.0.0.1:${mobilePort}/v2?token=${encodeURIComponent(token)}`,
+      `http://127.0.0.1:${mobilePort}/?token=${encodeURIComponent(token)}`,
     );
 
     // After App.tsx replaces history, the token should no longer be in the URL.
-    await expect(page).toHaveURL(/\/v2(?:\/)?(?:#.*)?$/);
+    await expect(page).toHaveURL(/\/?$/);
 
     // The node list (empty or populated) renders, not the connect screen.
     await expect(
@@ -138,7 +138,7 @@ test.describe('mobile /v2 SPA', () => {
     const mobilePort = await findMobilePort();
     expect(mobilePort).not.toBeNull();
 
-    const r = await fetch(`http://127.0.0.1:${mobilePort}/v2`);
+    const r = await fetch(`http://127.0.0.1:${mobilePort}/`);
     expect(r.status).toBe(401);
   });
 });

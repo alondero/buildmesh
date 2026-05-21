@@ -1,57 +1,27 @@
-//! Static asset serving.
+//! Static asset serving for the mobile SPA.
 //!
-//! Two surfaces coexist during the mobile-UI refactor:
-//!   * `GET /` — legacy single-file mobile HTML (`mobile_app.html`), still
-//!     production until stage 7. Embedded via `include_str!`.
-//!   * `GET /v2[/...]` — the new buildable mobile SPA, output by Vite into
-//!     `dist/mobile/` and embedded via `rust-embed`. Empty until stage 3
-//!     starts adding screens; in dev (debug builds) files are read from
-//!     disk so frontend iteration doesn't require recompiling Rust.
+//! Single source: `dist/mobile/` built by `vite build --mode mobile` and
+//! embedded via `rust-embed` (read from disk in debug, compiled-in in
+//! release). The legacy `mobile_app.html` is gone — `GET /` now returns
+//! the SPA shell directly so the existing QR code at `http://lan-ip:1992/`
+//! keeps working unchanged.
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-const MOBILE_APP_HTML: &str = include_str!("../mobile_app.html");
-
 #[derive(rust_embed::Embed)]
 #[folder = "../dist/mobile"]
-struct MobileV2Assets;
+struct MobileAssets;
 
-pub async fn serve_mobile_root(
+/// Serve the SPA shell at `/` (or `/v2` for backward compat).
+/// `extra_header` lets the dispatcher inject a `Set-Cookie` line on the
+/// initial token-bearing request; each extra line MUST end with `\r\n`.
+pub async fn serve_spa_shell(
     lines: &mut tokio::io::BufStream<TcpStream>,
-) -> std::io::Result<()> {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
-        MOBILE_APP_HTML.len(),
-        MOBILE_APP_HTML
-    );
-    lines.get_mut().write_all(response.as_bytes()).await
-}
-
-/// Serve the new mobile SPA at `/v2`. `path_without_query` is the full request
-/// path (e.g. `/v2`, `/v2/`, `/v2/assets/foo.js`); we strip the prefix and
-/// look it up against the embedded asset list. Empty path → `index.html`.
-///
-/// `extra_header` lets the dispatcher inject a `Set-Cookie` line when the
-/// caller authenticated via `?token=` so subsequent fetches use the cookie.
-/// Each extra line MUST end with `\r\n`.
-pub async fn serve_v2(
-    lines: &mut tokio::io::BufStream<TcpStream>,
-    path_without_query: &str,
     extra_header: Option<&str>,
 ) -> std::io::Result<()> {
-    let relative = path_without_query
-        .strip_prefix("/v2")
-        .unwrap_or("")
-        .trim_start_matches('/');
-    let asset_path = if relative.is_empty() {
-        "index.html"
-    } else {
-        relative
-    };
-
-    let Some(file) = MobileV2Assets::get(asset_path) else {
-        let body = "Not found — run `npm run build:mobile` to populate the v2 bundle.";
+    let Some(file) = MobileAssets::get("index.html") else {
+        let body = "Not found — run `npm run build:mobile` to populate the mobile bundle.";
         let response = format!(
             "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
@@ -59,14 +29,39 @@ pub async fn serve_v2(
         );
         return lines.get_mut().write_all(response.as_bytes()).await;
     };
-
-    let mime = mime_for(asset_path);
     let extra = extra_header.unwrap_or("");
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{}\r\n",
-        mime,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{}\r\n",
         file.data.len(),
         extra
+    );
+    let stream = lines.get_mut();
+    stream.write_all(headers.as_bytes()).await?;
+    stream.write_all(&file.data).await
+}
+
+/// Serve a single bundled asset by request path. `path_without_query` is
+/// the full path like `/assets/index-abc.js`; we strip the leading slash
+/// and look it up in the embedded asset list.
+pub async fn serve_asset(
+    lines: &mut tokio::io::BufStream<TcpStream>,
+    path_without_query: &str,
+) -> std::io::Result<()> {
+    let relative = path_without_query.trim_start_matches('/');
+    let Some(file) = MobileAssets::get(relative) else {
+        let body = "Asset not found.";
+        let response = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        return lines.get_mut().write_all(response.as_bytes()).await;
+    };
+    let mime = mime_for(relative);
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=31536000, immutable\r\n\r\n",
+        mime,
+        file.data.len()
     );
     let stream = lines.get_mut();
     stream.write_all(headers.as_bytes()).await?;
@@ -78,13 +73,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mobile_v2_assets_includes_built_index_html() {
-        // Requires `npm run build:mobile` to have run. The build.rs guard
-        // creates the directory, so cargo build won't fail on a fresh
-        // checkout — but the asset list will be empty and this test will
-        // tell you to run the mobile build.
+    fn mobile_assets_include_built_index_html() {
         assert!(
-            MobileV2Assets::get("index.html").is_some(),
+            MobileAssets::get("index.html").is_some(),
             "dist/mobile/index.html missing — run `npm run build:mobile`"
         );
     }

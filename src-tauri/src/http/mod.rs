@@ -460,27 +460,37 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         }
     }
 
-    // GET /v2[/...] — new mobile SPA served from the rust-embed bundle.
-    // On the initial load with a valid `?token=`, we issue an HttpOnly
-    // bm_session cookie so subsequent fetches and the WebSocket upgrade
-    // authenticate without keeping the token in URLs.
-    if method == "GET" && (path_without_query == "/v2" || path_without_query.starts_with("/v2/")) {
-        let cookie_valid = request::validate_token(request::extract_token_from_cookies(&headers));
-        let url_token_valid = request::validate_token(token.clone());
-        if !cookie_valid && !url_token_valid {
+    // GET /assets/* — bundled mobile assets (JS/CSS/etc). Same auth as
+    // the shell; legacy `/v2/assets/*` paths still work for any cached
+    // mobile bundle that referenced them before the stage 7 flip.
+    if method == "GET"
+        && (path_without_query.starts_with("/assets/")
+            || path_without_query.starts_with("/v2/assets/"))
+    {
+        if !request::authenticate(&headers, token) {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
         }
-        let set_cookie = if url_token_valid && !cookie_valid {
-            token.as_deref().map(request::session_cookie_header)
-        } else {
-            None
-        };
-        let extra = set_cookie.as_ref().map(|h| {
-            // assets::serve_v2 expects each extra header line to end with \r\n
-            format!("{}\r\n", h)
-        });
-        let _ = assets::serve_v2(&mut lines, &path_without_query, extra.as_deref()).await;
+        let normalized = path_without_query
+            .strip_prefix("/v2")
+            .unwrap_or(&path_without_query);
+        let _ = assets::serve_asset(&mut lines, normalized).await;
+        return;
+    }
+
+    // GET /v2 — backward-compat redirect to / so any saved phone bookmarks
+    // from stages 3-6 keep working. Will be removed once Adam has tapped
+    // the new QR at least once.
+    if method == "GET" && (path_without_query == "/v2" || path_without_query == "/v2/") {
+        let preserve_query = path_with_query
+            .split_once('?')
+            .map(|(_, q)| format!("?{}", q))
+            .unwrap_or_default();
+        let response = format!(
+            "HTTP/1.1 301 Moved Permanently\r\nLocation: /{}\r\nContent-Length: 0\r\n\r\n",
+            preserve_query
+        );
+        let _ = lines.get_mut().write_all(response.as_bytes()).await;
         return;
     }
 
@@ -500,12 +510,23 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         return;
     }
 
-    // Default: serve the legacy mobile HTML root.
-    if !request::authenticate(&headers, token) {
+    // Default: serve the mobile SPA shell at `/`. On the initial load with
+    // a valid `?token=`, issue an HttpOnly bm_session cookie so subsequent
+    // fetches and the WebSocket upgrade authenticate without keeping the
+    // token in URLs.
+    let cookie_valid = request::validate_token(request::extract_token_from_cookies(&headers));
+    let url_token_valid = request::validate_token(token.clone());
+    if !cookie_valid && !url_token_valid {
         let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
         return;
     }
-    let _ = assets::serve_mobile_root(&mut lines).await;
+    let set_cookie = if url_token_valid && !cookie_valid {
+        token.as_deref().map(request::session_cookie_header)
+    } else {
+        None
+    };
+    let extra = set_cookie.as_ref().map(|h| format!("{}\r\n", h));
+    let _ = assets::serve_spa_shell(&mut lines, extra.as_deref()).await;
 }
 
 #[cfg(test)]
@@ -600,12 +621,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_root_returns_401_without_token() {
-        assert_eq!(get_request("/v2").await, 401);
+    async fn root_returns_401_without_token() {
+        // Post-flip: / serves the SPA shell and requires auth like
+        // everything else.
+        assert_eq!(get_request("/").await, 401);
+    }
+
+    #[tokio::test]
+    async fn asset_returns_401_without_token() {
+        assert_eq!(get_request("/assets/index.js").await, 401);
+    }
+
+    #[tokio::test]
+    async fn v2_root_redirects_to_root() {
+        // /v2 is a deprecated alias kept around so saved phone bookmarks
+        // from stages 3-6 keep working. 301 lets the browser update.
+        assert_eq!(get_request("/v2").await, 301);
     }
 
     #[tokio::test]
     async fn v2_asset_returns_401_without_token() {
+        // Legacy /v2/assets/* paths still resolve to the same files so
+        // any mid-flip cached HTML doesn't 404 on its scripts.
         assert_eq!(get_request("/v2/assets/index.js").await, 401);
     }
 

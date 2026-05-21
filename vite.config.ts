@@ -18,7 +18,11 @@ export default defineConfig(async ({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     root: isMobile ? "mobile" : undefined,
-    base: isMobile ? "/v2/" : "/",
+    // Mobile served at `/` (matches the QR code URL) — Vite emits asset
+    // hrefs as `/assets/...` which the embedded HTTP server now routes
+    // to the rust-embed bundle. Desktop continues at `/` inside the
+    // Tauri webview.
+    base: "/",
     build: isMobile
       ? {
           outDir: "../dist/mobile",
