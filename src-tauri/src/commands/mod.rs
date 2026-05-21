@@ -15,6 +15,7 @@ pub mod git_tests;
 pub mod mesh_config;
 pub mod pr;
 pub mod mesh;
+pub mod project_detect;
 pub mod agent_node;
 pub mod remote;
 pub mod session_discovery;

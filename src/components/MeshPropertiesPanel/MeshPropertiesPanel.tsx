@@ -6,6 +6,12 @@ import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { UncommittedChangesSection } from './UncommittedChangesSection';
 import { useMeshGitStatus } from '../../hooks/useMeshGitStatus';
 import { listProviders, ProviderInfo } from '../../lib/tauri';
+import {
+  PROJECT_PRESETS,
+  resolvePreset,
+  type DetectedProject,
+  type ProjectPreset,
+} from '../../lib/projectPresets';
 
 interface MeshConfig {
   name: string | null;
@@ -60,6 +66,7 @@ export function MeshPropertiesPanel() {
     defaultProvider: '',
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [detected, setDetected] = useState<DetectedProject | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
@@ -75,6 +82,18 @@ export function MeshPropertiesPanel() {
   useEffect(() => {
     listProviders().then(setProviders).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (propertiesPanelMeshId == null || !mesh?.path) return;
+    setDetected(null);
+    invoke<DetectedProject>('detect_mesh_project', { meshPath: mesh.path })
+      .then((d) => {
+        if (mountedRef.current) setDetected(d);
+      })
+      .catch(() => {
+        if (mountedRef.current) setDetected(null);
+      });
+  }, [propertiesPanelMeshId, mesh?.path]);
 
   useEffect(() => {
     if (propertiesPanelMeshId == null) return;
@@ -175,6 +194,31 @@ export function MeshPropertiesPanel() {
       key: 'default_provider',
       value,
     });
+  };
+
+  const applyPreset = async (preset: ProjectPreset) => {
+    setForm((p) => ({ ...p, buildCommand: preset.build, runCommand: preset.run }));
+    await Promise.all([
+      invoke('update_mesh_field', {
+        meshId: propertiesPanelMeshId,
+        section: 'build',
+        key: 'command',
+        value: preset.build,
+      }),
+      invoke('update_mesh_field', {
+        meshId: propertiesPanelMeshId,
+        section: 'run',
+        key: 'command',
+        value: preset.run,
+      }),
+    ]);
+  };
+
+  const applyPresetById = async (id: string) => {
+    const preset = resolvePreset(id, detected?.node_scripts);
+    if (!preset) return;
+    await applyPreset(preset);
+    git?.refresh();
   };
 
   const handleDelete = async () => {
@@ -318,6 +362,41 @@ export function MeshPropertiesPanel() {
                     <option key={p.id} value={p.id}>{p.label}</option>
                   ))}
                 </select>
+              </div>
+
+              {/* Project preset */}
+              <div>
+                <label className="block text-xs text-[#9ca3af] mb-1">Project preset</label>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) void applyPresetById(e.target.value);
+                  }}
+                  className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
+                >
+                  <option value="">Choose a preset to fill Build/Run…</option>
+                  {PROJECT_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {detected?.preset_id === p.id ? `✓ ${p.label} (detected)` : p.label}
+                    </option>
+                  ))}
+                </select>
+                {detected?.preset_id &&
+                 !form.buildCommand.trim() &&
+                 !form.runCommand.trim() && (
+                  <div className="mt-2 flex items-start gap-2 bg-[#0a1a24] border border-[#00d4ff]/30 rounded px-2 py-1.5">
+                    <span className="text-xs text-[#9ca3af] flex-1">
+                      Looks like a <span className="text-[#e0e0e0]">{detected.label}</span> project.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void applyPresetById(detected.preset_id!)}
+                      className="text-xs text-[#00d4ff] hover:text-[#7fe5ff] font-medium"
+                    >
+                      Apply preset
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Use Worktree */}
