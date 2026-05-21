@@ -6,6 +6,7 @@ import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { useGitSummary } from '../../hooks/useGitSummary';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
+import { getMeshColor } from '../../lib/meshColors';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
@@ -17,6 +18,7 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
   const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   const meshesById = useMeshStore(state => state.meshesById);
+  const meshColor = getMeshColor(node.mesh_id);
 
   const handleClose = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -35,11 +37,14 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
   }, [meshesById, node.mesh_id, node.id]);
 
   return (
-    <div className="flex items-center justify-between px-2.5 py-1.5 bg-bg-overlay border-b border-border-default">
+    <div
+      className="flex items-center justify-between px-2.5 py-1.5 border-b border-border-default"
+      style={{ backgroundColor: `${meshColor.hex}18` }}
+    >
       <div className="flex items-center gap-2 overflow-hidden">
         <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
-        <span className="text-[11px] font-bold text-text-secondary truncate">
-          {node.name} {meshLabel}
+        <span className="text-[11px] font-semibold text-text-secondary truncate font-sans">
+          {node.name} <span className="text-text-muted font-normal">{meshLabel}</span>
         </span>
         {summary && (
           <span

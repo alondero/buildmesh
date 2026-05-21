@@ -1,5 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Outfit:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap');
 
 @theme {
   /* Backgrounds — layered dark surfaces */
@@ -49,6 +49,9 @@
   --color-border-active: #00d4ff;
 
   /* Typography */
+  --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  --font-family-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-family-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   --font-size-2xs: 10px;
   --font-size-xs: 11px;
@@ -95,9 +98,9 @@
 html, body {
   margin: 0;
   padding: 0;
-  font-family: var(--font-family-mono);
+  font-family: var(--font-family-sans);
   font-size: var(--font-size-base);
-  font-weight: 500;
+  font-weight: 400;
   line-height: 1.5;
   color: var(--color-text-primary);
   background-color: var(--color-bg-base);
@@ -147,6 +150,11 @@ html, body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-border-strong);
+}
+
+/* Mesh color stripe */
+.border-l-3 {
+  border-left-width: 3px;
 }
 
 /* Fast pulse for attention-needed indicators */
