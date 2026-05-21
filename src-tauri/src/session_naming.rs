@@ -104,6 +104,26 @@ static ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> =
         regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B012]").unwrap()
     });
 
+const CLAUDE_CODE_BANNER_CHARS: &[char] = &[
+    '\u{2588}', // █
+    '\u{258C}', // ▌
+    '\u{2590}', // ▐
+    '\u{2598}', // ▘
+    '\u{259B}', // ▛
+    '\u{259C}', // ▜
+    '\u{259D}', // ▝
+];
+
+/// Drop Claude Code splash lines before the LLM sees the buffer — the
+/// third banner line contains the cwd, which otherwise leaks into slugs
+/// (e.g. `open-lucky-box-worktree`).
+fn strip_claude_code_banner(s: &str) -> String {
+    s.lines()
+        .filter(|line| !line.chars().any(|c| CLAUDE_CODE_BANNER_CHARS.contains(&c)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 const MAX_BUFFER_CHARS: usize = 4000;
 const SUMMARIZE_BUFFER_CHARS: usize = 3000;
 
@@ -272,9 +292,13 @@ async fn summarize_and_rename_with(
     node_id: i64,
     buffer: &str,
 ) -> Result<String, String> {
-    let clean_buffer = ANSI_ESCAPE.replace_all(buffer, "").to_string();
+    let ansi_stripped = ANSI_ESCAPE.replace_all(buffer, "").to_string();
+    let clean_buffer = strip_claude_code_banner(&ansi_stripped);
 
-    let prompt = "You must output EXACTLY one line containing only 3-5 lowercase hyphenated words (e.g. fix-auth-token-refresh). No explanations, no punctuation, no quotes. Output ONLY the slug string.";
+    let prompt = "The text on stdin is a terminal log from an AI coding-assistant session. \
+                  Generate a short slug that describes the task the user is working on in this session. \
+                  Output EXACTLY one line: 3 to 5 lowercase words joined by hyphens, nothing else \
+                  (no explanation, no punctuation, no quotes, no example labels).";
 
     tracing::info!("session_naming: running summarize command for node {} ({} chars)", node_id, clean_buffer.len());
 
@@ -701,5 +725,28 @@ mod tests {
         repo.update_agent_node_name(42, "test-slug-name").unwrap();
         let calls = repo.updates.lock().unwrap();
         assert_eq!(calls[0], (42, "test-slug-name".to_string()));
+    }
+
+    #[test]
+    fn strip_claude_code_banner_removes_logo_and_cwd_lines() {
+        let input = "\u{2590}\u{259B}\u{2588}\u{2588}\u{2588}\u{259C}\u{258C}   Claude Code v2.1.145\n\
+                     \u{259D}\u{259C}\u{2588}\u{2588}\u{2588}\u{2588}\u{2588}\u{259B}\u{2598}  Opus 4.7 with xhigh effort \u{00B7} Claude Pro\n\
+                     \u{0020}\u{0020}\u{2598}\u{2598} \u{259D}\u{259D}    X:\\src\\buildmesh\\.claude\\worktrees\\open-lucky-box\n\
+                     \n\
+                     User asked to refactor the authentication flow.\n\
+                     Assistant: I'll start by reading the auth module.";
+
+        let stripped = strip_claude_code_banner(input);
+
+        assert!(!stripped.contains("Claude Code v"), "version line should be gone:\n{}", stripped);
+        assert!(!stripped.contains("Opus 4.7"), "model line should be gone:\n{}", stripped);
+        assert!(!stripped.contains("open-lucky-box"), "cwd/banner line should be gone:\n{}", stripped);
+        assert!(stripped.contains("refactor the authentication flow"), "real content must survive:\n{}", stripped);
+    }
+
+    #[test]
+    fn strip_claude_code_banner_is_noop_when_no_banner_present() {
+        let input = "User asked to fix a bug.\nAssistant: Looking at the code now.";
+        assert_eq!(strip_claude_code_banner(input), input);
     }
 }
