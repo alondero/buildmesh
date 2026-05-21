@@ -8,5 +8,16 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     println!("cargo:rustc-env=GIT_SHA={}", git_sha);
+
+    // Windows test binary lacks the comctl32 v6 manifest that tauri-build
+    // embeds into [[bin]] targets, so cargo test --lib exits with
+    // STATUS_ENTRYPOINT_NOT_FOUND when the loader can't find
+    // TaskDialogIndirect in System32's v5 comctl32. Delay-loading defers
+    // the resolution; test code never calls these APIs so the DLL never loads.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-arg=/DELAYLOAD:comctl32.dll");
+        println!("cargo:rustc-link-lib=delayimp");
+    }
+
     tauri_build::build()
 }
