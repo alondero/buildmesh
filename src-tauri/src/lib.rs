@@ -169,6 +169,7 @@ pub fn run() {
             commands::file_tree::list_directory,
             commands::file_tree::open_in_editor,
             commands::file_tree::get_user_config_dir,
+            commands::file_tree::to_host_path,
             // Git
             commands::git::get_git_status,
             commands::git::get_git_summary,
@@ -183,6 +184,8 @@ pub fn run() {
             // File watcher
             commands::file_watcher::watch_session,
             commands::file_watcher::unwatch_session,
+            // Frontend log bridge
+            commands::frontend_log::log_frontend,
             // Attention
             commands::attention::register_attention_session,
             commands::attention::clear_attention_session,

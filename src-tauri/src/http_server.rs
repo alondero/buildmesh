@@ -375,6 +375,17 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
                 Ok(meshes) => serde_json::to_string(&meshes).unwrap_or_else(|_| "[]".to_string()),
                 Err(_) => "[]".to_string(),
             };
+        } else if path_without_query == "/api/debug/state" {
+            // Combined diagnostic snapshot: which sessions Rust thinks are
+            // live, plus the crash-snapshot counters. Lets an LLM debug
+            // "is spawn working" without rebuilding or opening devtools.
+            let agents = crate::commands::agent::debug_list_agents().await;
+            let snapshot = crate::commands::agent::debug_crash_snapshot().await;
+            body = serde_json::to_string(&serde_json::json!({
+                "agents": agents,
+                "snapshot": snapshot,
+            }))
+            .unwrap_or_else(|_| r#"{"error":"serialize"}"#.to_string());
         } else {
             body = r#"{"error":"not found"}"#.to_string();
         }
