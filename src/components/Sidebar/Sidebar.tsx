@@ -446,22 +446,24 @@ function SortableMesh({
             {mesh.name}
           </span>
           {/* Add node — split button */}
-          <div className="relative flex items-center rounded border border-accent-cyan/30 overflow-hidden">
-            <button
-              onClick={(e) => { e.stopPropagation(); handleAddNode(); }}
-              className="flex items-center px-1.5 h-5 text-[12px] font-medium text-accent-cyan hover:bg-accent-cyan/15 transition-colors"
-              title="Add agent node"
-            >
-              +
-            </button>
-            <span className="w-px h-3 bg-accent-cyan/30" />
-            <button
-              onClick={(e) => { e.stopPropagation(); onNewNode(mesh); }}
-              className={`flex items-center px-1 h-5 text-[11px] hover:bg-accent-cyan/15 transition-colors ${isDropdownOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
-              title="Choose provider"
-            >
-              ▾
-            </button>
+          <div className="relative">
+            <div className="flex items-center rounded border border-accent-cyan/30 overflow-hidden">
+              <button
+                onClick={(e) => { e.stopPropagation(); handleAddNode(); }}
+                className="flex items-center px-1.5 h-5 text-[12px] font-medium text-accent-cyan hover:bg-accent-cyan/15 transition-colors"
+                title="Add agent node"
+              >
+                +
+              </button>
+              <span className="w-px h-3 bg-accent-cyan/30" />
+              <button
+                onClick={(e) => { e.stopPropagation(); onNewNode(mesh); }}
+                className={`flex items-center px-1 h-5 text-[11px] hover:bg-accent-cyan/15 transition-colors ${isDropdownOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
+                title="Choose provider"
+              >
+                ▾
+              </button>
+            </div>
             {isDropdownOpen && (
               <div data-dropdown-for={mesh.id} className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[140px]">
                 {providerList.map(p => (
