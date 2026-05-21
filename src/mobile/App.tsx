@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import "./styles.css";
-import { AgentNode, readStoredToken } from "./api";
+import { AgentNode, Mesh, readStoredToken } from "./api";
 import Connect from "./screens/Connect";
 import NodeList from "./screens/NodeList";
 
@@ -11,13 +11,17 @@ const TerminalScreen = lazy(() => import("./screens/TerminalScreen"));
 const ChangesScreen = lazy(() => import("./screens/ChangesScreen"));
 const DiffScreen = lazy(() => import("./screens/DiffScreen"));
 const CreatePrSheet = lazy(() => import("./screens/CreatePrSheet"));
+const SessionsScreen = lazy(() => import("./screens/SessionsScreen"));
+const IssuesScreen = lazy(() => import("./screens/IssuesScreen"));
 
 type Screen =
   | { kind: "connect" }
   | { kind: "list" }
   | { kind: "terminal"; node: AgentNode }
   | { kind: "changes"; node: AgentNode }
-  | { kind: "diff"; node: AgentNode; filePath: string };
+  | { kind: "diff"; node: AgentNode; filePath: string }
+  | { kind: "sessions"; mesh: Mesh }
+  | { kind: "issues"; mesh: Mesh };
 
 export default function App() {
   // If the URL has ?token=, the server has already set bm_session and we
@@ -60,6 +64,8 @@ export default function App() {
       {screen.kind === "list" && (
         <NodeList
           onOpenNode={(node) => setScreen({ kind: "terminal", node })}
+          onOpenSessions={(mesh) => setScreen({ kind: "sessions", mesh })}
+          onOpenIssues={(mesh) => setScreen({ kind: "issues", mesh })}
           onOffline={() => setOffline(true)}
         />
       )}
@@ -118,6 +124,32 @@ export default function App() {
             node={screen.node}
             filePath={screen.filePath}
             onBack={() => setScreen({ kind: "changes", node: screen.node })}
+          />
+        </Suspense>
+      )}
+      {screen.kind === "sessions" && (
+        <Suspense
+          fallback={
+            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
+          }
+        >
+          <SessionsScreen
+            mesh={screen.mesh}
+            onBack={() => setScreen({ kind: "list" })}
+            onResumed={(node) => setScreen({ kind: "terminal", node })}
+          />
+        </Suspense>
+      )}
+      {screen.kind === "issues" && (
+        <Suspense
+          fallback={
+            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
+          }
+        >
+          <IssuesScreen
+            mesh={screen.mesh}
+            onBack={() => setScreen({ kind: "list" })}
+            onSpawned={(node) => setScreen({ kind: "terminal", node })}
           />
         </Suspense>
       )}

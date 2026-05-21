@@ -152,6 +152,20 @@ fn path_segment_id(path: &str, prefix: &str, suffix: &str) -> Option<i64> {
     id_str.parse().ok()
 }
 
+/// Extract two numeric ids from a URL like `prefix{id1}middle{id2}suffix`.
+/// e.g. `/api/meshes/7/issues/42/spawn` → `(7, 42)`.
+fn path_two_segment_ids(
+    path: &str,
+    prefix: &str,
+    middle: &str,
+    suffix: &str,
+) -> Option<(i64, i64)> {
+    let rest = path.strip_prefix(prefix)?;
+    let (id1_str, rest) = rest.split_once(middle)?;
+    let id2_str = rest.strip_suffix(suffix)?;
+    Some((id1_str.parse().ok()?, id2_str.parse().ok()?))
+}
+
 /// Pull `?name=value` out of a request URL — first match wins. URL-decoding
 /// is intentionally minimal (just `+` → space and `%xx`) since we only use
 /// this for file paths and small string fields.
@@ -306,6 +320,39 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             routes::pr::create(&mut lines, mesh_id, content_length).await;
             return;
         }
+        // POST /api/meshes/{id}/sessions/import-and-resume
+        if let Some(mesh_id) = path_segment_id(
+            &path_without_query,
+            "/api/meshes/",
+            "/sessions/import-and-resume",
+        ) {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            routes::sessions::import_and_resume(&mut lines, mesh_id, content_length).await;
+            return;
+        }
+        // POST /api/meshes/{mid}/issues/{inum}/spawn
+        if let Some((mesh_id, issue_number)) = path_two_segment_ids(
+            &path_without_query,
+            "/api/meshes/",
+            "/issues/",
+            "/spawn",
+        ) {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            routes::issues::spawn(&mut lines, mesh_id, issue_number, content_length).await;
+            return;
+        }
     }
 
     // GET /api/agents/{id}/git/{status|summary|branch} and /api/agents/{id}/diff
@@ -352,6 +399,28 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
                 return;
             }
             routes::git::gh_auth(&mut lines).await;
+            return;
+        }
+        // GET /api/meshes/{id}/sessions/discover
+        if let Some(mesh_id) = path_segment_id(
+            &path_without_query,
+            "/api/meshes/",
+            "/sessions/discover",
+        ) {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::sessions::discover(&mut lines, mesh_id).await;
+            return;
+        }
+        // GET /api/meshes/{id}/issues
+        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/issues") {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::issues::list(&mut lines, mesh_id).await;
             return;
         }
     }
@@ -574,6 +643,50 @@ mod tests {
         assert_eq!(percent_decode("hello+world"), "hello world");
         assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
         assert_eq!(percent_decode("clean"), "clean");
+    }
+
+    #[test]
+    fn path_two_segment_ids_extracts_pair() {
+        assert_eq!(
+            path_two_segment_ids(
+                "/api/meshes/7/issues/42/spawn",
+                "/api/meshes/",
+                "/issues/",
+                "/spawn",
+            ),
+            Some((7, 42)),
+        );
+    }
+
+    #[test]
+    fn path_two_segment_ids_rejects_non_numeric() {
+        assert!(path_two_segment_ids(
+            "/api/meshes/foo/issues/42/spawn",
+            "/api/meshes/",
+            "/issues/",
+            "/spawn",
+        )
+        .is_none());
+        assert!(path_two_segment_ids(
+            "/api/meshes/7/issues/bar/spawn",
+            "/api/meshes/",
+            "/issues/",
+            "/spawn",
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn sessions_discover_requires_token() {
+        assert_eq!(
+            get_request("/api/meshes/1/sessions/discover").await,
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn meshes_issues_requires_token() {
+        assert_eq!(get_request("/api/meshes/1/issues").await, 401);
     }
 
     #[tokio::test]

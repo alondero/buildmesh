@@ -12,6 +12,8 @@ import {
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
+  onOpenSessions: (mesh: Mesh) => void;
+  onOpenIssues: (mesh: Mesh) => void;
   onOffline: () => void;
 };
 
@@ -31,12 +33,18 @@ const FALLBACK_PROVIDERS: Provider[] = [
   { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O" },
 ];
 
-export default function NodeList({ onOpenNode, onOffline }: Props) {
+export default function NodeList({
+  onOpenNode,
+  onOpenSessions,
+  onOpenIssues,
+  onOffline,
+}: Props) {
   const [meshes, setMeshes] = useState<Mesh[] | null>(null);
   const [nodes, setNodes] = useState<AgentNode[] | null>(null);
   const [pickerMeshId, setPickerMeshId] = useState<number | null>(null);
   const [providers, setProviders] = useState<Provider[]>(FALLBACK_PROVIDERS);
   const [creating, setCreating] = useState<number | null>(null);
+  const [meshActions, setMeshActions] = useState<Mesh | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -149,6 +157,26 @@ export default function NodeList({ onOpenNode, onOffline }: Props) {
               >
                 +
               </button>
+              <button
+                onClick={() => setMeshActions(mesh)}
+                aria-label={`More actions for ${mesh.name}`}
+                data-testid={`mesh-actions-${mesh.id}`}
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 6,
+                  background: "#2a2a2a",
+                  border: "1px solid #444",
+                  color: "#888",
+                  fontSize: 16,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                ⋯
+              </button>
             </div>
 
             {creating === mesh.id ? (
@@ -192,7 +220,125 @@ export default function NodeList({ onOpenNode, onOffline }: Props) {
           onCancel={() => setPickerMeshId(null)}
         />
       )}
+
+      {meshActions && (
+        <MeshActionsSheet
+          mesh={meshActions}
+          onClose={() => setMeshActions(null)}
+          onOpenSessions={() => {
+            const m = meshActions;
+            setMeshActions(null);
+            onOpenSessions(m);
+          }}
+          onOpenIssues={() => {
+            const m = meshActions;
+            setMeshActions(null);
+            onOpenIssues(m);
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function MeshActionsSheet({
+  mesh,
+  onClose,
+  onOpenSessions,
+  onOpenIssues,
+}: {
+  mesh: Mesh;
+  onClose: () => void;
+  onOpenSessions: () => void;
+  onOpenIssues: () => void;
+}) {
+  return (
+    <div
+      data-testid="mesh-actions-sheet"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 100,
+        display: "flex",
+        alignItems: "flex-end",
+      }}
+    >
+      <div
+        onClick={onClose}
+        style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)" }}
+      />
+      <div
+        style={{
+          position: "relative",
+          width: "100%",
+          background: "#1a1a1a",
+          borderRadius: "16px 16px 0 0",
+          padding: 20,
+          paddingBottom: "max(20px, env(safe-area-inset-bottom))",
+          zIndex: 1,
+        }}
+      >
+        <h3
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: "#888",
+            textTransform: "uppercase",
+            letterSpacing: "0.05em",
+            margin: 0,
+            marginBottom: 12,
+          }}
+        >
+          {mesh.name}
+        </h3>
+        <SheetButton
+          onClick={onOpenSessions}
+          testId="mesh-sheet-sessions"
+          label="Previous Sessions"
+          hint="Resume an existing CLI session"
+        />
+        <SheetButton
+          onClick={onOpenIssues}
+          testId="mesh-sheet-issues"
+          label="GitHub Issues"
+          hint="Spawn an agent prefilled with an issue"
+        />
+      </div>
+    </div>
+  );
+}
+
+function SheetButton({
+  onClick,
+  testId,
+  label,
+  hint,
+}: {
+  onClick: () => void;
+  testId: string;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      data-testid={testId}
+      style={{
+        display: "block",
+        width: "100%",
+        textAlign: "left",
+        padding: "14px 16px",
+        borderRadius: 10,
+        background: "#2a2a2a",
+        border: "1px solid transparent",
+        marginBottom: 8,
+        cursor: "pointer",
+        color: "inherit",
+      }}
+    >
+      <div style={{ fontSize: 14, fontWeight: 500, color: "#fff" }}>{label}</div>
+      <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>{hint}</div>
+    </button>
   );
 }
 

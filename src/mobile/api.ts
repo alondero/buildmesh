@@ -197,6 +197,85 @@ export async function createPr(
   return resp.json();
 }
 
+// --- Stage 5: kick off new tasks --------------------------------------------
+
+export interface DiscoveredSession {
+  cli_session_id: string;
+  first_message: string | null;
+  branch: string | null;
+  worktree_name: string | null;
+  last_active_at: string | null;
+  provider: string;
+}
+
+export interface GitHubIssue {
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  state: string;
+  labels: string[];
+}
+
+export async function discoverSessions(
+  meshId: number,
+): Promise<DiscoveredSession[]> {
+  return (await apiFetch(`/api/meshes/${meshId}/sessions/discover`)).json();
+}
+
+export async function importAndResume(
+  meshId: number,
+  session: DiscoveredSession,
+  provider?: string,
+): Promise<AgentNode> {
+  const resp = await apiFetch(
+    `/api/meshes/${meshId}/sessions/import-and-resume`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cli_session_id: session.cli_session_id,
+        branch: session.branch ?? "main",
+        worktree_name: session.worktree_name ?? undefined,
+        provider: provider ?? session.provider,
+      }),
+    },
+  );
+  // 207 means node created but spawn failed — surface as a throw the
+  // caller can catch and report. The node is still in the DB.
+  if (resp.status === 207) {
+    const partial = (await resp.json()) as { node: AgentNode; spawn_error: string };
+    throw new Error(
+      `Imported but spawn failed: ${partial.spawn_error} (node ${partial.node.id})`,
+    );
+  }
+  return resp.json();
+}
+
+export async function listIssues(meshId: number): Promise<GitHubIssue[]> {
+  return (await apiFetch(`/api/meshes/${meshId}/issues`)).json();
+}
+
+export async function spawnFromIssue(
+  meshId: number,
+  issue: GitHubIssue,
+  provider?: string,
+): Promise<AgentNode> {
+  const resp = await apiFetch(
+    `/api/meshes/${meshId}/issues/${issue.number}/spawn`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: issue.title,
+        body: issue.body ?? "",
+        provider,
+      }),
+    },
+  );
+  return resp.json();
+}
+
 /// Build the WS URL for a given node id. We prefer the page's own host:port
 /// so the v2 SPA works regardless of which fallback port (1992/1993/1994)
 /// the embedded server bound to — the legacy mobile_app.html hardcoded 1992.
