@@ -119,6 +119,84 @@ export async function createNode(req: CreateNodeRequest): Promise<AgentNode> {
   return resp.json();
 }
 
+// --- Stage 4: review & ship -------------------------------------------------
+
+export interface GitStatusEntry {
+  path: string;
+  status: string; // M / A / D / ?? / etc — git porcelain code
+}
+
+export interface GitSummary {
+  added: number;
+  modified: number;
+  deleted: number;
+}
+
+export interface DiffLine {
+  line_type: string; // "add" | "remove" | "context"
+  content: string;
+  old_line_no: number | null;
+  new_line_no: number | null;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  lines: DiffLine[];
+  old_highlighted: string;
+  new_highlighted: string;
+}
+
+export interface FileDiff {
+  path: string;
+  hunks: DiffHunk[];
+}
+
+export interface DiffResult {
+  files: FileDiff[];
+}
+
+export async function gitStatus(agentId: number): Promise<GitStatusEntry[]> {
+  return (await apiFetch(`/api/agents/${agentId}/git/status`)).json();
+}
+
+export async function gitSummary(agentId: number): Promise<GitSummary> {
+  return (await apiFetch(`/api/agents/${agentId}/git/summary`)).json();
+}
+
+export async function gitBranch(agentId: number): Promise<{ branch: string }> {
+  return (await apiFetch(`/api/agents/${agentId}/git/branch`)).json();
+}
+
+export async function diffFile(
+  agentId: number,
+  filePath: string,
+): Promise<DiffResult> {
+  const q = `path=${encodeURIComponent(filePath)}`;
+  return (await apiFetch(`/api/agents/${agentId}/diff?${q}`)).json();
+}
+
+export async function ghAuthOk(): Promise<boolean> {
+  const j = (await (await apiFetch("/api/gh/auth")).json()) as { ok: boolean };
+  return j.ok;
+}
+
+export async function createPr(
+  meshId: number,
+  title: string,
+  body: string,
+  baseBranch: string,
+): Promise<{ url: string }> {
+  const resp = await apiFetch(`/api/meshes/${meshId}/pr`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, body, base_branch: baseBranch }),
+  });
+  return resp.json();
+}
+
 /// Build the WS URL for a given node id. We prefer the page's own host:port
 /// so the v2 SPA works regardless of which fallback port (1992/1993/1994)
 /// the embedded server bound to — the legacy mobile_app.html hardcoded 1992.

@@ -142,6 +142,52 @@ async fn try_bind_ports(start: u16, end: u16) -> Option<u16> {
     None
 }
 
+/// Extract a numeric id from a URL path that looks like `prefix{id}suffix`.
+/// Returns None if the prefix/suffix don't match or the id segment isn't a
+/// valid i64. Used by the dispatcher to route `/api/agents/{id}/git/status`
+/// and friends without a regex dep.
+fn path_segment_id(path: &str, prefix: &str, suffix: &str) -> Option<i64> {
+    let rest = path.strip_prefix(prefix)?;
+    let id_str = rest.strip_suffix(suffix)?;
+    id_str.parse().ok()
+}
+
+/// Pull `?name=value` out of a request URL — first match wins. URL-decoding
+/// is intentionally minimal (just `+` → space and `%xx`) since we only use
+/// this for file paths and small string fields.
+fn query_param(path_with_query: &str, name: &str) -> Option<String> {
+    let query = path_with_query.split('?').nth(1)?;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == name {
+                return Some(percent_decode(v));
+            }
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.replace('+', " ");
+    let mut out = Vec::with_capacity(bytes.len());
+    let raw = bytes.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' && i + 2 < raw.len() {
+            let hi = (raw[i + 1] as char).to_digit(16);
+            let lo = (raw[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(raw[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
     let mut lines = tokio::io::BufStream::new(stream);
     let mut request_line = String::new();
@@ -245,6 +291,69 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             .unwrap_or(0);
         routes::nodes::create(&mut lines, content_length).await;
         return;
+    }
+
+    // POST /api/meshes/{id}/pr — create a GitHub PR for the mesh's branch.
+    if method == "POST" {
+        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pr") {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            routes::pr::create(&mut lines, mesh_id, content_length).await;
+            return;
+        }
+    }
+
+    // GET /api/agents/{id}/git/{status|summary|branch} and /api/agents/{id}/diff
+    if method == "GET" {
+        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/status")
+        {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::git::status(&mut lines, agent_id).await;
+            return;
+        }
+        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/summary")
+        {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::git::summary(&mut lines, agent_id).await;
+            return;
+        }
+        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/branch")
+        {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::git::branch(&mut lines, agent_id).await;
+            return;
+        }
+        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/diff") {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let file_path = query_param(&path_with_query, "path").unwrap_or_default();
+            routes::git::diff(&mut lines, agent_id, &file_path).await;
+            return;
+        }
+        if path_without_query == "/api/gh/auth" {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::git::gh_auth(&mut lines).await;
+            return;
+        }
     }
 
     // GET /v2[/...] — new mobile SPA served from the rust-embed bundle.
@@ -394,6 +503,77 @@ mod tests {
     #[tokio::test]
     async fn v2_asset_returns_401_without_token() {
         assert_eq!(get_request("/v2/assets/index.js").await, 401);
+    }
+
+    #[tokio::test]
+    async fn agents_git_status_requires_token() {
+        assert_eq!(get_request("/api/agents/42/git/status").await, 401);
+    }
+
+    #[tokio::test]
+    async fn agents_git_summary_requires_token() {
+        assert_eq!(get_request("/api/agents/42/git/summary").await, 401);
+    }
+
+    #[tokio::test]
+    async fn agents_git_branch_requires_token() {
+        assert_eq!(get_request("/api/agents/42/git/branch").await, 401);
+    }
+
+    #[tokio::test]
+    async fn agents_diff_requires_token() {
+        assert_eq!(get_request("/api/agents/42/diff?path=foo").await, 401);
+    }
+
+    #[tokio::test]
+    async fn gh_auth_requires_token() {
+        assert_eq!(get_request("/api/gh/auth").await, 401);
+    }
+
+    #[test]
+    fn path_segment_id_matches_id_between_prefix_and_suffix() {
+        assert_eq!(
+            path_segment_id("/api/agents/42/git/status", "/api/agents/", "/git/status"),
+            Some(42)
+        );
+        assert_eq!(
+            path_segment_id("/api/meshes/7/pr", "/api/meshes/", "/pr"),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn path_segment_id_rejects_wrong_prefix_or_suffix() {
+        assert_eq!(path_segment_id("/api/x/42/foo", "/api/agents/", "/foo"), None);
+        assert_eq!(
+            path_segment_id("/api/agents/42/other", "/api/agents/", "/git/status"),
+            None
+        );
+        assert_eq!(
+            path_segment_id("/api/agents/not-an-int/git/status", "/api/agents/", "/git/status"),
+            None
+        );
+    }
+
+    #[test]
+    fn query_param_extracts_named_value() {
+        assert_eq!(
+            query_param("/api/agents/1/diff?path=src/foo.rs", "path"),
+            Some("src/foo.rs".to_string())
+        );
+        assert_eq!(
+            query_param("/x?token=t&path=a%20b", "path"),
+            Some("a b".to_string())
+        );
+        assert_eq!(query_param("/x", "path"), None);
+        assert_eq!(query_param("/x?other=1", "path"), None);
+    }
+
+    #[test]
+    fn percent_decode_handles_spaces_and_hex() {
+        assert_eq!(percent_decode("hello+world"), "hello world");
+        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
+        assert_eq!(percent_decode("clean"), "clean");
     }
 
     #[tokio::test]

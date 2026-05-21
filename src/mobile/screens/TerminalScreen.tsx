@@ -10,9 +10,10 @@ const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 type Props = {
   node: AgentNode;
   onBack: () => void;
+  onOpenChanges?: () => void;
 };
 
-export default function TerminalScreen({ node, onBack }: Props) {
+export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
   const termHostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -206,6 +207,25 @@ export default function TerminalScreen({ node, onBack }: Props) {
         >
           {node.name}
         </span>
+        {onOpenChanges && (
+          <button
+            onClick={onOpenChanges}
+            aria-label="Changes"
+            data-testid="terminal-open-changes"
+            title="View changes"
+            style={{
+              background: "transparent",
+              border: "1px solid #333",
+              borderRadius: 6,
+              color: "#aaa",
+              fontSize: 12,
+              padding: "6px 10px",
+              cursor: "pointer",
+            }}
+          >
+            Δ
+          </button>
+        )}
       </div>
 
       <div

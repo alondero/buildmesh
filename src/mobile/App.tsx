@@ -8,11 +8,16 @@ import NodeList from "./screens/NodeList";
 // sessions look at the node list and don't open a terminal; defer the
 // chunk until first use to keep the initial load fast.
 const TerminalScreen = lazy(() => import("./screens/TerminalScreen"));
+const ChangesScreen = lazy(() => import("./screens/ChangesScreen"));
+const DiffScreen = lazy(() => import("./screens/DiffScreen"));
+const CreatePrSheet = lazy(() => import("./screens/CreatePrSheet"));
 
 type Screen =
   | { kind: "connect" }
   | { kind: "list" }
-  | { kind: "terminal"; node: AgentNode };
+  | { kind: "terminal"; node: AgentNode }
+  | { kind: "changes"; node: AgentNode }
+  | { kind: "diff"; node: AgentNode; filePath: string };
 
 export default function App() {
   // If the URL has ?token=, the server has already set bm_session and we
@@ -26,6 +31,11 @@ export default function App() {
 
   const [screen, setScreen] = useState<Screen>(initial);
   const [offline, setOffline] = useState(false);
+  const [prSheet, setPrSheet] = useState<{
+    node: AgentNode;
+    branch: string;
+  } | null>(null);
+  const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null);
 
   // Clean the token out of the URL once we've taken it from the query string
   // — the server set the cookie, so it's no longer needed there.
@@ -74,8 +84,101 @@ export default function App() {
           <TerminalScreen
             node={screen.node}
             onBack={() => setScreen({ kind: "list" })}
+            onOpenChanges={() =>
+              setScreen({ kind: "changes", node: screen.node })
+            }
           />
         </Suspense>
+      )}
+      {screen.kind === "changes" && (
+        <Suspense
+          fallback={
+            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
+          }
+        >
+          <ChangesScreen
+            node={screen.node}
+            onBack={() => setScreen({ kind: "terminal", node: screen.node })}
+            onOpenDiff={(filePath) =>
+              setScreen({ kind: "diff", node: screen.node, filePath })
+            }
+            onOpenPr={(branch) =>
+              setPrSheet({ node: screen.node, branch })
+            }
+          />
+        </Suspense>
+      )}
+      {screen.kind === "diff" && (
+        <Suspense
+          fallback={
+            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
+          }
+        >
+          <DiffScreen
+            node={screen.node}
+            filePath={screen.filePath}
+            onBack={() => setScreen({ kind: "changes", node: screen.node })}
+          />
+        </Suspense>
+      )}
+      {prSheet && (
+        <Suspense fallback={null}>
+          <CreatePrSheet
+            meshId={prSheet.node.mesh_id}
+            currentBranch={prSheet.branch}
+            onClose={() => setPrSheet(null)}
+            onCreated={(url) => {
+              setPrSheet(null);
+              setPrCreatedUrl(url);
+            }}
+          />
+        </Suspense>
+      )}
+      {prCreatedUrl && (
+        <div
+          data-testid="pr-success-toast"
+          style={{
+            position: "fixed",
+            bottom: 16,
+            left: 16,
+            right: 16,
+            background: "#1e3a2c",
+            color: "#a5d6a7",
+            border: "1px solid #2e7d32",
+            borderRadius: 8,
+            padding: 12,
+            zIndex: 300,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 13,
+          }}
+        >
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+            PR created:{" "}
+            <a
+              href={prCreatedUrl}
+              target="_blank"
+              rel="noreferrer"
+              style={{ color: "#a5d6a7", textDecoration: "underline" }}
+            >
+              {prCreatedUrl}
+            </a>
+          </span>
+          <button
+            onClick={() => setPrCreatedUrl(null)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "#a5d6a7",
+              fontSize: 18,
+              cursor: "pointer",
+              padding: 0,
+            }}
+          >
+            ×
+          </button>
+        </div>
       )}
       {offline && (
         <div
