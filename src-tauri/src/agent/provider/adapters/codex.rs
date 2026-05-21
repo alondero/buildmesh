@@ -12,8 +12,8 @@ fn shell_for(platform: Platform) -> WindowsShell {
 
 fn base_flags() -> Vec<String> {
     vec![
-        "--approval-mode".into(),
-        "full-auto".into(),
+        "--ask-for-approval".into(),
+        "never".into(),
         "--sandbox".into(),
         "danger-full-access".into(),
     ]
