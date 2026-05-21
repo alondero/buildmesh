@@ -304,7 +304,7 @@ function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: {
       data-session-item
       data-session-id={node.id}
       onClick={onSelect}
-      style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}18` }}
+      style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}40` }}
       className={`
         pl-3 pr-1 py-1.5 rounded cursor-pointer text-[12px] mb-0.5 flex items-center gap-2 group/node
         ${isActive ? 'border border-accent-cyan/50' : 'hover:brightness-125 border border-transparent'}
