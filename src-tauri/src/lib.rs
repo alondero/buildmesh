@@ -178,6 +178,7 @@ pub fn run() {
             commands::git::get_git_summary,
             commands::git::check_is_git_repo,
             commands::git::get_default_branch,
+            commands::git::git_sync,
             // Terminal
             commands::terminal::spawn_pty,
             commands::terminal::resize_pty,

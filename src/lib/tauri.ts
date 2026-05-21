@@ -143,6 +143,16 @@ export const checkIsGitRepo = (path: string) =>
 export const getDefaultBranch = (path: string) =>
   invoke<string>('get_default_branch', { path });
 
+export interface GitSyncResult {
+  fetched: boolean;
+  pulled: boolean;
+  new_commits: number;
+  message: string;
+}
+
+export const gitSync = (path: string) =>
+  invoke<GitSyncResult>('git_sync', { path });
+
 // Attention
 export const registerAttentionSession = (sessionId: number) =>
   invoke('register_attention_session', { sessionId });

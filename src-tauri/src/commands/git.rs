@@ -4,6 +4,9 @@ use git2::{Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
+use crate::env::to_host_path;
+use crate::process_util::command_no_window;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitSummary {
     pub total: usize,
@@ -130,4 +133,90 @@ pub fn get_default_branch(path: String) -> String {
     }
 
     "main".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitSyncResult {
+    pub fetched: bool,
+    pub pulled: bool,
+    pub new_commits: u32,
+    pub message: String,
+}
+
+/// Fetch from origin and attempt a fast-forward pull on the current branch.
+/// Returns a structured result with feedback about what happened.
+#[command]
+pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
+    let host_path = to_host_path(&path);
+
+    // Step 1: git fetch origin
+    let fetch_output = command_no_window("git")
+        .args(["fetch", "origin"])
+        .current_dir(&host_path)
+        .output()
+        .map_err(|e| format!("Failed to run git fetch: {}", e))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        return Ok(GitSyncResult {
+            fetched: false,
+            pulled: false,
+            new_commits: 0,
+            message: format!("Fetch failed: {}", stderr.trim()),
+        });
+    }
+
+    // Step 2: Count how many commits we're behind
+    let rev_list_output = command_no_window("git")
+        .args(["rev-list", "--count", "HEAD..@{u}"])
+        .current_dir(&host_path)
+        .output();
+
+    let behind_count: u32 = rev_list_output
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+        .unwrap_or(0);
+
+    if behind_count == 0 {
+        return Ok(GitSyncResult {
+            fetched: true,
+            pulled: false,
+            new_commits: 0,
+            message: "Already up to date".to_string(),
+        });
+    }
+
+    // Step 3: git pull --ff-only
+    let pull_output = command_no_window("git")
+        .args(["pull", "--ff-only"])
+        .current_dir(&host_path)
+        .output()
+        .map_err(|e| format!("Failed to run git pull: {}", e))?;
+
+    if !pull_output.status.success() {
+        let stderr = String::from_utf8_lossy(&pull_output.stderr);
+        return Ok(GitSyncResult {
+            fetched: true,
+            pulled: false,
+            new_commits: behind_count,
+            message: format!(
+                "Fetched {} new commit{} but fast-forward failed: {}",
+                behind_count,
+                if behind_count == 1 { "" } else { "s" },
+                stderr.trim()
+            ),
+        });
+    }
+
+    Ok(GitSyncResult {
+        fetched: true,
+        pulled: true,
+        new_commits: behind_count,
+        message: format!(
+            "Pulled {} new commit{}",
+            behind_count,
+            if behind_count == 1 { "" } else { "s" }
+        ),
+    })
 }
