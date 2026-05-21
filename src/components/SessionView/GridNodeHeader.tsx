@@ -39,7 +39,7 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
   return (
     <div
       className="flex items-center justify-between px-2.5 py-1.5 border-b border-border-default"
-      style={{ backgroundColor: `${meshColor.hex}18` }}
+      style={{ backgroundColor: `${meshColor.hex}40` }}
     >
       <div className="flex items-center gap-2 overflow-hidden">
         <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
