@@ -6,6 +6,7 @@ import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import type { FileExplorerContext } from '../../stores/uiStore';
 import { getStatusConfig } from '../../lib/status';
+import { getMeshColor } from '../../lib/meshColors';
 import { listProviders } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
@@ -109,7 +110,6 @@ export function Sidebar() {
   const [sessionBrowserModal, setSessionBrowserModal] = useState<{ meshId: number; meshPath: string } | null>(null);
   const openPropertiesPanel = useUIStore((s) => s.openPropertiesPanel);
   const toggleFileExplorer = useUIStore((s) => s.toggleFileExplorer);
-  const fileExplorerContext = useUIStore(s => s.fileExplorerContext);
 
   const handleSelectMesh = (meshId: number) => {
     if (selectedMeshId === meshId) {
@@ -233,19 +233,19 @@ export function Sidebar() {
       {/* Meshes list */}
       <div className="flex-1 overflow-y-auto">
         <div className="p-2">
-          <div className="flex items-center justify-between mb-1 px-2">
-            <span className="text-xs font-medium text-text-secondary uppercase">Meshes</span>
+          <div className="flex items-center justify-between mb-2 px-2">
+            <span className="text-[11px] font-medium text-text-muted uppercase font-sans tracking-wide">Meshes</span>
             <button
               onClick={handleAddMesh}
-              className="text-xs text-accent-cyan hover:text-accent-blue transition-colors"
+              className="text-[11px] text-accent-cyan hover:text-accent-blue transition-colors font-sans font-medium"
             >
               + Add
             </button>
           </div>
 
           {meshes.length === 0 ? (
-            <p className="text-xs text-text-muted px-2 py-4 text-center">
-              No meshes yet.{'\n'}Click + Add to get started.
+            <p className="text-[11px] text-text-muted px-2 py-4 text-center font-sans">
+              No meshes yet. Click + Add to get started.
             </p>
           ) : (
             <DndContext onDragEnd={handleDragEnd}>
@@ -265,7 +265,6 @@ export function Sidebar() {
                       onSelectProvider={handleSelectProvider}
                       onOpenProperties={openPropertiesPanel}
                       onToggleFileExplorer={toggleFileExplorer}
-                      fileExplorerContext={fileExplorerContext}
                       meshNodes={meshNodes}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}
@@ -284,7 +283,7 @@ export function Sidebar() {
       </div>
 
       {/* Footer */}
-      <div className="p-2 border-t border-border-subtle text-xs text-text-muted">
+      <div className="p-2 border-t border-border-subtle text-[11px] text-text-muted font-sans">
         <span>{agentNodes.filter(w => w.status === 'running').length} active</span>
       </div>
       </div>
@@ -292,8 +291,9 @@ export function Sidebar() {
   );
 }
 
-function NodeItem({ node, isActive, onSelect, onDelete }: {
+function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: {
   node: AgentNode;
+  meshColor: ReturnType<typeof getMeshColor>;
   isActive: boolean;
   onSelect: () => void;
   onDelete: (e: React.MouseEvent) => void;
@@ -304,16 +304,18 @@ function NodeItem({ node, isActive, onSelect, onDelete }: {
       data-session-item
       data-session-id={node.id}
       onClick={onSelect}
+      style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}18` }}
       className={`
-        pl-8 pr-1 py-1 rounded cursor-pointer text-sm mb-0.5 flex items-center gap-2
-        ${isActive ? 'bg-bg-overlay border border-accent-cyan/50' : 'hover:bg-bg-card border border-transparent'}
+        pl-3 pr-1 py-1.5 rounded cursor-pointer text-[12px] mb-0.5 flex items-center gap-2 group/node
+        ${isActive ? 'border border-accent-cyan/50' : 'hover:brightness-125 border border-transparent'}
       `}
     >
+      <span className="text-text-muted cursor-grab active:cursor-grabbing text-[10px] opacity-0 group-hover/node:opacity-100 transition-opacity">⋮⋮</span>
       <span className={config.color} title={config.label}>{config.dot}</span>
-      <span className="flex-1 truncate text-text-secondary">{node.name}</span>
+      <span className="flex-1 truncate text-text-secondary font-sans">{node.name}</span>
       <button
         onClick={onDelete}
-        className="text-text-muted hover:text-status-error text-xs px-1 transition-colors"
+        className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
         title="Delete node"
       >
         ×
@@ -332,7 +334,6 @@ interface SortableMeshProps {
   onSelectProvider: (mesh: Mesh, providerId: string) => void;
   onOpenProperties: (meshId: number) => void;
   onToggleFileExplorer: (context: FileExplorerContext) => void;
-  fileExplorerContext: FileExplorerContext | null;
   meshNodes: AgentNode[];
   activeNodeId: number | null;
   setActiveNode: (id: number) => void;
@@ -353,7 +354,6 @@ function SortableMesh({
   onSelectProvider,
   onOpenProperties,
   onToggleFileExplorer,
-  fileExplorerContext,
   meshNodes,
   activeNodeId,
   setActiveNode,
@@ -363,18 +363,17 @@ function SortableMesh({
   onOpenSessionBrowser,
   getDefaultProvider,
 }: SortableMeshProps) {
-  const isThisMeshOpen = fileExplorerContext?.type === 'mesh' && fileExplorerContext.meshId === mesh.id;
   const {
-    attributes,
-    listeners,
     setNodeRef,
     transform,
     transition,
     isDragging,
+    attributes,
+    listeners,
   } = useSortable({ id: mesh.id });
 
-  const [isArrowHovered, setIsArrowHovered] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const meshColor = getMeshColor(mesh.id);
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -382,12 +381,11 @@ function SortableMesh({
     opacity: isDragging ? 0.5 : 1,
   };
 
-  const handleMainClick = async () => {
+  const handleAddNode = async () => {
     const defaultProvider = await getDefaultProvider(mesh.id);
     onSelectProvider(mesh, defaultProvider);
   };
 
-  // Dismiss context menu on click outside or Escape
   useEffect(() => {
     if (!contextMenu) return;
     const handleClick = () => setContextMenu(null);
@@ -403,101 +401,73 @@ function SortableMesh({
   }, [contextMenu]);
 
   return (
-    <div ref={setNodeRef} style={style} className="mb-2 group/mesh">
-      <div className="flex items-center gap-1">
-        {/* Drag handle */}
-        <button
-          {...attributes}
-          {...listeners}
-          className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-xs px-1"
-          title="Drag to reorder"
-        >
-          ⋮⋮
-        </button>
-
-        {/* History button — browse previous sessions */}
-        <button
-          onClick={() => onOpenSessionBrowser(mesh.id)}
-          className="text-xs px-1 text-text-muted hover:text-accent-cyan transition-colors"
-          title="Browse previous sessions"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <polyline points="12 6 12 12 16 14"/>
-          </svg>
-        </button>
-
-        {/* Split button: main + for default provider, arrow for dropdown */}
-        <div className="relative flex">
-          {/* Main + button — spawns with default provider */}
-          <button
-            onClick={handleMainClick}
-            className={`text-xs px-1 ${isDropdownOpen ? 'text-accent-blue' : 'text-accent-cyan hover:text-accent-blue'}`}
-            title="New node with default provider"
+    <div ref={setNodeRef} style={style} className="mb-1 group/mesh">
+      {/* Mesh header — double height with color accent */}
+      <div
+        className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${meshColor.border} ${
+          isSelected ? 'bg-bg-card' : 'hover:bg-bg-card/50'
+        }`}
+        onClick={() => onSelectMesh(mesh.id)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <span
+            {...attributes}
+            {...listeners}
+            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-[10px] select-none"
+            title="Drag to reorder"
           >
-            +
-          </button>
-          {/* Arrow button — shows provider dropdown */}
-          <button
-            onClick={() => onNewNode(mesh)}
-            onMouseEnter={() => setIsArrowHovered(true)}
-            onMouseLeave={() => setIsArrowHovered(false)}
-            className={`text-xs px-0.5 ${isArrowHovered || isDropdownOpen ? 'text-accent-blue' : 'text-text-muted hover:text-accent-cyan'}`}
-            title="Choose provider"
+            ⋮⋮
+          </span>
+          <span
+            className="font-sans font-semibold text-[15px] text-text-primary truncate flex-1"
           >
-            ▾
-          </button>
-          {isDropdownOpen && (
-            <div data-dropdown-for={mesh.id} className="absolute left-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[120px]">
-              {providerList.map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => onSelectProvider(mesh, p.id)}
-                  className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-                >
-                  <span className={`w-2 h-2 rounded-full ${p.color}`} />
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <div
-          onClick={() => { onSelectMesh(mesh.id); }}
-          className={`flex-1 px-2 py-1.5 rounded cursor-pointer text-sm hover:bg-bg-card flex items-center ${
-            isSelected ? 'text-accent-cyan font-semibold' : 'text-text-secondary'
-          }`}
-        >
-          <span className="flex-1 truncate" onContextMenu={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setContextMenu({ x: e.clientX, y: e.clientY });
-          }}>{mesh.name}</span>
-          <button
-            onClick={(e) => { e.stopPropagation(); onOpenProperties(mesh.id); }}
-            className="opacity-0 group-hover/mesh:opacity-100 text-text-muted hover:text-accent-cyan text-xs px-1 transition-all"
-            title="Mesh properties"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-            </svg>
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); onToggleFileExplorer({ type: 'mesh', meshId: mesh.id, path: mesh.path }); }}
-            className={`${isThisMeshOpen ? 'opacity-100 bg-accent-green' : 'opacity-100 bg-accent-amber'} text-white text-xs px-1 transition-all`}
-            title="Open file explorer"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-            </svg>
-          </button>
+            {mesh.name}
+          </span>
+          {/* Add node — split button */}
+          <div className="relative flex items-center rounded border border-accent-cyan/30 overflow-hidden">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleAddNode(); }}
+              className="flex items-center px-1.5 h-5 text-[12px] font-medium text-accent-cyan hover:bg-accent-cyan/15 transition-colors"
+              title="Add agent node"
+            >
+              +
+            </button>
+            <span className="w-px h-3 bg-accent-cyan/30" />
+            <button
+              onClick={(e) => { e.stopPropagation(); onNewNode(mesh); }}
+              className={`flex items-center px-1 h-5 text-[11px] hover:bg-accent-cyan/15 transition-colors ${isDropdownOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
+              title="Choose provider"
+            >
+              ▾
+            </button>
+            {isDropdownOpen && (
+              <div data-dropdown-for={mesh.id} className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[140px]">
+                {providerList.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={(e) => { e.stopPropagation(); onSelectProvider(mesh, p.id); }}
+                    className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+                  >
+                    <span className={`w-2 h-2 rounded-full ${p.color}`} />
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Agent nodes within this mesh */}
       {meshNodes.map(node => (
         <NodeItem
           key={node.id}
           node={node}
+          meshColor={meshColor}
           isActive={activeNodeId === node.id}
           onSelect={() => {
             setActiveNode(node.id);
@@ -506,18 +476,35 @@ function SortableMesh({
           onDelete={(e) => onDeleteNode(e, node.id)}
         />
       ))}
-      {/* Context menu */}
+
+      {/* Context menu — periphery actions */}
       {contextMenu && (
         <div
-          className="fixed bg-bg-overlay border border-border-default rounded shadow-lg z-[100] py-1 min-w-[160px]"
+          className="fixed bg-bg-overlay border border-border-default rounded shadow-lg z-[100] py-1 min-w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button
-            onClick={() => {
-              setContextMenu(null);
-              onOpenSessionBrowser(mesh.id);
-            }}
+            onClick={() => { setContextMenu(null); onOpenProperties(mesh.id); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+            Properties
+          </button>
+          <button
+            onClick={() => { setContextMenu(null); onToggleFileExplorer({ type: 'mesh', meshId: mesh.id, path: mesh.path }); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            File Explorer
+          </button>
+          <button
+            onClick={() => { setContextMenu(null); onOpenSessionBrowser(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -527,10 +514,7 @@ function SortableMesh({
             Previous Sessions
           </button>
           <button
-            onClick={() => {
-              setContextMenu(null);
-              onOpenGitHubIssues(mesh.id);
-            }}
+            onClick={() => { setContextMenu(null); onOpenGitHubIssues(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

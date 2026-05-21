@@ -225,9 +225,22 @@ export function SessionView() {
         <div className="flex-1 flex overflow-hidden">
           {filteredNodes.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-text-muted">
-              <div className="text-center">
-                <p className="text-lg mb-2 text-text-secondary">Buildmesh Orchestrator</p>
-                <p className="text-sm">Select a node to start managing your agents</p>
+              <div className="text-center max-w-sm">
+                <p className="text-xl mb-2 text-text-primary font-sans font-semibold">Buildmesh</p>
+                <p className="text-sm text-text-secondary mb-6 font-sans">Orchestrate AI agents across your projects. Add a mesh to point at a project folder, then spawn agents to work in parallel.</p>
+                <button
+                  onClick={() => useMeshStore.getState().addMesh()}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                  </svg>
+                  Add Mesh
+                </button>
+                <div className="mt-8 text-[11px] text-text-muted font-mono space-y-1">
+                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">Cmd+T</kbd> New agent node</p>
+                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">Cmd+1-9</kbd> Switch nodes</p>
+                </div>
               </div>
             </div>
           ) : filteredNodes.length <= 2 ? (
