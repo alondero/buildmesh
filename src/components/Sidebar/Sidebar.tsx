@@ -6,7 +6,7 @@ import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import type { FileExplorerContext } from '../../stores/uiStore';
 import { getStatusConfig } from '../../lib/status';
-import { listProviders } from '../../lib/tauri';
+import { listProviders, gitSync } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { GitHubIssuesModal } from '../GitHubIssues/GitHubIssuesModal';
@@ -375,6 +375,24 @@ function SortableMesh({
 
   const [isArrowHovered, setIsArrowHovered] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncMessage(null);
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    try {
+      const result = await gitSync(mesh.path);
+      setSyncMessage(result.message);
+    } catch (e) {
+      setSyncMessage(`Sync error: ${e}`);
+    } finally {
+      setSyncing(false);
+      syncTimeoutRef.current = setTimeout(() => setSyncMessage(null), 4000);
+    }
+  };
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -424,6 +442,21 @@ function SortableMesh({
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="10"/>
             <polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </button>
+
+        {/* Sync button — fetch + pull latest */}
+        <button
+          onClick={handleSync}
+          disabled={syncing}
+          className={`text-xs px-1 transition-colors ${syncing ? 'text-accent-cyan animate-spin' : 'text-text-muted hover:text-accent-cyan'}`}
+          title={syncMessage ?? 'Pull latest changes'}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="23 4 23 10 17 10"/>
+            <polyline points="1 20 1 14 7 14"/>
+            <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+            <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
           </svg>
         </button>
 
@@ -494,6 +527,11 @@ function SortableMesh({
           </button>
         </div>
       </div>
+      {syncMessage && (
+        <div className="ml-8 mr-2 mb-1 px-2 py-1 rounded text-xs bg-bg-overlay border border-border-subtle text-text-secondary">
+          {syncMessage}
+        </div>
+      )}
       {meshNodes.map(node => (
         <NodeItem
           key={node.id}
@@ -513,6 +551,21 @@ function SortableMesh({
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          <button
+            onClick={() => {
+              setContextMenu(null);
+              handleSync();
+            }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+              <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+            </svg>
+            Sync Latest
+          </button>
           <button
             onClick={() => {
               setContextMenu(null);
