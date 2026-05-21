@@ -377,6 +377,22 @@ function SortableMesh({
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
+
+  const refreshDefaultProvider = async () => {
+    try {
+      const id = await getDefaultProvider(mesh.id);
+      setDefaultProviderId(id);
+    } catch {
+      // Tooltip falls back to the generic label below if this fails.
+    }
+  };
+
+  const defaultProviderLabel =
+    providerList.find(p => p.id === defaultProviderId)?.label ?? defaultProviderId;
+  const addNodeTitle = defaultProviderLabel
+    ? `Add agent node (${defaultProviderLabel})`
+    : 'Add agent node';
 
   const handleSync = async () => {
     setSyncing(true);
@@ -450,8 +466,10 @@ function SortableMesh({
             <div className="flex items-center rounded border border-accent-cyan/30 overflow-hidden">
               <button
                 onClick={(e) => { e.stopPropagation(); handleAddNode(); }}
+                onMouseEnter={refreshDefaultProvider}
+                onFocus={refreshDefaultProvider}
                 className="flex items-center px-1.5 h-5 text-[12px] font-medium text-accent-cyan hover:bg-accent-cyan/15 transition-colors"
-                title="Add agent node"
+                title={addNodeTitle}
               >
                 +
               </button>
