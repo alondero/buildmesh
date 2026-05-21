@@ -170,6 +170,7 @@ fn process_request(request: &str, app: &AppHandle) -> String {
             "update_worktree_base_ref" => handle_update_worktree_base_ref(&rpc_req.args),
             "remove_worktree_base_ref" => handle_remove_worktree_base_ref(&rpc_req.args),
             "update_mesh_use_worktree" => handle_update_mesh_use_worktree(&rpc_req.args),
+            "get_root_token" => handle_get_root_token(),
             _ => JsonRpcResponse::error(&format!("Unknown command: {}", rpc_req.cmd)),
         }
     } else if request.starts_with("GET /health") {
@@ -410,5 +411,17 @@ fn handle_update_mesh_use_worktree(args: &serde_json::Value) -> String {
     match tauri::async_runtime::block_on(crate::commands::mesh_config::update_mesh_use_worktree(mesh_id, use_worktree)) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id, "use_worktree": use_worktree })),
         Err(e) => JsonRpcResponse::error(&e),
+    }
+}
+
+/// Expose the remote-access root token to Playwright mobile e2e specs so
+/// they can construct `/v2?token=...` URLs without scraping the SQLite DB
+/// from outside. The Tauri command of the same name does the same thing
+/// for the desktop QR-code modal; we go through the test server here only
+/// because Playwright runs outside the Tauri webview.
+fn handle_get_root_token() -> String {
+    match crate::db::get_or_create_root_token() {
+        Ok(token) => JsonRpcResponse::success(&serde_json::json!({ "token": token })),
+        Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
