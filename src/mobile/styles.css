@@ -11,12 +11,21 @@ html, body {
   color: #e0e0e0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   -webkit-text-size-adjust: 100%;
+  /* Lock the document to the visual viewport. Without this the body scrolls
+     instead of xterm's internal viewport, which both loses the scrollback
+     and pushes the header off-screen. */
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 #root {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 input, button, textarea {

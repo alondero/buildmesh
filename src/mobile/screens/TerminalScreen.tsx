@@ -23,7 +23,6 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
   const closedByUserRef = useRef(false);
 
   const [reconnectIn, setReconnectIn] = useState<number | null>(null);
-  const [cmd, setCmd] = useState("");
 
   useEffect(() => {
     const term = new XTerm({
@@ -149,24 +148,10 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     }, delayMs);
   }
 
-  function sendCmd() {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(cmd + "\n");
-    setCmd("");
-  }
-
-  function handleKeydown(e: React.KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendCmd();
-    }
-  }
-
   return (
     <div
       data-testid="terminal-screen"
-      style={{ display: "flex", flexDirection: "column", flex: 1 }}
+      style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
     >
       <div
         style={{
@@ -176,6 +161,7 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
           alignItems: "center",
           gap: 12,
           borderBottom: "1px solid #333",
+          flexShrink: 0,
         }}
       >
         <button
@@ -232,54 +218,6 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
         ref={termHostRef}
         style={{ flex: 1, padding: 8, overflow: "hidden", minHeight: 0 }}
       />
-
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          padding: 8,
-          background: "#1a1a1a",
-          borderTop: "1px solid #333",
-        }}
-      >
-        <input
-          type="text"
-          inputMode="text"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          placeholder="Type a command…"
-          value={cmd}
-          onChange={(e) => setCmd(e.target.value)}
-          onKeyDown={handleKeydown}
-          data-testid="cmd-input"
-          style={{
-            flex: 1,
-            background: "#2a2a2a",
-            border: "1px solid #444",
-            borderRadius: 6,
-            padding: "8px 12px",
-            color: "#e0e0e0",
-            fontSize: 14,
-            outline: "none",
-          }}
-        />
-        <button
-          onClick={sendCmd}
-          data-testid="cmd-send"
-          style={{
-            background: "#2196f3",
-            border: "none",
-            borderRadius: 6,
-            padding: "8px 16px",
-            color: "#fff",
-            fontSize: 14,
-            cursor: "pointer",
-          }}
-        >
-          Send
-        </button>
-      </div>
 
       {reconnectIn !== null && (
         <div
