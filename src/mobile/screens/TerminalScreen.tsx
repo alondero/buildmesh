@@ -68,6 +68,23 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
   const closedByUserRef = useRef(false);
 
   const [reconnectIn, setReconnectIn] = useState<number | null>(null);
+  const [atBottom, setAtBottom] = useState(true);
+  const [copyMode, setCopyMode] = useState(false);
+  const [bufferText, setBufferText] = useState("");
+
+  function enterCopyMode() {
+    const term = termRef.current;
+    if (!term) return;
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      lines.push(line ? line.translateToString(true) : "");
+    }
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    setBufferText(lines.join("\n"));
+    setCopyMode(true);
+  }
 
   useEffect(() => {
     const term = new XTerm({
@@ -90,10 +107,31 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     fitRef.current = fit;
 
     let detachTouchPan: (() => void) | undefined;
+    let detachScroll: (() => void) | null = null;
+
     if (termHostRef.current) {
       term.open(termHostRef.current);
       fit.fit();
       detachTouchPan = attachTouchPan(termHostRef.current);
+
+      // xterm's internal scroll container. Listening here lets us show the
+      // "jump to latest" pill whenever the user scrolls away from the tail.
+      // No event fires when scrollHeight grows on writes (only scrollTop
+      // changes do), which is what we want: if they're scrolled up, they
+      // stay scrolled up regardless of new output.
+      const viewport = termHostRef.current.querySelector(
+        ".xterm-viewport",
+      ) as HTMLElement | null;
+      if (viewport) {
+        const onScroll = () => {
+          const dist =
+            viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+          setAtBottom(dist < 4);
+        };
+        viewport.addEventListener("scroll", onScroll, { passive: true });
+        onScroll();
+        detachScroll = () => viewport.removeEventListener("scroll", onScroll);
+      }
     }
 
     term.onData((data) => {
@@ -117,6 +155,7 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
       closedByUserRef.current = true;
       window.removeEventListener("resize", onWindowResize);
       detachTouchPan?.();
+      detachScroll?.();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
@@ -241,6 +280,23 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
         >
           {node.name}
         </span>
+        <button
+          onClick={enterCopyMode}
+          aria-label="Copy text"
+          data-testid="terminal-copy"
+          title="Select and copy text"
+          style={{
+            background: "transparent",
+            border: "1px solid #333",
+            borderRadius: 6,
+            color: "#aaa",
+            fontSize: 12,
+            padding: "6px 10px",
+            cursor: "pointer",
+          }}
+        >
+          Copy
+        </button>
         {onOpenChanges && (
           <button
             onClick={onOpenChanges}
@@ -263,9 +319,119 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
       </div>
 
       <div
-        ref={termHostRef}
-        style={{ flex: 1, padding: 8, overflow: "hidden", minHeight: 0 }}
-      />
+        style={{
+          position: "relative",
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+        }}
+      >
+        <div
+          ref={termHostRef}
+          style={{ flex: 1, padding: 8, overflow: "hidden", minHeight: 0 }}
+        />
+        {!atBottom && !copyMode && (
+          <button
+            onClick={() => termRef.current?.scrollToBottom()}
+            aria-label="Jump to latest output"
+            data-testid="jump-to-bottom"
+            style={{
+              position: "absolute",
+              right: 14,
+              bottom: 14,
+              background: "rgba(33, 150, 243, 0.95)",
+              color: "#fff",
+              border: "none",
+              borderRadius: 999,
+              padding: "8px 14px",
+              fontSize: 13,
+              fontWeight: 500,
+              boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
+              cursor: "pointer",
+              zIndex: 50,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            ↓ Latest
+          </button>
+        )}
+      </div>
+
+      {copyMode && (
+        <div
+          data-testid="copy-overlay"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "#0f0f0f",
+            zIndex: 200,
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          <div
+            style={{
+              background: "#1a1a1a",
+              padding: "10px 12px",
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              borderBottom: "1px solid #333",
+              flexShrink: 0,
+            }}
+          >
+            <span
+              style={{
+                flex: 1,
+                fontSize: 13,
+                color: "#aaa",
+              }}
+            >
+              Long-press to select, then Copy
+            </span>
+            <button
+              onClick={() => setCopyMode(false)}
+              data-testid="copy-done"
+              style={{
+                background: "#2196f3",
+                border: "none",
+                borderRadius: 6,
+                color: "#fff",
+                fontSize: 13,
+                fontWeight: 500,
+                padding: "6px 14px",
+                cursor: "pointer",
+              }}
+            >
+              Done
+            </button>
+          </div>
+          <pre
+            data-testid="copy-buffer"
+            style={{
+              flex: 1,
+              margin: 0,
+              padding: 12,
+              overflow: "auto",
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              fontFamily:
+                '"JetBrains Mono", "Cascadia Code", "Fira Code", monospace',
+              fontSize: 13,
+              lineHeight: 1.4,
+              color: "#e0e0e0",
+              background: "#0f0f0f",
+              userSelect: "text",
+              WebkitUserSelect: "text",
+              WebkitTouchCallout: "default",
+            }}
+          >
+            {bufferText}
+          </pre>
+        </div>
+      )}
 
       {reconnectIn !== null && (
         <div
