@@ -7,6 +7,51 @@ import { AgentNode, terminalWsUrl } from "../api";
 const MAX_RECONNECT = 5;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
 
+// xterm.js renders its grid into a canvas / DOM rows that sit on top of the
+// `.xterm-viewport` scrollable div. Mobile touchmove events land on those
+// upper layers and are never translated into viewport scrolls (xterm only
+// uses touch internally for tap-to-select). Map single-finger drags onto
+// `viewport.scrollTop` so the scrollback becomes reachable on touch.
+function attachTouchPan(host: HTMLElement): () => void {
+  const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
+  const xtermEl = host.querySelector<HTMLElement>(".xterm");
+  if (!viewport || !xtermEl) return () => {};
+
+  let lastY = 0;
+  let panning = false;
+
+  const onTouchStart = (e: TouchEvent) => {
+    if (e.touches.length !== 1) {
+      panning = false;
+      return;
+    }
+    panning = true;
+    lastY = e.touches[0].clientY;
+  };
+  const onTouchMove = (e: TouchEvent) => {
+    if (!panning || e.touches.length !== 1) return;
+    const y = e.touches[0].clientY;
+    viewport.scrollTop += lastY - y;
+    lastY = y;
+    e.preventDefault();
+  };
+  const onTouchEnd = () => {
+    panning = false;
+  };
+
+  xtermEl.addEventListener("touchstart", onTouchStart, { passive: true });
+  xtermEl.addEventListener("touchmove", onTouchMove, { passive: false });
+  xtermEl.addEventListener("touchend", onTouchEnd, { passive: true });
+  xtermEl.addEventListener("touchcancel", onTouchEnd, { passive: true });
+
+  return () => {
+    xtermEl.removeEventListener("touchstart", onTouchStart);
+    xtermEl.removeEventListener("touchmove", onTouchMove);
+    xtermEl.removeEventListener("touchend", onTouchEnd);
+    xtermEl.removeEventListener("touchcancel", onTouchEnd);
+  };
+}
+
 type Props = {
   node: AgentNode;
   onBack: () => void;
@@ -44,9 +89,11 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     termRef.current = term;
     fitRef.current = fit;
 
+    let detachTouchPan: (() => void) | undefined;
     if (termHostRef.current) {
       term.open(termHostRef.current);
       fit.fit();
+      detachTouchPan = attachTouchPan(termHostRef.current);
     }
 
     term.onData((data) => {
@@ -69,6 +116,7 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     return () => {
       closedByUserRef.current = true;
       window.removeEventListener("resize", onWindowResize);
+      detachTouchPan?.();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
