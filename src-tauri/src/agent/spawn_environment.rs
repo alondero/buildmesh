@@ -15,11 +15,12 @@ use crate::pty;
 use portable_pty::CommandBuilder;
 
 /// Encode a command string for PowerShell's -EncodedCommand parameter.
-/// PowerShell's -Command parses arguments before execution, tripping over special
-/// characters like backticks `<>()'"`|;&$#@ etc. -EncodedCommand takes a Base64
-/// UTF-16LE string and executes it without any parsing — all characters pass
-/// through unchanged, which is essential when prefill text from GitHub issues
-/// contains code snippets with these characters.
+/// -EncodedCommand decodes the Base64 payload into a PowerShell *script* and
+/// runs it. That avoids PowerShell's argument tokenizer (which would mangle
+/// `<>()` and backticks), but the decoded text is still parsed as PowerShell,
+/// so newlines and special tokens at the script's top level become statements.
+/// Always pair this with [`format_powershell_command`] to keep prefill text
+/// inside a single-quoted string literal.
 fn encode_for_powershell(cmd: &str) -> String {
     // PowerShell -EncodedCommand expects Base64 of raw UTF-16LE bytes, no BOM.
     // A BOM gets decoded as a leading U+FEFF/U+FFFE code unit and breaks parsing.
@@ -29,6 +30,29 @@ fn encode_for_powershell(cmd: &str) -> String {
     }
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(&le_bytes)
+}
+
+/// Quote a single PowerShell argument as a single-quoted string literal.
+/// Single quotes inside the string must be doubled (`'` → `''`); everything else
+/// (newlines, backticks, brackets, `$`, etc.) is preserved verbatim because
+/// single-quoted PowerShell strings perform no interpolation or escapes.
+fn ps_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Build a PowerShell script that invokes `binary` with `args`, with every
+/// token wrapped in single quotes and dispatched via the call operator (`&`).
+/// This ensures arguments containing newlines or PowerShell-significant chars
+/// (backticks, `<>`, parentheses, `|`, `;`, `$`, `#`, `&`, brackets, list
+/// markers like `1.`) are passed through as literal strings rather than being
+/// parsed as new statements when the script is decoded by `-EncodedCommand`.
+fn format_powershell_command(binary: &str, args: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(args.len() + 1);
+    parts.push(ps_single_quote(binary));
+    for a in args {
+        parts.push(ps_single_quote(a));
+    }
+    format!("& {}", parts.join(" "))
 }
 
 pub fn wrap(
@@ -55,12 +79,13 @@ pub fn wrap(
                     "spawn_environment: building Windows powershell.exe for {}",
                     recipe.binary
                 );
-                // Build the command as a single string so we can encode it.
-                // Using -EncodedCommand (Base64 UTF-16LE) prevents PowerShell from
-                // parsing special characters in arguments (backticks, <>, newlines,
-                // quotes, etc.) — critical when prefill text from GitHub issues
-                // contains code snippets with special chars.
-                let cmd_str = format!("{} {}", recipe.binary, recipe.base_args.join(" "));
+                // Build a PowerShell script that calls the binary with each arg
+                // single-quoted, then Base64/UTF-16LE encode it for
+                // -EncodedCommand. Quoting matters: multi-line prefill text
+                // (e.g. GitHub issue bodies with `1. ...` numbered lists or
+                // backticks) would otherwise be parsed as separate PowerShell
+                // statements after newline boundaries.
+                let cmd_str = format_powershell_command(recipe.binary, &recipe.base_args);
                 let encoded = encode_for_powershell(&cmd_str);
                 let mut c = CommandBuilder::new("powershell.exe");
                 c.args(["-NoLogo", "-EncodedCommand", &encoded]);
@@ -95,8 +120,19 @@ pub fn wrap(
 
 #[cfg(test)]
 mod tests {
-    use super::encode_for_powershell;
+    use super::{encode_for_powershell, format_powershell_command};
     use base64::Engine;
+
+    fn decode_ps(encoded: &str) -> String {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .expect("valid base64");
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16(&units).expect("valid utf-16")
+    }
 
     /// PowerShell's -EncodedCommand expects Base64 of UTF-16LE bytes with NO BOM.
     /// A BOM (or worse, the wrong-endian BOM) prepends a U+FEFF/U+FFFE code unit to
@@ -111,12 +147,56 @@ mod tests {
         // First two bytes must be the UTF-16LE encoding of 'e' (0x65 0x00), not a BOM.
         assert_eq!(&bytes[..2], &[0x65, 0x00], "leading bytes should be 'e' as UTF-16LE, not a BOM");
 
-        // Round-trip: decode the UTF-16LE bytes back to a string.
-        let units: Vec<u16> = bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        let decoded = String::from_utf16(&units).expect("valid utf-16");
+        let decoded = decode_ps(&encoded);
         assert_eq!(decoded, "echo hi");
+    }
+
+    /// The formatter must use PowerShell's call operator `&` with each arg
+    /// wrapped in single quotes, so multi-line prefill text (GitHub issue bodies
+    /// with backticks, brackets, numbered lists) is treated as a single string
+    /// literal — not parsed as separate PowerShell statements line-by-line.
+    ///
+    /// Regression for: spawning an agent from a GH issue whose body contained
+    /// markdown caused PowerShell to error with "Unexpected token '`mesh.toml'"
+    /// because each line of the body was being parsed as a new statement.
+    #[test]
+    fn format_powershell_command_quotes_multiline_prefill_safely() {
+        let body = "Currently, when spawning a new agent...\n\
+                    1. `mesh.toml [agent] default_provider` (per-mesh override)\n\
+                    2. Buildmesh-wide default\n\
+                    3. Anthropic (hardcoded fallback)";
+        let args = vec!["--anthropic".to_string(), "--prefill".to_string(), body.to_string()];
+        let cmd_str = format_powershell_command("cwrap", &args);
+
+        // Must start with the call operator so PowerShell treats it as command invocation.
+        assert!(cmd_str.starts_with("& "), "command must use PowerShell call operator: {}", cmd_str);
+
+        // The binary and every arg must be wrapped in single quotes. After the
+        // leading `& 'cwrap' `, there must be no bare newline outside of a quoted
+        // string — i.e. every newline in the prefill stays inside the single-quoted
+        // arg, not at the top level of the script.
+        let after_call = cmd_str.strip_prefix("& ").unwrap();
+        assert!(after_call.starts_with("'cwrap'"), "binary must be single-quoted: {}", cmd_str);
+
+        // The prefill body's newlines must appear inside a single-quoted region —
+        // i.e. between an odd-numbered ' and the next '. We verify by checking
+        // that every newline is preceded by an odd number of single quotes.
+        for (i, _) in cmd_str.match_indices('\n') {
+            let quotes_before = cmd_str[..i].chars().filter(|c| *c == '\'').count();
+            assert!(
+                quotes_before % 2 == 1,
+                "newline at byte {} is outside a quoted string — PowerShell will parse it as a new statement.\nCommand: {}",
+                i, cmd_str
+            );
+        }
+    }
+
+    /// Single quotes inside an argument must be escaped by doubling them ('')
+    /// per PowerShell single-quoted string rules.
+    #[test]
+    fn format_powershell_command_escapes_embedded_single_quotes() {
+        let args = vec!["--prefill".to_string(), "it's a test".to_string()];
+        let cmd_str = format_powershell_command("cwrap", &args);
+        assert!(cmd_str.contains("'it''s a test'"), "expected doubled-quote escaping, got: {}", cmd_str);
     }
 }
