@@ -78,10 +78,11 @@ async fn spawn_new_agent_impl(
 ) -> Result<crate::models::AgentNode, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
-    let effective_provider = provider
-        .or(mesh.default_provider)
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| "anthropic".to_string());
+    let effective_provider = crate::preferences::resolve_default_provider(
+        provider,
+        mesh.default_provider,
+        crate::preferences::default_provider(),
+    );
 
     let branch = crate::commands::git::get_default_branch(mesh.path.clone());
 

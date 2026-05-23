@@ -12,6 +12,7 @@ import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { GitHubIssuesModal } from '../GitHubIssues/GitHubIssuesModal';
 import { SessionBrowserModal } from '../SessionBrowser/SessionBrowserModal';
+import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import {
   DndContext,
   type DragEndEvent,
@@ -106,6 +107,7 @@ export function Sidebar() {
 
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessMeshId, setRemoteAccessMeshId] = useState<boolean>(false);
+  const [appSettingsOpen, setAppSettingsOpen] = useState<boolean>(false);
   const [githubIssuesModal, setGithubIssuesModal] = useState<{ meshId: number; meshPath: string } | null>(null);
   const [sessionBrowserModal, setSessionBrowserModal] = useState<{ meshId: number; meshPath: string } | null>(null);
   const openPropertiesPanel = useUIStore((s) => s.openPropertiesPanel);
@@ -191,10 +193,21 @@ export function Sidebar() {
         {/* Header */}
         <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
           <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
-          {/* Remote access button — always visible */}
+          {/* Settings (buildmesh-wide preferences) */}
+          <button
+            onClick={() => setAppSettingsOpen(true)}
+            className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
+            title="Settings"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+          {/* Remote access */}
           <button
             onClick={() => setRemoteAccessMeshId(true)}
-            className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
+            className="text-text-muted hover:text-accent-cyan transition-colors"
             title="Remote access"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -203,6 +216,13 @@ export function Sidebar() {
             </svg>
           </button>
         </div>
+
+      {/* App Settings Modal */}
+      {appSettingsOpen && (
+        <AppSettingsModal
+          onClose={() => setAppSettingsOpen(false)}
+        />
+      )}
 
       {/* Remote Access Modal */}
       {remoteAccessMeshId && (
