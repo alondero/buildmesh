@@ -27,10 +27,12 @@ window.__terminalManager = terminalManager;
 export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
+  const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [atBottom, setAtBottom] = useState(true);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [handoverProviderLabel, setHandoverProviderLabel] = useState<string | null>(null);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
@@ -234,11 +236,20 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     if (!containerRef.current) return;
     const cancelled = { current: false };
     const container = containerRef.current;
+    setAtBottom(true);
 
     terminalManager.attach(sessionId, container).then(async (inst) => {
       if (cancelled.current || !inst) return;
       instRef.current = inst;
       inst.onFindRequest = () => setSearchOpen(true);
+
+      const updateAtBottom = () => {
+        const buf = inst.term.buffer.active;
+        setAtBottom(buf.viewportY >= buf.baseY);
+      };
+      scrollDisposableRef.current?.dispose();
+      scrollDisposableRef.current = inst.term.onScroll(updateAtBottom);
+      updateAtBottom();
 
       if (sessionId === activeNodeId) {
         inst.term.focus();
@@ -258,6 +269,8 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       cancelled.current = true;
       const inst = terminalManager.getInstance(sessionId);
       if (inst) inst.onFindRequest = null;
+      scrollDisposableRef.current?.dispose();
+      scrollDisposableRef.current = null;
       terminalManager.detach(sessionId);
     };
   }, [sessionId, node?.status]);
@@ -297,6 +310,20 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
         <div className="absolute inset-0 bg-cyan-500/10 border-2 border-dashed border-cyan-500 rounded-lg flex items-center justify-center z-50 pointer-events-none">
           <span className="text-cyan-400 text-sm font-medium">Drop file to paste path</span>
         </div>
+      )}
+
+      {!atBottom && !isDragging && !searchOpen && (
+        <button
+          onClick={() => {
+            instRef.current?.term.scrollToBottom();
+            instRef.current?.term.focus();
+          }}
+          aria-label="Jump to latest output"
+          data-testid="jump-to-bottom"
+          className="absolute bottom-3 right-3 z-30 flex items-center gap-1 px-2.5 py-1 rounded-full bg-bg-card border border-border-default text-[11px] text-accent-cyan shadow-lg hover:bg-bg-base hover:border-accent-cyan transition-colors"
+        >
+          <span aria-hidden="true">↓</span> Latest
+        </button>
       )}
 
       {searchOpen && (
