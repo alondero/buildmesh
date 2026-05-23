@@ -1,15 +1,26 @@
 //! Unified session naming module.
 //!
 //! State maps:
+//! - `BUFFERING_READY` — node IDs whose PTY output should be accumulated. We
+//!   only flip a node into this set after the *first* idle/turn signal arrives,
+//!   which discards the chrome that Claude Code prints on startup (the
+//!   "Bypass Permissions" warning, plugin/skill listings, banner repaints) so
+//!   the renaming LLM never sees that text. Without this gate the LLM kept
+//!   producing names like `bypass-permissions-worktree` because the warning
+//!   dominated the buffer on short first turns.
 //! - `SESSION_BUFFERS` — PTY output accumulator; entry exists = hasn't been renamed yet
 //! - `RENAMING_IN_PROGRESS` — guards against duplicate concurrent LLM calls
 //! - `RENAME_ATTEMPTS` — per-node failure counter; caps retries at MAX_RENAME_ATTEMPTS
 //!
 //! Lifecycle:
 //! - `on_spawn()` generates an initial random name
-//! - `on_output(node_id, data)` buffers PTY output
-//! - `on_turn(node_id, app)` triggers LLM rename when buffer is sufficient
+//! - `on_output(node_id, data)` buffers PTY output once the node is in `BUFFERING_READY`
+//! - `on_turn(node_id, app)` flips the buffering gate (first call) and triggers
+//!   LLM rename when the buffer is sufficient (subsequent calls)
 //! - `cleanup(node_id)` removes all state for a node
+//!
+//! Diagnostic: set `BUILDMESH_DUMP_NAME_BUFFER=1` to dump the raw + cleaned
+//! buffer to `%TEMP%/bm-name-buffer-<node_id>-<ts>.txt` whenever a rename runs.
 
 use rand::seq::IndexedRandom;
 use std::collections::{HashMap, HashSet};
@@ -85,6 +96,14 @@ static NOUNS: &[&str] = &[
 static SESSION_BUFFERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+/// Nodes whose PTY output we are currently collecting for the renamer.
+/// A node is added on its first `on_turn` and removed on cleanup/reset/successful
+/// rename — anything emitted before the first turn signal is discarded so the
+/// startup chrome (banner, permission warnings, plugin listing) never reaches
+/// the LLM.
+static BUFFERING_READY: once_cell::sync::Lazy<Arc<Mutex<HashSet<i64>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
+
 /// Set of node IDs that have a rename task currently in-flight.
 /// Prevents duplicate concurrent LLM calls for the same node.
 static RENAMING_IN_PROGRESS: once_cell::sync::Lazy<Arc<Mutex<HashSet<i64>>>> =
@@ -141,8 +160,13 @@ pub fn on_spawn() -> String {
     format!("{}-{}-{}", adj1, adj2, noun)
 }
 
-/// Buffer PTY output for a node. Accumulates in SESSION_BUFFERS until rename.
+/// Buffer PTY output for a node. Accumulates in SESSION_BUFFERS once the node
+/// is in `BUFFERING_READY` (which only happens after the first `on_turn`,
+/// so startup chrome is dropped).
 pub fn on_output(node_id: i64, data: &str) {
+    if !BUFFERING_READY.lock().unwrap().contains(&node_id) {
+        return;
+    }
     let mut buffers = SESSION_BUFFERS.lock().unwrap();
     let buf = buffers.entry(node_id).or_default();
     buf.push_str(data);
@@ -156,24 +180,54 @@ pub fn on_output(node_id: i64, data: &str) {
 }
 
 /// Testable core: checks whether rename should trigger, returns the buffer if so.
+///
+/// Side effect: on the very first call for a default-named node, this flips the
+/// node into `BUFFERING_READY` so subsequent PTY output begins accumulating.
+/// On that first call the buffer is by definition empty, so this returns None
+/// and the actual rename fires on a later turn against clean post-startup content.
 fn should_trigger_rename(
     repo: &dyn SessionNamingRepository,
     node_id: i64,
 ) -> Option<String> {
     if let Ok(node) = repo.get_agent_node_by_id(node_id) {
         if !is_default_name(&node.name) {
-            SESSION_BUFFERS.lock().unwrap().remove(&node_id);
+            // Node has a real name already; tear down everything so its PTY
+            // output stops being buffered for no reason.
+            clear_node_state(node_id);
             return None;
         }
     }
 
-    {
+    // IMPORTANT: scope the lock guard to its own block and drop it BEFORE
+    // calling `clear_node_state` — std::sync::Mutex is not reentrant, and
+    // `clear_node_state` re-locks `RENAME_ATTEMPTS`. Holding the guard across
+    // that call self-deadlocks and freezes every other thread that later
+    // touches the same mutex.
+    let max_attempts_reached = {
         let attempts = RENAME_ATTEMPTS.lock().unwrap();
-        if attempts.get(&node_id).copied().unwrap_or(0) >= MAX_RENAME_ATTEMPTS {
-            tracing::debug!("on_turn({}): max rename attempts reached, giving up", node_id);
-            clear_node_state(node_id);
-            return None;
-        }
+        attempts.get(&node_id).copied().unwrap_or(0) >= MAX_RENAME_ATTEMPTS
+    };
+    if max_attempts_reached {
+        tracing::debug!("on_turn({}): max rename attempts reached, giving up", node_id);
+        // Drop buffer + gate but DELIBERATELY keep the attempt counter so
+        // future on_turn calls keep tripping this branch (sticky lockout).
+        // Calling clear_node_state here would wipe the counter and let the
+        // rename cycle restart.
+        SESSION_BUFFERS.lock().unwrap().remove(&node_id);
+        BUFFERING_READY.lock().unwrap().remove(&node_id);
+        return None;
+    }
+
+    // First idle/turn signal for this node — open the buffering gate so future
+    // PTY output is captured, then return without renaming. This drops all the
+    // startup chrome (banner, permission warnings, plugin/skill listings).
+    let was_newly_opened = BUFFERING_READY.lock().unwrap().insert(node_id);
+    if was_newly_opened {
+        tracing::info!(
+            "session_naming({}): opened buffering gate (post-startup); rename will run from next turn",
+            node_id
+        );
+        return None;
     }
 
     let buffer = {
@@ -235,7 +289,11 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
                         "Node {} giving up on rename after {} attempts (last error: {})",
                         node_id, attempt, e
                     );
+                    // Tear down buffer + gate so we stop collecting; the attempt
+                    // counter is intentionally left set so the next on_turn
+                    // sees max-attempts-reached and short-circuits (sticky lockout).
                     SESSION_BUFFERS.lock().unwrap().remove(&node_id);
+                    BUFFERING_READY.lock().unwrap().remove(&node_id);
                 } else {
                     tracing::warn!(
                         "Node {} rename attempt {}/{} failed (buffer preserved for retry): {}",
@@ -272,6 +330,7 @@ pub fn cleanup(node_id: i64) {
 fn clear_node_state(node_id: i64) {
     SESSION_BUFFERS.lock().unwrap().remove(&node_id);
     RENAME_ATTEMPTS.lock().unwrap().remove(&node_id);
+    BUFFERING_READY.lock().unwrap().remove(&node_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +340,33 @@ fn clear_node_state(node_id: i64) {
 pub fn buffers_size_bytes() -> usize {
     let buffers = SESSION_BUFFERS.lock().unwrap();
     buffers.values().map(|b| b.len()).sum()
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic dump (opt-in via env var)
+// ---------------------------------------------------------------------------
+
+/// Write the raw + cleaned rename buffer to a temp file when
+/// `BUILDMESH_DUMP_NAME_BUFFER` is set. Used to capture real fixtures when
+/// the renamer produces bad slugs. Failures are silently logged — diagnosis
+/// shouldn't break the rename pipeline.
+fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
+    if std::env::var_os("BUILDMESH_DUMP_NAME_BUFFER").is_none() {
+        return;
+    }
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3f");
+    let path = std::env::temp_dir().join(format!("bm-name-buffer-{}-{}.txt", node_id, ts));
+    let body = format!(
+        "=== RAW ({} chars) ===\n{}\n\n=== CLEANED ({} chars, sent to LLM) ===\n{}\n",
+        raw.len(),
+        raw,
+        cleaned.len(),
+        cleaned
+    );
+    match std::fs::write(&path, body) {
+        Ok(_) => tracing::info!("session_naming: dumped rename buffer to {:?}", path),
+        Err(e) => tracing::warn!("session_naming: failed to dump rename buffer: {}", e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +380,8 @@ async fn summarize_and_rename_with(
 ) -> Result<String, String> {
     let ansi_stripped = ANSI_ESCAPE.replace_all(buffer, "").to_string();
     let clean_buffer = strip_claude_code_banner(&ansi_stripped);
+
+    maybe_dump_rename_buffer(node_id, buffer, &clean_buffer);
 
     let prompt = "The text on stdin is a terminal log from an AI coding-assistant session. \
                   Generate a short slug that describes the task the user is working on in this session. \
@@ -430,6 +518,13 @@ fn slug_with_retry(raw: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// Open the buffering gate for a node so `on_output` writes immediately.
+    /// Real code opens the gate via `should_trigger_rename`; tests use this
+    /// to simulate "the agent has already had at least one turn".
+    fn open_gate(node_id: i64) {
+        BUFFERING_READY.lock().unwrap().insert(node_id);
+    }
+
     #[test]
     fn generates_three_word_hyphenated_name() {
         let name = on_spawn();
@@ -515,6 +610,7 @@ mod tests {
 
     #[test]
     fn buffer_caps_at_max() {
+        open_gate(999);
         let big = "x".repeat(5000);
         on_output(999, &big);
         let buffers = SESSION_BUFFERS.lock().unwrap();
@@ -531,6 +627,7 @@ mod tests {
 
     #[test]
     fn stale_buffer_cleared_on_cleanup() {
+        open_gate(5);
         let stale_text = "old context from a previous archived session";
         on_output(5, stale_text);
         {
@@ -549,6 +646,8 @@ mod tests {
 
     #[test]
     fn cleanup_only_clears_target_session() {
+        open_gate(5);
+        open_gate(99);
         on_output(5, "session 5 output");
         on_output(99, "session 99 output");
 
@@ -559,10 +658,12 @@ mod tests {
             assert!(buffers.get(&5).is_none());
             assert!(buffers.get(&99).is_some(), "session 99 buffer should survive");
         }
+        cleanup(99);
     }
 
     #[test]
     fn cleanup_is_idempotent() {
+        open_gate(8);
         on_output(8, "some output");
 
         cleanup(8);
@@ -575,6 +676,7 @@ mod tests {
     #[test]
     fn buffer_truncation_splits_multibyte_utf8_correctly() {
         let node_id = 77;
+        open_gate(node_id);
         let base = "x".repeat(4000);
         let with_kanji = format!("{}{}", base, "日本");
 
@@ -588,7 +690,42 @@ mod tests {
     }
 
     #[test]
-    fn on_output_always_buffers_for_default_name_nodes() {
+    fn on_output_drops_data_until_gate_opens() {
+        // Distinct id to avoid cross-test contamination with shared statics
+        let node_id = 4242;
+        cleanup(node_id);
+
+        // Before any on_turn signal, all output is discarded — this is the
+        // bypass-permissions-warning fix: chrome printed at startup never
+        // reaches the renaming buffer.
+        on_output(node_id, "chrome chrome chrome");
+        on_output(node_id, "Bypass Permissions warning text...");
+
+        {
+            let buffers = SESSION_BUFFERS.lock().unwrap();
+            assert!(
+                buffers.get(&node_id).is_none(),
+                "buffer must stay empty before gate opens"
+            );
+        }
+
+        // Now the gate flips (simulating first idle_prompt webhook)
+        open_gate(node_id);
+
+        on_output(node_id, "real user content");
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        assert_eq!(
+            buffers.get(&node_id).unwrap().as_str(),
+            "real user content",
+            "post-gate output must accumulate, no chrome contamination"
+        );
+        drop(buffers);
+        cleanup(node_id);
+    }
+
+    #[test]
+    fn on_output_accumulates_after_gate_opens() {
+        open_gate(42);
         on_output(42, "first output");
         on_output(42, "second output");
 
@@ -596,12 +733,14 @@ mod tests {
         assert_eq!(
             buffers.get(&42).unwrap().as_str(),
             "first outputsecond output",
-            "on_output should accumulate without gate"
+            "on_output should accumulate once the gate is open"
         );
     }
 
     #[test]
     fn reset_buffers_removes_only_target() {
+        open_gate(5);
+        open_gate(99);
         on_output(5, "session 5 output");
         on_output(99, "session 99 output");
 
@@ -610,6 +749,26 @@ mod tests {
         let buffers = SESSION_BUFFERS.lock().unwrap();
         assert!(buffers.get(&5).is_none());
         assert!(buffers.get(&99).is_some());
+        drop(buffers);
+        cleanup(99);
+    }
+
+    #[test]
+    fn reset_buffers_closes_gate_so_next_session_starts_fresh() {
+        // After a kill/resume cycle, the gate must close so the next agent's
+        // startup chrome is dropped just like the first time.
+        let node_id = 5151;
+        open_gate(node_id);
+        on_output(node_id, "turn-1 content");
+        reset_buffers(node_id);
+
+        // After reset, gate is closed — output is dropped until a new turn.
+        on_output(node_id, "resumed-agent startup chrome");
+        let buffers = SESSION_BUFFERS.lock().unwrap();
+        assert!(
+            buffers.get(&node_id).is_none(),
+            "reset_buffers must also close the gate so resume-startup chrome is dropped"
+        );
     }
 
     // --- SessionNamingRepository mock tests ---
@@ -660,6 +819,7 @@ mod tests {
     #[test]
     fn should_trigger_rename_skips_already_renamed_node() {
         let node_id = 70001;
+        open_gate(node_id);
         on_output(node_id, &"x".repeat(2000));
 
         let repo = MockRepo::with_name("fix-auth-token-refresh");
@@ -668,34 +828,70 @@ mod tests {
 
         let buffers = SESSION_BUFFERS.lock().unwrap();
         assert!(buffers.get(&node_id).is_none(), "buffer should be cleared");
+        assert!(
+            !BUFFERING_READY.lock().unwrap().contains(&node_id),
+            "gate should be closed for renamed node"
+        );
     }
 
     #[test]
-    fn should_trigger_rename_returns_buffer_for_default_name() {
+    fn should_trigger_rename_opens_gate_on_first_call_for_default_named_node() {
+        // First call (no gate yet) is the "discard startup chrome" turn.
+        // It opens the gate and returns None even if the buffer would have
+        // been large enough, because the buffer at this point would be chrome.
         let node_id = 70002;
-        on_output(node_id, &"x".repeat(2000));
+        cleanup(node_id);
 
         let repo = MockRepo::with_name("bold-keen-brook");
         let result = should_trigger_rename(&repo, node_id);
-        assert!(result.is_some(), "should trigger for default-named node");
-        assert_eq!(result.unwrap().len(), 2000);
+        assert!(result.is_none(), "first call must defer rename to open the gate");
+        assert!(
+            BUFFERING_READY.lock().unwrap().contains(&node_id),
+            "gate must be open after first call"
+        );
+        cleanup(node_id);
+    }
+
+    #[test]
+    fn should_trigger_rename_returns_buffer_on_second_call() {
+        let node_id = 70003;
+        cleanup(node_id);
+
+        let repo = MockRepo::with_name("bold-keen-brook");
+        // First call opens the gate, returns None
+        let first = should_trigger_rename(&repo, node_id);
+        assert!(first.is_none());
+
+        // Now real PTY output accumulates (gate is open)
+        on_output(node_id, &"x".repeat(2000));
+
+        // Second call sees the buffer and returns it for renaming
+        let second = should_trigger_rename(&repo, node_id);
+        assert!(second.is_some(), "second call should trigger rename");
+        assert_eq!(second.unwrap().len(), 2000);
 
         RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id);
+        cleanup(node_id);
     }
 
     #[test]
     fn should_trigger_rename_skips_insufficient_buffer() {
-        let node_id = 70003;
+        let node_id = 70004;
+        cleanup(node_id);
+        open_gate(node_id); // pretend gate already opened by an earlier turn
         on_output(node_id, "short");
 
         let repo = MockRepo::with_name("bold-keen-brook");
         let result = should_trigger_rename(&repo, node_id);
         assert!(result.is_none(), "should skip when buffer too small");
+        cleanup(node_id);
     }
 
     #[test]
     fn should_trigger_rename_skips_when_already_in_progress() {
-        let node_id = 70004;
+        let node_id = 70005;
+        cleanup(node_id);
+        open_gate(node_id);
         on_output(node_id, &"x".repeat(2000));
         RENAMING_IN_PROGRESS.lock().unwrap().insert(node_id);
 
@@ -704,11 +900,14 @@ mod tests {
         assert!(result.is_none(), "should skip when rename in progress");
 
         RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id);
+        cleanup(node_id);
     }
 
     #[test]
     fn should_trigger_rename_skips_when_max_attempts_reached() {
-        let node_id = 70005;
+        let node_id = 70006;
+        cleanup(node_id);
+        open_gate(node_id);
         on_output(node_id, &"x".repeat(2000));
         RENAME_ATTEMPTS.lock().unwrap().insert(node_id, MAX_RENAME_ATTEMPTS);
 
@@ -717,6 +916,71 @@ mod tests {
         assert!(result.is_none(), "should skip when max attempts reached");
 
         RENAME_ATTEMPTS.lock().unwrap().remove(&node_id);
+        cleanup(node_id);
+    }
+
+    #[test]
+    fn end_to_end_bypass_permissions_chrome_excluded_from_rename_buffer() {
+        // Regression for the bypass-permissions slug bug.
+        //
+        // Simulated lifecycle of a freshly-spawned agent:
+        //   1. Claude Code prints its startup chrome (banner + Bypass
+        //      Permissions warning + plugin listing).
+        //   2. First idle_prompt arrives -> on_turn fires -> gate opens.
+        //   3. User does one real turn; PTY emits the real content.
+        //   4. Second idle_prompt arrives -> on_turn fires -> buffer is read.
+        //
+        // The buffer handed to the renaming LLM must contain only step-3 content.
+        let node_id = 70999;
+        cleanup(node_id);
+
+        let chrome = "\
+            ╭─ WARNING ────────────────────────────────────╮\n\
+            │  Claude Code running in Bypass Permissions   │\n\
+            │  mode. Only use in a sandboxed environment.  │\n\
+            ╰──────────────────────────────────────────────╯\n\
+            Plugins loaded: hookify, feature-dev, frontend-design\n\
+            ";
+        // Step 1: chrome arrives before any on_turn — must be dropped
+        on_output(node_id, chrome);
+
+        let repo = MockRepo::with_name("bold-keen-brook");
+        // Step 2: first turn opens the gate
+        assert!(should_trigger_rename(&repo, node_id).is_none());
+
+        // Step 3: real user content accumulates
+        let real = "User: refactor the authentication module to use JWT.\n\
+                    Assistant: I'll start by reading auth/login.rs.\n";
+        let bulk = real.repeat(40); // push past SUMMARIZE_BUFFER_CHARS / 2
+        on_output(node_id, &bulk);
+
+        // Step 4: second turn — buffer is harvested
+        let harvested = should_trigger_rename(&repo, node_id)
+            .expect("rename should trigger on second turn with real content");
+
+        assert!(
+            !harvested.contains("Bypass Permissions"),
+            "chrome leaked into rename buffer:\n{}",
+            harvested
+        );
+        assert!(
+            !harvested.contains("Plugins loaded"),
+            "plugin listing leaked into rename buffer:\n{}",
+            harvested
+        );
+        assert!(
+            !harvested.contains("hookify"),
+            "skill name leaked from startup chrome:\n{}",
+            harvested
+        );
+        assert!(
+            harvested.contains("authentication module"),
+            "real user content missing from rename buffer:\n{}",
+            harvested
+        );
+
+        RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id);
+        cleanup(node_id);
     }
 
     #[test]
