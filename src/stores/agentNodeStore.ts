@@ -44,6 +44,7 @@ interface AgentNodeState {
   setActiveNode: (id: number | null) => Promise<void>;
   fetchCheckpoints: (nodeId: number) => Promise<void>;
   spawnAgent: (nodeId: number, provider: string, rows?: number, cols?: number) => Promise<void>;
+  spawnHandoverAgent: (meshId: number, prefill: string, provider?: string) => Promise<AgentNode>;
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
   writeToAgent: (nodeId: number, data: string) => Promise<void>;
@@ -189,6 +190,18 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       await get().fetchAgentNodes();
     } catch (e) {
       console.error('[agentNodeStore] spawnAgent failed:', e);
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  spawnHandoverAgent: async (meshId: number, prefill: string, provider?: string) => {
+    try {
+      const node = await invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
+      set((state) => ({ agentNodes: [...state.agentNodes, node] }));
+      await get().fetchAgentNodes();
+      return node;
+    } catch (e) {
       set({ error: String(e) });
       throw e;
     }

@@ -145,6 +145,7 @@ pub fn run() {
             commands::agent::debug_crash_snapshot,
             commands::agent::list_providers,
             commands::agent::spawn_issue_agent,
+            commands::agent::spawn_handover_agent,
             // Checkpoint
             commands::checkpoint::create_checkpoint,
             // Build/Run

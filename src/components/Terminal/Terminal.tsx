@@ -32,6 +32,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [handoverProviderLabel, setHandoverProviderLabel] = useState<string | null>(null);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
@@ -119,6 +120,22 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const handleClear = () => {
     const inst = terminalManager.getInstance(sessionId);
     if (inst) inst.term.clear();
+    setContextMenu(null);
+  };
+
+  const handleHandover = async () => {
+    const inst = terminalManager.getInstance(sessionId);
+    if (!inst || !inst.term.hasSelection()) { setContextMenu(null); return; }
+    const selection = inst.term.getSelection();
+    if (!selection.trim()) { setContextMenu(null); return; }
+    if (!node) { setContextMenu(null); return; }
+    try {
+      await useAgentNodeStore.getState().spawnHandoverAgent(
+        node.mesh_id, selection, undefined,
+      );
+    } catch (e) {
+      console.error('[AgentTerminal] handover failed:', e);
+    }
     setContextMenu(null);
   };
 
@@ -245,6 +262,18 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     };
   }, [sessionId, node?.status]);
 
+  // Pre-fetch the default provider label for the handover menu item
+  useEffect(() => {
+    if (!node) return;
+    invoke<string>('get_default_provider', { meshId: node.mesh_id })
+      .then(async (defProvider) => {
+        const providers = await invoke<{ id: string; label: string }[]>('list_providers');
+        const info = providers.find(p => p.id === defProvider);
+        setHandoverProviderLabel(info?.label ?? defProvider);
+      })
+      .catch(() => setHandoverProviderLabel('Default'));
+  }, [node?.mesh_id]);
+
   return (
     <div
       ref={containerRef}
@@ -319,6 +348,18 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
           >
             Find... <span className="float-right text-text-muted">{isMac ? '⌘F' : 'Ctrl+Shift+F'}</span>
           </button>
+          {handoverProviderLabel !== null && (
+            <>
+              <div className="border-t border-border-default my-0.5" />
+              <button
+                onClick={handleHandover}
+                disabled={!instRef.current?.term.hasSelection()}
+                className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
+              >
+                Handover to new Node [{handoverProviderLabel}]
+              </button>
+            </>
+          )}
           <div className="border-t border-border-default my-0.5" />
           <button
             onClick={handleClear}

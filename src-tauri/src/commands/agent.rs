@@ -66,17 +66,15 @@ pub async fn spawn_agent(
     }).await
 }
 
-/// Spawn an agent pre-filled with a GitHub issue's title and body.
-/// The `--prefill` arg is only passed for providers whose adapter declares
-/// `supports_prefill() = true`; others spawn without prefill and log a warning.
-#[command]
-pub async fn spawn_issue_agent(
-    app: AppHandle,
+/// Internal implementation shared by spawn_issue_agent and spawn_handover_agent.
+/// Takes the raw prefill text and a formatter to produce the final --prefill string.
+async fn spawn_new_agent_impl(
+    app: &AppHandle,
     mesh_id: i64,
-    issue_number: i64,
-    issue_title: String,
-    issue_body: String,
+    raw_prefill: String,
+    formatter: impl FnOnce(&str) -> String,
     provider: Option<String>,
+    source_issue: Option<i64>,
 ) -> Result<crate::models::AgentNode, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
@@ -92,29 +90,79 @@ pub async fn spawn_issue_agent(
         &mesh.path,
         &branch,
         Some(&effective_provider),
-        Some(issue_number),
+        source_issue,
     ).map_err(|e| e.to_string())?;
 
-    let prefill = if Provider::from_db_str(&effective_provider).adapter().supports_prefill() {
-        Some(format!("{}\n\n{}", issue_title, issue_body))
+    let prefill_text = if Provider::from_db_str(&effective_provider).adapter().supports_prefill() {
+        Some(formatter(&raw_prefill))
     } else {
-        tracing::warn!("spawn_issue_agent: --prefill not supported for provider '{}', skipping", effective_provider);
+        tracing::warn!(
+            "spawn_new_agent_impl: --prefill not supported for provider '{}', skipping",
+            effective_provider
+        );
         None
     };
 
     let node_id = node.id;
-    crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
+    crate::agent::spawn::spawn_agent_inner(app, SpawnOptions {
         session_id: node_id,
         provider: Provider::from_db_str(&effective_provider),
         resume: None,
         rows: 24,
         cols: 80,
-        prefill,
+        prefill: prefill_text,
         node: Some(node),
     }).await?;
 
-    tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node_id, issue_number);
     db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
+}
+
+/// Spawn an agent pre-filled with a GitHub issue's title and body.
+/// The `--prefill` arg is only passed for providers whose adapter declares
+/// `supports_prefill() = true`; others spawn without prefill and log a warning.
+#[command]
+pub async fn spawn_issue_agent(
+    app: AppHandle,
+    mesh_id: i64,
+    issue_number: i64,
+    issue_title: String,
+    issue_body: String,
+    provider: Option<String>,
+) -> Result<crate::models::AgentNode, String> {
+    let prefill = format!("{}\n\n{}", issue_title, issue_body);
+    let node = spawn_new_agent_impl(
+        &app,
+        mesh_id,
+        prefill,
+        |raw| raw.to_string(),
+        provider,
+        Some(issue_number),
+    ).await?;
+
+    tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node.id, issue_number);
+    Ok(node)
+}
+
+/// Spawn a new agent node pre-filled with selected text from a parent terminal.
+/// Used by the "Handover to new Node" context menu option.
+#[command]
+pub async fn spawn_handover_agent(
+    app: AppHandle,
+    mesh_id: i64,
+    prefill: String,
+    provider: Option<String>,
+) -> Result<crate::models::AgentNode, String> {
+    let node = spawn_new_agent_impl(
+        &app,
+        mesh_id,
+        prefill,
+        |raw| raw.to_string(),
+        provider,
+        None,
+    ).await?;
+
+    tracing::info!("spawn_handover_agent: spawned node {} via handover", node.id);
+    Ok(node)
 }
 
 /// Auto-resume all suspended sessions that have a stored CLI session ID.
