@@ -3,54 +3,10 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { AgentNode, terminalWsUrl } from "../api";
+import { attachTouchPan } from "./attachTouchPan";
 
 const MAX_RECONNECT = 5;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
-
-// xterm.js renders its grid into a canvas / DOM rows that sit on top of the
-// `.xterm-viewport` scrollable div. Mobile touchmove events land on those
-// upper layers and are never translated into viewport scrolls (xterm only
-// uses touch internally for tap-to-select). Map single-finger drags onto
-// `viewport.scrollTop` so the scrollback becomes reachable on touch.
-function attachTouchPan(host: HTMLElement): () => void {
-  const viewport = host.querySelector<HTMLElement>(".xterm-viewport");
-  const xtermEl = host.querySelector<HTMLElement>(".xterm");
-  if (!viewport || !xtermEl) return () => {};
-
-  let lastY = 0;
-  let panning = false;
-
-  const onTouchStart = (e: TouchEvent) => {
-    if (e.touches.length !== 1) {
-      panning = false;
-      return;
-    }
-    panning = true;
-    lastY = e.touches[0].clientY;
-  };
-  const onTouchMove = (e: TouchEvent) => {
-    if (!panning || e.touches.length !== 1) return;
-    const y = e.touches[0].clientY;
-    viewport.scrollTop += lastY - y;
-    lastY = y;
-    e.preventDefault();
-  };
-  const onTouchEnd = () => {
-    panning = false;
-  };
-
-  xtermEl.addEventListener("touchstart", onTouchStart, { passive: true });
-  xtermEl.addEventListener("touchmove", onTouchMove, { passive: false });
-  xtermEl.addEventListener("touchend", onTouchEnd, { passive: true });
-  xtermEl.addEventListener("touchcancel", onTouchEnd, { passive: true });
-
-  return () => {
-    xtermEl.removeEventListener("touchstart", onTouchStart);
-    xtermEl.removeEventListener("touchmove", onTouchMove);
-    xtermEl.removeEventListener("touchend", onTouchEnd);
-    xtermEl.removeEventListener("touchcancel", onTouchEnd);
-  };
-}
 
 type Props = {
   node: AgentNode;
@@ -112,26 +68,22 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     if (termHostRef.current) {
       term.open(termHostRef.current);
       fit.fit();
-      detachTouchPan = attachTouchPan(termHostRef.current);
+      detachTouchPan = attachTouchPan(termHostRef.current, term);
 
-      // xterm's internal scroll container. Listening here lets us show the
-      // "jump to latest" pill whenever the user scrolls away from the tail.
-      // No event fires when scrollHeight grows on writes (only scrollTop
-      // changes do), which is what we want: if they're scrolled up, they
-      // stay scrolled up regardless of new output.
-      const viewport = termHostRef.current.querySelector(
-        ".xterm-viewport",
-      ) as HTMLElement | null;
-      if (viewport) {
-        const onScroll = () => {
-          const dist =
-            viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
-          setAtBottom(dist < 4);
-        };
-        viewport.addEventListener("scroll", onScroll, { passive: true });
-        onScroll();
-        detachScroll = () => viewport.removeEventListener("scroll", onScroll);
-      }
+      // Drive the "jump to latest" pill off xterm's public scroll event and
+      // buffer coordinates. In v6 the DOM `.xterm-viewport` is no longer the
+      // real scroll axis (SmoothScrollableElement owns the scroll state), so
+      // a DOM scroll listener would never fire. `buffer.active.viewportY`
+      // tracks the top line of the viewport in scrollback coords, and equals
+      // `baseY` exactly when scrolled to the tail — no event fires when new
+      // output arrives while pinned to the tail, which is what we want.
+      const updateAtBottom = () => {
+        const buf = term.buffer.active;
+        setAtBottom(buf.viewportY >= buf.baseY);
+      };
+      const scrollDisposable = term.onScroll(updateAtBottom);
+      updateAtBottom();
+      detachScroll = () => scrollDisposable.dispose();
     }
 
     term.onData((data) => {
