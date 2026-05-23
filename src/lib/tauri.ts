@@ -189,6 +189,9 @@ export const getRepoIssues = (meshId: number) =>
 export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, issueBody: string, provider?: string) =>
   invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, issueBody, provider });
 
+export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: string) =>
+  invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
+
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
   invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 

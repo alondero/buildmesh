@@ -171,6 +171,7 @@ fn process_request(request: &str, app: &AppHandle) -> String {
             "remove_worktree_base_ref" => handle_remove_worktree_base_ref(&rpc_req.args),
             "update_mesh_use_worktree" => handle_update_mesh_use_worktree(&rpc_req.args),
             "get_root_token" => handle_get_root_token(),
+            "spawn_handover_agent" => handle_spawn_handover_agent(&rpc_req.args, app.clone()),
             _ => JsonRpcResponse::error(&format!("Unknown command: {}", rpc_req.cmd)),
         }
     } else if request.starts_with("GET /health") {
@@ -288,6 +289,39 @@ fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
         Err(e) => {
             tracing::error!("[test_server] spawn_agent panicked: {:?}", e);
             JsonRpcResponse::error(&format!("spawn_agent panicked: {:?}", e))
+        }
+    }
+}
+
+fn handle_spawn_handover_agent(args: &serde_json::Value, app: AppHandle) -> String {
+    let mesh_id = args.get("meshId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let prefill = args.get("prefill").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let provider = args.get("provider").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
+
+    tracing::info!("[test_server] spawn_handover_agent: mesh_id={}, prefill_len={}", mesh_id, prefill.len());
+
+    let app_clone = app.clone();
+    let result = std::thread::spawn(move || {
+        tauri::async_runtime::block_on(crate::commands::agent::spawn_handover_agent(
+            app_clone,
+            mesh_id,
+            prefill,
+            provider,
+        ))
+    }).join();
+
+    match result {
+        Ok(Ok(node)) => {
+            let _ = app.emit("session-created", serde_json::json!({ "id": node.id }));
+            JsonRpcResponse::success(&node)
+        }
+        Ok(Err(e)) => {
+            tracing::error!("[test_server] spawn_handover_agent error: {}", e);
+            JsonRpcResponse::error(&e)
+        }
+        Err(e) => {
+            tracing::error!("[test_server] spawn_handover_agent panicked: {:?}", e);
+            JsonRpcResponse::error(&format!("spawn_handover_agent panicked: {:?}", e))
         }
     }
 }
