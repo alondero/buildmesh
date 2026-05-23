@@ -65,7 +65,7 @@ The `idle_prompt` matcher is a Claude Code internal. The first `idle_prompt` (on
 The PTY reader thread sniffs `session-id:` or `session_id:` from agent output and auto-saves it to the DB for `--resume` support. Don't replicate this — it's backend-only.
 
 ### Turn Counting and Node Naming
-`session_naming.rs` captures PTY output, increments turn counters, and auto-names agent nodes via LLM summarization (slug-based, e.g. `fix-auth-flow`). The naming is async — it spawns a background task on turn 1.
+`session_naming.rs` captures PTY output and auto-names agent nodes via LLM summarisation (slug-based, e.g. `fix-auth-flow`). Buffering is gated: `on_output` only starts collecting after the first `on_turn` (first idle-prompt webhook) fires, so the Claude Code startup chrome — banner, "Bypass Permissions" warning, plugin/skill listing — is discarded before it can reach the LLM. The rename runs async one turn later, against clean post-startup content.
 
 ### Crash Recovery on Startup
 `lib.rs:46-54` marks any agent nodes still showing `Running` status as `Suspended` during app startup, since a crash means no live process exists. These are then auto-resumed via `auto_resume_nodes` on the frontend's first draw.
