@@ -112,15 +112,19 @@ pub async fn get_local_ip() -> Result<String, String> {
     .map_err(|_| "timeout detecting network interfaces (5s exceeded)".to_string())?
 }
 
-/// Get the default provider for a mesh, from its DB default_provider field.
-/// Returns "anthropic" if the field is absent or empty.
+/// Get the default provider for a mesh, applying the precedence chain:
+///   1. per-mesh DB `default_provider` (set via mesh.toml or Mesh Properties)
+///   2. buildmesh-wide `preferences::default_provider` (set via Settings)
+///   3. hardcoded `anthropic` fallback
 #[command]
 pub async fn get_default_provider(mesh_id: i64) -> Result<String, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("{}", e))?;
-    Ok(mesh.default_provider
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(|| "anthropic".to_string()))
+    Ok(crate::preferences::resolve_default_provider(
+        None,
+        mesh.default_provider,
+        crate::preferences::default_provider(),
+    ))
 }
 
 /// Find the first IP matching one of the given /8 prefixes (big-endian octets).

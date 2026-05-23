@@ -8,6 +8,7 @@ mod env;
 mod http;
 mod http_server;
 mod models;
+mod preferences;
 pub mod process_util;
 mod pty;
 mod services;
@@ -29,6 +30,9 @@ pub fn run() {
             std::fs::create_dir_all(&app_dir)?;
             let db_path = app_dir.join("buildmesh.db");
             db::init(&db_path)?;
+
+            // Wire the preferences module to the same on-disk location as the DB.
+            preferences::init(app_dir.clone());
 
             // Set up file-based logging with tracing
             let log_dir = app_dir.join("logs");
@@ -133,6 +137,9 @@ pub fn run() {
             commands::mesh::get_root_token,
             commands::mesh::get_local_ip,
             commands::mesh::get_default_provider,
+            // App preferences (buildmesh-wide)
+            commands::preferences::get_app_preferences,
+            commands::preferences::set_app_default_provider,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,
