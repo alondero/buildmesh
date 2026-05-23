@@ -69,6 +69,7 @@ export class TerminalRegistry {
   }
 
   private attachToDOM(inst: TerminalInstance, container: HTMLElement): TerminalInstance {
+    const wasFreshOpen = !inst.opened;
     if (!inst.opened) {
       inst.opened = true;
       inst.term.open(container);
@@ -94,7 +95,10 @@ export class TerminalRegistry {
 
     requestAnimationFrame(() => {
       measureAndFit(inst);
-      inst.term.scrollToBottom();
+      // Only auto-scroll-to-tail on the first open. On re-attach the user
+      // may have scrolled back to read history; forcing the tail here would
+      // silently destroy that position (and flash the jump-to-latest pill).
+      if (wasFreshOpen) inst.term.scrollToBottom();
       inst.term.refresh(0, inst.term.rows - 1);
     });
 

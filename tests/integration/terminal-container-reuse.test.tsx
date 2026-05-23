@@ -128,3 +128,53 @@ describe('terminal container reuse on sessionId change (single-pane mesh switch)
     expect(inst!.term.element!.parentElement).toBe(containerB);
   });
 });
+
+// Regression: TerminalRegistry.attachToDOM unconditionally scheduled
+// scrollToBottom() in a requestAnimationFrame on every attach, which forced
+// the terminal back to the tail whenever the React effect re-ran (e.g. on
+// node.status transitions). That destroyed the user's scrollback context
+// silently and also caused the new "jump to latest" pill to flash for one
+// frame on every switch back to a scrolled-up terminal. Auto-scroll-to-tail
+// is only meaningful on the *first* DOM open of an instance — once the user
+// has a buffer they may have scrolled, re-attaches must preserve that.
+describe('terminal attach preserves scroll position on re-attach', () => {
+  beforeEach(() => {
+    if (!('ResizeObserver' in globalThis)) {
+      (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      };
+    }
+    vi.clearAllMocks();
+    terminalManager.dispose(1);
+  });
+
+  afterEach(() => {
+    terminalManager.dispose(1);
+  });
+
+  it('scrollToBottom is called on first open but NOT on re-attach', async () => {
+    const containerA = document.createElement('div');
+    const inst = await terminalManager.attach(1, containerA);
+    expect(inst).not.toBeNull();
+
+    // Flush the rAF that attachToDOM queues for measureAndFit/refresh.
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const firstOpenCalls = (inst!.term.scrollToBottom as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(firstOpenCalls).toBeGreaterThanOrEqual(1);
+
+    // Simulate the effect re-running (e.g. node.status changed) — detach
+    // followed by attach back into a fresh container, same instance.
+    terminalManager.detach(1);
+    const containerB = document.createElement('div');
+    const inst2 = await terminalManager.attach(1, containerB);
+    expect(inst2).toBe(inst);
+
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    const afterReattachCalls = (inst!.term.scrollToBottom as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // The re-attach must not have triggered another scrollToBottom.
+    expect(afterReattachCalls).toBe(firstOpenCalls);
+  });
+});
