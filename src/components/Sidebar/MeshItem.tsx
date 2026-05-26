@@ -1,0 +1,224 @@
+import { useState, useEffect, useRef } from 'react';
+import { useSortable } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import type { Mesh } from '../../stores/meshStore';
+import type { AgentNode } from '../../stores/agentNodeStore';
+import type { FileExplorerContext } from '../../stores/uiStore';
+import { getMeshColor } from '../../lib/meshColors';
+import { gitSync } from '../../lib/tauri';
+import { NodeItem } from './NodeItem';
+import { NodeCreationForm } from './NodeCreationForm';
+import type { ProviderEntry } from './ProviderDropdown';
+
+interface MeshItemProps {
+  mesh: Mesh;
+  isSelected: boolean;
+  isDropdownOpen: boolean;
+  providerList: ProviderEntry[];
+  onSelectMesh: (id: number) => void;
+  onNewNode: (mesh: Mesh) => void;
+  onSelectProvider: (mesh: Mesh, providerId: string) => void;
+  onOpenProperties: (meshId: number) => void;
+  onToggleFileExplorer: (context: FileExplorerContext) => void;
+  meshNodes: AgentNode[];
+  activeNodeId: number | null;
+  setActiveNode: (id: number) => void;
+  selectMesh: (id: number | null) => void;
+  onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
+  onOpenGitHubIssues: (meshId: number) => void;
+  onOpenSessionBrowser: (meshId: number) => void;
+  getDefaultProvider: (meshId: number) => Promise<string>;
+}
+
+export function MeshItem({
+  mesh,
+  isSelected,
+  isDropdownOpen,
+  providerList,
+  onSelectMesh,
+  onNewNode,
+  onSelectProvider,
+  onOpenProperties,
+  onToggleFileExplorer,
+  meshNodes,
+  activeNodeId,
+  setActiveNode,
+  selectMesh,
+  onDeleteNode,
+  onOpenGitHubIssues,
+  onOpenSessionBrowser,
+  getDefaultProvider,
+}: MeshItemProps) {
+  const {
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+    attributes,
+    listeners,
+  } = useSortable({ id: mesh.id });
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const meshColor = getMeshColor(mesh.id);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
+  const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleSync = async () => {
+    setSyncing(true);
+    setSyncMessage(null);
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    try {
+      const result = await gitSync(mesh.path);
+      setSyncMessage(result.message);
+    } catch (e) {
+      setSyncMessage(`Sync error: ${e}`);
+    } finally {
+      setSyncing(false);
+      syncTimeoutRef.current = setTimeout(() => setSyncMessage(null), 4000);
+    }
+  };
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => setContextMenu(null);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
+
+  return (
+    <div ref={setNodeRef} style={style} className="mb-1 group/mesh">
+      {/* Mesh header — double height with color accent */}
+      <div
+        className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${meshColor.border} ${
+          isSelected ? 'bg-bg-card' : 'hover:bg-bg-card/50'
+        }`}
+        onClick={() => onSelectMesh(mesh.id)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setContextMenu({ x: e.clientX, y: e.clientY });
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <span
+            {...attributes}
+            {...listeners}
+            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-[10px] select-none"
+            title="Drag to reorder"
+          >
+            ⋮⋮
+          </span>
+          <span
+            className="font-sans font-semibold text-[15px] text-text-primary truncate flex-1"
+          >
+            {mesh.name}
+          </span>
+          <NodeCreationForm
+            mesh={mesh}
+            isDropdownOpen={isDropdownOpen}
+            providers={providerList}
+            onToggleDropdown={onNewNode}
+            onSelectProvider={onSelectProvider}
+            getDefaultProvider={getDefaultProvider}
+          />
+        </div>
+      </div>
+      {syncMessage && (
+        <div className="ml-2 mr-2 mb-1 px-2 py-1 rounded text-xs bg-bg-overlay border border-border-subtle text-text-secondary">
+          {syncMessage}
+        </div>
+      )}
+
+      {/* Agent nodes within this mesh */}
+      {meshNodes.map(node => (
+        <NodeItem
+          key={node.id}
+          node={node}
+          meshColor={meshColor}
+          isActive={activeNodeId === node.id}
+          onSelect={() => {
+            setActiveNode(node.id);
+            selectMesh(node.mesh_id);
+          }}
+          onDelete={(e) => onDeleteNode(e, node.id)}
+        />
+      ))}
+
+      {/* Context menu — periphery actions */}
+      {contextMenu && (
+        <div
+          className="fixed bg-bg-overlay border border-border-default rounded shadow-lg z-[100] py-1 min-w-[180px]"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => { setContextMenu(null); onOpenProperties(mesh.id); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+            Properties
+          </button>
+          <button
+            onClick={() => { setContextMenu(null); onToggleFileExplorer({ type: 'mesh', meshId: mesh.id, path: mesh.path }); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+            </svg>
+            File Explorer
+          </button>
+          <button
+            onClick={() => { setContextMenu(null); handleSync(); }}
+            disabled={syncing}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncing ? 'animate-spin' : ''}>
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+              <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+            </svg>
+            {syncing ? 'Syncing...' : 'Sync Latest'}
+          </button>
+          <button
+            onClick={() => { setContextMenu(null); onOpenSessionBrowser(mesh.id); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <polyline points="12 6 12 12 16 14"/>
+            </svg>
+            Previous Sessions
+          </button>
+          <button
+            onClick={() => { setContextMenu(null); onOpenGitHubIssues(mesh.id); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10"/>
+              <line x1="12" y1="8" x2="12" y2="16"/>
+              <line x1="8" y1="12" x2="16" y2="12"/>
+            </svg>
+            GitHub Issues
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
