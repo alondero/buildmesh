@@ -195,6 +195,31 @@ fn register_agent(
     );
 }
 
+/// Core PTY read loop: read 8 KiB chunks until EOF or error, decoding each as
+/// (lossy) UTF-8 and handing it to `on_chunk`. Returns when the PTY closes.
+///
+/// Extracted so the production reader thread and the real-PTY integration test
+/// exercise the exact same read path (see `src-tauri/tests/pty_spawn.rs`).
+pub fn pump_pty_output(
+    mut reader: Box<dyn std::io::Read + Send>,
+    mut on_chunk: impl FnMut(&str),
+) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let data = String::from_utf8_lossy(&buf[..n]);
+                on_chunk(&data);
+            }
+            Err(e) => {
+                tracing::error!("PTY read error: {}", e);
+                break;
+            }
+        }
+    }
+}
+
 /// Start the PTY reader thread.
 fn start_reader(
     app: tauri::AppHandle,
@@ -209,44 +234,29 @@ fn start_reader(
     let session_captured = AtomicBool::new(!needs_session_capture);
 
     std::thread::spawn(move || {
-        let mut r = reader;
-        let mut buf = [0u8; 8192];
-        loop {
-            match r.read(&mut buf) {
-                Ok(0) => {
-                    tracing::debug!("PTY EOF received for session {}, reader exiting", session_id);
-                    break;
-                }
-                Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
+        pump_pty_output(reader, |data| {
+            crate::session_naming::on_output(session_id, data);
 
-                    crate::session_naming::on_output(session_id, &data);
-
-                    if !session_captured.load(Ordering::Relaxed) {
-                        if let Some(uuid) = crate::session_capture::try_extract_session_id(&data) {
-                            let _ = db::update_cli_session_id(session_id, uuid);
-                            session_captured.store(true, Ordering::Relaxed);
-                            tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
-                        }
-                    }
-
-                    let _ = app_clone.emit(
-                        "agent-output",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "line": data
-                        }),
-                    );
-
-                    // Forward to any connected mobile WebSocket clients
-                    crate::http_server::send_pty_output(session_id, data.into_bytes());
-                }
-                Err(e) => {
-                    tracing::error!("PTY read error for session {}: {}", session_id, e);
-                    break;
+            if !session_captured.load(Ordering::Relaxed) {
+                if let Some(uuid) = crate::session_capture::try_extract_session_id(data) {
+                    let _ = db::update_cli_session_id(session_id, uuid);
+                    session_captured.store(true, Ordering::Relaxed);
+                    tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
                 }
             }
-        }
+
+            let _ = app_clone.emit(
+                "agent-output",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "line": data
+                }),
+            );
+
+            // Forward to any connected mobile WebSocket clients
+            crate::http_server::send_pty_output(session_id, data.as_bytes().to_vec());
+        });
+        tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 
         // Detect early exit (likely a failed --resume)

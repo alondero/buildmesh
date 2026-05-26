@@ -1,13 +1,13 @@
 //! Buildmesh — Rust Backend
 //! AI Agent Orchestration Hub for Windows + WSL
 
-mod agent;
+pub mod agent;
 mod commands;
 mod db;
 mod env;
 mod http;
 mod http_server;
-mod models;
+pub mod models;
 mod preferences;
 pub mod process_util;
 mod pty;
