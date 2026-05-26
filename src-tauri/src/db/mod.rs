@@ -496,35 +496,43 @@ pub(crate) fn reset_for_testing() {
 
 // --- Internal Helpers (no locking) ---
 
+/// Canonical column projection for reading a `Mesh` row. The `COALESCE`
+/// defaults must stay in sync with `map_mesh_row`'s positional `row.get`s.
+const MESH_COLUMNS: &str =
+    "id, name, path, layout, position, created_at, \
+     COALESCE(build_command, ''), COALESCE(run_command, ''), \
+     COALESCE(model, ''), COALESCE(effort, ''), \
+     COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
+     COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')";
+
+/// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
+/// normalizes empty config strings to `None` (via `parse_str`).
+fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
+    Ok(Mesh {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        path: row.get(2)?,
+        layout: row.get::<_, String>(3)?,
+        position: row.get(4)?,
+        created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now()),
+        build_command: parse_str(row.get::<_, String>(6)?),
+        run_command: parse_str(row.get::<_, String>(7)?),
+        model: parse_str(row.get::<_, String>(8)?),
+        effort: parse_str(row.get::<_, String>(9)?),
+        use_worktree: row.get::<_, i32>(10)? != 0,
+        worktree_mode: parse_str(row.get::<_, String>(11)?),
+        default_provider: parse_str(row.get::<_, String>(12)?),
+        base_ref: row.get::<_, String>(13)?,
+    })
+}
+
 fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, path, layout, position, created_at,
-                COALESCE(build_command, ''), COALESCE(run_command, ''),
-                COALESCE(model, ''), COALESCE(effort, ''),
-                COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''),
-                COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')
-         FROM meshes WHERE id = ?1"
+        &format!("SELECT {} FROM meshes WHERE id = ?1", MESH_COLUMNS)
     )?;
-    stmt.query_row(params![id], |row| {
-        Ok(Mesh {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            path: row.get(2)?,
-            layout: row.get::<_, String>(3)?,
-            position: row.get(4)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-            build_command: parse_str(row.get::<_, String>(6)?),
-            run_command: parse_str(row.get::<_, String>(7)?),
-            model: parse_str(row.get::<_, String>(8)?),
-            effort: parse_str(row.get::<_, String>(9)?),
-            use_worktree: row.get::<_, i32>(10)? != 0,
-            worktree_mode: parse_str(row.get::<_, String>(11)?),
-            default_provider: parse_str(row.get::<_, String>(12)?),
-            base_ref: row.get::<_, String>(13)?,
-        })
-    })
+    stmt.query_row(params![id], map_mesh_row)
 }
 
 fn parse_str(s: String) -> Option<String> {
@@ -622,33 +630,9 @@ pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, name, path, layout, position, created_at,
-                COALESCE(build_command, ''), COALESCE(run_command, ''),
-                COALESCE(model, ''), COALESCE(effort, ''),
-                COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''),
-                COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')
-         FROM meshes ORDER BY position ASC, name ASC"
+        &format!("SELECT {} FROM meshes ORDER BY position ASC, name ASC", MESH_COLUMNS)
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(Mesh {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            path: row.get(2)?,
-            layout: row.get::<_, String>(3)?,
-            position: row.get(4)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-            build_command: parse_str(row.get::<_, String>(6)?),
-            run_command: parse_str(row.get::<_, String>(7)?),
-            model: parse_str(row.get::<_, String>(8)?),
-            effort: parse_str(row.get::<_, String>(9)?),
-            use_worktree: row.get::<_, i32>(10)? != 0,
-            worktree_mode: parse_str(row.get::<_, String>(11)?),
-            default_provider: parse_str(row.get::<_, String>(12)?),
-            base_ref: row.get::<_, String>(13)?,
-        })
-    })?;
+    let rows = stmt.query_map([], map_mesh_row)?;
     rows.collect()
 }
 
@@ -656,33 +640,9 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
 pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT id, name, path, layout, position, created_at,
-                COALESCE(build_command, ''), COALESCE(run_command, ''),
-                COALESCE(model, ''), COALESCE(effort, ''),
-                COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''),
-                COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')
-         FROM meshes WHERE path = ?1"
+        &format!("SELECT {} FROM meshes WHERE path = ?1", MESH_COLUMNS)
     )?;
-    stmt.query_row(params![path], |row| {
-        Ok(Mesh {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            path: row.get(2)?,
-            layout: row.get::<_, String>(3)?,
-            position: row.get(4)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-            build_command: parse_str(row.get::<_, String>(6)?),
-            run_command: parse_str(row.get::<_, String>(7)?),
-            model: parse_str(row.get::<_, String>(8)?),
-            effort: parse_str(row.get::<_, String>(9)?),
-            use_worktree: row.get::<_, i32>(10)? != 0,
-            worktree_mode: parse_str(row.get::<_, String>(11)?),
-            default_provider: parse_str(row.get::<_, String>(12)?),
-            base_ref: row.get::<_, String>(13)?,
-        })
-    })
+    stmt.query_row(params![path], map_mesh_row)
 }
 
 pub fn delete_mesh(id: i64) -> SqlResult<()> {

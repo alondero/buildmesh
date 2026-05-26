@@ -2,47 +2,11 @@
 
 use crate::db;
 use crate::env;
+use crate::models::MeshConfig;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
-
-// ---------------------------------------------------------------------------
-// Config (read from DB)
-// ---------------------------------------------------------------------------
-
-/// Represents the mesh build/run configuration (read from SQLite)
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct BuildRunConfig {
-    pub build_command: String,
-    pub run_command: String,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    /// If false, agents work directly in the repo root instead of in a worktree
-    pub use_worktree: bool,
-    /// "detached" (default) or "branched" - controls git worktree add behavior
-    pub worktree_mode: Option<String>,
-    /// Default provider for the + button in the mesh list (e.g. "minimax")
-    pub default_provider: Option<String>,
-}
-
-/// Parse build/run config from the database for a mesh at the given path.
-fn build_run_config_from_mesh(mesh: &crate::models::Mesh) -> Result<BuildRunConfig, String> {
-    let build_command = mesh.build_command.clone()
-        .ok_or_else(|| "build command not configured".to_string())?;
-    let run_command = mesh.run_command.clone()
-        .ok_or_else(|| "run command not configured".to_string())?;
-
-    Ok(BuildRunConfig {
-        build_command,
-        run_command,
-        model: mesh.model.clone(),
-        effort: mesh.effort.clone(),
-        use_worktree: mesh.use_worktree,
-        worktree_mode: mesh.worktree_mode.clone(),
-        default_provider: mesh.default_provider.clone(),
-    })
-}
 
 // ---------------------------------------------------------------------------
 // Worktree path resolution
@@ -138,10 +102,10 @@ pub async fn build_run(
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;
 
-    // 2. Parse mesh config from DB
+    // 2. Read canonical mesh config from DB
     let mesh = db::get_mesh_by_path(&node.path)
         .map_err(|e| format!("failed to get mesh for path {}: {}", node.path, e))?;
-    let config = build_run_config_from_mesh(&mesh)?;
+    let config = MeshConfig::from(&mesh);
 
     // 3. If use_worktree is false, work directly in repo root
     let use_worktree = config.use_worktree;
@@ -166,8 +130,10 @@ pub async fn build_run(
 
     // 5. Get the command to run
     let command = match mode {
-        BuildRunMode::Build => &config.build_command,
-        BuildRunMode::Run => &config.run_command,
+        BuildRunMode::Build => config.build_command.as_deref()
+            .ok_or_else(|| "build command not configured".to_string())?,
+        BuildRunMode::Run => config.run_command.as_deref()
+            .ok_or_else(|| "run command not configured".to_string())?,
     };
 
     // 5. Get shell working directory from resolved path
@@ -249,10 +215,10 @@ pub async fn build_run(
 }
 
 #[tauri::command]
-pub async fn get_mesh_config(mesh_id: i64) -> Result<BuildRunConfig, String> {
+pub async fn get_mesh_config(mesh_id: i64) -> Result<MeshConfig, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("failed to get mesh {}: {}", mesh_id, e))?;
-    build_run_config_from_mesh(&mesh)
+    Ok(MeshConfig::from(&mesh))
 }
 
 /// Close a build/run terminal for a node
@@ -272,21 +238,3 @@ pub async fn ensure_mesh_config(_mesh_id: i64) -> Result<String, String> {
     Ok(String::new())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_run_config_has_use_worktree_field() {
-        let config = BuildRunConfig {
-            build_command: "npm run build".to_string(),
-            run_command: "npm run dev".to_string(),
-            model: None,
-            effort: None,
-            use_worktree: true,
-            worktree_mode: None,
-            default_provider: None,
-        };
-        assert!(config.use_worktree);
-    }
-}

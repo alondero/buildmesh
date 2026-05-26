@@ -345,7 +345,7 @@ pub async fn spawn_agent_inner(
     };
 
     // 5. Read mesh config for use_worktree / model / effort / worktree_mode
-    let config = env::read_mesh_spawn_config(&std::path::PathBuf::from(&node.path));
+    let config = env::read_mesh_config(&std::path::PathBuf::from(&node.path));
     let use_worktree = config.as_ref().map(|c| c.use_worktree).unwrap_or(true);
     let model_override = config.as_ref().and_then(|c| c.model.as_deref());
     let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
