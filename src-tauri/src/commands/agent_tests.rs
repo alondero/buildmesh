@@ -1,250 +1,319 @@
-//! Tests for worktree resume fix
+//! Tests for `build_spawn_command` — the function that composes a provider's
+//! spawn recipe with session-id mode, model/effort/prefill overrides, and the
+//! runtime-environment wrapper into the final `CommandBuilder`.
 //!
-//! These tests verify that sessions store worktree_name and that the
-//! spawn command passes `-w <worktree_name>` explicitly to cwrap.
+//! These tests call the real `build_spawn_command` and assert on the resulting
+//! `CommandBuilder` (argv / cwd / env). They are NOT re-implementations of the
+//! logic under test: every expectation is a literal value, so a mutation to the
+//! composition (dropping `--session-id`, mis-ordering args, applying an override
+//! to a provider that doesn't support it, forgetting the cwd/env) fails the suite.
+//!
+//! `env_type = Wsl` is used throughout because `spawn_environment::wrap`'s WSL
+//! branch is host-independent (`wsl.exe --cd <path> -- <binary> <args...>`),
+//! keeping these assertions deterministic regardless of where `cargo test` runs.
+//! The only host-dependent input is the provider *recipe* (binary + base flag),
+//! which differs on macOS — handled via [`anthropic_recipe`].
 //!
 //! Run with: cd src-tauri && cargo test
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use crate::agent::spawn::{build_spawn_command, SessionIdMode};
+    use crate::env::ResolvedPath;
+    use crate::models::{EnvType, Provider};
 
-    /// Test 1: Session model should have worktree_name field
-    /// This documents the expected struct shape after the fix.
-    #[test]
-    fn session_model_has_worktree_name() {
-        // The Session struct should have a worktree_name: Option<String> field
-        // This test documents the expected state post-fix.
-        struct Session {
-            id: i64,
-            project_id: i64,
-            name: String,
-            path: String,
-            branch: String,
-            env: String,
-            provider: String,
-            status: String,
-            cli_session_id: Option<String>,
-            worktree_name: Option<String>, // NEW field
-            created_at: String,
+    const SPAWN_PATH: &str = "/home/user/repo/.claude/worktrees/wt-1";
+    const SESSION_ID: i64 = 42;
+
+    fn wsl_resolved() -> ResolvedPath {
+        ResolvedPath {
+            host_path: SPAWN_PATH.to_string(),
+            spawn_path: SPAWN_PATH.to_string(),
+            env_type: EnvType::Wsl,
         }
-
-        let session = Session {
-            id: 1,
-            project_id: 1,
-            name: "async-plotting-riddle".to_string(),
-            path: "X:\\src\\pixelpath".to_string(),
-            branch: "main".to_string(),
-            env: "windows".to_string(),
-            provider: "minimax".to_string(),
-            status: "idle".to_string(),
-            cli_session_id: Some("abc-123".to_string()),
-            worktree_name: Some("async-plotting-riddle".to_string()),
-            created_at: "2026-05-03".to_string(),
-        };
-
-        assert!(session.worktree_name.is_some());
-        assert_eq!(session.worktree_name.as_ref().unwrap(), "async-plotting-riddle");
     }
 
-    /// Test 2: build_spawn_command should pass `-w <name>` for cwrap providers
-    /// when worktree_name is Some(name).
-    #[test]
-    fn build_spawn_command_with_explicit_worktree_name() {
-        // Document the expected command structure:
-        // For cwrap provider (Anthropic/Minimax) with worktree_name = Some("async-plotting-riddle"):
-        // cmd.exe /c cwrap --minimax -w async-plotting-riddle --session-id <id>
-        //                                ^^^^^^^^^^^^^^^^^^^^^^^^^
-        //                                this should be the worktree name, NOT omitted
-
-        let is_cwrap = true;
-        let worktree_name = Some("async-plotting-riddle".to_string());
-        let session_id_mode = "Assign";
-
-        // Simulated args building
-        let mut args = vec!["--minimax".to_string()];
-        if is_cwrap {
-            if let Some(ref name) = worktree_name {
-                args.push("-w".to_string());
-                args.push(name.clone());
-            }
-        }
-        match session_id_mode {
-            "Assign" => {
-                args.push("--session-id".to_string());
-                args.push("abc-123".to_string());
-            }
-            _ => {}
-        }
-
-        assert_eq!(args, vec![
-            "--minimax",
-            "-w",
-            "async-plotting-riddle",
-            "--session-id",
-            "abc-123"
-        ]);
+    /// Collect a CommandBuilder's argv as plain strings.
+    fn argv(cmd: &portable_pty::CommandBuilder) -> Vec<String> {
+        cmd.get_argv()
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
     }
 
-    /// Test 3: Non-cwrap providers (gemini, opencode) should NOT get -w flag
-    #[test]
-    fn non_cwrap_providers_no_worktree_flag() {
-        let is_cwrap = false;
-        let worktree_name = Some("async-plotting-riddle".to_string());
-
-        let mut args = vec!["gemini".to_string()];
-        if is_cwrap {
-            if let Some(ref name) = worktree_name {
-                args.push("-w".to_string());
-                args.push(name.clone());
-            }
+    /// The Anthropic recipe is the one piece of expected data that varies by host:
+    /// macOS spawns `claude --dangerously-skip-permissions`, everywhere else
+    /// `cwrap --anthropic`. Returned as literal test data, not derived from code under test.
+    fn anthropic_recipe() -> (&'static str, &'static str) {
+        if cfg!(target_os = "macos") {
+            ("claude", "--dangerously-skip-permissions")
+        } else {
+            ("cwrap", "--anthropic")
         }
-
-        // Should just be ["gemini"] - no worktree flags
-        assert_eq!(args, vec!["gemini"]);
     }
 
-    /// Test 4: Null worktree_name falls back to `-w` without explicit name on Assign mode
-    /// (backward compatibility for old sessions)
-    #[test]
-    fn null_worktree_name_falls_back_to_w_without_name() {
-        let is_cwrap = true;
-        let worktree_name: Option<String> = None;
-        let session_id_mode = "Assign";
-
-        let mut args = vec!["--minimax".to_string()];
-        if is_cwrap {
-            match session_id_mode {
-                "Assign" => {
-                    if let Some(ref name) = worktree_name {
-                        args.push("-w".to_string());
-                        args.push(name.clone());
-                    } else {
-                        args.push("-w".to_string());
-                    }
-                }
-                "Resume" => {}
-                _ => {}
-            }
-        }
-
-        // Should be ["--minimax", "-w"] — no explicit worktree name
-        assert_eq!(args, vec!["--minimax", "-w"]);
-    }
-
-    /// Test 5: Resume mode should omit `-w` entirely, as the process is spawned inside the worktree
-    #[test]
-    fn resume_mode_omits_w_flag() {
-        let is_cwrap = true;
-        let worktree_name = Some("async-plotting-riddle".to_string());
-        let session_id_mode = "Resume";
-
-        let mut args = vec!["--minimax".to_string()];
-        if is_cwrap {
-            match session_id_mode {
-                "Assign" => {
-                    if let Some(ref name) = worktree_name {
-                        args.push("-w".to_string());
-                        args.push(name.clone());
-                    } else {
-                        args.push("-w".to_string());
-                    }
-                }
-                "Resume" => {}
-                _ => {}
-            }
-        }
-        match session_id_mode {
-            "Resume" => {
-                args.push("--resume".to_string());
-                args.push("abc-123".to_string());
-            }
-            _ => {}
-        }
-
-        // Should just be ["--minimax", "--resume", "abc-123"]
-        assert_eq!(args, vec!["--minimax", "--resume", "abc-123"]);
-    }
-
-    /// Test 6: DB schema should have worktree_name column
-    /// This documents the expected SQL for the migration.
-    #[test]
-    fn db_schema_has_worktree_name_column() {
-        // Expected CREATE TABLE statement for sessions:
-        let expected_columns = vec![
-            "id INTEGER PRIMARY KEY",
-            "project_id INTEGER NOT NULL",
-            "name TEXT NOT NULL",
-            "path TEXT NOT NULL",
-            "branch TEXT NOT NULL DEFAULT 'main'",
-            "env TEXT NOT NULL DEFAULT 'windows'",
-            "provider TEXT NOT NULL DEFAULT 'anthropic'",
-            "status TEXT NOT NULL DEFAULT 'idle'",
-            "cli_session_id TEXT",
-            "worktree_name TEXT", // NEW — nullable
-            "created_at TEXT NOT NULL DEFAULT (datetime('now'))",
+    /// Build the expected WSL-wrapped argv: `wsl.exe --cd <path> -- <binary> <inner...>`.
+    fn expected_wsl(binary: &str, inner: &[&str]) -> Vec<String> {
+        let mut v = vec![
+            "wsl.exe".to_string(),
+            "--cd".to_string(),
+            SPAWN_PATH.to_string(),
+            "--".to_string(),
+            binary.to_string(),
         ];
-
-        // Verify worktree_name is present and is TEXT (nullable)
-        let has_worktree_name = expected_columns.iter().any(|c| c.contains("worktree_name TEXT"));
-        assert!(has_worktree_name, "sessions table should have worktree_name TEXT column");
+        v.extend(inner.iter().map(|s| s.to_string()));
+        v
     }
 
-    /// Test 7: Session path format for worktree-based sessions
-    /// When a session is created, path stays as main repo path.
-    /// The worktree path is derived at spawn time using worktree_name.
+    /// Assigning a fresh session id appends `--session-id <uuid>` after the
+    /// provider's base flag, and the whole thing is wrapped for WSL.
     #[test]
-    fn session_path_stays_main_repo_on_create() {
-        // On create_session, path should be the main project path
-        // not the worktree path. The worktree path is computed at spawn.
-        let session_path = "X:\\src\\pixelpath";
-        let worktree_name = Some("async-plotting-riddle".to_string());
-
-        // Worktree path = session.path + "/.claude/worktrees/" + worktree_name
-        let worktree_path = format!(
-            "{}\\.claude\\worktrees\\{}",
-            session_path,
-            worktree_name.unwrap()
+    fn anthropic_assign_builds_full_wsl_command() {
+        let (binary, flag) = anthropic_recipe();
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Anthropic,
+            &SessionIdMode::Assign("uuid-assign".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
         );
 
-        assert_eq!(worktree_path, "X:\\src\\pixelpath\\.claude\\worktrees\\async-plotting-riddle");
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl(binary, &[flag, "--session-id", "uuid-assign"])
+        );
     }
 
-    /// Test 8: cwrap command structure for Windows cwrap providers via PowerShell
+    /// Resuming appends `--resume <id>` (and never `--session-id`).
     #[test]
-    fn windows_cwrap_command_structure() {
-        // For Windows with cwrap providers, the command now uses PowerShell:
-        // powershell.exe -NoLogo -Command "cwrap --<provider> -w <name> --session-id <id>"
-        //
-        // We pass -NoLogo to suppress the PowerShell banner and -Command to run
-        // the cwrap invocation directly. The combined args string is joined and
-        // passed as a single -Command argument rather than a cmd.exe /c layer.
+    fn anthropic_resume_appends_resume_args() {
+        let (binary, flag) = anthropic_recipe();
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Anthropic,
+            &SessionIdMode::Resume("uuid-resume".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
 
-        let binary = "cwrap";
-        let provider_flag = "--minimax";
-        let worktree_name = "async-plotting-riddle";
-        let session_id_arg = "--session-id";
-        let session_id = "abc-123";
+        let args = argv(&cmd);
+        assert_eq!(args, expected_wsl(binary, &[flag, "--resume", "uuid-resume"]));
+        assert!(
+            !args.iter().any(|a| a == "--session-id"),
+            "resume must not pass --session-id: {:?}",
+            args
+        );
+    }
 
-        // Build the inner args like build_spawn_command does
-        let mut args = vec![provider_flag.to_string()];
-        args.push("-w".to_string());
-        args.push(worktree_name.to_string());
-        args.push(session_id_arg.to_string());
-        args.push(session_id.to_string());
+    /// Minimax is a cwrap provider on every host, so its recipe is stable:
+    /// `cwrap --minimax --session-id <uuid>`.
+    #[test]
+    fn minimax_assign_builds_cwrap_command() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::Assign("mm-1".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
 
-        // Simulating build_spawn_command for Windows cwrap via PowerShell
-        // The combined inner command: "cwrap --minimax -w async-plotting-riddle --session-id abc-123"
-        let combined = format!("{} {}", binary, args.join(" "));
-        let cmd_args = vec!["powershell.exe", "-NoLogo", "-Command", &combined];
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl("cwrap", &["--minimax", "--session-id", "mm-1"])
+        );
+    }
 
-        let expected = vec![
-            "powershell.exe",
-            "-NoLogo",
-            "-Command",
-            "cwrap --minimax -w async-plotting-riddle --session-id abc-123"
-        ];
+    /// Model + effort overrides are appended (in that order) for a provider that
+    /// declares `supports_model_override()`.
+    #[test]
+    fn model_and_effort_overrides_appended_for_supporting_provider() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::Assign("mm-2".to_string()),
+            SESSION_ID,
+            Some("opus"),
+            Some("high"),
+            None,
+        );
 
-        assert_eq!(cmd_args, expected);
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl(
+                "cwrap",
+                &[
+                    "--minimax",
+                    "--session-id",
+                    "mm-2",
+                    "--model",
+                    "opus",
+                    "--effort",
+                    "high",
+                ]
+            )
+        );
+    }
+
+    /// Prefill text is appended as `--prefill <text>` for a supporting provider.
+    #[test]
+    fn prefill_appended_for_supporting_provider() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            Some("hello world"),
+        );
+
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl("cwrap", &["--minimax", "--prefill", "hello world"])
+        );
+    }
+
+    /// Empty override/prefill strings are treated as absent — no flags emitted.
+    #[test]
+    fn empty_overrides_are_ignored() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::None,
+            SESSION_ID,
+            Some(""),
+            Some(""),
+            Some(""),
+        );
+
+        assert_eq!(argv(&cmd), expected_wsl("cwrap", &["--minimax"]));
+    }
+
+    /// Gemini supports neither resume, model override, nor prefill: even when a
+    /// caller passes those, the args must NOT appear. Guards against a mutation
+    /// that drops the capability gating.
+    #[test]
+    fn gemini_ignores_unsupported_overrides_and_prefill() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Gemini,
+            &SessionIdMode::None,
+            SESSION_ID,
+            Some("opus"),
+            Some("high"),
+            Some("prefill text"),
+        );
+
+        let args = argv(&cmd);
+        assert_eq!(args, expected_wsl("gemini", &["--yolo"]));
+        for forbidden in ["--model", "--effort", "--prefill", "opus", "high", "prefill text"] {
+            assert!(
+                !args.iter().any(|a| a == forbidden),
+                "gemini should not emit {:?}, got {:?}",
+                forbidden,
+                args
+            );
+        }
+    }
+
+    /// Codex provides a dedicated resume recipe (`codex resume <id> ...flags`)
+    /// via `spawn_recipe_for_resume`, which `build_spawn_command` must use
+    /// instead of the default `spawn_recipe` + `--resume`.
+    #[test]
+    fn codex_resume_uses_resume_recipe() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Codex,
+            &SessionIdMode::Resume("codex-sess".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl(
+                "codex",
+                &[
+                    "resume",
+                    "codex-sess",
+                    "--ask-for-approval",
+                    "never",
+                    "--sandbox",
+                    "danger-full-access",
+                ]
+            )
+        );
+    }
+
+    /// Codex self-assigns its session id, so `session_assign_args` is empty:
+    /// Assign mode must NOT inject `--session-id`.
+    #[test]
+    fn codex_assign_omits_session_flag() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Codex,
+            &SessionIdMode::Assign("ignored".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
+
+        let args = argv(&cmd);
+        assert_eq!(
+            args,
+            expected_wsl(
+                "codex",
+                &[
+                    "--ask-for-approval",
+                    "never",
+                    "--sandbox",
+                    "danger-full-access",
+                ]
+            )
+        );
+        assert!(
+            !args.iter().any(|a| a == "--session-id" || a == "ignored"),
+            "codex self-assigns; Assign must not add --session-id: {:?}",
+            args
+        );
+    }
+
+    /// The wrapper sets the spawn cwd and the BUILDMESH_SESSION_ID / BUILDMESH_PORT
+    /// env vars that the agent and its hooks rely on.
+    #[test]
+    fn sets_cwd_and_buildmesh_env() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::Assign("mm-env".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            cmd.get_cwd().map(|c| c.to_string_lossy().into_owned()),
+            Some(SPAWN_PATH.to_string())
+        );
+        assert_eq!(
+            cmd.get_env("BUILDMESH_SESSION_ID")
+                .map(|v| v.to_string_lossy().into_owned()),
+            Some(SESSION_ID.to_string())
+        );
+        assert_eq!(
+            cmd.get_env("BUILDMESH_PORT")
+                .map(|v| v.to_string_lossy().into_owned()),
+            Some(crate::http_server::HTTP_PORT_DEFAULT.to_string())
+        );
     }
 }
