@@ -250,6 +250,38 @@ pub struct DiffLine {
     pub new_num: Option<usize>,
 }
 
+/// Per-repo git prune info — branches, worktrees, and remote-tracking refs
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRepoPruneInfo {
+    pub path: String,
+    pub local_branches: Vec<BranchInfo>,
+    pub worktrees: Vec<WorktreeInfo>,
+    pub remote_tracking_branches: Vec<String>,
+}
+
+/// A local branch and its prune-relevant metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_head: bool,
+    /// None when the repo has no main/master branch to compare against.
+    pub is_merged_into_main: Option<bool>,
+    pub is_orphan: bool,
+    pub has_uncommitted: bool,
+    pub last_commit_date: Option<String>,
+    pub ahead: u64,
+    pub behind: u64,
+}
+
+/// A worktree (main or linked) and its prune-relevant metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeInfo {
+    pub path: String,
+    pub branch: Option<String>,
+    pub is_active: bool,
+    pub is_stale: bool,
+}
+
 /// App settings stored in SQLite
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {

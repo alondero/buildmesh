@@ -1,0 +1,304 @@
+//! Git branch & worktree pruning — enumeration and batch deletion.
+//!
+//! All git reads go through git2 against the live filesystem (never cached),
+//! so the view always reflects on-disk reality. The `is_active` flag is the
+//! one piece that crosses into application state: a worktree is "active" when
+//! a non-archived agent node points at its path.
+
+use git2::{BranchType, Repository, StatusOptions, WorktreePruneOptions};
+
+use crate::db;
+use crate::env::to_host_path;
+use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
+
+/// Discover all local branches, worktrees, and remote-tracking branches for
+/// the repo(s) in a mesh. MVP: the mesh path is treated as a single repo.
+#[tauri::command]
+pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, String> {
+    let mesh = db::get_mesh_by_id(mesh_id)
+        .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+
+    // Cross-reference worktree paths against non-archived agent nodes.
+    let active_paths: Vec<String> = db::list_agent_nodes()
+        .map_err(|e| format!("failed to list agent nodes: {}", e))?
+        .into_iter()
+        .map(|n| n.path)
+        .collect();
+
+    let repo_path = to_host_path(&mesh.path);
+    let info = collect_prune_info(&repo_path, &active_paths)?;
+    Ok(vec![info])
+}
+
+/// Force-delete local branches by name from the repo at `worktree_path`.
+/// Batches across all names, continuing past individual failures and
+/// reporting the combined set of errors at the end.
+#[tauri::command]
+pub async fn delete_branches(
+    worktree_path: String,
+    branch_names: Vec<String>,
+) -> Result<(), String> {
+    delete_branches_in_repo(&to_host_path(&worktree_path), &branch_names)
+}
+
+fn delete_branches_in_repo(repo_path: &str, branch_names: &[String]) -> Result<(), String> {
+    let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
+
+    let mut errors: Vec<String> = Vec::new();
+    for name in branch_names {
+        match repo.find_branch(name, BranchType::Local) {
+            Ok(mut branch) => {
+                if let Err(e) = branch.delete() {
+                    errors.push(format!("{}: {}", name, e));
+                }
+            }
+            Err(e) => errors.push(format!("{}: {}", name, e)),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Remove worktrees by path. Each path is opened as a worktree of its parent
+/// repo and pruned, deleting both the admin entry and the working directory.
+/// The main worktree cannot be removed this way and surfaces as an error.
+#[tauri::command]
+pub async fn delete_worktrees(worktree_paths: Vec<String>) -> Result<(), String> {
+    remove_worktrees(&worktree_paths)
+}
+
+fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
+    let mut errors: Vec<String> = Vec::new();
+    for path in worktree_paths {
+        if let Err(e) = remove_one_worktree(path) {
+            errors.push(format!("{}: {}", path, e));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Prune stale remote-tracking refs by fetching with `--prune`.
+#[tauri::command]
+pub async fn prune_remote_tracking(worktree_path: String) -> Result<(), String> {
+    let host_path = to_host_path(&worktree_path);
+    let output = crate::process_util::command_no_window("git")
+        .args(["fetch", "--prune"])
+        .current_dir(&host_path)
+        .output()
+        .map_err(|e| format!("failed to run git fetch --prune: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+// ── Internals (DB-free, unit-testable against real temp repos) ──────────────
+
+fn remove_one_worktree(path: &str) -> Result<(), String> {
+    let host_path = to_host_path(path);
+    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
+    let worktree = git2::Worktree::open_from_repository(&repo)
+        .map_err(|e| format!("not a removable worktree: {}", e))?;
+    let mut opts = WorktreePruneOptions::new();
+    opts.valid(true).locked(true).working_tree(true);
+    worktree.prune(Some(&mut opts)).map_err(|e| e.to_string())
+}
+
+/// The branch a worktree's HEAD points at, read from HEAD's symbolic target so
+/// it survives the branch being deleted. Returns None for a detached HEAD.
+fn head_branch_name(repo: &Repository) -> Option<String> {
+    let head = repo.find_reference("HEAD").ok()?;
+    let target = head.symbolic_target()?;
+    target.strip_prefix("refs/heads/").map(|s| s.to_string())
+}
+
+/// Resolve the tip commit of the repo's `main` (or `master`) branch, if any.
+fn main_branch_oid(repo: &Repository) -> Option<git2::Oid> {
+    for candidate in ["main", "master"] {
+        if let Ok(branch) = repo.find_branch(candidate, BranchType::Local) {
+            if let Ok(commit) = branch.get().peel_to_commit() {
+                return Some(commit.id());
+            }
+        }
+    }
+    None
+}
+
+fn format_commit_time(time: git2::Time) -> Option<String> {
+    chrono::DateTime::from_timestamp(time.seconds(), 0).map(|dt| dt.to_rfc3339())
+}
+
+/// Whether the repo's working tree has any non-ignored changes.
+fn repo_has_uncommitted(repo: &Repository) -> bool {
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    match repo.statuses(Some(&mut opts)) {
+        Ok(statuses) => statuses
+            .iter()
+            .any(|e| !e.status().is_ignored() && e.status() != git2::Status::CURRENT),
+        Err(_) => false,
+    }
+}
+
+/// Pure enumeration: given a repo path and the set of active node paths,
+/// build the prune info. No DB access — the caller supplies `active_paths`.
+fn collect_prune_info(
+    repo_path: &str,
+    active_paths: &[String],
+) -> Result<GitRepoPruneInfo, String> {
+    let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
+
+    let main_oid = main_branch_oid(&repo);
+    let head_dirty = repo_has_uncommitted(&repo);
+
+    // ── Local branches ──────────────────────────────────────────────────
+    let mut local_branches: Vec<BranchInfo> = Vec::new();
+    let mut local_names: Vec<String> = Vec::new();
+
+    let branches = repo
+        .branches(Some(BranchType::Local))
+        .map_err(|e| e.to_string())?;
+    for entry in branches {
+        let (branch, _) = entry.map_err(|e| e.to_string())?;
+        let name = match branch.name().map_err(|e| e.to_string())? {
+            Some(n) => n.to_string(),
+            None => continue, // non-UTF8 branch name
+        };
+        local_names.push(name.clone());
+
+        let is_head = branch.is_head();
+        let branch_oid = branch.get().peel_to_commit().ok().map(|c| c.id());
+        let last_commit_date = branch
+            .get()
+            .peel_to_commit()
+            .ok()
+            .and_then(|c| format_commit_time(c.time()));
+
+        // Upstream resolution → ahead/behind + orphan detection.
+        let mut ahead = 0u64;
+        let mut behind = 0u64;
+        let mut is_orphan = false;
+        let refname = format!("refs/heads/{}", name);
+        if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
+            // An upstream is configured for this branch.
+            if let Some(upstream_ref) = upstream_buf.as_str() {
+                match repo.find_reference(upstream_ref) {
+                    Ok(up_ref) => {
+                        if let (Some(local), Some(up)) =
+                            (branch_oid, up_ref.target())
+                        {
+                            if let Ok((a, b)) = repo.graph_ahead_behind(local, up) {
+                                ahead = a as u64;
+                                behind = b as u64;
+                            }
+                        }
+                    }
+                    // Configured upstream no longer exists → orphan.
+                    Err(_) => is_orphan = true,
+                }
+            }
+        }
+
+        let is_merged_into_main = match (main_oid, branch_oid) {
+            (Some(main), Some(b)) => Some(
+                main == b || repo.graph_descendant_of(main, b).unwrap_or(false),
+            ),
+            _ => None,
+        };
+
+        local_branches.push(BranchInfo {
+            name,
+            is_head,
+            is_merged_into_main,
+            is_orphan,
+            has_uncommitted: is_head && head_dirty,
+            last_commit_date,
+            ahead,
+            behind,
+        });
+    }
+
+    // ── Worktrees (main + linked) ───────────────────────────────────────
+    let mut worktrees: Vec<WorktreeInfo> = Vec::new();
+
+    if let Some(workdir) = repo.workdir() {
+        let path = workdir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+        let branch = head_branch_name(&repo);
+        worktrees.push(WorktreeInfo {
+            is_active: path_is_active(&path, active_paths),
+            is_stale: branch_is_stale(&branch, &local_names),
+            branch,
+            path,
+        });
+    }
+
+    if let Ok(names) = repo.worktrees() {
+        for wt_name in names.iter().flatten() {
+            let wt = match repo.find_worktree(wt_name) {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
+            let path = wt.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+            let branch = Repository::open(wt.path())
+                .ok()
+                .and_then(|r| head_branch_name(&r));
+            worktrees.push(WorktreeInfo {
+                is_active: path_is_active(&path, active_paths),
+                is_stale: branch_is_stale(&branch, &local_names),
+                branch,
+                path,
+            });
+        }
+    }
+
+    // ── Remote-tracking branches ────────────────────────────────────────
+    let mut remote_tracking_branches: Vec<String> = Vec::new();
+    if let Ok(branches) = repo.branches(Some(BranchType::Remote)) {
+        for entry in branches.flatten() {
+            if let Ok(Some(name)) = entry.0.name() {
+                if name.ends_with("/HEAD") {
+                    continue;
+                }
+                remote_tracking_branches.push(name.to_string());
+            }
+        }
+    }
+
+    Ok(GitRepoPruneInfo {
+        path: repo_path.to_string(),
+        local_branches,
+        worktrees,
+        remote_tracking_branches,
+    })
+}
+
+fn path_is_active(path: &str, active_paths: &[String]) -> bool {
+    let norm = normalize_path(path);
+    active_paths.iter().any(|p| normalize_path(p) == norm)
+}
+
+fn normalize_path(p: &str) -> String {
+    let host = to_host_path(p);
+    host.trim_end_matches(['/', '\\']).replace('\\', "/")
+}
+
+/// A worktree is stale when it points at a branch that no longer exists
+/// locally. Detached worktrees (no branch) are never stale.
+fn branch_is_stale(branch: &Option<String>, local_names: &[String]) -> bool {
+    matches!(branch, Some(b) if !local_names.iter().any(|n| n == b))
+}
+
+#[cfg(test)]
+#[path = "prune_tests.rs"]
+mod prune_tests;

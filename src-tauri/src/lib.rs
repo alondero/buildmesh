@@ -187,6 +187,11 @@ pub fn run() {
             commands::git::check_is_git_repo,
             commands::git::get_default_branch,
             commands::git::git_sync,
+            // Prune (branches & worktrees)
+            commands::prune::get_git_prune_info,
+            commands::prune::delete_branches,
+            commands::prune::delete_worktrees,
+            commands::prune::prune_remote_tracking,
             // Terminal
             commands::terminal::spawn_pty,
             commands::terminal::resize_pty,

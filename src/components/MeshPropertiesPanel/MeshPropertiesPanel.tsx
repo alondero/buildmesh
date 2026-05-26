@@ -4,6 +4,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { UncommittedChangesSection } from './UncommittedChangesSection';
+import { BranchesWorktreesSection } from './BranchesWorktreesSection';
 import { useMeshGitStatus } from '../../hooks/useMeshGitStatus';
 import { listProviders, ProviderInfo } from '../../lib/tauri';
 import {
@@ -499,6 +500,9 @@ export function MeshPropertiesPanel() {
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
                 />
               </div>
+
+              {/* Branches & Worktrees */}
+              <BranchesWorktreesSection meshId={propertiesPanelMeshId} />
             </>
           )}
         </div>

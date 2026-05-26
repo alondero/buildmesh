@@ -1,0 +1,411 @@
+//! Tests for branch & worktree prune operations.
+//!
+//! These build real temporary git repositories with known branch/worktree
+//! state and verify the enumeration and deletion behaviour. Only external
+//! behaviour (inputs → outputs) is asserted — no internal state inspection.
+//!
+//! Run with: cd src-tauri && cargo test prune
+
+use super::*;
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Unique temp directory with RAII cleanup on drop.
+struct TempDir(std::path::PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let tmp = std::env::temp_dir().join(format!("buildmesh_prune_test_{}_{}", pid, id));
+        Self(tmp)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn path_str(&self) -> String {
+        self.0.to_string_lossy().to_string()
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn sig() -> git2::Signature<'static> {
+    git2::Signature::now("test", "test@example.com").unwrap()
+}
+
+/// Init a repo with an initial commit on `main` (and no stray default branch).
+fn init_repo(path: &Path) -> git2::Repository {
+    fs::create_dir_all(path).unwrap();
+    let mut opts = git2::RepositoryInitOptions::new();
+    opts.initial_head("main");
+    let repo = git2::Repository::init_opts(path, &opts).unwrap();
+    {
+        let s = sig();
+        fs::write(path.join("file.txt"), "initial").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        repo.commit(Some("HEAD"), &s, &s, "initial commit", &tree, &[])
+            .unwrap();
+    }
+    repo
+}
+
+/// Add a commit on the currently checked-out HEAD.
+fn commit_file(repo: &git2::Repository, name: &str, content: &str) -> git2::Oid {
+    let workdir = repo.workdir().unwrap();
+    fs::write(workdir.join(name), content).unwrap();
+    let mut index = repo.index().unwrap();
+    index.add_path(Path::new(name)).unwrap();
+    index.write().unwrap();
+    let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    let s = sig();
+    repo.commit(Some("HEAD"), &s, &s, "commit", &tree, &[&parent])
+        .unwrap()
+}
+
+/// Create a branch pointing at HEAD without checking it out.
+fn branch_from_head(repo: &git2::Repository, name: &str) {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch(name, &head, false).unwrap();
+}
+
+fn find_branch<'a>(info: &'a GitRepoPruneInfo, name: &str) -> &'a BranchInfo {
+    info.local_branches
+        .iter()
+        .find(|b| b.name == name)
+        .unwrap_or_else(|| panic!("branch {} not enumerated", name))
+}
+
+// ── get_git_prune_info / collect_prune_info ─────────────────────────────────
+
+#[test]
+fn enumerates_local_branches() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+    branch_from_head(&repo, "feature-b");
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let mut names: Vec<&str> = info.local_branches.iter().map(|b| b.name.as_str()).collect();
+    names.sort();
+    assert_eq!(names, vec!["feature-a", "feature-b", "main"]);
+}
+
+#[test]
+fn head_branch_is_flagged() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert!(find_branch(&info, "main").is_head);
+    assert!(!find_branch(&info, "feature-a").is_head);
+}
+
+#[test]
+fn merged_branch_detected() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    // feature-a points at an ancestor of main → merged.
+    branch_from_head(&repo, "feature-a");
+    commit_file(&repo, "more.txt", "more"); // advances main past feature-a
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert_eq!(find_branch(&info, "feature-a").is_merged_into_main, Some(true));
+    // main is trivially "merged into" itself.
+    assert_eq!(find_branch(&info, "main").is_merged_into_main, Some(true));
+}
+
+#[test]
+fn unmerged_branch_detected() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+    // Check out feature-a and add a commit not contained in main.
+    repo.set_head("refs/heads/feature-a").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    commit_file(&repo, "feat.txt", "feature work");
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert_eq!(find_branch(&info, "feature-a").is_merged_into_main, Some(false));
+}
+
+#[test]
+fn merged_state_none_without_main() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    // Rename main → trunk so there's no main/master to compare against.
+    {
+        let mut b = repo.find_branch("main", git2::BranchType::Local).unwrap();
+        b.rename("trunk", true).unwrap();
+        repo.set_head("refs/heads/trunk").unwrap();
+    }
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert_eq!(find_branch(&info, "trunk").is_merged_into_main, None);
+}
+
+#[test]
+fn last_commit_date_present() {
+    let dir = TempDir::new();
+    init_repo(dir.path());
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert!(find_branch(&info, "main").last_commit_date.is_some());
+}
+
+#[test]
+fn ahead_behind_against_upstream() {
+    // Build an "origin" bare-ish setup by cloning via a remote-tracking ref.
+    let origin = TempDir::new();
+    let origin_repo = init_repo(origin.path());
+    commit_file(&origin_repo, "shared.txt", "v1");
+
+    let work = TempDir::new();
+    let repo = git2::Repository::clone(origin.path().to_str().unwrap(), work.path()).unwrap();
+
+    // Local advances by one commit ahead of origin/main.
+    commit_file(&repo, "local.txt", "local change");
+
+    // Origin advances by one commit; fetch so the remote-tracking ref moves.
+    commit_file(&origin_repo, "remote.txt", "remote change");
+    repo.find_remote("origin")
+        .unwrap()
+        .fetch::<&str>(&[], None, None)
+        .unwrap();
+
+    let info = collect_prune_info(&work.path_str(), &[]).unwrap();
+    let main = find_branch(&info, "main");
+    assert_eq!(main.ahead, 1, "one local commit not on origin");
+    assert_eq!(main.behind, 1, "one origin commit not local");
+    assert!(!main.is_orphan);
+}
+
+#[test]
+fn orphan_branch_detected() {
+    let origin = TempDir::new();
+    init_repo(origin.path());
+
+    let work = TempDir::new();
+    let repo = git2::Repository::clone(origin.path().to_str().unwrap(), work.path()).unwrap();
+
+    // main now tracks origin/main. Delete the remote-tracking ref to orphan it.
+    repo.find_reference("refs/remotes/origin/main")
+        .unwrap()
+        .delete()
+        .unwrap();
+
+    let info = collect_prune_info(&work.path_str(), &[]).unwrap();
+    assert!(find_branch(&info, "main").is_orphan, "upstream ref is gone → orphan");
+}
+
+#[test]
+fn branch_without_upstream_is_not_orphan() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "local-only");
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let b = find_branch(&info, "local-only");
+    assert!(!b.is_orphan);
+    assert_eq!(b.ahead, 0);
+    assert_eq!(b.behind, 0);
+}
+
+#[test]
+fn remote_tracking_branches_listed_without_head() {
+    let origin = TempDir::new();
+    init_repo(origin.path());
+
+    let work = TempDir::new();
+    git2::Repository::clone(origin.path().to_str().unwrap(), work.path()).unwrap();
+
+    let info = collect_prune_info(&work.path_str(), &[]).unwrap();
+    assert!(
+        info.remote_tracking_branches.iter().any(|b| b == "origin/main"),
+        "expected origin/main, got {:?}",
+        info.remote_tracking_branches
+    );
+    assert!(
+        !info.remote_tracking_branches.iter().any(|b| b.ends_with("/HEAD")),
+        "origin/HEAD should be filtered out"
+    );
+}
+
+#[test]
+fn main_worktree_enumerated() {
+    let dir = TempDir::new();
+    init_repo(dir.path());
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert_eq!(info.worktrees.len(), 1);
+    assert_eq!(info.worktrees[0].branch.as_deref(), Some("main"));
+    assert!(!info.worktrees[0].is_active);
+    assert!(!info.worktrees[0].is_stale);
+}
+
+#[test]
+fn linked_worktree_enumerated_and_active_flag() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+
+    // Mark the worktree path active.
+    let active = vec![wt_dir.path_str()];
+    let info = collect_prune_info(&dir.path_str(), &active).unwrap();
+
+    let wt = info
+        .worktrees
+        .iter()
+        .find(|w| w.branch.as_deref() == Some("wt-branch"))
+        .expect("linked worktree enumerated");
+    assert!(wt.is_active, "worktree path matches an active node");
+    assert!(!wt.is_stale, "branch still exists");
+}
+
+#[test]
+fn stale_worktree_when_branch_deleted() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "doomed");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/doomed").unwrap(),
+        ))),
+    )
+    .unwrap();
+
+    // Delete the branch the worktree was based on (it's checked out, but the
+    // worktree's own HEAD still names it). Force a stale state by removing the
+    // ref directly.
+    repo.find_reference("refs/heads/doomed").unwrap().delete().unwrap();
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let wt = info
+        .worktrees
+        .iter()
+        .find(|w| w.branch.as_deref() == Some("doomed"))
+        .expect("worktree still enumerated");
+    assert!(wt.is_stale, "branch no longer in local list → stale");
+}
+
+// ── delete_branches ─────────────────────────────────────────────────────────
+
+#[test]
+fn delete_branches_removes_named_branches() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+    branch_from_head(&repo, "feature-b");
+
+    delete_branches_in_repo(&dir.path_str(), &["feature-a".to_string()]).unwrap();
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let names: Vec<&str> = info.local_branches.iter().map(|b| b.name.as_str()).collect();
+    assert!(!names.contains(&"feature-a"));
+    assert!(names.contains(&"feature-b"));
+    assert!(names.contains(&"main"));
+}
+
+#[test]
+fn delete_branches_cannot_delete_head() {
+    let dir = TempDir::new();
+    init_repo(dir.path());
+
+    let err = delete_branches_in_repo(&dir.path_str(), &["main".to_string()]).unwrap_err();
+    assert!(err.contains("main"), "error should name the failed branch: {}", err);
+
+    // main must survive.
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert!(info.local_branches.iter().any(|b| b.name == "main"));
+}
+
+#[test]
+fn delete_branches_continues_on_individual_failure() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "deletable");
+
+    // "main" (HEAD) fails, "deletable" succeeds, "ghost" doesn't exist.
+    let err = delete_branches_in_repo(
+        &dir.path_str(),
+        &[
+            "main".to_string(),
+            "deletable".to_string(),
+            "ghost".to_string(),
+        ],
+    )
+    .unwrap_err();
+
+    assert!(err.contains("main"));
+    assert!(err.contains("ghost"));
+
+    // The deletable branch was still removed despite the others failing.
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert!(!info.local_branches.iter().any(|b| b.name == "deletable"));
+}
+
+// ── delete_worktrees ────────────────────────────────────────────────────────
+
+#[test]
+fn remove_worktrees_removes_linked_worktree() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+    assert!(wt_dir.path().exists());
+
+    remove_worktrees(&[wt_dir.path_str()]).unwrap();
+
+    assert!(!wt_dir.path().exists(), "working directory should be gone");
+    // The worktree admin entry is pruned too.
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert_eq!(info.worktrees.len(), 1, "only the main worktree remains");
+}
+
+#[test]
+fn remove_worktrees_cannot_remove_main() {
+    let dir = TempDir::new();
+    init_repo(dir.path());
+
+    let err = remove_worktrees(&[dir.path_str()]).unwrap_err();
+    assert!(
+        err.contains("not a removable worktree") || err.contains(&dir.path_str()),
+        "main worktree removal should fail: {}",
+        err
+    );
+    assert!(dir.path().exists(), "main worktree must survive");
+}

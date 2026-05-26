@@ -18,6 +18,7 @@ pub mod pr;
 pub mod mesh;
 pub mod preferences;
 pub mod project_detect;
+pub mod prune;
 pub mod agent_node;
 pub mod remote;
 pub mod session_discovery;
