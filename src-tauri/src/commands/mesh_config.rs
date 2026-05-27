@@ -64,17 +64,7 @@ pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    Ok(MeshConfig {
-        name: if mesh.name.is_empty() { None } else { Some(mesh.name) },
-        build_command: mesh.build_command,
-        run_command: mesh.run_command,
-        model: mesh.model,
-        effort: mesh.effort,
-        base_ref: Some(mesh.base_ref),
-        use_worktree: mesh.use_worktree,
-        worktree_mode: mesh.worktree_mode,
-        default_provider: mesh.default_provider,
-    })
+    Ok(MeshConfig::from(&mesh))
 }
 
 #[tauri::command]

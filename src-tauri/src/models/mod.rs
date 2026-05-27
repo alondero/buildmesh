@@ -147,7 +147,7 @@ pub struct Mesh {
     pub layout: String, // 'grid' or 'single'
     pub position: i64, // sort order in sidebar
     pub created_at: DateTime<Utc>,
-    // Mesh-level config (moved from mesh.toml)
+    // Mesh-level config (see MeshConfig for the canonical typed view)
     pub build_command: Option<String>,
     pub run_command: Option<String>,
     pub model: Option<String>,
@@ -290,7 +290,11 @@ pub struct AppSettings {
     pub wsl_cli_path: String,
 }
 
-/// Mesh configuration (mesh-level, from meshes table)
+/// Canonical mesh-level configuration, derived from a `Mesh` DB row.
+///
+/// This is the single typed view of mesh config used by every consumer
+/// (frontend properties, agent spawning, build/run). Construct it via
+/// `MeshConfig::from(&mesh)` — never hand-copy `Mesh` fields elsewhere.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MeshConfig {
     pub name: Option<String>,
@@ -302,6 +306,22 @@ pub struct MeshConfig {
     pub use_worktree: bool,
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
+}
+
+impl From<&Mesh> for MeshConfig {
+    fn from(mesh: &Mesh) -> Self {
+        Self {
+            name: if mesh.name.is_empty() { None } else { Some(mesh.name.clone()) },
+            build_command: mesh.build_command.clone(),
+            run_command: mesh.run_command.clone(),
+            model: mesh.model.clone(),
+            effort: mesh.effort.clone(),
+            base_ref: Some(mesh.base_ref.clone()),
+            use_worktree: mesh.use_worktree,
+            worktree_mode: mesh.worktree_mode.clone(),
+            default_provider: mesh.default_provider.clone(),
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -317,6 +337,47 @@ impl Default for AppSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_mesh() -> Mesh {
+        Mesh {
+            id: 1,
+            name: "demo".to_string(),
+            path: "/repo".to_string(),
+            layout: "grid".to_string(),
+            position: 0,
+            created_at: Utc::now(),
+            build_command: Some("npm run build".to_string()),
+            run_command: None,
+            model: Some("opus".to_string()),
+            effort: None,
+            use_worktree: false,
+            worktree_mode: Some("branched".to_string()),
+            default_provider: None,
+            base_ref: "origin/main".to_string(),
+        }
+    }
+
+    #[test]
+    fn mesh_config_from_mesh_maps_all_fields() {
+        let cfg = MeshConfig::from(&sample_mesh());
+        assert_eq!(cfg.name.as_deref(), Some("demo"));
+        assert_eq!(cfg.build_command.as_deref(), Some("npm run build"));
+        assert_eq!(cfg.run_command, None);
+        assert_eq!(cfg.model.as_deref(), Some("opus"));
+        assert_eq!(cfg.effort, None);
+        // base_ref always carries a value (DB COALESCEs to 'origin/main')
+        assert_eq!(cfg.base_ref.as_deref(), Some("origin/main"));
+        assert!(!cfg.use_worktree);
+        assert_eq!(cfg.worktree_mode.as_deref(), Some("branched"));
+        assert_eq!(cfg.default_provider, None);
+    }
+
+    #[test]
+    fn mesh_config_from_mesh_blank_name_is_none() {
+        let mut mesh = sample_mesh();
+        mesh.name = String::new();
+        assert_eq!(MeshConfig::from(&mesh).name, None);
+    }
 
     #[test]
     fn session_status_round_trip_all_variants() {
