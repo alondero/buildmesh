@@ -1,9 +1,37 @@
-type WriteFn = (data: string) => void;
+export type TerminalWriteData = string | Uint8Array;
+
+type WriteFn = (data: TerminalWriteData) => void;
 type SchedulerFn = (cb: () => void) => void;
 
 interface BufferEntry {
-  buffer: string;
+  chunks: TerminalWriteData[];
   frameRequested: boolean;
+}
+
+function isByteChunk(data: TerminalWriteData): data is Uint8Array {
+  return data instanceof Uint8Array;
+}
+
+function mergeByteChunks(chunks: Uint8Array[]): Uint8Array {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const merged = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+
+function coalesceChunks(chunks: TerminalWriteData[]): TerminalWriteData[] {
+  if (chunks.length === 0) return [];
+  if (chunks.every(chunk => typeof chunk === 'string')) {
+    return [chunks.join('')];
+  }
+  if (chunks.every(isByteChunk)) {
+    return [mergeByteChunks(chunks)];
+  }
+  return chunks;
 }
 
 export class TerminalWriter {
@@ -16,7 +44,7 @@ export class TerminalWriter {
   }
 
   register(nodeId: number, writeFn: WriteFn): void {
-    this.entries.set(nodeId, { buffer: '', frameRequested: false });
+    this.entries.set(nodeId, { chunks: [], frameRequested: false });
     this.writeFns.set(nodeId, writeFn);
   }
 
@@ -25,10 +53,10 @@ export class TerminalWriter {
     this.writeFns.delete(nodeId);
   }
 
-  append(nodeId: number, data: string): void {
+  append(nodeId: number, data: TerminalWriteData): void {
     const entry = this.entries.get(nodeId);
     if (!entry) return;
-    entry.buffer += data;
+    entry.chunks.push(data);
     this.scheduleFlush(nodeId, entry);
   }
 
@@ -37,10 +65,13 @@ export class TerminalWriter {
     entry.frameRequested = true;
     this.scheduler(() => {
       const current = this.entries.get(nodeId);
-      if (current === entry && entry.buffer) {
+      if (current === entry && entry.chunks.length > 0) {
         const writeFn = this.writeFns.get(nodeId);
-        writeFn?.(entry.buffer);
-        entry.buffer = '';
+        const chunks = coalesceChunks(entry.chunks);
+        entry.chunks = [];
+        for (const chunk of chunks) {
+          writeFn?.(chunk);
+        }
       }
       entry.frameRequested = false;
     });
@@ -51,6 +82,8 @@ export class TerminalWriter {
   }
 
   pendingBytes(nodeId: number): number {
-    return this.entries.get(nodeId)?.buffer.length ?? 0;
+    return this.entries.get(nodeId)?.chunks.reduce((sum, chunk) => {
+      return sum + (typeof chunk === 'string' ? chunk.length : chunk.byteLength);
+    }, 0) ?? 0;
   }
 }

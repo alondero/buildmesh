@@ -3,6 +3,7 @@
 use crate::db;
 use crate::env;
 use crate::models::MeshConfig;
+use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -195,8 +196,11 @@ pub async fn build_run(
                     break;
                 }
                 Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let _ = app_handle.emit(&format!("build-run-output-{}", node_id_clone), &data);
+                    let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                    let _ = app_handle.emit(
+                        &format!("build-run-output-{}", node_id_clone),
+                        serde_json::json!({ "data": data }),
+                    );
                 }
                 Err(e) => {
                     tracing::error!("build_run PTY read error: {}", e);
@@ -237,4 +241,3 @@ pub async fn ensure_mesh_config(_mesh_id: i64) -> Result<String, String> {
     // Config is now in the DB from mesh creation time — nothing to create
     Ok(String::new())
 }
-

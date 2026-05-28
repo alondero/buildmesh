@@ -13,6 +13,19 @@ interface BuildRunTerminalProps {
   onClose?: () => void;
 }
 
+interface BuildRunOutputPayload {
+  data: string;
+}
+
+function decodeBase64Bytes(data: string): Uint8Array {
+  const binary = globalThis.atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true, onClose }: BuildRunTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -41,8 +54,12 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
     resizeObserver.observe(containerRef.current);
 
     const eventName = `build-run-output-${sessionId}`;
-    listen<string>(eventName, (event) => {
-      term.write(event.payload);
+    listen<string | BuildRunOutputPayload>(eventName, (event) => {
+      if (typeof event.payload === 'string') {
+        term.write(event.payload);
+      } else {
+        term.write(decodeBase64Bytes(event.payload.data));
+      }
     }).then(unlisten => {
       if (cancelled) {
         unlisten();
