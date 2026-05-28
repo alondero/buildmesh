@@ -9,7 +9,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { createTerminalOptions } from './terminalConfig';
 import { resolveKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
-import { TerminalWriter } from './TerminalWriter';
+import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
 import { FontSizeManager } from './FontSizeManager';
 
 export interface TerminalInstance {
@@ -22,6 +22,27 @@ export interface TerminalInstance {
   resizeObserver: ResizeObserver | null;
   attachedContainer: HTMLElement | null;
   onFindRequest: (() => void) | null;
+}
+
+interface AgentOutputPayload {
+  session_id: number;
+  data?: string;
+  line?: string;
+}
+
+function decodeBase64Bytes(data: string): Uint8Array {
+  const binary = globalThis.atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData | null {
+  if (payload.data !== undefined) return decodeBase64Bytes(payload.data);
+  if (payload.line !== undefined) return payload.line;
+  return null;
 }
 
 function measureAndFit(inst: TerminalInstance): void {
@@ -185,9 +206,12 @@ export class TerminalRegistry {
       this.writer.register(nodeId, (data) => term.write(data));
       this.fontSizeManager.register(nodeId, term, () => measureAndFit(instance));
 
-      const unlisten = await listen<{ session_id: number; line: string }>('agent-output', (event) => {
+      const unlisten = await listen<AgentOutputPayload>('agent-output', (event) => {
         if (event.payload.session_id === nodeId) {
-          this.writer.append(nodeId, event.payload.line);
+          const data = terminalDataFromPayload(event.payload);
+          if (data !== null) {
+            this.writer.append(nodeId, data);
+          }
         }
       });
 

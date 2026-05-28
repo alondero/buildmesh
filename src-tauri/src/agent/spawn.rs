@@ -10,6 +10,7 @@ use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
 use crate::models::{AgentNode, Provider, SessionStatus};
+use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -195,22 +196,25 @@ fn register_agent(
     );
 }
 
-/// Core PTY read loop: read 8 KiB chunks until EOF or error, decoding each as
-/// (lossy) UTF-8 and handing it to `on_chunk`. Returns when the PTY closes.
+fn encode_pty_chunk(data: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+/// Core PTY read loop: read 8 KiB chunks until EOF or error, handing raw bytes
+/// to `on_chunk`. Returns when the PTY closes.
 ///
 /// Extracted so the production reader thread and the real-PTY integration test
 /// exercise the exact same read path (see `src-tauri/tests/pty_spawn.rs`).
 pub fn pump_pty_output(
     mut reader: Box<dyn std::io::Read + Send>,
-    mut on_chunk: impl FnMut(&str),
+    mut on_chunk: impl FnMut(&[u8]),
 ) {
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                let data = String::from_utf8_lossy(&buf[..n]);
-                on_chunk(&data);
+                on_chunk(&buf[..n]);
             }
             Err(e) => {
                 tracing::error!("PTY read error: {}", e);
@@ -235,10 +239,11 @@ fn start_reader(
 
     std::thread::spawn(move || {
         pump_pty_output(reader, |data| {
-            crate::session_naming::on_output(session_id, data);
+            let text = String::from_utf8_lossy(data);
+            crate::session_naming::on_output(session_id, &text);
 
             if !session_captured.load(Ordering::Relaxed) {
-                if let Some(uuid) = crate::session_capture::try_extract_session_id(data) {
+                if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
                     let _ = db::update_cli_session_id(session_id, uuid);
                     session_captured.store(true, Ordering::Relaxed);
                     tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
@@ -249,12 +254,12 @@ fn start_reader(
                 "agent-output",
                 serde_json::json!({
                     "session_id": session_id,
-                    "line": data
+                    "data": encode_pty_chunk(data)
                 }),
             );
 
             // Forward to any connected mobile WebSocket clients
-            crate::http_server::send_pty_output(session_id, data.as_bytes().to_vec());
+            crate::http_server::send_pty_output(session_id, data.to_vec());
         });
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);

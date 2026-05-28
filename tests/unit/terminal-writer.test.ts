@@ -52,6 +52,18 @@ describe('TerminalWriter', () => {
       expect(writeFn).toHaveBeenCalledWith('hello world');
     });
 
+    it('buffers byte chunks without stringifying them', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      writer.append(1, new Uint8Array([0xe2, 0x96]));
+      writer.append(1, new Uint8Array([0x88]));
+
+      flush();
+      expect(writeFn).toHaveBeenCalledOnce();
+      expect(writeFn).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
+    });
+
     it('only schedules one frame per batch', () => {
       writer.register(1, vi.fn());
       writer.append(1, 'a');

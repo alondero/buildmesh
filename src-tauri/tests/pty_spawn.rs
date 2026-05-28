@@ -18,6 +18,8 @@
 //! fixes called out in the issue: the PowerShell BOM fix (30380d9) and the
 //! `cmd.exe /c` batch wrapping (ee6472f).
 
+use std::collections::VecDeque;
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -26,6 +28,27 @@ use buildmesh_lib::agent::provider::{SpawnRecipe, WindowsShell};
 use buildmesh_lib::agent::spawn::{open_pty_pair, pump_pty_output, spawn_child};
 use buildmesh_lib::agent::spawn_environment;
 use buildmesh_lib::models::EnvType;
+
+struct ChunkedReader {
+    chunks: VecDeque<Vec<u8>>,
+}
+
+impl ChunkedReader {
+    fn new(chunks: Vec<Vec<u8>>) -> Self {
+        Self { chunks: chunks.into() }
+    }
+}
+
+impl Read for ChunkedReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(chunk) = self.chunks.pop_front() else {
+            return Ok(0);
+        };
+        assert!(chunk.len() <= buf.len(), "test chunk must fit read buffer");
+        buf[..chunk.len()].copy_from_slice(&chunk);
+        Ok(chunk.len())
+    }
+}
 
 /// Spawn `recipe` under a real PTY, drain its output through the production read
 /// loop, wait for the child to exit, and clean up the registry. Returns the
@@ -58,12 +81,12 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe) -> (String, bool
     );
 
     // Drain output on a background thread using the production read loop.
-    let collected = Arc::new(Mutex::new(String::new()));
+    let collected = Arc::new(Mutex::new(Vec::new()));
     let collected_w = collected.clone();
     let reader_alive_thread = reader_alive.clone();
     let reader_handle = std::thread::spawn(move || {
         pump_pty_output(reader, |chunk| {
-            collected_w.lock().unwrap().push_str(chunk);
+            collected_w.lock().unwrap().extend_from_slice(chunk);
         });
         // Mirror the production reader thread: liveness ends when the PTY closes.
         reader_alive_thread.store(false, Ordering::SeqCst);
@@ -91,8 +114,20 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe) -> (String, bool
         "PROCESS_REGISTRY entry for session {session_id} should be cleaned up"
     );
 
-    let out = collected.lock().unwrap().clone();
+    let out = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
     (out, exit_ok)
+}
+
+#[test]
+fn pump_pty_output_preserves_split_utf8_sequences() {
+    let reader = ChunkedReader::new(vec![vec![0xe2, 0x96], vec![0x88]]);
+    let mut collected = Vec::new();
+
+    pump_pty_output(Box::new(reader), |chunk| {
+        collected.extend_from_slice(chunk);
+    });
+
+    assert_eq!(collected, "█".as_bytes());
 }
 
 #[cfg(unix)]

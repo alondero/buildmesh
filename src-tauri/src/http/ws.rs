@@ -74,30 +74,46 @@ pub(crate) async fn handle_ws_connection(
 
     // Prefer a clean terminal snapshot over raw history replay, which contains
     // stale cursor-positioning sequences from TUI redraws.
-    let history_fallback = || {
-        let h = get_pty_history(node_id);
-        String::from_utf8_lossy(&h).into_owned()
-    };
-    let initial_data = match super::app_handle() {
-        Some(app) => super::request_terminal_snapshot(app, node_id)
-            .await
-            .unwrap_or_else(history_fallback),
-        None => history_fallback(),
-    };
-    if !initial_data.is_empty()
-        && write
-            .send(tungstenite::Message::Text(initial_data.into()))
-            .await
-            .is_err()
-    {
-        return;
+    match super::app_handle() {
+        Some(app) => {
+            if let Some(snapshot) = super::request_terminal_snapshot(app, node_id).await {
+                if !snapshot.is_empty()
+                    && write
+                        .send(tungstenite::Message::Text(snapshot.into()))
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+            } else {
+                let history = get_pty_history(node_id);
+                if !history.is_empty()
+                    && write
+                        .send(tungstenite::Message::Binary(history.into()))
+                        .await
+                        .is_err()
+                {
+                    return;
+                }
+            }
+        }
+        None => {
+            let history = get_pty_history(node_id);
+            if !history.is_empty()
+                && write
+                    .send(tungstenite::Message::Binary(history.into()))
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+        }
     }
 
     let write_task = tauri::async_runtime::spawn(async move {
         while let Ok(data) = rx.recv().await {
-            let text = String::from_utf8_lossy(&data).into_owned();
             if write
-                .send(tungstenite::Message::Text(text.into()))
+                .send(tungstenite::Message::Binary(data.into()))
                 .await
                 .is_err()
             {
@@ -288,8 +304,8 @@ mod tests {
         let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
         let (mut ws, _) = connect_async(&url).await.unwrap();
         let msg = ws.next().await.unwrap().unwrap();
-        assert!(msg.is_text());
-        assert_eq!(msg.into_text().unwrap(), "hello from history\r\n");
+        assert!(msg.is_binary());
+        assert_eq!(msg.into_data(), b"hello from history\r\n".to_vec());
     }
 
     #[tokio::test]
@@ -313,8 +329,8 @@ mod tests {
         send_pty_output(node_id, b"live data\r\n".to_vec());
 
         let msg = ws.next().await.unwrap().unwrap();
-        assert!(msg.is_text());
-        assert_eq!(msg.into_text().unwrap(), "live data\r\n");
+        assert!(msg.is_binary());
+        assert_eq!(msg.into_data(), b"live data\r\n".to_vec());
     }
 
     #[tokio::test]
@@ -336,13 +352,15 @@ mod tests {
         let (mut ws, _) = connect_async(&url).await.unwrap();
 
         let msg1 = ws.next().await.unwrap().unwrap();
-        assert_eq!(msg1.into_text().unwrap(), "old output\r\n");
+        assert!(msg1.is_binary());
+        assert_eq!(msg1.into_data(), b"old output\r\n".to_vec());
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         send_pty_output(node_id, b"new output\r\n".to_vec());
 
         let msg2 = ws.next().await.unwrap().unwrap();
-        assert_eq!(msg2.into_text().unwrap(), "new output\r\n");
+        assert!(msg2.is_binary());
+        assert_eq!(msg2.into_data(), b"new output\r\n".to_vec());
     }
 
     #[tokio::test]

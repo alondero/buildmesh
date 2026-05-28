@@ -148,6 +148,21 @@ describe('Event Listener Integration', () => {
     expect(writeSpy).toHaveBeenCalledWith('Hello\n');
   });
 
+  it('agent-output byte payloads are decoded and written to terminal as bytes', async () => {
+    const instance = await terminalManager.getOrCreate(1);
+    expect(instance).not.toBeNull();
+
+    const writeSpy = vi.spyOn(instance!.term, 'write');
+
+    mockListeners.get('agent-output')?.forEach(cb =>
+      cb({ payload: { session_id: 1, data: '4paI' } })
+    );
+
+    vi.runAllTimers();
+
+    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
+  });
+
   it('events for different sessions are not cross-written', async () => {
     const instance1 = await terminalManager.getOrCreate(1);
     const instance2 = await terminalManager.getOrCreate(2);
