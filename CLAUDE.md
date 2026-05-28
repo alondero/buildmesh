@@ -1,53 +1,29 @@
-Buildmesh is a Tauri desktop application for orchestrating AI agents (Claude Code, Gemini, Open Code) across multiple projects concurrently. It provides a multiplexer-style environment with persistent terminals and hybrid Windows/WSL support.
+Buildmesh is a Tauri 2 desktop app (React 19 frontend, Rust backend) for orchestrating AI coding agents (Claude Code, Gemini, OpenCode) across projects, with persistent xterm.js terminals and hybrid Windows/WSL support.
 
-## High-Level Design
+**`docs/knowledge-primer.md` is the source of truth for architecture, conventions, and anti-patterns. Read it before touching backend, terminal, agent-spawn, or path code.** This file holds only the always-on rules.
 
-Single-window desktop app with a **sidebar** for navigation and a **Session View** with a tab bar.
-- **Persistent Terminal Registry:** `xterm.js` instances are stored in a global registry (`Terminal.tsx`), ensuring colors and context are preserved during session switches.
-- **Hybrid Path Mapping:** Linux paths in WSL are mapped to Windows UNC paths (`\\wsl$\...`) for host-side file tree and watcher operations.
-- **PTY Management:** Simplified backend PTY lifecycle in `agent.rs`. Agents are spawned as durable processes.
+## Commands
+- Test: `npm test` (unit + integration) · `npm run test:e2e` (needs app on :1991)
+- Typecheck/build: `npm run build` (runs `tsc`, then vite)
+- Rust: `cargo test` / `cargo clippy` (run inside `src-tauri/`)
 
-## Key Data Types
+## Hard rules — cause real breakage, do not violate
+- **Never** call `.dispose()` on an xterm.js terminal unless the agent node is deleted → permanent terminal blanking. `TerminalManager` is a singleton; instances survive React remounts.
+- **Never** pass Linux/WSL paths to Windows-side APIs. Convert via `env::to_host_path` (`src-tauri/src/env/mod.rs`); build `\\wsl$\` paths only inside that module.
+- On Windows, spawn cwrap providers (Anthropic, Minimax) via `cmd.exe /c` — never directly. Gemini/OpenCode spawn directly.
+- **Never** lock the DB mutex in nested calls → deadlock. Use `_inner(&Connection)` helpers; public fns lock once and pass the connection through (`src-tauri/src/db/mod.rs`).
+- Don't replicate PTY-side `session-id` capture or node auto-naming — backend-only (`session_naming.rs`).
 
-- **Mesh:** Top-level folder on disk.
-- **AgentNode:** An isolated agent instance. Persists `cli_session_id` for robust `--resume` support.
-- **Layout:** Supports `single` and `grid` (split-pane) views.
+A PreToolUse hook (`.claude/hooks/guard-antipatterns.mjs`) blocks edits that violate the dispose and WSL-path rules. Add `// allow-dispose` / `// allow-wsl-path` on the line only when the exception is genuinely correct.
 
-## Technical Stack
+## Code quality
+- Match existing patterns. No new abstractions, deps, or speculative generality beyond the task.
+- Add or update tests for behaviour changes (`tests/unit`, `tests/integration`).
+- Comment only non-obvious *why*; let names carry the *what*.
 
-- **Frontend:** React 19, Zustand 5, xterm.js, Tailwind 4.
-- **Backend:** Tauri 2, Rust, portable-pty, rusqlite, regex.
-- **Environment:** Automated detection and path mapping between Windows and WSL.
-
-## Database Schema (v3)
-
-- **meshes:** id, name, path, created_at.
-- **agent_nodes:** id, mesh_id, name, path, branch, env, provider, status, cli_session_id, created_at.
-- **checkpoints:** id, agent_node_id, git_ref, turn_index, message, created_at.
-
-## Guidelines
-
-- **Terminal Persistence:** Never dispose of a terminal instance unless the agent node is explicitly archived/deleted.
-- **Path Handling:** Use `env::to_host_path` when accessing the file system from the backend to ensure compatibility with WSL sessions.
-- **Agent Spawning:** On Windows, spawn `cwrap` via `cmd.exe /c` to ensure ConPTY correctly handles ANSI sequences.
-- **Agent Node ID Capture:** The backend PTY reader thread automatically captures `session-id` patterns from agent output to update the database for future resumes.
-
-## Agent skills
-
-### Verification
-
-Autonomous pass/fail check for code changes — tiered build/lint/test/launch/log-scan loop with self-improving recipes. Invoke with `/verify` (default `standard`), `/verify quick`, `/verify full`, or `/verify --escalate`. Distinct from `/use`, which is a human-in-the-loop launch-and-watch. See `.claude/skills/verify/skill.md`.
-
-### Issue tracker
-
-GitHub Issues in `alondero/buildmesh`. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Defaults: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
-
-See docs/knowledge-primer.md for codebase conventions, anti-patterns, and key architectural decisions.
+## Pointers
+- Architecture & anti-patterns (detailed): `docs/knowledge-primer.md`
+- DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`, `checkpoints`.
+- Verification: `/verify` — see `.claude/skills/verify/skill.md`
+- Issues (`alondero/buildmesh`): `docs/agents/issue-tracker.md`; triage labels: `docs/agents/triage-labels.md`
+- Domain-context convention (`CONTEXT.md` + `docs/adr/`, not yet created): `docs/agents/domain.md`
