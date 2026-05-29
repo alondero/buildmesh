@@ -86,6 +86,37 @@ mod tests {
         .unwrap();
     }
 
+    fn run_git(path: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run git {:?}: {}", args, e));
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn run_git_without_dir(args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to run git {:?}: {}", args, e));
+
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     /// Mirrors the status-counting logic from get_git_summary.
     /// Keep in sync with git.rs.
     fn count_status(repo: &git2::Repository) -> (usize, usize, usize, usize) {
@@ -265,6 +296,43 @@ mod tests {
         assert_eq!(total, 2, "rename = deleted + added");
         assert_eq!(added, 1);
         assert_eq!(deleted, 1);
+    }
+
+    #[tokio::test]
+    async fn git_sync_fetches_current_branch_upstream_when_remote_is_not_origin() {
+        let remote = TempGitRepo::new();
+        fs::create_dir_all(remote.path()).unwrap();
+        git2::Repository::init_bare(remote.path()).unwrap();
+
+        let seed = TempGitRepo::new();
+        let seed_repo = init_git_repo(seed.path());
+        run_git(seed.path(), &["branch", "-M", "main"]);
+        run_git(seed.path(), &["remote", "add", "main", remote.path().to_str().unwrap()]);
+        run_git(seed.path(), &["push", "-u", "main", "main"]);
+
+        let local = TempGitRepo::new();
+        run_git_without_dir(&[
+            "clone",
+            "-o",
+            "main",
+            "-b",
+            "main",
+            remote.path().to_str().unwrap(),
+            local.path().to_str().unwrap(),
+        ]);
+
+        stage_file(&seed_repo, seed.path(), "remote-change.txt", "remote change");
+        commit_staged(&seed_repo, "add remote change");
+        run_git(seed.path(), &["push", "main", "main"]);
+
+        let result = crate::commands::git::git_sync(local.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+
+        assert!(result.fetched, "expected fetch to succeed: {}", result.message);
+        assert!(result.pulled, "expected fast-forward pull: {}", result.message);
+        assert_eq!(result.new_commits, 1);
+        assert!(local.path().join("remote-change.txt").exists());
     }
 
     #[test]

@@ -143,15 +143,15 @@ pub struct GitSyncResult {
     pub message: String,
 }
 
-/// Fetch from origin and attempt a fast-forward pull on the current branch.
+/// Fetch from the current branch's default remote and attempt a fast-forward pull.
 /// Returns a structured result with feedback about what happened.
 #[command]
 pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     let host_path = to_host_path(&path);
 
-    // Step 1: git fetch origin
+    // Step 1: git fetch
     let fetch_output = command_no_window("git")
-        .args(["fetch", "origin"])
+        .args(["fetch"])
         .current_dir(&host_path)
         .output()
         .map_err(|e| format!("Failed to run git fetch: {}", e))?;
