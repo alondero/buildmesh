@@ -10,7 +10,7 @@ export interface AgentNode {
   path: string;
   branch: string;
   env: 'windows' | 'wsl';
-  provider: 'anthropic' | 'minimax' | 'gemini' | 'opencode' | 'codex';
+  provider: 'anthropic' | 'minimax' | 'agy' | 'opencode' | 'codex';
   status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
   cli_session_id?: string;
   worktree_name?: string;

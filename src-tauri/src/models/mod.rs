@@ -46,7 +46,7 @@ impl EnvType {
 pub enum Provider {
     Anthropic,
     Minimax,
-    Gemini,
+    Agy,
     OpenCode,
     Codex,
 }
@@ -57,7 +57,7 @@ impl Provider {
         &[
             Provider::Anthropic,
             Provider::Minimax,
-            Provider::Gemini,
+            Provider::Agy,
             Provider::OpenCode,
             Provider::Codex,
         ]
@@ -68,7 +68,7 @@ impl Provider {
     pub fn from_db_str(s: &str) -> Provider {
         match s {
             "minimax" => Provider::Minimax,
-            "gemini" => Provider::Gemini,
+            "agy" => Provider::Agy,
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
             _ => Provider::Anthropic,
@@ -82,7 +82,7 @@ impl Provider {
         match self {
             Provider::Anthropic => &adapters::ANTHROPIC,
             Provider::Minimax => &adapters::MINIMAX,
-            Provider::Gemini => &adapters::GEMINI,
+            Provider::Agy => &adapters::AGY,
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
         }
@@ -94,7 +94,7 @@ impl std::fmt::Display for Provider {
         match self {
             Provider::Anthropic => write!(f, "anthropic"),
             Provider::Minimax => write!(f, "minimax"),
-            Provider::Gemini => write!(f, "gemini"),
+            Provider::Agy => write!(f, "agy"),
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
         }
@@ -408,7 +408,7 @@ mod tests {
         use crate::agent::provider::Platform;
         assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
         assert_eq!(Provider::Minimax.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
-        assert_eq!(Provider::Gemini.adapter().spawn_recipe(Platform::Windows).binary, "gemini");
+        assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows).binary, "agy");
         assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
         assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows).binary, "codex");
     }
@@ -423,7 +423,7 @@ mod tests {
     fn provider_capabilities_split_correctly() {
         assert!(Provider::Anthropic.adapter().supports_resume());
         assert!(Provider::Minimax.adapter().supports_resume());
-        assert!(!Provider::Gemini.adapter().supports_resume());
+        assert!(Provider::Agy.adapter().supports_resume());
         assert!(!Provider::OpenCode.adapter().supports_resume());
         assert!(Provider::Codex.adapter().supports_resume());
     }
@@ -451,7 +451,7 @@ mod tests {
     fn provider_display_lowercase() {
         assert_eq!(format!("{}", Provider::Anthropic), "anthropic");
         assert_eq!(format!("{}", Provider::Minimax), "minimax");
-        assert_eq!(format!("{}", Provider::Gemini), "gemini");
+        assert_eq!(format!("{}", Provider::Agy), "agy");
         assert_eq!(format!("{}", Provider::OpenCode), "opencode");
         assert_eq!(format!("{}", Provider::Codex), "codex");
     }

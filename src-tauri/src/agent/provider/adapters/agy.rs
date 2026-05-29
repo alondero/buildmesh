@@ -1,16 +1,16 @@
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 
-pub struct GeminiAdapter;
-pub static GEMINI: GeminiAdapter = GeminiAdapter;
+pub struct AgyAdapter;
+pub static AGY: AgyAdapter = AgyAdapter;
 
-impl AgentProvider for GeminiAdapter {
+impl AgentProvider for AgyAdapter {
     fn id(&self) -> &'static str {
-        "gemini"
+        "agy"
     }
 
     fn ui(&self) -> UiMeta {
         UiMeta {
-            label: "Google Gemini".into(),
+            label: "Antigravity CLI".into(),
             color: "#10b981".into(),
             icon: "G".into(),
         }
@@ -18,14 +18,14 @@ impl AgentProvider for GeminiAdapter {
 
     fn spawn_recipe(&self, _platform: Platform) -> SpawnRecipe {
         SpawnRecipe {
-            binary: "gemini",
-            base_args: vec!["--yolo".into()],
+            binary: "agy",
+            base_args: vec!["--dangerously-skip-permissions".into()],
             windows_shell: WindowsShell::Cmd,
         }
     }
 
     fn supports_resume(&self) -> bool {
-        false
+        true
     }
 
     fn auto_resume_on_startup(&self) -> bool {
@@ -45,9 +45,6 @@ impl AgentProvider for GeminiAdapter {
     }
 
     fn available_on(&self) -> &'static [Platform] {
-        // Pre-refactor `available_providers()` showed only Anthropic on macOS, even
-        // though the spawn code has a macOS branch for Gemini (--yolo). Keep the
-        // historical UI behaviour: Windows/Linux only.
-        &[Platform::Windows, Platform::Linux]
+        &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 }

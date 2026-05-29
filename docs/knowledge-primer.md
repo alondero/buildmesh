@@ -25,7 +25,7 @@ Single layout was removed 2026-04-29. Only `grid` layout (split-panes) is valid.
 Linux paths from WSL agents must map to Windows UNC paths (`\\wsl$\...`) before backend file operations. Use `env::to_host_path` in `src-tauri/src/env/mod.rs`. Never pass Linux paths to Windows-side APIs.
 
 ### Agent Spawning on Windows
-Anthropic and Minimax use `cwrap` spawned via `cmd.exe /c` — **not** direct. Gemini and OpenCode are spawned **directly** (no cwrap). See `src-tauri/src/commands/agent.rs`.
+Anthropic and Minimax use `cwrap` spawned via `cmd.exe /c` — **not** direct. Antigravity and OpenCode are spawned **directly** (no cwrap). See `src-tauri/src/commands/agent.rs`.
 
 ### Database Pattern
 Use `_inner` helper functions that accept `&Connection` to avoid mutex deadlocks. Public functions lock once and pass the connection through. See `src-tauri/src/db/mod.rs`.
@@ -71,7 +71,7 @@ The PTY reader thread sniffs `session-id:` or `session_id:` from agent output an
 `lib.rs:46-54` marks any agent nodes still showing `Running` status as `Suspended` during app startup, since a crash means no live process exists. These are then auto-resumed via `auto_resume_nodes` on the frontend's first draw.
 
 ### auto_resume_nodes
-On app restart, the frontend calls `auto_resume_nodes` which iterates all `Suspended` agent nodes with a `cli_session_id` and calls `spawn_agent_inner` with `SessionIdMode::Resume`. Only Anthropic and Minimax (cwrap providers) are auto-resumed — Gemini and OpenCode skip this path and go directly to `Idle`.
+On app restart, the frontend calls `auto_resume_nodes` which iterates all `Suspended` agent nodes with a `cli_session_id` and calls `spawn_agent_inner` with `SessionIdMode::Resume`. Only Anthropic and Minimax (cwrap providers) are auto-resumed — Antigravity and OpenCode skip this path and go directly to `Idle`.
 
 ### Early-Exit Detection
 The PTY reader thread records `spawned_at`. If the reader exits within 3 seconds, the agent node is marked `Error` and a `resume-failed` event is emitted. This catches failed `--resume` attempts where the agent CLI exits because the session has expired.

@@ -178,8 +178,8 @@ mod tests {
             save(AppPreferences { default_provider: Some(String::new()) }).unwrap();
             assert_eq!(default_provider(), None);
 
-            save(AppPreferences { default_provider: Some("gemini".to_string()) }).unwrap();
-            assert_eq!(default_provider(), Some("gemini".to_string()));
+            save(AppPreferences { default_provider: Some("agy".to_string()) }).unwrap();
+            assert_eq!(default_provider(), Some("agy".to_string()));
         });
     }
 
@@ -188,7 +188,7 @@ mod tests {
         let got = resolve_default_provider(
             Some("codex".into()),
             Some("minimax".into()),
-            Some("gemini".into()),
+            Some("agy".into()),
         );
         assert_eq!(got, "codex");
     }

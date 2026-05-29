@@ -4,7 +4,7 @@
 
 **What we are building:** A desktop AI agent orchestration hub for running multiple agents across multiple projects concurrently — with auto-resume, git-aware worktrees, and a terminal-native UX.
 
-**Core purpose:** Enable developers to run, monitor, and coordinate multiple AI coding agents (Claude Code, Gemini, Open Code) across any number of projects and sessions simultaneously. The app is the ephemeral UI layer — agents are durable CLI processes that survive app restarts.
+**Core purpose:** Enable developers to run, monitor, and coordinate multiple AI coding agents (Claude Code, Antigravity, Open Code) across any number of projects and sessions simultaneously. The app is the ephemeral UI layer — agents are durable CLI processes that survive app restarts.
 
 **Why it matters:** Running agents in parallel on a complex project means juggling terminals and losing visibility. Buildmesh gives you a dashboard where every agent session is visible, resumable, and inspectable — with diff review and file change tracking.
 
@@ -68,7 +68,7 @@ The left sidebar shows a **Projects** tree — the top-level organizational unit
       ● swift-ocean-breeze (WSL) — Running
 ```
 
-Each project is a folder on disk. Sessions are listed under their project. The provider dropdown appears next to each session (default, or pick Claude Code Anthropic/Minimax, Gemini, Open Code).
+Each project is a folder on disk. Sessions are listed under their project. The provider dropdown appears next to each session (default, or pick Claude Code Anthropic/Minimax, Antigravity, Open Code).
 
 **First launch:** Shows "Open a project" empty state. **Subsequent launches:** Restores full state with all projects and sessions, auto-resumes running agents.
 
@@ -111,7 +111,7 @@ wsl.exe --cd /home/user/projects/my-webapp -- cwrap --anthropic
 wsl.exe --cd /home/user/projects/my-webapp -- cwrap --minimax
 
 # Other agents
-gemini
+agy
 opencode
 ```
 
@@ -123,7 +123,7 @@ opencode
 
 - [x] **Projects** — Open folder via native picker, auto-named from folder
 - [x] **Sessions** — Auto-named (3-word generator), worktree/branch auto-created
-- [x] **Multi-provider** — Claude Code (Anthropic/Minimax), Gemini, Open Code
+- [x] **Multi-provider** — Claude Code (Anthropic/Minimax), Antigravity, Open Code
 - [x] **Provider hierarchy** — Global default > project default > session override
 - [x] **Auto-resume** — Agents restored on app reopen via `--resume <session-id>`
 - [ ] **Session View** — Single terminal (xterm.js), no chat abstraction
@@ -202,7 +202,7 @@ opencode
 | **Diff Engine** | `syntect` (syntax highlighting) + `difference-rs` | Targeted diffs with proper highlighting |
 | **File Watcher** | `notify` (Rust crate) | Windows-native fs watching |
 | **Git Operations** | `git2` Rust crate | Worktree creation, checkpoint refs |
-| **Agent CLIs** | `cwrap --anthropic/--minimax`, `gemini`, `opencode` | All on system PATH |
+| **Agent CLIs** | `cwrap --anthropic/--minimax`, `agy`, `opencode` | All on system PATH |
 
 ### 5.3 Data Model
 
@@ -211,7 +211,7 @@ Project
   ├── id: i64
   ├── name: string        // auto-derived from folder name
   ├── path: string        // absolute path to folder on disk
-  ├── default_provider: string  // "anthropic" | "minimax" | "gemini" | "opencode"
+  ├── default_provider: string  // "anthropic" | "minimax" | "agy" | "opencode"
   └── created_at: datetime
 
 Session
@@ -221,7 +221,7 @@ Session
   ├── branch: string     // worktree branch name
   ├── path: string        // absolute path (worktree or project folder)
   ├── env: string        // "windows" | "wsl"
-  ├── provider: string    // "anthropic" | "minimax" | "gemini" | "opencode"
+  ├── provider: string    // "anthropic" | "minimax" | "agy" | "opencode"
   ├── status: string     // "running" | "idle" | "error"
   ├── session_id: string  // CLI's session ID (for --resume)
   └── created_at: datetime

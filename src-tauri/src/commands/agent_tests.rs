@@ -195,15 +195,15 @@ mod tests {
         assert_eq!(argv(&cmd), expected_wsl("cwrap", &["--minimax"]));
     }
 
-    /// Gemini supports neither resume, model override, nor prefill: even when a
+    /// Agy supports resume but still ignores model override and prefill: even when a
     /// caller passes those, the args must NOT appear. Guards against a mutation
     /// that drops the capability gating.
     #[test]
-    fn gemini_ignores_unsupported_overrides_and_prefill() {
+    fn agy_supports_resume_but_ignores_model_override_and_prefill() {
         let cmd = build_spawn_command(
             &wsl_resolved(),
-            Provider::Gemini,
-            &SessionIdMode::None,
+            Provider::Agy,
+            &SessionIdMode::Resume("test-session".into()),
             SESSION_ID,
             Some("opus"),
             Some("high"),
@@ -211,11 +211,11 @@ mod tests {
         );
 
         let args = argv(&cmd);
-        assert_eq!(args, expected_wsl("gemini", &["--yolo"]));
+        assert_eq!(args, expected_wsl("agy", &["--dangerously-skip-permissions"]));
         for forbidden in ["--model", "--effort", "--prefill", "opus", "high", "prefill text"] {
             assert!(
                 !args.iter().any(|a| a == forbidden),
-                "gemini should not emit {:?}, got {:?}",
+                "agy should not emit {:?}, got {:?}",
                 forbidden,
                 args
             );

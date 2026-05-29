@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -128,6 +128,9 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             }
             if current_version < 9 {
                 migrate_agent_node_source_issue(conn)?;
+            }
+            if current_version < 10 {
+                migrate_gemini_to_agy(conn)?;
             }
         }
 
@@ -398,6 +401,24 @@ fn migrate_agent_node_source_issue(conn: &Connection) -> SqlResult<()> {
     if !has_col {
         conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_issue INTEGER", [])?;
         tracing::info!("Added source_issue column to agent_nodes table");
+    }
+    Ok(())
+}
+
+fn migrate_gemini_to_agy(conn: &Connection) -> SqlResult<()> {
+    let rows_agents = conn.execute(
+        "UPDATE agent_nodes SET provider = 'agy' WHERE provider = 'gemini'",
+        [],
+    )?;
+    if rows_agents > 0 {
+        tracing::info!("Migrated {} agent_nodes from gemini to agy", rows_agents);
+    }
+    let rows_meshes = conn.execute(
+        "UPDATE meshes SET default_provider = 'agy' WHERE default_provider = 'gemini'",
+        [],
+    )?;
+    if rows_meshes > 0 {
+        tracing::info!("Migrated {} meshes default_provider from gemini to agy", rows_meshes);
     }
     Ok(())
 }
