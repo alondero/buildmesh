@@ -16,7 +16,7 @@ const MESH: Mesh = {
 
 const PROVIDERS: ProviderEntry[] = [
   { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
-  { id: 'gemini', label: 'Gemini', color: 'bg-emerald-500' },
+  { id: 'agy', label: 'Agy', color: 'bg-emerald-500' },
 ];
 
 function setup(overrides: Partial<React.ComponentProps<typeof NodeCreationForm>> = {}) {
@@ -58,21 +58,21 @@ describe('NodeCreationForm', () => {
 
   it('hides the provider dropdown while closed', () => {
     setup({ isDropdownOpen: false });
-    expect(screen.queryByRole('button', { name: 'Gemini' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Agy' })).toBeNull();
   });
 
   it('shows the provider dropdown when open', () => {
     setup({ isDropdownOpen: true });
     expect(screen.getByRole('button', { name: 'Anthropic' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Gemini' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Agy' })).toBeTruthy();
   });
 
   it('selects a specific provider from the open dropdown', async () => {
     const { onSelectProvider } = setup({ isDropdownOpen: true });
 
-    await userEvent.click(screen.getByRole('button', { name: 'Gemini' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
 
-    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'gemini');
+    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy');
   });
 
   it('reflects the resolved default provider in the + button tooltip on hover', async () => {

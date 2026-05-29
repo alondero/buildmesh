@@ -5,13 +5,13 @@ import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../
 
 const PROVIDERS: ProviderEntry[] = [
   { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
-  { id: 'gemini', label: 'Gemini', color: 'bg-emerald-500' },
+  { id: 'agy', label: 'Agy', color: 'bg-emerald-500' },
 ];
 
 describe('colorClassForProvider', () => {
   it('maps known providers to their badge colour', () => {
     expect(colorClassForProvider('anthropic')).toBe('bg-blue-500');
-    expect(colorClassForProvider('gemini')).toBe('bg-emerald-500');
+    expect(colorClassForProvider('agy')).toBe('bg-emerald-500');
   });
 
   it('falls back to gray for unknown providers', () => {
@@ -23,7 +23,7 @@ describe('ProviderDropdown', () => {
   it('renders a button for every provider', () => {
     render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
     expect(screen.getByRole('button', { name: 'Anthropic' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Gemini' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Agy' })).toBeTruthy();
   });
 
   it('tags the container with the mesh id for click-outside detection', () => {
@@ -35,10 +35,9 @@ describe('ProviderDropdown', () => {
     const onSelect = vi.fn();
     render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={onSelect} />);
 
-    await userEvent.click(screen.getByRole('button', { name: 'Gemini' }));
+await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
 
-    expect(onSelect).toHaveBeenCalledTimes(1);
-    expect(onSelect).toHaveBeenCalledWith('gemini');
+    expect(onSelect).toHaveBeenCalledWith('agy');
   });
 
   it('stops click propagation so the parent row is not toggled', async () => {

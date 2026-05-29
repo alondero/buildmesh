@@ -96,7 +96,7 @@ spawn_agent(session_id, provider, resume, rows, cols)
 
 1. `spawn_with_explicit_worktree_name`: Verify Assign command args contain `-w <name>`
 2. `resume_mode_omits_w_flag`: Verify Resume command omits `-w` flag
-3. `non_cwrap_provider_no_worktree_flag`: Verify gemini/opencode don't get `-w`
+3. `non_cwrap_provider_no_worktree_flag`: Verify agy/opencode don't get `-w`
 4. `null_worktree_name_falls_back_to_w_without_name`: For backward compat
 
 ## Files to Modify

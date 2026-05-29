@@ -7,7 +7,7 @@ export function colorClassForProvider(providerId: string): string {
   const map: Record<string, string> = {
     anthropic: 'bg-blue-500',
     minimax: 'bg-indigo-500',
-    gemini: 'bg-emerald-500',
+    agy: 'bg-emerald-500',
     opencode: 'bg-amber-500',
   };
   return map[providerId] ?? 'bg-gray-500';
