@@ -36,6 +36,7 @@ test-results/
 .claude/settings.local.json
 .claude/tasks/
 .claude/memory/
+.claude/scheduled_tasks.lock
 CLAUDE.local.md
 coverage/
 coverage/
