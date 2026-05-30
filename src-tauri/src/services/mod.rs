@@ -5,3 +5,4 @@ pub mod checkpoint;
 pub mod github;
 pub mod mesh;
 pub mod session_discovery;
+pub mod usage;

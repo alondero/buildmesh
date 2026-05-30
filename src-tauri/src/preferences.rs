@@ -18,6 +18,9 @@ pub struct AppPreferences {
     /// `None` means "no app-wide override — use the hardcoded fallback".
     #[serde(default)]
     pub default_provider: Option<String>,
+    /// MiniMax API key for usage fetching. Stored plaintext in preferences.json.
+    #[serde(default)]
+    pub minimax_api_key: Option<String>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -163,6 +166,7 @@ mod tests {
         with_temp_dir(|_| {
             let prefs = AppPreferences {
                 default_provider: Some("minimax".to_string()),
+                ..Default::default()
             };
             save(prefs.clone()).unwrap();
             // Clear cache to force a disk read.
@@ -175,10 +179,10 @@ mod tests {
     #[test]
     fn default_provider_helper_strips_empty_strings() {
         with_temp_dir(|_| {
-            save(AppPreferences { default_provider: Some(String::new()) }).unwrap();
+            save(AppPreferences { default_provider: Some(String::new()), ..Default::default() }).unwrap();
             assert_eq!(default_provider(), None);
 
-            save(AppPreferences { default_provider: Some("agy".to_string()) }).unwrap();
+            save(AppPreferences { default_provider: Some("agy".to_string()), ..Default::default() }).unwrap();
             assert_eq!(default_provider(), Some("agy".to_string()));
         });
     }

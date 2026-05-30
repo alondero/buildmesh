@@ -219,6 +219,10 @@ pub fn run() {
             // Session Discovery
             commands::session_discovery::discover_sessions,
             commands::session_discovery::import_discovered_session,
+            // Usage
+            commands::usage::get_provider_usage,
+            commands::usage::get_all_provider_usage,
+            commands::usage::set_minimax_api_key,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
