@@ -167,8 +167,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         {usage && usage.loggedIn && !usage.error && (
           <div>
-            {usage.windows.map((w, i) => (
-              <UsageBar key={i} window={w} />
+            {usage.windows.map(w => (
+              <UsageBar key={w.label} window={w} />
             ))}
             {usage.detail && (
               <p className="text-[10px] text-accent-cyan mt-1">{usage.detail}</p>
