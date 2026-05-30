@@ -4,6 +4,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { UncommittedChangesSection } from './UncommittedChangesSection';
+import { AiContextSection } from './AiContextSection';
 import { BranchesWorktreesSection } from './BranchesWorktreesSection';
 import { useMeshGitStatus } from '../../hooks/useMeshGitStatus';
 import { listProviders, ProviderInfo } from '../../lib/tauri';
@@ -307,6 +308,13 @@ export function MeshPropertiesPanel() {
                   onRefresh={() => git.refresh()}
                 />
               )}
+
+              {/* AI context portability */}
+              <AiContextSection
+                meshId={propertiesPanelMeshId}
+                meshPath={mesh.path}
+                isAuthenticated={git?.isAuthenticated ?? false}
+              />
 
               {/* Model */}
               <div>
