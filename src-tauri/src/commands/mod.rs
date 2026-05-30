@@ -3,6 +3,7 @@
 pub mod agent;
 #[cfg(test)]
 pub mod agent_tests;
+pub mod ai_context;
 pub mod attention;
 pub mod build_run;
 pub mod checkpoint;

@@ -214,6 +214,9 @@ pub fn run() {
             commands::pr::check_gh_auth,
             commands::pr::create_pr_for_mesh,
             commands::pr::get_repo_issues,
+            // AI context portability
+            commands::ai_context::detect_ai_context,
+            commands::ai_context::create_ai_context_portability_pr,
             // Remote
             commands::remote::submit_terminal_snapshot,
             // Session Discovery

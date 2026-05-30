@@ -195,6 +195,21 @@ export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: s
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
   invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 
+// AI context portability
+export interface AiContextStatus {
+  claude_md_exists: boolean;
+  agents_md_exists: boolean;
+  skills_dir_exists: boolean;
+  skill_count: number;
+  agents_skills_exists: boolean;
+}
+
+export const detectAiContext = (meshPath: string) =>
+  invoke<AiContextStatus>('detect_ai_context', { meshPath });
+
+export const createAiContextPortabilityPr = (meshId: number) =>
+  invoke<string>('create_ai_context_portability_pr', { meshId });
+
 export const listProviders = () =>
   invoke<ProviderInfo[]>('list_providers');
 
