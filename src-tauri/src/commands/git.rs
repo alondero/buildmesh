@@ -24,7 +24,8 @@ pub struct GitStatus {
 /// Get git status for a directory — returns list of changed files
 #[command]
 pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
-    let repo = Repository::open(&path).map_err(|e| e.to_string())?;
+    let host_path = to_host_path(&path);
+    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
@@ -68,7 +69,8 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
 /// Get aggregate git change summary for a directory
 #[command]
 pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
-    let repo = Repository::open(&path).map_err(|e| e.to_string())?;
+    let host_path = to_host_path(&path);
+    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)

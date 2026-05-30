@@ -49,9 +49,9 @@ mod tests {
         let result = test_migrate_if_needed(&conn);
         assert!(result.is_ok(), "migrate_if_needed should not error");
 
-        // Assert: layout column now exists
+        // Assert: layout column now exists (table renamed to meshes during migration)
         let has_layout_after: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('projects') WHERE name = 'layout'",
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -59,7 +59,7 @@ mod tests {
 
         // Assert: existing project survived migration with 'grid' default
         let layout: String = conn.query_row(
-            "SELECT layout FROM projects WHERE name = 'existing-project'",
+            "SELECT layout FROM meshes WHERE name = 'existing-project'",
             [],
             |row| row.get(0),
         ).unwrap();
@@ -142,11 +142,12 @@ mod tests {
         test_migrate_if_needed(&conn).unwrap();
         test_migrate_if_needed(&conn).unwrap(); // should not panic or error
 
+        // Table renamed from projects→meshes during migration
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM projects",
+            "SELECT COUNT(*) FROM meshes",
             [],
             |row| row.get(0),
         ).unwrap();
-        assert_eq!(count, 0, "no projects should exist after double migration");
+        assert_eq!(count, 0, "no meshes should exist after double migration");
     }
 }

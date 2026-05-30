@@ -39,13 +39,8 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     // Run migrations (may add columns to existing tables)
     migrate_if_needed(&conn)?;
 
-    // Create schema (all tables + indexes, IF NOT EXISTS so they're idempotent)
-    // After migrations run, ensure the meshes table has all v8+ columns.
-    // migrate_mesh_config_columns uses IF NOT EXISTS (via pragma_table_info checks)
-    // so it's safe to call here unconditionally as a safety net for DBs that skipped
-    // migrations due to the projects-table guard.
-    ensure_mesh_config_columns(&conn)?;
-    ensure_agent_node_source_issue(&conn)?;
+    // Create schema (all tables + indexes, IF NOT EXISTS so they're idempotent).
+    // For fresh DBs this creates the tables; for existing DBs it's a no-op.
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS meshes (
@@ -83,6 +78,11 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
         "
     )?;
+
+    // Safety nets: add any columns that may be missing on old or migrated DBs.
+    // These are no-ops on fresh DBs (tables just created above have the base schema).
+    ensure_mesh_config_columns(&conn)?;
+    ensure_agent_node_source_issue(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
     Ok(())
@@ -204,6 +204,17 @@ pub(crate) fn ensure_agent_node_source_issue(conn: &Connection) -> SqlResult<()>
 /// the projects-table guard (existing DBs that already had schema_version=8
 /// but whose meshes table lacked the config columns).
 fn ensure_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meshes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+
     let columns = [
         ("build_command", "TEXT"),
         ("run_command", "TEXT"),
@@ -330,8 +341,12 @@ fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
         )
         .unwrap_or(false);
 
+    // Always rename projects→meshes; only rename sessions-related tables if they exist.
+    // Without this, DBs that have `projects` but no `sessions` (v2 schema) would skip
+    // the rename and then crash in migrate_mesh_config_columns (which references `meshes`).
     if !sessions_exists {
-        tracing::info!("sessions table not found — skipping mesh rename migration");
+        conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
+        tracing::info!("Migrated projects→meshes (no sessions table present)");
         return Ok(());
     }
 
