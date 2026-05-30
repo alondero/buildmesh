@@ -24,6 +24,17 @@ pub fn watch_session(
     let watch_path_for_callback = watch_path.clone();
     let last_emit = Arc::new(Mutex::new(Instant::now() - std::time::Duration::from_secs(1)));
 
+    // internal_path must match what getNodeGitPath() computes on the frontend:
+    // node.path for non-worktree nodes, node.path/.claude/worktrees/name for worktree nodes.
+    let internal_path = match node.worktree_name.as_deref() {
+        Some(wt) if !wt.is_empty() => format!("{}/.claude/worktrees/{}", node.path, wt),
+        _ => node.path.clone(),
+    };
+    let internal_path_for_callback = internal_path.clone();
+
+    // Clone before the closure consumes app_handle — needed for the immediate emit below.
+    let app_handle_outer = app_handle.clone();
+
     let mut watcher = RecommendedWatcher::new(
         move |result: Result<Event, notify::Error>| {
             match result {
@@ -34,7 +45,7 @@ pub fn watch_session(
                         *last = now;
                         let _ = app_handle.emit("git-changed", serde_json::json!({
                             "path": &watch_path_for_callback,
-                            "internal_path": &node.path
+                            "internal_path": &internal_path_for_callback
                         }));
                     }
                 }
@@ -50,6 +61,12 @@ pub fn watch_session(
     if path.exists() {
         watcher.watch(path, RecursiveMode::Recursive)
             .map_err(|e| e.to_string())?;
+        // Emit an immediate GIT_CHANGED so any pre-existing uncommitted changes
+        // are reflected without waiting for the next file write.
+        let _ = app_handle_outer.emit("git-changed", serde_json::json!({
+            "path": &watch_path,
+            "internal_path": &internal_path
+        }));
     }
 
     let mut watchers = WATCHERS.lock().unwrap();

@@ -181,7 +181,8 @@ export function SessionView() {
     return () => {
       unwatchSession(activeNode.id).catch(console.error);
     };
-  }, [activeNode?.id]);
+  // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree
+  }, [activeNode?.id, activeNode?.cli_session_id]);
 
   useEffect(() => {
     if (selectedMeshId === null) return;
