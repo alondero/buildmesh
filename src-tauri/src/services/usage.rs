@@ -77,9 +77,30 @@ struct OAuthCred {
     access_token: Option<String>,
 }
 
-/// Reads an `{ "access_token": "..." }` credential file, mapping a missing file
-/// or absent token to [`UsageError::NoCredential`].
-fn read_token(path: PathBuf) -> Result<String, UsageError> {
+#[derive(Deserialize)]
+struct ClaudeAiOauth {
+    #[serde(rename = "accessToken")]
+    access_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AnthropicOAuthCred {
+    #[serde(rename = "claudeAiOauth")]
+    claude_ai_oauth: Option<ClaudeAiOauth>,
+}
+
+/// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
+fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential)?;
+    let cred: AnthropicOAuthCred =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
+    cred.claude_ai_oauth
+        .and_then(|o| o.access_token)
+        .ok_or(UsageError::NoCredential)
+}
+
+/// Reads Codex's credentials JSON which has access_token at the top level.
+fn read_codex_token(path: PathBuf) -> Result<String, UsageError> {
     let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential)?;
     let cred: OAuthCred =
         serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
@@ -169,7 +190,7 @@ fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> 
 }
 
 pub fn anthropic_usage() -> ProviderUsage {
-    let token = match read_token(anthropic_cred_path()) {
+    let token = match read_anthropic_token(anthropic_cred_path()) {
         Ok(t) => t,
         Err(e) => return logged_out("anthropic", e.to_string()),
     };
@@ -223,7 +244,7 @@ fn parse_codex_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
 }
 
 pub fn codex_usage() -> ProviderUsage {
-    let token = match read_token(codex_auth_path()) {
+    let token = match read_codex_token(codex_auth_path()) {
         Ok(t) => t,
         Err(e) => return logged_out("codex", e.to_string()),
     };
@@ -445,5 +466,31 @@ mod tests {
         let usage = minimax_usage("");
         assert!(!usage.logged_in);
         assert!(usage.error.is_some());
+    }
+
+    #[test]
+    fn test_read_anthropic_token_valid() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_anthropic_cred.json");
+        let content = r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-testtoken123","refreshToken":"sk-ant-ort01-ref123","expiresAt":123456789,"scopes":[],"subscriptionType":"pro","rateLimitTier":"default"}}"#;
+        std::fs::write(&file_path, content).unwrap();
+
+        let token = read_anthropic_token(file_path.clone()).unwrap();
+        assert_eq!(token, "sk-ant-oat01-testtoken123");
+
+        std::fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn test_read_codex_token_valid() {
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join("test_codex_cred.json");
+        let content = r#"{"access_token":"test-codex-access-token-456"}"#;
+        std::fs::write(&file_path, content).unwrap();
+
+        let token = read_codex_token(file_path.clone()).unwrap();
+        assert_eq!(token, "test-codex-access-token-456");
+
+        std::fs::remove_file(file_path).unwrap();
     }
 }
