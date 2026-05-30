@@ -161,31 +161,52 @@ fn fetch_usage(
 }
 
 fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
-    #[derive(Deserialize)]
-    struct Resp {
-        usage: Option<Vec<AnthropicWindow>>,
-    }
-    #[derive(Deserialize)]
-    struct AnthropicWindow {
-        name: Option<String>,
-        #[serde(rename = "usedPercent")]
-        used_percent: Option<f64>,
-        #[serde(rename = "resetsAt")]
+    #[derive(Deserialize, Debug)]
+    struct UsageBucket {
+        utilization: Option<f64>,
+        #[serde(rename = "resets_at")]
         resets_at: Option<String>,
+    }
+    #[derive(Deserialize, Debug)]
+    struct Resp {
+        #[serde(default)]
+        five_hour: Option<UsageBucket>,
+        #[serde(default)]
+        seven_day: Option<UsageBucket>,
+        #[serde(default)]
+        seven_day_sonnet: Option<UsageBucket>,
     }
 
     let resp: Resp = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
-    let windows = resp
-        .usage
-        .unwrap_or_default()
-        .into_iter()
-        .map(|w| UsageWindow {
-            label: w.name.unwrap_or_else(|| "Unknown".to_string()),
-            used_percent: w.used_percent,
-            resets_at: w.resets_at,
-        })
-        .collect();
+    let mut windows = Vec::new();
+    if let Some(bucket) = resp.five_hour {
+        if let Some(util) = bucket.utilization {
+            windows.push(UsageWindow {
+                label: "5-hour".to_string(),
+                used_percent: Some(util),
+                resets_at: bucket.resets_at,
+            });
+        }
+    }
+    if let Some(bucket) = resp.seven_day {
+        if let Some(util) = bucket.utilization {
+            windows.push(UsageWindow {
+                label: "7-day".to_string(),
+                used_percent: Some(util),
+                resets_at: bucket.resets_at,
+            });
+        }
+    }
+    if let Some(bucket) = resp.seven_day_sonnet {
+        if let Some(util) = bucket.utilization {
+            windows.push(UsageWindow {
+                label: "7-day Sonnet".to_string(),
+                used_percent: Some(util),
+                resets_at: bucket.resets_at,
+            });
+        }
+    }
     Ok(windows)
 }
 
@@ -399,11 +420,13 @@ mod tests {
 
     #[test]
     fn parse_anthropic_response_valid() {
-        let json = r#"{"usage":[{"name":"5-hour","usedPercent":45.5,"resetsAt":"2026-05-30T12:00:00Z"}]}"#;
+        let json = r#"{"five_hour":{"utilization":41.0,"resets_at":"2026-05-30T21:30:00.379395+00:00"},"seven_day":{"utilization":33.0,"resets_at":"2026-06-05T04:00:00.379418+00:00"}}"#;
         let windows = parse_anthropic_response(json).unwrap();
-        assert_eq!(windows.len(), 1);
+        assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "5-hour");
-        assert_eq!(windows[0].used_percent, Some(45.5));
+        assert_eq!(windows[0].used_percent, Some(41.0));
+        assert_eq!(windows[1].label, "7-day");
+        assert_eq!(windows[1].used_percent, Some(33.0));
     }
 
     #[test]
