@@ -3,7 +3,7 @@
 //! Endpoints are undocumented / reverse-engineered; treat non-200 responses or
 //! shape mismatches as "usage unavailable", never as hard errors.
 
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -31,12 +31,12 @@ pub struct ProviderUsage {
     pub error: Option<String>,
 }
 
+/// Failures that happen before we ever reach an endpoint: no credential on disk,
+/// or a credential/response body that doesn't deserialize. Transport- and
+/// status-level failures are handled inline in [`fetch_usage`].
 #[derive(Debug)]
 pub enum UsageError {
     NoCredential,
-    RateLimited,
-    Http(reqwest::Error),
-    Api(u16, String),
     Shape(String),
 }
 
@@ -44,17 +44,8 @@ impl std::fmt::Display for UsageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             UsageError::NoCredential => write!(f, "No credential found for this provider"),
-            UsageError::RateLimited => write!(f, "Rate limited — try again later"),
-            UsageError::Http(e) => write!(f, "HTTP error: {}", e),
-            UsageError::Api(code, msg) => write!(f, "API error ({}): {}", code, msg),
             UsageError::Shape(msg) => write!(f, "Unexpected response shape: {}", msg),
         }
-    }
-}
-
-impl From<reqwest::Error> for UsageError {
-    fn from(e: reqwest::Error) -> Self {
-        UsageError::Http(e)
     }
 }
 
@@ -62,13 +53,15 @@ fn home_dir() -> PathBuf {
     env::var("USERPROFILE")
         .or_else(|_| env::var("HOME"))
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("C:/Users/alond"))
+        .unwrap_or_default()
 }
 
+/// Codex stores its auth under `$CODEX_HOME` (which points *at* the dir),
+/// defaulting to `~/.codex`.
 fn codex_home() -> PathBuf {
     env::var("CODEX_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home_dir())
+        .unwrap_or_else(|_| home_dir().join(".codex"))
 }
 
 fn anthropic_cred_path() -> PathBuf {
@@ -76,23 +69,74 @@ fn anthropic_cred_path() -> PathBuf {
 }
 
 fn codex_auth_path() -> PathBuf {
-    codex_home().join(".codex").join("auth.json")
+    codex_home().join("auth.json")
 }
 
 #[derive(Deserialize)]
-struct AnthropicCred {
-    #[serde(rename = "access_token")]
+struct OAuthCred {
     access_token: Option<String>,
 }
 
-fn read_anthropic_token() -> Result<String, UsageError> {
-    let path = anthropic_cred_path();
-    let content = fs::read_to_string(&path)
-        .map_err(|_| UsageError::NoCredential)?;
-    let cred: AnthropicCred = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.access_token
-        .ok_or(UsageError::NoCredential)
+/// Reads an `{ "access_token": "..." }` credential file, mapping a missing file
+/// or absent token to [`UsageError::NoCredential`].
+fn read_token(path: PathBuf) -> Result<String, UsageError> {
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential)?;
+    let cred: OAuthCred =
+        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
+    cred.access_token.ok_or(UsageError::NoCredential)
+}
+
+fn logged_out(provider: &str, error: String) -> ProviderUsage {
+    ProviderUsage {
+        provider: provider.to_string(),
+        logged_in: false,
+        windows: vec![],
+        detail: None,
+        error: Some(error),
+    }
+}
+
+/// Drives the shared request → status-check → parse flow. Callers reach this
+/// only once a credential is confirmed present, so any failure here is reported
+/// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
+fn fetch_usage(
+    provider: &str,
+    build_request: impl FnOnce(&Client) -> RequestBuilder,
+    parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
+) -> ProviderUsage {
+    let unavailable = |error: String| ProviderUsage {
+        provider: provider.to_string(),
+        logged_in: true,
+        windows: vec![],
+        detail: None,
+        error: Some(error),
+    };
+
+    let client = match Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => return unavailable(format!("Client error: {}", e)),
+    };
+
+    match build_request(&client).send() {
+        Ok(r) if r.status() == 429 => {
+            unavailable("Rate limited — usage data temporarily unavailable".to_string())
+        }
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status().as_u16();
+            unavailable(format!("API error {}: {}", code, r.text().unwrap_or_default()))
+        }
+        Ok(r) => match parse(&r.text().unwrap_or_default()) {
+            Ok((windows, detail)) => ProviderUsage {
+                provider: provider.to_string(),
+                logged_in: true,
+                windows,
+                detail,
+                error: None,
+            },
+            Err(e) => unavailable(format!("Failed to parse response: {}", e)),
+        },
+        Err(e) => unavailable(format!("Request failed: {}", e)),
+    }
 }
 
 fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
@@ -109,10 +153,11 @@ fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> 
         resets_at: Option<String>,
     }
 
-    let resp: Resp = serde_json::from_str(body)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let resp: Resp = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
-    let windows = resp.usage.unwrap_or_default()
+    let windows = resp
+        .usage
+        .unwrap_or_default()
         .into_iter()
         .map(|w| UsageWindow {
             label: w.name.unwrap_or_else(|| "Unknown".to_string()),
@@ -124,96 +169,19 @@ fn parse_anthropic_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> 
 }
 
 pub fn anthropic_usage() -> ProviderUsage {
-    let token = match read_anthropic_token() {
+    let token = match read_token(anthropic_cred_path()) {
         Ok(t) => t,
-        Err(e) => return ProviderUsage {
-            provider: "anthropic".to_string(),
-            logged_in: false,
-            windows: vec![],
-            detail: None,
-            error: Some(e.to_string()),
-        },
+        Err(e) => return logged_out("anthropic", e.to_string()),
     };
-
-    let client = match Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => return ProviderUsage {
-            provider: "anthropic".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some(format!("Client error: {}", e)),
+    fetch_usage(
+        "anthropic",
+        |c| {
+            c.get("https://api.anthropic.com/api/oauth/usage")
+                .header("Authorization", format!("Bearer {}", token))
+                .header("anthropic-beta", "oauth-2025-04-20")
         },
-    };
-
-    let resp = client
-        .get("https://api.anthropic.com/api/oauth/usage")
-        .header("Authorization", format!("Bearer {}", token))
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .send();
-
-    match resp {
-        Ok(r) if r.status() == 429 => ProviderUsage {
-            provider: "anthropic".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some("Rate limited — usage data temporarily unavailable".to_string()),
-        },
-        Ok(r) => {
-            let status = r.status();
-            if !status.is_success() {
-                let body = r.text().unwrap_or_default();
-                return ProviderUsage {
-                    provider: "anthropic".to_string(),
-                    logged_in: true,
-                    windows: vec![],
-                    detail: None,
-                    error: Some(format!("API error {}: {}", status.as_u16(), body)),
-                };
-            }
-            let body = r.text().unwrap_or_default();
-            match parse_anthropic_response(&body) {
-                Ok(windows) => ProviderUsage {
-                    provider: "anthropic".to_string(),
-                    logged_in: true,
-                    windows,
-                    detail: None,
-                    error: None,
-                },
-                Err(e) => ProviderUsage {
-                    provider: "anthropic".to_string(),
-                    logged_in: true,
-                    windows: vec![],
-                    detail: None,
-                    error: Some(format!("Failed to parse response: {}", e)),
-                },
-            }
-        }
-        Err(e) => ProviderUsage {
-            provider: "anthropic".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some(format!("Request failed: {}", e)),
-        },
-    }
-}
-
-#[derive(Deserialize)]
-struct CodexAuth {
-    #[serde(rename = "access_token")]
-    access_token: Option<String>,
-}
-
-fn read_codex_token() -> Result<String, UsageError> {
-    let path = codex_auth_path();
-    let content = fs::read_to_string(&path)
-        .map_err(|_| UsageError::NoCredential)?;
-    let auth: CodexAuth = serde_json::from_str(&content)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
-    auth.access_token
-        .ok_or(UsageError::NoCredential)
+        |body| Ok((parse_anthropic_response(body)?, None)),
+    )
 }
 
 fn parse_codex_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
@@ -234,8 +202,7 @@ fn parse_codex_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
         label: Option<String>,
     }
 
-    let resp: Resp = serde_json::from_str(body)
-        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let resp: Resp = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
     let mut windows = vec![];
     if let Some(p) = resp.primary {
@@ -256,154 +223,18 @@ fn parse_codex_response(body: &str) -> Result<Vec<UsageWindow>, UsageError> {
 }
 
 pub fn codex_usage() -> ProviderUsage {
-    let token = match read_codex_token() {
+    let token = match read_token(codex_auth_path()) {
         Ok(t) => t,
-        Err(e) => return ProviderUsage {
-            provider: "codex".to_string(),
-            logged_in: false,
-            windows: vec![],
-            detail: None,
-            error: Some(e.to_string()),
-        },
+        Err(e) => return logged_out("codex", e.to_string()),
     };
-
-    let client = match Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => return ProviderUsage {
-            provider: "codex".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some(format!("Client error: {}", e)),
+    fetch_usage(
+        "codex",
+        |c| {
+            c.get("https://chatgpt.com/backend-api/wham/usage")
+                .header("Authorization", format!("Bearer {}", token))
         },
-    };
-
-    let resp = client
-        .get("https://chatgpt.com/backend-api/wham/usage")
-        .header("Authorization", format!("Bearer {}", token))
-        .send();
-
-    match resp {
-        Ok(r) if r.status() == 429 => ProviderUsage {
-            provider: "codex".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some("Rate limited — usage data temporarily unavailable".to_string()),
-        },
-        Ok(r) => {
-            let status = r.status();
-            if !status.is_success() {
-                let body = r.text().unwrap_or_default();
-                return ProviderUsage {
-                    provider: "codex".to_string(),
-                    logged_in: true,
-                    windows: vec![],
-                    detail: None,
-                    error: Some(format!("API error {}: {}", status.as_u16(), body)),
-                };
-            }
-            let body = r.text().unwrap_or_default();
-            match parse_codex_response(&body) {
-                Ok(windows) => ProviderUsage {
-                    provider: "codex".to_string(),
-                    logged_in: true,
-                    windows,
-                    detail: None,
-                    error: None,
-                },
-                Err(e) => ProviderUsage {
-                    provider: "codex".to_string(),
-                    logged_in: true,
-                    windows: vec![],
-                    detail: None,
-                    error: Some(format!("Failed to parse response: {}", e)),
-                },
-            }
-        }
-        Err(e) => ProviderUsage {
-            provider: "codex".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some(format!("Request failed: {}", e)),
-        },
-    }
-}
-
-pub fn minimax_usage(api_key: &str) -> ProviderUsage {
-    if api_key.is_empty() {
-        return ProviderUsage {
-            provider: "minimax".to_string(),
-            logged_in: false,
-            windows: vec![],
-            detail: None,
-            error: Some("No API key configured".to_string()),
-        };
-    }
-
-    let client = match Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => return ProviderUsage {
-            provider: "minimax".to_string(),
-            logged_in: false,
-            windows: vec![],
-            detail: None,
-            error: Some(format!("Client error: {}", e)),
-        },
-    };
-
-    let resp = client
-        .get("https://api.minimax.io/v1/token_plan/remains")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .send();
-
-    match resp {
-        Ok(r) if r.status() == 429 => ProviderUsage {
-            provider: "minimax".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some("Rate limited — try again later".to_string()),
-        },
-        Ok(r) => {
-            let status = r.status();
-            if !status.is_success() {
-                let body = r.text().unwrap_or_default();
-                return ProviderUsage {
-                    provider: "minimax".to_string(),
-                    logged_in: true,
-                    windows: vec![],
-                    detail: None,
-                    error: Some(format!("API error {}: {}", status.as_u16(), body)),
-                };
-            }
-            let body = r.text().unwrap_or_default();
-            match serde_json::from_str::<MinimaxResp>(&body) {
-                Ok(resp) => ProviderUsage {
-                    provider: "minimax".to_string(),
-                    logged_in: true,
-                    windows: vec![],
-                    detail: Some(format!("{} remaining tokens", resp.data.remains_quota)),
-                    error: None,
-                },
-                Err(e) => ProviderUsage {
-                    provider: "minimax".to_string(),
-                    logged_in: true,
-                    windows: vec![],
-                    detail: None,
-                    error: Some(format!("Failed to parse response: {}", e)),
-                },
-            }
-        }
-        Err(e) => ProviderUsage {
-            provider: "minimax".to_string(),
-            logged_in: true,
-            windows: vec![],
-            detail: None,
-            error: Some(format!("Request failed: {}", e)),
-        },
-    }
+        |body| Ok((parse_codex_response(body)?, None)),
+    )
 }
 
 #[derive(Deserialize)]
@@ -415,6 +246,25 @@ struct MinimaxResp {
 struct MinimaxData {
     #[serde(rename = "remains_quota")]
     remains_quota: String,
+}
+
+pub fn minimax_usage(api_key: &str) -> ProviderUsage {
+    if api_key.is_empty() {
+        return logged_out("minimax", "No API key configured".to_string());
+    }
+    let auth = format!("Bearer {}", api_key);
+    fetch_usage(
+        "minimax",
+        |c| {
+            c.get("https://api.minimax.io/v1/token_plan/remains")
+                .header("Authorization", auth)
+        },
+        |body| {
+            let resp: MinimaxResp =
+                serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+            Ok((vec![], Some(format!("{} remaining tokens", resp.data.remains_quota))))
+        },
+    )
 }
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
