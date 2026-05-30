@@ -24,3 +24,4 @@ pub mod remote;
 pub mod session_discovery;
 pub mod terminal;
 pub mod test;
+pub mod usage;
