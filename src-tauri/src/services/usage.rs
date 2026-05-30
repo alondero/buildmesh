@@ -237,15 +237,96 @@ pub fn codex_usage() -> ProviderUsage {
     )
 }
 
-#[derive(Deserialize)]
-struct MinimaxResp {
-    data: MinimaxData,
+#[derive(Deserialize, Debug)]
+struct MinimaxCategory {
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    end_time: i64,
+    #[serde(default)]
+    current_interval_total_count: i64,
+    #[serde(default)]
+    current_interval_usage_count: i64,
+    #[serde(default)]
+    current_weekly_total_count: i64,
+    #[serde(default)]
+    current_weekly_usage_count: i64,
+    #[serde(default)]
+    weekly_end_time: i64,
 }
 
-#[derive(Deserialize)]
-struct MinimaxData {
-    #[serde(rename = "remains_quota")]
-    remains_quota: String,
+#[derive(Deserialize, Debug)]
+struct MinimaxResp {
+    #[serde(default)]
+    category_remains: Vec<MinimaxCategory>,
+}
+
+fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+    let resp: MinimaxResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+
+    let mut windows = vec![];
+    let mut text_gen_detail = None;
+
+    for cat in resp.category_remains {
+        let is_relevant = cat.category == "text_generation"
+            || cat.category == "coding-plan-vlm"
+            || cat.category == "coding-plan-search"
+            || cat.current_interval_usage_count > 0
+            || cat.current_weekly_usage_count > 0;
+
+        if !is_relevant {
+            continue;
+        }
+
+        if cat.current_interval_total_count > 0 {
+            let used_percent = (cat.current_interval_usage_count as f64
+                / cat.current_interval_total_count as f64)
+                * 100.0;
+            let resets_at = if cat.end_time > 0 {
+                chrono::DateTime::from_timestamp_millis(cat.end_time).map(|dt| dt.to_rfc3339())
+            } else {
+                None
+            };
+            windows.push(UsageWindow {
+                label: format!("{} (5-hour)", cat.display_name),
+                used_percent: Some(used_percent),
+                resets_at,
+            });
+        }
+
+        if cat.current_weekly_total_count > 0 {
+            let used_percent = (cat.current_weekly_usage_count as f64
+                / cat.current_weekly_total_count as f64)
+                * 100.0;
+            let resets_at = if cat.weekly_end_time > 0 {
+                chrono::DateTime::from_timestamp_millis(cat.weekly_end_time).map(|dt| dt.to_rfc3339())
+            } else {
+                None
+            };
+            windows.push(UsageWindow {
+                label: format!("{} (Weekly)", cat.display_name),
+                used_percent: Some(used_percent),
+                resets_at,
+            });
+        }
+
+        if cat.category == "text_generation" && cat.current_interval_total_count > 0 {
+            let remaining = cat.current_interval_total_count - cat.current_interval_usage_count;
+            text_gen_detail = Some(format!(
+                "{} / {} text generation requests remaining (5-hour window)",
+                remaining, cat.current_interval_total_count
+            ));
+        }
+    }
+
+    if windows.is_empty() && text_gen_detail.is_none() {
+        text_gen_detail = Some("No active token plan quotas found".to_string());
+    }
+
+    Ok((windows, text_gen_detail))
 }
 
 pub fn minimax_usage(api_key: &str) -> ProviderUsage {
@@ -259,11 +340,7 @@ pub fn minimax_usage(api_key: &str) -> ProviderUsage {
             c.get("https://api.minimax.io/v1/token_plan/remains")
                 .header("Authorization", auth)
         },
-        |body| {
-            let resp: MinimaxResp =
-                serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
-            Ok((vec![], Some(format!("{} remaining tokens", resp.data.remains_quota))))
-        },
+        |body| parse_minimax_response(body),
     )
 }
 
@@ -330,6 +407,37 @@ mod tests {
         let windows = parse_codex_response(json).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "5-hour");
+    }
+
+    #[test]
+    fn parse_minimax_response_valid() {
+        let json = r#"{
+            "category_remains": [
+                {
+                    "category": "text_generation",
+                    "display_name": "Text Generation",
+                    "end_time": 1780153200000,
+                    "current_interval_total_count": 15000,
+                    "current_interval_usage_count": 55,
+                    "current_weekly_total_count": 150000,
+                    "current_weekly_usage_count": 732,
+                    "weekly_end_time": 1780272000000
+                }
+            ],
+            "base_resp": {
+                "status_code": 0,
+                "status_msg": "success"
+            }
+        }"#;
+        let (windows, detail) = parse_minimax_response(json).unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Text Generation (5-hour)");
+        assert_eq!(windows[0].used_percent, Some((55.0 / 15000.0) * 100.0));
+        assert!(windows[0].resets_at.is_some());
+        assert_eq!(windows[1].label, "Text Generation (Weekly)");
+        assert_eq!(windows[1].used_percent, Some((732.0 / 150000.0) * 100.0));
+        assert!(windows[1].resets_at.is_some());
+        assert_eq!(detail, Some("14945 / 15000 text generation requests remaining (5-hour window)".to_string()));
     }
 
     #[test]
