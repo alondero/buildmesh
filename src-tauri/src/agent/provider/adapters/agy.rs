@@ -25,7 +25,7 @@ impl AgentProvider for AgyAdapter {
     }
 
     fn supports_resume(&self) -> bool {
-        true
+        false
     }
 
     fn auto_resume_on_startup(&self) -> bool {
@@ -46,5 +46,13 @@ impl AgentProvider for AgyAdapter {
 
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Linux, Platform::Macos]
+    }
+
+    fn self_assigns_session_id(&self) -> bool {
+        true
+    }
+
+    fn session_assign_args(&self, _id: &str) -> Vec<String> {
+        vec![]
     }
 }

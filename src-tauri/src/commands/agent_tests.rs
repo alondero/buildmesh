@@ -195,15 +195,15 @@ mod tests {
         assert_eq!(argv(&cmd), expected_wsl("cwrap", &["--minimax"]));
     }
 
-    /// Agy supports resume but still ignores model override and prefill: even when a
-    /// caller passes those, the args must NOT appear. Guards against a mutation
-    /// that drops the capability gating.
+    /// Agy self-assigns session IDs and ignores model/prefill overrides:
+    /// even when a caller passes those, the args must NOT appear.
+    /// Guards against a mutation that drops the capability gating.
     #[test]
-    fn agy_supports_resume_but_ignores_model_override_and_prefill() {
+    fn agy_ignores_model_override_and_prefill() {
         let cmd = build_spawn_command(
             &wsl_resolved(),
             Provider::Agy,
-            &SessionIdMode::Resume("test-session".into()),
+            &SessionIdMode::None,
             SESSION_ID,
             Some("opus"),
             Some("high"),
@@ -212,7 +212,7 @@ mod tests {
 
         let args = argv(&cmd);
         assert_eq!(args, expected_wsl("agy", &["--dangerously-skip-permissions"]));
-        for forbidden in ["--model", "--effort", "--prefill", "opus", "high", "prefill text"] {
+        for forbidden in ["--model", "--effort", "--prefill", "--session-id", "--resume", "opus", "high", "prefill text"] {
             assert!(
                 !args.iter().any(|a| a == forbidden),
                 "agy should not emit {:?}, got {:?}",
@@ -220,6 +220,28 @@ mod tests {
                 args
             );
         }
+    }
+
+    /// Agy self-assigns session IDs — Assign mode must NOT inject `--session-id`.
+    #[test]
+    fn agy_assign_omits_session_flag() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Agy,
+            &SessionIdMode::Assign("ignored".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
+
+        let args = argv(&cmd);
+        assert_eq!(args, expected_wsl("agy", &["--dangerously-skip-permissions"]));
+        assert!(
+            !args.iter().any(|a| a == "--session-id" || a == "ignored"),
+            "agy self-assigns; Assign must not add --session-id: {:?}",
+            args
+        );
     }
 
     /// Codex provides a dedicated resume recipe (`codex resume <id> ...flags`)
