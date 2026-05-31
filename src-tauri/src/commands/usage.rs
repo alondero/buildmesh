@@ -19,7 +19,7 @@ fn cached_or_fetch(provider: &str, force_refresh: bool, prefs: &AppPreferences) 
         "anthropic" => usage::anthropic_usage(),
         "codex" => usage::codex_usage(),
         "minimax" => usage::minimax_usage(prefs.minimax_api_key.as_deref().unwrap_or("")),
-        "agy" => usage::agy_usage(prefs.google_cloud_project.as_deref().unwrap_or("cloudshell-gca")),
+        "agy" => usage::agy_usage(),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
     };
 
