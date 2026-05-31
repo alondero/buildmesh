@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 use tauri::Emitter;
@@ -39,6 +39,26 @@ const HTTP_PORT_END: u16 = 1994;
 /// The actual server may bind 1993 or 1994 if 1992 is taken; the hook will
 /// silently no-op on the wrong port since `|| true` is appended.
 pub const HTTP_PORT_DEFAULT: u16 = HTTP_PORT_START;
+
+/// Port offset applied to every server so a dev build (identifier `*.dev`) can
+/// run side-by-side with the stable hub without contending on 1991/1992.
+/// Stable → 0, dev → 1000 (test 2991, HTTP 2992-2994).
+pub fn port_offset(identifier: &str) -> u16 {
+    if identifier.ends_with(".dev") { 1000 } else { 0 }
+}
+
+/// The HTTP port the server actually bound, published once `start_http_server`
+/// succeeds. Agent spawning reads this (via `current_http_port`) so the
+/// attention webhook points at *this* instance — both for the dev-profile
+/// offset and the 1992→1993→1994 fallback. Defaults to `HTTP_PORT_DEFAULT`
+/// before bind (and in unit tests where no server runs).
+static RESOLVED_HTTP_PORT: AtomicU16 = AtomicU16::new(HTTP_PORT_DEFAULT);
+
+/// The HTTP port this instance bound, for callers that must reach it (agent
+/// attention hooks). Returns `HTTP_PORT_DEFAULT` until the server binds.
+pub fn current_http_port() -> u16 {
+    RESOLVED_HTTP_PORT.load(Ordering::SeqCst)
+}
 
 // --- Snapshot request/response (used by ws.rs to seed initial terminal state) ---
 
@@ -98,20 +118,23 @@ pub(crate) async fn request_terminal_snapshot(
 /// Start the HTTP server, trying ports 1992→1993→1994 until one binds.
 /// Emits a `remote-access-port` event with the actual port used so the
 /// QR code modal can update without recompiling.
-pub fn start_http_server(app: tauri::AppHandle) {
+pub fn start_http_server(app: tauri::AppHandle, port_offset: u16) {
     let _ = APP_HANDLE.set(app.clone());
 
     tauri::async_runtime::spawn(async move {
-        let port = try_bind_ports(HTTP_PORT_START, HTTP_PORT_END).await;
+        let start = HTTP_PORT_START + port_offset;
+        let end = HTTP_PORT_END + port_offset;
+        let port = try_bind_ports(start, end).await;
 
         if let Some(port) = port {
+            RESOLVED_HTTP_PORT.store(port, Ordering::SeqCst);
             tracing::info!("HTTP server listening on http://0.0.0.0:{}", port);
             let _ = app.emit("remote-access-port", serde_json::json!({ "port": port }));
         } else {
             tracing::error!(
                 "Failed to bind HTTP server on any port {}–{}",
-                HTTP_PORT_START,
-                HTTP_PORT_END
+                start,
+                end
             );
         }
     });
@@ -533,6 +556,15 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn port_offset_is_zero_for_stable_and_1000_for_dev() {
+        assert_eq!(port_offset("com.alond.buildmesh"), 0);
+        assert_eq!(port_offset("com.alond.buildmesh.dev"), 1000);
+        // Dev offset shifts the HTTP range clear of the stable hub: 1992 → 2992.
+        assert_eq!(HTTP_PORT_START + port_offset("com.alond.buildmesh.dev"), 2992);
+        assert_eq!(HTTP_PORT_END + port_offset("com.alond.buildmesh.dev"), 2994);
+    }
 
     async fn attention_post(path: &str) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

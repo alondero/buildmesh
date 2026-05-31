@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(
             cmd.get_env("BUILDMESH_PORT")
                 .map(|v| v.to_string_lossy().into_owned()),
-            Some(crate::http_server::HTTP_PORT_DEFAULT.to_string())
+            Some(crate::http_server::current_http_port().to_string())
         );
     }
 }

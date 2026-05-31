@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Buildmesh Dev",
+  "identifier": "com.alond.buildmesh.dev",
+  "mainBinaryName": "buildmesh-dev",
+  "app": {
+    "windows": [
+      {
+        "title": "Buildmesh Dev"
+      }
+    ]
+  }
+}
