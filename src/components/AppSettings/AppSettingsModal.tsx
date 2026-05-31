@@ -31,6 +31,28 @@ interface ProviderUsage {
 
 const NO_OVERRIDE = '__no_override__';
 
+export function UsageBar({ window }: { window: UsageWindow }) {
+  const percent = window.usedPercent ?? 0;
+  const color = percent > 80 ? 'bg-status-error' : percent > 60 ? 'bg-status-warning' : 'bg-accent-cyan';
+  // Show the figure whenever it's known — 0% (full quota remaining) is a real
+  // value, not missing data. Only a null usedPercent is "N/A".
+  const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'N/A';
+  return (
+    <div className="mt-1">
+      <div className="flex justify-between text-[10px] text-text-muted mb-0.5">
+        <span>{window.label}</span>
+        <span>{display}</span>
+      </div>
+      <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
+        <div className={`h-full ${color} rounded-full`} style={{ width: `${Math.min(percent, 100)}%` }} />
+      </div>
+      {window.resetsAt && (
+        <p className="text-[9px] text-text-muted mt-0.5">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
+      )}
+    </div>
+  );
+}
+
 export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selected, setSelected] = useState<string>(NO_OVERRIDE);
@@ -117,25 +139,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       agy: '🟢',
     };
     return <span className="text-sm">{icons[id] || '❓'}</span>;
-  };
-
-  const UsageBar = ({ window }: { window: UsageWindow }) => {
-    const percent = window.usedPercent ?? 0;
-    const color = percent > 80 ? 'bg-status-error' : percent > 60 ? 'bg-status-warning' : 'bg-accent-cyan';
-    return (
-      <div className="mt-1">
-        <div className="flex justify-between text-[10px] text-text-muted mb-0.5">
-          <span>{window.label}</span>
-          <span>{percent > 0 ? `${percent.toFixed(1)}%` : 'N/A'}</span>
-        </div>
-        <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
-          <div className={`h-full ${color} rounded-full`} style={{ width: `${Math.min(percent, 100)}%` }} />
-        </div>
-        {window.resetsAt && (
-          <p className="text-[9px] text-text-muted mt-0.5">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
-        )}
-      </div>
-    );
   };
 
   const ProviderCard = ({ providerId, label }: { providerId: string; label: string }) => {
