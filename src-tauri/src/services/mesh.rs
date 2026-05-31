@@ -40,10 +40,14 @@ pub fn name_from_path(path: &str) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| {
-            path.rsplit(|c| c == '/' || c == '\\')
+            let sep = if path.contains('\\') { '\\' } else { '/' };
+            #[allow(clippy::manual_pattern_char_comparison)]
+            let result = path
+                .rsplit(|c| c == sep)
                 .next()
                 .unwrap_or(path)
-                .to_string()
+                .to_string();
+            result
         })
 }
 

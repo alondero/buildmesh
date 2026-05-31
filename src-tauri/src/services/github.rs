@@ -361,13 +361,8 @@ fn parse_gh_hosts_yaml(content: &str) -> Option<String> {
 /// Parse owner/repo from a GitHub remote URL.
 /// Handles both HTTPS (https://github.com/owner/repo) and SSH (git@github.com:owner/repo) formats.
 pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
-    let rest = if url.starts_with("https://github.com/") {
-        &url["https://github.com/".len()..]
-    } else if url.starts_with("git@github.com:") {
-        &url["git@github.com:".len()..]
-    } else {
-        return None;
-    };
+    let rest = url.strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("git@github.com:"))?;
 
     let parts: Vec<&str> = rest.split('/').collect();
     if parts.len() >= 2 && !parts[0].is_empty() && !parts[1].is_empty() {

@@ -26,8 +26,8 @@ fn read_dir_recursive(path: &Path, base_path: &str, host_base: &str, depth: usiz
     // Calculate the internal path for the frontend
     // We replace the host-specific prefix with the original guest path
     let host_path_str = path.to_string_lossy().to_string();
-    let internal_path = if host_path_str.starts_with(host_base) {
-        format!("{}{}", base_path, &host_path_str[host_base.len()..].replace('\\', "/"))
+    let internal_path = if let Some(stripped) = host_path_str.strip_prefix(host_base) {
+        format!("{}{}", base_path, &stripped.replace('\\', "/"))
     } else {
         host_path_str.replace('\\', "/")
     };

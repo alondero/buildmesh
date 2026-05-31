@@ -391,14 +391,13 @@ async fn summarize_and_rename_with(
     tracing::info!("session_naming: running summarize command for node {} ({} chars)", node_id, clean_buffer.len());
 
     let mut cmd = {
-        #[cfg(target_os = "windows")]
-        {
-            let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
-            c.args(["/c", "cwrap", "--minimax", "-p", &prompt]);
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(0x08000000);
-            c
-        }
+#[cfg(target_os = "windows")]
+            {
+                let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
+                c.args(["/c", "cwrap", "--minimax", "-p", prompt]);
+                c.creation_flags(0x08000000);
+                c
+            }
         #[cfg(not(target_os = "windows"))]
         {
             let mut c = tokio::process::Command::new("cwrap");
@@ -487,7 +486,7 @@ fn slug_with_retry(raw: &str) -> Result<String, String> {
     };
 
     let token_count = candidate.split('-').count();
-    if token_count >= 3 && token_count <= 5 && SLUG_REGEX.is_match(&candidate) {
+    if (3..=5).contains(&token_count) && SLUG_REGEX.is_match(&candidate) {
         return Ok(candidate);
     }
 
@@ -499,7 +498,7 @@ fn slug_with_retry(raw: &str) -> Result<String, String> {
         .to_string();
 
     let fallback_count = fallback.split('-').count();
-    if fallback_count >= 3 && fallback_count <= 5 && SLUG_REGEX.is_match(&fallback) {
+    if (3..=5).contains(&fallback_count) && SLUG_REGEX.is_match(&fallback) {
         return Ok(fallback);
     }
 

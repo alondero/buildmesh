@@ -317,6 +317,7 @@ fn migrate_sessions_worktree_name(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
     // Guard: only rename if old table names exist (upgrade path from v5)
     let projects_exists: bool = conn
@@ -479,7 +480,7 @@ pub fn validate_root_token(token: &str) -> SqlResult<bool> {
         |row| row.get(0),
     ).ok();
 
-    Ok(stored.as_ref().map(|s| s.as_str()).unwrap_or("") == token)
+    Ok(stored.as_deref().unwrap_or("") == token)
 }
 
 /// Exposes migrate_if_needed for integration testing.
@@ -690,6 +691,7 @@ pub fn delete_mesh(id: i64) -> SqlResult<()> {
 
 // --- Agent Node operations ---
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_agent_node(
     mesh_id: i64,
     name: &str,

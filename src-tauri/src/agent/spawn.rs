@@ -405,6 +405,17 @@ pub async fn spawn_agent_inner(
                 tracing::error!("spawn_agent_inner: {}", msg);
                 return Err(msg);
             }
+
+            if adapter.id() == "agy" {
+                let gemini_path = std::path::Path::new(&resolved.host_path).join(".gemini");
+                if !gemini_path.exists() {
+                    if let Err(e) = std::fs::create_dir(&gemini_path) {
+                        tracing::warn!("spawn_agent_inner: failed to create .gemini folder in worktree: {}", e);
+                    } else {
+                        tracing::info!("spawn_agent_inner: created .gemini folder in worktree for AGY detection");
+                    }
+                }
+            }
         }
 
         if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
@@ -427,17 +438,15 @@ pub async fn spawn_agent_inner(
         prefill.as_deref(),
     );
 
-    let child = spawn_child(&pair, cmd).map_err(|e| {
-        let err_msg = e.clone();
+    let child = spawn_child(&pair, cmd).inspect_err(|e| {
         let _ = app.emit(
             "provider-error",
             serde_json::json!({
                 "session_id": session_id,
                 "provider": provider,
-                "message": err_msg
+                "message": e
             }),
         );
-        e
     })?;
 
     tracing::info!("spawn_agent_inner: process spawned successfully");
