@@ -4,7 +4,7 @@ use crate::preferences::{self, AppPreferences};
 use crate::services::usage::{self, ProviderUsage};
 use tauri::command;
 
-const PROVIDERS: [&str; 3] = ["anthropic", "codex", "minimax"];
+const PROVIDERS: [&str; 4] = ["anthropic", "codex", "minimax", "agy"];
 
 /// Fetches a single provider's usage, serving a fresh cache entry unless
 /// `force_refresh` is set, and caching whatever it fetches.
@@ -19,6 +19,7 @@ fn cached_or_fetch(provider: &str, force_refresh: bool, prefs: &AppPreferences) 
         "anthropic" => usage::anthropic_usage(),
         "codex" => usage::codex_usage(),
         "minimax" => usage::minimax_usage(prefs.minimax_api_key.as_deref().unwrap_or("")),
+        "agy" => usage::agy_usage(prefs.google_cloud_project.as_deref().unwrap_or("cloudshell-gca")),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
     };
 

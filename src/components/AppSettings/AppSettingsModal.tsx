@@ -114,6 +114,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       anthropic: '🧠',
       codex: '⚡',
       minimax: '🔷',
+      agy: '🟢',
     };
     return <span className="text-sm">{icons[id] || '❓'}</span>;
   };
@@ -237,6 +238,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           <div className="space-y-3">
             <ProviderCard providerId="anthropic" label="Anthropic / Claude" />
+            <ProviderCard providerId="agy" label="Google / Antigravity" />
             <ProviderCard providerId="codex" label="OpenAI / Codex" />
             <ProviderCard providerId="minimax" label="MiniMax" />
           </div>

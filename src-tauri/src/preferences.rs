@@ -21,6 +21,9 @@ pub struct AppPreferences {
     /// MiniMax API key for usage fetching. Stored plaintext in preferences.json.
     #[serde(default)]
     pub minimax_api_key: Option<String>,
+    /// Google Cloud project for Antigravity/Gemini quota API. Defaults to "cloudshell-gca".
+    #[serde(default)]
+    pub google_cloud_project: Option<String>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
