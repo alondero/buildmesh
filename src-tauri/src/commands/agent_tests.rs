@@ -129,6 +129,26 @@ mod tests {
         );
     }
 
+    /// Kimi is a cwrap provider on every host, so its recipe is stable:
+    /// `cwrap --kimi --session-id <uuid>`.
+    #[test]
+    fn kimi_assign_builds_cwrap_command() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Kimi,
+            &SessionIdMode::Assign("ki-1".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl("cwrap", &["--kimi", "--session-id", "ki-1"])
+        );
+    }
+
     /// Model + effort overrides are appended (in that order) for a provider that
     /// declares `supports_model_override()`.
     #[test]

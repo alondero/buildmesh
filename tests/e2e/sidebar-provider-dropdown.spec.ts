@@ -39,6 +39,7 @@ test.describe('sidebar provider dropdown', () => {
     // Dropdown should appear with provider options
     await expect(page.locator('text=Anthropic').first()).toBeVisible();
     await expect(page.locator('text=Minimax').first()).toBeVisible();
+    await expect(page.locator('text=Kimi').first()).toBeVisible();
     await expect(page.locator('text=Agy').first()).toBeVisible();
     await expect(page.locator('text=OpenCode').first()).toBeVisible();
   });

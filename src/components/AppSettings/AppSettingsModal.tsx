@@ -114,6 +114,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       anthropic: '🧠',
       codex: '⚡',
       minimax: '🔷',
+      kimi: '🌙',
       agy: '🟢',
     };
     return <span className="text-sm">{icons[id] || '❓'}</span>;

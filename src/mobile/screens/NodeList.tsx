@@ -31,6 +31,7 @@ const STATUS_COLORS: Record<NodeStatus, string> = {
 const FALLBACK_PROVIDERS: Provider[] = [
   { id: "anthropic", label: "Anthropic (Claude)", color: "#1d7cfc", icon: "A" },
   { id: "minimax", label: "MiniMax", color: "#6366f1", icon: "M" },
+  { id: "kimi", label: "Kimi", color: "#00c4c4", icon: "K" },
   { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G" },
   { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O" },
 ];
@@ -627,7 +628,7 @@ function useWsEvents(onEvent: () => void) {
 }
 
 function providerIcon(provider: string): string {
-  return ({ anthropic: "A", minimax: "M", agy: "G", opencode: "O" } as Record<
+  return ({ anthropic: "A", minimax: "M", kimi: "K", agy: "G", opencode: "O" } as Record<
     string,
     string
   >)[provider] ?? "?";
@@ -637,6 +638,7 @@ function providerColor(provider: string): string {
   return ({
     anthropic: "#1d7cfc",
     minimax: "#6366f1",
+    kimi: "#00c4c4",
     agy: "#10b981",
     opencode: "#f59e0b",
   } as Record<string, string>)[provider] ?? "#555";
