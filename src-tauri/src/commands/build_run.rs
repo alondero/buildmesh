@@ -152,17 +152,17 @@ pub async fn build_run(
     let mut cmd = if resolved.env_type == crate::models::EnvType::Wsl {
         let mut c = CommandBuilder::new("wsl.exe");
         c.arg("-e");
-        c.arg(command.to_string());
+        c.arg(command);
         c
     } else if cfg!(target_os = "macos") {
         let mut c = CommandBuilder::new("sh");
         c.arg("-c");
-        c.arg(command.to_string());
+        c.arg(command);
         c
     } else {
         let mut c = CommandBuilder::new("cmd.exe");
         c.arg("/c");
-        c.arg(command.to_string());
+        c.arg(command);
         c
     };
     cmd.cwd(shell_cwd);

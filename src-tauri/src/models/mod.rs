@@ -288,7 +288,7 @@ pub struct WorktreeInfo {
 }
 
 /// App settings stored in SQLite
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub default_projects_root: String,
     pub windows_cli_path: String,
@@ -325,16 +325,6 @@ impl From<&Mesh> for MeshConfig {
             use_worktree: mesh.use_worktree,
             worktree_mode: mesh.worktree_mode.clone(),
             default_provider: mesh.default_provider.clone(),
-        }
-    }
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            default_projects_root: String::new(),
-            windows_cli_path: String::new(),
-            wsl_cli_path: String::new(),
         }
     }
 }

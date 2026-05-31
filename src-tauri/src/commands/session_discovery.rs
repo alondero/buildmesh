@@ -44,5 +44,5 @@ pub async fn import_discovered_session(
     db::update_cli_session_id(node.id, &cli_session_id)
         .map_err(|e| e.to_string())?;
 
-    Ok(db::get_agent_node_by_id(node.id).map_err(|e| e.to_string())?)
+    db::get_agent_node_by_id(node.id).map_err(|e| e.to_string())
 }

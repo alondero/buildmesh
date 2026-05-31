@@ -18,7 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const TEST_SERVER_PORT: u16 = 1991;
-const TEST_SERVER_ADDR: &str = "::"; // Kept as documentation; actual binding uses IpAddr::new
+const _TEST_SERVER_ADDR: &str = "::"; // Kept as documentation; actual binding uses IpAddr::new
 
 static TEST_SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -46,6 +46,7 @@ impl JsonRpcResponse {
     }
 }
 
+#[allow(dead_code)]
 #[command]
 pub fn is_test_server_running() -> bool {
     TEST_SERVER_RUNNING.load(Ordering::SeqCst)

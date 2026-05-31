@@ -76,6 +76,7 @@ fn is_synthetic_message(text: &str) -> bool {
 /// Parse a JSONL session file to extract the first real user message and metadata.
 /// Skips synthetic injected messages (e.g. local-command-caveat) and reads until
 /// it finds a genuine user-authored entry.
+#[allow(clippy::type_complexity)]
 fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);

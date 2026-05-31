@@ -370,7 +370,7 @@ pub fn minimax_usage(api_key: &str) -> ProviderUsage {
             c.get("https://api.minimax.io/v1/token_plan/remains")
                 .header("Authorization", auth)
         },
-        |body| parse_minimax_response(body),
+        parse_minimax_response,
     )
 }
 

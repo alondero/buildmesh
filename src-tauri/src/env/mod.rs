@@ -4,7 +4,7 @@ mod mesh_config;
 
 pub use mesh_config::read_mesh_config;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use once_cell::sync::Lazy;
 use std::env;
 
@@ -14,6 +14,7 @@ use crate::process_util::command_no_window;
 static DETECTED_DISTRO: Lazy<Option<String>> = Lazy::new(get_default_wsl_distro_impl);
 
 /// The Windows username, cached after first lookup
+#[allow(dead_code)]
 static WINDOWS_USERNAME: Lazy<Option<String>> = Lazy::new(get_windows_username_impl);
 
 /// Get the default WSL distro name by parsing `wsl.exe -l -v` output.
@@ -35,8 +36,7 @@ fn get_default_wsl_distro_impl() -> Option<String> {
     stdout
         .lines()
         .skip(1) // skip header
-        .filter(|l| !l.trim().is_empty())
-        .next()
+        .find(|l| !l.trim().is_empty())
         .and_then(|l| l.split_whitespace().next())
         .map(|s| s.to_string())
 }
@@ -47,11 +47,13 @@ fn get_default_wsl_distro() -> Option<String> {
 }
 
 /// Get the Windows username (used for path construction)
+#[allow(dead_code)]
 fn get_windows_username_impl() -> Option<String> {
     env::var("USERNAME").ok()
 }
 
 /// Get the cached Windows username
+#[allow(dead_code)]
 fn get_windows_username() -> Option<String> {
     WINDOWS_USERNAME.clone()
 }
@@ -115,30 +117,28 @@ pub fn current_env() -> Environment {
 
 /// Convert a session path to the correct form for spawning commands
 /// WSL paths are stored as Unix paths internally, Windows paths as Windows paths
-pub fn to_spawn_path(path: &PathBuf) -> PathBuf {
+pub fn to_spawn_path(path: &Path) -> PathBuf {
     match current_env() {
         Environment::Wsl => {
-            // If path looks like /mnt/c/... convert to WSL form
             if path.to_string_lossy().starts_with("/mnt/") {
-                path.clone()
+                path.to_path_buf()
             } else if path.to_string_lossy().starts_with("C:\\") || path.to_string_lossy().starts_with("c:\\") {
-                // Convert C:\... to /mnt/c/...
                 let path_str = path.to_string_lossy().to_lowercase();
                 let drive = path_str.chars().next().unwrap_or('c');
                 let rest = &path_str[2..].replace('\\', "/");
                 PathBuf::from(format!("/mnt/{}{}", drive, rest))
             } else {
-                path.clone()
+                path.to_path_buf()
             }
         }
         Environment::Windows => {
-            // Keep Windows paths as-is
-            path.clone()
+            path.to_path_buf()
         }
     }
 }
 
 /// Get the path to the cc wrapper script
+#[allow(dead_code)]
 pub fn cc_path() -> PathBuf {
     match current_env() {
         Environment::Wsl => PathBuf::from("/mnt/c/Users/alond/.local/bin/cc"),
@@ -160,6 +160,7 @@ pub fn cc_path() -> PathBuf {
 }
 
 /// Get the Git binary path for the correct environment
+#[allow(dead_code)]
 pub fn git_path() -> PathBuf {
     match current_env() {
         Environment::Wsl => PathBuf::from("git"),
@@ -180,7 +181,7 @@ pub fn git_path() -> PathBuf {
 }
 
 /// Determine the environment for a given session path
-pub fn env_for_path(path: &PathBuf) -> Environment {
+pub fn env_for_path(path: &Path) -> Environment {
     if cfg!(target_os = "macos") {
         return Environment::Windows;
     }

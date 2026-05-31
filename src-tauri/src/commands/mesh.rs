@@ -25,12 +25,15 @@ pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| {
-                // fallback: split on either slash to get last segment
-                p.to_string_lossy()
-                    .rsplit(|c| c == '/' || c == '\\')
+                let path_str = p.to_string_lossy();
+                let sep = if path_str.contains('\\') { '\\' } else { '/' };
+                #[allow(clippy::manual_pattern_char_comparison)]
+                let result = path_str
+                    .rsplit(|c| c == sep)
                     .next()
                     .unwrap_or(&p.to_string_lossy())
-                    .to_string()
+                    .to_string();
+                result
             })
     } else {
         // Url case — rsplit on '/' to get last path segment
@@ -133,7 +136,7 @@ fn find_first_lan_ip(
     prefixes: &[u8],
 ) -> Option<String> {
     for (name, ip) in interfaces {
-        if let Some(ip_str) = iface_addr_in_lan_range(name, ip, prefixes) {
+        if let Some(ip_str) = _iface_addr_in_lan_range(name, ip, prefixes) {
             return Some(ip_str);
         }
     }
@@ -142,7 +145,7 @@ fn find_first_lan_ip(
 
 /// Returns the IP address if this interface is a typical LAN address (not Docker/tunnel/VirtualBox).
 /// Only considers addresses matching one of the given /8 prefixes.
-fn iface_addr_in_lan_range(name: &str, ip: &std::net::IpAddr, prefixes: &[u8]) -> Option<String> {
+fn _iface_addr_in_lan_range(_name: &str, ip: &std::net::IpAddr, prefixes: &[u8]) -> Option<String> {
     let ip_str = ip.to_string();
 
     // Skip Docker bridge (172.16-31.x), VirtualBox Host-Only (192.168.56.x),

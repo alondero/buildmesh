@@ -216,13 +216,10 @@ fn get_known_nodes() -> &'static Arc<RwLock<HashMap<i64, NodeChannel>>> {
 pub fn ensure_pty_channel(node_id: i64) {
     let nodes = get_known_nodes();
     let mut locked = nodes.write();
-    if !locked.contains_key(&node_id) {
+    locked.entry(node_id).or_insert_with(|| {
         let (tx, _) = broadcast::channel(1024);
-        locked.insert(
-            node_id,
-            NodeChannel { sender: tx, history: VecDeque::new() },
-        );
-    }
+        NodeChannel { sender: tx, history: VecDeque::new() }
+    });
 }
 
 pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
