@@ -374,87 +374,265 @@ pub fn minimax_usage(api_key: &str) -> ProviderUsage {
     )
 }
 
-fn google_cred_path() -> PathBuf {
-    home_dir().join(".gemini").join("oauth_creds.json")
-}
+// ─── Google / Antigravity (`agy`) ───────────────────────────────────────────
+//
+// The Antigravity CLI surfaces a per-model quota that is a DIFFERENT product
+// from Gemini Code Assist: it lives on the `daily-cloudcode-pa` staging host,
+// behind `fetchAvailableModels`, and is gated purely by the client User-Agent.
+// Auth is separate from `~/.gemini/oauth_creds.json` — the token lives in the OS
+// credential store under `gemini:antigravity` (written by the agy CLI itself).
+//
+// This path is deliberately best-effort and FRAGILE (staging host, User-Agent
+// gate, no token refresh since the Antigravity OAuth client isn't recoverable).
+// Per the module contract, any failure degrades to "unavailable", never errors.
+
+const AGY_HOST: &str = "https://daily-cloudcode-pa.googleapis.com";
+/// The Antigravity CLI identifies with this User-Agent and the Cloud Code private
+/// API allowlists it. Load-bearing: without it the API returns 403 PERMISSION_DENIED.
+const AGY_USER_AGENT: &str = "antigravity/cli/1.0.3 windows/amd64";
+/// Credential Manager target the agy CLI stores its OAuth token under.
+const AGY_CRED_TARGET: &str = "gemini:antigravity";
 
 #[derive(Deserialize)]
-struct GoogleOAuthCred {
+struct AgyTokenField {
     access_token: Option<String>,
 }
 
-fn read_google_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
-    let cred: GoogleOAuthCred =
-        serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.access_token.ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
+#[derive(Deserialize)]
+struct AgyCred {
+    token: Option<AgyTokenField>,
 }
 
-#[derive(Deserialize, Debug)]
-struct GoogleQuotaBucket {
-    #[serde(rename = "modelId")]
-    model_id: String,
+/// Parses the agy credential blob (`{ "token": { "access_token": … }, … }`).
+fn parse_agy_token(blob: &[u8]) -> Result<String, UsageError> {
+    let text = std::str::from_utf8(blob).map_err(|e| UsageError::Shape(e.to_string()))?;
+    let cred: AgyCred = serde_json::from_str(text).map_err(|e| UsageError::Shape(e.to_string()))?;
+    cred.token
+        .and_then(|t| t.access_token)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| UsageError::NoCredential(AGY_CRED_TARGET.to_string()))
+}
+
+/// Reads the agy OAuth access token from the OS credential store. Windows-only
+/// for now (the agy CLI keyrings differ per platform); elsewhere the provider
+/// simply reports logged-out.
+#[cfg(windows)]
+fn read_agy_token() -> Result<String, UsageError> {
+    parse_agy_token(&windows_cred::read(AGY_CRED_TARGET)?)
+}
+
+#[cfg(not(windows))]
+fn read_agy_token() -> Result<String, UsageError> {
+    Err(UsageError::NoCredential(
+        "Antigravity usage is only available on Windows".to_string(),
+    ))
+}
+
+/// Minimal FFI to the Windows Credential Manager (`advapi32!CredReadW`) — just
+/// enough to read a generic credential blob, so we avoid a winapi/windows dep.
+#[cfg(windows)]
+mod windows_cred {
+    use super::UsageError;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[repr(C)]
+    struct Filetime {
+        _low: u32,
+        _high: u32,
+    }
+
+    #[repr(C)]
+    struct CredentialW {
+        _flags: u32,
+        _typ: u32,
+        _target_name: *mut u16,
+        _comment: *mut u16,
+        _last_written: Filetime,
+        credential_blob_size: u32,
+        credential_blob: *mut u8,
+        _persist: u32,
+        _attribute_count: u32,
+        _attributes: *mut core::ffi::c_void,
+        _target_alias: *mut u16,
+        _user_name: *mut u16,
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn CredReadW(target: *const u16, typ: u32, flags: u32, cred: *mut *mut CredentialW) -> i32;
+        fn CredFree(buf: *mut core::ffi::c_void);
+    }
+
+    const CRED_TYPE_GENERIC: u32 = 1;
+
+    pub fn read(target: &str) -> Result<Vec<u8>, UsageError> {
+        let wide: Vec<u16> = std::ffi::OsStr::new(target)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` is a NUL-terminated UTF-16 string; CredReadW writes a
+        // single owned pointer we free with CredFree after copying its blob.
+        unsafe {
+            let mut ptr: *mut CredentialW = std::ptr::null_mut();
+            if CredReadW(wide.as_ptr(), CRED_TYPE_GENERIC, 0, &mut ptr) == 0 || ptr.is_null() {
+                return Err(UsageError::NoCredential(target.to_string()));
+            }
+            let cred = &*ptr;
+            // `from_raw_parts` requires a non-null pointer even for length 0, so
+            // guard the empty/null-blob case rather than risk UB.
+            let blob = if cred.credential_blob.is_null() || cred.credential_blob_size == 0 {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(cred.credential_blob, cred.credential_blob_size as usize)
+                    .to_vec()
+            };
+            CredFree(ptr as *mut core::ffi::c_void);
+            Ok(blob)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct AgyLoadResp {
+    #[serde(rename = "cloudaicompanionProject")]
+    cloudaicompanion_project: Option<String>,
+}
+
+/// `loadCodeAssist` bootstraps the session and returns the user's auto-managed
+/// cloudaicompanion project, which `fetchAvailableModels` then requires.
+fn agy_load_project(client: &Client, token: &str) -> Result<String, UsageError> {
+    let resp = client
+        .post(format!("{AGY_HOST}/v1internal:loadCodeAssist"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("User-Agent", AGY_USER_AGENT)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "metadata": {} }))
+        .send()
+        .map_err(|e| UsageError::Shape(format!("loadCodeAssist failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(UsageError::Shape(format!(
+            "loadCodeAssist HTTP {} — try re-authenticating via the Antigravity CLI",
+            resp.status().as_u16()
+        )));
+    }
+    let parsed: AgyLoadResp = serde_json::from_str(&resp.text().unwrap_or_default())
+        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    parsed
+        .cloudaicompanion_project
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| UsageError::Shape("loadCodeAssist returned no project".into()))
+}
+
+#[derive(Deserialize)]
+struct AgyQuotaInfo {
     #[serde(rename = "remainingFraction")]
     remaining_fraction: Option<f64>,
-    #[serde(rename = "remainingAmount")]
-    remaining_amount: Option<String>,
     #[serde(rename = "resetTime")]
     reset_time: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
-struct GoogleQuotaResp {
-    buckets: Option<Vec<GoogleQuotaBucket>>,
+#[derive(Deserialize)]
+struct AgyModel {
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+    #[serde(rename = "quotaInfo")]
+    quota_info: Option<AgyQuotaInfo>,
 }
 
-fn parse_google_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
-    let resp: GoogleQuotaResp =
+#[derive(Deserialize)]
+struct AgyGroup {
+    #[serde(rename = "modelIds", default)]
+    model_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AgySort {
+    #[serde(default)]
+    groups: Vec<AgyGroup>,
+}
+
+#[derive(Deserialize)]
+struct AgyModelsResp {
+    #[serde(default)]
+    models: HashMap<String, AgyModel>,
+    #[serde(rename = "agentModelSorts", default)]
+    agent_model_sorts: Vec<AgySort>,
+}
+
+/// Appends one window per model that carries a quota. `used_percent` is the
+/// inverse of the remaining fraction, matching how the other providers report.
+fn push_agy_window(windows: &mut Vec<UsageWindow>, model: &AgyModel) {
+    if let (Some(name), Some(q)) = (&model.display_name, &model.quota_info) {
+        if let Some(fraction) = q.remaining_fraction {
+            windows.push(UsageWindow {
+                label: name.clone(),
+                used_percent: Some((1.0 - fraction) * 100.0),
+                resets_at: q.reset_time.clone(),
+            });
+        }
+    }
+}
+
+/// Builds usage windows from `fetchAvailableModels`. The first `agentModelSorts`
+/// entry dictates which models (and in what order) the Antigravity UI surfaces;
+/// we mirror it, falling back to every quota-bearing model if it's absent.
+fn parse_agy_models(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
+    let resp: AgyModelsResp =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
+    let ordered_ids: Vec<&String> = resp
+        .agent_model_sorts
+        .first()
+        .map(|sort| sort.groups.iter().flat_map(|g| g.model_ids.iter()).collect())
+        .unwrap_or_default();
+
     let mut windows = vec![];
-    let mut detail = None;
-
-    if let Some(buckets) = resp.buckets {
-        for bucket in buckets {
-            if let Some(fraction) = bucket.remaining_fraction {
-                let used_percent = (1.0 - fraction) * 100.0;
-                
-                windows.push(UsageWindow {
-                    label: bucket.model_id.clone(),
-                    used_percent: Some(used_percent),
-                    resets_at: bucket.reset_time.clone(),
-                });
-
-                if detail.is_none() {
-                    if let Some(amt) = &bucket.remaining_amount {
-                        detail = Some(format!("Remaining: {} requests", amt));
-                    }
-                }
+    if ordered_ids.is_empty() {
+        for model in resp.models.values() {
+            push_agy_window(&mut windows, model);
+        }
+    } else {
+        for id in ordered_ids {
+            if let Some(model) = resp.models.get(id) {
+                push_agy_window(&mut windows, model);
             }
         }
     }
 
-    if windows.is_empty() {
-        detail = Some("No active usage quotas found".to_string());
-    }
-
+    let detail = if windows.is_empty() {
+        Some("No active model quotas found".to_string())
+    } else {
+        None
+    };
     Ok((windows, detail))
 }
 
-pub fn agy_usage(project: &str) -> ProviderUsage {
-    let token = match read_google_token(google_cred_path()) {
+pub fn agy_usage() -> ProviderUsage {
+    let token = match read_agy_token() {
         Ok(t) => t,
         Err(e) => return logged_out("agy", e.to_string()),
     };
+    let client = match Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => return logged_out("agy", format!("Client error: {e}")),
+    };
+    // fetchAvailableModels needs the user's cloudaicompanion project, which
+    // loadCodeAssist hands back.
+    let project = match agy_load_project(&client, &token) {
+        Ok(p) => p,
+        Err(e) => return logged_out("agy", e.to_string()),
+    };
+
     fetch_usage(
         "agy",
         |c| {
-            c.post("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
-                .header("Authorization", format!("Bearer {}", token))
+            c.post(format!("{AGY_HOST}/v1internal:fetchAvailableModels"))
+                .header("Authorization", format!("Bearer {token}"))
+                .header("User-Agent", AGY_USER_AGENT)
                 .header("Content-Type", "application/json")
                 .json(&serde_json::json!({ "project": project }))
         },
-        |body| parse_google_response(body),
+        parse_agy_models,
     )
 }
 
@@ -587,5 +765,64 @@ mod tests {
         assert_eq!(token, "test-codex-access-token-456");
 
         std::fs::remove_file(file_path).unwrap();
+    }
+
+    #[test]
+    fn parse_agy_token_extracts_nested_access_token() {
+        let blob = br#"{"token":{"access_token":"ya29.agytok","token_type":"Bearer","refresh_token":"1//ref","expiry":"2026-05-31T12:00:00Z"},"auth_method":"consumer"}"#;
+        assert_eq!(parse_agy_token(blob).unwrap(), "ya29.agytok");
+    }
+
+    #[test]
+    fn parse_agy_token_missing_is_error() {
+        assert!(parse_agy_token(br#"{"auth_method":"consumer"}"#).is_err());
+        assert!(parse_agy_token(br#"{"token":{"access_token":""}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_agy_models_follows_sort_order_and_inverts_fraction() {
+        // Two ranked models + one with no quota (must be skipped). The sort order
+        // (claude before flash) must be preserved regardless of map iteration.
+        let json = r#"{
+            "models": {
+                "m-flash": {"displayName":"Gemini 3.5 Flash (Medium)","quotaInfo":{"remainingFraction":0.8,"resetTime":"2026-05-31T12:22:46Z"}},
+                "m-claude": {"displayName":"Claude Sonnet 4.6 (Thinking)","quotaInfo":{"remainingFraction":1.0,"resetTime":"2026-05-31T16:51:02Z"}},
+                "m-hidden": {"displayName":"No Quota Model"}
+            },
+            "agentModelSorts": [{"displayName":"Recommended","groups":[{"modelIds":["m-claude","m-flash"]}]}]
+        }"#;
+        let (windows, detail) = parse_agy_models(json).unwrap();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Claude Sonnet 4.6 (Thinking)");
+        assert_eq!(windows[0].used_percent, Some(0.0));
+        assert_eq!(windows[1].label, "Gemini 3.5 Flash (Medium)");
+        // Same float expression the parser uses (0.8 remaining → ~20% used).
+        assert_eq!(windows[1].used_percent, Some((1.0 - 0.8) * 100.0));
+        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-05-31T12:22:46Z"));
+        assert_eq!(detail, None);
+    }
+
+    #[test]
+    fn parse_agy_models_falls_back_to_all_when_no_sorts() {
+        let json = r#"{"models":{"a":{"displayName":"Model A","quotaInfo":{"remainingFraction":0.5}}}}"#;
+        let (windows, _) = parse_agy_models(json).unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].used_percent, Some(50.0));
+    }
+
+    #[test]
+    fn parse_agy_models_empty_reports_detail() {
+        let (windows, detail) = parse_agy_models(r#"{"models":{}}"#).unwrap();
+        assert!(windows.is_empty());
+        assert_eq!(detail.as_deref(), Some("No active model quotas found"));
+    }
+
+    #[test]
+    fn agy_load_project_extracts_companion_project() {
+        let resp: AgyLoadResp = serde_json::from_str(
+            r#"{"currentTier":{"id":"standard-tier"},"cloudaicompanionProject":"sinuous-strategy-j3z18"}"#,
+        )
+        .unwrap();
+        assert_eq!(resp.cloudaicompanion_project.as_deref(), Some("sinuous-strategy-j3z18"));
     }
 }
