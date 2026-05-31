@@ -9,7 +9,7 @@
     "build:mobile": "vite build --mode mobile",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:build:dev": "tauri build -- --config src-tauri/tauri.dev.conf.json",
+    "tauri:build:dev": "tauri build --config src-tauri/tauri.dev.conf.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
