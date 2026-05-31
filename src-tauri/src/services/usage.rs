@@ -36,14 +36,14 @@ pub struct ProviderUsage {
 /// status-level failures are handled inline in [`fetch_usage`].
 #[derive(Debug)]
 pub enum UsageError {
-    NoCredential,
+    NoCredential(String),
     Shape(String),
 }
 
 impl std::fmt::Display for UsageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UsageError::NoCredential => write!(f, "No credential found for this provider"),
+            UsageError::NoCredential(path) => write!(f, "No credential found at {}", path),
             UsageError::Shape(msg) => write!(f, "Unexpected response shape: {}", msg),
         }
     }
@@ -91,20 +91,20 @@ struct AnthropicOAuthCred {
 
 /// Reads Anthropic's credentials JSON which nests the accessToken inside claudeAiOauth.
 fn read_anthropic_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential)?;
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
     let cred: AnthropicOAuthCred =
         serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
     cred.claude_ai_oauth
         .and_then(|o| o.access_token)
-        .ok_or(UsageError::NoCredential)
+        .ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
 /// Reads Codex's credentials JSON which has access_token at the top level.
 fn read_codex_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential)?;
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
     let cred: OAuthCred =
         serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.access_token.ok_or(UsageError::NoCredential)
+    cred.access_token.ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
 fn logged_out(provider: &str, error: String) -> ProviderUsage {
@@ -396,10 +396,10 @@ struct GoogleOAuthCred {
 }
 
 fn read_google_token(path: PathBuf) -> Result<String, UsageError> {
-    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential)?;
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
     let cred: GoogleOAuthCred =
         serde_json::from_str(&content).map_err(|e| UsageError::Shape(e.to_string()))?;
-    cred.access_token.ok_or(UsageError::NoCredential)
+    cred.access_token.ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
 #[derive(Deserialize, Debug)]
@@ -453,7 +453,7 @@ fn parse_google_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String>
     Ok((windows, detail))
 }
 
-pub fn agy_usage() -> ProviderUsage {
+pub fn agy_usage(project: &str) -> ProviderUsage {
     let token = match read_google_token(google_cred_path()) {
         Ok(t) => t,
         Err(e) => return logged_out("agy", e.to_string()),
@@ -464,7 +464,7 @@ pub fn agy_usage() -> ProviderUsage {
             c.post("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
                 .header("Authorization", format!("Bearer {}", token))
                 .header("Content-Type", "application/json")
-                .json(&serde_json::json!({ "project": "cloudshell-gca" }))
+                .json(&serde_json::json!({ "project": project }))
         },
         |body| parse_google_response(body),
     )
