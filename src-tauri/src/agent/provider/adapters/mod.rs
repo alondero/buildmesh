@@ -9,11 +9,14 @@
 pub mod agy;
 pub mod anthropic;
 pub mod codex;
+pub mod kimi;
 pub mod minimax;
 pub mod opencode;
 
 pub use agy::AGY;
 pub use anthropic::ANTHROPIC;
 pub use codex::CODEX;
+pub use kimi::KIMI;
 pub use minimax::MINIMAX;
 pub use opencode::OPENCODE;
+

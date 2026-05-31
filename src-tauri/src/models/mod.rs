@@ -49,6 +49,7 @@ pub enum Provider {
     Agy,
     OpenCode,
     Codex,
+    Kimi,
 }
 
 impl Provider {
@@ -60,6 +61,7 @@ impl Provider {
             Provider::Agy,
             Provider::OpenCode,
             Provider::Codex,
+            Provider::Kimi,
         ]
     }
 
@@ -71,6 +73,7 @@ impl Provider {
             "agy" => Provider::Agy,
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
+            "kimi" => Provider::Kimi,
             _ => Provider::Anthropic,
         }
     }
@@ -85,6 +88,7 @@ impl Provider {
             Provider::Agy => &adapters::AGY,
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
+            Provider::Kimi => &adapters::KIMI,
         }
     }
 }
@@ -97,6 +101,7 @@ impl std::fmt::Display for Provider {
             Provider::Agy => write!(f, "agy"),
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
+            Provider::Kimi => write!(f, "kimi"),
         }
     }
 }
@@ -408,6 +413,7 @@ mod tests {
         use crate::agent::provider::Platform;
         assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
         assert_eq!(Provider::Minimax.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
+        assert_eq!(Provider::Kimi.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
         assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows).binary, "agy");
         assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
         assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows).binary, "codex");
@@ -423,6 +429,7 @@ mod tests {
     fn provider_capabilities_split_correctly() {
         assert!(Provider::Anthropic.adapter().supports_resume());
         assert!(Provider::Minimax.adapter().supports_resume());
+        assert!(Provider::Kimi.adapter().supports_resume());
         assert!(!Provider::Agy.adapter().supports_resume());
         assert!(!Provider::OpenCode.adapter().supports_resume());
         assert!(Provider::Codex.adapter().supports_resume());
@@ -454,6 +461,7 @@ mod tests {
         assert_eq!(format!("{}", Provider::Agy), "agy");
         assert_eq!(format!("{}", Provider::OpenCode), "opencode");
         assert_eq!(format!("{}", Provider::Codex), "codex");
+        assert_eq!(format!("{}", Provider::Kimi), "kimi");
     }
 
     #[test]
@@ -480,6 +488,7 @@ mod tests {
     fn other_providers_do_not_self_assign() {
         assert!(!Provider::Anthropic.adapter().self_assigns_session_id());
         assert!(!Provider::Minimax.adapter().self_assigns_session_id());
+        assert!(!Provider::Kimi.adapter().self_assigns_session_id());
     }
 
     #[test]

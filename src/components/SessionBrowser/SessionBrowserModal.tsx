@@ -109,7 +109,7 @@ export function SessionBrowserModal({ meshId, meshPath, providerList, onClose }:
 
   // Filter providers to only those that support resume (Claude Code-backed)
   const resumableProviders = providerList.filter(p =>
-    ['anthropic', 'minimax'].includes(p.id)
+    ['anthropic', 'minimax', 'kimi'].includes(p.id)
   );
 
   return (
