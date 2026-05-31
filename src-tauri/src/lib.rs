@@ -73,11 +73,17 @@ pub fn run() {
                 tracing::warn!("Main window not found during setup");
             }
 
-            // Start HTTP test server on port 1991 for Playwright E2E tests
-            commands::test::start_test_server(app.handle().clone());
+            // Dev builds (identifier `*.dev`) run alongside the stable hub.
+            // Offset every server port by 1000 so the two instances never
+            // contend on 1991/1992. Derived from the bundle identifier so a
+            // single config overlay flips binary, data dir, and ports together.
+            let port_offset = http::port_offset(&app.config().identifier);
+
+            // Start HTTP test server (1991, or 2991 for the dev profile) for Playwright E2E tests
+            commands::test::start_test_server(app.handle().clone(), port_offset);
 
             // Start embedded HTTP/WebSocket server for mobile remote access
-            http_server::start_http_server(app.handle().clone());
+            http_server::start_http_server(app.handle().clone(), port_offset);
 
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();

@@ -130,10 +130,13 @@ pub fn inject_attention_hook(project_path: &std::path::Path) {
         Err(_) => serde_json::json!({}),
     };
 
-    let hook_command = format!(
-        "curl -sf -X POST http://localhost:{}/api/attention/$BUILDMESH_SESSION_ID || true",
-        crate::http_server::HTTP_PORT_DEFAULT,
-    );
+    // Resolve the port from $BUILDMESH_PORT at hook-run time (set per-agent in
+    // spawn_environment) rather than baking a literal. This keeps the hook
+    // correct across the 1992→1994 fallback and routes a dev-profile agent's
+    // attention to the dev instance (2992), not the stable hub.
+    let hook_command =
+        "curl -sf -X POST http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"
+            .to_string();
 
     let expected_hooks = serde_json::json!({
         "Notification": [{

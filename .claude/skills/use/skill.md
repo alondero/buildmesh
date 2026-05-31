@@ -9,23 +9,25 @@ description: Launch Buildmesh exe and monitor its debug log output in this sessi
 
 The user says "run /use" — activate this skill. This is the **human-in-the-loop** launch-and-watch path; for autonomous pass/fail verification of a change, use `/verify` instead.
 
+`/use` runs the **dev profile** (`buildmesh-dev`, identity `com.alond.buildmesh.dev`, ports 2991/2992). It builds and launches a separate binary that runs side-by-side with the stable `buildmesh` hub — so launching it **never** interrupts the agents the hub is orchestrating.
+
 ## What to do
 
 ### Step 1: Build and launch
 
-Run the deterministic launch script for the host platform:
+Run the deterministic dev-profile launch script for the host platform:
 
-- **Windows (default for this project):** `pwsh -File scripts\run.ps1` (or `powershell.exe -File scripts\run.ps1`)
-- **macOS / Linux:** `./scripts/run.sh`
+- **Windows (default for this project):** `pwsh -File scripts\run-dev.ps1` (or `powershell.exe -File scripts\run-dev.ps1`)
+- **macOS / Linux:** `./scripts/run-dev.sh`
 
-Each script handles: kill existing → build → launch raw binary → verify startup. If it exits non-zero, report the error and stop.
+Each script handles: kill existing **buildmesh-dev** (never the stable hub) → build dev profile → launch raw `buildmesh-dev` binary → verify startup. If it exits non-zero, report the error and stop.
 
 ### Step 2: Start log monitor
 
-Once the script confirms success, tail the log for the host platform:
+Once the script confirms success, tail the **dev-profile** log for the host platform:
 
-- **Windows:** `Get-Content "$env:APPDATA\com.alond.buildmesh\logs\buildmesh.log" -Wait -Tail 0`
-- **macOS:** `tail -f "$HOME/Library/Application Support/com.alond.buildmesh/logs/buildmesh.log"`
+- **Windows:** `Get-Content "$env:APPDATA\com.alond.buildmesh.dev\logs\buildmesh.log" -Wait -Tail 0`
+- **macOS:** `tail -f "$HOME/Library/Application Support/com.alond.buildmesh.dev/logs/buildmesh.log"`
 
 Run this as a background task. Filter for: `ERROR`, `error`, `failed`, `Failed`, `WARN`, `warn`.
 
@@ -35,8 +37,11 @@ Show PID and confirm log monitor is active.
 
 ## Log file location
 
-- **Windows:** `%APPDATA%\com.alond.buildmesh\logs\buildmesh.log`
-- **macOS:** `~/Library/Application Support/com.alond.buildmesh/logs/buildmesh.log`
+Dev profile (what `/use` launches):
+- **Windows:** `%APPDATA%\com.alond.buildmesh.dev\logs\buildmesh.log`
+- **macOS:** `~/Library/Application Support/com.alond.buildmesh.dev/logs/buildmesh.log`
+
+The stable hub logs to `com.alond.buildmesh` (no `.dev`) — a different directory.
 
 ## Important
 

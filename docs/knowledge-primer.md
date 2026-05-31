@@ -42,8 +42,10 @@ Use `_inner` helper functions that accept `&Connection` to avoid mutex deadlocks
 Agents signal they need user input via a Claude Code stop hook configured in `.claude/settings.local.json` (written by `inject_attention_hook` in `agent.rs`). The hook fires on Claude Code's built-in `idle_prompt` matcher and calls a curl command that hits the backend's HTTP server:
 
 ```
-Notification: [{ matcher: "idle_prompt", hooks: [{ type: "command", command: "curl -sf -X POST http://localhost:1992/api/attention/$BUILDMESH_SESSION_ID" }] }]
+Notification: [{ matcher: "idle_prompt", hooks: [{ type: "command", command: "curl -sf -X POST http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID" }] }]
 ```
+
+The hook reads `$BUILDMESH_PORT` (set per-agent in `spawn_environment`) at run time rather than baking a literal port, so it routes correctly across the 1992→1994 fallback and to the dev profile's 2992 when an agent is spawned by `buildmesh-dev`.
 
 When the HTTP server receives `POST /api/attention/{session_id}`, it immediately:
 1. Inserts the session ID into `ATTENTION_PENDING` (in-memory `HashSet`)

@@ -53,34 +53,36 @@ pub fn is_test_server_running() -> bool {
 
 /// Start the HTTP test server. Uses `tauri::async_runtime::spawn` so the task
 /// runs on the Tauri-managed tokio runtime, not the global one.
-pub fn start_test_server(app_handle: AppHandle) {
+pub fn start_test_server(app_handle: AppHandle, port_offset: u16) {
     // Windows requires explicit binding to each address family.
     // We bind to 0.0.0.0 (IPv4) first, then spawn a separate task for [::] (IPv6).
     use std::net::{IpAddr, SocketAddr};
 
+    // Dev profile binds 2991 so it never contends with the stable hub's 1991.
+    let port = TEST_SERVER_PORT + port_offset;
     let ipv4_addr: IpAddr = "0.0.0.0".parse().unwrap();
     let ipv6_addr: IpAddr = "::".parse().unwrap();
-    let addr_ipv4 = SocketAddr::new(ipv4_addr, TEST_SERVER_PORT);
-    let addr_ipv6 = SocketAddr::new(ipv6_addr, TEST_SERVER_PORT);
+    let addr_ipv4 = SocketAddr::new(ipv4_addr, port);
+    let addr_ipv6 = SocketAddr::new(ipv6_addr, port);
 
     tauri::async_runtime::spawn(async move {
         // Primary: IPv4 listener (required for 127.0.0.1 access)
         let listener_ipv4 = match TcpListener::bind(addr_ipv4).await {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!("[test_server] Failed to bind IPv4 on port {}: {}", TEST_SERVER_PORT, e);
+                tracing::error!("[test_server] Failed to bind IPv4 on port {}: {}", port, e);
                 TEST_SERVER_RUNNING.store(false, Ordering::SeqCst);
                 return;
             }
         };
 
         TEST_SERVER_RUNNING.store(true, Ordering::SeqCst);
-        tracing::info!("[test_server] HTTP test server listening on http://0.0.0.0:{} (IPv4)", TEST_SERVER_PORT);
+        tracing::info!("[test_server] HTTP test server listening on http://0.0.0.0:{} (IPv4)", port);
 
         // Optional: also listen on IPv6 for localhost over IPv6
         let app_ipv6 = app_handle.clone();
         let _ = TcpListener::bind(addr_ipv6).await.map(|listener_ipv6| {
-            tracing::info!("[test_server] HTTP test server also listening on http://[::]:{} (IPv6)", TEST_SERVER_PORT);
+            tracing::info!("[test_server] HTTP test server also listening on http://[::]:{} (IPv6)", port);
             tauri::async_runtime::spawn(async move {
                 loop {
                     match listener_ipv6.accept().await {

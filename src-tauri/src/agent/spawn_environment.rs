@@ -112,7 +112,7 @@ pub fn wrap(
 
     cmd.cwd(spawn_path);
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
-    cmd.env("BUILDMESH_PORT", crate::http_server::HTTP_PORT_DEFAULT.to_string());
+    cmd.env("BUILDMESH_PORT", crate::http_server::current_http_port().to_string());
     pty::strip_git_env_vars(&mut cmd);
 
     cmd
