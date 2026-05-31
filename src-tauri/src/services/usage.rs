@@ -313,11 +313,7 @@ fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String
     let mut text_gen_detail = None;
 
     for cat in resp.category_remains {
-        let is_relevant = cat.category == "text_generation"
-            || cat.category == "coding-plan-vlm"
-            || cat.category == "coding-plan-search"
-            || cat.current_interval_usage_count > 0
-            || cat.current_weekly_usage_count > 0;
+        let is_relevant = cat.category == "text_generation";
 
         if !is_relevant {
             continue;
@@ -353,14 +349,6 @@ fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String
                 used_percent: Some(used_percent),
                 resets_at,
             });
-        }
-
-        if cat.category == "text_generation" && cat.current_interval_total_count > 0 {
-            let remaining = cat.current_interval_total_count - cat.current_interval_usage_count;
-            text_gen_detail = Some(format!(
-                "{} / {} text generation requests remaining (5-hour window)",
-                remaining, cat.current_interval_total_count
-            ));
         }
     }
 
@@ -565,7 +553,7 @@ mod tests {
         assert_eq!(windows[1].label, "Text Generation (Weekly)");
         assert_eq!(windows[1].used_percent, Some((732.0 / 150000.0) * 100.0));
         assert!(windows[1].resets_at.is_some());
-        assert_eq!(detail, Some("14945 / 15000 text generation requests remaining (5-hour window)".to_string()));
+        assert_eq!(detail, None);
     }
 
     #[test]
