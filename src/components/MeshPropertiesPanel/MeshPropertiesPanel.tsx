@@ -49,6 +49,7 @@ const WORKTREE_MODE_OPTIONS = [
 export function MeshPropertiesPanel() {
   const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
   const closePropertiesPanel = useUIStore((s) => s.closePropertiesPanel);
+  const toggleFileExplorer = useUIStore((s) => s.toggleFileExplorer);
   const mesh = useMeshStore((s) =>
     propertiesPanelMeshId != null ? s.meshesById.get(propertiesPanelMeshId) : undefined
   );
@@ -233,8 +234,8 @@ export function MeshPropertiesPanel() {
   };
 
   const handleViewDiff = () => {
-    // ChangedFilesPanel not yet integrated — stub to keep UI functional
-    console.warn('handleViewDiff: not yet implemented');
+    if (propertiesPanelMeshId == null || !mesh?.path) return;
+    toggleFileExplorer({ type: 'mesh', meshId: propertiesPanelMeshId, path: mesh.path });
   };
 
   if (propertiesPanelMeshId == null || !mesh) return null;

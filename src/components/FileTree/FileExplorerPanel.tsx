@@ -5,6 +5,7 @@ import {
 } from '../../lib/tauri';
 import { FileTree } from '../FileTree/FileTree';
 import { DiffView } from '../FileTree/DiffView';
+import { ChangedFilesSection } from '../FileTree/ChangedFilesSection';
 import type { FileExplorerContext } from '../../stores/uiStore';
 
 interface FileExplorerPanelProps {
@@ -34,6 +35,7 @@ export function FileExplorerPanel({
   const [currentDiff, setCurrentDiff] = useState<DiffResult | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   const [widthRef, setWidthRef] = useState(width);
+  const [fileTreeExpanded, setFileTreeExpanded] = useState(true);
 
   useEffect(() => { setWidthRef(width); }, [width]);
 
@@ -91,6 +93,7 @@ export function FileExplorerPanel({
   }, [context]);
 
   const isTreeView = selectedFile === null;
+  const hasGit = context.type === 'agent' || context.type === 'mesh';
   const headerTitle = (() => {
     switch (context.type) {
       case 'agent':
@@ -193,14 +196,32 @@ export function FileExplorerPanel({
         {/* Content */}
         {isTreeView ? (
           <div className="flex-1 overflow-auto">
-            <FileTree
-              rootPath={context.path}
-              showGitStatus={context.type === 'agent'}
-              onChangedFileSelect={handleChangedFileSelect}
-              onUnchangedFileSelect={handleUnchangedFileSelect}
-              selectedFile={selectedFile}
-              onFileSelect={setSelectedFile}
-            />
+            {hasGit && (
+              <ChangedFilesSection
+                rootPath={context.path}
+                selectedFile={selectedFile}
+                onChangedFileSelect={handleChangedFileSelect}
+              />
+            )}
+            <button
+              onClick={() => setFileTreeExpanded(!fileTreeExpanded)}
+              className="w-full flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-text-secondary hover:bg-bg-card transition-colors border-b border-border-subtle"
+            >
+              <span className="text-text-muted w-3 text-center text-[10px]">
+                {fileTreeExpanded ? '▼' : '▶'}
+              </span>
+              <span className="flex-1 text-left">File Tree</span>
+            </button>
+            {fileTreeExpanded && (
+              <FileTree
+                rootPath={context.path}
+                showGitStatus={hasGit}
+                onChangedFileSelect={handleChangedFileSelect}
+                onUnchangedFileSelect={handleUnchangedFileSelect}
+                selectedFile={selectedFile}
+                onFileSelect={setSelectedFile}
+              />
+            )}
           </div>
         ) : (
           <div className="flex-1 overflow-hidden">
