@@ -62,11 +62,13 @@ export function FileTree({
   }, [rootPath, showGitStatus]);
 
   const handleFileClick = useCallback(
-    async (path: string, isChanged: boolean) => {
+    async (path: string, relPath: string, isChanged: boolean) => {
       if (isChanged && onChangedFileSelect) {
         onFileSelect(path);
         try {
-          const diff = await diffFileAgainstHead(rootPath, path);
+          // diff_file_against_head joins session_path + file_path, so the
+          // file_path must be relative to the repo root.
+          const diff = await diffFileAgainstHead(rootPath, relPath);
           onChangedFileSelect(path, diff);
         } catch (e) {
           console.error('Failed to load diff:', e);
@@ -102,7 +104,10 @@ export function FileTree({
     );
   }
 
-  const gitStatusMap = new Map(gitStatusState.map((s) => [s.path, s.status]));
+  // list_directory returns absolute node paths; get_git_status returns paths
+  // relative to the repo root. Key the map by the relative path and reconcile
+  // each node by stripping rootPath, so changed files are badged correctly.
+  const gitStatusMap = new Map(gitStatusState.map((s) => [normalizePath(s.path), s.status]));
 
   return (
     <div className="text-xs font-mono">
@@ -110,6 +115,7 @@ export function FileTree({
         <TreeNode
           key={child.path}
           node={child}
+          rootPath={rootPath}
           gitStatusMap={gitStatusMap}
           depth={0}
           showGitStatus={showGitStatus}
@@ -121,17 +127,33 @@ export function FileTree({
   );
 }
 
+/** Normalize separators to `/` and drop any trailing slash. */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+/** Path of `abs` relative to `root`, or null if `abs` is not under `root`. */
+function relativeToRoot(root: string, abs: string): string | null {
+  const nr = normalizePath(root);
+  const na = normalizePath(abs);
+  if (na === nr) return '';
+  const prefix = nr + '/';
+  return na.startsWith(prefix) ? na.slice(prefix.length) : null;
+}
+
 interface TreeNodeProps {
   node: FileNode;
+  rootPath: string;
   gitStatusMap: Map<string, string>;
   depth: number;
   showGitStatus: boolean;
   selectedFile: string | null;
-  onFileClick: (path: string, isChanged: boolean) => void;
+  onFileClick: (path: string, relPath: string, isChanged: boolean) => void;
 }
 
 function TreeNode({
   node,
+  rootPath,
   gitStatusMap,
   depth,
   showGitStatus,
@@ -140,7 +162,8 @@ function TreeNode({
 }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(false);
 
-  const status = gitStatusMap.get(node.path);
+  const relPath = relativeToRoot(rootPath, node.path);
+  const status = relPath != null ? gitStatusMap.get(relPath) : undefined;
   const isChanged = status !== undefined;
   const isSelected = selectedFile === node.path;
 
@@ -165,7 +188,7 @@ function TreeNode({
           if (node.is_dir) {
             setExpanded(!expanded);
           } else {
-            onFileClick(node.path, isChanged);
+            onFileClick(node.path, relPath ?? node.path, isChanged);
           }
         }}
       >
@@ -196,6 +219,7 @@ function TreeNode({
           <TreeNode
             key={child.path}
             node={child}
+            rootPath={rootPath}
             gitStatusMap={gitStatusMap}
             depth={depth + 1}
             showGitStatus={showGitStatus}
