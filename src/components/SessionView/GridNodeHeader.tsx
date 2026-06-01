@@ -43,8 +43,8 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
     >
       <div className="flex items-center gap-2 overflow-hidden">
         <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
-        <span className="text-[11px] font-semibold text-text-secondary truncate font-sans">
-          {node.name} <span className="text-text-muted font-normal">{meshLabel}</span>
+        <span className="text-[12px] font-semibold text-text-primary truncate font-sans drop-shadow-sm">
+          {node.name} <span className="text-text-secondary font-normal">{meshLabel}</span>
         </span>
         {summary && (
           <span

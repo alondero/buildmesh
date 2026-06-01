@@ -40,10 +40,10 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors border border-transparent hover:border-border-default"
+        className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-sans font-semibold tracking-wide text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 hover:text-accent-cyan border border-accent-cyan/30 hover:border-accent-cyan/60 transition-colors shadow-sm"
       >
         <span>Build</span>
-        <span className="text-[8px]">▼</span>
+        <span className="text-[8px] leading-none">▼</span>
       </button>
 
       {isOpen && (
