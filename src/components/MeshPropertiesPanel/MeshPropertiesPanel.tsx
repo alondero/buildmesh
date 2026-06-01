@@ -55,6 +55,7 @@ export function MeshPropertiesPanel() {
   );
   const updateMeshName = useMeshStore((s) => s.updateMeshName);
   const deleteMesh = useMeshStore((s) => s.deleteMesh);
+  const selectMesh = useMeshStore((s) => s.selectMesh);
 
   const [, setInitialConfig] = useState<MeshConfig | null>(null);
   const [form, setForm] = useState({
@@ -235,6 +236,9 @@ export function MeshPropertiesPanel() {
 
   const handleViewDiff = () => {
     if (propertiesPanelMeshId == null || !mesh?.path) return;
+    // Select the mesh first: SessionView closes any file explorer whose mesh
+    // isn't the selected one, so opening for a non-selected mesh would no-op.
+    selectMesh(propertiesPanelMeshId);
     toggleFileExplorer({ type: 'mesh', meshId: propertiesPanelMeshId, path: mesh.path });
   };
 
