@@ -168,17 +168,18 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
         });
     }
 
-    // Step 2: Count how many commits we're behind
-    let rev_list_output = command_no_window("git")
-        .args(["rev-list", "--count", "HEAD..@{u}"])
-        .current_dir(&host_path)
-        .output();
-
-    let behind_count: u32 = rev_list_output
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
-        .unwrap_or(0);
+    // Step 2: Count how many commits we're behind. We compute this via
+    // git2's `graph_ahead_behind` rather than shelling out to
+    // `git rev-list --count HEAD..@{u}` because the `@{u}` syntax fails
+    // on Windows when spawned via `std::process::Command::args` — the
+    // curly braces are stripped during command-line construction and
+    // git sees `HEAD..@u`, which it rejects as ambiguous. Using git2
+    // (already imported in this file) sidesteps the brace issue at its
+    // source rather than working around it in the subprocess arg.
+    let behind_count: u32 = count_commits_behind(&host_path).unwrap_or_else(|e| {
+        tracing::warn!("git_sync: failed to count commits behind upstream: {}", e);
+        0
+    });
 
     if behind_count == 0 {
         return Ok(GitSyncResult {
@@ -221,4 +222,49 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
             if behind_count == 1 { "" } else { "s" }
         ),
     })
+}
+
+/// How many commits the current branch is behind its upstream.
+/// Returns `Ok(0)` when the branch has no upstream configured.
+/// Uses git2 to avoid the `@{u}` brace issue with `std::process::Command::args` on Windows.
+fn count_commits_behind(host_path: &str) -> Result<u32, String> {
+    let repo = Repository::open(host_path)
+        .map_err(|e| format!("Failed to open repository at {}: {}", host_path, e))?;
+
+    let head_oid = repo
+        .head()
+        .map_err(|e| format!("Failed to read HEAD: {}", e))?
+        .peel_to_commit()
+        .map_err(|e| format!("HEAD is not a commit: {}", e))?
+        .id();
+
+    // Find the upstream remote-tracking ref for the current branch.
+    // `branch_upstream_name` returns something like "refs/remotes/main/main"
+    // when the local branch tracks `main/main`.
+    let branch_name = repo
+        .head()
+        .map_err(|e| format!("Failed to read HEAD: {}", e))?
+        .shorthand()
+        .ok_or_else(|| "HEAD is not on a branch".to_string())?
+        .to_string();
+    let local_refname = format!("refs/heads/{}", branch_name);
+    let upstream_name = repo
+        .branch_upstream_name(&local_refname)
+        .map_err(|e| format!("no upstream configured for {}: {:?}", local_refname, e))?
+        .as_str()
+        .ok_or_else(|| "upstream name is not valid UTF-8".to_string())?
+        .to_string();
+    let upstream_oid = repo
+        .find_reference(&upstream_name)
+        .map_err(|e| format!("Failed to find upstream ref {}: {}", upstream_name, e))?
+        .target()
+        .ok_or_else(|| "upstream ref has no target".to_string())?;
+
+    let (_ahead, behind) = repo
+        .graph_ahead_behind(head_oid, upstream_oid)
+        .map_err(|e| format!("graph_ahead_behind failed: {}", e))?;
+    // `graph_ahead_behind` returns usize; on a 32-bit platform this could
+    // overflow u32, but on any realistic repo it won't. Saturate rather
+    // than panic.
+    Ok(behind.try_into().unwrap_or(u32::MAX))
 }
