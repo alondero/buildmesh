@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { invoke } from '@tauri-apps/api/core';
 import { DndContext } from '@dnd-kit/core';
 import { SortableContext } from '@dnd-kit/sortable';
 import { MeshItem } from '../../src/components/Sidebar/MeshItem';
@@ -120,5 +121,51 @@ describe('MeshItem', () => {
     fireEvent.contextMenu(screen.getByText('my-mesh'));
     await userEvent.click(screen.getByText('GitHub Issues'));
     expect(props.onOpenGitHubIssues).toHaveBeenCalledWith(3);
+  });
+
+  it('renders a sync button in the header to the left of the Add Node form', async () => {
+    renderMeshItem();
+    expect(await screen.findByTitle('Sync from upstream')).toBeTruthy();
+  });
+
+  it('shows a behind-count badge when the branch is behind upstream', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'get_git_branch_status'
+        ? Promise.resolve({ name: 'main', ahead: 0, behind: 17 })
+        : Promise.resolve({}),
+    );
+    renderMeshItem();
+    expect(await screen.findByText('↓17')).toBeTruthy();
+  });
+
+  it('hides the behind-count badge when the branch is up to date', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'get_git_branch_status'
+        ? Promise.resolve({ name: 'main', ahead: 0, behind: 0 })
+        : Promise.resolve({}),
+    );
+    renderMeshItem();
+    await screen.findByTitle('Sync from upstream');
+    expect(screen.queryByText(/↓/)).toBeNull();
+  });
+
+  it('runs gitSync, spins, and shows the result message when the sync button is clicked', async () => {
+    let resolveSync!: (v: unknown) => void;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'git_sync') return new Promise((res) => { resolveSync = res; });
+      return Promise.resolve({});
+    });
+    renderMeshItem();
+
+    await userEvent.click(await screen.findByTitle('Sync from upstream'));
+
+    // While the pull is in flight the button reflects the syncing state.
+    const spinning = screen.getByTitle('Syncing…');
+    expect(spinning.querySelector('.animate-spin')).toBeTruthy();
+
+    resolveSync({ fetched: true, pulled: true, new_commits: 3, message: 'Pulled 3 commits' });
+
+    expect(await screen.findByText('Pulled 3 commits')).toBeTruthy();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('git_sync', { path: '/tmp/my-mesh' });
   });
 });
