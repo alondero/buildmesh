@@ -129,6 +129,15 @@ export interface GitStatus {
 export const getGitStatus = (path: string) =>
   invoke<GitStatus[]>('get_git_status', { path });
 
+export interface GitBranchStatus {
+  name: string;
+  ahead: number;
+  behind: number;
+}
+
+export const getGitBranchStatus = (path: string) =>
+  invoke<GitBranchStatus | null>('get_git_branch_status', { path });
+
 export interface GitSummary {
   total: number;
   added: number;

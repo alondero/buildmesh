@@ -189,6 +189,7 @@ pub fn run() {
             commands::file_tree::to_host_path,
             // Git
             commands::git::get_git_status,
+            commands::git::get_git_branch_status,
             commands::git::get_git_summary,
             commands::git::check_is_git_repo,
             commands::git::get_default_branch,

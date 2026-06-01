@@ -447,6 +447,99 @@ mod tests {
         assert!(statuses.is_empty(), "clean repo has no changed files: {statuses:?}");
     }
 
+    // ─── get_git_branch_status ──────────────────────────────────────────────
+
+    #[test]
+    fn branch_status_returns_none_for_non_git_dir() {
+        let dir = TempGitRepo::new();
+        fs::create_dir_all(dir.path()).unwrap();
+
+        let result =
+            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+                .unwrap();
+        assert!(result.is_none(), "non-git dir should return None");
+    }
+
+    #[test]
+    fn branch_status_reports_branch_name_with_no_upstream() {
+        let repo_dir = TempGitRepo::new();
+        init_git_repo(repo_dir.path());
+        run_git(repo_dir.path(), &["branch", "-M", "main"]);
+
+        let status =
+            crate::commands::git::get_git_branch_status(repo_dir.path().to_string_lossy().into_owned())
+                .unwrap()
+                .expect("repo with a commit should report a branch");
+
+        assert_eq!(status.name, "main");
+        assert_eq!(status.ahead, 0, "no upstream → ahead is 0");
+        assert_eq!(status.behind, 0, "no upstream → behind is 0");
+    }
+
+    #[test]
+    fn branch_status_counts_behind_when_remote_is_ahead() {
+        let remote = TempGitRepo::new();
+        fs::create_dir_all(remote.path()).unwrap();
+        git2::Repository::init_bare(remote.path()).unwrap();
+
+        let seed = TempGitRepo::new();
+        let seed_repo = init_git_repo(seed.path());
+        run_git(seed.path(), &["branch", "-M", "main"]);
+        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let local = TempGitRepo::new();
+        run_git_without_dir(&[
+            "clone",
+            "-b",
+            "main",
+            remote.path().to_str().unwrap(),
+            local.path().to_str().unwrap(),
+        ]);
+
+        // Advance the remote by one commit, then fetch into the local clone
+        // (fetch updates the tracking ref without moving local HEAD).
+        stage_file(&seed_repo, seed.path(), "remote-change.txt", "remote change");
+        commit_staged(&seed_repo, "add remote change");
+        run_git(seed.path(), &["push", "origin", "main"]);
+        run_git(local.path(), &["fetch", "origin"]);
+
+        let status =
+            crate::commands::git::get_git_branch_status(local.path().to_string_lossy().into_owned())
+                .unwrap()
+                .expect("clone should report a branch");
+
+        assert_eq!(status.name, "main");
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 1, "remote advanced by one commit");
+    }
+
+    #[test]
+    fn branch_status_counts_ahead_when_local_is_ahead() {
+        let remote = TempGitRepo::new();
+        fs::create_dir_all(remote.path()).unwrap();
+        git2::Repository::init_bare(remote.path()).unwrap();
+
+        let local = TempGitRepo::new();
+        let local_repo = init_git_repo(local.path());
+        run_git(local.path(), &["branch", "-M", "main"]);
+        run_git(local.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(local.path(), &["push", "-u", "origin", "main"]);
+
+        // Commit locally without pushing.
+        stage_file(&local_repo, local.path(), "local-change.txt", "local change");
+        commit_staged(&local_repo, "add local change");
+
+        let status =
+            crate::commands::git::get_git_branch_status(local.path().to_string_lossy().into_owned())
+                .unwrap()
+                .expect("repo should report a branch");
+
+        assert_eq!(status.name, "main");
+        assert_eq!(status.ahead, 1, "one unpushed local commit");
+        assert_eq!(status.behind, 0);
+    }
+
     #[test]
     fn test_count_status_main_repo_vs_worktree() {
         let _repo = TempGitRepo::new();

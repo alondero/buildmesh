@@ -72,6 +72,67 @@ fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
     stats
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitBranchStatus {
+    pub name: String,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+/// Report the current branch and how far ahead/behind its upstream it is.
+///
+/// Returns `None` when `path` is not a git repository or HEAD is unborn (no
+/// commits yet). A detached HEAD reports as `name = "HEAD"` with no upstream.
+/// Ahead/behind are `0` when no upstream is configured.
+///
+/// Uses git2's `graph_ahead_behind` rather than `git rev-list HEAD..@{u}`: the
+/// brace syntax is silently mangled by `Command::args` on Windows
+/// (see commands/prune.rs for the same pattern).
+#[command]
+pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
+    let host_path = to_host_path(&path);
+    let repo = match Repository::open(&host_path) {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+
+    let head = match repo.head() {
+        Ok(h) => h,
+        Err(_) => return Ok(None), // unborn HEAD (no commits yet)
+    };
+
+    // shorthand() yields the branch name, "HEAD" when detached, and None only
+    // for a non-UTF8 ref name (which we can't represent, so treat as no branch).
+    let name = match head.shorthand() {
+        Some(n) => n.to_string(),
+        None => return Ok(None),
+    };
+
+    let local_oid = head.target();
+
+    let mut ahead = 0u32;
+    let mut behind = 0u32;
+    let refname = format!("refs/heads/{}", name);
+    if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
+        if let Some(upstream_ref) = upstream_buf.as_str() {
+            if let Ok(up_ref) = repo.find_reference(upstream_ref) {
+                if let (Some(local), Some(up)) = (local_oid, up_ref.target()) {
+                    if let Ok((a, b)) = repo.graph_ahead_behind(local, up) {
+                        ahead = a as u32;
+                        behind = b as u32;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Some(GitBranchStatus {
+        name,
+        ahead,
+        behind,
+    }))
+}
+
 /// Get git status for a directory — returns list of changed files with per-file
 /// line additions/deletions for all uncommitted changes.
 #[command]
