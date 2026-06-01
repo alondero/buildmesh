@@ -122,6 +122,8 @@ export const getUserConfigDir = () =>
 export interface GitStatus {
   path: string;
   status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
+  additions: number;
+  deletions: number;
 }
 
 export const getGitStatus = (path: string) =>
