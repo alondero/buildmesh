@@ -49,11 +49,13 @@ const WORKTREE_MODE_OPTIONS = [
 export function MeshPropertiesPanel() {
   const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
   const closePropertiesPanel = useUIStore((s) => s.closePropertiesPanel);
+  const toggleFileExplorer = useUIStore((s) => s.toggleFileExplorer);
   const mesh = useMeshStore((s) =>
     propertiesPanelMeshId != null ? s.meshesById.get(propertiesPanelMeshId) : undefined
   );
   const updateMeshName = useMeshStore((s) => s.updateMeshName);
   const deleteMesh = useMeshStore((s) => s.deleteMesh);
+  const selectMesh = useMeshStore((s) => s.selectMesh);
 
   const [, setInitialConfig] = useState<MeshConfig | null>(null);
   const [form, setForm] = useState({
@@ -233,8 +235,11 @@ export function MeshPropertiesPanel() {
   };
 
   const handleViewDiff = () => {
-    // ChangedFilesPanel not yet integrated — stub to keep UI functional
-    console.warn('handleViewDiff: not yet implemented');
+    if (propertiesPanelMeshId == null || !mesh?.path) return;
+    // Select the mesh first: SessionView closes any file explorer whose mesh
+    // isn't the selected one, so opening for a non-selected mesh would no-op.
+    selectMesh(propertiesPanelMeshId);
+    toggleFileExplorer({ type: 'mesh', meshId: propertiesPanelMeshId, path: mesh.path });
   };
 
   if (propertiesPanelMeshId == null || !mesh) return null;
