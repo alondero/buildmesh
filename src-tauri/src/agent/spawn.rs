@@ -48,6 +48,17 @@ pub enum SessionIdMode {
     None,
 }
 
+/// Collapse `\r\n` and bare `\r` to `\n` in prefill text.
+///
+/// GitHub issue/PR bodies come back from the REST API with CRLF line endings.
+/// A bare carriage return reaching an agent's TUI input (notably cwrap → ConPTY
+/// on Windows) is interpreted as Enter, submitting the prompt after the first
+/// line — so an issue-seeded agent only ever sees its first line. macOS (`claude`
+/// spawned directly) tolerates CRLF, which is why this only bit Windows.
+fn normalize_prefill_newlines(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
@@ -99,7 +110,7 @@ pub fn build_spawn_command(
 
     if adapter.supports_prefill() {
         if let Some(text) = prefill.filter(|s| !s.is_empty()) {
-            recipe.base_args.extend(adapter.prefill_args(text));
+            recipe.base_args.extend(adapter.prefill_args(&normalize_prefill_newlines(text)));
         }
     }
 

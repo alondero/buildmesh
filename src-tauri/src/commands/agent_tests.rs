@@ -199,6 +199,33 @@ mod tests {
         );
     }
 
+    /// Prefill CRLF (and bare CR) are normalised to LF before reaching the provider.
+    ///
+    /// Regression for: spawning an agent from a GitHub issue only pre-filled the
+    /// first line on Windows. Issue bodies carry CRLF; a bare `\r` typed into the
+    /// agent's TUI (cwrap → ConPTY) submits the prompt after line one. The argv
+    /// the spawn command builds must contain LF-only prefill text.
+    #[test]
+    fn prefill_crlf_normalised_to_lf() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            Some("Title\r\n\r\nLine 1\r\nLine 2\rLine 3"),
+        );
+
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl(
+                "cwrap",
+                &["--minimax", "--prefill", "Title\n\nLine 1\nLine 2\nLine 3"]
+            )
+        );
+    }
+
     /// Empty override/prefill strings are treated as absent — no flags emitted.
     #[test]
     fn empty_overrides_are_ignored() {
