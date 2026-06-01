@@ -380,19 +380,11 @@ pub async fn spawn_agent_inner(
 
     // 7. Create worktree if needed
     if let Some(wt_name) = spawn_worktree_name {
-        if worktree_mode == "branched" {
-            match env::check_source_branch_clean(&node.path) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err("Cannot create branched worktree: source branch has uncommitted changes. Commit or discard changes first, or use detached mode.".to_string());
-                }
-                Err(e) => {
-                    tracing::warn!("spawn_agent_inner: failed to check source branch cleanliness: {}", e);
-                    return Err("Cannot create branched worktree: failed to verify source branch is clean. Check that git is available and the repository is valid.".to_string());
-                }
-            }
-        }
-
+        // Branched worktrees are isolated checkouts: git worktree add checks
+        // out the commit, not the parent's working tree, so uncommitted
+        // changes in the parent cannot leak into the new worktree. We
+        // intentionally do not gate spawn on parent cleanliness (see
+        // docs/adr/0002-allow-branched-worktree-creation-on-dirty-mesh.md).
         let host_path = std::path::Path::new(&resolved.host_path);
         if !host_path.exists() {
             let root = node.path.clone();

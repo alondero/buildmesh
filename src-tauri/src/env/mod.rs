@@ -486,24 +486,6 @@ pub fn create_git_worktree(
     Ok(())
 }
 
-/// Check if the source branch is clean (no uncommitted changes).
-/// Used before creating branched worktrees to prevent state pollution.
-pub fn check_source_branch_clean(project_root: &str) -> Result<bool, String> {
-    let repo = git2::Repository::open(project_root)
-        .map_err(|e| format!("Failed to open repository at {}: {}", project_root, e))?;
-
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(true);
-
-    let statuses = repo.statuses(Some(&mut opts))
-        .map_err(|e| format!("Failed to check git status: {}", e))?;
-
-    // Clean means no entries (ignoring ignored files)
-    let has_changes = statuses.iter().any(|entry| !entry.status().is_ignored());
-    Ok(!has_changes)
-}
-
 /// Get the .claude directory for session storage in the correct environment
 pub fn claude_dir() -> PathBuf {
     match current_env() {
@@ -523,6 +505,9 @@ pub fn claude_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
@@ -582,5 +567,186 @@ mod tests {
         // Should return a valid path without crashing
         assert!(!resolved.host_path.is_empty());
         assert!(!resolved.spawn_path.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Regression tests for #210 — branched worktrees must be creatable
+    // from a dirty parent. The git worktree model isolates checkouts by
+    // design, so the previous "source must be clean" gate was an
+    // artificial constraint. These tests document the underlying
+    // capability and guard against it being re-broken.
+    // -----------------------------------------------------------------
+
+    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    /// Per-test scratch directory under %TEMP%, named uniquely so parallel
+    /// cargo test invocations don't collide. Removed on drop.
+    struct TestDir(PathBuf);
+    impl TestDir {
+        fn new(suffix: &str) -> Self {
+            let id = NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir().join(format!(
+                "buildmesh_wt_test_{}_{}_{}",
+                suffix,
+                std::process::id(),
+                id
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Init a repo with one initial commit containing the given files.
+    /// `path` is expected to exist (callers pass a `TestDir`).
+    fn init_repo_with_commit(path: &Path, files: &[(&str, &str)]) -> git2::Repository {
+        let repo = git2::Repository::init(path).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+
+        let mut index = repo.index().unwrap();
+        for (name, content) in files {
+            let full = path.join(name);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, content).unwrap();
+            index.add_path(Path::new(name)).unwrap();
+        }
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        {
+            // Scope the Tree borrow so it's dropped before we return `repo`.
+            let tree = repo.find_tree(tree_oid).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                .unwrap();
+        }
+        repo
+    }
+
+    /// Returns true if the repo at `path` has any non-ignored working-tree
+    /// changes. Used as a precondition assertion by the dirty-parent tests
+    /// so a silent failure to dirty the repo doesn't make the test pass
+    /// for the wrong reason.
+    fn repo_is_dirty(path: &Path) -> bool {
+        let repo = git2::Repository::open(path).unwrap();
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true).recurse_untracked_dirs(true);
+        let statuses = repo.statuses(Some(&mut opts)).unwrap();
+        statuses.iter().any(|entry| !entry.status().is_ignored())
+    }
+
+    /// Acceptance criterion for #210: `create_git_worktree` must succeed in
+    /// `branched` mode even when the parent repo has uncommitted changes.
+    /// This test guards the underlying git capability that the spawn-time
+    /// gate used to block.
+    #[test]
+    fn create_branched_worktree_succeeds_with_dirty_parent() {
+        let td = TestDir::new("dirty_branched");
+        let parent = td.path();
+
+        // Clean initial commit with one tracked file.
+        init_repo_with_commit(parent, &[("README.md", "# project\n")]);
+
+        // Make the working tree dirty: modify the tracked file and add a
+        // brand-new untracked file. Both must be ignored by worktree add.
+        fs::write(parent.join("README.md"), "# project (in-progress edit)\n").unwrap();
+        fs::write(parent.join("scratch.txt"), "untracked local note").unwrap();
+
+        // Sanity: parent is actually dirty (would have failed the old gate).
+        assert!(
+            repo_is_dirty(parent),
+            "precondition: parent repo must be dirty for this test to be meaningful"
+        );
+
+        // The actual capability: create a branched worktree.
+        let wt_path = parent.join(".claude").join("worktrees").join("wt-1");
+        create_git_worktree(
+            parent.to_str().unwrap(),
+            wt_path.to_str().unwrap(),
+            "wt-1",
+            "branched",
+        )
+        .expect("branched worktree creation must succeed with a dirty parent");
+
+        // The worktree directory exists and is a real git checkout.
+        assert!(wt_path.exists(), "worktree directory should exist");
+        let wt_repo = git2::Repository::open(&wt_path).expect("worktree should be a valid repo");
+
+        // The new branch must be checked out in the worktree.
+        let head = wt_repo.head().unwrap();
+        assert_eq!(
+            head.shorthand().unwrap_or(""),
+            "wt-1",
+            "worktree HEAD should be on the new branch"
+        );
+
+        // Critical: the parent's uncommitted changes must NOT leak into the
+        // new worktree (worktree add checks out the commit, not the
+        // working tree of the parent).
+        let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
+        assert_eq!(
+            wt_readme, "# project\n",
+            "worktree must contain the committed version, not the parent's dirty edit"
+        );
+        assert!(
+            !wt_path.join("scratch.txt").exists(),
+            "parent's untracked file must not appear in the worktree"
+        );
+
+        // The parent is still dirty after the worktree add.
+        assert!(
+            repo_is_dirty(parent),
+            "creating a worktree must not modify the parent's working tree"
+        );
+    }
+
+    /// Detached mode must keep working — unchanged by #210.
+    #[test]
+    fn create_detached_worktree_succeeds_with_dirty_parent() {
+        let td = TestDir::new("dirty_detached");
+        let parent = td.path();
+
+        init_repo_with_commit(parent, &[("README.md", "# project\n")]);
+        fs::write(parent.join("README.md"), "# project (in-progress edit)\n").unwrap();
+
+        assert!(repo_is_dirty(parent), "precondition: parent repo must be dirty");
+
+        let wt_path = parent.join(".claude").join("worktrees").join("wt-det");
+        create_git_worktree(
+            parent.to_str().unwrap(),
+            wt_path.to_str().unwrap(),
+            "wt-det",
+            "detached",
+        )
+        .expect("detached worktree creation must succeed with a dirty parent");
+
+        assert!(wt_path.exists(), "worktree directory should exist");
+
+        // The worktree HEAD must be detached (not on the auto-created branch).
+        let wt_repo =
+            git2::Repository::open(&wt_path).expect("worktree should be a valid repo");
+        assert!(
+            wt_repo.head_detached().unwrap_or(false),
+            "worktree HEAD should be detached in detached mode"
+        );
+
+        // The parent's dirty edit must not leak into the worktree.
+        let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
+        assert_eq!(
+            wt_readme, "# project\n",
+            "worktree must contain the committed version, not the parent's dirty edit"
+        );
+
+        // The parent is still dirty after the worktree add.
+        assert!(
+            repo_is_dirty(parent),
+            "creating a worktree must not modify the parent's working tree"
+        );
     }
 }
