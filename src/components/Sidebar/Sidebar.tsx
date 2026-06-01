@@ -178,11 +178,6 @@ export function Sidebar() {
             )}
           </div>
         </div>
-
-        {/* Footer */}
-        <div className="p-2 border-t border-border-subtle text-[11px] text-text-muted font-sans">
-          <span>{agentNodes.filter(w => w.status === 'running').length} active</span>
-        </div>
       </div>
     </div>
   );
