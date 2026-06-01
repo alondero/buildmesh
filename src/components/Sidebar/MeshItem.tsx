@@ -6,6 +6,7 @@ import type { AgentNode } from '../../stores/agentNodeStore';
 import type { FileExplorerContext } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
+import { useMeshBranchStatus } from '../../hooks/useMeshBranchStatus';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
 import type { ProviderEntry } from './ProviderDropdown';
@@ -63,6 +64,8 @@ export function MeshItem({
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { branchStatus, refresh: refreshBranchStatus } = useMeshBranchStatus(mesh.path);
+  const behind = branchStatus?.behind ?? 0;
 
   const handleSync = async () => {
     setSyncing(true);
@@ -71,6 +74,8 @@ export function MeshItem({
     try {
       const result = await gitSync(mesh.path);
       setSyncMessage(result.message);
+      // The pull may have advanced HEAD — recompute the behind count.
+      refreshBranchStatus();
     } catch (e) {
       setSyncMessage(`Sync error: ${e}`);
     } finally {
@@ -126,6 +131,28 @@ export function MeshItem({
           >
             {mesh.name}
           </span>
+          {behind > 0 && (
+            <span
+              className="text-[11px] font-semibold text-status-warning leading-none tabular-nums"
+              title={`${behind} commit${behind === 1 ? '' : 's'} behind upstream`}
+            >
+              ↓{behind}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); handleSync(); }}
+            disabled={syncing}
+            title={syncing ? 'Syncing…' : 'Sync from upstream'}
+            className="text-text-muted hover:text-text-secondary disabled:opacity-50 transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncing ? 'animate-spin' : ''}>
+              <polyline points="23 4 23 10 17 10"/>
+              <polyline points="1 20 1 14 7 14"/>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+              <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+            </svg>
+          </button>
           <NodeCreationForm
             mesh={mesh}
             isDropdownOpen={isDropdownOpen}

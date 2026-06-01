@@ -9,6 +9,14 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockResolvedValue({}),
 }));
 
+// Mock window API - used for focus tracking (onFocusChanged)
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: vi.fn(() => ({
+    isFocused: vi.fn().mockResolvedValue(true),
+    onFocusChanged: vi.fn().mockResolvedValue(() => {}),
+  })),
+}));
+
 // Mock event system
 const mockListeners = new Map<string, Set<(...args: unknown[]) => void>>();
 
