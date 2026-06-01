@@ -12,11 +12,11 @@ Single-context layout: one `CONTEXT.md` and `docs/adr/` at the repo root.
 
 ## CONTEXT.md
 
-Not yet created. The `diagnose` and `tdd` skills will read it when it exists.
+Defined at the repo root — see [CONTEXT.md](../../CONTEXT.md). It holds the project's domain language: what a **Mesh** is, what an **Agent Node** is, how they relate, and the canonical *avoid* terms (e.g. "session"/"pane" for an Agent Node).
 
 ## docs/adr/
 
-Not yet created. Architectural Decision Records go here.
+Architecture Decision Records live at [docs/adr/](../adr/). Add a new ADR there when a decision is consequential enough that future contributors (human or AI) will need to know the *why*.
 
 ## Layout
 
