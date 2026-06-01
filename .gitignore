@@ -37,6 +37,7 @@ test-results/
 .claude/tasks/
 .claude/memory/
 .claude/scheduled_tasks.lock
+.antigravitycli/*.json
 CLAUDE.local.md
 coverage/
 coverage/
