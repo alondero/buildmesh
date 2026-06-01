@@ -101,9 +101,16 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const handlePaste = () => {
     const inst = terminalManager.getInstance(sessionId);
     if (inst) {
-      navigator.clipboard.readText().then(text => {
+      // invoke('read_clipboard') uses pbpaste on macOS to bypass the WKWebView
+      // clipboard-permission popup (macOS 14+). On other platforms it errors and
+      // we fall back to the web clipboard API.
+      invoke<string>('read_clipboard').then(text => {
         if (text) inst.term.paste(text);
-      }).catch(console.error);
+      }).catch(() => {
+        navigator.clipboard.readText().then(text => {
+          if (text) inst.term.paste(text);
+        }).catch(console.error);
+      });
     }
     setContextMenu(null);
   };
@@ -348,6 +355,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
           className="fixed bg-bg-card border border-border-default rounded shadow-lg z-[100] py-1 min-w-[160px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
           <button
             onClick={handleCopy}

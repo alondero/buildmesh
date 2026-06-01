@@ -207,6 +207,8 @@ pub fn run() {
             // File watcher
             commands::file_watcher::watch_session,
             commands::file_watcher::unwatch_session,
+            // Clipboard (native read bypasses macOS WKWebView permission popup)
+            commands::clipboard::read_clipboard,
             // Frontend log bridge
             commands::frontend_log::log_frontend,
             // Attention
