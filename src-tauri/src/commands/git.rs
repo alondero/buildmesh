@@ -1,6 +1,8 @@
 //! Git operations via git2 crate
 
-use git2::{Repository, StatusOptions};
+use std::collections::HashMap;
+
+use git2::{DiffOptions, Patch, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use tauri::command;
 
@@ -19,9 +21,59 @@ pub struct GitSummary {
 pub struct GitStatus {
     pub path: String,
     pub status: String, // "modified" | "added" | "deleted" | "renamed" | "untracked"
+    pub additions: usize,
+    pub deletions: usize,
 }
 
-/// Get git status for a directory — returns list of changed files
+/// Build a map of `relative path -> (additions, deletions)` covering every
+/// uncommitted change (HEAD → index + working tree), so each status entry can
+/// be annotated with its line-level diff stats.
+///
+/// Untracked files require `show_untracked_content` so their new lines are
+/// counted as additions; without it git2 emits an empty patch for them.
+fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
+    let mut diff_opts = DiffOptions::new();
+    diff_opts
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
+
+    // No HEAD yet (repo with no commits) → diff against an empty tree.
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+
+    let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
+
+    let diff = match repo.diff_tree_to_workdir_with_index(head_tree.as_ref(), Some(&mut diff_opts)) {
+        Ok(diff) => diff,
+        Err(_) => return stats,
+    };
+
+    let num_deltas = diff.deltas().len();
+    for idx in 0..num_deltas {
+        // Binary files / errors yield no patch — leave them at (0, 0).
+        let patch = match Patch::from_diff(&diff, idx) {
+            Ok(Some(p)) => p,
+            _ => continue,
+        };
+
+        let (_context, additions, deletions) = match patch.line_stats() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // Key on both old and new path so deleted (old) and added (new) files
+        // are both found by the status loop's relative path.
+        let delta = patch.delta();
+        for file in [delta.new_file().path(), delta.old_file().path()].into_iter().flatten() {
+            stats.insert(file.to_string_lossy().to_string(), (additions, deletions));
+        }
+    }
+
+    stats
+}
+
+/// Get git status for a directory — returns list of changed files with per-file
+/// line additions/deletions for all uncommitted changes.
 #[command]
 pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
     let host_path = to_host_path(&path);
@@ -33,6 +85,8 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
 
     let statuses = repo.statuses(Some(&mut opts))
         .map_err(|e| e.to_string())?;
+
+    let line_stats = line_stats_by_path(&repo);
 
     let mut changed_files: Vec<GitStatus> = Vec::new();
 
@@ -57,9 +111,13 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
             "untracked"
         };
 
+        let (additions, deletions) = line_stats.get(&path).copied().unwrap_or((0, 0));
+
         changed_files.push(GitStatus {
             path,
             status: status_str.to_string(),
+            additions,
+            deletions,
         });
     }
 

@@ -364,6 +364,89 @@ mod tests {
         assert_eq!(main_total, 0, "main repo should not see worktree changes");
     }
 
+    // ─── get_git_status line-stat tests ────────────────────────────────────────
+
+    /// Look up a single changed file in the result, asserting it exists.
+    fn find_status<'a>(
+        statuses: &'a [crate::commands::git::GitStatus],
+        path: &str,
+    ) -> &'a crate::commands::git::GitStatus {
+        statuses
+            .iter()
+            .find(|s| s.path == path)
+            .unwrap_or_else(|| panic!("expected status entry for {path}, got {statuses:?}"))
+    }
+
+    #[test]
+    fn get_git_status_counts_additions_for_untracked_file() {
+        let _repo = TempGitRepo::new();
+        let _ = init_git_repo(_repo.path());
+
+        // Brand-new, unstaged file with three lines.
+        fs::write(_repo.path().join("new.txt"), "x\ny\nz\n").unwrap();
+
+        let statuses =
+            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+                .unwrap();
+
+        let entry = find_status(&statuses, "new.txt");
+        assert_eq!(entry.status, "added");
+        assert_eq!(entry.additions, 3, "three new lines");
+        assert_eq!(entry.deletions, 0);
+    }
+
+    #[test]
+    fn get_git_status_counts_additions_and_deletions_for_modified_file() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+
+        // Commit a baseline, then edit it: change one line, append one line.
+        stage_file(&repo, _repo.path(), "edit.txt", "a\nb\nc\n");
+        commit_staged(&repo, "add edit.txt");
+        fs::write(_repo.path().join("edit.txt"), "a\nB\nc\nd\n").unwrap();
+
+        let statuses =
+            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+                .unwrap();
+
+        let entry = find_status(&statuses, "edit.txt");
+        assert_eq!(entry.status, "modified");
+        // b -> B is one deletion + one addition; trailing d is one addition.
+        assert_eq!(entry.additions, 2);
+        assert_eq!(entry.deletions, 1);
+    }
+
+    #[test]
+    fn get_git_status_counts_deletions_for_deleted_file() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+
+        stage_file(&repo, _repo.path(), "gone.txt", "p\nq\n");
+        commit_staged(&repo, "add gone.txt");
+        fs::remove_file(_repo.path().join("gone.txt")).unwrap();
+
+        let statuses =
+            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+                .unwrap();
+
+        let entry = find_status(&statuses, "gone.txt");
+        assert_eq!(entry.status, "deleted");
+        assert_eq!(entry.additions, 0);
+        assert_eq!(entry.deletions, 2, "both committed lines removed");
+    }
+
+    #[test]
+    fn get_git_status_reports_zero_stats_for_clean_repo() {
+        let _repo = TempGitRepo::new();
+        let _ = init_git_repo(_repo.path());
+
+        let statuses =
+            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+                .unwrap();
+
+        assert!(statuses.is_empty(), "clean repo has no changed files: {statuses:?}");
+    }
+
     #[test]
     fn test_count_status_main_repo_vs_worktree() {
         let _repo = TempGitRepo::new();
