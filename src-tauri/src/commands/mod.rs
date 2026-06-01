@@ -1,6 +1,7 @@
 //! Tauri command modules
 
 pub mod agent;
+pub mod clipboard;
 #[cfg(test)]
 pub mod agent_tests;
 pub mod ai_context;

@@ -249,10 +249,14 @@ export class TerminalRegistry {
             return false;
           case 'paste':
             ev.preventDefault();
-            navigator.clipboard.readText().then(text => {
+            invoke<string>('read_clipboard').then(text => {
               if (text) term.paste(text);
-            }).catch(err => {
-              console.warn('[TerminalRegistry] Clipboard read failed:', err);
+            }).catch(() => {
+              navigator.clipboard.readText().then(text => {
+                if (text) term.paste(text);
+              }).catch(err => {
+                console.warn('[TerminalRegistry] Clipboard read failed:', err);
+              });
             });
             return false;
           case 'selectAll':
