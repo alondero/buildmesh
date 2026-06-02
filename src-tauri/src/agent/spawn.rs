@@ -372,6 +372,10 @@ pub async fn spawn_agent_inner(
         .as_ref()
         .and_then(|c| c.worktree_mode.as_deref())
         .unwrap_or("detached");
+    let base_ref = config
+        .as_ref()
+        .and_then(|c| c.base_ref.as_deref())
+        .unwrap_or("origin/main");
 
     // 6. Compute spawn path
     let spawn_worktree_name = if use_worktree {
@@ -402,7 +406,7 @@ pub async fn spawn_agent_inner(
             tokio::task::spawn_blocking(move || env::fetch_origin(&root)).await.ok();
 
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
-            if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode)
+            if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode, base_ref)
             {
                 let msg = format!("Failed to create git worktree: {}", e);
                 tracing::error!("spawn_agent_inner: {}", msg);
