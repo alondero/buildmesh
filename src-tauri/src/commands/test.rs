@@ -378,7 +378,13 @@ fn handle_delete_session(args: &serde_json::Value) -> String {
     let remove_worktree = args.get("removeWorktree").and_then(|v| v.as_bool()).unwrap_or(false);
 
     match crate::services::agent_node::delete(session_id, remove_worktree) {
-        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
+        Ok(_) => {
+            // The real app drains worktree removals in the background; the test
+            // server flushes synchronously so E2E sees the directory gone when
+            // the call returns.
+            crate::services::agent_node::process_pending_removals();
+            JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id }))
+        }
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }

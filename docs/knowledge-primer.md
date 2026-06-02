@@ -97,6 +97,8 @@ Buildmesh creates a dedicated worktree per agent node **itself**, via `git2` in 
 
 **Resume:** worktrees are created only when the directory does not already exist (the `if !host_path.exists()` guard in `spawn.rs`), so resume simply re-spawns inside the existing worktree — no re-creation, and none of the old `-w` "already checked out" failures.
 
+**Close/removal (optimistic + deferred):** closing a node is split in two. Phase 1 (`services::agent_node::delete`) kills the process tree and, in one transaction, deletes the `agent_nodes` row *and* enqueues the worktree into `pending_worktree_removals` — fast and authoritative, so the UI drops the node at once. The slow recursive directory delete (`remove_one_worktree`) runs as a background drain (`process_pending_removals`) that dequeues only on success; an app quit mid-cleanup is resumed by the startup reconcile in `lib.rs` `setup()`. Net: "node gone from UI" no longer implies "directory gone" — close is eventually-consistent on disk, and a stuck removal raises a `worktree-cleanup-failed` toast. See `docs/adr/0004-optimistic-node-close-deferred-worktree-removal.md`.
+
 ## Logging and Crash Handling
 
 - Logs written to `buildmesh.log` via `tracing-appender` (not console)

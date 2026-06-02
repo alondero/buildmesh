@@ -69,11 +69,40 @@ pub async fn update_session_status(
         .map_err(|e| e.to_string())
 }
 
-/// Delete an agent node permanently
+/// Delete an agent node permanently.
+///
+/// Returns as soon as the node is killed and removed from the database (Phase 1),
+/// so the UI can drop it at once. The slow worktree-directory removal runs in a
+/// background task that emits `worktree-cleanup-failed` if it can't finish — the
+/// node is already gone either way (#243).
 #[command]
-pub async fn delete_session(session_id: i64, remove_worktree: Option<bool>) -> Result<(), String> {
+pub async fn delete_session(
+    session_id: i64,
+    remove_worktree: Option<bool>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     services::agent_node::delete(session_id, remove_worktree.unwrap_or(false))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    drain_pending_removals(app);
+    Ok(())
+}
+
+/// Spawn the background worktree-removal drain, emitting `worktree-cleanup-failed`
+/// for any removal that couldn't complete. Shared by close and startup reconcile.
+pub fn drain_pending_removals(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn_blocking(move || {
+        for (removal, error) in services::agent_node::process_pending_removals() {
+            let _ = app.emit(
+                "worktree-cleanup-failed",
+                serde_json::json!({
+                    "node_name": removal.node_name,
+                    "worktree_path": removal.worktree_path,
+                    "error": error,
+                }),
+            );
+        }
+    });
 }
 
 /// Check whether the node's worktree can be removed safely on close.

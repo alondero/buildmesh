@@ -63,6 +63,11 @@ pub fn run() {
                 Err(e) => tracing::error!("Crash recovery failed: {}", e),
             }
 
+            // Reconcile worktree removals that didn't finish before a previous
+            // exit. A close records the intent durably, so a mid-cleanup quit is
+            // resumed here rather than orphaning the directory forever (#243).
+            commands::agent_node::drain_pending_removals(app.handle().clone());
+
             // Log window creation and set title with git commit
             let git_sha = env!("GIT_SHA");
             if let Some(window) = app.get_webview_window("main") {

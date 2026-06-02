@@ -250,6 +250,47 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().activeNodeId).toBe(9);
     });
 
+    it('removes the node from the UI before the worktree cleanup resolves', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 15 })], activeNodeId: 15 });
+      let resolveDelete!: () => void;
+      const deletePending = new Promise<void>((r) => { resolveDelete = r; });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
+        if (cmd === 'delete_session') return deletePending;
+        return Promise.resolve(undefined);
+      });
+
+      const closePromise = useAgentNodeStore.getState().deleteAgentNode(15);
+
+      // The node must be gone optimistically while delete_session is still pending.
+      await vi.waitFor(() => {
+        expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+        expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
+      });
+
+      resolveDelete();
+      await closePromise;
+    });
+
+    it('still deletes the session when kill_agent rejects', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 22 })], activeNodeId: 22 });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
+        if (cmd === 'kill_agent') return Promise.reject(new Error('status update failed'));
+        return Promise.resolve(undefined);
+      });
+
+      await useAgentNodeStore.getState().deleteAgentNode(22);
+
+      // A kill_agent failure must not abandon the DB-side delete, or the node
+      // would resurrect on the next fetch.
+      expect(mockInvoke).toHaveBeenCalledWith('delete_session', {
+        sessionId: 22,
+        removeWorktree: true,
+      });
+      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+    });
+
     it('does not request worktree removal when the node has no worktree path', async () => {
       useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 10, worktree_name: undefined })], activeNodeId: 10 });
       mockDeleteFlow(makeSafety({ worktree_path: null }));

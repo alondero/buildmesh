@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::env;
-use crate::models::{AgentNode, Provider, SessionStatus};
+use crate::models::{AgentNode, PendingWorktreeRemoval, Provider, SessionStatus};
 use git2::{Oid, Repository, StatusOptions};
 use serde::Serialize;
 
@@ -10,14 +10,12 @@ use serde::Serialize;
 #[derive(Debug)]
 pub enum AgentNodeError {
     Db(rusqlite::Error),
-    Git(String),
 }
 
 impl std::fmt::Display for AgentNodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AgentNodeError::Db(e) => write!(f, "{}", e),
-            AgentNodeError::Git(e) => write!(f, "{}", e),
         }
     }
 }
@@ -86,24 +84,99 @@ pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety,
     Ok(close_safety_for_worktree_path(&worktree_path))
 }
 
-/// Delete an agent node, cleaning up associated runtime state (node_namer buffers).
+/// Close an agent node (Phase 1 — fast and authoritative).
+///
+/// This kills the agent process tree and removes the node from the database
+/// immediately, but deliberately does **not** delete the worktree directory:
+/// that recursive delete is slow (a `node_modules`-heavy tree is tens of
+/// thousands of files) and retry-prone on Windows, so blocking the close on it
+/// is what makes the UI feel frozen. Instead, when a worktree should be removed
+/// we record it in the durable `pending_worktree_removals` queue — atomically
+/// with deleting the row — and let `process_pending_removals` reclaim the disk
+/// in the background or on next launch. The kill stays synchronous here: it's
+/// fast, and it's the one step we must finish before parting with the node so we
+/// never leave a live agent running or fighting the eventual removal (#239).
 pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeError> {
     let node = db::get_agent_node_by_id(session_id)?;
 
-    if remove_worktree {
-        // A live agent keeps file handles open inside its worktree, which pins
-        // the directory and blocks removal. Kill the whole process tree before
-        // touching the worktree so removal isn't fighting a running agent — the
-        // frontend kills first too, but this keeps removal correct for any other
-        // caller (HTTP, tests) and makes the kill→remove ordering explicit (#239).
+    let removal_path = if remove_worktree {
         crate::agent::process::PROCESS_REGISTRY.kill_session(session_id);
         crate::agent::process::PROCESS_REGISTRY.remove(&session_id);
-    }
+        worktree_path_for_node(&node)
+    } else {
+        None
+    };
 
-    delete_worktree_for_node(&node, remove_worktree)?;
     crate::session_naming::cleanup(session_id);
-    db::delete_agent_node(session_id)?;
+
+    let removal = removal_path.as_deref().map(|p| (p, node.name.as_str()));
+    db::delete_agent_node_enqueueing_removal(session_id, removal)?;
     Ok(())
+}
+
+/// Serializes drains. Each drain processes the *whole* queue, so two running at
+/// once (e.g. closing two nodes in quick succession, or a close overlapping the
+/// startup reconcile) would both try to remove the same just-enqueued worktree
+/// and race on its `.removing` staging directory. Holding this for the drain's
+/// duration means a second drain waits, then re-lists and finds the first
+/// already dequeued — no wasted work, no spurious cleanup-failed warnings.
+static DRAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Drain the pending worktree-removal queue: remove each queued worktree's
+/// directory, dequeuing only the ones that succeed. Removals that still fail
+/// (e.g. a handle is somehow held) stay queued for the next drain or next
+/// launch, and are returned so the caller can warn the user. Safe to run from
+/// the close path and from startup reconcile — `remove_one_worktree` is
+/// idempotent (a missing directory counts as already removed).
+pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
+    let _guard = DRAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let pending = match db::list_pending_worktree_removals() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("could not read pending worktree removals: {}", e);
+            return Vec::new();
+        }
+    };
+
+    process_removals(
+        pending,
+        crate::commands::prune::remove_one_worktree,
+        db::delete_pending_worktree_removal,
+    )
+}
+
+/// Pure orchestration for the drain: for each removal, attempt the directory
+/// remove; on success dequeue it; on failure keep it queued and collect it.
+/// Dependencies are injected so the "dequeue only on success" invariant — the
+/// thing that guarantees failed cleanups get retried rather than lost — is
+/// testable without the global DB or a real filesystem.
+fn process_removals(
+    pending: Vec<PendingWorktreeRemoval>,
+    remove: impl Fn(&str) -> Result<(), String>,
+    dequeue: impl Fn(&str) -> db::SqlResult<()>,
+) -> Vec<(PendingWorktreeRemoval, String)> {
+    let mut failures = Vec::new();
+    for removal in pending {
+        match remove(&removal.worktree_path) {
+            Ok(()) => {
+                if let Err(e) = dequeue(&removal.worktree_path) {
+                    tracing::error!(
+                        "removed worktree {} but failed to dequeue it: {}",
+                        removal.worktree_path, e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "worktree removal for {} failed, will retry: {}",
+                    removal.node_name, e
+                );
+                failures.push((removal, e));
+            }
+        }
+    }
+    failures
 }
 
 /// Update agent node status from a string representation.
@@ -124,18 +197,6 @@ fn worktree_path_for_node(node: &AgentNode) -> Option<String> {
     }
 
     Some(env::resolve_agent_path(&node.path, Some(worktree_name)).host_path)
-}
-
-fn delete_worktree_for_node(node: &AgentNode, remove_worktree: bool) -> Result<(), AgentNodeError> {
-    if !remove_worktree {
-        return Ok(());
-    }
-
-    let Some(worktree_path) = worktree_path_for_node(node) else {
-        return Ok(());
-    };
-
-    crate::commands::prune::remove_one_worktree(&worktree_path).map_err(AgentNodeError::Git)
 }
 
 /// Inspect a worktree to decide whether closing its node can remove it.
@@ -429,59 +490,75 @@ mod tests {
     }
 
     #[test]
-    fn delete_worktree_for_node_removes_named_worktree_when_requested() {
+    fn worktree_path_for_node_resolves_named_worktree() {
         let root = TempDir::new();
-        let root_repo = init_repo(root.path());
-        let worktree_path = add_worktree(&root_repo, &root, "wt-remove");
         let node = make_node(&root, Some("wt-remove"));
 
-        delete_worktree_for_node(&node, true).unwrap();
+        let path = worktree_path_for_node(&node).expect("worktree node has a path");
 
-        assert!(
-            !worktree_path.exists(),
-            "linked worktree directory should be pruned"
-        );
-        assert!(root.path().exists(), "mesh root must remain");
+        assert!(path.ends_with("wt-remove"), "path points at the named worktree");
     }
 
     #[test]
-    fn delete_worktree_for_node_keeps_named_worktree_when_not_requested() {
+    fn worktree_path_for_node_is_none_without_worktree_name() {
+        // The mesh-root node has no worktree_name — closing it must never derive
+        // a removable path, or close would queue the mesh root for deletion.
         let root = TempDir::new();
-        let root_repo = init_repo(root.path());
-        let worktree_path = add_worktree(&root_repo, &root, "wt-keep");
-        let node = make_node(&root, Some("wt-keep"));
-
-        delete_worktree_for_node(&node, false).unwrap();
-
-        assert!(
-            worktree_path.exists(),
-            "linked worktree should be left on disk"
-        );
-        assert!(root.path().exists(), "mesh root must remain");
-    }
-
-    #[test]
-    fn delete_worktree_for_node_never_removes_mesh_root_without_worktree_name() {
-        let root = TempDir::new();
-        init_repo(root.path());
         let node = make_node(&root, None);
 
-        delete_worktree_for_node(&node, true).unwrap();
-
-        assert!(root.path().exists(), "mesh root must not be pruned");
+        assert_eq!(worktree_path_for_node(&node), None);
     }
 
     #[test]
-    fn delete_worktree_for_node_succeeds_when_working_dir_already_gone() {
+    fn worktree_path_for_node_is_none_when_use_worktree_false() {
+        let root = TempDir::new();
+        let mut node = make_node(&root, Some("wt-inplace"));
+        node.use_worktree = false;
+
+        assert_eq!(worktree_path_for_node(&node), None);
+    }
+
+    #[test]
+    fn drain_removes_real_worktree_and_dequeues_only_on_success() {
         let root = TempDir::new();
         let root_repo = init_repo(root.path());
-        let worktree_path = add_worktree(&root_repo, &root, "wt-gone");
-        // A previous interrupted close left the working directory missing (#239).
-        fs::remove_dir_all(&worktree_path).unwrap();
-        let node = make_node(&root, Some("wt-gone"));
+        let good = add_worktree(&root_repo, &root, "wt-good");
 
-        // Must not error: there is nothing left to remove, so the node closes.
-        delete_worktree_for_node(&node, true).unwrap();
+        let pending = vec![
+            PendingWorktreeRemoval {
+                worktree_path: good.to_string_lossy().to_string(),
+                node_name: "wt-good".to_string(),
+            },
+            PendingWorktreeRemoval {
+                worktree_path: "/nonexistent/wt-bad".to_string(),
+                node_name: "wt-bad".to_string(),
+            },
+        ];
+
+        let dequeued = std::cell::RefCell::new(Vec::<String>::new());
+        let failures = process_removals(
+            pending,
+            |path| {
+                // A missing parent repo can't be opened → genuine failure.
+                if path.starts_with("/nonexistent") {
+                    return Err("not a removable worktree".to_string());
+                }
+                crate::commands::prune::remove_one_worktree(path)
+            },
+            |path| {
+                dequeued.borrow_mut().push(path.to_string());
+                Ok(())
+            },
+        );
+
+        assert!(!good.exists(), "the real worktree directory must be removed");
+        assert_eq!(
+            dequeued.into_inner(),
+            vec![good.to_string_lossy().to_string()],
+            "only the successful removal is dequeued"
+        );
+        assert_eq!(failures.len(), 1, "the failed removal is returned for warning");
+        assert_eq!(failures[0].0.node_name, "wt-bad");
     }
 
     #[test]
