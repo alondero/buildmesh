@@ -105,14 +105,53 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<(), String> 
 
 // ── Internals (DB-free, unit-testable against real temp repos) ──────────────
 
+/// How many times to attempt the working-tree rmdir, and how long to wait
+/// between tries. Windows releases a just-killed process's directory handles
+/// asynchronously, so the rmdir can briefly fail with "being used by another
+/// process" even after the agent is gone; a short backoff rides that out.
+const WORKTREE_RMDIR_ATTEMPTS: u32 = 5;
+const WORKTREE_RMDIR_BACKOFF_MS: u64 = 100;
+
 pub(crate) fn remove_one_worktree(path: &str) -> Result<(), String> {
     let host_path = to_host_path(path);
     let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
     let worktree = git2::Worktree::open_from_repository(&repo)
         .map_err(|e| format!("not a removable worktree: {}", e))?;
+
+    // Delete the working directory ourselves first. git2's prune removes the
+    // admin gitdir before the working tree, so if its rmdir loses the race with
+    // a just-killed agent's handle release it leaves a dangling, un-prunable
+    // worktree. Owning the rmdir lets us retry through that window; git2 then
+    // only does the admin-entry bookkeeping, which never touches locked files.
+    remove_worktree_dir_with_retry(&host_path)?;
+
     let mut opts = WorktreePruneOptions::new();
-    opts.valid(true).locked(true).working_tree(true);
+    opts.valid(true).locked(true);
     worktree.prune(Some(&mut opts)).map_err(|e| e.to_string())
+}
+
+/// Recursively remove a worktree's working directory, retrying with backoff to
+/// absorb the brief window where a just-killed process's handles are still
+/// being released by the OS (the Windows close-node failure mode).
+fn remove_worktree_dir_with_retry(path: &str) -> Result<(), String> {
+    let mut last_err = String::new();
+    for attempt in 0..WORKTREE_RMDIR_ATTEMPTS {
+        if !std::path::Path::new(path).exists() {
+            return Ok(());
+        }
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt + 1 < WORKTREE_RMDIR_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        WORKTREE_RMDIR_BACKOFF_MS,
+                    ));
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// The branch a worktree's HEAD points at, read from HEAD's symbolic target so

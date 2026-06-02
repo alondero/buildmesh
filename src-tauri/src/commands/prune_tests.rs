@@ -409,3 +409,78 @@ fn remove_worktrees_cannot_remove_main() {
     );
     assert!(dir.path().exists(), "main worktree must survive");
 }
+
+/// Build a repo with one linked worktree, then pin that worktree the way a live
+/// agent does: a shell (`cmd`) with a long-running grandchild (`ping`) whose
+/// inherited stdout is an open file handle inside the tree. An open handle
+/// blocks `rmdir` on Windows until the whole process tree is killed. Returns the
+/// worktree TempDir and the still-running locker child.
+///
+/// (`dir` — the parent repo — is returned so the caller keeps it alive.)
+#[cfg(windows)]
+fn worktree_pinned_by_process_tree() -> (TempDir, TempDir, std::process::Child) {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+    assert!(wt_dir.path().exists());
+
+    // Dropping our own copy of the handle leaves the child as the sole holder.
+    let lock_handle = fs::File::create(wt_dir.path().join("agent.lock")).expect("create lock file");
+    let locker = crate::process_util::command_no_window("cmd")
+        .args(["/c", "ping -n 30 127.0.0.1"])
+        .current_dir(wt_dir.path())
+        .stdout(std::process::Stdio::from(lock_handle))
+        .spawn()
+        .expect("spawn locking process");
+    // Give the tree a moment to start writing before we probe.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    (dir, wt_dir, locker)
+}
+
+/// Reproduces the Windows close-node failure: while an agent process holds an
+/// open handle inside the worktree, removing it fails. On Unix this never
+/// reproduces (open handles don't block `rmdir`), so the test is Windows-only.
+#[cfg(windows)]
+#[test]
+fn remove_worktree_fails_while_process_pins_it() {
+    let (_dir, wt_dir, mut locker) = worktree_pinned_by_process_tree();
+
+    let err = remove_one_worktree(&wt_dir.path_str())
+        .expect_err("prune must fail while a process holds a handle in the worktree");
+    assert!(
+        err.contains("being used by another process")
+            || err.to_lowercase().contains("access is denied")
+            || err.to_lowercase().contains("cannot access"),
+        "expected a Windows file-in-use error, got: {}",
+        err
+    );
+
+    crate::process_util::kill_process_tree(locker.id());
+    let _ = locker.wait();
+}
+
+/// The fix: killing the whole process tree (shell + agent grandchild) releases
+/// the worktree, and removal then succeeds — the rmdir retry rides out the
+/// async handle-release window after the kill.
+#[cfg(windows)]
+#[test]
+fn remove_worktree_succeeds_after_killing_process_tree() {
+    let (_dir, wt_dir, mut locker) = worktree_pinned_by_process_tree();
+
+    crate::process_util::kill_process_tree(locker.id());
+    let _ = locker.wait();
+
+    remove_one_worktree(&wt_dir.path_str()).expect("prune succeeds once the tree is gone");
+    assert!(!wt_dir.path().exists(), "working directory should be gone");
+}
