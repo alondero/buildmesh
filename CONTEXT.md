@@ -16,6 +16,10 @@ _Avoid_: Session, pane, terminal node
 A collapsible side panel displaying files and changes for a given Mesh or Agent Node.
 _Avoid_: File tree panel, sidebar drawer
 
+**Base Ref**:
+The Git reference a new Agent Node's worktree is created from (default `origin/main`). Configured per Mesh; surfaced in the UI as "Fresh" (the Base Ref) vs "Head" (the Mesh's current checkout).
+_Avoid_: Base branch, starting point, source branch
+
 **Changed Files Section**:
 A distinct view in the File Explorer Panel listing modified files with their addition/deletion line counts.
 _Avoid_: Modified files list

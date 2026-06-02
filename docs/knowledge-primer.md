@@ -92,10 +92,10 @@ Each entry holds:
 
 All fields are behind `Arc<Mutex<...>>` so the PTY reader thread and Tauri command handlers can both access them safely.
 
-### Worktree Support (`-w`)
-cwrap providers (Anthropic, Minimax) get the `-w` flag added to their args, which creates a dedicated worktree per agent node. This prevents concurrent agent node conflicts when multiple agent nodes target the same git repository. See `agent.rs:140-186`.
+### Worktree Support (git2-based)
+Buildmesh creates a dedicated worktree per agent node **itself**, via `git2` in `env/mod.rs` (`create_git_worktree` → `add_worktree_impl`) — for **all** providers, not just cwrap. This prevents concurrent agent node conflicts when multiple agent nodes target the same git repository. Two modes: `detached` (default, detached HEAD) and `branched` (a real branch per worktree); both are currently cut from the mesh root's live `HEAD`. See `docs/adr/0003-buildmesh-owns-worktree-creation.md` for why this moved off the agent CLI's old `-w` flag, and issue #230 for the `base_ref` follow-up (worktrees should honour the configured base ref, not raw `HEAD`).
 
-**Resume fix (2026-05-03, Updated 2026-05-09):** On resume, we spawn the background process directly from inside the worktree directory, rather than the Git root. We completely omit the `-w` flag because the worktree was already created during the first spawn. Passing `-w` would cause `claude` (and `cwrap`) to attempt `git worktree add` again, resulting in a fatal "already checked out" error. Running it directly inside the worktree ensures the session finds its existing state.
+**Resume:** worktrees are created only when the directory does not already exist (the `if !host_path.exists()` guard in `spawn.rs`), so resume simply re-spawns inside the existing worktree — no re-creation, and none of the old `-w` "already checked out" failures.
 
 ## Logging and Crash Handling
 
