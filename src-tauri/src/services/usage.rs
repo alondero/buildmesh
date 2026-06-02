@@ -280,83 +280,66 @@ pub fn codex_usage() -> ProviderUsage {
 }
 
 #[derive(Deserialize, Debug)]
-struct MinimaxCategory {
+struct MinimaxModelRemain {
     #[serde(default)]
-    category: String,
-    #[serde(default)]
-    display_name: String,
+    model_name: String,
     #[serde(default)]
     end_time: i64,
     #[serde(default)]
-    current_interval_total_count: i64,
-    #[serde(default)]
-    current_interval_usage_count: i64,
-    #[serde(default)]
-    current_weekly_total_count: i64,
-    #[serde(default)]
-    current_weekly_usage_count: i64,
+    current_interval_remaining_percent: Option<f64>,
     #[serde(default)]
     weekly_end_time: i64,
+    #[serde(default)]
+    current_weekly_remaining_percent: Option<f64>,
 }
 
 #[derive(Deserialize, Debug)]
 struct MinimaxResp {
-    #[serde(default)]
-    category_remains: Vec<MinimaxCategory>,
+    // Required (no #[serde(default)]) so the legacy `category_remains`-shaped
+    // response — which the parser used pre-2026-06 — fails loudly instead of
+    // silently zero-windowing. See test parse_minimax_response_rejects_legacy_category_remains.
+    model_remains: Vec<MinimaxModelRemain>,
 }
 
 fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError> {
     let resp: MinimaxResp =
         serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
 
+    // Only the text-generation plan ("general") is surfaced — other entries in
+    // `model_remains` (e.g. "video") are intentionally hidden, matching the
+    // PR #204 simplification that hid MCP Understand Image / Web Search.
     let mut windows = vec![];
-    let mut text_gen_detail = None;
 
-    for cat in resp.category_remains {
-        let is_relevant = cat.category == "text_generation";
-
-        if !is_relevant {
+    for model in resp.model_remains {
+        if model.model_name != "general" {
             continue;
         }
 
-        if cat.current_interval_total_count > 0 {
-            let used_percent = (cat.current_interval_usage_count as f64
-                / cat.current_interval_total_count as f64)
-                * 100.0;
-            let resets_at = if cat.end_time > 0 {
-                chrono::DateTime::from_timestamp_millis(cat.end_time).map(|dt| dt.to_rfc3339())
-            } else {
-                None
-            };
-            windows.push(UsageWindow {
-                label: format!("{} (5-hour)", cat.display_name),
-                used_percent: Some(used_percent),
-                resets_at,
-            });
-        }
+        let mut push_window = |label: &str, remaining: Option<f64>, end_ms: i64| {
+            if let Some(remaining) = remaining {
+                let resets_at = if end_ms > 0 {
+                    chrono::DateTime::from_timestamp_millis(end_ms).map(|dt| dt.to_rfc3339())
+                } else {
+                    None
+                };
+                windows.push(UsageWindow {
+                    label: label.to_string(),
+                    used_percent: Some(100.0 - remaining),
+                    resets_at,
+                });
+            }
+        };
 
-        if cat.current_weekly_total_count > 0 {
-            let used_percent = (cat.current_weekly_usage_count as f64
-                / cat.current_weekly_total_count as f64)
-                * 100.0;
-            let resets_at = if cat.weekly_end_time > 0 {
-                chrono::DateTime::from_timestamp_millis(cat.weekly_end_time).map(|dt| dt.to_rfc3339())
-            } else {
-                None
-            };
-            windows.push(UsageWindow {
-                label: format!("{} (Weekly)", cat.display_name),
-                used_percent: Some(used_percent),
-                resets_at,
-            });
-        }
+        push_window("5-hour", model.current_interval_remaining_percent, model.end_time);
+        push_window("Weekly", model.current_weekly_remaining_percent, model.weekly_end_time);
     }
 
-    if windows.is_empty() && text_gen_detail.is_none() {
-        text_gen_detail = Some("No active token plan quotas found".to_string());
-    }
-
-    Ok((windows, text_gen_detail))
+    let detail = if windows.is_empty() {
+        Some("No active token plan quotas found".to_string())
+    } else {
+        None
+    };
+    Ok((windows, detail))
 }
 
 pub fn minimax_usage(api_key: &str) -> ProviderUsage {
@@ -705,6 +688,103 @@ mod tests {
 
     #[test]
     fn parse_minimax_response_valid() {
+        // Live response shape as of 2026-06-01: wrapper is `model_remains` (not
+        // `category_remains`), items carry `model_name` instead of
+        // `category`/`display_name`, and the source of truth is the
+        // `*_remaining_percent` fields (0-100) rather than the count pair.
+        let json = r#"{
+            "model_remains": [
+                {
+                    "start_time": 1780344000000,
+                    "end_time": 1780358400000,
+                    "remains_time": 5511238,
+                    "current_interval_total_count": 0,
+                    "current_interval_usage_count": 0,
+                    "model_name": "general",
+                    "current_weekly_total_count": 0,
+                    "current_weekly_usage_count": 0,
+                    "weekly_start_time": 1780272000000,
+                    "weekly_end_time": 1780876800000,
+                    "weekly_remains_time": 523911238,
+                    "current_interval_status": 1,
+                    "current_interval_remaining_percent": 89,
+                    "current_weekly_status": 1,
+                    "current_weekly_remaining_percent": 96
+                },
+                {
+                    "start_time": 1780272000000,
+                    "end_time": 1780358400000,
+                    "remains_time": 5511238,
+                    "current_interval_total_count": 3,
+                    "current_interval_usage_count": 0,
+                    "model_name": "video",
+                    "current_weekly_total_count": 21,
+                    "current_weekly_usage_count": 0,
+                    "weekly_start_time": 1780272000000,
+                    "weekly_end_time": 1780876800000,
+                    "weekly_remains_time": 523911238,
+                    "current_interval_status": 1,
+                    "current_interval_remaining_percent": 100,
+                    "current_weekly_status": 1,
+                    "current_weekly_remaining_percent": 100
+                }
+            ],
+            "base_resp": {
+                "status_code": 0,
+                "status_msg": "success"
+            }
+        }"#;
+        let (windows, detail) = parse_minimax_response(json).unwrap();
+        // Only the "general" (text-generation) model is surfaced; the "video"
+        // entry must be filtered out, leaving 2 windows.
+        assert_eq!(windows.len(), 2);
+        // First: general 5-hour, 89% remaining → 11% used.
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(11.0));
+        assert!(windows[0].resets_at.is_some());
+        // Second: general weekly, 96% remaining → 4% used.
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[1].used_percent, Some(4.0));
+        assert!(windows[1].resets_at.is_some());
+        assert_eq!(detail, None);
+    }
+
+    #[test]
+    fn parse_minimax_response_empty_model_remains() {
+        // When the response shape is current but no models are listed, we still
+        // surface the user-facing "no quotas" detail rather than failing.
+        let json = r#"{
+            "model_remains": [],
+            "base_resp": { "status_code": 0, "status_msg": "success" }
+        }"#;
+        let (windows, detail) = parse_minimax_response(json).unwrap();
+        assert!(windows.is_empty());
+        assert_eq!(detail.as_deref(), Some("No active token plan quotas found"));
+    }
+
+    #[test]
+    fn parse_minimax_response_model_without_percent_is_skipped() {
+        // Forward-compat: a model entry with neither remaining field should
+        // be skipped silently rather than producing a NaN window.
+        let json = r#"{
+            "model_remains": [
+                {
+                    "model_name": "unknown",
+                    "end_time": 1780358400000,
+                    "weekly_end_time": 1780876800000
+                }
+            ],
+            "base_resp": { "status_code": 0, "status_msg": "success" }
+        }"#;
+        let (windows, detail) = parse_minimax_response(json).unwrap();
+        assert!(windows.is_empty());
+        assert_eq!(detail.as_deref(), Some("No active token plan quotas found"));
+    }
+
+    #[test]
+    fn parse_minimax_response_rejects_legacy_category_remains() {
+        // Regression guard: if Minimax ever reverts the wrapper, the parser must
+        // NOT silently return zero windows — the old shape should fail loudly.
         let json = r#"{
             "category_remains": [
                 {
@@ -718,20 +798,13 @@ mod tests {
                     "weekly_end_time": 1780272000000
                 }
             ],
-            "base_resp": {
-                "status_code": 0,
-                "status_msg": "success"
-            }
+            "base_resp": { "status_code": 0, "status_msg": "success" }
         }"#;
-        let (windows, detail) = parse_minimax_response(json).unwrap();
-        assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0].label, "Text Generation (5-hour)");
-        assert_eq!(windows[0].used_percent, Some((55.0 / 15000.0) * 100.0));
-        assert!(windows[0].resets_at.is_some());
-        assert_eq!(windows[1].label, "Text Generation (Weekly)");
-        assert_eq!(windows[1].used_percent, Some((732.0 / 150000.0) * 100.0));
-        assert!(windows[1].resets_at.is_some());
-        assert_eq!(detail, None);
+        let result = parse_minimax_response(json);
+        assert!(
+            result.is_err(),
+            "legacy category_remains shape must be rejected, not silently zero-windowed"
+        );
     }
 
     #[test]
