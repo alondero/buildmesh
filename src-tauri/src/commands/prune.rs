@@ -105,15 +105,23 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<(), String> 
 
 // ── Internals (DB-free, unit-testable against real temp repos) ──────────────
 
-/// How many times to attempt the working-tree rmdir, and how long to wait
+/// How many times to attempt the working-tree removal, and how long to wait
 /// between tries. Windows releases a just-killed process's directory handles
-/// asynchronously, so the rmdir can briefly fail with "being used by another
+/// asynchronously, so the removal can briefly fail with "being used by another
 /// process" even after the agent is gone; a short backoff rides that out.
-const WORKTREE_RMDIR_ATTEMPTS: u32 = 5;
-const WORKTREE_RMDIR_BACKOFF_MS: u64 = 100;
+const WORKTREE_REMOVE_ATTEMPTS: u32 = 5;
+const WORKTREE_REMOVE_BACKOFF_MS: u64 = 100;
 
 pub(crate) fn remove_one_worktree(path: &str) -> Result<(), String> {
     let host_path = to_host_path(path);
+
+    // An already-gone working directory is nothing to remove. The node may have
+    // been gutted by a previous interrupted close (#239); treat it as success so
+    // the close can still proceed rather than erroring on a missing repo.
+    if !std::path::Path::new(&host_path).exists() {
+        return Ok(());
+    }
+
     let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
     let worktree = git2::Worktree::open_from_repository(&repo)
         .map_err(|e| format!("not a removable worktree: {}", e))?;
@@ -121,7 +129,7 @@ pub(crate) fn remove_one_worktree(path: &str) -> Result<(), String> {
     // Delete the working directory ourselves first. git2's prune removes the
     // admin gitdir before the working tree, so if its rmdir loses the race with
     // a just-killed agent's handle release it leaves a dangling, un-prunable
-    // worktree. Owning the rmdir lets us retry through that window; git2 then
+    // worktree. Owning the removal lets us retry through that window; git2 then
     // only does the admin-entry bookkeeping, which never touches locked files.
     remove_worktree_dir_with_retry(&host_path)?;
 
@@ -130,22 +138,38 @@ pub(crate) fn remove_one_worktree(path: &str) -> Result<(), String> {
     worktree.prune(Some(&mut opts)).map_err(|e| e.to_string())
 }
 
-/// Recursively remove a worktree's working directory, retrying with backoff to
-/// absorb the brief window where a just-killed process's handles are still
+/// Remove a worktree's working directory *all-or-nothing*, retrying with backoff
+/// to absorb the brief window where a just-killed process's handles are still
 /// being released by the OS (the Windows close-node failure mode).
+///
+/// We can't delete in place: `fs::remove_dir_all` walks entries one at a time,
+/// so a live agent's locked file makes it gut everything it *can* delete (the
+/// source tree and the `.git` gitlink) before it fails — leaving a broken stub
+/// that can't be opened as a repo, so the node can never be closed (#239).
+/// Instead we rename the whole directory to a sibling staging name first: on
+/// Windows that rename fails atomically while any descendant handle is open, so
+/// a failure leaves the worktree fully intact. Only once the rename succeeds —
+/// proving nothing pins the tree — do we delete the staged copy, where a
+/// partial failure can no longer harm the live worktree path.
 fn remove_worktree_dir_with_retry(path: &str) -> Result<(), String> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(());
+    }
+
+    let staging = format!("{}.removing", path.trim_end_matches(['/', '\\']));
+    // Clear any staging dir left by a previous interrupted removal; by
+    // definition it holds no live handles, so this can't gut the live worktree.
+    let _ = std::fs::remove_dir_all(&staging);
+
     let mut last_err = String::new();
-    for attempt in 0..WORKTREE_RMDIR_ATTEMPTS {
-        if !std::path::Path::new(path).exists() {
-            return Ok(());
-        }
-        match std::fs::remove_dir_all(path) {
-            Ok(()) => return Ok(()),
+    for attempt in 0..WORKTREE_REMOVE_ATTEMPTS {
+        match std::fs::rename(path, &staging) {
+            Ok(()) => return std::fs::remove_dir_all(&staging).map_err(|e| e.to_string()),
             Err(e) => {
                 last_err = e.to_string();
-                if attempt + 1 < WORKTREE_RMDIR_ATTEMPTS {
+                if attempt + 1 < WORKTREE_REMOVE_ATTEMPTS {
                     std::thread::sleep(std::time::Duration::from_millis(
-                        WORKTREE_RMDIR_BACKOFF_MS,
+                        WORKTREE_REMOVE_BACKOFF_MS,
                     ));
                 }
             }
