@@ -38,16 +38,16 @@ export function UsageBar({ window }: { window: UsageWindow }) {
   // value, not missing data. Only a null usedPercent is "N/A".
   const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'N/A';
   return (
-    <div className="mt-1">
-      <div className="flex justify-between text-[10px] text-text-muted mb-0.5">
+    <div className="mt-2">
+      <div className="flex justify-between text-base text-text-muted mb-1">
         <span>{window.label}</span>
         <span>{display}</span>
       </div>
-      <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
+      <div className="h-3 bg-bg-card rounded-full overflow-hidden">
         <div className={`h-full ${color} rounded-full`} style={{ width: `${Math.min(percent, 100)}%` }} />
       </div>
       {window.resetsAt && (
-        <p className="text-[9px] text-text-muted mt-0.5">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
+        <p className="text-sm text-text-muted mt-1">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
       )}
     </div>
   );
@@ -139,35 +139,35 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       kimi: '🌙',
       agy: '🟢',
     };
-    return <span className="text-sm">{icons[id] || '❓'}</span>;
+    return <span className="text-2xl">{icons[id] || '❓'}</span>;
   };
 
   const ProviderCard = ({ providerId, label }: { providerId: string; label: string }) => {
     const usage = getUsageForProvider(providerId);
 
     return (
-      <div className="border border-border-subtle rounded p-3">
-        <div className="flex items-center gap-2 mb-2">
+      <div className="border border-border-subtle rounded-lg p-5">
+        <div className="flex items-center gap-3 mb-3">
           <ProviderIcon id={providerId} />
-          <span className="text-xs font-medium text-text-primary">{label}</span>
-          {usageLoading && <span className="ml-auto text-[10px] text-text-muted">Loading...</span>}
+          <span className="text-lg font-medium text-text-primary">{label}</span>
+          {usageLoading && <span className="ml-auto text-base text-text-muted">Loading...</span>}
         </div>
 
         {!usage && !usageLoading && (
-          <p className="text-[11px] text-text-muted">Unable to load usage data</p>
+          <p className="text-base text-text-muted">Unable to load usage data</p>
         )}
 
         {usage && !usage.loggedIn && (
           <div>
-            <p className="text-[11px] text-status-warning">Not logged in</p>
-            <p className="text-[10px] text-text-muted mt-0.5">
+            <p className="text-base text-status-warning">Not logged in</p>
+            <p className="text-sm text-text-muted mt-1">
               Run the {label} CLI login first
             </p>
           </div>
         )}
 
         {usage && usage.loggedIn && usage.error && (
-          <p className="text-[11px] text-status-error">{usage.error}</p>
+          <p className="text-base text-status-error">{usage.error}</p>
         )}
 
         {usage && usage.loggedIn && !usage.error && (
@@ -176,7 +176,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               <UsageBar key={w.label} window={w} />
             ))}
             {usage.detail && (
-              <p className="text-[10px] text-accent-cyan mt-1">{usage.detail}</p>
+              <p className="text-sm text-accent-cyan mt-2">{usage.detail}</p>
             )}
           </div>
         )}
@@ -189,33 +189,33 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       <div className="absolute inset-0 bg-black/70" />
 
       <div
-        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-6 max-w-md w-full max-h-[80vh] overflow-y-auto"
+        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-10 max-w-4xl w-full max-h-[80vh] overflow-y-auto"
         onClick={e => e.stopPropagation()}
       >
         <button
           onClick={onClose}
-          className="absolute top-3 right-3 text-text-muted hover:text-text-secondary text-lg"
+          className="absolute top-5 right-5 text-text-muted hover:text-text-secondary text-3xl"
         >
           ×
         </button>
 
-        <h2 className="text-sm font-semibold text-text-primary mb-1">Settings</h2>
-        <p className="text-xs text-text-muted mb-5">
+        <h2 className="text-2xl font-semibold text-text-primary mb-2">Settings</h2>
+        <p className="text-base text-text-muted mb-6">
           Buildmesh-wide defaults. Per-mesh values in Mesh Properties take precedence.
         </p>
 
-        <div className="space-y-2">
-          <label className="block text-xs font-medium text-text-secondary">
+        <div className="space-y-4">
+          <label className="block text-lg font-medium text-text-secondary">
             Default provider
           </label>
-          <p className="text-[11px] text-text-muted">
+          <p className="text-base text-text-muted">
             Used when a mesh has no `default_provider` of its own.
           </p>
           <select
             value={selected}
             disabled={!loaded || saving}
             onChange={e => handleSave(e.target.value)}
-            className="w-full bg-bg-card border border-border-subtle rounded px-2 py-1.5 text-xs text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           >
             <option value={NO_OVERRIDE}>Anthropic (built-in default)</option>
             {providers.map(p => (
@@ -225,48 +225,48 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         </div>
 
         {error && (
-          <div className="mt-3 text-status-error text-xs">{error}</div>
+          <div className="mt-4 text-status-error text-base">{error}</div>
         )}
 
-        <div className="mt-5 pt-3 border-t border-border-subtle">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-semibold text-text-primary">Accounts & Usage</h3>
+        <div className="mt-8 pt-5 border-t border-border-subtle">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-xl font-semibold text-text-primary">Accounts & Usage</h3>
             <button
               onClick={handleRefresh}
               disabled={usageLoading}
-              className="text-[10px] text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
+              className="text-base text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
             >
               Refresh
             </button>
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-4">
             <ProviderCard providerId="anthropic" label="Anthropic / Claude" />
             <ProviderCard providerId="agy" label="Google / Antigravity" />
             <ProviderCard providerId="codex" label="OpenAI / Codex" />
             <ProviderCard providerId="minimax" label="MiniMax" />
           </div>
 
-          <div className="mt-3 border border-border-subtle rounded p-3">
-            <div className="flex items-center gap-2 mb-2">
+          <div className="mt-5 border border-border-subtle rounded-lg p-5">
+            <div className="flex items-center gap-3 mb-3">
               <ProviderIcon id="minimax" />
-              <span className="text-xs font-medium text-text-primary">MiniMax API Key</span>
+              <span className="text-lg font-medium text-text-primary">MiniMax API Key</span>
             </div>
-            <p className="text-[10px] text-text-muted mb-2">
+            <p className="text-base text-text-muted mb-3">
               Stored locally in preferences.json
             </p>
-            <div className="flex gap-2">
+            <div className="flex gap-3">
               <input
                 type="password"
                 value={minimaxKey}
                 onChange={e => setMinimaxKey(e.target.value)}
                 placeholder="Enter API key..."
-                className="flex-1 bg-bg-card border border-border-subtle rounded px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-cyan"
+                className="flex-1 bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               />
               <button
                 onClick={handleSaveMinimaxKey}
                 disabled={minimaxKeySaving}
-                className="px-3 py-1 bg-accent-cyan/20 text-accent-cyan text-xs rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+                className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
               >
                 {minimaxKeySaving ? 'Saving...' : 'Save'}
               </button>
@@ -274,8 +274,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           </div>
         </div>
 
-        <div className="mt-5 pt-3 border-t border-border-subtle">
-          <p className="text-[10px] text-text-muted">
+        <div className="mt-8 pt-5 border-t border-border-subtle">
+          <p className="text-base text-text-muted">
             Stored in your app data directory at <span className="font-mono">preferences.json</span>.
           </p>
         </div>
