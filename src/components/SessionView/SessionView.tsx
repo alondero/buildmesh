@@ -184,15 +184,19 @@ export function SessionView() {
   // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree
   }, [activeNode?.id, activeNode?.cli_session_id]);
 
+  // React only to mesh switches, not to context changes. Reading the context
+  // via getState() (rather than the subscribed value) keeps it out of the deps:
+  // otherwise opening an agent's file explorer mutates fileExplorerContext, re-runs
+  // this effect, and closes the panel the instant it's opened (#changes-header).
   useEffect(() => {
     if (selectedMeshId === null) return;
-    const ctx = fileExplorerContext;
+    const ctx = useUIStore.getState().fileExplorerContext;
     const shouldClose = ctx && (
       (ctx.type === 'mesh' && ctx.meshId !== selectedMeshId) ||
       ctx.type === 'agent'
     );
     if (shouldClose) closeFileExplorer();
-  }, [selectedMeshId, fileExplorerContext, closeFileExplorer]);
+  }, [selectedMeshId, closeFileExplorer]);
 
   // Auto-select first node when switching to a mesh that doesn't include the active node
   useEffect(() => {
