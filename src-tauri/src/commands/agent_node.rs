@@ -3,6 +3,7 @@
 use crate::db;
 use crate::models::AgentNode;
 use crate::services;
+use crate::services::agent_node::WorktreeCloseSafety;
 use tauri::{command, Emitter};
 
 /// Create a new agent node
@@ -70,8 +71,15 @@ pub async fn update_session_status(
 
 /// Delete an agent node permanently
 #[command]
-pub async fn delete_session(session_id: i64) -> Result<(), String> {
-    services::agent_node::delete(session_id)
+pub async fn delete_session(session_id: i64, remove_worktree: Option<bool>) -> Result<(), String> {
+    services::agent_node::delete(session_id, remove_worktree.unwrap_or(false))
+        .map_err(|e| e.to_string())
+}
+
+/// Check whether the node's worktree can be removed safely on close.
+#[command]
+pub async fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety, String> {
+    services::agent_node::get_worktree_close_safety(session_id)
         .map_err(|e| e.to_string())
 }
 
