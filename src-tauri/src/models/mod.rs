@@ -192,6 +192,16 @@ pub struct Checkpoint {
     pub created_at: DateTime<Utc>,
 }
 
+/// A worktree whose node is already closed but whose on-disk directory still
+/// needs removing. Recording the intent durably lets the slow, retry-prone
+/// removal run in the background (or resume on next launch) without the node
+/// lingering in the UI while it grinds. Drained by `process_pending_removals`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingWorktreeRemoval {
+    pub worktree_path: String,
+    pub node_name: String,
+}
+
 /// A chat message in the agent session
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {

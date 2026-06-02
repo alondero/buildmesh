@@ -75,6 +75,13 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS pending_worktree_removals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            worktree_path TEXT NOT NULL UNIQUE,
+            node_name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
         "
     )?;
@@ -744,12 +751,6 @@ pub fn archive_agent_node(id: i64) -> SqlResult<()> {
     update_agent_node_status(id, SessionStatus::Archived)
 }
 
-pub fn delete_agent_node(id: i64) -> SqlResult<()> {
-    let db = get().lock().unwrap();
-    db.execute("DELETE FROM agent_nodes WHERE id = ?1", params![id])?;
-    Ok(())
-}
-
 pub fn restore_agent_node(id: i64) -> SqlResult<()> {
     update_agent_node_status(id, SessionStatus::Idle)
 }
@@ -776,6 +777,79 @@ pub fn list_suspended_nodes() -> SqlResult<Vec<AgentNode>> {
     )?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
+}
+
+// --- Pending worktree removal queue ---
+//
+// Closing a node deletes its row immediately so the UI can drop it at once, but
+// the worktree directory removal is slow and retry-prone. We record the intent
+// here (atomically with the row delete) so a background task — or the next app
+// launch — can finish the removal. `worktree_path` is UNIQUE so re-enqueuing the
+// same path is a no-op rather than a duplicate.
+
+fn enqueue_worktree_removal_inner(conn: &Connection, path: &str, node_name: &str) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO pending_worktree_removals (worktree_path, node_name) VALUES (?1, ?2)",
+        params![path, node_name],
+    )?;
+    Ok(())
+}
+
+fn list_pending_worktree_removals_inner(conn: &Connection) -> SqlResult<Vec<PendingWorktreeRemoval>> {
+    let mut stmt = conn.prepare(
+        "SELECT worktree_path, node_name FROM pending_worktree_removals ORDER BY id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(PendingWorktreeRemoval {
+            worktree_path: row.get(0)?,
+            node_name: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn delete_pending_worktree_removal_inner(conn: &Connection, path: &str) -> SqlResult<()> {
+    conn.execute(
+        "DELETE FROM pending_worktree_removals WHERE worktree_path = ?1",
+        params![path],
+    )?;
+    Ok(())
+}
+
+fn delete_agent_node_enqueueing_removal_inner(
+    conn: &Connection,
+    id: i64,
+    removal: Option<(&str, &str)>,
+) -> SqlResult<()> {
+    conn.execute("DELETE FROM agent_nodes WHERE id = ?1", params![id])?;
+    if let Some((path, node_name)) = removal {
+        enqueue_worktree_removal_inner(conn, path, node_name)?;
+    }
+    Ok(())
+}
+
+/// Delete an agent node row and, in the same transaction, enqueue its worktree
+/// for background removal. Doing both atomically is what makes the optimistic
+/// close honest: the system can never forget a worktree it owes a cleanup, even
+/// if it's killed between the two writes.
+pub fn delete_agent_node_enqueueing_removal(
+    id: i64,
+    removal: Option<(&str, &str)>,
+) -> SqlResult<()> {
+    let mut db = get().lock().unwrap();
+    let tx = db.transaction()?;
+    delete_agent_node_enqueueing_removal_inner(&tx, id, removal)?;
+    tx.commit()
+}
+
+pub fn list_pending_worktree_removals() -> SqlResult<Vec<PendingWorktreeRemoval>> {
+    let db = get().lock().unwrap();
+    list_pending_worktree_removals_inner(&db)
+}
+
+pub fn delete_pending_worktree_removal(path: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    delete_pending_worktree_removal_inner(&db, path)
 }
 
 // --- Checkpoint operations ---

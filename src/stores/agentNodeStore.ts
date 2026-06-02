@@ -174,13 +174,32 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         removeWorktree = action === 'remove';
       }
 
-      await invoke('kill_agent', { sessionId: id });
-      await invoke('delete_session', { sessionId: id, removeWorktree });
+      // Optimistic close: drop the node from the UI now so closing feels
+      // instant. The backend kills the agent and removes the row in a fast
+      // Phase 1, then reclaims the worktree directory in the background; a
+      // failed cleanup surfaces later via the 'worktree-cleanup-failed' event
+      // rather than holding the node on screen while the slow delete runs.
       disposeTerminal(id);
       set((state) => ({
         agentNodes: state.agentNodes.filter(s => s.id !== id),
         activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
       }));
+
+      try {
+        // kill_agent tears the process down before its bookkeeping (a DB status
+        // update) can fail, and the node is being deleted anyway — so never let
+        // a kill_agent rejection skip delete_session, or the node would vanish
+        // from the UI while its row and worktree survive and resurrect on the
+        // next fetch.
+        try {
+          await invoke('kill_agent', { sessionId: id });
+        } catch (e) {
+          console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
+        }
+        await invoke('delete_session', { sessionId: id, removeWorktree });
+      } catch (e) {
+        set({ error: String(e) });
+      }
     } catch (e) {
       set({ error: String(e) });
     }

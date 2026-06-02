@@ -124,6 +124,101 @@ fn test_v8_to_v9_adds_source_issue_via_safety_net() {
     crate::db::ensure_agent_node_source_issue(&conn).unwrap();
 }
 
+// --- Pending worktree removal queue ---
+
+/// In-memory schema with just the two tables the close path touches.
+fn pending_removal_schema() -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "
+        CREATE TABLE agent_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            env TEXT NOT NULL DEFAULT 'windows',
+            provider TEXT NOT NULL DEFAULT 'anthropic',
+            status TEXT NOT NULL DEFAULT 'idle',
+            cli_session_id TEXT,
+            worktree_name TEXT,
+            source_issue INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE pending_worktree_removals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            worktree_path TEXT NOT NULL UNIQUE,
+            node_name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (42, 1, 'bold-keen-brook', '/repo');
+        ",
+    )
+    .unwrap();
+    conn
+}
+
+/// Closing a node with a worktree must delete the row AND record the pending
+/// removal in one go — that durable record is what lets the UI drop the node
+/// instantly while the disk cleanup runs later.
+#[test]
+fn close_deletes_row_and_enqueues_removal() {
+    let conn = pending_removal_schema();
+
+    crate::db::delete_agent_node_enqueueing_removal_inner(
+        &conn,
+        42,
+        Some(("/repo/.claude/worktrees/bold-keen-brook", "bold-keen-brook")),
+    )
+    .unwrap();
+
+    let node_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_nodes WHERE id = 42", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(node_count, 0, "node row must be gone immediately");
+
+    let pending = crate::db::list_pending_worktree_removals_inner(&conn).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].worktree_path, "/repo/.claude/worktrees/bold-keen-brook");
+    assert_eq!(pending[0].node_name, "bold-keen-brook");
+}
+
+/// An in-place node (no worktree) closes without queueing any cleanup.
+#[test]
+fn close_without_worktree_enqueues_nothing() {
+    let conn = pending_removal_schema();
+
+    crate::db::delete_agent_node_enqueueing_removal_inner(&conn, 42, None).unwrap();
+
+    assert!(crate::db::list_pending_worktree_removals_inner(&conn).unwrap().is_empty());
+}
+
+/// Re-enqueuing the same path (e.g. a retry after a failed drain) is a no-op,
+/// not a duplicate — the queue holds at most one entry per worktree.
+#[test]
+fn enqueue_is_idempotent_per_path() {
+    let conn = pending_removal_schema();
+
+    crate::db::enqueue_worktree_removal_inner(&conn, "/repo/wt", "n").unwrap();
+    crate::db::enqueue_worktree_removal_inner(&conn, "/repo/wt", "n").unwrap();
+
+    assert_eq!(crate::db::list_pending_worktree_removals_inner(&conn).unwrap().len(), 1);
+}
+
+/// A successful drain dequeues exactly the path it cleaned, leaving others.
+#[test]
+fn delete_pending_removes_only_named_path() {
+    let conn = pending_removal_schema();
+    crate::db::enqueue_worktree_removal_inner(&conn, "/repo/a", "a").unwrap();
+    crate::db::enqueue_worktree_removal_inner(&conn, "/repo/b", "b").unwrap();
+
+    crate::db::delete_pending_worktree_removal_inner(&conn, "/repo/a").unwrap();
+
+    let remaining = crate::db::list_pending_worktree_removals_inner(&conn).unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].worktree_path, "/repo/b");
+}
+
 /// Verify idempotency: running migration twice does not error
 #[test]
 fn test_migrate_if_needed_is_idempotent() {

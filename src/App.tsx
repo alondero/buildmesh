@@ -224,6 +224,23 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
+  // The node closes instantly; if its worktree directory couldn't be removed in
+  // the background, warn here. It stays queued and is retried on next launch.
+  useEffect(() => {
+    const unlisten = listen<{ node_name: string; worktree_path: string; error: string }>(
+      'worktree-cleanup-failed',
+      (event) => {
+        const toast: ErrorToast = {
+          id: Date.now(),
+          provider: 'Worktree',
+          message: `Couldn't remove worktree for ${event.payload.node_name} — it'll be retried on next launch.`,
+        };
+        setToasts((prev) => [...prev, toast]);
+      },
+    );
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
   const dismissToast = (id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
