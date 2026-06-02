@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { disposeTerminal } from '../components/Terminal/Terminal';
+import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
+import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
 
 export interface AgentNode {
   id: number;
@@ -25,6 +27,20 @@ export interface Checkpoint {
   turn_index: number;
   message: string;
   created_at: string;
+}
+
+type WorktreeCloseActionResolver = (
+  node: AgentNode,
+  safety: WorktreeCloseSafety,
+) => Promise<WorktreeCloseAction>;
+
+const defaultWorktreeCloseActionResolver: WorktreeCloseActionResolver = (node, safety) =>
+  requestWorktreeCloseAction(node.name, safety);
+
+let worktreeCloseActionResolver = defaultWorktreeCloseActionResolver;
+
+export function setWorktreeCloseActionResolverForTests(resolver?: WorktreeCloseActionResolver) {
+  worktreeCloseActionResolver = resolver ?? defaultWorktreeCloseActionResolver;
 }
 
 interface AgentNodeState {
@@ -145,15 +161,26 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   deleteAgentNode: async (id) => {
     try {
+      const node = get().agentNodes.find(s => s.id === id);
+      const safety = await invoke<WorktreeCloseSafety>('get_worktree_close_safety', { sessionId: id });
+      let removeWorktree = Boolean(safety.worktree_path);
+
+      if (safety.worktree_path && hasWorktreeCloseRisk(safety)) {
+        if (!node) {
+          throw new Error(`Agent node ${id} is not loaded, cannot confirm worktree removal`);
+        }
+        const action = await worktreeCloseActionResolver(node, safety);
+        if (action === 'cancel') return;
+        removeWorktree = action === 'remove';
+      }
+
       await invoke('kill_agent', { sessionId: id });
+      await invoke('delete_session', { sessionId: id, removeWorktree });
       disposeTerminal(id);
-      // Remove node from local state — no fetch needed
       set((state) => ({
         agentNodes: state.agentNodes.filter(s => s.id !== id),
         activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
       }));
-      // Also delete from backend so node doesn't reappear on refresh
-      await invoke('delete_session', { sessionId: id });
     } catch (e) {
       set({ error: String(e) });
     }

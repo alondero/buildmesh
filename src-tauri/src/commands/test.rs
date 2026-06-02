@@ -165,6 +165,7 @@ fn process_request(request: &str, app: &AppHandle) -> String {
             "kill_agent" => handle_kill_agent(&rpc_req.args),
             "delete_project" => handle_delete_project(&rpc_req.args),
             "delete_session" => handle_delete_session(&rpc_req.args),
+            "get_worktree_close_safety" => handle_get_worktree_close_safety(&rpc_req.args),
             "archive_session" => handle_archive_session(&rpc_req.args),
             "inject_test_output" => handle_inject_test_output(&rpc_req.args, app.clone()),
             "set_active_session" => handle_set_active_session(&rpc_req.args, app.clone()),
@@ -374,9 +375,19 @@ fn handle_delete_project(args: &serde_json::Value) -> String {
 
 fn handle_delete_session(args: &serde_json::Value) -> String {
     let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let remove_worktree = args.get("removeWorktree").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    match crate::db::delete_agent_node(session_id) {
+    match crate::services::agent_node::delete(session_id, remove_worktree) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
+        Err(e) => JsonRpcResponse::error(&e.to_string()),
+    }
+}
+
+fn handle_get_worktree_close_safety(args: &serde_json::Value) -> String {
+    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    match crate::services::agent_node::get_worktree_close_safety(session_id) {
+        Ok(safety) => JsonRpcResponse::success(&safety),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }

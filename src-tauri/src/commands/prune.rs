@@ -105,7 +105,7 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<(), String> 
 
 // ── Internals (DB-free, unit-testable against real temp repos) ──────────────
 
-fn remove_one_worktree(path: &str) -> Result<(), String> {
+pub(crate) fn remove_one_worktree(path: &str) -> Result<(), String> {
     let host_path = to_host_path(path);
     let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
     let worktree = git2::Worktree::open_from_repository(&repo)
@@ -290,7 +290,10 @@ fn path_is_active(path: &str, active_paths: &[String]) -> bool {
 
 fn normalize_path(p: &str) -> String {
     let host = to_host_path(p);
-    host.trim_end_matches(['/', '\\']).replace('\\', "/")
+    let trimmed = host.trim_end_matches(['/', '\\']);
+    std::fs::canonicalize(trimmed)
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| trimmed.replace('\\', "/"))
 }
 
 /// A worktree is stale when it points at a branch that no longer exists

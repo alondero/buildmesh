@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentNode, Checkpoint } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
+import type { WorktreeCloseSafety } from './worktreeClose';
 
 export interface DiffResult {
   files: Array<{
@@ -31,6 +32,12 @@ export const listSessions = () =>
 
 export const getSession = (sessionId: number) =>
   invoke<AgentNode>('get_session', { sessionId });
+
+export const getWorktreeCloseSafety = (sessionId: number) =>
+  invoke<WorktreeCloseSafety>('get_worktree_close_safety', { sessionId });
+
+export const deleteSession = (sessionId: number, removeWorktree = false) =>
+  invoke('delete_session', { sessionId, removeWorktree });
 
 // Mesh
 export const addProject = () =>

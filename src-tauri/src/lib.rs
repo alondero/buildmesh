@@ -130,6 +130,7 @@ pub fn run() {
             commands::agent_node::restore_session,
             commands::agent_node::update_session_status,
             commands::agent_node::delete_session,
+            commands::agent_node::get_worktree_close_safety,
             commands::agent_node::set_cli_session_id,
             commands::agent_node::set_active_session,
             // Mesh

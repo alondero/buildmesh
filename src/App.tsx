@@ -6,6 +6,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
 import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshPropertiesPanel';
+import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
@@ -241,6 +242,7 @@ function App() {
       <SessionView />
 
       {propertiesPanelMeshId != null && <MeshPropertiesPanel />}
+      <WorktreeCloseDialog />
 
       {/* Toast notifications */}
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
