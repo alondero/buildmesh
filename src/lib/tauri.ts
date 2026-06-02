@@ -204,8 +204,8 @@ export interface GitHubIssue {
 export const getRepoIssues = (meshId: number) =>
   invoke<GitHubIssue[]>('get_repo_issues', { meshId });
 
-export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, issueBody: string, provider?: string) =>
-  invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, issueBody, provider });
+export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
+  invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });
 
 export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: string) =>
   invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });

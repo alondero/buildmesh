@@ -521,16 +521,6 @@ pub fn get() -> &'static Mutex<Connection> {
     DB.get().expect("database not initialized")
 }
 
-/// Resets the DB global between test runs. This is only for use in tests.
-#[cfg(test)]
-pub(crate) fn reset_for_testing() {
-    use std::sync::Mutex;
-    // Replace the global DB with a fresh in-memory connection.
-    // This is only safe in tests which run single-threaded with exclusive access.
-    let fresh = Mutex::new(rusqlite::Connection::open_in_memory().unwrap());
-    let _ = DB.set(fresh);
-}
-
 // --- Internal Helpers (no locking) ---
 
 /// Canonical column projection for reading a `Mesh` row. The `COALESCE`

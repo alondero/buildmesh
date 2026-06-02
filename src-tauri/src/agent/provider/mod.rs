@@ -99,8 +99,10 @@ pub trait AgentProvider: Send + Sync {
     /// Whether `--model <name>` / `--effort <level>` args from mesh config apply.
     fn supports_model_override(&self) -> bool;
 
-    /// Whether `--prefill <text>` is accepted (used by `spawn_issue_agent` to seed
-    /// the agent with a GitHub issue's title + body on first turn).
+    /// Whether `--prefill <text>` is accepted. Used by both spawn flows:
+    /// `spawn_issue_agent` (URL + title hint, ~150 bytes; never the full body —
+    /// see memory: buildmesh-issue-spawn-url-only) and `spawn_handover_agent`
+    /// (free-form selected text from a parent terminal, often multi-line).
     fn supports_prefill(&self) -> bool;
 
     /// Platforms where this provider is available. Used to filter `list_providers`.

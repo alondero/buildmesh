@@ -68,28 +68,6 @@ pub async fn serve_asset(
     stream.write_all(&file.data).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mobile_assets_include_built_index_html() {
-        assert!(
-            MobileAssets::get("index.html").is_some(),
-            "dist/mobile/index.html missing — run `npm run build:mobile`"
-        );
-    }
-
-    #[test]
-    fn mime_for_known_extensions() {
-        assert!(mime_for("index.html").starts_with("text/html"));
-        assert!(mime_for("app.js").starts_with("application/javascript"));
-        assert!(mime_for("style.css").starts_with("text/css"));
-        assert!(mime_for("logo.svg") == "image/svg+xml");
-        assert!(mime_for("unknown.xyz") == "application/octet-stream");
-    }
-}
-
 fn mime_for(path: &str) -> &'static str {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".html") {
@@ -118,5 +96,27 @@ fn mime_for(path: &str) -> &'static str {
         "text/plain; charset=utf-8"
     } else {
         "application/octet-stream"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mobile_assets_include_built_index_html() {
+        assert!(
+            MobileAssets::get("index.html").is_some(),
+            "dist/mobile/index.html missing — run `npm run build:mobile`"
+        );
+    }
+
+    #[test]
+    fn mime_for_known_extensions() {
+        assert!(mime_for("index.html").starts_with("text/html"));
+        assert!(mime_for("app.js").starts_with("application/javascript"));
+        assert!(mime_for("style.css").starts_with("text/css"));
+        assert!(mime_for("logo.svg") == "image/svg+xml");
+        assert!(mime_for("unknown.xyz") == "application/octet-stream");
     }
 }

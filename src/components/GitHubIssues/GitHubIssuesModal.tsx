@@ -40,7 +40,7 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
   const handleSpawn = async (issue: GitHubIssue) => {
     setSpawning(issue.number);
     try {
-      await spawnIssueAgent(meshId, issue.number, issue.title, issue.body);
+      await spawnIssueAgent(meshId, issue.number, issue.title);
       await useAgentNodeStore.getState().fetchAgentNodes();
       onClose();
     } catch (e) {
