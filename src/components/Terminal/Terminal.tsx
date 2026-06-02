@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, type WheelEvent as ReactWheel
 import '@xterm/xterm/css/xterm.css';
 import { invoke } from '@tauri-apps/api/core';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { useUIStore } from '../../stores/uiStore';
 import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
@@ -28,7 +29,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
+  const isDragging = useUIStore(state => state.dragTargetNodeId === sessionId);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -40,41 +41,9 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const node = agentNodes.find(s => s.id === sessionId);
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  const handleDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length === 0) return;
-
-    const inst = terminalManager.getInstance(sessionId);
-    if (!inst) return;
-
-    const paths = await Promise.all(
-      files.map(async (file) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const filePath = (file as any).path as string;
-        if (!filePath) return null;
-        return invoke<string>('to_host_path', { path: filePath });
-      })
-    );
-    for (const absPath of paths) {
-      if (absPath) inst.term.write(absPath);
-    }
-  };
+  // OS file drops (Explorer / Finder) are handled window-level in
+  // useFileDropToTerminal — Tauri intercepts the native drop before the DOM, so
+  // an element-level HTML5 onDrop never receives the files.
 
   const handleWheel = useCallback((e: ReactWheelEvent<HTMLDivElement>) => {
     if (e.ctrlKey) {
@@ -297,6 +266,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   return (
     <div
       ref={containerRef}
+      data-node-id={sessionId}
       className="h-full w-full relative outline-none"
       style={{ padding: '4px' }}
       tabIndex={0}
@@ -308,9 +278,6 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
         }
       }}
       onContextMenu={handleContextMenu}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
       onWheel={handleWheel}
     >
       {isDragging && (

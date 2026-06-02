@@ -11,6 +11,7 @@ import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
+import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import './App.css';
 
 const createNodeGuard = createShortcutGuard(300);
@@ -32,6 +33,9 @@ function App() {
 
   // Track window focus state for conditional shortcut handling
   const isFocusedRef = useRef(false);
+
+  // Paste absolute file paths into the hovered agent terminal on OS file drop.
+  useFileDropToTerminal();
 
   // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
   // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
