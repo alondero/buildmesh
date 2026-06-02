@@ -21,6 +21,11 @@ interface UIState {
   propertiesPanelMeshId: number | null;
   openPropertiesPanel: (meshId: number) => void;
   closePropertiesPanel: () => void;
+
+  // Agent node currently under an OS file-drag, or null. Drives the terminal
+  // "drop file to paste path" overlay; set by the window-level drop listener.
+  dragTargetNodeId: number | null;
+  setDragTargetNodeId: (nodeId: number | null) => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -91,5 +96,13 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   closePropertiesPanel: () => {
     set({ propertiesPanelMeshId: null });
+  },
+
+  dragTargetNodeId: null,
+
+  setDragTargetNodeId: (nodeId: number | null) => {
+    if (get().dragTargetNodeId !== nodeId) {
+      set({ dragTargetNodeId: nodeId });
+    }
   },
 }));
