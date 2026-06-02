@@ -338,36 +338,72 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
     Ok(())
 }
 
-/// Add a worktree to the repo — branched (new branch from HEAD) or detached.
+/// Resolve the base commit a new worktree should be created from.
+///
+/// `"HEAD"` (or empty) uses the Mesh root's current HEAD — the explicit
+/// "Head" option. Any other ref (e.g. `"origin/main"`) is resolved via
+/// revparse; callers must run [`fetch_origin`] first so remote-tracking refs
+/// are current. If the ref cannot be resolved (offline, missing), this falls
+/// back to HEAD with a warning rather than failing the spawn, consistent with
+/// ADR 0001's offline-fallback intent.
+fn resolve_base_commit<'r>(
+    repo: &'r git2::Repository,
+    base_ref: &str,
+) -> Result<git2::Commit<'r>, String> {
+    let head_commit = || {
+        repo.head()
+            .and_then(|h| h.peel_to_commit())
+            .map_err(|e| format!("Failed to resolve HEAD commit: {}", e))
+    };
+
+    if base_ref.is_empty() || base_ref == "HEAD" {
+        return head_commit();
+    }
+
+    match repo
+        .revparse_single(base_ref)
+        .and_then(|obj| obj.peel_to_commit())
+    {
+        Ok(commit) => Ok(commit),
+        Err(e) => {
+            tracing::warn!(
+                "resolve_base_commit: could not resolve base_ref '{}' ({}); falling back to HEAD",
+                base_ref,
+                e
+            );
+            head_commit()
+        }
+    }
+}
+
+/// Add a worktree to the repo — branched (new branch) or detached — based on
+/// the commit resolved from `base_ref` (see [`resolve_base_commit`]).
 fn add_worktree_impl(
     repo: &git2::Repository,
     branch_name: &str,
     host_path: &std::path::Path,
     use_branched: bool,
+    base_ref: &str,
 ) -> Result<(), String> {
-    if use_branched {
-        let head_commit = repo.head()
-            .and_then(|h| h.peel_to_commit())
-            .map_err(|e| format!("Failed to resolve HEAD commit: {}", e))?;
-        let branch = repo.branch(branch_name, &head_commit, false)
-            .map_err(|e| format!("Failed to create branch '{}': {}", branch_name, e))?;
-        let reference = branch.into_reference();
-        let mut opts = git2::WorktreeAddOptions::new();
-        opts.reference(Some(&reference));
-        repo.worktree(branch_name, host_path, Some(&opts))
-            .map_err(|e| format!("Git worktree add failed: {}", e))?;
-    } else {
-        // git2 worktree add without a reference auto-creates a branch; detach HEAD after.
-        repo.worktree(branch_name, host_path, None)
-            .map_err(|e| format!("Git worktree add failed: {}", e))?;
+    let base_commit = resolve_base_commit(repo, base_ref)?;
 
+    // Both modes create a branch at the resolved base so the worktree checks
+    // out that commit (not the Mesh root's current HEAD). Detached mode then
+    // detaches the worktree's HEAD and removes the temporary branch.
+    let branch = repo
+        .branch(branch_name, &base_commit, false)
+        .map_err(|e| format!("Failed to create branch '{}': {}", branch_name, e))?;
+    let reference = branch.into_reference();
+    let mut opts = git2::WorktreeAddOptions::new();
+    opts.reference(Some(&reference));
+    repo.worktree(branch_name, host_path, Some(&opts))
+        .map_err(|e| format!("Git worktree add failed: {}", e))?;
+
+    if !use_branched {
         let wt_repo = git2::Repository::open(host_path)
             .map_err(|e| format!("Failed to open worktree repo: {}", e))?;
-        let head_oid = wt_repo.head()
-            .and_then(|h| h.peel_to_commit())
-            .map_err(|e| format!("Failed to resolve worktree HEAD: {}", e))?
-            .id();
-        wt_repo.set_head_detached(head_oid)
+        wt_repo
+            .set_head_detached(base_commit.id())
             .map_err(|e| format!("Failed to detach HEAD in worktree: {}", e))?;
 
         if let Ok(mut branch) = repo.find_branch(branch_name, git2::BranchType::Local) {
@@ -421,6 +457,7 @@ pub fn create_git_worktree(
     worktree_host_path: &str,
     branch_name: &str,
     worktree_mode: &str,
+    base_ref: &str,
 ) -> Result<(), String> {
     let host_path = std::path::Path::new(worktree_host_path);
 
@@ -433,19 +470,19 @@ pub fn create_git_worktree(
         std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create worktrees directory: {}", e))?;
     }
 
-    tracing::info!("Creating git worktree: {} at {} (mode: {})", branch_name, worktree_host_path, worktree_mode);
+    tracing::info!("Creating git worktree: {} at {} (mode: {}, base_ref: {})", branch_name, worktree_host_path, worktree_mode, base_ref);
 
     let repo = git2::Repository::open(project_root)
         .map_err(|e| format!("Failed to open repository at {}: {}", project_root, e))?;
 
     let use_branched = worktree_mode == "branched";
 
-    match add_worktree_impl(&repo, branch_name, host_path, use_branched) {
+    match add_worktree_impl(&repo, branch_name, host_path, use_branched, base_ref) {
         Ok(()) => {}
         Err(err) if err.contains("already exists") || err.contains("already checked out") => {
             tracing::warn!("Worktree already exists in git metadata, attempting to repair...");
             prune_stale_worktrees(&repo);
-            add_worktree_impl(&repo, branch_name, host_path, use_branched)?;
+            add_worktree_impl(&repo, branch_name, host_path, use_branched, base_ref)?;
         }
         Err(err) => return Err(err),
     }
@@ -671,6 +708,7 @@ mod tests {
             wt_path.to_str().unwrap(),
             "wt-1",
             "branched",
+            "HEAD",
         )
         .expect("branched worktree creation must succeed with a dirty parent");
 
@@ -723,6 +761,7 @@ mod tests {
             wt_path.to_str().unwrap(),
             "wt-det",
             "detached",
+            "HEAD",
         )
         .expect("detached worktree creation must succeed with a dirty parent");
 
@@ -747,6 +786,191 @@ mod tests {
         assert!(
             repo_is_dirty(parent),
             "creating a worktree must not modify the parent's working tree"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Regression tests for #230 — worktrees must be based on the
+    // configured base_ref (default origin/main), not the Mesh root's
+    // local HEAD. Without this, root drift (parked on a feature branch,
+    // behind origin) is inherited by every new worktree.
+    // -----------------------------------------------------------------
+
+    /// Add a commit on top of current HEAD with the given file content,
+    /// advancing HEAD. Returns the new commit oid.
+    fn commit_file(repo: &git2::Repository, root: &Path, name: &str, content: &str) -> git2::Oid {
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        fs::write(root.join(name), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(name)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "more", &tree, &[&parent])
+            .unwrap()
+    }
+
+    /// Set up a repo where `origin/main` (a remote-tracking ref) points at the
+    /// initial commit, then drift the local HEAD forward to a second commit.
+    /// Returns (repo, origin_main_oid).
+    fn repo_with_drifted_head(root: &Path) -> (git2::Repository, git2::Oid) {
+        let repo = init_repo_with_commit(root, &[("f.txt", "from-origin-main\n")]);
+        let origin_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference("refs/remotes/origin/main", origin_oid, false, "test")
+            .unwrap();
+        commit_file(&repo, root, "f.txt", "local-drift\n");
+        assert_ne!(
+            repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid,
+            "precondition: HEAD must differ from origin/main"
+        );
+        (repo, origin_oid)
+    }
+
+    #[test]
+    fn resolve_base_commit_head_returns_mesh_root_head() {
+        let td = TestDir::new("resolve_head");
+        let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
+        let head = repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(resolve_base_commit(&repo, "HEAD").unwrap().id(), head);
+        assert_eq!(resolve_base_commit(&repo, "").unwrap().id(), head);
+    }
+
+    #[test]
+    fn resolve_base_commit_resolves_remote_ref() {
+        let td = TestDir::new("resolve_remote");
+        let (repo, origin_oid) = repo_with_drifted_head(td.path());
+        assert_eq!(
+            resolve_base_commit(&repo, "origin/main").unwrap().id(),
+            origin_oid,
+            "origin/main must resolve to the remote-tracking commit, not HEAD"
+        );
+    }
+
+    #[test]
+    fn resolve_base_commit_falls_back_to_head_when_unresolvable() {
+        let td = TestDir::new("resolve_fallback");
+        let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
+        let head = repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(
+            resolve_base_commit(&repo, "origin/does-not-exist")
+                .unwrap()
+                .id(),
+            head,
+            "an unresolvable ref must fall back to HEAD rather than error"
+        );
+    }
+
+    #[test]
+    fn branched_worktree_bases_off_base_ref_not_head() {
+        let td = TestDir::new("base_ref_branched");
+        let parent = td.path();
+        let (_repo, origin_oid) = repo_with_drifted_head(parent);
+
+        let wt_path = parent.join(".claude").join("worktrees").join("wt-br");
+        create_git_worktree(
+            parent.to_str().unwrap(),
+            wt_path.to_str().unwrap(),
+            "wt-br",
+            "branched",
+            "origin/main",
+        )
+        .expect("branched worktree creation must succeed");
+
+        let content = fs::read_to_string(wt_path.join("f.txt")).unwrap();
+        assert_eq!(
+            content, "from-origin-main\n",
+            "worktree must be based on origin/main, not the drifted Mesh root HEAD"
+        );
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        assert_eq!(
+            wt_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid
+        );
+    }
+
+    #[test]
+    fn detached_worktree_bases_off_base_ref_not_head() {
+        let td = TestDir::new("base_ref_detached");
+        let parent = td.path();
+        let (_repo, origin_oid) = repo_with_drifted_head(parent);
+
+        let wt_path = parent.join(".claude").join("worktrees").join("wt-det");
+        create_git_worktree(
+            parent.to_str().unwrap(),
+            wt_path.to_str().unwrap(),
+            "wt-det",
+            "detached",
+            "origin/main",
+        )
+        .expect("detached worktree creation must succeed");
+
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        assert!(
+            wt_repo.head_detached().unwrap_or(false),
+            "worktree HEAD should be detached in detached mode"
+        );
+        assert_eq!(
+            wt_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid,
+            "detached worktree must point at origin/main, not the drifted HEAD"
+        );
+        let content = fs::read_to_string(wt_path.join("f.txt")).unwrap();
+        assert_eq!(content, "from-origin-main\n");
+    }
+
+    #[test]
+    fn worktree_base_ref_head_reproduces_mesh_root_head() {
+        let td = TestDir::new("base_ref_head");
+        let parent = td.path();
+        let (repo, origin_oid) = repo_with_drifted_head(parent);
+        let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        let wt_path = parent.join(".claude").join("worktrees").join("wt-head");
+        create_git_worktree(
+            parent.to_str().unwrap(),
+            wt_path.to_str().unwrap(),
+            "wt-head",
+            "branched",
+            "HEAD",
+        )
+        .expect("worktree creation must succeed");
+
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        let wt_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(
+            wt_oid, head_oid,
+            "base_ref=HEAD must reproduce today's behaviour (based on Mesh root HEAD)"
+        );
+        assert_ne!(wt_oid, origin_oid, "HEAD has drifted away from origin/main");
+        let content = fs::read_to_string(wt_path.join("f.txt")).unwrap();
+        assert_eq!(content, "local-drift\n");
+    }
+
+    #[test]
+    fn worktree_unresolvable_base_ref_falls_back_to_head() {
+        let td = TestDir::new("base_ref_offline");
+        let parent = td.path();
+        let repo = init_repo_with_commit(parent, &[("f.txt", "only-commit\n")]);
+        let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        // No origin/main ref exists (simulates offline / missing remote).
+        let wt_path = parent.join(".claude").join("worktrees").join("wt-off");
+        create_git_worktree(
+            parent.to_str().unwrap(),
+            wt_path.to_str().unwrap(),
+            "wt-off",
+            "branched",
+            "origin/main",
+        )
+        .expect("spawn must not fail when base_ref is unresolvable");
+
+        let wt_repo = git2::Repository::open(&wt_path).unwrap();
+        assert_eq!(
+            wt_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            head_oid,
+            "unresolvable base_ref must fall back to HEAD"
         );
     }
 }
