@@ -7,7 +7,6 @@
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, Result as SqlResult};
-    use std::sync::Mutex;
 
     /// Creates a v2 schema (before layout column) for migration testing.
     /// This simulates an existing DB that needs migration to v3/v4+.

@@ -21,9 +21,15 @@ pub async fn list(
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+// deny_unknown_fields is deliberate. The previous SpawnRequest carried a
+// `body: String`; if a stale mobile bundle (served from `dist/mobile` via
+// rust-embed and possibly cached on a phone for releases) keeps POSTing the
+// legacy `{title, body, provider}` shape, we want a loud 400 — not a silent
+// body-dropped success — so the user knows to refresh. See memory:
+// buildmesh-serde-default-fragility.
 struct SpawnRequest {
     title: String,
-    body: String,
     provider: Option<String>,
 }
 
@@ -58,13 +64,14 @@ pub async fn spawn(
     };
 
     // spawn_issue_agent is a #[tauri::command] but takes plain args except
-    // for AppHandle which we already hold, so we call it directly.
+    // for AppHandle which we already hold, so we call it directly. The
+    // backend derives the GitHub URL from the mesh's `origin` remote — we
+    // only need the issue number and a title hint here.
     match crate::commands::agent::spawn_issue_agent(
         app.clone(),
         mesh_id,
         issue_number,
         req.title,
-        req.body,
         req.provider,
     )
     .await

@@ -67,27 +67,26 @@ pub async fn spawn_agent(
 }
 
 /// Internal implementation shared by spawn_issue_agent and spawn_handover_agent.
-/// Takes the raw prefill text and a formatter to produce the final --prefill string.
+/// Takes a pre-fetched `&Mesh` and a fully-formatted prefill string. Source-specific
+/// shaping (e.g. GitHub issue → URL+title) happens in the caller before this is
+/// called, so the impl is just: resolve provider → create node → spawn.
 async fn spawn_new_agent_impl(
     app: &AppHandle,
-    mesh_id: i64,
-    raw_prefill: String,
-    formatter: impl FnOnce(&str) -> String,
+    mesh: &crate::models::Mesh,
+    prefill: String,
     provider: Option<String>,
     source_issue: Option<i64>,
 ) -> Result<crate::models::AgentNode, String> {
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-
     let effective_provider = crate::preferences::resolve_default_provider(
         provider,
-        mesh.default_provider,
+        mesh.default_provider.clone(),
         crate::preferences::default_provider(),
     );
 
     let branch = crate::commands::git::get_default_branch(mesh.path.clone());
 
     let node = crate::services::agent_node::create(
-        mesh_id,
+        mesh.id,
         &mesh.path,
         &branch,
         Some(&effective_provider),
@@ -95,7 +94,7 @@ async fn spawn_new_agent_impl(
     ).map_err(|e| e.to_string())?;
 
     let prefill_text = if Provider::from_db_str(&effective_provider).adapter().supports_prefill() {
-        Some(formatter(&raw_prefill))
+        Some(prefill)
     } else {
         tracing::warn!(
             "spawn_new_agent_impl: --prefill not supported for provider '{}', skipping",
@@ -118,7 +117,15 @@ async fn spawn_new_agent_impl(
     db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
 }
 
-/// Spawn an agent pre-filled with a GitHub issue's title and body.
+/// Spawn an agent pre-filled with a pointer to a GitHub issue (URL + title hint).
+///
+/// We deliberately pass just the URL and title, not the full issue body. Shipping
+/// a multi-KB markdown body through the Windows PowerShell `-EncodedCommand`
+/// argv path is the worst-case input for that pipeline (backticks, code fences,
+/// nested quotes) and was the main reason this flow was unreliable on Windows.
+/// LLMs can read the URL themselves and they need the link anyway to cite the
+/// issue in the closing PR.
+///
 /// The `--prefill` arg is only passed for providers whose adapter declares
 /// `supports_prefill() = true`; others spawn without prefill and log a warning.
 #[command]
@@ -127,21 +134,56 @@ pub async fn spawn_issue_agent(
     mesh_id: i64,
     issue_number: i64,
     issue_title: String,
-    issue_body: String,
     provider: Option<String>,
 ) -> Result<crate::models::AgentNode, String> {
-    let prefill = format!("{}\n\n{}", issue_title, issue_body);
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+        .map_err(|e| format!("{} — cannot derive issue URL", e))?;
+
+    let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
+
     let node = spawn_new_agent_impl(
         &app,
-        mesh_id,
+        &mesh,
         prefill,
-        |raw| raw.to_string(),
         provider,
         Some(issue_number),
     ).await?;
 
     tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node.id, issue_number);
     Ok(node)
+}
+
+/// Compose the prefill string handed to the agent on GitHub-issue spawn.
+///
+/// Shape: `Please work on GitHub issue #N — Title\n<html_url>` — terse imperative,
+/// the issue number for cite-ability, the title as a one-line freebie so the
+/// agent can usually start without round-tripping for the body, and the URL as
+/// the canonical source. An empty title degrades to just `#N\n<url>` (no
+/// dangling em-dash artifact).
+///
+/// The title is passed verbatim — the consumer is an LLM, not a parser, and
+/// the prefill bytes round-trip safely through the PowerShell `-EncodedCommand`
+/// path (see memory: powershell-encoding-fix). Using an em-dash instead of
+/// surrounding quotes sidesteps any escape question entirely.
+///
+/// Pure function — exposed `pub(crate)` for unit tests in `agent_tests.rs`.
+pub(crate) fn format_issue_prefill(
+    owner: &str,
+    repo: &str,
+    issue_number: i64,
+    issue_title: &str,
+) -> String {
+    let url = format!("https://github.com/{}/{}/issues/{}", owner, repo, issue_number);
+    let trimmed = issue_title.trim();
+    if trimmed.is_empty() {
+        format!("Please work on GitHub issue #{}\n{}", issue_number, url)
+    } else {
+        format!(
+            "Please work on GitHub issue #{} — {}\n{}",
+            issue_number, trimmed, url
+        )
+    }
 }
 
 /// Spawn a new agent node pre-filled with selected text from a parent terminal.
@@ -153,11 +195,11 @@ pub async fn spawn_handover_agent(
     prefill: String,
     provider: Option<String>,
 ) -> Result<crate::models::AgentNode, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let node = spawn_new_agent_impl(
         &app,
-        mesh_id,
+        &mesh,
         prefill,
-        |raw| raw.to_string(),
         provider,
         None,
     ).await?;

@@ -82,7 +82,7 @@ pub fn wrap(
                 // Build a PowerShell script that calls the binary with each arg
                 // single-quoted, then Base64/UTF-16LE encode it for
                 // -EncodedCommand. Quoting matters: multi-line prefill text
-                // (e.g. GitHub issue bodies with `1. ...` numbered lists or
+                // (e.g. handover prefills containing `1. ...` numbered lists or
                 // backticks) would otherwise be parsed as separate PowerShell
                 // statements after newline boundaries.
                 let cmd_str = format_powershell_command(recipe.binary, &recipe.base_args);
@@ -152,13 +152,16 @@ mod tests {
     }
 
     /// The formatter must use PowerShell's call operator `&` with each arg
-    /// wrapped in single quotes, so multi-line prefill text (GitHub issue bodies
-    /// with backticks, brackets, numbered lists) is treated as a single string
-    /// literal — not parsed as separate PowerShell statements line-by-line.
+    /// wrapped in single quotes, so multi-line prefill text (e.g. selected text
+    /// from a Handover containing backticks, brackets, numbered lists) is
+    /// treated as a single string literal — not parsed as separate PowerShell
+    /// statements line-by-line.
     ///
-    /// Regression for: spawning an agent from a GH issue whose body contained
-    /// markdown caused PowerShell to error with "Unexpected token '`mesh.toml'"
-    /// because each line of the body was being parsed as a new statement.
+    /// Regression originally surfaced when issue-spawn shipped full markdown
+    /// bodies through prefill ("Unexpected token '`mesh.toml'"); the issue path
+    /// no longer does that (just a URL + title — see memory:
+    /// buildmesh-issue-spawn-url-only), but the handover path still ships
+    /// arbitrary multi-line text so the guarantee still matters.
     #[test]
     fn format_powershell_command_quotes_multiline_prefill_safely() {
         let body = "Currently, when spawning a new agent...\n\

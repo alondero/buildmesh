@@ -23,16 +23,19 @@ pub fn check_gh_auth() -> bool {
 }
 
 /// Get open GitHub issues for a mesh.
-/// Returns an empty list if no `origin` remote is configured.
+/// Returns an empty list if the mesh has no GitHub remote (or any error
+/// resolving one), with a `warn!` capturing the reason. The modal degrades
+/// gracefully — see [`resolve_github_owner_repo`] for the error wording the
+/// sibling spawn endpoint surfaces directly.
 #[command]
 pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
 
-    let (owner, repo) = match resolve_owner_repo(&mesh.path)? {
-        Some(pair) => pair,
-        None => {
-            tracing::warn!("get_repo_issues: no origin remote for mesh at {}", mesh.path);
+    let (owner, repo) = match resolve_github_owner_repo(&mesh) {
+        Ok(pair) => pair,
+        Err(reason) => {
+            tracing::warn!("get_repo_issues: {} — returning empty issue list", reason);
             return Ok(Vec::new());
         }
     };
@@ -157,8 +160,35 @@ fn repo_info(path: &str) -> Result<RepoInfo, String> {
     Ok(RepoInfo { branch, remote_url })
 }
 
+/// Resolve a Mesh's `origin` remote to (owner, repo) for GitHub operations,
+/// with a diagnostic that disambiguates "no origin at all" from "origin exists
+/// but isn't a GitHub URL". Used by both `get_repo_issues` (which degrades
+/// gracefully to an empty list + warn) and `spawn_issue_agent` (which
+/// propagates the error to the user, since they actively clicked Spawn).
+pub(crate) fn resolve_github_owner_repo(
+    mesh: &crate::models::Mesh,
+) -> Result<(String, String), String> {
+    match resolve_owner_repo(&mesh.path)? {
+        Some(pair) => Ok(pair),
+        None => {
+            let has_origin = git2::Repository::open(&mesh.path)
+                .ok()
+                .and_then(|r| r.find_remote("origin").ok().map(|_| ()))
+                .is_some();
+            if has_origin {
+                Err(format!(
+                    "Mesh at {} has an `origin` remote, but it isn't a GitHub URL",
+                    mesh.path
+                ))
+            } else {
+                Err(format!("Mesh at {} has no `origin` remote", mesh.path))
+            }
+        }
+    }
+}
+
 /// Resolve owner/repo from a path, returning None if no origin remote.
-fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>, String> {
+pub(crate) fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>, String> {
     let repo = Repository::open(path).map_err(|e| format!("git error: {}", e))?;
     let url = match repo.find_remote("origin") {
         Ok(remote) => remote.url().map(|u| u.to_string()),

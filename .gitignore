@@ -30,6 +30,12 @@ user-research-grillme-*.md
 test-results/
 .playwright-cli/
 
+# Stray review/diff artifacts from agent sessions (e.g. `git diff > /tmp/x.patch`
+# landing in worktree root on git-bash Windows). Real patch files committed to
+# the repo should live in docs/ or similar — pattern is anchored to root only.
+/review-diff.patch
+/*.patch.tmp
+
 # Claude worktrees and local settings (local only)
 .claude/worktrees/
 .claude/settings.json

@@ -261,6 +261,9 @@ export async function spawnFromIssue(
   issue: GitHubIssue,
   provider?: string,
 ): Promise<AgentNode> {
+  // Backend derives the issue URL from the mesh's `origin` remote — we only
+  // ship the title hint, not the body (avoids pushing a multi-KB markdown
+  // blob through the Windows PowerShell -EncodedCommand argv path).
   const resp = await apiFetch(
     `/api/meshes/${meshId}/issues/${issue.number}/spawn`,
     {
@@ -268,7 +271,6 @@ export async function spawnFromIssue(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         title: issue.title,
-        body: issue.body ?? "",
         provider,
       }),
     },

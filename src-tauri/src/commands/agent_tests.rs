@@ -201,10 +201,14 @@ mod tests {
 
     /// Prefill CRLF (and bare CR) are normalised to LF before reaching the provider.
     ///
-    /// Regression for: spawning an agent from a GitHub issue only pre-filled the
-    /// first line on Windows. Issue bodies carry CRLF; a bare `\r` typed into the
-    /// agent's TUI (cwrap → ConPTY) submits the prompt after line one. The argv
-    /// the spawn command builds must contain LF-only prefill text.
+    /// Regression for: handover prefills containing Windows line endings only
+    /// pre-filled the first line in the agent's TUI. A bare `\r` typed into
+    /// cwrap → ConPTY submits the prompt after line one. The argv the spawn
+    /// command builds must contain LF-only prefill text.
+    ///
+    /// (The GitHub-issue spawn path no longer ships the issue body — just a
+    /// short URL-bearing instruction — but selected text in the handover flow
+    /// can still carry CRLF, so this guarantee is still meaningful.)
     #[test]
     fn prefill_crlf_normalised_to_lf() {
         let cmd = build_spawn_command(
@@ -353,6 +357,71 @@ mod tests {
             !args.iter().any(|a| a == "--session-id" || a == "ignored"),
             "codex self-assigns; Assign must not add --session-id: {:?}",
             args
+        );
+    }
+
+    /// Spawning from a GitHub issue prefills the agent with a short URL-bearing
+    /// instruction, NOT the full issue body. The body used to be concatenated in
+    /// (title + "\n\n" + body) which forced megabytes of markdown through the
+    /// Windows PowerShell -EncodedCommand path (see memory: powershell-encoding-fix).
+    /// The URL is the canonical source the agent fetches on demand and the cite
+    /// it uses when opening the PR that closes the issue.
+    #[test]
+    fn issue_prefill_is_url_with_title_hint_not_body() {
+        let prefill = crate::commands::agent::format_issue_prefill(
+            "alondero",
+            "buildmesh",
+            123,
+            "Add dark mode to settings",
+        );
+
+        assert_eq!(
+            prefill,
+            "Please work on GitHub issue #123 — Add dark mode to settings\n\
+             https://github.com/alondero/buildmesh/issues/123"
+        );
+    }
+
+    /// An empty title falls back to a number-only imperative — no dangling
+    /// em-dash artifact.
+    #[test]
+    fn issue_prefill_with_empty_title_falls_back_to_number_only() {
+        let prefill = crate::commands::agent::format_issue_prefill(
+            "alondero",
+            "buildmesh",
+            7,
+            "",
+        );
+
+        assert_eq!(
+            prefill,
+            "Please work on GitHub issue #7\n\
+             https://github.com/alondero/buildmesh/issues/7"
+        );
+    }
+
+    /// Titles with double quotes pass through verbatim — the prefill format
+    /// uses an em-dash separator rather than surrounding quotes, so there is
+    /// nothing to escape. The consumer is an LLM, not a parser; ensuring
+    /// `\"` doesn't leak into the prompt is the explicit goal here.
+    #[test]
+    fn issue_prefill_preserves_quotes_in_title_verbatim() {
+        let prefill = crate::commands::agent::format_issue_prefill(
+            "alondero",
+            "buildmesh",
+            42,
+            "Fix the \"weird\" race in spawn",
+        );
+
+        assert_eq!(
+            prefill,
+            "Please work on GitHub issue #42 — Fix the \"weird\" race in spawn\n\
+             https://github.com/alondero/buildmesh/issues/42"
+        );
+        assert!(
+            !prefill.contains('\\'),
+            "title must reach the LLM without backslash escapes: {:?}",
+            prefill
         );
     }
 
