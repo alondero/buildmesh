@@ -83,14 +83,23 @@ pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety,
         });
     };
 
-    let mut safety = close_safety_for_worktree_path(&worktree_path)?;
-    safety.worktree_path = Some(worktree_path);
-    Ok(safety)
+    Ok(close_safety_for_worktree_path(&worktree_path))
 }
 
 /// Delete an agent node, cleaning up associated runtime state (node_namer buffers).
 pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeError> {
     let node = db::get_agent_node_by_id(session_id)?;
+
+    if remove_worktree {
+        // A live agent keeps file handles open inside its worktree, which pins
+        // the directory and blocks removal. Kill the whole process tree before
+        // touching the worktree so removal isn't fighting a running agent — the
+        // frontend kills first too, but this keeps removal correct for any other
+        // caller (HTTP, tests) and makes the kill→remove ordering explicit (#239).
+        crate::agent::process::PROCESS_REGISTRY.kill_session(session_id);
+        crate::agent::process::PROCESS_REGISTRY.remove(&session_id);
+    }
+
     delete_worktree_for_node(&node, remove_worktree)?;
     crate::session_naming::cleanup(session_id);
     db::delete_agent_node(session_id)?;
@@ -129,28 +138,42 @@ fn delete_worktree_for_node(node: &AgentNode, remove_worktree: bool) -> Result<(
     crate::commands::prune::remove_one_worktree(&worktree_path).map_err(AgentNodeError::Git)
 }
 
-fn close_safety_for_worktree_path(path: &str) -> Result<WorktreeCloseSafety, AgentNodeError> {
+/// Inspect a worktree to decide whether closing its node can remove it.
+///
+/// A worktree we can't even open as a repository — its directory is gone or its
+/// git metadata is unreadable — has no detectable work to protect and nothing
+/// removable, so it reports `worktree_path: None` ("nothing to remove, safe to
+/// close") rather than failing. Blocking the close on it would leave the node
+/// permanently un-closable from the UI (#239).
+fn close_safety_for_worktree_path(path: &str) -> WorktreeCloseSafety {
     let host_path = env::to_host_path(path);
-    let repo = Repository::open(&host_path).map_err(|e| {
-        AgentNodeError::Git(format!("failed to open worktree {}: {}", host_path, e))
-    })?;
+    let nothing_to_remove = WorktreeCloseSafety {
+        worktree_path: None,
+        has_uncommitted: false,
+        has_unpushed: false,
+        is_detached: false,
+    };
+
+    let Ok(repo) = Repository::open(&host_path) else {
+        return nothing_to_remove;
+    };
+    let Ok(head) = repo.head() else {
+        return nothing_to_remove;
+    };
 
     let has_uncommitted = repo_has_uncommitted(&repo);
-    let head = repo
-        .head()
-        .map_err(|e| AgentNodeError::Git(format!("failed to read worktree HEAD: {}", e)))?;
     let is_detached = !head.is_branch();
     let has_unpushed = head
         .target()
         .map(|head_oid| head_has_unpushed_or_unmerged_commits(&repo, &head, head_oid, is_detached))
         .unwrap_or(false);
 
-    Ok(WorktreeCloseSafety {
-        worktree_path: None,
+    WorktreeCloseSafety {
+        worktree_path: Some(path.to_string()),
         has_uncommitted,
         has_unpushed,
         is_detached,
-    })
+    }
 }
 
 fn repo_has_uncommitted(repo: &Repository) -> bool {
@@ -340,7 +363,7 @@ mod tests {
         let root_repo = init_repo(root.path());
         let worktree_path = add_worktree(&root_repo, &root, "wt-safe");
 
-        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy()).unwrap();
+        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy());
 
         assert!(!safety.has_uncommitted);
         assert!(!safety.has_unpushed);
@@ -354,7 +377,7 @@ mod tests {
         let worktree_path = add_worktree(&root_repo, &root, "wt-dirty");
         fs::write(worktree_path.join("scratch.txt"), "not committed").unwrap();
 
-        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy()).unwrap();
+        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy());
 
         assert!(safety.has_uncommitted);
         assert!(!safety.has_unpushed);
@@ -368,7 +391,7 @@ mod tests {
         let worktree_repo = git2::Repository::open(&worktree_path).unwrap();
         commit_file(&worktree_repo, "work.txt", "committed locally");
 
-        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy()).unwrap();
+        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy());
 
         assert!(!safety.has_uncommitted);
         assert!(safety.has_unpushed);
@@ -383,7 +406,7 @@ mod tests {
         let head = worktree_repo.head().unwrap().peel_to_commit().unwrap();
         worktree_repo.set_head_detached(head.id()).unwrap();
 
-        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy()).unwrap();
+        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy());
 
         assert!(safety.is_detached);
         assert!(!safety.has_unpushed);
@@ -399,7 +422,7 @@ mod tests {
         worktree_repo.set_head_detached(head.id()).unwrap();
         commit_file(&worktree_repo, "detached.txt", "detached work");
 
-        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy()).unwrap();
+        let safety = close_safety_for_worktree_path(&worktree_path.to_string_lossy());
 
         assert!(safety.is_detached);
         assert!(safety.has_unpushed);
@@ -446,5 +469,45 @@ mod tests {
         delete_worktree_for_node(&node, true).unwrap();
 
         assert!(root.path().exists(), "mesh root must not be pruned");
+    }
+
+    #[test]
+    fn delete_worktree_for_node_succeeds_when_working_dir_already_gone() {
+        let root = TempDir::new();
+        let root_repo = init_repo(root.path());
+        let worktree_path = add_worktree(&root_repo, &root, "wt-gone");
+        // A previous interrupted close left the working directory missing (#239).
+        fs::remove_dir_all(&worktree_path).unwrap();
+        let node = make_node(&root, Some("wt-gone"));
+
+        // Must not error: there is nothing left to remove, so the node closes.
+        delete_worktree_for_node(&node, true).unwrap();
+    }
+
+    #[test]
+    fn close_safety_treats_missing_worktree_as_nothing_to_remove() {
+        let root = TempDir::new();
+        let missing = root.path().join("does-not-exist");
+
+        let safety = close_safety_for_worktree_path(&missing.to_string_lossy());
+
+        // A worktree we can't open has no work to protect and nothing to remove,
+        // so it must never block the close (#239).
+        assert_eq!(safety.worktree_path, None);
+        assert!(!safety.has_uncommitted);
+        assert!(!safety.has_unpushed);
+        assert!(!safety.is_detached);
+    }
+
+    #[test]
+    fn close_safety_treats_non_repo_directory_as_nothing_to_remove() {
+        let root = TempDir::new();
+        fs::create_dir_all(root.path()).unwrap();
+        fs::write(root.path().join("stray.txt"), "not a git repo").unwrap();
+
+        let safety = close_safety_for_worktree_path(&root.path_str());
+
+        assert_eq!(safety.worktree_path, None);
+        assert!(!safety.has_uncommitted);
     }
 }

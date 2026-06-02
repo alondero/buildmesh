@@ -484,3 +484,57 @@ fn remove_worktree_succeeds_after_killing_process_tree() {
     remove_one_worktree(&wt_dir.path_str()).expect("prune succeeds once the tree is gone");
     assert!(!wt_dir.path().exists(), "working directory should be gone");
 }
+
+/// #239 regression: a removal that fails because a live agent still pins the
+/// worktree must leave the working tree *fully intact*, never half-deleted.
+/// The old `remove_dir_all` walked entries one by one, gutting the source files
+/// and the `.git` gitlink before it hit the locked file and bailed — leaving a
+/// broken stub that could no longer be opened as a repo, so the node could
+/// never be closed. Removal must be all-or-nothing.
+#[cfg(windows)]
+#[test]
+fn remove_worktree_does_not_gut_tree_when_pinned() {
+    let (_dir, wt_dir, mut locker) = worktree_pinned_by_process_tree();
+
+    remove_one_worktree(&wt_dir.path_str())
+        .expect_err("removal must fail while a process pins the worktree");
+
+    // Everything the failed removal would otherwise have gutted must survive.
+    assert!(
+        wt_dir.path().join("file.txt").exists(),
+        "committed source file must survive a failed removal, not be gutted"
+    );
+    assert!(
+        wt_dir.path().join(".git").exists(),
+        ".git gitlink must survive a failed removal, not be gutted"
+    );
+
+    crate::process_util::kill_process_tree(locker.id());
+    let _ = locker.wait();
+}
+
+/// #239: an already-gone working directory is success — there is nothing to
+/// delete, so removal must not error (the node can still be closed cleanly).
+#[test]
+fn remove_worktree_treats_missing_working_dir_as_success() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+
+    // Simulate a worktree whose working directory has already vanished.
+    fs::remove_dir_all(wt_dir.path()).unwrap();
+    assert!(!wt_dir.path().exists());
+
+    remove_one_worktree(&wt_dir.path_str())
+        .expect("a missing working directory is nothing to remove → success");
+}
