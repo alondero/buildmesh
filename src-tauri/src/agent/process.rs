@@ -94,10 +94,19 @@ impl AgentProcessRegistry {
         }
     }
 
-    /// Kill the child process and mark the reader as dead for a session.
+    /// Kill the child process tree and mark the reader as dead for a session.
+    ///
+    /// The PTY child is a shell; the agent CLI runs as its descendant. On
+    /// Windows `Child::kill` (`TerminateProcess`) would leave that descendant
+    /// alive, pinning the worktree directory and blocking its removal on close.
+    /// Killing the whole tree first ensures nothing holds the worktree's CWD.
     pub fn kill_session(&self, session_id: i64) {
         if let Some(agent) = self.inner.get(&session_id) {
-            agent.child.lock().unwrap().kill().ok();
+            let mut child = agent.child.lock().unwrap();
+            if let Some(pid) = child.process_id() {
+                crate::process_util::kill_process_tree(pid);
+            }
+            child.kill().ok();
             agent.reader_alive.store(false, Ordering::SeqCst);
         }
     }

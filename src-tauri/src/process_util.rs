@@ -23,3 +23,22 @@ pub fn command_no_window(program: &str) -> Command {
         cmd
     }
 }
+
+/// Forcefully terminate a process and all of its descendants.
+///
+/// On Windows, `TerminateProcess` (what portable-pty's `Child::kill` calls)
+/// only kills the targeted process. The PTY child is a shell, so the agent CLI
+/// it spawns survives and keeps its working directory pinned — which blocks
+/// removing the agent's worktree on close. `taskkill /T` walks the whole tree.
+///
+/// On Unix this is a no-op: closing the PTY master already `SIGHUP`s the
+/// foreground process group, and a process's CWD never blocks `rmdir`.
+#[cfg(target_os = "windows")]
+pub fn kill_process_tree(pid: u32) {
+    let _ = command_no_window("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .output();
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn kill_process_tree(_pid: u32) {}
