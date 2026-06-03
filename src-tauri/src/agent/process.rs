@@ -12,6 +12,11 @@ pub struct AgentProcess {
     pub writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub reader_alive: Arc<AtomicBool>,
+    /// Job Object containing the agent's whole process tree, when assignment
+    /// succeeded (Windows only; `None` on failure → `kill_session` falls back to
+    /// `taskkill`). Killing the job reaches detached descendants — e.g. a dev
+    /// server the agent orphaned — that the PPID tree walk would miss.
+    pub job: Option<crate::process_util::JobHandle>,
 }
 
 /// Trait abstracting the process registry methods needed by http_server.
@@ -96,12 +101,21 @@ impl AgentProcessRegistry {
 
     /// Kill the child process tree and mark the reader as dead for a session.
     ///
-    /// The PTY child is a shell; the agent CLI runs as its descendant. On
-    /// Windows `Child::kill` (`TerminateProcess`) would leave that descendant
-    /// alive, pinning the worktree directory and blocking its removal on close.
-    /// Killing the whole tree first ensures nothing holds the worktree's CWD.
+    /// The PTY child is a shell; the agent CLI (and anything it launches, like a
+    /// dev server) runs as its descendant. On Windows `Child::kill`
+    /// (`TerminateProcess`) only kills the shell, leaving descendants alive and
+    /// pinning the worktree directory — blocking its removal on close.
+    ///
+    /// Killing the Job Object first is the authoritative step: it reaches every
+    /// contained descendant including ones that detached or orphaned, which the
+    /// `taskkill /T` PPID walk can't. `taskkill` then stays as a fallback for the
+    /// rare case job assignment failed at spawn, and `child.kill()` reaps the
+    /// shell handle portable-pty owns.
     pub fn kill_session(&self, session_id: i64) {
         if let Some(agent) = self.inner.get(&session_id) {
+            if let Some(job) = &agent.job {
+                job.terminate();
+            }
             let mut child = agent.child.lock().unwrap();
             if let Some(pid) = child.process_id() {
                 crate::process_util::kill_process_tree(pid);
