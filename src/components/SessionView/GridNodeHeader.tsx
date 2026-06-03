@@ -49,10 +49,23 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
         {summary && (
           <span
             onClick={(e) => { e.stopPropagation(); toggleFileExplorer({ type: 'agent', nodeId: node.id, path: gitPath }); }}
-            className={`text-[10px] font-mono cursor-pointer hover:text-accent-cyan ${isPanelNode ? 'text-accent-cyan' : 'text-text-muted'}`}
+            className="text-[11px] font-mono font-semibold cursor-pointer flex items-center gap-1.5 drop-shadow-sm hover:brightness-125"
             title="Click to see changes"
           >
-            +{summary.added} ~{summary.modified} -{summary.deleted}
+            {/* Each count carries its own semantic colour so added / modified / deleted
+                read at a glance against the mesh-tinted header. Zero counts stay muted
+                so the eye lands on the changes that exist. When this node owns the
+                agent file-explorer panel the whole chip flips to cyan as a selection
+                cue, matching the panel border. */}
+            <span className={isPanelNode ? 'text-accent-cyan' : summary.added ? 'text-green-400' : 'text-text-muted'}>
+              +{summary.added}
+            </span>
+            <span className={isPanelNode ? 'text-accent-cyan' : summary.modified ? 'text-amber-400' : 'text-text-muted'}>
+              ~{summary.modified}
+            </span>
+            <span className={isPanelNode ? 'text-accent-cyan' : summary.deleted ? 'text-red-400' : 'text-text-muted'}>
+              -{summary.deleted}
+            </span>
           </span>
         )}
       </div>
