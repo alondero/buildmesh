@@ -198,6 +198,7 @@ fn register_agent(
     writer: Box<dyn std::io::Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     reader_alive: Arc<AtomicBool>,
+    job: Option<crate::process_util::JobHandle>,
 ) {
     PROCESS_REGISTRY.insert(
         session_id,
@@ -206,6 +207,7 @@ fn register_agent(
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(master)),
             reader_alive,
+            job,
         },
     );
 }
@@ -458,6 +460,19 @@ pub async fn spawn_agent_inner(
 
     tracing::info!("spawn_agent_inner: process spawned successfully");
 
+    // Contain the whole process tree in a Job Object straight away, before the
+    // shell launches the agent CLI — so any process the agent later detaches
+    // (e.g. a dev server it backgrounds) is still killed on close, even when its
+    // parent has exited and `taskkill /T` could no longer reach it.
+    let job = child.process_id().and_then(crate::process_util::JobHandle::contain);
+    if job.is_none() {
+        tracing::warn!(
+            "spawn_agent_inner: could not contain session {} in a Job Object; \
+             close will fall back to taskkill (detached children may survive)",
+            session_id
+        );
+    }
+
     // 10. Setup IO and register
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
@@ -465,7 +480,7 @@ pub async fn spawn_agent_inner(
     let reader_alive = Arc::new(AtomicBool::new(true));
 
     tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
-    register_agent(session_id, child, writer, master, reader_alive.clone());
+    register_agent(session_id, child, writer, master, reader_alive.clone(), job);
     tracing::info!("spawn_agent_inner: stored agent process");
 
     // 11. Inject attention hook

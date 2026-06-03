@@ -77,6 +77,7 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe) -> (String, bool
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(master)),
             reader_alive: reader_alive.clone(),
+            job: None,
         },
     );
 
