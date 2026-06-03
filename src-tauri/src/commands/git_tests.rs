@@ -474,6 +474,22 @@ mod tests {
         assert_eq!(status.name, "main");
         assert_eq!(status.ahead, 0, "no upstream → ahead is 0");
         assert_eq!(status.behind, 0, "no upstream → behind is 0");
+        assert!(!status.short_sha.is_empty(), "repo with a commit should report a short SHA");
+        assert_eq!(status.short_sha.len(), 7, "git2 short_id() defaults to 7 chars");
+    }
+
+    #[test]
+    fn branch_status_reports_empty_short_sha_for_unborn_head() {
+        // Unborn HEAD: repo initialised but no commits.
+        let dir = TempGitRepo::new();
+        let _repo = git2::Repository::init(dir.path()).unwrap();
+
+        // get_git_branch_status returns Ok(None) for an unborn HEAD (the existing
+        // path in get_git_branch_status short-circuits on `repo.head()` Err).
+        let result =
+            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+                .unwrap();
+        assert!(result.is_none(), "unborn HEAD should return None");
     }
 
     #[test]
@@ -538,6 +554,31 @@ mod tests {
         assert_eq!(status.name, "main");
         assert_eq!(status.ahead, 1, "one unpushed local commit");
         assert_eq!(status.behind, 0);
+    }
+
+    #[test]
+    fn branch_status_reports_short_sha_for_detached_head() {
+        // Detached HEAD: the default mode for agent worktrees in buildmesh
+        // (see buildmesh-worktree-mode memory). We must still report a short
+        // SHA so the File Explorer header can render "detached @ a064f55".
+        let dir = TempGitRepo::new();
+        let repo = init_git_repo(dir.path());
+        let head_oid = repo.head().unwrap().target().unwrap();
+
+        // Detach HEAD at the current commit.
+        repo.set_head_detached(head_oid).unwrap();
+
+        let status =
+            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+                .unwrap()
+                .expect("detached HEAD on a commit should still report a status");
+
+        assert_eq!(status.name, "HEAD", "shorthand() of a detached HEAD is \"HEAD\"");
+        assert_eq!(
+            status.short_sha, head_oid.to_string().get(..7).unwrap(),
+            "short_sha should be the 7-char prefix of the HEAD OID"
+        );
+        assert_eq!(status.short_sha.len(), 7);
     }
 
     #[test]

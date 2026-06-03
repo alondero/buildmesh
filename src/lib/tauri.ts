@@ -140,6 +140,13 @@ export interface GitBranchStatus {
   name: string;
   ahead: number;
   behind: number;
+  /**
+   * Abbreviated HEAD OID (7 chars by default — matches `git rev-parse --short HEAD`).
+   * Empty string when HEAD is unborn. Lets the UI render a stable identifier on
+   * detached-HEAD worktrees (the default buildmesh agent worktree mode) where
+   * `name === 'HEAD'` would otherwise be uninformative.
+   */
+  short_sha: string;
 }
 
 export const getGitBranchStatus = (path: string) =>

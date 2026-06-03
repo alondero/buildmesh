@@ -5,13 +5,14 @@ import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
 import { GIT_CHANGED } from '../lib/events';
 
 /**
- * Tracks how far a mesh's branch is ahead/behind its upstream.
+ * Tracks the current Git branch (name, ahead/behind, short SHA) of an arbitrary
+ * repository path — mesh root, agent worktree, etc.
  *
  * Refetches on mount, on window focus (the user may have pulled in a terminal
  * while away), and on GIT_CHANGED events for this path (file-watcher driven).
  * Returns null branch status for non-git paths or before the first fetch.
  */
-export function useMeshBranchStatus(meshPath: string | null): {
+export function useGitBranchStatus(gitPath: string | null): {
   branchStatus: GitBranchStatus | null;
   refresh: () => void;
 } {
@@ -26,25 +27,25 @@ export function useMeshBranchStatus(meshPath: string | null): {
   }, []);
 
   const refresh = useCallback(() => {
-    if (meshPath) fetch(meshPath);
-  }, [meshPath, fetch]);
+    if (gitPath) fetch(gitPath);
+  }, [gitPath, fetch]);
 
   // Fetch on mount / path change
   useEffect(() => {
-    if (!meshPath) {
+    if (!gitPath) {
       setBranchStatus(null);
       return;
     }
-    fetch(meshPath);
-  }, [meshPath, fetch]);
+    fetch(gitPath);
+  }, [gitPath, fetch]);
 
   // Refetch when the file watcher reports a change for this path
   useEffect(() => {
-    if (!meshPath) return;
+    if (!gitPath) return;
     const unlisten = listen<{ path: string; internal_path?: string }>(
       GIT_CHANGED,
       (event) => {
-        if (event.payload.path === meshPath || event.payload.internal_path === meshPath) {
+        if (event.payload.path === gitPath || event.payload.internal_path === gitPath) {
           refresh();
         }
       },
@@ -52,11 +53,11 @@ export function useMeshBranchStatus(meshPath: string | null): {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [meshPath, refresh]);
+  }, [gitPath, refresh]);
 
   // Refetch when the window regains focus
   useEffect(() => {
-    if (!meshPath) return;
+    if (!gitPath) return;
     let unlisten: (() => void) | null = null;
     let cancelled = false;
     getCurrentWindow()
@@ -71,7 +72,7 @@ export function useMeshBranchStatus(meshPath: string | null): {
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, [meshPath, refresh]);
+  }, [gitPath, refresh]);
 
   return { branchStatus, refresh };
 }

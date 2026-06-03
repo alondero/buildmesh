@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { FileExplorerPanel } from '../../src/components/FileTree/FileExplorerPanel';
-import type { FileNode, GitStatus } from '../../src/lib/tauri';
+import type { FileNode, GitBranchStatus, GitStatus } from '../../src/lib/tauri';
 
 const TREE: FileNode = {
   name: 'repo',
@@ -17,10 +17,11 @@ const STATUS: GitStatus[] = [
   { path: 'src/app.ts', status: 'modified', additions: 2, deletions: 1 },
 ];
 
-function mockBackend() {
+function mockBackend(branchStatus: GitBranchStatus | null = null) {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     if (cmd === 'list_directory') return Promise.resolve(TREE);
     if (cmd === 'get_git_status') return Promise.resolve(STATUS);
+    if (cmd === 'get_git_branch_status') return Promise.resolve(branchStatus);
     return Promise.resolve({});
   });
 }
@@ -82,5 +83,57 @@ describe('FileExplorerPanel', () => {
 
     await screen.findByText('File Tree');
     expect(screen.queryByText('Changed Files')).toBeNull();
+  });
+
+  it('shows the branch name in the mesh header when the repo is on a branch', async () => {
+    mockBackend({ name: 'main', ahead: 0, behind: 0, short_sha: 'a064f55' });
+
+    render(
+      <FileExplorerPanel
+        context={{ type: 'mesh', meshId: 1, path: '/repo' }}
+        width={300}
+        onWidthChange={noop}
+        onClose={noop}
+        meshName="demo"
+      />
+    );
+
+    expect(await screen.findByText('main')).toBeTruthy();
+  });
+
+  it('shows "detached @ <sha>" in the agent header when on a detached HEAD', async () => {
+    // The default buildmesh agent worktree mode is detached HEAD
+    // (see buildmesh-worktree-mode). The header must show the short SHA so
+    // the user can tell two detached worktrees apart.
+    mockBackend({ name: 'HEAD', ahead: 0, behind: 0, short_sha: 'a064f55' });
+
+    render(
+      <FileExplorerPanel
+        context={{ type: 'agent', nodeId: 1, path: '/repo' }}
+        width={300}
+        onWidthChange={noop}
+        onClose={noop}
+        nodeName="agent-1"
+        changedCount={3}
+      />
+    );
+
+    expect(await screen.findByText('detached @ a064f55')).toBeTruthy();
+  });
+
+  it('omits the branch label for a userConfig context', async () => {
+    mockBackend({ name: 'main', ahead: 0, behind: 0, short_sha: 'a064f55' });
+
+    render(
+      <FileExplorerPanel
+        context={{ type: 'userConfig', path: '/cfg' }}
+        width={300}
+        onWidthChange={noop}
+        onClose={noop}
+      />
+    );
+
+    await screen.findByText('File Tree');
+    expect(screen.queryByText('main')).toBeNull();
   });
 });
