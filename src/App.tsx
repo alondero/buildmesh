@@ -12,15 +12,19 @@ import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
+import {
+  applyToastCap,
+  dedupToasts,
+  TOAST_DEDUP_TTL_MS,
+  TOAST_MAX,
+  TOAST_TTL_MS,
+  type Toast,
+} from './lib/toastUtils';
 import './App.css';
 
 const createNodeGuard = createShortcutGuard(300);
 
-interface ErrorToast {
-  id: number;
-  provider: string;
-  message: string;
-}
+type ErrorToast = Toast;
 
 function App() {
   const { fetchMeshes } = useMeshStore();
@@ -171,20 +175,14 @@ function App() {
 
   useEffect(() => {
     const unlisten = listen<{ provider: string; message: string }>('provider-error', (event) => {
-      const toast: ErrorToast = {
-        id: Date.now(),
-        provider: event.payload.provider,
-        message: event.payload.message,
-      };
-      setToasts((prev) => [...prev, toast]);
+      addToast(event.payload.provider, event.payload.message);
     });
     return () => { unlisten.then((fn) => fn()); };
   }, [setToasts]);
 
   useEffect(() => {
     if (storeError) {
-      const toast: ErrorToast = { id: Date.now(), provider: 'System', message: storeError };
-      setToasts((prev) => [...prev, toast]);
+      addToast('System', storeError);
     }
   }, [storeError, setToasts]);
 
@@ -218,12 +216,7 @@ function App() {
 
   useEffect(() => {
     const unlisten = listen<{ session_id: number; error: string }>('resume-failed', (event) => {
-      const toast: ErrorToast = {
-        id: Date.now(),
-        provider: 'Resume',
-        message: `Session ${event.payload.session_id}: ${event.payload.error}`,
-      };
-      setToasts((prev) => [...prev, toast]);
+      addToast('Resume', `Session ${event.payload.session_id}: ${event.payload.error}`);
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
@@ -234,16 +227,32 @@ function App() {
     const unlisten = listen<{ node_name: string; worktree_path: string; error: string }>(
       'worktree-cleanup-failed',
       (event) => {
-        const toast: ErrorToast = {
-          id: Date.now(),
-          provider: 'Worktree',
-          message: `Couldn't remove worktree for ${event.payload.node_name} — it'll be retried on next launch.`,
-        };
-        setToasts((prev) => [...prev, toast]);
+        addToast(
+          'Worktree',
+          `Couldn't remove worktree for ${event.payload.node_name} — it'll be retried on next launch.`,
+        );
       },
     );
     return () => { unlisten.then((fn) => fn()); };
   }, []);
+
+  // Auto-dismiss toasts after TOAST_TTL_MS. A 1s tick is coarse
+  // enough that it won't fight React's render cycle, fine enough
+  // that the user sees the toast disappear in real time.
+  useEffect(() => {
+    if (toasts.length === 0) return;
+    const tick = () => {
+      setToasts((prev) => prev.filter((t) => Date.now() - t.createdAt < TOAST_TTL_MS));
+    };
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [toasts.length]);
+
+  const addToast = (provider: string, message: string) => {
+    const now = Date.now();
+    const incoming: ErrorToast = { id: now, provider, message, createdAt: now };
+    setToasts((prev) => applyToastCap(dedupToasts(prev, incoming, now, TOAST_DEDUP_TTL_MS), TOAST_MAX));
+  };
 
   const dismissToast = (id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
@@ -268,12 +277,22 @@ function App() {
       {/* Toast notifications */}
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
         {toasts.map((toast) => (
-          <div key={toast.id} className="bg-[#0d0d16] border border-[#ef4444]/50 text-white px-4 py-3 rounded flex items-center gap-2">
-            <div className="flex-1">
+          <div
+            key={toast.id}
+            className="bg-[#0d0d16] border border-[#ef4444]/50 text-white px-4 py-3 rounded flex items-start gap-2 min-w-[280px] max-w-[420px] shadow-lg"
+          >
+            <div className="flex-1 min-w-0">
               <div className="text-[10px] font-bold text-red-500 uppercase">{toast.provider} Error</div>
-              <div className="text-xs text-[#94a3b8]">{toast.message}</div>
+              <div className="text-xs text-[#94a3b8] break-words">{toast.message}</div>
             </div>
-            <button onClick={() => dismissToast(toast.id)} className="text-white/50 hover:text-white">&times;</button>
+            <button
+              type="button"
+              onClick={() => dismissToast(toast.id)}
+              aria-label="Dismiss notification"
+              className="shrink-0 -m-1 p-1 rounded text-white/60 hover:text-white hover:bg-white/10 text-base leading-none"
+            >
+              ×
+            </button>
           </div>
         ))}
       </div>
