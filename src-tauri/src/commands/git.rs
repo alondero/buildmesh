@@ -77,13 +77,19 @@ pub struct GitBranchStatus {
     pub name: String,
     pub ahead: u32,
     pub behind: u32,
+    /// Abbreviated HEAD OID (7 chars by default, matches `git rev-parse --short HEAD`).
+    /// Empty string when HEAD is unborn. Useful for showing a stable identifier on
+    /// detached-HEAD worktrees (the default buildmesh agent worktree mode) where
+    /// `name == "HEAD"` would otherwise be uninformative.
+    pub short_sha: String,
 }
 
 /// Report the current branch and how far ahead/behind its upstream it is.
 ///
 /// Returns `None` when `path` is not a git repository or HEAD is unborn (no
-/// commits yet). A detached HEAD reports as `name = "HEAD"` with no upstream.
-/// Ahead/behind are `0` when no upstream is configured.
+/// commits yet). A detached HEAD reports as `name = "HEAD"` with no upstream,
+/// but `short_sha` is still populated so the UI can render e.g.
+/// `detached @ a064f55`. Ahead/behind are `0` when no upstream is configured.
 ///
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list HEAD..@{u}`: the
 /// brace syntax is silently mangled by `Command::args` on Windows
@@ -110,6 +116,14 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 
     let local_oid = head.target();
 
+    // short_id() respects the repo's `core.abbreviate` (default 7). For unborn
+    // HEAD the OID is None; we leave short_sha empty rather than fabricate.
+    let short_sha = local_oid
+        .and_then(|oid| repo.find_object(oid, None).ok())
+        .and_then(|obj| obj.short_id().ok())
+        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .unwrap_or_default();
+
     let mut ahead = 0u32;
     let mut behind = 0u32;
     let refname = format!("refs/heads/{}", name);
@@ -130,6 +144,7 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
         name,
         ahead,
         behind,
+        short_sha,
     }))
 }
 

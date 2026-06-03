@@ -6,7 +6,7 @@ import type { AgentNode } from '../../stores/agentNodeStore';
 import type { FileExplorerContext } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
-import { useMeshBranchStatus } from '../../hooks/useMeshBranchStatus';
+import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
 import type { ProviderEntry } from './ProviderDropdown';
@@ -64,7 +64,7 @@ export function MeshItem({
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { branchStatus, refresh: refreshBranchStatus } = useMeshBranchStatus(mesh.path);
+  const { branchStatus, refresh: refreshBranchStatus } = useGitBranchStatus(mesh.path);
   const behind = branchStatus?.behind ?? 0;
 
   const handleSync = async () => {

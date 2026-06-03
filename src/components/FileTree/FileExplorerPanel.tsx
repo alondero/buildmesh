@@ -6,6 +6,7 @@ import {
 import { FileTree } from '../FileTree/FileTree';
 import { DiffView } from '../FileTree/DiffView';
 import { ChangedFilesSection } from '../FileTree/ChangedFilesSection';
+import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import type { FileExplorerContext } from '../../stores/uiStore';
 
 interface FileExplorerPanelProps {
@@ -94,6 +95,18 @@ export function FileExplorerPanel({
 
   const isTreeView = selectedFile === null;
   const hasGit = context.type === 'agent' || context.type === 'mesh';
+  // Subscribe to branch status for git contexts; passes null for userConfig so
+  // the hook short-circuits and we render no branch label.
+  const { branchStatus } = useGitBranchStatus(hasGit ? context.path : null);
+  // Detached HEAD is the default buildmesh agent worktree mode (see
+  // buildmesh-worktree-mode memory). `name === "HEAD"` would be uninformative,
+  // so we render `detached @ <short-sha>` instead — mirrors `git rev-parse`
+  // output. Empty `name` (no commits, yet) hides the label.
+  const branchLabel = branchStatus
+    ? branchStatus.name === 'HEAD' && branchStatus.short_sha
+      ? `detached @ ${branchStatus.short_sha}`
+      : branchStatus.name
+    : null;
   const headerTitle = (() => {
     switch (context.type) {
       case 'agent':
@@ -123,8 +136,19 @@ export function FileExplorerPanel({
         >
           {isTreeView ? (
             <>
-              <span className="text-xs text-text-secondary font-medium truncate">
-                {headerTitle}
+              <span className="text-xs text-text-secondary font-medium truncate flex items-center gap-1.5 min-w-0">
+                <span className="truncate">{headerTitle}</span>
+                {branchLabel && (
+                  <>
+                    <span className="text-text-muted flex-shrink-0" aria-hidden="true">·</span>
+                    <span
+                      className="text-[10px] font-mono text-text-muted whitespace-nowrap flex-shrink-0"
+                      title={`Current branch: ${branchLabel}`}
+                    >
+                      {branchLabel}
+                    </span>
+                  </>
+                )}
               </span>
               <button
                 onClick={onClose}
