@@ -35,13 +35,6 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
         onCommit={(next) => renameAgentNode(node.id, next)}
         className="flex-1 truncate text-text-secondary font-sans text-left"
       />
-      <span className={`text-[9px] font-mono px-1 py-0.5 rounded border leading-none font-medium select-none ${
-        node.use_worktree
-          ? 'bg-bg-overlay border-border-subtle text-text-muted'
-          : 'bg-accent-cyan/10 border-accent-cyan/30 text-accent-cyan font-semibold'
-      }`}>
-        {node.use_worktree ? 'worktree' : 'root'}
-      </span>
       <button
         onClick={onDelete}
         className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
