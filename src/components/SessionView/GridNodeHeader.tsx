@@ -7,6 +7,7 @@ import { useGitSummary } from '../../hooks/useGitSummary';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
+import { ProviderIcon } from '../Providers/ProviderIcon';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
@@ -43,6 +44,7 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
     >
       <div className="flex items-center gap-2 overflow-hidden">
         <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
+        <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 drop-shadow-sm" />
         <span className="text-[12px] font-semibold text-text-primary truncate font-sans drop-shadow-sm">
           {node.name} <span className="text-text-secondary font-normal">{meshLabel}</span>
         </span>

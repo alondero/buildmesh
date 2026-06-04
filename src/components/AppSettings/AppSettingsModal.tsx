@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { ProviderIcon } from '../Providers/ProviderIcon';
 
 interface AppSettingsModalProps {
   onClose: () => void;
@@ -131,24 +132,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const getUsageForProvider = (providerId: string) =>
     usageData.find(u => u.provider === providerId);
 
-  const ProviderIcon = ({ id }: { id: string }) => {
-    const icons: Record<string, string> = {
-      anthropic: '🧠',
-      codex: '⚡',
-      minimax: '🔷',
-      kimi: '🌙',
-      agy: '🟢',
-    };
-    return <span className="text-2xl">{icons[id] || '❓'}</span>;
-  };
-
   const ProviderCard = ({ providerId, label }: { providerId: string; label: string }) => {
     const usage = getUsageForProvider(providerId);
 
     return (
       <div className="border border-border-subtle rounded-lg p-5">
         <div className="flex items-center gap-3 mb-3">
-          <ProviderIcon id={providerId} />
+          <ProviderIcon providerId={providerId} className="h-6 w-6" />
           <span className="text-lg font-medium text-text-primary">{label}</span>
           {usageLoading && <span className="ml-auto text-base text-text-muted">Loading...</span>}
         </div>
@@ -249,7 +239,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           <div className="mt-5 border border-border-subtle rounded-lg p-5">
             <div className="flex items-center gap-3 mb-3">
-              <ProviderIcon id="minimax" />
+              <ProviderIcon providerId="minimax" className="h-6 w-6" />
               <span className="text-lg font-medium text-text-primary">MiniMax API Key</span>
             </div>
             <p className="text-base text-text-muted mb-3">
