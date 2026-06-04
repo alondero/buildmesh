@@ -138,6 +138,7 @@ pub fn run() {
             commands::agent_node::get_worktree_close_safety,
             commands::agent_node::set_cli_session_id,
             commands::agent_node::set_active_session,
+            commands::agent_node::rename_session,
             // Mesh
             commands::mesh::add_project,
             commands::mesh::create_project,

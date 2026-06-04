@@ -303,4 +303,47 @@ describe('useAgentNodeStore', () => {
       });
     });
   });
+
+  describe('renameAgentNode', () => {
+    it('optimistically updates the name and calls rename_session', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 11, name: 'bold-keen-brook' })] });
+      mockInvoke.mockResolvedValueOnce(undefined);
+
+      await useAgentNodeStore.getState().renameAgentNode(11, 'Refactor OAuth callback');
+
+      // The store reflects the new name.
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 11)?.name)
+        .toBe('Refactor OAuth callback');
+      // And the backend was told the same name, with the camelCase sessionId
+      // convention used by every other agent-node invoke call.
+      expect(mockInvoke).toHaveBeenCalledWith('rename_session', {
+        sessionId: 11,
+        name: 'Refactor OAuth callback',
+      });
+    });
+
+    it('rolls back the optimistic update and re-throws on invoke failure', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 12, name: 'old-name' })] });
+      mockInvoke.mockRejectedValueOnce(new Error('name too long (max 80 chars)'));
+
+      await expect(
+        useAgentNodeStore.getState().renameAgentNode(12, 'x'.repeat(81))
+      ).rejects.toThrow('name too long');
+
+      // Rollback restored the prior name, and the error is surfaced on the store.
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 12)?.name)
+        .toBe('old-name');
+      expect(useAgentNodeStore.getState().error).toContain('name too long');
+    });
+
+    it('is a no-op when the node is not in the store', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 13 })] });
+
+      await useAgentNodeStore.getState().renameAgentNode(999, 'whatever');
+
+      // No invoke call was made and the store is untouched.
+      expect(mockInvoke).not.toHaveBeenCalled();
+      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+    });
+  });
 });

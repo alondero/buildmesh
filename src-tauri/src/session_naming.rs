@@ -265,8 +265,28 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
 
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
-        match summarize_and_rename_with(&DbSessionNamingRepository, node_id, &buffer).await {
+        match summarize_and_rename_with(node_id, &buffer).await {
             Ok(slug) => {
+                // User-rename race guard: the LLM call above can take 5-30s.
+                // During that window the user may have invoked `rename_session`
+                // and overwritten the node's name in the DB. Re-read and skip
+                // both the write and the event emit if the user has taken
+                // ownership — the user always wins.
+                if user_renamed_mid_flight(&DbSessionNamingRepository, node_id) {
+                    tracing::info!(
+                        "Node {} was manually renamed during LLM call; skipping slug '{}'",
+                        node_id,
+                        slug
+                    );
+                    clear_node_state(node_id);
+                    RENAMING_IN_PROGRESS.lock().unwrap().remove(&node_id);
+                    return;
+                }
+                if let Err(e) =
+                    DbSessionNamingRepository.update_agent_node_name(node_id, &slug)
+                {
+                    tracing::warn!("Node {} rename write failed: {}", node_id, e);
+                }
                 clear_node_state(node_id);
                 let _ = app_for_task.emit(
                     "session-renamed",
@@ -315,6 +335,22 @@ pub fn is_default_name(name: &str) -> bool {
     ADJECTIVES.contains(&parts[0])
         && ADJECTIVES.contains(&parts[1])
         && NOUNS.contains(&parts[2])
+}
+
+/// Race-guard helper: returns true if the node's name in the DB is not a
+/// default slug (i.e. it was either LLM-renamed earlier or manually renamed
+/// by the user). Called from the LLM commit path to make sure a user
+/// rename that landed during the LLM call wins over the auto-rename. On a
+/// DB read error we err on the side of "user has not renamed" so the LLM
+/// rename is allowed to proceed (failing closed here would be a silent
+/// regression of the auto-rename for nodes whose DB read transiently fails).
+pub(crate) fn user_renamed_mid_flight(
+    repo: &dyn SessionNamingRepository,
+    node_id: i64,
+) -> bool {
+    repo.get_agent_node_by_id(node_id)
+        .map(|n| !is_default_name(&n.name))
+        .unwrap_or(false)
 }
 
 /// Clear the buffer for a node. Called on kill so the node can resume fresh.
@@ -374,7 +410,6 @@ fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 // ---------------------------------------------------------------------------
 
 async fn summarize_and_rename_with(
-    repo: &dyn SessionNamingRepository,
     node_id: i64,
     buffer: &str,
 ) -> Result<String, String> {
@@ -439,7 +474,6 @@ async fn summarize_and_rename_with(
 
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let slug = slug_with_retry(&raw)?;
-    repo.update_agent_node_name(node_id, &slug)?;
     Ok(slug)
 }
 
@@ -1011,5 +1045,74 @@ mod tests {
     fn strip_claude_code_banner_is_noop_when_no_banner_present() {
         let input = "User asked to fix a bug.\nAssistant: Looking at the code now.";
         assert_eq!(strip_claude_code_banner(input), input);
+    }
+
+    // --- Manual rename race guard ---
+
+    #[test]
+    fn user_renamed_mid_flight_returns_true_for_user_chosen_name() {
+        // "Fix OAuth callback" is not a default adj-adj-noun slug — the
+        // guard must return true so the LLM slug is dropped.
+        let repo = MockRepo::with_name("Fix OAuth callback");
+        assert!(user_renamed_mid_flight(&repo, 1));
+    }
+
+    #[test]
+    fn user_renamed_mid_flight_returns_true_for_prior_llm_rename() {
+        // A node whose LLM rename already committed is also "renamed";
+        // the guard skips re-renaming in that case too.
+        let repo = MockRepo::with_name("fix-auth-token-refresh");
+        assert!(user_renamed_mid_flight(&repo, 1));
+    }
+
+    #[test]
+    fn user_renamed_mid_flight_returns_false_for_default_name() {
+        // Default adj-adj-noun slugs (e.g. "bold-keen-brook") mean the node
+        // has NOT been renamed, so the LLM rename is allowed to proceed.
+        let repo = MockRepo::with_name("bold-keen-brook");
+        assert!(!user_renamed_mid_flight(&repo, 1));
+    }
+
+    #[test]
+    fn user_renamed_mid_flight_returns_false_on_db_error() {
+        // A transient DB read failure must NOT silently disable the
+        // auto-rename path; err on the side of "user has not renamed" so
+        // the LLM slug still gets a chance to commit.
+        let repo = MockRepo {
+            node_name: String::new(),
+            should_fail: true,
+            updates: std::sync::Mutex::new(vec![]),
+        };
+        assert!(!user_renamed_mid_flight(&repo, 1));
+    }
+
+    // --- cleanup() frees the rename-eligible state ---
+
+    #[test]
+    fn cleanup_removes_node_from_rename_eligible_maps() {
+        // The manual-rename command relies on `cleanup` to free the buffer,
+        // gate, and attempt counter for a node that no longer needs a
+        // rename. `RENAMING_IN_PROGRESS` is intentionally NOT touched here:
+        // it lives in the spawned task's epilogue so a concurrent LLM
+        // rename is never lost mid-flight. Seed the three eligible maps
+        // and assert cleanup drains them.
+        let node_id = 81000i64;
+        cleanup(node_id); // start from a clean slate
+
+        SESSION_BUFFERS.lock().unwrap().insert(node_id, "buffered output".to_string());
+        BUFFERING_READY.lock().unwrap().insert(node_id);
+        RENAME_ATTEMPTS.lock().unwrap().insert(node_id, 2);
+
+        // Sanity: present in all three.
+        assert!(SESSION_BUFFERS.lock().unwrap().contains_key(&node_id));
+        assert!(BUFFERING_READY.lock().unwrap().contains(&node_id));
+        assert_eq!(RENAME_ATTEMPTS.lock().unwrap().get(&node_id).copied(), Some(2));
+
+        cleanup(node_id);
+
+        // Post-cleanup: the three eligible maps are drained.
+        assert!(!SESSION_BUFFERS.lock().unwrap().contains_key(&node_id));
+        assert!(!BUFFERING_READY.lock().unwrap().contains(&node_id));
+        assert!(!RENAME_ATTEMPTS.lock().unwrap().contains_key(&node_id));
     }
 }

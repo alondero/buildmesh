@@ -8,6 +8,7 @@ import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { InlineEditableText } from '../shared/InlineEditableText';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
@@ -18,6 +19,7 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
   const toggleFileExplorer = useUIStore(state => state.toggleFileExplorer);
   const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
+  const renameAgentNode = useAgentNodeStore(state => state.renameAgentNode);
   const meshesById = useMeshStore(state => state.meshesById);
   const meshColor = getMeshColor(node.mesh_id);
 
@@ -46,7 +48,11 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
         <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
         <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 drop-shadow-sm" />
         <span className="text-[12px] font-semibold text-text-primary truncate font-sans drop-shadow-sm">
-          {node.name} <span className="text-text-secondary font-normal">{meshLabel}</span>
+          <InlineEditableText
+            value={node.name}
+            onCommit={(next) => renameAgentNode(node.id, next)}
+            className="text-[12px] font-semibold text-text-primary font-sans drop-shadow-sm"
+          /> <span className="text-text-secondary font-normal">{meshLabel}</span>
         </span>
         {summary && (
           <span
