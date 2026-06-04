@@ -91,6 +91,7 @@ async fn spawn_new_agent_impl(
         &branch,
         Some(&effective_provider),
         source_issue,
+        None,
     ).map_err(|e| e.to_string())?;
 
     let prefill_text = if Provider::from_db_str(&effective_provider).adapter().supports_prefill() {

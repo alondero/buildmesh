@@ -9,8 +9,14 @@ A project workspace associated with a local Git repository root path.
 _Avoid_: Project, repo, folder
 
 **Agent Node**:
-An interactive panel running a single agent execution process within a dedicated worktree or directory.
+An interactive panel running a single agent execution process within a dedicated directory (either a worktree or the mesh root).
 _Avoid_: Session, pane, terminal node
+
+**Worktree Node**:
+An Agent Node operating on an isolated Git worktree branch of its parent Mesh. (Used when the Mesh property use_worktree is true, unless overridden).
+
+**Root Node**:
+An Agent Node operating directly on the parent Mesh's root directory, bypassing worktree isolation. (Used when the Mesh property use_worktree is false, or when overridden via Alt-click).
 
 **File Explorer Panel**:
 A collapsible side panel displaying files and changes for a given Mesh or Agent Node.

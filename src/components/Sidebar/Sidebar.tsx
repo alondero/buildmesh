@@ -62,10 +62,10 @@ export function Sidebar() {
   const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
   const handleToggleDropdown = (mesh: Mesh) => setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
 
-  const handleSelectProvider = async (mesh: Mesh, providerId: string) => {
+  const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
     setOpenDropdownFor(null);
     try {
-      const node = await createAgentNode(mesh.id, mesh.name, mesh.path, 'main', providerId);
+      const node = await createAgentNode(mesh.id, mesh.name, mesh.path, 'main', providerId, useWorktree);
       await setActiveNode(node.id);
       selectMesh(mesh.id);
     } catch (e) {

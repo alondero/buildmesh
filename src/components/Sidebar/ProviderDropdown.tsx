@@ -17,7 +17,7 @@ export function colorClassForProvider(providerId: string): string {
 interface ProviderDropdownProps {
   meshId: number;
   providers: ProviderEntry[];
-  onSelect: (providerId: string) => void;
+  onSelect: (providerId: string, altKey: boolean) => void;
 }
 
 export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdownProps) {
@@ -29,7 +29,7 @@ export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdo
       {providers.map(p => (
         <button
           key={p.id}
-          onClick={(e) => { e.stopPropagation(); onSelect(p.id); }}
+          onClick={(e) => { e.stopPropagation(); onSelect(p.id, e.altKey); }}
           className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
         >
           <span className={`w-2 h-2 rounded-full ${p.color}`} />

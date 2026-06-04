@@ -37,7 +37,7 @@ describe('ProviderDropdown', () => {
 
 await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
 
-    expect(onSelect).toHaveBeenCalledWith('agy');
+    expect(onSelect).toHaveBeenCalledWith('agy', false);
   });
 
   it('stops click propagation so the parent row is not toggled', async () => {

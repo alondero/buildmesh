@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NodeCreationForm } from '../../src/components/Sidebar/NodeCreationForm';
 import type { Mesh } from '../../src/stores/meshStore';
@@ -44,7 +44,16 @@ describe('NodeCreationForm', () => {
     await userEvent.click(screen.getByTitle('Add agent node'));
 
     expect(getDefaultProvider).toHaveBeenCalledWith(7);
-    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'anthropic'));
+    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'anthropic', true));
+  });
+
+  it('adds a node in the mesh root when + is alt-clicked', async () => {
+    const { onSelectProvider, getDefaultProvider } = setup();
+
+    fireEvent.click(screen.getByTitle('Add agent node'), { altKey: true });
+
+    expect(getDefaultProvider).toHaveBeenCalledWith(7);
+    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'anthropic', false));
   });
 
   it('toggles the dropdown when the chevron is clicked', async () => {
@@ -72,7 +81,15 @@ describe('NodeCreationForm', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
 
-    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy');
+    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', true);
+  });
+
+  it('selects a specific provider in the mesh root from the open dropdown when alt-clicked', async () => {
+    const { onSelectProvider } = setup({ isDropdownOpen: true });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agy' }), { altKey: true });
+
+    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', false);
   });
 
   it('reflects the resolved default provider in the + button tooltip on hover', async () => {

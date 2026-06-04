@@ -26,6 +26,13 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
       <span className="text-text-muted cursor-grab active:cursor-grabbing text-[10px] opacity-0 group-hover/node:opacity-100 transition-opacity">⋮⋮</span>
       <span className={config.color} title={config.label}>{config.dot}</span>
       <span className="flex-1 truncate text-text-secondary font-sans">{node.name}</span>
+      <span className={`text-[9px] font-mono px-1 py-0.5 rounded border leading-none font-medium select-none ${
+        node.use_worktree
+          ? 'bg-bg-overlay border-border-subtle text-text-muted'
+          : 'bg-accent-cyan/10 border-accent-cyan/30 text-accent-cyan font-semibold'
+      }`}>
+        {node.use_worktree ? 'worktree' : 'root'}
+      </span>
       <button
         onClick={onDelete}
         className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"

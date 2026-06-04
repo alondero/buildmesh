@@ -110,6 +110,83 @@ fn build_sides(lines: &[DiffLine]) -> (String, String) {
     (old_lines.join("\n"), new_lines.join("\n"))
 }
 
+/// Number of unchanged context lines to show on each side of a change
+/// region. Mirrors the default in `git diff -U3` and GitHub's collapsed
+/// diff view, so the user sees the change with enough surrounding code to
+/// orient themselves but is not flooded with the whole file.
+const CONTEXT_LINES: usize = 3;
+
+/// Split a flat diff into hunks with bounded context. Long stretches of
+/// unchanged lines that fall outside the context window around any change
+/// are dropped. Adjacent change regions whose context windows overlap
+/// (i.e. the gap between them is ≤ 2 * CONTEXT_LINES) are merged into a
+/// single hunk. Returns an empty vec if the diff contains no changes.
+fn group_into_hunks(lines: &[DiffLine], context: usize) -> Vec<Vec<DiffLine>> {
+    let change_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.line_type != "context")
+        .map(|(i, _)| i)
+        .collect();
+
+    if change_indices.is_empty() {
+        return vec![];
+    }
+
+    // Window of [i - context, i + context] around each change, clamped to
+    // the diff line range. End is exclusive (Rust range convention).
+    let mut windows: Vec<(usize, usize)> = change_indices
+        .iter()
+        .map(|&i| {
+            let start = i.saturating_sub(context);
+            let end = (i + context + 1).min(lines.len());
+            (start, end)
+        })
+        .collect();
+
+    // Merge overlapping / touching windows so that close changes share
+    // their context lines and render as a single hunk.
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for w in windows.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            if w.0 <= last.1 {
+                last.1 = last.1.max(w.1);
+                continue;
+            }
+        }
+        merged.push(w);
+    }
+
+    merged
+        .iter()
+        .map(|(start, end)| lines[*start..*end].to_vec())
+        .collect()
+}
+
+/// Build a single DiffHunk for a group of diff lines, computing syntax
+/// highlighting and hunk header metadata (old_start / new_start).
+fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
+    let (old_highlighted, new_highlighted) = build_sides(group);
+    let old_hl = highlight_content(&old_highlighted, highlight_path);
+    let new_hl = highlight_content(&new_highlighted, highlight_path);
+    // hunk header: oldest new/old line number in this group, plus the
+    // count of remove/add lines (matches the previous single-hunk
+    // convention; consumers that want total hunk length can read lines.len()).
+    let old_start = group.iter().find_map(|l| l.old_num).unwrap_or(0);
+    let new_start = group.iter().find_map(|l| l.new_num).unwrap_or(0);
+    let old_lines = group.iter().filter(|l| l.line_type == "remove").count();
+    let new_lines = group.iter().filter(|l| l.line_type == "add").count();
+    DiffHunk {
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        old_highlighted: old_hl,
+        new_highlighted: new_hl,
+        lines: group.to_vec(),
+    }
+}
+
 /// Diff two files on disk
 #[command]
 pub async fn diff_files(
@@ -119,19 +196,11 @@ pub async fn diff_files(
     let old_content = fs::read_to_string(&old_path).unwrap_or_default();
     let new_content = fs::read_to_string(&new_path).unwrap_or_default();
     let lines = compute_file_diff(&old_content, &new_content);
-    let (old_highlighted, new_highlighted) = build_sides(&lines);
-    let old_hl = highlight_content(&old_highlighted, &new_path);
-    let new_hl = highlight_content(&new_highlighted, &new_path);
-
-    let hunks = vec![DiffHunk {
-        old_start: 1,
-        old_lines: lines.iter().filter(|l| l.line_type == "remove").count(),
-        new_start: 1,
-        new_lines: lines.iter().filter(|l| l.line_type == "add").count(),
-        old_highlighted: old_hl,
-        new_highlighted: new_hl,
-        lines,
-    }];
+    let groups = group_into_hunks(&lines, CONTEXT_LINES);
+    let hunks = groups
+        .iter()
+        .map(|g| build_hunk(g, &new_path))
+        .collect();
 
     Ok(DiffResult {
         files: vec![FileDiff {
@@ -170,19 +239,11 @@ pub async fn diff_file_against_head(
 
     let old_content = head_content.as_deref().unwrap_or("");
     let lines = compute_file_diff(old_content, &current_content);
-    let (old_highlighted, new_highlighted) = build_sides(&lines);
-    let old_hl = highlight_content(&old_highlighted, &file_path);
-    let new_hl = highlight_content(&new_highlighted, &file_path);
-
-    let hunks = vec![DiffHunk {
-        old_start: 1,
-        old_lines: lines.iter().filter(|l| l.line_type == "remove").count(),
-        new_start: 1,
-        new_lines: lines.iter().filter(|l| l.line_type == "add").count(),
-        old_highlighted: old_hl,
-        new_highlighted: new_hl,
-        lines,
-    }];
+    let groups = group_into_hunks(&lines, CONTEXT_LINES);
+    let hunks = groups
+        .iter()
+        .map(|g| build_hunk(g, &file_path))
+        .collect();
 
     Ok(DiffResult {
         files: vec![FileDiff {
@@ -390,5 +451,85 @@ mod tests {
     fn highlight_content_handles_unknown_extension() {
         let result = highlight_content("random text", "file.xyz123");
         assert!(result.contains("random text"));
+    }
+
+    // Regression: clicking a changed file used to render the entire file as
+    // context lines, drowning the actual diff. The diff must be grouped into
+    // hunks with a small window of context around each change (GitHub-style)
+    // so the user only sees the changed regions. We assert this indirectly
+    // by checking that the total line count returned is bounded for a small
+    // change in a large file. The exact hunk-grouping API is added in the
+    // companion test below; this one pins the upstream contract.
+    #[test]
+    fn compute_file_diff_bounds_context_for_small_change_in_large_file() {
+        // 100-line file, one line changed at position 50.
+        let mut old_content = String::new();
+        for i in 0..100 {
+            old_content.push_str(&format!("line {}\n", i));
+        }
+        let mut new_content = old_content.clone();
+        let pos = old_content.find("line 50\n").unwrap();
+        let end = pos + "line 50\n".len();
+        new_content.replace_range(pos..end, "line FIFTY\n");
+
+        // Today: the full 100 unchanged lines are returned as context plus
+        // 1 remove + 1 add = 102. The fix groups lines into hunks and drops
+        // long unchanged stretches, so the post-fix total should be a small
+        // window around the change (~10-20 lines), not 102.
+        //
+        // To make the assertion meaningful regardless of which grouping API
+        // ends up winning, we test the public command entry point: assemble
+        // a tiny on-disk repo with one tracked file, call the Tauri command
+        // (via the helper that doesn't require Tauri runtime), and bound
+        // the returned `DiffResult` size.
+        //
+        // The helper used here (`diff_files`) wraps `compute_file_diff` plus
+        // a single hunk; once hunk grouping is in place this helper should
+        // be updated to produce multiple hunks and the test re-pinned to
+        // `diff_file_against_head`. We assert a budget that the unfixed
+        // implementation violates (~102 lines) and the fixed implementation
+        // satisfies (under 30 lines).
+        let tmp = tempdir_via_env();
+        let old = tmp.join("old.txt");
+        let new = tmp.join("new.txt");
+        std::fs::write(&old, &old_content).unwrap();
+        std::fs::write(&new, &new_content).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(diff_files(
+            old.to_string_lossy().to_string(),
+            new.to_string_lossy().to_string(),
+        ));
+        let result = result.expect("diff_files should succeed");
+
+        // The public helper today still emits a single hunk containing every
+        // line. Once hunk grouping is in place, total line count across all
+        // hunks should be bounded to the context window.
+        let total_lines: usize = result
+            .files
+            .iter()
+            .flat_map(|f| f.hunks.iter())
+            .map(|h| h.lines.len())
+            .sum();
+        assert!(
+            total_lines < 30,
+            "expected bounded diff (<30 lines) for a 1-line change in a 100-line file, got {} lines",
+            total_lines
+        );
+    }
+
+    fn tempdir_via_env() -> std::path::PathBuf {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "buildmesh-diff-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = base.join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

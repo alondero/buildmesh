@@ -95,6 +95,7 @@ pub async fn import_and_resume(
         .map(Provider::from_db_str)
         .unwrap_or(Provider::Anthropic);
 
+    let use_worktree = req.worktree_name.is_some();
     let node = match db::create_agent_node(
         mesh_id,
         &session_name,
@@ -104,6 +105,7 @@ pub async fn import_and_resume(
         provider_enum,
         req.worktree_name.as_deref(),
         None,
+        use_worktree,
     ) {
         Ok(n) => n,
         Err(e) => {
