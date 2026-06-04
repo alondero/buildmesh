@@ -453,13 +453,113 @@ mod tests {
         assert!(result.contains("random text"));
     }
 
+    fn tempdir_via_env() -> std::path::PathBuf {
+        let base = std::env::temp_dir();
+        let unique = format!(
+            "buildmesh-diff-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = base.join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn group_into_hunks_empty_when_no_changes() {
+        let lines = vec![
+            DiffLine { line_type: "context".into(), content: "a".into(), old_num: Some(1), new_num: Some(1) },
+            DiffLine { line_type: "context".into(), content: "b".into(), old_num: Some(2), new_num: Some(2) },
+        ];
+        assert!(group_into_hunks(&lines, 3).is_empty());
+    }
+
+    #[test]
+    fn group_into_hunks_bounds_context_for_isolated_change() {
+        // 20 context lines, one change at index 20, 19 trailing context.
+        // With context=3 the result must be a single hunk spanning indices
+        // [17, 24) — the 3 context lines before the change plus the change
+        // itself plus 3 after — regardless of how many other unchanged
+        // lines are in the file.
+        let mut lines = Vec::new();
+        for i in 0..20 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+        lines.push(DiffLine { line_type: "add".into(), content: "NEW".into(), old_num: None, new_num: Some(21) });
+        for i in 21..40 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+
+        let hunks = group_into_hunks(&lines, 3);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].len(), 7, "expected 3 context + 1 add + 3 context = 7");
+        // First 3 are context, then the add, then 3 more context.
+        for line in &hunks[0][..3] {
+            assert_eq!(line.line_type, "context");
+        }
+        assert_eq!(hunks[0][3].line_type, "add");
+        for line in &hunks[0][4..] {
+            assert_eq!(line.line_type, "context");
+        }
+    }
+
+    #[test]
+    fn group_into_hunks_splits_far_apart_changes() {
+        // Two changes 50 context lines apart must produce two separate hunks
+        // (one hunk would re-introduce the "entire file" rendering we are
+        // trying to avoid).
+        let mut lines = Vec::new();
+        for i in 0..10 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+        lines.push(DiffLine { line_type: "add".into(), content: "FIRST".into(), old_num: None, new_num: Some(11) });
+        for i in 11..61 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+        lines.push(DiffLine { line_type: "add".into(), content: "SECOND".into(), old_num: None, new_num: Some(62) });
+        for i in 62..70 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+
+        let hunks = group_into_hunks(&lines, 3);
+        assert_eq!(hunks.len(), 2, "expected two hunks, got {}: {:#?}", hunks.len(), hunks);
+        assert!(hunks[0].iter().any(|l| l.content == "FIRST"));
+        assert!(hunks[1].iter().any(|l| l.content == "SECOND"));
+        // Neither hunk should contain the full file (50 context lines
+        // between changes must be dropped).
+        assert!(hunks[0].len() < 10);
+        assert!(hunks[1].len() < 10);
+    }
+
+    #[test]
+    fn group_into_hunks_merges_close_changes() {
+        // Two changes 4 context lines apart (≤ 2 * CONTEXT) should merge
+        // into a single hunk with a shared context window in the middle.
+        let mut lines = Vec::new();
+        for i in 0..5 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+        lines.push(DiffLine { line_type: "add".into(), content: "FIRST".into(), old_num: None, new_num: Some(6) });
+        for i in 6..10 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+        lines.push(DiffLine { line_type: "add".into(), content: "SECOND".into(), old_num: None, new_num: Some(11) });
+        for i in 11..15 {
+            lines.push(DiffLine { line_type: "context".into(), content: format!("a{}", i), old_num: Some(i+1), new_num: Some(i+1) });
+        }
+
+        let hunks = group_into_hunks(&lines, 3);
+        assert_eq!(hunks.len(), 1, "close changes should merge into one hunk");
+    }
+
     // Regression: clicking a changed file used to render the entire file as
     // context lines, drowning the actual diff. The diff must be grouped into
     // hunks with a small window of context around each change (GitHub-style)
-    // so the user only sees the changed regions. We assert this indirectly
-    // by checking that the total line count returned is bounded for a small
-    // change in a large file. The exact hunk-grouping API is added in the
-    // companion test below; this one pins the upstream contract.
+    // so the user only sees the changed regions. We pin the end-to-end
+    // contract via the public `diff_files` command.
     #[test]
     fn compute_file_diff_bounds_context_for_small_change_in_large_file() {
         // 100-line file, one line changed at position 50.
@@ -516,20 +616,5 @@ mod tests {
             "expected bounded diff (<30 lines) for a 1-line change in a 100-line file, got {} lines",
             total_lines
         );
-    }
-
-    fn tempdir_via_env() -> std::path::PathBuf {
-        let base = std::env::temp_dir();
-        let unique = format!(
-            "buildmesh-diff-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let dir = base.join(unique);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
     }
 }

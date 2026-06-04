@@ -14,7 +14,11 @@ export function DiffView({ diff }: DiffViewProps) {
   }
 
   return (
-    <div className="flex-1 overflow-auto font-mono text-xs">
+    // `min-h-0` is the key bit: a flex item defaults to `min-height: auto`
+    // (its content's intrinsic height), which prevents it from shrinking
+    // below the content and defeats `overflow-auto`. Setting `min-h-0` lets
+    // the panel actually scroll when the diff is taller than the viewport.
+    <div className="flex-1 min-h-0 overflow-auto font-mono text-xs">
       {diff.files.map((file) => (
         <div key={file.path}>
           <div className="sticky top-0 bg-bg-overlay border-b border-border-subtle">

@@ -248,7 +248,12 @@ export function FileExplorerPanel({
             )}
           </div>
         ) : (
-          <div className="flex-1 overflow-hidden">
+          // The diff body must scroll when the diff is tall. The container
+          // here is a flex child of the panel's flex column above (line 131),
+          // and it must itself be a flex column so that DiffView's `flex-1`
+          // actually constrains its height — otherwise the diff grows to its
+          // content height and the parent clips it without ever scrolling.
+          <div className="flex-1 overflow-hidden flex flex-col">
             {currentDiff ? (
               <DiffView diff={currentDiff} />
             ) : (
