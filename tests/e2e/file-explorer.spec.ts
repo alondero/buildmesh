@@ -29,7 +29,7 @@ test.describe('file explorer', () => {
 
     // Navigate to app
     await page.goto('http://localhost:1420');
-    await page.waitForSelector('text="Meshes"', { timeout: 15000 });
+    await page.waitForSelector('img[alt="Buildmesh"]', { timeout: 15000 });
     await page.waitForTimeout(3000);
 
     // Find mesh row and hover
@@ -44,7 +44,7 @@ test.describe('file explorer', () => {
         await page.waitForTimeout(2000);
 
         // Should still be showing the app
-        expect(await page.locator('text="Meshes"').isVisible()).toBe(true);
+        expect(await page.locator('img[alt="Buildmesh"]').isVisible()).toBe(true);
       }
     }
   });
@@ -74,7 +74,7 @@ test.describe('file explorer', () => {
 
     // Navigate to app
     await page.goto('http://localhost:1420');
-    await page.waitForSelector('text="Meshes"', { timeout: 15000 });
+    await page.waitForSelector('img[alt="Buildmesh"]', { timeout: 15000 });
     await page.waitForTimeout(3000);
 
     // Click on an agent node first (user reported this triggers the bug)
@@ -97,7 +97,7 @@ test.describe('file explorer', () => {
         await page.waitForTimeout(3000);
 
         // Should still be showing the app
-        expect(await page.locator('text="Meshes"').isVisible()).toBe(true);
+        expect(await page.locator('img[alt="Buildmesh"]').isVisible()).toBe(true);
 
         // Check for React error #321
         const react321Errors = consoleErrors.filter(e => e.includes('321') || e.includes('word-wrap'));
