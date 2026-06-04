@@ -542,13 +542,32 @@ struct AgyModelsResp {
     agent_model_sorts: Vec<AgySort>,
 }
 
+/// Models whose `displayName` starts with this prefix all draw from one shared
+/// Gemini bucket on Google's side (verified live 2026-06-04), even though the
+/// API reports them as separate effort-level entries (Flash Low/Medium/High,
+/// Pro Low/High). We collapse them into a single row to avoid five identical bars.
+const GEMINI_DISPLAY_PREFIX: &str = "Gemini";
+const GEMINI_COLLAPSED_LABEL: &str = "Gemini (all models)";
+
 /// Appends one window per model that carries a quota. `used_percent` is the
 /// inverse of the remaining fraction, matching how the other providers report.
-fn push_agy_window(windows: &mut Vec<UsageWindow>, model: &AgyModel) {
+/// Gemini-prefixed models are emitted at most once (relabeled to
+/// `GEMINI_COLLAPSED_LABEL`) — see the prefix constant for the rationale.
+fn push_agy_window(windows: &mut Vec<UsageWindow>, model: &AgyModel, seen_gemini: &mut bool) {
     if let (Some(name), Some(q)) = (&model.display_name, &model.quota_info) {
         if let Some(fraction) = q.remaining_fraction {
+            let is_gemini = name.starts_with(GEMINI_DISPLAY_PREFIX);
+            if is_gemini && *seen_gemini {
+                return;
+            }
+            let label = if is_gemini {
+                *seen_gemini = true;
+                GEMINI_COLLAPSED_LABEL.to_string()
+            } else {
+                name.clone()
+            };
             windows.push(UsageWindow {
-                label: name.clone(),
+                label,
                 used_percent: Some((1.0 - fraction) * 100.0),
                 resets_at: q.reset_time.clone(),
             });
@@ -570,14 +589,15 @@ fn parse_agy_models(body: &str) -> Result<(Vec<UsageWindow>, Option<String>), Us
         .unwrap_or_default();
 
     let mut windows = vec![];
+    let mut seen_gemini = false;
     if ordered_ids.is_empty() {
         for model in resp.models.values() {
-            push_agy_window(&mut windows, model);
+            push_agy_window(&mut windows, model, &mut seen_gemini);
         }
     } else {
         for id in ordered_ids {
             if let Some(model) = resp.models.get(id) {
-                push_agy_window(&mut windows, model);
+                push_agy_window(&mut windows, model, &mut seen_gemini);
             }
         }
     }
@@ -868,7 +888,9 @@ mod tests {
         assert_eq!(windows.len(), 2);
         assert_eq!(windows[0].label, "Claude Sonnet 4.6 (Thinking)");
         assert_eq!(windows[0].used_percent, Some(0.0));
-        assert_eq!(windows[1].label, "Gemini 3.5 Flash (Medium)");
+        // Single Gemini entry is still relabeled — the collapsed label applies
+        // unconditionally so the row always reads as "this is your Gemini budget".
+        assert_eq!(windows[1].label, "Gemini (all models)");
         // Same float expression the parser uses (0.8 remaining → ~20% used).
         assert_eq!(windows[1].used_percent, Some((1.0 - 0.8) * 100.0));
         assert_eq!(windows[1].resets_at.as_deref(), Some("2026-05-31T12:22:46Z"));
@@ -888,6 +910,36 @@ mod tests {
         let (windows, detail) = parse_agy_models(r#"{"models":{}}"#).unwrap();
         assert!(windows.is_empty());
         assert_eq!(detail.as_deref(), Some("No active model quotas found"));
+    }
+
+    #[test]
+    fn parse_agy_models_collapses_gemini_effort_levels() {
+        // Antigravity returns one quota row per Gemini effort level (Low / Medium /
+        // High, Pro Low / High) but they all read off one shared bucket on
+        // Google's side, so we render them as a single "Gemini (all models)" row
+        // at the first Gemini entry's position in the sort. Non-Gemini models
+        // pass through unchanged. In production all Gemini entries carry the
+        // SAME remainingFraction (verified live 2026-06-04).
+        let json = r#"{
+            "models": {
+                "m-flash-low":   {"displayName":"Gemini 3.5 Flash (Low)",   "quotaInfo":{"remainingFraction":0.7,"resetTime":"2026-06-04T12:00:00Z"}},
+                "m-flash-med":   {"displayName":"Gemini 3.5 Flash (Medium)","quotaInfo":{"remainingFraction":0.7,"resetTime":"2026-06-04T12:00:00Z"}},
+                "m-flash-high":  {"displayName":"Gemini 3.5 Flash (High)",  "quotaInfo":{"remainingFraction":0.7,"resetTime":"2026-06-04T12:00:00Z"}},
+                "m-claude":      {"displayName":"Claude Sonnet 4.6 (Thinking)","quotaInfo":{"remainingFraction":1.0,"resetTime":"2026-06-04T16:00:00Z"}},
+                "m-gpt":         {"displayName":"GPT-OSS 120B","quotaInfo":{"remainingFraction":0.5,"resetTime":"2026-06-04T18:00:00Z"}}
+            },
+            "agentModelSorts":[{"groups":[{"modelIds":["m-claude","m-flash-med","m-flash-low","m-flash-high","m-gpt"]}]}]
+        }"#;
+        let (windows, detail) = parse_agy_models(json).unwrap();
+        // 5 input models → 3 windows out (the 3 Gemini rows collapse to 1).
+        assert_eq!(windows.len(), 3, "Gemini effort levels should collapse to a single row");
+        // Sort order preserved: claude → (collapsed gemini at first gemini's slot) → gpt.
+        assert_eq!(windows[0].label, "Claude Sonnet 4.6 (Thinking)");
+        assert_eq!(windows[1].label, "Gemini (all models)");
+        assert_eq!(windows[1].used_percent, Some((1.0 - 0.7) * 100.0));
+        assert_eq!(windows[1].resets_at.as_deref(), Some("2026-06-04T12:00:00Z"));
+        assert_eq!(windows[2].label, "GPT-OSS 120B");
+        assert_eq!(detail, None);
     }
 
     #[test]
