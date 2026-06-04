@@ -1,6 +1,7 @@
 //! Diff computation using difference-rs with syntect syntax highlighting for Buildmesh
 
 use crate::db;
+use crate::env::to_host_path;
 use crate::models::{DiffHunk, DiffLine, FileDiff, DiffResult};
 use difference_rs::{Changeset, Difference};
 use once_cell::sync::Lazy;
@@ -25,6 +26,60 @@ fn highlight_content(content: &str, path: &str) -> String {
 
     highlighted_html_for_string(content, &SYNTAX_SET, syntax, theme)
         .unwrap_or_else(|_| content.to_string())
+}
+
+/// Minimal HTML escape for the highlighting fallback path, so a line we
+/// couldn't tokenise still renders as text rather than injecting markup.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Highlight each line of a hunk independently, returning inline HTML aligned
+/// 1:1 with `group`. Two stateful highlighters (one per side) are advanced in
+/// lockstep so multi-line constructs — block comments, multi-line strings —
+/// stay coloured correctly: a context line advances both sides, an add advances
+/// only the new side, a remove only the old side.
+fn highlight_group_lines(group: &[DiffLine], path: &str) -> Vec<String> {
+    use syntect::easy::HighlightLines;
+    use syntect::html::{styled_line_to_highlighted_html, IncludeBackground};
+
+    let ext = ext_for_path(path);
+    let syntax = SYNTAX_SET
+        .find_syntax_by_extension(&ext)
+        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+    let theme = &THEME_SET.themes["base16-ocean.dark"];
+
+    let mut old_h = HighlightLines::new(syntax, theme);
+    let mut new_h = HighlightLines::new(syntax, theme);
+
+    let render = |line: &DiffLine,
+                  ranges: Result<Vec<(syntect::highlighting::Style, &str)>, _>| {
+        ranges
+            .ok()
+            .and_then(|r| styled_line_to_highlighted_html(&r, IncludeBackground::No).ok())
+            .unwrap_or_else(|| html_escape(&line.content))
+    };
+
+    group
+        .iter()
+        .map(|line| {
+            // HighlightLines expects a trailing newline to terminate the line;
+            // the stray `\n` lands inside a span and collapses harmlessly in
+            // the single-line row the frontend renders.
+            let with_nl = format!("{}\n", line.content);
+            match line.line_type.as_str() {
+                "add" => render(line, new_h.highlight_line(&with_nl, &SYNTAX_SET)),
+                "remove" => render(line, old_h.highlight_line(&with_nl, &SYNTAX_SET)),
+                _ => {
+                    // context: keep both sides' parser state in sync, emit new.
+                    let _ = old_h.highlight_line(&with_nl, &SYNTAX_SET);
+                    render(line, new_h.highlight_line(&with_nl, &SYNTAX_SET))
+                }
+            }
+        })
+        .collect()
 }
 
 /// Get file extension from path
@@ -176,6 +231,7 @@ fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
     let new_start = group.iter().find_map(|l| l.new_num).unwrap_or(0);
     let old_lines = group.iter().filter(|l| l.line_type == "remove").count();
     let new_lines = group.iter().filter(|l| l.line_type == "add").count();
+    let lines_highlighted = highlight_group_lines(group, highlight_path);
     DiffHunk {
         old_start,
         old_lines,
@@ -184,6 +240,7 @@ fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
         old_highlighted: old_hl,
         new_highlighted: new_hl,
         lines: group.to_vec(),
+        lines_highlighted,
     }
 }
 
@@ -206,6 +263,7 @@ pub async fn diff_files(
         files: vec![FileDiff {
             path: new_path,
             hunks,
+            ..Default::default()
         }],
     })
 }
@@ -249,8 +307,185 @@ pub async fn diff_file_against_head(
         files: vec![FileDiff {
             path: file_path,
             hunks,
+            ..Default::default()
         }],
     })
+}
+
+/// Map a libgit2 delta status onto the frontend status vocabulary
+/// (`GitStatus.status`), so the changed-files list and tree badges share one
+/// set of labels.
+fn delta_status_str(status: git2::Delta) -> &'static str {
+    use git2::Delta;
+    match status {
+        Delta::Added => "added",
+        Delta::Deleted => "deleted",
+        Delta::Renamed | Delta::Copied => "renamed",
+        Delta::Untracked => "untracked",
+        // Typechange (e.g. file → symlink) and anything unforeseen read as a
+        // modification — the safe, least-surprising default.
+        _ => "modified",
+    }
+}
+
+/// Read a path's blob out of a tree as a String (empty if absent). NUL bytes
+/// survive (valid UTF-8), so binary detection downstream still works.
+fn tree_blob_string(repo: &git2::Repository, tree: Option<&git2::Tree>, path: &str) -> String {
+    tree.and_then(|t| t.get_path(std::path::Path::new(path)).ok())
+        .and_then(|e| e.to_object(repo).ok())
+        .and_then(|o| o.as_blob().map(|b| String::from_utf8_lossy(b.content()).to_string()))
+        .unwrap_or_default()
+}
+
+/// Resolve the baseline tree to diff a worktree against: the merge-base of the
+/// worktree `HEAD` and `base_ref`. Fallback chain (see ADR 0005): merge-base →
+/// the `base_ref` commit (unrelated histories) → `HEAD` (no resolvable base) →
+/// `None`, i.e. the empty tree (a repo with no commits, where everything in the
+/// working dir reads as an addition).
+fn resolve_base_tree<'r>(repo: &'r git2::Repository, base_ref: &str) -> Option<git2::Tree<'r>> {
+    let head_commit = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    let base_commit = repo
+        .revparse_single(base_ref)
+        .ok()
+        .and_then(|o| o.peel_to_commit().ok());
+
+    match (head_commit, base_commit) {
+        (Some(head), Some(base)) => {
+            if let Ok(mb) = repo.merge_base(head.id(), base.id()) {
+                if let Some(tree) = repo.find_commit(mb).ok().and_then(|c| c.tree().ok()) {
+                    return Some(tree);
+                }
+            }
+            base.tree().ok()
+        }
+        (Some(head), None) => head.tree().ok(),
+        (None, Some(base)) => base.tree().ok(),
+        (None, None) => None,
+    }
+}
+
+/// Core diff used by the desktop review panel and the mobile changes view.
+/// Diffs the working directory against the merge-base with `base_ref`, so the
+/// result is everything the agent changed since branching — committed *and*
+/// uncommitted (ADR 0005). `only`, when set, restricts to one repo-relative
+/// path. Files are returned sorted by path for a stable review order.
+fn diff_against_base(
+    repo_path: &str,
+    base_ref: &str,
+    only: Option<&str>,
+) -> Result<DiffResult, String> {
+    let host = to_host_path(repo_path);
+    let repo = git2::Repository::open(&host).map_err(|e| e.to_string())?;
+    let base_tree = resolve_base_tree(&repo, base_ref);
+
+    let mut opts = git2::DiffOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    if let Some(p) = only {
+        opts.pathspec(p);
+    }
+
+    let mut diff = repo
+        .diff_tree_to_workdir_with_index(base_tree.as_ref(), Some(&mut opts))
+        .map_err(|e| e.to_string())?;
+
+    // Collapse a delete+add of the same content into a single "renamed" entry.
+    let mut find = git2::DiffFindOptions::new();
+    find.renames(true);
+    let _ = diff.find_similar(Some(&mut find));
+
+    let root = std::path::Path::new(&host);
+    let mut files = Vec::new();
+
+    for delta in diff.deltas() {
+        let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
+            continue;
+        };
+        let rel = path.to_string_lossy().to_string();
+        let status = delta_status_str(delta.status());
+
+        let old_rel = delta.old_file().path().map(|p| p.to_string_lossy().to_string());
+        let old_path = if status == "renamed" { old_rel.clone() } else { None };
+
+        // Old side comes from the base tree (under the pre-rename path); a brand
+        // new file has no old side.
+        let old_content = if matches!(status, "added" | "untracked") {
+            String::new()
+        } else {
+            tree_blob_string(&repo, base_tree.as_ref(), old_rel.as_deref().unwrap_or(&rel))
+        };
+
+        // New side is the current bytes on disk (absent for deletions).
+        let raw = std::fs::read(root.join(&rel)).ok();
+        let is_binary = delta.new_file().is_binary()
+            || delta.old_file().is_binary()
+            || raw.as_ref().map(|b| b.contains(&0)).unwrap_or(false)
+            || old_content.as_bytes().contains(&0);
+
+        if is_binary {
+            files.push(FileDiff {
+                path: rel,
+                status: status.to_string(),
+                old_path,
+                binary: true,
+                ..Default::default()
+            });
+            continue;
+        }
+
+        let new_content = raw
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+            .unwrap_or_default();
+
+        let lines = compute_file_diff(&old_content, &new_content);
+        let additions = lines.iter().filter(|l| l.line_type == "add").count();
+        let deletions = lines.iter().filter(|l| l.line_type == "remove").count();
+        let hunks = group_into_hunks(&lines, CONTEXT_LINES)
+            .iter()
+            .map(|g| build_hunk(g, &rel))
+            .collect();
+
+        files.push(FileDiff {
+            path: rel,
+            hunks,
+            status: status.to_string(),
+            old_path,
+            additions,
+            deletions,
+            binary: false,
+        });
+    }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(DiffResult { files })
+}
+
+/// Resolve an Agent Node's mesh `base_ref`, defaulting to `origin/main` if the
+/// mesh row can't be read.
+fn node_base_ref(node: &crate::models::AgentNode) -> String {
+    db::get_mesh_by_id(node.mesh_id)
+        .map(|m| m.base_ref)
+        .unwrap_or_else(|_| "origin/main".to_string())
+}
+
+/// Diff every file an Agent Node changed since it branched (ADR 0005). One call
+/// returns the whole change set the review panel renders as a stacked view.
+#[command]
+pub async fn diff_node_against_base(node_id: i64) -> Result<DiffResult, String> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    let base_ref = node_base_ref(&node);
+    diff_against_base(&node.path, &base_ref, None)
+}
+
+/// Diff a single file of an Agent Node against its merge-base — the per-file
+/// entry point the mobile changes view taps into.
+#[command]
+pub async fn diff_node_file_against_base(
+    node_id: i64,
+    file_path: String,
+) -> Result<DiffResult, String> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    let base_ref = node_base_ref(&node);
+    diff_against_base(&node.path, &base_ref, Some(&file_path))
 }
 
 /// Diff session files against a checkpoint
@@ -313,8 +548,9 @@ pub async fn diff_session_checkpoint(
                             old_highlighted: old_hl,
                             new_highlighted: new_hl,
                             lines,
+                            ..Default::default()
                         }];
-                        files.push(FileDiff { path: file_path, hunks });
+                        files.push(FileDiff { path: file_path, hunks, ..Default::default() });
                     }
                 } else {
                     let lines = compute_file_diff("", &current_content);
@@ -329,8 +565,9 @@ pub async fn diff_session_checkpoint(
                         old_highlighted: old_hl,
                         new_highlighted: new_hl,
                         lines,
+                        ..Default::default()
                     }];
-                    files.push(FileDiff { path: file_path, hunks });
+                    files.push(FileDiff { path: file_path, hunks, ..Default::default() });
                 }
             }
         }
@@ -616,5 +853,153 @@ mod tests {
             "expected bounded diff (<30 lines) for a 1-line change in a 100-line file, got {} lines",
             total_lines
         );
+    }
+
+    // ----- merge-base diff (ADR 0005) -----------------------------------
+
+    /// Init a repo with a single base commit (`base.txt`) and a `base` branch
+    /// pointing at it, so tests can use `"base"` as `base_ref`.
+    fn init_repo_with_base(dir: &std::path::Path) -> git2::Repository {
+        let repo = git2::Repository::init(dir).unwrap();
+        let sig = git2::Signature::now("t", "t@example.com").unwrap();
+        std::fs::write(dir.join("base.txt"), "one\ntwo\nthree\n").unwrap();
+        // Scope every borrow of `repo` so it can be moved out on return.
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(std::path::Path::new("base.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let oid = repo.commit(Some("HEAD"), &sig, &sig, "base", &tree, &[]).unwrap();
+            let base_commit = repo.find_commit(oid).unwrap();
+            repo.branch("base", &base_commit, true).unwrap();
+        }
+        repo
+    }
+
+    /// Stage every change under the repo and commit it, advancing HEAD past the
+    /// `base` branch.
+    fn commit_all(repo: &git2::Repository, msg: &str) {
+        let sig = git2::Signature::now("t", "t@example.com").unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, msg, &tree, &[&parent]).unwrap();
+    }
+
+    #[test]
+    fn diff_against_base_shows_committed_and_uncommitted_work() {
+        let tmp = tempdir_via_env();
+        let repo = init_repo_with_base(&tmp);
+
+        // The agent commits a new file after branching...
+        std::fs::write(tmp.join("committed.txt"), "a\nb\n").unwrap();
+        commit_all(&repo, "agent work");
+        // ...and leaves an uncommitted edit to an existing file.
+        std::fs::write(tmp.join("base.txt"), "one\nTWO\nthree\n").unwrap();
+
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+        let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"committed.txt"), "committed file missing: {:?}", paths);
+        assert!(paths.contains(&"base.txt"), "uncommitted edit missing: {:?}", paths);
+
+        let committed = result.files.iter().find(|f| f.path == "committed.txt").unwrap();
+        assert_eq!(committed.status, "added");
+        assert_eq!(committed.additions, 2);
+        assert_eq!(committed.deletions, 0);
+    }
+
+    #[test]
+    fn diff_against_base_detects_rename() {
+        let tmp = tempdir_via_env();
+        let repo = init_repo_with_base(&tmp);
+
+        std::fs::remove_file(tmp.join("base.txt")).unwrap();
+        std::fs::write(tmp.join("renamed.txt"), "one\ntwo\nthree\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.remove_path(std::path::Path::new("base.txt")).unwrap();
+            index.add_path(std::path::Path::new("renamed.txt")).unwrap();
+            index.write().unwrap();
+        }
+        commit_all(&repo, "rename base.txt");
+
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+        let renamed = result
+            .files
+            .iter()
+            .find(|f| f.path == "renamed.txt")
+            .unwrap_or_else(|| panic!("renamed file missing: {:?}",
+                result.files.iter().map(|f| (&f.path, &f.status)).collect::<Vec<_>>()));
+        assert_eq!(renamed.status, "renamed");
+        assert_eq!(renamed.old_path.as_deref(), Some("base.txt"));
+    }
+
+    #[test]
+    fn diff_against_base_falls_back_to_head_when_base_unresolvable() {
+        let tmp = tempdir_via_env();
+        let _repo = init_repo_with_base(&tmp);
+
+        std::fs::write(tmp.join("base.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+
+        // A base_ref that doesn't resolve must fall back to HEAD, not error.
+        let result =
+            diff_against_base(tmp.to_str().unwrap(), "origin/does-not-exist", None).unwrap();
+        let f = result.files.iter().find(|f| f.path == "base.txt").unwrap();
+        assert_eq!(f.status, "modified");
+        assert_eq!(f.additions, 1);
+        assert_eq!(f.deletions, 0);
+    }
+
+    #[test]
+    fn diff_against_base_flags_binary_without_hunks() {
+        let tmp = tempdir_via_env();
+        let _repo = init_repo_with_base(&tmp);
+
+        std::fs::write(tmp.join("blob.bin"), [0u8, 1, 2, 0, 255, 7]).unwrap();
+
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", None).unwrap();
+        let bin = result.files.iter().find(|f| f.path == "blob.bin").unwrap();
+        assert!(bin.binary, "binary file should be flagged");
+        assert!(bin.hunks.is_empty(), "binary file must not dump byte hunks");
+    }
+
+    #[test]
+    fn build_hunk_emits_per_line_highlight_aligned_with_lines() {
+        let lines = compute_file_diff("let x = 1;\n", "let x = 2;\n");
+        let groups = group_into_hunks(&lines, CONTEXT_LINES);
+        assert!(!groups.is_empty());
+        let hunk = build_hunk(&groups[0], "main.rs");
+        // One highlighted string per line, same order.
+        assert_eq!(hunk.lines_highlighted.len(), hunk.lines.len());
+        // Highlighted output is HTML spans, not raw source.
+        assert!(hunk.lines_highlighted.iter().any(|h| h.contains("<span")));
+        // The changed token survives into the highlighted HTML.
+        assert!(
+            hunk.lines_highlighted.iter().any(|h| h.contains('2')),
+            "expected the new value to appear in highlighted output"
+        );
+    }
+
+    #[test]
+    fn html_escape_neutralises_markup() {
+        assert_eq!(html_escape("a < b && c > d"), "a &lt; b &amp;&amp; c &gt; d");
+    }
+
+    #[test]
+    fn diff_against_base_only_restricts_to_one_path() {
+        let tmp = tempdir_via_env();
+        let repo = init_repo_with_base(&tmp);
+
+        std::fs::write(tmp.join("a.txt"), "x\n").unwrap();
+        std::fs::write(tmp.join("b.txt"), "y\n").unwrap();
+        commit_all(&repo, "two files");
+
+        let result = diff_against_base(tmp.to_str().unwrap(), "base", Some("a.txt")).unwrap();
+        let paths: Vec<&str> = result.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, vec!["a.txt"], "only the filtered path should appear");
     }
 }

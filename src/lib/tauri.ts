@@ -3,24 +3,50 @@ import type { AgentNode, Checkpoint } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { WorktreeCloseSafety } from './worktreeClose';
 
+export type DiffLineType = 'context' | 'add' | 'remove';
+
+export interface DiffLine {
+  line_type: DiffLineType;
+  content: string;
+  old_num: number | null;
+  new_num: number | null;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  old_highlighted: string;
+  new_highlighted: string;
+  lines: DiffLine[];
+  /** Per-line highlighted inline HTML, aligned 1:1 with `lines`. May be absent
+   *  for producers that only feed the side-by-side view. */
+  lines_highlighted?: string[];
+}
+
+/** Change kind, shared with `GitStatus.status`. */
+export type FileDiffStatus =
+  | 'added'
+  | 'modified'
+  | 'deleted'
+  | 'renamed'
+  | 'untracked';
+
+export interface FileDiff {
+  path: string;
+  hunks: DiffHunk[];
+  /** Empty string from older diff producers that don't set a status. */
+  status: FileDiffStatus | '';
+  /** Source path for renames; null otherwise. */
+  old_path: string | null;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
 export interface DiffResult {
-  files: Array<{
-    path: string;
-    hunks: Array<{
-      old_start: number;
-      old_lines: number;
-      new_start: number;
-      new_lines: number;
-      old_highlighted: string;
-      new_highlighted: string;
-      lines: Array<{
-        line_type: string;
-        content: string;
-        old_num: number | null;
-        new_num: number | null;
-      }>;
-    }>;
-  }>;
+  files: FileDiff[];
 }
 
 // Agent Node
@@ -87,6 +113,14 @@ export const diffSessionCheckpoint = (sessionId: number, checkpointId: number) =
 
 export const diffFileAgainstHead = (sessionPath: string, filePath: string) =>
   invoke<DiffResult>('diff_file_against_head', { sessionPath, filePath });
+
+// Every file an agent changed since branching (merge-base with mesh base_ref;
+// see ADR 0005). One call returns the whole change set for the review panel.
+export const diffNodeAgainstBase = (nodeId: number) =>
+  invoke<DiffResult>('diff_node_against_base', { nodeId });
+
+export const diffNodeFileAgainstBase = (nodeId: number, filePath: string) =>
+  invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
 
 // Terminal
 export const spawnPty = (command: string, args: string[], cwd: string, ptyId: string) =>

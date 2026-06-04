@@ -236,24 +236,47 @@ pub struct DiffResult {
 }
 
 /// A single file diff
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileDiff {
     pub path: String,
     pub hunks: Vec<DiffHunk>,
+    /// Change kind: "added" | "modified" | "deleted" | "renamed" | "untracked".
+    /// Matches the vocabulary `GitStatus.status` uses on the frontend.
+    #[serde(default)]
+    pub status: String,
+    /// For renames, the path the file moved *from*; `None` otherwise.
+    #[serde(default)]
+    pub old_path: Option<String>,
+    /// Added / removed line counts across the whole file (not just the
+    /// context-bounded hunks), so summaries match `git diff --stat`.
+    #[serde(default)]
+    pub additions: usize,
+    #[serde(default)]
+    pub deletions: usize,
+    /// True for binary files — `hunks` is empty and the UI shows a placeholder
+    /// instead of dumping bytes.
+    #[serde(default)]
+    pub binary: bool,
 }
 
 /// A hunk within a diff
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DiffHunk {
     pub old_start: usize,
     pub old_lines: usize,
     pub new_start: usize,
     pub new_lines: usize,
-    /// Full highlighted HTML for the old version of this hunk
+    /// Full highlighted HTML for the old version of this hunk (side-by-side view)
     pub old_highlighted: String,
-    /// Full highlighted HTML for the new version of this hunk
+    /// Full highlighted HTML for the new version of this hunk (side-by-side view)
     pub new_highlighted: String,
     pub lines: Vec<DiffLine>,
+    /// Per-line highlighted inline HTML, aligned 1:1 with `lines`. Lets the
+    /// unified view colour each row with syntax highlighting while keeping its
+    /// own add/remove background and gutter. Empty for producers that only feed
+    /// the side-by-side view (e.g. the checkpoint diff).
+    #[serde(default)]
+    pub lines_highlighted: Vec<String>,
 }
 
 /// A single line in a diff

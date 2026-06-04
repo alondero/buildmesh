@@ -67,9 +67,11 @@ pub async fn branch(
     }
 }
 
-/// `GET /api/agents/{id}/diff?path=<relative-file-path>` — file diff vs HEAD.
-/// We render server-side via `commands::diff::diff_file_against_head` so the
-/// mobile UI gets pre-highlighted side-by-side hunks ready to display.
+/// `GET /api/agents/{id}/diff?path=<relative-file-path>` — file diff against
+/// the agent's merge-base with its mesh `base_ref` (ADR 0005), so committed and
+/// uncommitted agent work both show. Rendered server-side via
+/// `commands::diff::diff_node_file_against_base` so the mobile UI gets
+/// pre-highlighted hunks ready to display.
 pub async fn diff(
     lines: &mut tokio::io::BufStream<TcpStream>,
     agent_id: i64,
@@ -89,11 +91,11 @@ pub async fn diff(
         request::send_json_error(lines, "400 Bad Request", "Invalid path").await;
         return;
     }
-    let Ok(node) = db::get_agent_node_by_id(agent_id) else {
+    if db::get_agent_node_by_id(agent_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
-    };
-    match crate::commands::diff::diff_file_against_head(node.path, file_path.to_string()).await {
+    }
+    match crate::commands::diff::diff_node_file_against_base(agent_id, file_path.to_string()).await {
         Ok(diff) => {
             let body = serde_json::to_string(&diff).unwrap_or_else(|_| "{}".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
