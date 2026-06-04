@@ -57,6 +57,7 @@ interface AgentNodeState {
   fetchAgentNodes: () => Promise<void>;
   createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
+  renameAgentNode: (id: number, name: string) => Promise<void>;
   setActiveNode: (id: number | null) => Promise<void>;
   fetchCheckpoints: (nodeId: number) => Promise<void>;
   spawnAgent: (nodeId: number, provider: string, rows?: number, cols?: number) => Promise<void>;
@@ -202,6 +203,32 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       }
     } catch (e) {
       set({ error: String(e) });
+    }
+  },
+
+  renameAgentNode: async (id, name) => {
+    const prior = get().agentNodes.find(s => s.id === id);
+    if (!prior) return;
+    // Optimistic update so the UI reflects the new name before the
+    // round-trip. The backend emits `session-renamed` on success, which
+    // is a no-op for us (already matches) and keeps other windows in sync.
+    set((state) => ({
+      agentNodes: state.agentNodes.map(s =>
+        s.id === id ? { ...s, name } : s
+      ),
+    }));
+    try {
+      await invoke('rename_session', { sessionId: id, name });
+    } catch (e) {
+      // Roll back the optimistic update so the UI shows the prior name
+      // again. The user can retry or fix the input.
+      set((state) => ({
+        agentNodes: state.agentNodes.map(s =>
+          s.id === id ? { ...s, name: prior.name } : s
+        ),
+        error: String(e),
+      }));
+      throw e;
     }
   },
 

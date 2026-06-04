@@ -1,7 +1,9 @@
 import type { AgentNode } from '../../stores/agentNodeStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { InlineEditableText } from '../shared/InlineEditableText';
 
 interface NodeItemProps {
   node: AgentNode;
@@ -13,6 +15,7 @@ interface NodeItemProps {
 
 export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: NodeItemProps) {
   const config = getStatusConfig(node.status);
+  const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   return (
     <div
       data-session-item
@@ -27,7 +30,11 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
       <span className="text-text-muted cursor-grab active:cursor-grabbing text-[10px] opacity-0 group-hover/node:opacity-100 transition-opacity">⋮⋮</span>
       <span className={config.color} title={config.label}>{config.dot}</span>
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />
-      <span className="flex-1 truncate text-text-secondary font-sans">{node.name}</span>
+      <InlineEditableText
+        value={node.name}
+        onCommit={(next) => renameAgentNode(node.id, next)}
+        className="flex-1 truncate text-text-secondary font-sans text-left"
+      />
       <span className={`text-[9px] font-mono px-1 py-0.5 rounded border leading-none font-medium select-none ${
         node.use_worktree
           ? 'bg-bg-overlay border-border-subtle text-text-muted'

@@ -126,3 +126,84 @@ pub async fn set_active_session(session_id: i64, app: tauri::AppHandle) -> Resul
     app.emit("session-activated", serde_json::json!({ "session_id": session_id }))
         .map_err(|e: tauri::Error| e.to_string())
 }
+
+/// Trim and validate a user-supplied rename. Returns the canonical (trimmed)
+/// form on success, or an error message on rejection. Pulled out of the
+/// `#[command]` body so it can be unit-tested without Tauri.
+pub fn validate_rename_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("name cannot be empty".to_string());
+    }
+    if trimmed.chars().count() > 80 {
+        return Err("name too long (max 80 chars)".to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Manually rename an agent node, overriding the auto-LLM renamer.
+///
+/// The user's name is "sticky": `is_default_name` returns false for it, so
+/// `should_trigger_rename` short-circuits on every subsequent turn. We also
+/// tear down the in-memory rename state via `session_naming::cleanup` so
+/// `SESSION_BUFFERS` doesn't keep growing for a node that no longer needs
+/// a rename. Emits the same `session-renamed` event as the LLM path so the
+/// frontend store and any other listeners stay in sync.
+#[command]
+pub async fn rename_session(
+    session_id: i64,
+    name: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let trimmed = validate_rename_name(&name)?;
+
+    // Drop any in-flight rename state FIRST so the LLM's eventual commit
+    // hits our race guard (which re-reads the node's name from the DB).
+    crate::session_naming::cleanup(session_id);
+
+    db::update_agent_node_name(session_id, &trimmed).map_err(|e| e.to_string())?;
+
+    let _ = app.emit(
+        "session-renamed",
+        serde_json::json!({
+            "session_id": session_id,
+            "name": trimmed,
+        }),
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_rename_name;
+
+    #[test]
+    fn validate_accepts_trimmed_name() {
+        assert_eq!(validate_rename_name("Fix OAuth callback").unwrap(), "Fix OAuth callback");
+    }
+
+    #[test]
+    fn validate_strips_surrounding_whitespace() {
+        assert_eq!(validate_rename_name("   spaced   ").unwrap(), "spaced");
+    }
+
+    #[test]
+    fn validate_rejects_empty() {
+        assert!(validate_rename_name("").is_err());
+        assert!(validate_rename_name("    ").is_err());
+        assert!(validate_rename_name("\t\n").is_err());
+    }
+
+    #[test]
+    fn validate_rejects_over_80_chars() {
+        let long = "x".repeat(81);
+        let err = validate_rename_name(&long).unwrap_err();
+        assert!(err.contains("too long"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn validate_accepts_exactly_80_chars() {
+        let eighty = "x".repeat(80);
+        assert_eq!(validate_rename_name(&eighty).unwrap().len(), 80);
+    }
+}
