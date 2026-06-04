@@ -7,7 +7,7 @@ interface NodeCreationFormProps {
   isDropdownOpen: boolean;
   providers: ProviderEntry[];
   onToggleDropdown: (mesh: Mesh) => void;
-  onSelectProvider: (mesh: Mesh, providerId: string) => void;
+  onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
@@ -35,16 +35,16 @@ export function NodeCreationForm({
     ? `Add agent node (${defaultProviderLabel})`
     : 'Add agent node';
 
-  const handleAddNode = async () => {
+  const handleAddNode = async (altKey: boolean) => {
     const defaultProvider = await getDefaultProvider(mesh.id);
-    onSelectProvider(mesh, defaultProvider);
+    onSelectProvider(mesh, defaultProvider, !altKey);
   };
 
   return (
     <div className="relative">
       <div className="flex items-center rounded border border-accent-cyan/30 overflow-hidden">
         <button
-          onClick={(e) => { e.stopPropagation(); handleAddNode(); }}
+          onClick={(e) => { e.stopPropagation(); handleAddNode(e.altKey); }}
           onMouseEnter={refreshDefaultProvider}
           onFocus={refreshDefaultProvider}
           className="flex items-center px-1.5 h-5 text-[12px] font-medium text-accent-cyan hover:bg-accent-cyan/15 transition-colors"
@@ -65,7 +65,7 @@ export function NodeCreationForm({
         <ProviderDropdown
           meshId={mesh.id}
           providers={providers}
-          onSelect={(providerId) => onSelectProvider(mesh, providerId)}
+          onSelect={(providerId, altKey) => onSelectProvider(mesh, providerId, !altKey)}
         />
       )}
     </div>

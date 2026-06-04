@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -63,6 +63,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             status TEXT NOT NULL DEFAULT 'idle',
             cli_session_id TEXT,
             worktree_name TEXT,
+            use_worktree INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -90,6 +91,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     // These are no-ops on fresh DBs (tables just created above have the base schema).
     ensure_mesh_config_columns(&conn)?;
     ensure_agent_node_source_issue(&conn)?;
+    ensure_agent_node_use_worktree(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
     Ok(())
@@ -138,6 +140,9 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             }
             if current_version < 10 {
                 migrate_gemini_to_agy(conn)?;
+            }
+            if current_version < 11 {
+                migrate_agent_node_use_worktree(conn)?;
             }
         }
 
@@ -202,6 +207,46 @@ pub(crate) fn ensure_agent_node_source_issue(conn: &Connection) -> SqlResult<()>
     if !has_col {
         conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_issue INTEGER", [])?;
         tracing::warn!("ensure_agent_node_source_issue: added missing source_issue column");
+    }
+    Ok(())
+}
+
+fn migrate_agent_node_use_worktree(conn: &Connection) -> SqlResult<()> {
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'use_worktree'",
+            [],
+            |row| row.get(0),
+        ).unwrap_or(false);
+    if !has_col {
+        conn.execute("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1", [])?;
+        tracing::info!("Added use_worktree column to agent_nodes table");
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_agent_node_use_worktree(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'use_worktree'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1", [])?;
+        tracing::warn!("ensure_agent_node_use_worktree: added missing use_worktree column");
     }
     Ok(())
 }
@@ -574,7 +619,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -588,7 +633,7 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
-        use_worktree: true,
+        use_worktree: row.get::<_, i32>(12)? != 0,
         source_issue: row.get(11)?,
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
@@ -698,12 +743,23 @@ pub fn create_agent_node(
     provider: Provider,
     worktree_name: Option<&str>,
     source_issue: Option<i64>,
+    use_worktree: bool,
 ) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8)",
-        params![mesh_id, name, path, branch, env.to_string(), provider.to_string(), worktree_name, source_issue],
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, use_worktree)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9)",
+        params![
+            mesh_id,
+            name,
+            path,
+            branch,
+            env.to_string(),
+            provider.to_string(),
+            worktree_name,
+            source_issue,
+            if use_worktree { 1 } else { 0 }
+        ],
     )?;
     let id = db.last_insert_rowid();
     get_agent_node_by_id_inner(&db, id)

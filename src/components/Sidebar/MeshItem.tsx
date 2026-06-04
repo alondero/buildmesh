@@ -18,7 +18,7 @@ interface MeshItemProps {
   providerList: ProviderEntry[];
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
-  onSelectProvider: (mesh: Mesh, providerId: string) => void;
+  onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
   onOpenProperties: (meshId: number) => void;
   onToggleFileExplorer: (context: FileExplorerContext) => void;
   meshNodes: AgentNode[];

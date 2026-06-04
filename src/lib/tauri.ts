@@ -24,8 +24,8 @@ export interface DiffResult {
 }
 
 // Agent Node
-export const createSession = (meshId: number, name: string, path: string, branch: string) =>
-  invoke<AgentNode>('create_session', { meshId, name, path, branch });
+export const createSession = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) =>
+  invoke<AgentNode>('create_session', { meshId, name, path, branch, provider, useWorktree });
 
 export const listSessions = () =>
   invoke<AgentNode[]>('list_sessions');

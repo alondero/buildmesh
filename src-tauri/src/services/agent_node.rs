@@ -42,14 +42,24 @@ pub fn create(
     branch: &str,
     provider: Option<&str>,
     source_issue: Option<i64>,
+    use_worktree_override: Option<bool>,
 ) -> Result<AgentNode, AgentNodeError> {
+    let mesh = db::get_mesh_by_id(mesh_id)?;
+    let use_worktree = use_worktree_override.unwrap_or(mesh.use_worktree);
+
     let session_name = crate::session_naming::on_spawn();
     tracing::debug!(
-        "agent_node::create: mesh_id={}, name={}, path={}, branch={}, provider={:?}",
-        mesh_id, session_name, path, branch, provider
+        "agent_node::create: mesh_id={}, name={}, path={}, branch={}, provider={:?}, use_worktree={}",
+        mesh_id, session_name, path, branch, provider, use_worktree
     );
 
-    let resolved = env::resolve_agent_path(path, None);
+    let worktree_db_name = if use_worktree {
+        Some(session_name.as_str())
+    } else {
+        None
+    };
+
+    let resolved = env::resolve_agent_path(path, worktree_db_name);
     let env_type = resolved.env_type;
     let provider_enum = provider
         .map(Provider::from_db_str)
@@ -62,8 +72,9 @@ pub fn create(
         branch,
         env_type,
         provider_enum,
-        Some(&session_name),
+        worktree_db_name,
         source_issue,
+        use_worktree,
     )?;
 
     Ok(node)

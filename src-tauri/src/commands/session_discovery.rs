@@ -30,6 +30,7 @@ pub async fn import_discovered_session(
         .map(Provider::from_db_str)
         .unwrap_or(Provider::Anthropic);
 
+    let use_worktree = worktree_name.is_some();
     let node = db::create_agent_node(
         mesh_id,
         &session_name,
@@ -39,6 +40,7 @@ pub async fn import_discovered_session(
         provider_enum,
         worktree_name.as_deref(),
         None,
+        use_worktree,
     ).map_err(|e| e.to_string())?;
 
     db::update_cli_session_id(node.id, &cli_session_id)

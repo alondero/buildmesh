@@ -55,7 +55,7 @@ interface AgentNodeState {
   getActiveMeshId: () => number | null;
 
   fetchAgentNodes: () => Promise<void>;
-  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string) => Promise<AgentNode>;
+  createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   setActiveNode: (id: number | null) => Promise<void>;
   fetchCheckpoints: (nodeId: number) => Promise<void>;
@@ -146,10 +146,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     };
   })(),
 
-  createAgentNode: async (meshId, name, path, branch, provider?: string): Promise<AgentNode> => {
+  createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean): Promise<AgentNode> => {
     try {
       const node = await invoke<AgentNode>('create_session', {
-        meshId, name, path, branch, provider
+        meshId, name, path, branch, provider, useWorktree
       });
       set((state) => ({ agentNodes: [...state.agentNodes, node] }));
       return node;
