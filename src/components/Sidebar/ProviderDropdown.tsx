@@ -1,8 +1,11 @@
+import { ProviderIcon } from '../Providers/ProviderIcon';
+
 export type ProviderEntry = { id: string; label: string; color: string };
 
 // Tailwind class map for provider badges. Stays in the frontend because Tailwind's
 // purge tool needs static class strings — backend can't emit these dynamically.
 // Backend ProviderInfo.color (hex) is not used here for the same reason.
+// Kept exported for any external consumer that still wants the coloured dot.
 export function colorClassForProvider(providerId: string): string {
   const map: Record<string, string> = {
     anthropic: 'bg-blue-500',
@@ -32,7 +35,7 @@ export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdo
           onClick={(e) => { e.stopPropagation(); onSelect(p.id, e.altKey); }}
           className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
         >
-          <span className={`w-2 h-2 rounded-full ${p.color}`} />
+          <ProviderIcon providerId={p.id} className="h-3.5 w-3.5" />
           {p.label}
         </button>
       ))}

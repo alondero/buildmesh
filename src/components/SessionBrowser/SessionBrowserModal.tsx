@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { discoverSessions, importDiscoveredSession, type DiscoveredSession } from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
+import { ProviderIcon } from '../Providers/ProviderIcon';
 
 interface SessionBrowserModalProps {
   meshId: number;
@@ -220,7 +221,7 @@ export function SessionBrowserModal({ meshId, meshPath, providerList, onClose }:
                             onClick={() => handleResume(session, p.id)}
                             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
                           >
-                            <span className={`w-2 h-2 rounded-full ${p.color}`} />
+                            <ProviderIcon providerId={p.id} className="h-3.5 w-3.5" />
                             {p.label}
                           </button>
                         ))}
