@@ -86,3 +86,41 @@ describe('GridNodeHeader git-summary chip', () => {
     expect(getByText('-1').className).toContain('text-accent-cyan');
   });
 });
+
+describe('GridNodeHeader worktree/root pill', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    useUIStore.setState({ fileExplorerContext: null });
+    summaryMock.mockReset();
+  });
+
+  it('shows a muted "worktree" pill when the node runs in a worktree', () => {
+    summaryMock.mockReturnValue(null);
+    const { getByText } = render(
+      <GridNodeHeader node={{ ...NODE, use_worktree: true }} onBuildRun={() => {}} />
+    );
+    const pill = getByText('worktree');
+    expect(pill.className).toContain('text-text-muted');
+    expect(pill.className).not.toContain('text-accent-cyan');
+  });
+
+  it('shows a cyan "root" pill when the node runs in the repository root', () => {
+    summaryMock.mockReturnValue(null);
+    const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const pill = getByText('root');
+    expect(pill.className).toContain('text-accent-cyan');
+    expect(pill.className).toContain('font-semibold');
+  });
+
+  it('gives the pill a tooltip explaining what the label means', () => {
+    summaryMock.mockReturnValue(null);
+    const { container, rerender } = render(
+      <GridNodeHeader node={{ ...NODE, use_worktree: true }} onBuildRun={() => {}} />
+    );
+    expect(container.querySelector('[title="Agent runs in a git worktree"]')).toBeTruthy();
+
+    rerender(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(container.querySelector('[title="Agent runs in the repository root"]')).toBeTruthy();
+  });
+});

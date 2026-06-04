@@ -54,6 +54,18 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
             className="text-[12px] font-semibold text-text-primary font-sans drop-shadow-sm"
           /> <span className="text-text-secondary font-normal">{meshLabel}</span>
         </span>
+        <span
+          title={node.use_worktree
+            ? 'Agent runs in a git worktree'
+            : 'Agent runs in the repository root'}
+          className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none whitespace-nowrap drop-shadow-sm ${
+            node.use_worktree
+              ? 'bg-bg-overlay/70 text-text-muted ring-1 ring-inset ring-border-subtle'
+              : 'bg-accent-cyan/15 text-accent-cyan ring-1 ring-inset ring-accent-cyan/40 font-semibold'
+          }`}
+        >
+          {node.use_worktree ? 'worktree' : 'root'}
+        </span>
         {summary && (
           <span
             onClick={(e) => { e.stopPropagation(); toggleFileExplorer({ type: 'agent', nodeId: node.id, path: gitPath }); }}
