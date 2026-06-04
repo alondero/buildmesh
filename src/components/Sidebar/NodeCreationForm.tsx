@@ -37,7 +37,11 @@ export function NodeCreationForm({
 
   const handleAddNode = async (altKey: boolean) => {
     const defaultProvider = await getDefaultProvider(mesh.id);
-    onSelectProvider(mesh, defaultProvider, !altKey);
+    // Pass undefined on a normal click so the backend falls back to
+    // mesh.use_worktree (the authoritative value from mesh.toml / DB).
+    // Alt-click is the explicit override to spawn the node in the mesh root,
+    // regardless of the mesh default.
+    onSelectProvider(mesh, defaultProvider, altKey ? false : undefined);
   };
 
   return (
@@ -65,7 +69,7 @@ export function NodeCreationForm({
         <ProviderDropdown
           meshId={mesh.id}
           providers={providers}
-          onSelect={(providerId, altKey) => onSelectProvider(mesh, providerId, !altKey)}
+          onSelect={(providerId, altKey) => onSelectProvider(mesh, providerId, altKey ? false : undefined)}
         />
       )}
     </div>

@@ -38,13 +38,17 @@ function setup(overrides: Partial<React.ComponentProps<typeof NodeCreationForm>>
 }
 
 describe('NodeCreationForm', () => {
-  it('adds a node with the default provider when + is clicked', async () => {
+  it('adds a node with the default provider when + is clicked, deferring use_worktree to the mesh default', async () => {
+    // Regression: a normal click must NOT force use_worktree=true, because
+    // meshes with use_worktree=false in mesh.toml would otherwise get a worktree
+    // node and the wrong "worktree" pill / "Build from worktree" label.
+    // Passing undefined lets the backend fall back to mesh.use_worktree.
     const { onSelectProvider, getDefaultProvider } = setup();
 
     await userEvent.click(screen.getByTitle('Add agent node'));
 
     expect(getDefaultProvider).toHaveBeenCalledWith(7);
-    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'anthropic', true));
+    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'anthropic', undefined));
   });
 
   it('adds a node in the mesh root when + is alt-clicked', async () => {
@@ -76,12 +80,12 @@ describe('NodeCreationForm', () => {
     expect(screen.getByRole('button', { name: 'Agy' })).toBeTruthy();
   });
 
-  it('selects a specific provider from the open dropdown', async () => {
+  it('selects a specific provider from the open dropdown, deferring use_worktree to the mesh default', async () => {
     const { onSelectProvider } = setup({ isDropdownOpen: true });
 
     await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
 
-    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', true);
+    expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', undefined);
   });
 
   it('selects a specific provider in the mesh root from the open dropdown when alt-clicked', async () => {
