@@ -12,7 +12,7 @@ import { InlineEditableText } from '../shared/InlineEditableText';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
-  onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
+  onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
 }
 
 export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {

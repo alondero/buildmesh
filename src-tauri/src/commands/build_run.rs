@@ -56,6 +56,11 @@ fn validate_worktree_exists(resolved: &env::ResolvedPath, worktree_name: Option<
 /// A build/run process tracked separately from agents
 struct BuildRunProcess {
     master: Arc<Mutex<Box<dyn portable_pty::MasterPty + Send>>>,
+    /// Writer for sending user input to the PTY. Always populated (even for
+    /// one-shot build/run) so `write_to_build_run` can be called for any
+    /// entry in the registry. Build/run never receives user input today,
+    /// but storing the writer is harmless and keeps the surface uniform.
+    writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
 }
 
 /// Registry for build/run processes
@@ -77,20 +82,101 @@ impl BuildRunRegistry {
     fn remove(&mut self, node_id: &i64) -> Option<Arc<BuildRunProcess>> {
         self.processes.remove(node_id)
     }
+
+    /// Write bytes (user keystrokes) to the PTY master of a live process.
+    /// Returns `Err("Build run not running")` if the node has no live process
+    /// — matches the agent registry's error string shape so the frontend can
+    /// safely ignore the "not running" case.
+    pub fn write_bytes(&self, node_id: i64, data: &[u8]) -> Result<(), String> {
+        let process = self
+            .processes
+            .get(&node_id)
+            .ok_or_else(|| "Build run not running".to_string())?;
+        let mut writer = process.writer.lock().unwrap();
+        writer.write_all(data).map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())
+    }
+
+    /// Resize the PTY to `cols` x `rows`. Same "not running" semantics.
+    pub fn resize_pty(&self, node_id: i64, cols: u16, rows: u16) -> Result<(), String> {
+        let process = self
+            .processes
+            .get(&node_id)
+            .ok_or_else(|| "Build run not running".to_string())?;
+        let master = process.master.lock().unwrap();
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| e.to_string())
+    }
 }
 
 static BUILD_RUN_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<BuildRunRegistry>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(BuildRunRegistry::new())));
 
 // ---------------------------------------------------------------------------
+// Shell selection
+// ---------------------------------------------------------------------------
+
+/// Build the `CommandBuilder` for either a one-shot build/run command or an
+/// interactive shell. Terminal mode drops the `-c` / `-e` / `/c` flag and
+/// the command argument — we want a long-running shell, not a one-shot.
+///
+/// Shell choice per platform (terminal mode):
+/// - Wsl → `wsl.exe` (default user's login shell, cwd is the WSL path)
+/// - macOS → `sh`
+/// - Windows → `powershell.exe` (per user preference; ANSI renders in PTY)
+/// - Linux → `sh` (matches the build/run macOS branch; both are
+///   `cfg!(target_os = "macos") == false` in practice on Windows builds,
+///   but the value is correct on macOS/Linux dev builds too)
+fn build_shell_command(
+    mode: BuildRunMode,
+    command: &str,
+    env_type: crate::models::EnvType,
+) -> CommandBuilder {
+    if mode == BuildRunMode::Terminal {
+        if env_type == crate::models::EnvType::Wsl {
+            CommandBuilder::new("wsl.exe")
+        } else if cfg!(target_os = "macos") {
+            CommandBuilder::new("sh")
+        } else {
+            CommandBuilder::new("powershell.exe")
+        }
+    } else if env_type == crate::models::EnvType::Wsl {
+        let mut c = CommandBuilder::new("wsl.exe");
+        c.arg("-e");
+        c.arg(command);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = CommandBuilder::new("sh");
+        c.arg("-c");
+        c.arg(command);
+        c
+    } else {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.arg("/c");
+        c.arg(command);
+        c
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tauri command
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BuildRunMode {
     Build,
     Run,
+    /// Interactive shell spawned in the worktree directory. The user types
+    /// into it via `write_to_build_run`; output is streamed on the same
+    /// `build-run-output-{node_id}` event channel as build/run.
+    Terminal,
 }
 
 #[tauri::command]
@@ -129,12 +215,14 @@ pub async fn build_run(
         }
     }
 
-    // 5. Get the command to run
+    // 5. Get the command to run. Terminal mode spawns an interactive shell
+    //    directly, so no command string is needed.
     let command = match mode {
         BuildRunMode::Build => config.build_command.as_deref()
             .ok_or_else(|| "build command not configured".to_string())?,
         BuildRunMode::Run => config.run_command.as_deref()
             .ok_or_else(|| "run command not configured".to_string())?,
+        BuildRunMode::Terminal => "",
     };
 
     // 5. Get shell working directory from resolved path
@@ -149,22 +237,7 @@ pub async fn build_run(
         pixel_height: 0,
     }).map_err(|e| format!("failed to open PTY: {}", e))?;
 
-    let mut cmd = if resolved.env_type == crate::models::EnvType::Wsl {
-        let mut c = CommandBuilder::new("wsl.exe");
-        c.arg("-e");
-        c.arg(command);
-        c
-    } else if cfg!(target_os = "macos") {
-        let mut c = CommandBuilder::new("sh");
-        c.arg("-c");
-        c.arg(command);
-        c
-    } else {
-        let mut c = CommandBuilder::new("cmd.exe");
-        c.arg("/c");
-        c.arg(command);
-        c
-    };
+    let mut cmd = build_shell_command(mode, command, resolved.env_type);
     cmd.cwd(shell_cwd);
     crate::pty::strip_git_env_vars(&mut cmd);
 
@@ -175,11 +248,19 @@ pub async fn build_run(
         .try_clone_reader()
         .map_err(|e| format!("failed to clone PTY reader: {}", e))?;
 
+    // Take writer up-front so the registry can serve `write_to_build_run`
+    // for terminal mode. `take_writer()` is a one-shot — must be called
+    // before the master is moved into the registry.
+    let writer = pair.master
+        .take_writer()
+        .map_err(|e| format!("failed to take PTY writer: {}", e))?;
+
     // 8. Store process in registry
     {
         let mut registry = BUILD_RUN_REGISTRY.lock().unwrap();
         registry.insert(node_id, BuildRunProcess {
             master: Arc::new(Mutex::new(pair.master)),
+            writer: Arc::new(Mutex::new(writer)),
         });
     }
 
@@ -240,4 +321,59 @@ pub async fn close_build_run(node_id: i64) -> Result<(), String> {
 pub async fn ensure_mesh_config(_mesh_id: i64) -> Result<String, String> {
     // Config is now in the DB from mesh creation time — nothing to create
     Ok(String::new())
+}
+
+/// Forward user keystrokes to the live build/run PTY. Currently meaningful
+/// only for `BuildRunMode::Terminal`; build/run ignores input.
+/// Mirrors `agent::write_to_agent` (`src-tauri/src/commands/agent.rs:291`).
+#[tauri::command]
+pub fn write_to_build_run(node_id: i64, data: String) -> Result<(), String> {
+    let registry = BUILD_RUN_REGISTRY.lock().unwrap();
+    registry.write_bytes(node_id, data.as_bytes())
+}
+
+/// Resize the live build/run PTY to the given terminal grid size.
+/// Mirrors `agent::resize_agent` (`src-tauri/src/commands/agent.rs:286`).
+#[tauri::command]
+pub fn resize_build_run(node_id: i64, rows: u16, cols: u16) -> Result<(), String> {
+    let registry = BUILD_RUN_REGISTRY.lock().unwrap();
+    registry.resize_pty(node_id, cols, rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_run_mode_serializes_lowercase() {
+        for (variant, expected) in [
+            (BuildRunMode::Build, "\"build\""),
+            (BuildRunMode::Run, "\"run\""),
+            (BuildRunMode::Terminal, "\"terminal\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected, "serialize {:?}", variant);
+
+            let round: BuildRunMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(round, variant, "round-trip {:?}", variant);
+        }
+    }
+
+    #[test]
+    fn build_run_registry_write_bytes_to_dead_session() {
+        let registry = BuildRunRegistry::new();
+        let result = registry.write_bytes(42, b"hello");
+        assert!(result.is_err());
+        // Frontend matches on this substring to swallow the "not running"
+        // case silently — keep the contract stable.
+        assert!(result.unwrap_err().contains("not running"));
+    }
+
+    #[test]
+    fn build_run_registry_resize_pty_to_dead_session() {
+        let registry = BuildRunRegistry::new();
+        let result = registry.resize_pty(42, 80, 24);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not running"));
+    }
 }

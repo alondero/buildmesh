@@ -3,7 +3,7 @@ import { AgentNode } from '../../stores/agentNodeStore';
 
 interface BuildRunDropdownProps {
   node: AgentNode;
-  onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
+  onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
 }
 
 export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
@@ -36,6 +36,11 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     onBuildRun(node.id, 'run');
   };
 
+  const handleTerminal = async () => {
+    setIsOpen(false);
+    onBuildRun(node.id, 'terminal');
+  };
+
   return (
     <div className="relative" ref={dropdownRef}>
       <button
@@ -59,6 +64,13 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
             className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             {node.use_worktree ? 'Run from worktree' : 'Run'}
+          </button>
+          <div className="my-1 border-t border-border-default" />
+          <button
+            onClick={handleTerminal}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+          >
+            {node.use_worktree ? 'Terminal in worktree' : 'Terminal'}
           </button>
         </div>
       )}

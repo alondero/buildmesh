@@ -15,9 +15,9 @@ const RESIZE_HANDLE_WIDTH = 4;
 
 interface ResizablePanesProps {
   nodes: AgentNode[];
-  onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
-  buildRunOpen: { nodeId: number; mode: 'build' | 'run' } | null;
-  setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' } | null) => void;
+  onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
+  buildRunOpen: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
+  setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null) => void;
 }
 
 function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: ResizablePanesProps) {
@@ -154,7 +154,7 @@ export function SessionView() {
   const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
   const closeFileExplorer = useUIStore(state => state.closeFileExplorer);
   const [fileExplorerWidth, setFileExplorerWidth] = useState(360);
-  const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' } | null>(null);
+  const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' | 'terminal' } | null>(null);
 
   const filteredNodes = useMemo(() => {
     if (selectedMeshId === null) {
