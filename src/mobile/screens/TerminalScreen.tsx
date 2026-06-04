@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { AgentNode, terminalWsUrl } from "../api";
 import { attachTouchPan } from "./attachTouchPan";
@@ -56,9 +57,15 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
         selectionBackground: "#3a3a3a",
       },
       scrollback: 1000,
+      // Required so Unicode11Addon can override the glyph-width tables below.
+      allowProposedApi: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // Match modern agent CLIs' Unicode 11+ widths so emoji rows don't shear
+    // table borders (xterm defaults to Unicode 6 widths otherwise).
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
     termRef.current = term;
     fitRef.current = fit;
 
