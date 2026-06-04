@@ -7,6 +7,7 @@ import {
   diffFileAgainstHead,
   type DiffResult,
 } from '../../lib/tauri';
+import { statusMeta } from '../Diff/Diff';
 
 interface FileTreeProps {
   rootPath: string;
@@ -167,14 +168,6 @@ function TreeNode({
   const isChanged = status !== undefined;
   const isSelected = selectedFile === node.path;
 
-  const statusColors: Record<string, string> = {
-    added: 'text-accent-green',
-    modified: 'text-accent-amber',
-    deleted: 'text-accent-red',
-    renamed: 'text-purple-400',
-    untracked: 'text-text-muted',
-  };
-
   return (
     <div>
       <div
@@ -210,7 +203,12 @@ function TreeNode({
           {node.name}
         </span>
         {showGitStatus && status && (
-          <span className={`font-bold ${statusColors[status]}`}>M</span>
+          <span
+            className={`font-bold ${statusMeta(status as GitStatus['status']).color}`}
+            title={statusMeta(status as GitStatus['status']).label}
+          >
+            {statusMeta(status as GitStatus['status']).letter}
+          </span>
         )}
       </div>
       {node.is_dir &&
