@@ -10,9 +10,9 @@ const HANDLE_PX = 5;
 
 interface GridSplitterProps {
   nodes: AgentNode[];
-  onBuildRun: (nodeId: number, mode: 'build' | 'run') => void;
-  buildRunOpen: { nodeId: number; mode: 'build' | 'run' } | null;
-  setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' } | null) => void;
+  onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
+  buildRunOpen: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null;
+  setBuildRunOpen: (val: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null) => void;
 }
 
 type DragAxis = 'col' | 'row';

@@ -8,7 +8,7 @@ import { TERMINAL_OPTIONS } from './terminalConfig';
 
 interface BuildRunTerminalProps {
   sessionId: number;
-  mode?: 'build' | 'run';
+  mode?: 'build' | 'run' | 'terminal';
   useWorktree?: boolean;
   onClose?: () => void;
 }
@@ -26,11 +26,25 @@ function decodeBase64Bytes(data: string): Uint8Array {
   return bytes;
 }
 
+function modeLabel(mode: 'build' | 'run' | 'terminal'): string {
+  if (mode === 'terminal') return 'Terminal';
+  return mode === 'build' ? 'Build' : 'Run';
+}
+
+function modeBanner(mode: 'build' | 'run' | 'terminal'): string {
+  if (mode === 'terminal') return 'Opening terminal';
+  return mode === 'build' ? 'Building' : 'Running';
+}
+
 export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true, onClose }: BuildRunTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
+  // term.onData / term.onResize return disposables. The xterm teardown in
+  // cleanup takes care of them automatically (same pattern as the agent
+  // terminal — see TerminalRegistry.ts). We don't track them individually
+  // so the cleanup function stays free of any explicit teardown calls.
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -45,6 +59,23 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
 
     termRef.current = term;
     fitAddonRef.current = fitAddon;
+
+    // Wire keystroke + resize handlers for interactive terminal mode only.
+    // Mirrors the agent terminal's pattern in TerminalRegistry.ts:228-282.
+    if (mode === 'terminal') {
+      term.onData((data) => {
+        invoke('write_to_build_run', { nodeId: sessionId, data }).catch((err) => {
+          // The PTY may have exited (e.g. user typed `exit`) — swallow the
+          // "not running" error since it's expected. Other errors are real.
+          if (err !== 'Build run not running') {
+            console.error('[BuildRunTerminal] write_to_build_run failed:', err);
+          }
+        });
+      });
+      term.onResize(({ cols, rows }) => {
+        invoke('resize_build_run', { nodeId: sessionId, rows, cols }).catch(() => {});
+      });
+    }
 
     const resizeObserver = new ResizeObserver(() => {
       requestAnimationFrame(() => {
@@ -66,7 +97,9 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
         return;
       }
       unlistenRef.current = unlisten;
-      term.write(`${mode === 'build' ? 'Building' : 'Running'}${useWorktree ? ' from worktree' : ''}...\r\n`);
+      const bannerPrefix = modeBanner(mode);
+      const worktreeSuffix = useWorktree ? ' in worktree' : '';
+      term.write(`${bannerPrefix}${worktreeSuffix}...\r\n`);
       invoke('build_run', { nodeId: sessionId, mode }).catch(err => {
         term.write(`\r\nError: ${String(err)}\r\n`);
       });
@@ -76,16 +109,16 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
       cancelled = true;
       resizeObserver.disconnect();
       unlistenRef.current?.();
-      term.dispose();
+      term.dispose(); // allow-dispose — BuildRunTerminal is a one-shot panel, not the agent-terminal singleton
       invoke('close_build_run', { nodeId: sessionId }).catch(() => {});
     };
-  }, [sessionId, mode]);
+  }, [sessionId, mode, useWorktree]);
 
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-bg-overlay border-t border-border-default">
       <div className="flex items-center justify-between px-2 py-1 bg-bg-base border-b border-border-default">
         <span className="text-[10px] font-mono text-text-muted">
-          {mode === 'build' ? 'Build' : 'Run'}{useWorktree ? ': worktree' : ''}
+          {modeLabel(mode)}{useWorktree ? ': worktree' : ''}
         </span>
         <button
           onClick={onClose}

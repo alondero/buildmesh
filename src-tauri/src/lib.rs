@@ -172,6 +172,8 @@ pub fn run() {
             commands::build_run::get_mesh_config,
             commands::build_run::close_build_run,
             commands::build_run::ensure_mesh_config,
+            commands::build_run::write_to_build_run,
+            commands::build_run::resize_build_run,
             // Mesh config
             commands::mesh_config::get_mesh_properties,
             commands::mesh_config::update_mesh_name,
