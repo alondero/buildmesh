@@ -57,6 +57,7 @@ vi.mock('@xterm/xterm', () => {
     scrollToBottom = vi.fn();
     refresh = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
+    unicode = { activeVersion: '6' };
     rows = 24;
     cols = 80;
     element: HTMLElement | null = null;
@@ -69,6 +70,13 @@ vi.mock('@xterm/xterm', () => {
   return {
     Terminal: MockTerminal,
   };
+});
+
+vi.mock('@xterm/addon-unicode11', () => {
+  class MockUnicode11Addon {
+    dispose = vi.fn();
+  }
+  return { Unicode11Addon: MockUnicode11Addon };
 });
 
 // ============================================================

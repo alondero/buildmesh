@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -190,6 +191,12 @@ export class TerminalRegistry {
         openUrl(uri).catch(console.error);
       });
       term.loadAddon(webLinksAddon);
+      // Align glyph widths with the Unicode 11+ tables that modern agent CLIs
+      // (string-width) use to lay out tables/box-drawing. Without this, xterm
+      // falls back to Unicode 6 widths and emoji rows shear their borders.
+      // Requires allowProposedApi (set in terminalConfig BASE_TERMINAL_OPTIONS).
+      term.loadAddon(new Unicode11Addon());
+      term.unicode.activeVersion = '11';
 
       const instance: TerminalInstance = {
         term,

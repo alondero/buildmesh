@@ -40,6 +40,7 @@ vi.mock('@xterm/xterm', () => {
     getSelection = vi.fn().mockReturnValue('');
     paste = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
+    unicode = { activeVersion: '6' };
     rows = 24;
     cols = 80;
     options = { fontSize: 10 };
@@ -82,6 +83,13 @@ vi.mock('@xterm/addon-web-links', () => {
     constructor(_handler?: unknown) {}
   }
   return { WebLinksAddon: MockWebLinksAddon };
+});
+
+vi.mock('@xterm/addon-unicode11', () => {
+  class MockUnicode11Addon {
+    dispose = vi.fn();
+  }
+  return { Unicode11Addon: MockUnicode11Addon };
 });
 
 describe('TerminalRegistry', () => {
@@ -131,6 +139,14 @@ describe('TerminalRegistry', () => {
       registry.subscribe(cb);
       await registry.getOrCreate(1);
       expect(cb).toHaveBeenCalled();
+    });
+
+    // Regression: without the Unicode 11 width tables, xterm falls back to
+    // Unicode 6 widths and emoji-bearing CLI output (Claude Code status tables,
+    // gh, npm) shears its box-drawing borders on Windows.
+    it('activates Unicode 11 glyph widths', async () => {
+      const inst = await registry.getOrCreate(1);
+      expect(inst!.term.unicode.activeVersion).toBe('11');
     });
   });
 

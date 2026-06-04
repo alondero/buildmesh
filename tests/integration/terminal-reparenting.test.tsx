@@ -45,6 +45,7 @@ vi.mock('@xterm/xterm', () => {
     refresh = vi.fn();
     resize = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
+    unicode = { activeVersion: '6' };
     rows = 24;
     cols = 80;
     element: HTMLElement | null = null;
