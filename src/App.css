@@ -29,6 +29,15 @@
   --color-accent-violet: #8b5cf6;
   --color-accent-violet-dim: rgba(139, 92, 246, 0.15);
 
+  /* Accent — Semantic green/red/amber. Used by the diff view (added /
+     removed / modified lines and file badges), the changed-files list, and
+     the file-tree status letters. Tailwind v4 only emits `text-accent-green`,
+     `bg-accent-red/10`, etc. when these tokens exist — without them the diff
+     renders colourless. Values mirror the status-* palette below. */
+  --color-accent-green: #22c55e;
+  --color-accent-red: #ef4444;
+  --color-accent-amber: #f59e0b;
+
   /* Semantic — Status */
   --color-status-success: #22c55e;
   --color-status-success-bg: rgba(34, 197, 94, 0.10);

@@ -191,6 +191,8 @@ pub fn run() {
             commands::diff::diff_files,
             commands::diff::diff_session_checkpoint,
             commands::diff::diff_file_against_head,
+            commands::diff::diff_node_against_base,
+            commands::diff::diff_node_file_against_base,
             // File tree
             commands::file_tree::list_directory,
             commands::file_tree::open_in_editor,

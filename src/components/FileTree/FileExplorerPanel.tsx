@@ -6,6 +6,7 @@ import {
 import { FileTree } from '../FileTree/FileTree';
 import { DiffView } from '../FileTree/DiffView';
 import { ChangedFilesSection } from '../FileTree/ChangedFilesSection';
+import { AgentReviewPanel } from '../FileTree/AgentReviewPanel';
 import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import type { FileExplorerContext } from '../../stores/uiStore';
 
@@ -218,7 +219,11 @@ export function FileExplorerPanel({
         </div>
 
         {/* Content */}
-        {isTreeView ? (
+        {context.type === 'agent' ? (
+          // The cornerstone review surface: all of this agent's changes since
+          // it branched, stacked in one scroll view (ADR 0005).
+          <AgentReviewPanel nodeId={context.nodeId} rootPath={context.path} />
+        ) : isTreeView ? (
           <div className="flex-1 overflow-auto">
             {hasGit && (
               <ChangedFilesSection
