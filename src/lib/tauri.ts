@@ -212,6 +212,58 @@ export interface GitSyncResult {
 export const gitSync = (path: string) =>
   invoke<GitSyncResult>('git_sync', { path });
 
+// ── Mesh health & recovery (issue #231) ─────────────────────────────────────
+
+/**
+ * A worktree that currently has the Base Ref's branch checked out,
+ * blocking `git checkout <base>` from the Mesh root. The `name` is
+ * the worktree's basename for display. `is_active` is true when a
+ * non-archived agent node currently points at `path`.
+ */
+export interface HoldingWorktree {
+  path: string;
+  name: string;
+  is_active: boolean;
+}
+
+/**
+ * Single-snapshot read of a Mesh's Git health. `local_base_branch` is
+ * derived from `base_ref` (e.g. `origin/main` → `main`). `is_drifted`
+ * is true when the current branch differs from the base (or HEAD is
+ * detached on a non-base OID). `unpushed_ahead` counts local commits
+ * that would be stranded by a restore-to-base.
+ */
+export interface MeshHealth {
+  base_ref: string;
+  local_base_branch: string | null;
+  current_branch: string | null;
+  current_short_sha: string;
+  is_detached: boolean;
+  is_dirty: boolean;
+  unpushed_ahead: number;
+  has_upstream: boolean;
+  is_drifted: boolean;
+  base_branch_holder: HoldingWorktree | null;
+}
+
+export const getMeshHealth = (meshId: number) =>
+  invoke<MeshHealth>('get_mesh_health', { meshId });
+
+export interface RestoreResult {
+  restored: boolean;
+  message: string;
+}
+
+export const restoreMeshToBase = (meshId: number) =>
+  invoke<RestoreResult>('restore_mesh_to_base', { meshId });
+
+export interface FreeResult {
+  detached_at_sha: string;
+}
+
+export const freeBaseBranch = (meshId: number, worktreePath: string) =>
+  invoke<FreeResult>('free_base_branch', { meshId, worktreePath });
+
 // Attention
 export const registerAttentionSession = (sessionId: number) =>
   invoke('register_attention_session', { sessionId });

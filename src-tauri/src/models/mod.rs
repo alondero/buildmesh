@@ -362,6 +362,51 @@ impl From<&Mesh> for MeshConfig {
     }
 }
 
+/// A worktree that currently holds the Base Ref's branch checked out,
+/// blocking `git checkout <base>` from the Mesh root. Returned by
+/// `get_mesh_health` as part of `MeshHealth.base_branch_holder`.
+///
+/// `path` is the on-disk worktree path (host-normalised). `name` is the
+/// basename for display. `is_active` reflects whether a non-archived
+/// agent node currently points at the path (active worktrees can't be
+/// freely deleted but can be safely detached via `free_base_branch`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoldingWorktree {
+    pub path: String,
+    pub name: String,
+    pub is_active: bool,
+}
+
+/// A single-snapshot read of a Mesh's Git health — what the Base Ref
+/// resolved to, where HEAD actually is, and whether recovery is
+/// currently safe. Computed by `commands::git::compute_mesh_health` and
+/// returned over IPC by the `get_mesh_health` Tauri command.
+///
+/// Detection rules (see the `MeshHealth` doc on the command side for the
+/// full reasoning):
+/// - `local_base_branch` is derived from `base_ref` (e.g. `origin/main` → `main`).
+/// - `is_drifted = true` when `current_branch != local_base_branch` or HEAD
+///   is detached on a non-base OID. Detached at the base branch's OID is
+///   not drifted — close enough to base that no badge is needed.
+/// - `unpushed_ahead` is 0 when there is no upstream; a no-upstream branch
+///   with local commits still triggers the "unpushed" guard because the
+///   branch ref is the only handle to those commits.
+/// - `base_branch_holder` is `Some` when the Base Ref's branch is checked
+///   out in any of the Mesh's worktrees (main or linked).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeshHealth {
+    pub base_ref: String,
+    pub local_base_branch: Option<String>,
+    pub current_branch: Option<String>,
+    pub current_short_sha: String,
+    pub is_detached: bool,
+    pub is_dirty: bool,
+    pub unpushed_ahead: u32,
+    pub has_upstream: bool,
+    pub is_drifted: bool,
+    pub base_branch_holder: Option<HoldingWorktree>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
+import { useMeshHealth } from '../../hooks/useMeshHealth';
+import {
+  restoreMeshToBase,
+  freeBaseBranch,
+  type MeshHealth,
+  type HoldingWorktree,
+} from '../../lib/tauri';
 
 interface BranchInfo {
   name: string;
@@ -29,6 +36,12 @@ interface GitRepoPruneInfo {
 
 interface Props {
   meshId: number;
+  /** Absolute host path of the Mesh root. Required so the `useMeshHealth`
+   * hook can install its `git-changed` listener and auto-refresh when a
+   * background `git checkout` (e.g. from a terminal) changes the root's
+   * HEAD. Without it the panel only refreshes from explicit user actions
+   * (Restore / Free button clicks). */
+  meshPath: string;
 }
 
 const Badge = ({ color, text, title }: { color: string; text: string; title?: string }) => (
@@ -60,7 +73,7 @@ const isRecommendedBranch = (b: BranchInfo) =>
 
 const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
 
-export function BranchesWorktreesSection({ meshId }: Props) {
+export function BranchesWorktreesSection({ meshId, meshPath }: Props) {
   const [collapsed, setCollapsed] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,6 +81,16 @@ export function BranchesWorktreesSection({ meshId }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Health recovery: track in-flight actions and the last result so the
+  // UI can disable buttons during the call and show a one-line status.
+  const [restoreInFlight, setRestoreInFlight] = useState(false);
+  const [freeInFlight, setFreeInFlight] = useState(false);
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  // The hook is keyed on `meshId`; meshPath lets the GIT_CHANGED listener
+  // fire on background `git checkout` events from outside the app, so the
+  // health block stays in sync with the root's actual HEAD without a
+  // window-focus round-trip.
+  const { health, refresh: refreshHealth } = useMeshHealth(meshId, meshPath);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -87,6 +110,44 @@ export function BranchesWorktreesSection({ meshId }: Props) {
       load();
     }
   }, [collapsed, repos.length, loading, error, load]);
+
+  const handleRestore = async () => {
+    setRestoreInFlight(true);
+    setRecoveryMessage(null);
+    try {
+      const result = await restoreMeshToBase(meshId);
+      setRecoveryMessage(result.message);
+      refreshHealth();
+      load();
+    } catch (e) {
+      setRecoveryMessage(`Restore error: ${e}`);
+    } finally {
+      setRestoreInFlight(false);
+    }
+  };
+
+  const handleFree = async (holder: HoldingWorktree) => {
+    setFreeInFlight(true);
+    setRecoveryMessage(null);
+    try {
+      const result = await freeBaseBranch(meshId, holder.path);
+      setRecoveryMessage(`Freed base branch at ${result.detached_at_sha}`);
+      refreshHealth();
+      load();
+    } catch (e) {
+      setRecoveryMessage(`Free error: ${e}`);
+    } finally {
+      setFreeInFlight(false);
+    }
+  };
+
+  // Has this mesh got any health signal to surface?
+  const hasHealthSignal =
+    health !== null &&
+    (health.is_drifted ||
+      health.base_branch_holder !== null ||
+      health.unpushed_ahead > 0 ||
+      health.is_dirty);
 
   const toggle = (key: string) => {
     setSelected((prev) => {
@@ -168,7 +229,17 @@ export function BranchesWorktreesSection({ meshId }: Props) {
         onClick={() => setCollapsed((c) => !c)}
         className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-[#e0e0e0] hover:bg-[#1a1a2e]/40 transition-colors"
       >
-        <span>Branches &amp; Worktrees</span>
+        <span className="flex items-center gap-2">
+          Branches &amp; Worktrees
+          {hasHealthSignal && (
+            <span
+              className="text-[10px] font-bold text-status-warning bg-status-warning-bg/15 rounded px-1.5 leading-[16px]"
+              title={health ? healthOneLiner(health) : ''}
+            >
+              !
+            </span>
+          )}
+        </span>
         <svg
           width="12"
           height="12"
@@ -184,8 +255,29 @@ export function BranchesWorktreesSection({ meshId }: Props) {
         </svg>
       </button>
 
+      {/* Always-visible one-liner when the section is collapsed and the
+          mesh has a health signal — surfaces the problem without forcing
+          the user to expand. */}
+      {collapsed && hasHealthSignal && health && (
+        <p
+          className="px-3 pb-2 text-[10px] text-status-warning truncate"
+          title={healthOneLiner(health)}
+        >
+          {healthOneLiner(health)}
+        </p>
+      )}
+
       {!collapsed && (
         <div className="px-3 pb-3 space-y-3 border-t border-[#2a2a2a] pt-3">
+          {hasHealthSignal && health && (
+            <HealthBlock
+              health={health}
+              inFlight={restoreInFlight || freeInFlight}
+              onRestore={handleRestore}
+              onFree={handleFree}
+              message={recoveryMessage}
+            />
+          )}
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <button
@@ -369,6 +461,111 @@ export function BranchesWorktreesSection({ meshId }: Props) {
           onConfirm={handleDelete}
           onCancel={() => setConfirming(false)}
         />
+      )}
+    </div>
+  );
+}
+
+// ── Health block (issue #231) ───────────────────────────────────────────────
+
+/**
+ * Build a one-line summary of a Mesh's health state. Used in both the
+ * section header (when collapsed) and the inline tooltip. Priority order
+ * matches the sidebar badge: hostage first, then drift, then dirty, then
+ * unpushed.
+ */
+function healthOneLiner(health: MeshHealth): string {
+  const parts: string[] = [];
+  if (health.base_branch_holder) {
+    const h = health.base_branch_holder;
+    const localBase = health.local_base_branch ?? 'main';
+    parts.push(`${localBase} held by ${h.name}`);
+  }
+  if (health.is_drifted) {
+    const localBase = health.local_base_branch ?? 'base';
+    const current = health.current_branch ?? `detached @ ${health.current_short_sha}`;
+    parts.push(`root on ${current}, base ${localBase}`);
+  }
+  if (health.is_dirty) parts.push('uncommitted changes');
+  if (health.unpushed_ahead > 0) {
+    parts.push(`${health.unpushed_ahead} unpushed commit${health.unpushed_ahead === 1 ? '' : 's'}`);
+  }
+  return parts.join(' · ');
+}
+
+interface HealthBlockProps {
+  health: MeshHealth;
+  inFlight: boolean;
+  onRestore: () => void;
+  onFree: (holder: HoldingWorktree) => void;
+  message: string | null;
+}
+
+/**
+ * The full health card shown at the top of the expanded
+ * `BranchesWorktreesSection` body. Surfaces the drift reason(s) and
+ * one-click fix buttons whose disabled-state mirrors the backend guard
+ * chain (issue #231 — the refuse-rather-than-silently-fail rule).
+ */
+function HealthBlock({ health, inFlight, onRestore, onFree, message }: HealthBlockProps) {
+  const localBase = health.local_base_branch ?? 'base';
+
+  // Mirror the backend guard chain for the "Restore root to base" button:
+  // disabled when there's a guard that would refuse, with the guard's
+  // message in the tooltip so the user knows why.
+  const restoreBlockedBy: string | null = (() => {
+    if (health.is_dirty) return 'root has uncommitted changes — commit or stash first';
+    if (health.unpushed_ahead > 0) {
+      const branch = health.current_branch ?? 'HEAD';
+      const hint = health.has_upstream ? 'push' : 'push or branch';
+      return `${health.unpushed_ahead} unpushed commit(s) on ${branch} — ${hint}, branch, or reset first`;
+    }
+    if (health.base_branch_holder) {
+      return `${localBase} held by ${health.base_branch_holder.name} — free it first`;
+    }
+    if (!health.is_drifted) {
+      // Not drifted AND no upstream unpushed and no hostage — nothing to do.
+      return 'already on the base branch';
+    }
+    return null;
+  })();
+
+  return (
+    <div className="rounded border border-status-warning/40 bg-status-warning-bg/5 p-2 space-y-2">
+      <p className="text-[11px] text-status-warning font-medium">
+        {healthOneLiner(health)}
+      </p>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onRestore}
+          disabled={inFlight || restoreBlockedBy !== null}
+          title={restoreBlockedBy ?? 'Restore the mesh root to the base branch'}
+          className="text-[10px] text-[#00d4ff] hover:text-[#7fe5ff] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Restore root to {localBase}
+        </button>
+
+        {health.base_branch_holder && (
+          <button
+            type="button"
+            onClick={() => onFree(health.base_branch_holder!)}
+            disabled={inFlight}
+            title={
+              health.base_branch_holder.is_active
+                ? `Detach ${health.base_branch_holder.name}'s HEAD (active agent worktree — safe, non-destructive)`
+                : `Detach ${health.base_branch_holder.name}'s HEAD, releasing ${localBase}`
+            }
+            className="text-[10px] text-[#00d4ff] hover:text-[#7fe5ff] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Free {localBase} ({health.base_branch_holder.name})
+          </button>
+        )}
+      </div>
+
+      {message && (
+        <p className="text-[10px] text-text-secondary break-words">{message}</p>
       )}
     </div>
   );

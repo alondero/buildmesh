@@ -205,6 +205,9 @@ pub fn run() {
             commands::git::check_is_git_repo,
             commands::git::get_default_branch,
             commands::git::git_sync,
+            commands::git::get_mesh_health,
+            commands::git::restore_mesh_to_base,
+            commands::git::free_base_branch,
             // Prune (branches & worktrees)
             commands::prune::get_git_prune_info,
             commands::prune::delete_branches,

@@ -30,11 +30,26 @@ _Avoid_: Base branch, starting point, source branch
 A distinct view in the File Explorer Panel listing modified files with their addition/deletion line counts.
 _Avoid_: Modified files list
 
+**Drifted root**:
+A Mesh whose root HEAD is not on the Base Ref's branch (e.g. the user parked the root on `feat/x` and forgot) — or is detached on a non-base commit. Surfaces as an amber `!` badge in the sidebar; one-click fix is "Restore root to base" in the mesh properties panel.
+_Avoid_: Wrong branch, off branch, out of sync
+
+**Base branch hostage**:
+A condition where the Base Ref's branch (e.g. `main`) is checked out in one of the Mesh's worktrees, blocking `git checkout main` from the root. The health block names the holding worktree; the one-click fix is "Free base branch (worktree-name)".
+_Avoid_: Branch locked, branch busy
+
+**Unpushed commits on root**:
+A Mesh whose root branch has local commits that aren't on its upstream — or has no upstream at all. The "Restore root to base" button refuses until the user pushes, branches, or resets the work, because a checkout would strand those commits in reflog.
+_Avoid_: Local commits, un-pushed work
+
 ## Relationships
 
 - A **Mesh** can have one or more **Agent Nodes**
 - An **Agent Node** operates on a child worktree or branch of its parent **Mesh**
 - A **File Explorer Panel** shows context for either a **Mesh** or an **Agent Node**
+- A **Mesh** can have a **drifted root** if its root HEAD is not on the Base Ref's branch
+- A **Mesh** can be in a **base branch hostage** state when one of its worktrees holds the Base Ref's branch
+- A **Mesh** can have **unpushed commits on root** that block the recovery actions
 
 ## Example dialogue
 
