@@ -66,6 +66,31 @@ describe('Diff component', () => {
     expect(screen.queryByText('hello')).toBeNull();
   });
 
+  it('tints added lines green and removed lines red (at-a-glance scanning)', () => {
+    const hunk = {
+      old_start: 1,
+      old_lines: 1,
+      new_start: 1,
+      new_lines: 1,
+      old_highlighted: '',
+      new_highlighted: '',
+      lines: [
+        { line_type: 'context' as const, content: 'unchanged', old_num: 1, new_num: 1 },
+        { line_type: 'remove' as const, content: 'was here', old_num: 2, new_num: null },
+        { line_type: 'add' as const, content: 'now here', old_num: null, new_num: 2 },
+      ],
+      // No highlighted HTML → content renders as plain text we can query.
+      lines_highlighted: [],
+    };
+    render(<FileDiffCard file={file({ path: 'x.ts', hunks: [hunk] })} />);
+    expect(screen.getByText('now here').closest('div')?.className).toContain(
+      'bg-accent-green'
+    );
+    expect(screen.getByText('was here').closest('div')?.className).toContain(
+      'bg-accent-red'
+    );
+  });
+
   it('renders syntax-highlighted line HTML when provided', () => {
     const { container } = render(
       <FileDiffCard file={file({ path: 'x.ts', hunks: [textHunk('const y = 1')] })} />

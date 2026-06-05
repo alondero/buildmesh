@@ -44,9 +44,9 @@ export function diffCardId(path: string): string {
 function lineClasses(type: DiffLine['line_type']): string {
   switch (type) {
     case 'add':
-      return 'bg-accent-green/10';
+      return 'bg-accent-green/15';
     case 'remove':
-      return 'bg-accent-red/10';
+      return 'bg-accent-red/15';
     default:
       return '';
   }

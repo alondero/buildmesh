@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
 import { FileExplorerPanel } from '../../src/components/FileTree/FileExplorerPanel';
+import { GIT_CHANGED } from '../../src/lib/events';
 import type { DiffResult, GitBranchStatus } from '../../src/lib/tauri';
 
 // A two-file change set with a tall first file, so the review surface must
@@ -136,5 +138,69 @@ describe('Agent review surface', () => {
         el.className.includes('min-h-0') && el.className.includes('flex-1')
     );
     expect(reviewScroller).toBeTruthy();
+  });
+});
+
+// Regression: the chip on the node title bar re-counts changes live on every
+// GIT_CHANGED event, but the review panel used to snapshot the diff once on
+// mount. As the agent kept editing the chip would say "1 file changed" while
+// the stale panel still said "No changes vs base branch". The panel must
+// re-pull on GIT_CHANGED for its own worktree path.
+describe('Agent review surface — live refresh on GIT_CHANGED', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it('re-fetches the diff when a GIT_CHANGED event fires for the node path', async () => {
+    let diffCalls = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'diff_node_against_base') {
+        diffCalls += 1;
+        // First read: nothing changed yet. After the watcher fires, the
+        // agent's edit shows up.
+        return Promise.resolve(
+          (diffCalls === 1 ? { files: [] } : DIFF) as DiffResult
+        );
+      }
+      if (cmd === 'get_git_branch_status')
+        return Promise.resolve(null as GitBranchStatus | null);
+      return Promise.resolve({});
+    });
+
+    renderPanel(); // context.path === '/repo'
+    expect(
+      await screen.findByText('No changes vs base branch')
+    ).toBeTruthy();
+
+    // The file watcher reports a change in this node's worktree.
+    await act(async () => {
+      await emit(GIT_CHANGED, { path: '/repo' });
+    });
+
+    expect(await screen.findByText('2 files changed')).toBeTruthy();
+    expect(diffCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  it('ignores GIT_CHANGED events for a different worktree', async () => {
+    let diffCalls = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'diff_node_against_base') {
+        diffCalls += 1;
+        return Promise.resolve({ files: [] } as DiffResult);
+      }
+      if (cmd === 'get_git_branch_status')
+        return Promise.resolve(null as GitBranchStatus | null);
+      return Promise.resolve({});
+    });
+
+    renderPanel(); // context.path === '/repo'
+    await screen.findByText('No changes vs base branch');
+    const callsAfterMount = diffCalls;
+
+    await act(async () => {
+      await emit(GIT_CHANGED, { path: '/some/other/worktree' });
+    });
+
+    expect(diffCalls).toBe(callsAfterMount);
   });
 });

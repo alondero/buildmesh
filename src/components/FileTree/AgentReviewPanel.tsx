@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import {
   diffNodeAgainstBase,
   openInEditor,
   type DiffResult,
 } from '../../lib/tauri';
-import { Diff, diffTotals, diffCardId, statusMeta } from '../Diff/Diff';
+import { GIT_CHANGED } from '../../lib/events';
+import { Diff, diffTotals } from '../Diff/Diff';
 import { FileTree } from './FileTree';
 
 interface AgentReviewPanelProps {
@@ -23,28 +25,61 @@ export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
   const [diff, setDiff] = useState<DiffResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [indexOpen, setIndexOpen] = useState(true);
   const [treeOpen, setTreeOpen] = useState(false);
 
+  // Monotonic token so that, when several fetches overlap (node switch, or a
+  // burst of GIT_CHANGED events), only the most recent one is allowed to write
+  // state — older in-flight results are dropped.
+  const reqId = useRef(0);
+
+  const fetchDiff = useCallback(
+    (opts?: { background?: boolean }) => {
+      const myId = ++reqId.current;
+      // A background refetch keeps the current diff on screen rather than
+      // flashing the full-panel loading state.
+      if (!opts?.background) setLoading(true);
+      setError(null);
+      diffNodeAgainstBase(nodeId)
+        .then((d) => {
+          if (reqId.current !== myId) return;
+          setDiff(d);
+          setLoading(false);
+        })
+        .catch((e) => {
+          if (reqId.current !== myId) return;
+          // Don't blow away a good diff because a background refresh failed;
+          // only surface the error when we have nothing else to show.
+          if (!opts?.background) setError(String(e));
+          setLoading(false);
+        });
+    },
+    [nodeId]
+  );
+
+  // Initial load, and a fresh load whenever the node changes.
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    diffNodeAgainstBase(nodeId)
-      .then((d) => {
-        if (cancelled) return;
-        setDiff(d);
-        setLoading(false);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setError(String(e));
-        setLoading(false);
-      });
+    fetchDiff();
+  }, [fetchDiff]);
+
+  // Live refresh: the agent keeps editing after the panel mounts, so re-pull
+  // the diff whenever the file watcher reports a change in *this* node's
+  // worktree. Mirrors how the title-bar git summary chip stays live
+  // (useGitSummary) — without this the panel silently goes stale and disagrees
+  // with the chip.
+  useEffect(() => {
+    const unlisten = listen(GIT_CHANGED, (event) => {
+      const { path, internal_path } = event.payload as {
+        path: string;
+        internal_path?: string;
+      };
+      if (path === rootPath || internal_path === rootPath) {
+        fetchDiff({ background: true });
+      }
+    });
     return () => {
-      cancelled = true;
+      unlisten.then((u) => u());
     };
-  }, [nodeId]);
+  }, [rootPath, fetchDiff]);
 
   if (loading) {
     return (
@@ -63,12 +98,6 @@ export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
 
   const files = diff?.files ?? [];
   const totals = diffTotals(files);
-
-  const jump = (path: string) => {
-    document
-      .getElementById(diffCardId(path))
-      ?.scrollIntoView({ block: 'start' });
-  };
 
   return (
     <div className="flex-1 min-h-0 overflow-auto">
@@ -96,57 +125,10 @@ export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
           No changes vs base branch
         </div>
       ) : (
-        <>
-          {/* Jump-to-file index. */}
-          <div className="border-b border-border-subtle">
-            <button
-              onClick={() => setIndexOpen(!indexOpen)}
-              className="w-full flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-text-secondary hover:bg-bg-card transition-colors"
-            >
-              <span className="text-text-muted w-3 text-center text-[10px]">
-                {indexOpen ? '▼' : '▶'}
-              </span>
-              <span className="flex-1 text-left">Files</span>
-              <span className="text-text-muted text-[10px]">{files.length}</span>
-            </button>
-            {indexOpen &&
-              files.map((file) => {
-                const meta = statusMeta(file.status);
-                return (
-                  <button
-                    key={file.path}
-                    onClick={() => jump(file.path)}
-                    title={file.path}
-                    className="w-full flex items-center gap-2 px-2 py-0.5 text-xs font-mono text-left hover:bg-bg-card transition-colors"
-                    style={{ paddingLeft: 20 }}
-                  >
-                    <span
-                      className={`font-bold w-3 flex-shrink-0 ${meta.color}`}
-                      title={meta.label}
-                    >
-                      {meta.letter}
-                    </span>
-                    <span className="flex-1 truncate text-text-muted">
-                      {file.path}
-                    </span>
-                    {file.additions > 0 && (
-                      <span className="text-accent-green flex-shrink-0">
-                        +{file.additions}
-                      </span>
-                    )}
-                    {file.deletions > 0 && (
-                      <span className="text-accent-red flex-shrink-0">
-                        -{file.deletions}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-          </div>
-
-          {/* The stacked, highlighted diffs. */}
-          <Diff files={files} />
-        </>
+        // The stacked, highlighted diffs. Each file card has its own sticky
+        // header (status letter, path, +/-), so it doubles as the scannable
+        // file list — no separate jump index needed in this narrow panel.
+        <Diff files={files} />
       )}
 
       {/* Browse the full tree to open any (even unchanged) file in the editor. */}
