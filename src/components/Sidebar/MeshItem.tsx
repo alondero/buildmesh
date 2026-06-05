@@ -6,10 +6,35 @@ import type { AgentNode } from '../../stores/agentNodeStore';
 import type { FileExplorerContext } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
+import type { MeshHealth } from '../../lib/tauri';
 import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
+import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
 import type { ProviderEntry } from './ProviderDropdown';
+
+/// Build the tooltip text for the sidebar drift `!` badge. Lists the
+/// reasons in priority order — hostage first (it blocks a restore), then
+/// drift, then dirty / unpushed. Mirrors the issue spec's "what to fix
+/// first" priority.
+function buildDriftTooltip(health: MeshHealth): string {
+  const lines: string[] = [];
+  if (health.base_branch_holder) {
+    const h = health.base_branch_holder;
+    const localBase = health.local_base_branch ?? 'main';
+    lines.push(`${localBase} held by ${h.name} — click to fix`);
+  }
+  if (health.is_drifted) {
+    const localBase = health.local_base_branch ?? 'base';
+    const current = health.current_branch ?? `detached @ ${health.current_short_sha}`;
+    lines.push(`Root on ${current}, base is ${localBase}`);
+  }
+  if (health.is_dirty) lines.push('uncommitted changes');
+  if (health.unpushed_ahead > 0) {
+    lines.push(`${health.unpushed_ahead} unpushed commit${health.unpushed_ahead === 1 ? '' : 's'}`);
+  }
+  return lines.join('\n');
+}
 
 interface MeshItemProps {
   mesh: Mesh;
@@ -65,6 +90,7 @@ export function MeshItem({
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { branchStatus, refresh: refreshBranchStatus } = useGitBranchStatus(mesh.path);
+  const { health } = useMeshHealth(mesh.id, mesh.path);
   const behind = branchStatus?.behind ?? 0;
 
   const handleSync = async () => {
@@ -131,6 +157,20 @@ export function MeshItem({
           >
             {mesh.name}
           </span>
+          {health && (health.is_drifted || health.base_branch_holder !== null) && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenProperties(mesh.id);
+              }}
+              title={buildDriftTooltip(health)}
+              className="text-[11px] font-bold text-status-warning bg-status-warning-bg/15 hover:bg-status-warning-bg/30 rounded px-1.5 leading-[18px] transition-colors"
+              aria-label="Mesh health issue"
+            >
+              !
+            </button>
+          )}
           {behind > 0 && (
             <span
               className="text-[11px] font-semibold text-status-warning leading-none tabular-nums"

@@ -515,7 +515,7 @@ export function MeshPropertiesPanel() {
               </div>
 
               {/* Branches & Worktrees */}
-              <BranchesWorktreesSection meshId={propertiesPanelMeshId} />
+              <BranchesWorktreesSection meshId={propertiesPanelMeshId} meshPath={mesh.path} />
             </>
           )}
         </div>
