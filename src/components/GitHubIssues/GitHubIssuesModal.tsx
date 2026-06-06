@@ -1,18 +1,24 @@
 import { useState, useEffect } from 'react';
 import { getRepoIssues, spawnIssueAgent, type GitHubIssue } from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { ProviderDropdown, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
 interface GitHubIssuesModalProps {
   meshId: number;
   meshPath: string;
+  providerList: ProviderEntry[];
+  getDefaultProvider: (meshId: number) => Promise<string>;
   onClose: () => void;
 }
 
-export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesModalProps) {
+export function GitHubIssuesModal({ meshId, meshPath, providerList, getDefaultProvider, onClose }: GitHubIssuesModalProps) {
   const [issues, setIssues] = useState<GitHubIssue[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawning, setSpawning] = useState<number | null>(null);
+  // Only one dropdown open at a time, keyed by issue number — mirrors the
+  // SessionBrowserModal pattern so the click-outside handling stays simple.
+  const [openDropdown, setOpenDropdown] = useState<number | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -37,10 +43,46 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
-  const handleSpawn = async (issue: GitHubIssue) => {
+  // Close the provider dropdown when clicking outside of it. The dropdown
+  // container carries a `data-dropdown-for` attribute set to the issue number.
+  useEffect(() => {
+    if (openDropdown === null) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(`[data-dropdown-for="${openDropdown}"]`)) {
+        setOpenDropdown(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [openDropdown]);
+
+  const handleSpawn = async (issue: GitHubIssue, providerId: string) => {
     setSpawning(issue.number);
     try {
-      await spawnIssueAgent(meshId, issue.number, issue.title);
+      await spawnIssueAgent(meshId, issue.number, issue.title, providerId);
+      setOpenDropdown(null);
+      await useAgentNodeStore.getState().fetchAgentNodes();
+      onClose();
+    } catch (e) {
+      console.error('Failed to spawn issue agent:', e);
+      setSpawning(null);
+    }
+  };
+
+  // Primary "Spawn" button uses the mesh's resolved default provider —
+  // explicit > per-mesh > app-wide > "anthropic" fallback is enforced
+  // server-side by spawn_new_agent_impl when we pass `provider`.
+  // We mark `spawning` BEFORE awaiting getDefaultProvider so the split
+  // button's `disabled` immediately blocks a second click on the same
+  // issue (e.g. picking a different provider in the still-open dropdown)
+  // from racing with the in-flight default-resolution IPC.
+  const handleDefaultSpawn = async (issue: GitHubIssue) => {
+    setSpawning(issue.number);
+    try {
+      const defaultProvider = await getDefaultProvider(meshId);
+      await spawnIssueAgent(meshId, issue.number, issue.title, defaultProvider);
+      setOpenDropdown(null);
       await useAgentNodeStore.getState().fetchAgentNodes();
       onClose();
     } catch (e) {
@@ -115,13 +157,32 @@ export function GitHubIssuesModal({ meshId, meshPath, onClose }: GitHubIssuesMod
                       <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{issue.body}</p>
                     )}
                   </div>
-                  <button
-                    onClick={() => handleSpawn(issue)}
-                    disabled={spawning !== null}
-                    className="shrink-0 px-2.5 py-1 text-xs font-medium rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {spawning === issue.number ? 'Spawning...' : 'Spawn'}
-                  </button>
+
+                  {/* Split spawn button — primary uses default provider, ▾ opens picker */}
+                  <div className="relative flex shrink-0" onMouseDown={e => e.stopPropagation()}>
+                    <button
+                      onClick={() => handleDefaultSpawn(issue)}
+                      disabled={spawning !== null}
+                      className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {spawning === issue.number ? 'Spawning...' : 'Spawn'}
+                    </button>
+                    <button
+                      onClick={() => setOpenDropdown(openDropdown === issue.number ? null : issue.number)}
+                      disabled={spawning !== null}
+                      className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="Choose provider"
+                    >
+                      ▾
+                    </button>
+                    {openDropdown === issue.number && (
+                      <ProviderDropdown
+                        meshId={issue.number}
+                        providers={providerList}
+                        onSelect={(providerId) => handleSpawn(issue, providerId)}
+                      />
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
