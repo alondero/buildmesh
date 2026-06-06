@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import {
   openInEditor,
+  openInFileManager,
   type DiffResult,
 } from '../../lib/tauri';
 import { FileTree } from '../FileTree/FileTree';
@@ -88,6 +89,14 @@ export function FileExplorerPanel({
     }
   };
 
+  const handleOpenInFileManager = async () => {
+    try {
+      await openInFileManager(context.path);
+    } catch (e) {
+      console.error('Failed to open folder in file manager:', e);
+    }
+  };
+
   // Reset state when context changes
   useEffect(() => {
     setSelectedFile(null);
@@ -151,25 +160,49 @@ export function FileExplorerPanel({
                   </>
                 )}
               </span>
-              <button
-                onClick={onClose}
-                className="text-text-muted hover:text-text-secondary transition-colors ml-2"
-                title="Close"
-              >
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+              {/* The two trailing actions sit in a flex group so `justify-between`
+                  on the header has just two children (title + actions) — otherwise
+                  a 3-child layout centers the middle one. */}
+              <div className="flex items-center gap-2 ml-2 flex-shrink-0">
+                <button
+                  onClick={handleOpenInFileManager}
+                  className="text-text-muted hover:text-accent-cyan transition-colors"
+                  title="Open in file explorer"
+                  aria-label="Open in file explorer"
                 >
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2" />
+                  </svg>
+                </button>
+                <button
+                  onClick={onClose}
+                  className="text-text-muted hover:text-text-secondary transition-colors"
+                  title="Close"
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
             </>
           ) : (
             <>

@@ -196,6 +196,7 @@ pub fn run() {
             // File tree
             commands::file_tree::list_directory,
             commands::file_tree::open_in_editor,
+            commands::file_tree::open_in_file_manager,
             commands::file_tree::get_user_config_dir,
             commands::file_tree::to_host_path,
             // Git
