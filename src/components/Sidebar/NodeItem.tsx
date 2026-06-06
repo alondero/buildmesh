@@ -28,7 +28,12 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
       `}
     >
       <span className="text-text-muted cursor-grab active:cursor-grabbing text-[10px] opacity-0 group-hover/node:opacity-100 transition-opacity">⋮⋮</span>
-      <span className={config.color} title={config.label}>{config.dot}</span>
+      <span
+        className={`${config.color} inline-flex h-3 w-3 shrink-0 items-center justify-center text-xs leading-none`}
+        title={config.label}
+      >
+        {config.dot}
+      </span>
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />
       <InlineEditableText
         value={node.name}

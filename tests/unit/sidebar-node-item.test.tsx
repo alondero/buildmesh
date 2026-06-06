@@ -53,4 +53,46 @@ describe('NodeItem', () => {
     fireEvent.click(screen.getByTitle('Delete node'));
     expect(onDelete).toHaveBeenCalledTimes(1);
   });
+
+  it('renders the status dot in a fixed-size box so ●/○/⏸/✗ align in the sidebar', () => {
+    // jsdom can't measure layout, so assert className structure. The dot
+    // span must carry the same fixed-width/height classes regardless of
+    // status; otherwise Outfit renders the outline of ○ visibly larger
+    // than the filled ●, misaligning the dots down the sidebar list.
+    //
+    // Iterate every SessionStatus so the regression guard covers the
+    // `text-violet` (suspended) and `animate-pulse-fast` (awaiting_input)
+    // branches too — not just the two colour-matched cases.
+    const stripVariable = (cn: string) =>
+      cn
+        .replace(/status-\S+/g, '')
+        .replace(/\btext-violet\b/g, '')
+        .replace(/\banimate-pulse-fast\b/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const expected =
+      'inline-flex h-3 w-3 shrink-0 items-center justify-center text-xs leading-none';
+
+    for (const [status, label] of [
+      ['running', 'Running'],
+      ['idle', 'Idle'],
+      ['awaiting_input', 'Needs attention'],
+      ['error', 'Error'],
+      ['suspended', 'Suspended'],
+    ] as const) {
+      const { unmount } = render(
+        <NodeItem
+          node={makeNode({ status })}
+          meshColor={meshColor}
+          isActive={false}
+          onSelect={() => {}}
+          onDelete={() => {}}
+        />,
+      );
+      const wrapper = stripVariable(screen.getByTitle(label).className);
+      expect(wrapper, `status=${status}`).toBe(expected);
+      unmount();
+    }
+  });
 });
