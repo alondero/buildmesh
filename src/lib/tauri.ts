@@ -290,6 +290,17 @@ export const getCurrentBranch = (sessionId: number) =>
 export const checkGhAuth = () =>
   invoke<boolean>('check_gh_auth');
 
+/** Open PR summary for an agent node — surfaces as the "PR #N" chip. */
+export interface OpenPr {
+  number: number;
+  url: string;
+  title: string;
+  draft: boolean;
+}
+
+export const getOpenPrForNode = (nodeId: number) =>
+  invoke<OpenPr | null>('get_open_pr_for_node', { nodeId });
+
 // GitHub Issues
 export interface GitHubIssue {
   number: number;
