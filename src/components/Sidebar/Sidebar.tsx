@@ -128,7 +128,13 @@ export function Sidebar() {
         {appSettingsOpen && <AppSettingsModal onClose={() => setAppSettingsOpen(false)} />}
         {remoteAccessOpen && <RemoteAccessModal onClose={() => setRemoteAccessOpen(false)} />}
         {githubIssuesModal && (
-          <GitHubIssuesModal meshId={githubIssuesModal.meshId} meshPath={githubIssuesModal.meshPath} onClose={() => setGithubIssuesModal(null)} />
+          <GitHubIssuesModal
+            meshId={githubIssuesModal.meshId}
+            meshPath={githubIssuesModal.meshPath}
+            providerList={providerData}
+            getDefaultProvider={getDefaultProvider}
+            onClose={() => setGithubIssuesModal(null)}
+          />
         )}
         {sessionBrowserModal && (
           <SessionBrowserModal meshId={sessionBrowserModal.meshId} meshPath={sessionBrowserModal.meshPath} providerList={providerData} onClose={() => setSessionBrowserModal(null)} />
