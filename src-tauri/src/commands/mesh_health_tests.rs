@@ -38,9 +38,6 @@ impl TempDir {
     fn path(&self) -> &Path {
         &self.root
     }
-    fn path_str(&self) -> String {
-        self.root.to_string_lossy().to_string()
-    }
     /// Allocate a sibling directory outside `self.root` (so the root's
     /// working tree stays clean) and track it for cleanup.
     fn outer(&mut self, name: &str) -> PathBuf {
@@ -75,6 +72,27 @@ fn init_repo(path: &Path) -> Repository {
     fs::create_dir_all(path).unwrap();
     let mut opts = git2::RepositoryInitOptions::new();
     opts.initial_head("main");
+    let repo = Repository::init_opts(path, &opts).unwrap();
+    {
+        let s = sig();
+        fs::write(path.join("file.txt"), "initial").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        repo.commit(Some("HEAD"), &s, &s, "initial commit", &tree, &[])
+            .unwrap();
+    }
+    repo
+}
+
+/// Init a repo with an initial commit on `master` and NO `main` branch —
+/// models a repo whose trunk predates the `main` rename. The buildmesh
+/// default `base_ref` of `origin/main` does not resolve in such a repo.
+fn init_repo_on_master(path: &Path) -> Repository {
+    fs::create_dir_all(path).unwrap();
+    let mut opts = git2::RepositoryInitOptions::new();
+    opts.initial_head("master");
     let repo = Repository::init_opts(path, &opts).unwrap();
     {
         let s = sig();
@@ -150,7 +168,7 @@ fn add_worktree_on_branch(repo: &Repository, wt_path: &Path, branch: &str) {
         .find_branch(branch, git2::BranchType::Local)
         .unwrap()
         .into_reference();
-    repo.worktree(branch, wt_path, Some(&mut opts)).unwrap();
+    repo.worktree(branch, wt_path, Some(&opts)).unwrap();
 }
 
 // ── parse_local_branch ──────────────────────────────────────────────────────
@@ -308,6 +326,41 @@ fn is_drifted_false_when_base_ref_unresolvable() {
 }
 
 #[test]
+fn drift_clear_when_base_branch_absent_from_repo() {
+    // A repo whose trunk is `master` carrying the default `origin/main`
+    // base_ref: there is no `main` branch (local or remote-tracking) to
+    // drift from, so the root being on `master` must NOT be flagged as
+    // drift. Regression for the false "Root on master, base is main"
+    // badge (#265 follow-up).
+    let td = TempDir::new();
+    let repo = init_repo_on_master(td.path());
+
+    let health = compute_mesh_health(&repo, "origin/main").unwrap();
+    assert_eq!(health.current_branch.as_deref(), Some("master"));
+    assert_eq!(health.local_base_branch.as_deref(), Some("main"));
+    assert!(
+        !health.is_drifted,
+        "base branch `main` does not exist in this repo — cannot drift from a phantom"
+    );
+}
+
+#[test]
+fn drift_still_detected_when_base_branch_present_but_off_it() {
+    // Guard against over-suppression: when the base branch DOES exist and
+    // the root is on a different branch, drift is still reported.
+    let td = TempDir::new();
+    let repo = init_repo(td.path());
+    create_branch_at_head(&repo, "feat/x");
+    checkout_branch(&repo, "feat/x");
+
+    let health = compute_mesh_health(&repo, "origin/main").unwrap();
+    assert!(
+        health.is_drifted,
+        "local `main` exists and root is on feat/x → genuine drift"
+    );
+}
+
+#[test]
 fn is_dirty_reports_uncommitted_changes() {
     let td = TempDir::new();
     let repo = init_repo(td.path());
@@ -399,22 +452,19 @@ fn hostage_detected_when_linked_worktree_holds_base_branch() {
 }
 
 #[test]
-fn hostage_detected_by_main_worktree() {
+fn hostage_clear_when_root_holds_base_branch() {
+    // The repo root (main worktree) sitting on the base branch is the
+    // HEALTHY, desired state — never a hostage. A hostage is specifically a
+    // *linked* worktree holding the base branch and blocking `git checkout`
+    // from the root; the root holding its own branch blocks nothing.
+    // Regression for the false "main held by <repo>" badge (#265 follow-up).
     let td = TempDir::new();
     let repo = init_repo(td.path());
-    // The repo itself is the main worktree, currently on main. Verify
-    // find_base_branch_holder finds the root path itself (not just linked
-    // worktrees) — this is the case where the root is on a different
-    // branch from the holder, and the holder is the root.
-    let root_path = td.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    // init_repo leaves us on `main`, with no linked worktrees.
     let holder = find_base_branch_holder(&repo, "main", &[]);
-    assert!(holder.is_some());
-    let h = holder.unwrap();
-    // The main worktree's normalised path should match the root.
-    assert_eq!(
-        h.path.replace('\\', "/").trim_end_matches('/'),
-        root_path.replace('\\', "/").trim_end_matches('/'),
-        "the main worktree (the repo root) holds the branch"
+    assert!(
+        holder.is_none(),
+        "the root being on the base branch is not a hostage"
     );
 }
 
@@ -445,7 +495,7 @@ fn hostage_marks_active_when_path_matches_an_agent_node() {
 
     // Pretend the wt is an active agent node by listing it in active_paths.
     let wt_str = wt_path.to_string_lossy().to_string();
-    let holder = find_base_branch_holder(&repo, "main", &[wt_str.clone()]);
+    let holder = find_base_branch_holder(&repo, "main", std::slice::from_ref(&wt_str));
     assert!(holder.is_some());
     let h = holder.unwrap();
     assert!(h.is_active, "path matches an active node → is_active = true");

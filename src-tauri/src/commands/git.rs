@@ -536,6 +536,7 @@ pub(crate) fn compute_mesh_health(
         current_branch.as_deref(),
         is_detached,
         local_base_branch.as_deref(),
+        base_ref,
     );
 
     Ok(MeshHealth {
@@ -615,23 +616,35 @@ fn compute_unpushed(
 }
 
 /// `is_drifted` rules, in priority order:
-/// 1. `local_base_branch.is_none()` (no base configured) → `false`
-/// 2. `current_branch == Some(local_base_branch)`        → `false` (on base)
-/// 3. Detached HEAD at the base branch's OID             → `false` (close enough)
-/// 4. Otherwise                                          → `true`
+/// 1. `local_base_branch.is_none()` (no base configured)       → `false`
+/// 2. base branch absent from the repo (e.g. default `origin/main`
+///    against a `master`-trunk repo)                           → `false`
+/// 3. `current_branch == Some(local_base_branch)`              → `false` (on base)
+/// 4. Detached HEAD at the base branch's OID                   → `false` (close enough)
+/// 5. Otherwise                                                → `true`
 ///
-/// Returns `true` (drifted) when we cannot determine equality, as a
-/// conservative default — it's better to surface a possibly-false badge
-/// than to miss a real drift.
+/// Rule 2 is the key guard against false positives: the buildmesh DB
+/// defaults every Mesh's `base_ref` to `origin/main`, so a repo whose
+/// trunk is `master` (or any other name) would otherwise be reported as
+/// permanently "drifted" off a `main` branch that does not exist. We only
+/// claim drift when there is a real base to drift *from*.
+///
+/// Among the remaining cases we still return `true` when OID equality for a
+/// detached HEAD cannot be determined — better a possibly-false badge than
+/// a missed real drift, once we know the base genuinely exists.
 fn compute_is_drifted(
     repo: &Repository,
     current_branch: Option<&str>,
     is_detached: bool,
     local_base_branch: Option<&str>,
+    base_ref: &str,
 ) -> bool {
     let Some(local) = local_base_branch else {
         return false;
     };
+    if !base_branch_present(repo, local, base_ref) {
+        return false;
+    }
     if !is_detached {
         return current_branch != Some(local);
     }
@@ -647,6 +660,25 @@ fn compute_is_drifted(
         (Some(b), Some(h)) => b != h,
         _ => true,
     }
+}
+
+/// Does the configured base branch actually exist in this repo? A Mesh
+/// carrying the default `origin/main` base_ref against a repo whose trunk
+/// is `master` has no `main` to compare against — drift detection must
+/// treat that as "no base", not "permanently drifted".
+///
+/// Resolution order: a local branch with the parsed name is the strongest
+/// signal; failing that, the raw `base_ref` may name a remote-tracking
+/// branch (`origin/main`) that `revparse` can resolve even with no local
+/// branch present.
+fn base_branch_present(repo: &Repository, local_base_branch: &str, base_ref: &str) -> bool {
+    if repo
+        .find_branch(local_base_branch, git2::BranchType::Local)
+        .is_ok()
+    {
+        return true;
+    }
+    repo.revparse_single(base_ref).is_ok()
 }
 
 /// Read the symbolic branch name from a worktree repo's HEAD. Returns
@@ -671,8 +703,15 @@ fn normalize_holder_path(p: &str) -> String {
         .unwrap_or_else(|_| trimmed.replace('\\', "/"))
 }
 
-/// Which worktree (main or linked) currently has the Base Ref's branch
-/// checked out? Returns the first match.
+/// Which *linked* worktree currently has the Base Ref's branch checked
+/// out, holding it hostage from the Mesh root? Returns the first match.
+///
+/// The Mesh root (the main worktree) is deliberately NOT considered: the
+/// root sitting on the base branch is the healthy, desired state, not a
+/// hostage — git only blocks a `git checkout <base>` from the root when a
+/// *different* worktree already holds that branch. Treating the root as a
+/// holder produced a false "base held by <repo>" badge for every healthy
+/// Mesh (#265 follow-up).
 ///
 /// `active_paths` is the set of agent-node worktree paths; a holder whose
 /// path matches an entry in the list is marked `is_active = true` so
@@ -682,16 +721,7 @@ pub(crate) fn find_base_branch_holder(
     local_base_branch: &str,
     active_paths: &[String],
 ) -> Option<HoldingWorktree> {
-    // Check the main worktree first. The main worktree's workdir may
-    // differ from the path the repo was opened with, so we reopen it.
-    if let Some(main_workdir) = repo.workdir() {
-        if let Ok(main_repo) = Repository::open(main_workdir) {
-            if head_branch_name_local(&main_repo).as_deref() == Some(local_base_branch) {
-                return Some(make_holder(main_workdir.to_string_lossy().as_ref(), active_paths));
-            }
-        }
-    }
-    // Then linked worktrees.
+    // Linked worktrees only — the main worktree (root) is never a hostage.
     if let Ok(names) = repo.worktrees() {
         for wt_name in names.iter().flatten() {
             if let Ok(wt) = repo.find_worktree(wt_name) {
