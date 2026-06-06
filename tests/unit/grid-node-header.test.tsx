@@ -8,7 +8,7 @@
  * which node owns the panel.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render } from '@testing-library/react';
+import { fireEvent, render } from '@testing-library/react';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -22,6 +22,23 @@ vi.mock('../../src/components/BuildRun/BuildRunDropdown', () => ({
 const summaryMock = vi.fn();
 vi.mock('../../src/hooks/useGitSummary', () => ({
   useGitSummary: () => ({ summary: summaryMock(), loading: false, refresh: vi.fn() }),
+}));
+
+// Each test sets what the PR chip will see by calling prMock.mockReturnValue(...)
+// (or .mockReturnValue(null) to hide the chip). Mirrors the summaryMock pattern.
+const prMock = vi.fn();
+vi.mock('../../src/hooks/useOpenPr', () => ({
+  useOpenPr: () => ({ pr: prMock(), loading: false, refresh: vi.fn() }),
+}));
+
+// Stub the opener plugin so the chip's onClick doesn't try to launch a real browser.
+// `vi.hoisted` is required because `vi.mock` factories are hoisted to the top of
+// the file, before any `const` declarations at module scope.
+const { openUrlMock } = vi.hoisted(() => ({
+  openUrlMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: openUrlMock,
 }));
 
 import { GridNodeHeader } from '../../src/components/SessionView/GridNodeHeader';
@@ -54,6 +71,8 @@ describe('GridNodeHeader git-summary chip', () => {
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     useUIStore.setState({ fileExplorerContext: null });
     summaryMock.mockReset();
+    prMock.mockReset();
+    openUrlMock.mockClear();
   });
 
   it('colours added / modified / deleted counts distinctly so the diff pops', () => {
@@ -122,5 +141,66 @@ describe('GridNodeHeader worktree/root pill', () => {
 
     rerender(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     expect(container.querySelector('[title="Agent runs in the repository root"]')).toBeTruthy();
+  });
+});
+
+describe('GridNodeHeader PR chip', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    useUIStore.setState({ fileExplorerContext: null });
+    summaryMock.mockReset();
+    prMock.mockReset();
+    openUrlMock.mockClear();
+  });
+
+  it('renders "PR #123" when an open PR exists for the branch', () => {
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue({
+      number: 123,
+      url: 'https://github.com/alondero/buildmesh/pull/123',
+      title: 'Add PR chip',
+      draft: false,
+    });
+    const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const chip = getByText('PR #123');
+
+    // Green "open" semantic (matches the rest of the chip family)
+    expect(chip.className).toContain('text-green-400');
+    expect(chip.className).toContain('cursor-pointer');
+    // Titlebar chip pattern
+    expect(chip.className).toContain('rounded-full');
+    expect(chip.className).toContain('ring-1');
+  });
+
+  it('hides the chip when no open PR exists', () => {
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+    const { queryByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(queryByText(/^PR #/)).toBeNull();
+  });
+
+  it('opens the PR in the default browser when clicked', () => {
+    summaryMock.mockReturnValue(null);
+    const url = 'https://github.com/alondero/buildmesh/pull/123';
+    prMock.mockReturnValue({ number: 123, url, title: 'Add PR chip', draft: false });
+    const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+
+    fireEvent.click(getByText('PR #123'));
+    expect(openUrlMock).toHaveBeenCalledWith(url);
+  });
+
+  it('prefixes the title with "Draft" when the PR is a draft', () => {
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue({
+      number: 124,
+      url: 'https://github.com/alondero/buildmesh/pull/124',
+      title: 'WIP PR chip',
+      draft: true,
+    });
+    const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const chip = container.querySelector('[title^="Draft"]');
+    expect(chip).toBeTruthy();
+    expect(chip!.getAttribute('title')).toBe('Draft · WIP PR chip');
   });
 });

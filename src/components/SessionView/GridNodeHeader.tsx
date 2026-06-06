@@ -4,11 +4,13 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { useGitSummary } from '../../hooks/useGitSummary';
+import { useOpenPr } from '../../hooks/useOpenPr';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
@@ -30,6 +32,7 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
 
   const gitPath = getNodeGitPath(node);
   const { summary } = useGitSummary(gitPath || null);
+  const { pr: openPr } = useOpenPr(node.id, gitPath || null);
 
   const isPanelNode =
     fileExplorerContext?.type === 'agent' && fileExplorerContext.nodeId === node.id;
@@ -86,6 +89,23 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
             <span className={isPanelNode ? 'text-accent-cyan' : summary.deleted ? 'text-red-400' : 'text-text-muted'}>
               -{summary.deleted}
             </span>
+          </span>
+        )}
+        {/* Open PR chip — surfaces a clickable link to the PR for the branch
+            this node is working on. Hidden when no PR is open (useOpenPr
+            returns null for the common cases: no auth, no PR, non-GitHub
+            origin, unborn branch). Tooltip carries the PR title; if the PR
+            is a draft, the tooltip is suffixed so the user knows. */}
+        {openPr && (
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              openUrl(openPr.url).catch(console.error);
+            }}
+            title={openPr.draft ? `Draft · ${openPr.title}` : openPr.title}
+            className="text-[10px] font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-green-400/10 text-green-400 ring-1 ring-inset ring-green-400/30 drop-shadow-sm hover:brightness-125 transition-colors"
+          >
+            PR #{openPr.number}
           </span>
         )}
       </div>

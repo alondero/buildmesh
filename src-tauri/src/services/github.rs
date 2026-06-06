@@ -52,6 +52,12 @@ pub struct Issue {
 pub struct PullRequest {
     pub number: i64,
     pub html_url: String,
+    /// Human-readable PR title — surfaced in the chip tooltip.
+    #[serde(default)]
+    pub title: String,
+    /// `true` for draft PRs. GitHub always returns this field on `/pulls` responses.
+    #[serde(default)]
+    pub draft: bool,
 }
 
 /// A lightweight GitHub API client.
@@ -150,6 +156,43 @@ impl GitHubClient {
 
         let pr: PullRequest = resp.json()?;
         Ok(pr.html_url)
+    }
+
+    /// Find the first open pull request whose `head.ref` matches `branch`.
+    /// Returns `Ok(None)` when the repository or branch is unknown to GitHub
+    /// (treated as "no PR" — common for never-pushed branches). Other
+    /// non-success statuses propagate as `GitHubError::Api`.
+    pub fn find_open_pr_for_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Option<PullRequest>, GitHubError> {
+        // GitHub's `head=OWNER:BRANCH` filter matches the head ref of a PR.
+        // The `state=open` filter is the only thing we care about; `per_page=1`
+        // is the invariant: one branch → at most one open PR.
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/pulls?head={owner}:{branch}&state=open&per_page=1"
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        // 404 is "no such repo OR no such branch on this repo" — both mean "no PR".
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        let prs: Vec<PullRequest> = resp.json()?;
+        Ok(prs.into_iter().next())
     }
 
     /// Merge a pull request via squash and delete the branch.
