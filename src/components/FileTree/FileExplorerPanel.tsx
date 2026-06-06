@@ -108,10 +108,11 @@ export function FileExplorerPanel({
   // Subscribe to branch status for git contexts; passes null for userConfig so
   // the hook short-circuits and we render no branch label.
   const { branchStatus } = useGitBranchStatus(hasGit ? context.path : null);
-  // Detached HEAD is the default buildmesh agent worktree mode (see
-  // buildmesh-worktree-mode memory). `name === "HEAD"` would be uninformative,
-  // so we render `detached @ <short-sha>` instead — mirrors `git rev-parse`
-  // output. Empty `name` (no commits, yet) hides the label.
+  // When an agent's HEAD is detached (either because the mesh is configured
+  // for `detached` worktree mode, or because `free_base_branch` recovery
+  // detached a branched worktree — see ADR 0006), `name === "HEAD"` would be
+  // uninformative, so we render `detached @ <short-sha>` instead. Empty
+  // `name` (no commits, yet) hides the label.
   const branchLabel = branchStatus
     ? branchStatus.name === 'HEAD' && branchStatus.short_sha
       ? `detached @ ${branchStatus.short_sha}`

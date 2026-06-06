@@ -16,6 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
+/// Default `worktree_mode` when the mesh config leaves it unset. The UI
+/// default in `MeshPropertiesPanel.tsx` and the example in `mesh.toml.example`
+/// must agree. See `docs/knowledge-primer.md` (Worktree Support) for the
+/// branched-vs-detached rationale.
+pub const DEFAULT_WORKTREE_MODE: &str = "branched";
+
 /// Options for spawning or resuming an agent process.
 pub struct SpawnOptions {
     pub session_id: i64,
@@ -373,7 +379,7 @@ pub async fn spawn_agent_inner(
     let worktree_mode = config
         .as_ref()
         .and_then(|c| c.worktree_mode.as_deref())
-        .unwrap_or("detached");
+        .unwrap_or(DEFAULT_WORKTREE_MODE);
     let base_ref = config
         .as_ref()
         .and_then(|c| c.base_ref.as_deref())
@@ -499,4 +505,17 @@ pub async fn spawn_agent_inner(
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
     tracing::info!("spawn_agent_inner: complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pin the spawn-time fallback. Mirrors the TS constant
+    /// `DEFAULT_WORKTREE_MODE` exported from `MeshPropertiesPanel.tsx`; the
+    /// two are coupled by convention, not by code.
+    #[test]
+    fn default_worktree_mode_is_branched() {
+        assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
 }

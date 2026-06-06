@@ -82,8 +82,9 @@ pub struct GitBranchStatus {
     pub behind: u32,
     /// Abbreviated HEAD OID (7 chars by default, matches `git rev-parse --short HEAD`).
     /// Empty string when HEAD is unborn. Useful for showing a stable identifier on
-    /// detached-HEAD worktrees (the default buildmesh agent worktree mode) where
-    /// `name == "HEAD"` would otherwise be uninformative.
+    /// detached-HEAD worktrees (e.g. after `free_base_branch` recovery detaches a
+    /// branched worktree — see ADR 0006) where `name == "HEAD"` would otherwise be
+    /// uninformative.
     pub short_sha: String,
 }
 
