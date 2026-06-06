@@ -558,9 +558,10 @@ mod tests {
 
     #[test]
     fn branch_status_reports_short_sha_for_detached_head() {
-        // Detached HEAD: the default mode for agent worktrees in buildmesh
-        // (see buildmesh-worktree-mode memory). We must still report a short
-        // SHA so the File Explorer header can render "detached @ a064f55".
+        // Applies to agents in `detached` worktree mode and to `branched`
+        // agents detached by `free_base_branch` recovery (ADR 0006). We must
+        // still report a short SHA so the File Explorer header can render
+        // "detached @ a064f55".
         let dir = TempGitRepo::new();
         let repo = init_git_repo(dir.path());
         let head_oid = repo.head().unwrap().target().unwrap();

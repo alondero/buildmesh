@@ -19,7 +19,7 @@ Buildmesh takes ownership of worktree creation:
 
 1. **PR #51** (`1fd5003`, 2026-05-10) removed `-w` delegation and introduced `create_git_worktree`, which creates the worktree before spawning and runs all agents directly inside their worktree directory — for every provider, uniformly. PR #133 (`8bcb57b`, 2026-05-19) then deleted the `is_cwrap` branch entirely, leaving one provider-agnostic spawn path.
 2. **PR #126** (`fa73608`, 2026-05-18) replaced the `git worktree add` shell-out with `git2` library calls (`add_worktree_impl`), primarily to eliminate the Windows console-window flash that every CLI shell-out caused.
-3. Buildmesh owns the checkout topology — `detached` (default) vs `branched` worktree modes — and post-creation fix-ups: `.worktreeinclude` file copying, `.git`-path sanitization for WSL/Windows, and `prune_stale_worktrees` + retry-once self-healing.
+3. Buildmesh owns the checkout topology — `branched` (default) vs `detached` worktree modes — and post-creation fix-ups: `.worktreeinclude` file copying, `.git`-path sanitization for WSL/Windows, and `prune_stale_worktrees` + retry-once self-healing.
 4. Resume is a no-op on the worktree: creation only runs when the worktree directory does not already exist, replacing the brittle `-w`-on-resume handling.
 
 ## Considered alternatives

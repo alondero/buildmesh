@@ -41,9 +41,12 @@ const BASEREF_OPTIONS = [
   { value: 'head', label: 'Head — resume last session (HEAD)' },
 ];
 
+// Must agree with `DEFAULT_WORKTREE_MODE` in `src-tauri/src/agent/spawn.rs`.
+export const DEFAULT_WORKTREE_MODE = 'branched';
+
 const WORKTREE_MODE_OPTIONS = [
-  { value: 'detached', label: 'Detached — detached HEAD worktree (default)' },
-  { value: 'branched', label: 'Branched — actual git branch per worktree' },
+  { value: 'branched', label: 'Branched — actual git branch per worktree (default)' },
+  { value: 'detached', label: 'Detached — detached HEAD worktree' },
 ];
 
 export function MeshPropertiesPanel() {
@@ -64,7 +67,7 @@ export function MeshPropertiesPanel() {
     effort: '',
     useWorktree: true,
     baseRef: 'fresh',
-    worktreeMode: 'detached',
+    worktreeMode: DEFAULT_WORKTREE_MODE,
     buildCommand: '',
     runCommand: '',
     defaultProvider: '',
@@ -113,7 +116,7 @@ export function MeshPropertiesPanel() {
           effort: config.effort ?? '',
           useWorktree: config.use_worktree,
           baseRef: config.base_ref === 'HEAD' ? 'head' : 'fresh',
-          worktreeMode: config.worktree_mode ?? 'detached',
+          worktreeMode: config.worktree_mode ?? DEFAULT_WORKTREE_MODE,
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
           defaultProvider: config.default_provider ?? '',

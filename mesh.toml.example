@@ -44,9 +44,9 @@ use_worktree = true
 
 # How git worktrees are created for new agent nodes.
 # Options:
-#   "detached" (default) — detached HEAD worktree, no branch tracking
-#   "branched"          — actual git branch per worktree (e.g. worktree-agent-1)
-worktree_mode = "detached"
+#   "branched" (default) — actual git branch per worktree (e.g. worktree-agent-1)
+#   "detached"          — detached HEAD worktree, no branch tracking
+worktree_mode = "branched"
 
 # ---------------------------------------------------------------------------
 # Worktree starting point (stored in .claude/settings.json, not mesh.toml)

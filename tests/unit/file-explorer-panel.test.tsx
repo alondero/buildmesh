@@ -102,9 +102,10 @@ describe('FileExplorerPanel', () => {
   });
 
   it('shows "detached @ <sha>" in the agent header when on a detached HEAD', async () => {
-    // The default buildmesh agent worktree mode is detached HEAD
-    // (see buildmesh-worktree-mode). The header must show the short SHA so
-    // the user can tell two detached worktrees apart.
+    // Applies to agents in `detached` worktree mode, and to `branched` agents
+    // that have been detached by `free_base_branch` recovery (ADR 0006).
+    // The header must show the short SHA so the user can tell two detached
+    // worktrees apart.
     mockBackend({ name: 'HEAD', ahead: 0, behind: 0, short_sha: 'a064f55' });
 
     render(
