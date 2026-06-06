@@ -156,6 +156,9 @@ export const listDirectory = (path: string, maxDepth?: number) =>
 export const openInEditor = (path: string) =>
   invoke('open_in_editor', { path });
 
+export const openInFileManager = (path: string) =>
+  invoke('open_in_file_manager', { path });
+
 export const getUserConfigDir = () =>
   invoke<string>('get_user_config_dir');
 
