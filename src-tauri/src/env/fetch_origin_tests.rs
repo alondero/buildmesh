@@ -12,12 +12,15 @@ use crate::env::test_helpers::{commit_file, init_repo_with_commit, TestDir};
 use std::path::Path;
 use std::process::Command;
 
-/// Set `origin` to the given path on the repo at `path`. Used to wire
-/// the working repo to a local "remote" so we can exercise the fetch
-/// path without network.
-fn set_local_origin(host_path: &Path, origin_path: &Path) {
+/// Wire a local "remote" at `remote_path` to the repo at `host_path` under
+/// the given remote name (e.g. `"origin"`, `"upstream"`). Used so the
+/// fetch path can be exercised end-to-end without network.
+fn set_local_remote(host_path: &Path, remote_name: &str, remote_path: &Path) {
+    // Defensive: clear any pre-existing remote with the same name so a
+    // shared TestDir (re-run, or parallel test sharing a tmp parent) can
+    // be re-wired cleanly.
     let _ = Command::new("git")
-        .args(["remote", "remove", "origin"])
+        .args(["remote", "remove", remote_name])
         .current_dir(host_path)
         .output();
 
@@ -25,13 +28,19 @@ fn set_local_origin(host_path: &Path, origin_path: &Path) {
         .args([
             "remote",
             "add",
-            "origin",
-            &origin_path.to_string_lossy(),
+            remote_name,
+            &remote_path.to_string_lossy(),
         ])
         .current_dir(host_path)
         .status()
         .expect("git remote add failed");
     assert!(status.success(), "git remote add must succeed");
+}
+
+/// Convenience: equivalent to `set_local_remote(host_path, "origin", ...)`.
+/// Kept for the existing #213 tests to keep their bodies readable.
+fn set_local_origin(host_path: &Path, origin_path: &Path) {
+    set_local_remote(host_path, "origin", origin_path);
 }
 
 // ── Issue #213 acceptance criteria ─────────────────────────────────────────
@@ -55,7 +64,7 @@ fn fetch_origin_skips_dirty_parent() {
         "precondition: parent must be dirty"
     );
 
-    let outcome = fetch_origin(parent.to_str().unwrap());
+    let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
     assert_eq!(outcome, Ok(FetchOutcome::SkippedDirty));
 }
 
@@ -69,7 +78,7 @@ fn fetch_origin_skips_when_no_origin_remote() {
     let parent = td.path();
     init_repo_with_commit(parent, &[("README.md", "x\n")]);
 
-    let outcome = fetch_origin(parent.to_str().unwrap());
+    let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
     assert_eq!(outcome, Ok(FetchOutcome::SkippedNoRemote));
 }
 
@@ -83,7 +92,7 @@ fn fetch_origin_reports_repo_unusable_for_non_repo() {
     // Create a file in the dir so it's a valid path but not a repo.
     std::fs::write(parent.join("not-a-repo.txt"), "x").unwrap();
 
-    let outcome = fetch_origin(parent.to_str().unwrap());
+    let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
     assert!(matches!(outcome, Err(FetchError::RepoUnusable(_))));
 }
 
@@ -144,7 +153,7 @@ fn fetch_origin_fetches_and_fast_forwards_clean_local_remote() {
     assert_eq!(content, "v1\n", "precondition: local must be at v1");
 
     // The actual capability: auto-sync.
-    let outcome = fetch_origin(parent.to_str().unwrap());
+    let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
     assert_eq!(
         outcome,
         Ok(FetchOutcome::Synced { new_commits: 1 }),
@@ -275,7 +284,7 @@ fn fetch_origin_reports_diverged_when_fast_forward_impossible() {
     // Now: local HEAD = C1_local (descendant of C0); origin/main =
     // C1_remote (also descendant of C0). Neither is ancestor of
     // the other. `git pull --ff-only` MUST reject.
-    let outcome = fetch_origin(parent.to_str().unwrap());
+    let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
     match outcome {
         Ok(FetchOutcome::FetchedButDiverged { new_commits, .. }) => {
             assert!(
@@ -296,5 +305,274 @@ fn fetch_origin_reports_diverged_when_fast_forward_impossible() {
     assert_eq!(
         content, "local\n",
         "postcondition: ff-pull failure must not touch the local branch"
+    );
+}
+
+// ── Issue #276 acceptance criteria ──────────────────────────────────────────
+//
+// The fetch target is now derived from the configured `base_ref` rather than
+// hardcoded to `origin`. The headline test (#276's "concrete failure scenario"
+// in the issue body) is a Mesh with `upstream` configured as the only remote
+// and `base_ref = "upstream/main"`: the old hardcoded-`origin` code would
+// return `SkippedNoRemote`; the new code must successfully sync.
+
+/// **Headline test for #276.** A repo whose only remote is `upstream`
+/// (no `origin` at all) must still be auto-synced when
+/// `base_ref = "upstream/main"`. On the old hardcoded-`origin` code
+/// this would short-circuit to `SkippedNoRemote` and the user would
+/// see no sync; here we expect a real `Synced { new_commits: 1 }`.
+///
+/// Test shape mirrors `fetch_origin_fetches_and_fast_forwards_clean_local_remote`
+/// but the local "remote" is wired under the name `upstream` instead of
+/// `origin`. Local HEAD is rewound one commit so upstream/main is exactly
+/// 1 commit ahead — the ff-pulls cleanly.
+#[test]
+fn fetch_origin_uses_base_ref_remote_not_origin() {
+    let td = TestDir::new("autosync_upstream_remote");
+    let parent = td.path();
+    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let upstream_dir = td.path().parent().unwrap().join(format!("{}_upstream", name));
+    std::fs::create_dir_all(&upstream_dir).unwrap();
+
+    // Bare "remote" under the name `upstream` (NOT `origin`).
+    let status = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(&upstream_dir)
+        .status()
+        .expect("git init --bare failed");
+    assert!(status.success());
+
+    let repo = init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+    set_local_remote(parent, "upstream", &upstream_dir);
+
+    // Push the v1 commit, then build "remote is ahead" state: add v2
+    // locally, push, reset local to v1.
+    let status = Command::new("git")
+        .args(["push", "-u", "upstream", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push -u upstream failed");
+    assert!(status.success());
+    commit_file(&repo, parent, "README.md", "v2\n");
+    let status = Command::new("git")
+        .args(["push", "upstream", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push upstream v2 failed");
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(parent)
+        .status()
+        .expect("git reset failed");
+    assert!(status.success());
+
+    // Sanity: local at v1, upstream/main at v2, NO `origin` remote.
+    let content = std::fs::read_to_string(parent.join("README.md")).unwrap();
+    assert_eq!(content, "v1\n", "precondition: local must be at v1");
+    let remotes = Command::new("git")
+        .args(["remote"])
+        .current_dir(parent)
+        .output()
+        .unwrap();
+    let remote_list = String::from_utf8_lossy(&remotes.stdout);
+    assert!(
+        !remote_list.lines().any(|l| l.trim() == "origin"),
+        "precondition: this test must NOT have an origin remote; got: {:?}",
+        remote_list
+    );
+    assert!(
+        remote_list.lines().any(|l| l.trim() == "upstream"),
+        "precondition: this test must have an upstream remote; got: {:?}",
+        remote_list
+    );
+
+    // The actual capability: auto-sync against the configured `base_ref`.
+    let outcome = fetch_origin(parent.to_str().unwrap(), "upstream/main");
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::Synced { new_commits: 1 }),
+        "fetch_origin must sync against the base_ref's remote, not hardcoded origin"
+    );
+
+    // Postcondition: local has ff-pulled to v2.
+    let content = std::fs::read_to_string(parent.join("README.md")).unwrap();
+    assert_eq!(
+        content, "v2\n",
+        "postcondition: ff-pull from upstream must move the local branch forward"
+    );
+}
+
+/// `base_ref = "HEAD"` must fall back to today's behaviour: fetch from
+/// `origin` (the default). This guards the issue's "Edge case: HEAD or
+/// empty falls back to origin" requirement.
+#[test]
+fn fetch_origin_falls_back_to_origin_when_base_ref_is_head() {
+    let td = TestDir::new("autosync_base_ref_head");
+    let parent = td.path();
+    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
+    std::fs::create_dir_all(&origin_dir).unwrap();
+
+    let status = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(&origin_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let repo = init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+    set_local_origin(parent, &origin_dir);
+
+    let status = Command::new("git")
+        .args(["push", "-u", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    commit_file(&repo, parent, "README.md", "v2\n");
+    let status = Command::new("git")
+        .args(["push", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // base_ref = "HEAD" should resolve to "fetch from origin" — the
+    // current behaviour the issue is preserving.
+    let outcome = fetch_origin(parent.to_str().unwrap(), "HEAD");
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::Synced { new_commits: 1 }),
+        "base_ref=HEAD must fall back to origin"
+    );
+}
+
+/// `base_ref = ""` (empty) must behave identically to `"HEAD"`: fall
+/// back to `origin`. The DB COALESCEs to `'origin/main'` so an empty
+/// string is unlikely in production, but the helper must still be
+/// defensive.
+#[test]
+fn fetch_origin_falls_back_to_origin_when_base_ref_is_empty() {
+    let td = TestDir::new("autosync_base_ref_empty");
+    let parent = td.path();
+    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
+    std::fs::create_dir_all(&origin_dir).unwrap();
+
+    let status = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(&origin_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let repo = init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+    set_local_origin(parent, &origin_dir);
+
+    let status = Command::new("git")
+        .args(["push", "-u", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    commit_file(&repo, parent, "README.md", "v2\n");
+    let status = Command::new("git")
+        .args(["push", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let outcome = fetch_origin(parent.to_str().unwrap(), "");
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::Synced { new_commits: 1 }),
+        "base_ref='' must fall back to origin"
+    );
+}
+
+/// `base_ref = "refs/heads/main"` (no remote prefix) must fall back
+/// to the branch's configured upstream remote, ultimately defaulting
+/// to `origin`. We test the chain by configuring the local branch
+/// `main`'s upstream to `origin` and verifying the fetch succeeds.
+#[test]
+fn fetch_origin_falls_back_to_origin_for_refs_heads_branch() {
+    let td = TestDir::new("autosync_refs_heads_main");
+    let parent = td.path();
+    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
+    std::fs::create_dir_all(&origin_dir).unwrap();
+
+    let status = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(&origin_dir)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let repo = init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+    set_local_origin(parent, &origin_dir);
+
+    let status = Command::new("git")
+        .args(["push", "-u", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    commit_file(&repo, parent, "README.md", "v2\n");
+    let status = Command::new("git")
+        .args(["push", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(parent)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // base_ref is the full ref form with no remote prefix. The
+    // implementation should fall back to branch.main.remote (= origin
+    // after `git push -u`).
+    let outcome = fetch_origin(parent.to_str().unwrap(), "refs/heads/main");
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::Synced { new_commits: 1 }),
+        "base_ref=refs/heads/main must fall back to the branch's upstream remote"
+    );
+}
+
+/// When `base_ref` names a remote that doesn't exist in the repo, the
+/// auto-sync must return `SkippedNoRemote` (the same outcome as
+/// missing-origin today) — never an error toast, never a fetch
+/// attempt. This is the "Edge case: missing remote" requirement.
+#[test]
+fn fetch_origin_skips_when_base_ref_remote_missing() {
+    let td = TestDir::new("autosync_base_ref_missing_remote");
+    let parent = td.path();
+    init_repo_with_commit(parent, &[("README.md", "x\n")]);
+    // Deliberately: NO remotes configured. base_ref says
+    // "upstream/main" but there's no `upstream` remote.
+
+    let outcome = fetch_origin(parent.to_str().unwrap(), "upstream/main");
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::SkippedNoRemote),
+        "missing base_ref remote must produce SkippedNoRemote, not an error toast"
     );
 }
