@@ -891,7 +891,6 @@ mod tests {
         init_repo_with_commit, repo_is_dirty, repo_with_drifted_head, TestDir,
     };
     use std::fs;
-    use std::path::Path;
 
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
