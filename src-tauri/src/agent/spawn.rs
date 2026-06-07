@@ -415,21 +415,30 @@ pub async fn spawn_agent_inner(
             // a non-fast-forwardable history is surfaced as a `mesh-sync-
             // warning` Tauri event so the frontend can show a non-fatal
             // toast, but spawn always proceeds from the local HEAD.
-            // Skips (dirty parent, no origin remote, already up to date)
-            // are silent — the user doesn't need to know about them.
+            // Skips (dirty parent, no remote, already up to date) are
+            // silent — the user doesn't need to know about them.
+            //
+            // The remote is derived from the mesh's `base_ref` (issue
+            // #276), so a Mesh with `base_ref = "upstream/main"` syncs
+            // against `upstream` rather than hardcoded `origin`. We move
+            // `base_ref` into the closure because `spawn_blocking` needs
+            // a `'static` closure.
             let root = node.path.clone();
-            let sync_result = tokio::task::spawn_blocking(move || env::fetch_origin(&root))
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        "spawn_agent_inner: fetch_origin task panicked: {}",
-                        e
-                    );
-                    Err(env::FetchError::FetchFailed(format!(
-                        "sync task panicked: {}",
-                        e
-                    )))
-                });
+            let base_ref_owned = base_ref.to_string();
+            let sync_result = tokio::task::spawn_blocking(move || {
+                env::fetch_origin(&root, &base_ref_owned)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "spawn_agent_inner: fetch_origin task panicked: {}",
+                    e
+                );
+                Err(env::FetchError::FetchFailed(format!(
+                    "sync task panicked: {}",
+                    e
+                )))
+            });
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
