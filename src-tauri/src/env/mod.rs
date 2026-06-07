@@ -430,25 +430,249 @@ fn prune_stale_worktrees(repo: &git2::Repository) {
     }
 }
 
-/// Fetch from `origin` so remote-tracking refs (e.g. origin/main) are current.
-/// Best-effort: logs a warning on failure but never propagates errors.
-pub fn fetch_origin(project_root: &str) {
+/// Outcome of a single `fetch_origin` invocation. The variants let the
+/// caller (spawn.rs) decide whether to surface a warning toast without
+/// having to reparse strings — every non-`Skipped*` non-`UpToDate` outcome
+/// is something the user might want to know about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchOutcome {
+    /// Parent repo has uncommitted changes; the pull is skipped per
+    /// issue #213's "skip if dirty" criterion. This is silent from the
+    /// user's perspective — the user clearly knows the working tree is
+    /// dirty, and we don't want to nag them on every spawn.
+    SkippedDirty,
+    /// No `origin` remote is configured. A purely local Mesh is a
+    /// valid setup; we don't surface a toast for that.
+    SkippedNoRemote,
+    /// Fetched and there were no new commits to pull — already up to
+    /// date.
+    UpToDate,
+    /// Fetched and fast-forwarded `new_commits` commits onto the
+    /// current branch. The Agent Node will start from the latest
+    /// upstream HEAD.
+    Synced { new_commits: u32 },
+    /// Fetched `new_commits` commits but the fast-forward was rejected
+    /// (local history has diverged from the remote). The Agent Node
+    /// still spawns — from the local HEAD — but the user should be
+    /// told the auto-sync was partial, so this is the case that
+    /// surfaces a warning toast.
+    FetchedButDiverged { new_commits: u32, reason: String },
+}
+
+/// Failure modes for `fetch_origin` that the caller should treat as
+/// "auto-sync unavailable, proceed with local HEAD anyway". The
+/// variants carry enough context to compose a user-readable toast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchError {
+    /// The path exists but isn't a git repository (or can't be
+    /// opened as one). Unusual — a Mesh without a repo is a
+    /// misconfiguration — but we still proceed to spawn since the
+    /// agent's behaviour with a non-repo path is a separate concern.
+    RepoUnusable(String),
+    /// `git fetch` itself failed (most commonly: no network, DNS
+    /// failure, or `origin` was removed between the no-remote check
+    /// and the fetch). Carries stderr for the toast.
+    FetchFailed(String),
+}
+
+/// Fetch from `origin` and fast-forward the parent **Mesh**'s current
+/// branch onto the remote tip.
+///
+/// Behaviour (issue #213):
+/// 1. **Dirty parent → skip silently.** A repo with uncommitted
+///    changes returns `Ok(SkippedDirty)`. The user is in the middle
+///    of something; we don't want to surface a warning on every spawn.
+/// 2. **No `origin` remote → skip silently.** A purely local Mesh is
+///    valid; this returns `Ok(SkippedNoRemote)`.
+/// 3. **Clean repo with remote → fetch, then `git pull --ff-only`.**
+///    `Ok(UpToDate)` if nothing to pull, `Ok(Synced)` if commits were
+///    pulled, `Ok(FetchedButDiverged)` if the history has diverged
+///    (caller surfaces a warning toast), `Err(FetchFailed)` if the
+///    fetch itself failed (caller surfaces a warning toast).
+///
+/// **This function never blocks the spawn.** The caller (`spawn.rs`)
+/// is expected to call it as a best-effort step and continue with
+/// local-HEAD fallback on any non-`Ok(Synced|_UpToDate|_Skipped*)`
+/// outcome.
+pub fn fetch_origin(project_root: &str) -> Result<FetchOutcome, FetchError> {
     let host_root = to_host_path(project_root);
+
+    // Step 1: open the repo. If the path isn't a git repo, we can't
+    // decide dirty / has-remote / pull — bail with a typed error.
+    let repo = match git2::Repository::open(&host_root) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "fetch_origin: path {} is not a usable git repo ({}); skipping auto-sync",
+                host_root,
+                e
+            );
+            return Err(FetchError::RepoUnusable(e.to_string()));
+        }
+    };
+
+    // Step 2: skip if the working tree is dirty. Untracked files and
+    // staged-but-uncommitted changes both count. We deliberately do
+    // this BEFORE shelling out — no point spending a network round
+    // trip on a sync that we'd refuse to apply. The
+    // `unwrap_or(true)` is the safer fallback: if the status call
+    // itself fails (corrupt index, permission denied on .git), we
+    // treat the repo as dirty and skip rather than try to pull into
+    // a state we couldn't even read.
+    let mut status_opts = git2::StatusOptions::new();
+    status_opts
+        .include_untracked(true)
+        .recurse_untracked_dirs(true);
+    let is_dirty = repo
+        .statuses(Some(&mut status_opts))
+        .map(|s| s.iter().any(|e| !e.status().is_ignored()))
+        .unwrap_or(true);
+    if is_dirty {
+        tracing::info!(
+            "fetch_origin: {} has uncommitted changes; skipping auto-sync",
+            host_root
+        );
+        return Ok(FetchOutcome::SkippedDirty);
+    }
+
+    // Step 3: skip if there's no `origin` remote. A Mesh may be a
+    // purely local repo (not yet pushed) and that's a valid state.
+    let has_origin = repo.find_remote("origin").is_ok();
+    if !has_origin {
+        tracing::info!(
+            "fetch_origin: {} has no 'origin' remote; skipping auto-sync",
+            host_root
+        );
+        return Ok(FetchOutcome::SkippedNoRemote);
+    }
+
+    // Step 4: `git fetch origin`. If this fails (network down,
+    // auth, remote deleted between the has-remote check and the
+    // fetch) we return FetchFailed and the caller surfaces a toast.
     tracing::info!("fetch_origin: running git fetch origin in {}", host_root);
-    match command_no_window("git")
+    let fetch_output = match command_no_window("git")
         .args(["fetch", "origin"])
         .current_dir(&host_root)
         .output()
     {
-        Ok(output) if !output.status.success() => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("fetch_origin: git fetch origin failed (non-fatal): {}", stderr);
-        }
+        Ok(o) => o,
         Err(e) => {
-            tracing::warn!("fetch_origin: failed to run git fetch (non-fatal): {}", e);
+            tracing::warn!("fetch_origin: failed to spawn git fetch: {}", e);
+            return Err(FetchError::FetchFailed(e.to_string()));
         }
-        _ => {}
+    };
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        let trimmed = stderr.trim();
+        tracing::warn!("fetch_origin: git fetch origin failed: {}", trimmed);
+        return Err(FetchError::FetchFailed(trimmed.to_string()));
     }
+
+    // Step 5: count how many commits the local branch is behind the
+    // upstream. If 0, we're already in sync. We use git2's
+    // `graph_ahead_behind` (not `git rev-list HEAD..@{u}`) to avoid
+    // the Windows `@{u}` brace-stripping bug — see the comment in
+    // commands/git.rs for the same pattern.
+    let new_commits = match count_commits_behind_upstream(&repo) {
+        Ok(n) => n,
+        Err(e) => {
+            // No upstream configured is the most common cause here
+            // (e.g. a fresh local-only branch that just gained a
+            // remote via `git remote add` but never pushed). Treat
+            // it as "nothing to pull" rather than a hard error.
+            tracing::info!(
+                "fetch_origin: no upstream to compare against ({}); treating as up-to-date",
+                e
+            );
+            return Ok(FetchOutcome::UpToDate);
+        }
+    };
+    if new_commits == 0 {
+        return Ok(FetchOutcome::UpToDate);
+    }
+
+    // Step 6: `git pull --ff-only --no-rebase`. We pass --no-rebase
+    // explicitly because a user's global `pull.rebase=true` would
+    // otherwise turn this into a rebase — and rebase on a diverged
+    // history produces a merge conflict (write conflict markers to
+    // the working tree) instead of the clean "not fast-forwardable"
+    // rejection we want. The auto-sync is read-only by policy
+    // (issue #213: spawn never blocks, never mutates the local
+    // branch on failure), so we must never silently rebase.
+    tracing::info!(
+        "fetch_origin: running git pull --ff-only --no-rebase ({} new commit{} behind)",
+        new_commits,
+        if new_commits == 1 { "" } else { "s" }
+    );
+    let pull_output = match command_no_window("git")
+        .args(["pull", "--ff-only", "--no-rebase"])
+        .current_dir(&host_root)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return Ok(FetchOutcome::FetchedButDiverged {
+                new_commits,
+                reason: format!("git pull --ff-only failed to start: {}", e),
+            });
+        }
+    };
+    if !pull_output.status.success() {
+        let stderr = String::from_utf8_lossy(&pull_output.stderr);
+        let trimmed = stderr.trim();
+        tracing::warn!(
+            "fetch_origin: git pull --ff-only rejected: {}",
+            trimmed
+        );
+        return Ok(FetchOutcome::FetchedButDiverged {
+            new_commits,
+            reason: if trimmed.is_empty() {
+                "fast-forward rejected (likely local history diverged)".to_string()
+            } else {
+                trimmed.to_string()
+            },
+        });
+    }
+
+    Ok(FetchOutcome::Synced { new_commits })
+}
+
+/// How many commits the current branch is behind its upstream. Used
+/// by `fetch_origin` to decide whether a `git pull --ff-only` would do
+/// anything. Mirrors the helper of the same name in
+/// `commands::git::count_commits_behind` but takes an already-open
+/// `Repository` so we don't pay the cost of re-opening it here.
+fn count_commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
+    let head_oid = repo
+        .head()
+        .map_err(|e| format!("Failed to read HEAD: {}", e))?
+        .peel_to_commit()
+        .map_err(|e| format!("HEAD is not a commit: {}", e))?
+        .id();
+
+    let branch_name = repo
+        .head()
+        .map_err(|e| format!("Failed to read HEAD: {}", e))?
+        .shorthand()
+        .ok_or_else(|| "HEAD is not on a branch".to_string())?
+        .to_string();
+    let local_refname = format!("refs/heads/{}", branch_name);
+    let upstream_name = repo
+        .branch_upstream_name(&local_refname)
+        .map_err(|e| format!("no upstream configured for {}: {:?}", local_refname, e))?
+        .as_str()
+        .ok_or_else(|| "upstream name is not valid UTF-8".to_string())?
+        .to_string();
+    let upstream_oid = repo
+        .find_reference(&upstream_name)
+        .map_err(|e| format!("Failed to find upstream ref {}: {}", upstream_name, e))?
+        .target()
+        .ok_or_else(|| "upstream ref has no target".to_string())?;
+
+    let (_ahead, behind) = repo
+        .graph_ahead_behind(head_oid, upstream_oid)
+        .map_err(|e| format!("graph_ahead_behind failed: {}", e))?;
+    Ok(behind.try_into().unwrap_or(u32::MAX))
 }
 
 /// Create a new Git worktree at the specified path and honor .worktreeinclude.
@@ -540,11 +764,134 @@ pub fn claude_dir() -> PathBuf {
 }
 
 #[cfg(test)]
+#[path = "fetch_origin_tests.rs"]
+mod fetch_origin_tests;
+
+/// Shared test fixtures used by both `mod tests` (worktree / base_ref
+/// regression suites) and `fetch_origin_tests` (issue #213). Lifted
+/// out of `mod tests` so the sibling fetch_origin module can reach
+/// them — `mod tests` items are private to that scope. Kept inside
+/// env/mod.rs rather than a standalone file so the helpers stay
+/// co-located with the production code they exercise.
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
+
+    /// Per-test scratch directory under %TEMP%, named uniquely so parallel
+    /// cargo test invocations don't collide. Removed on drop.
+    pub(crate) struct TestDir(PathBuf);
+    impl TestDir {
+        pub(crate) fn new(suffix: &str) -> Self {
+            let id = NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir().join(format!(
+                "buildmesh_wt_test_{}_{}_{}",
+                suffix,
+                std::process::id(),
+                id
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Init a repo with one initial commit containing the given files.
+    /// `path` is expected to exist (callers pass a `TestDir`).
+    pub(crate) fn init_repo_with_commit(
+        path: &Path,
+        files: &[(&str, &str)],
+    ) -> git2::Repository {
+        let repo = git2::Repository::init(path).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+
+        let mut index = repo.index().unwrap();
+        for (name, content) in files {
+            let full = path.join(name);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, content).unwrap();
+            index.add_path(Path::new(name)).unwrap();
+        }
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        {
+            // Scope the Tree borrow so it's dropped before we return `repo`.
+            let tree = repo.find_tree(tree_oid).unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                .unwrap();
+        }
+        repo
+    }
+
+    /// Returns true if the repo at `path` has any non-ignored working-tree
+    /// changes. Used as a precondition assertion by the dirty-parent tests
+    /// so a silent failure to dirty the repo doesn't make the test pass
+    /// for the wrong reason.
+    pub(crate) fn repo_is_dirty(path: &Path) -> bool {
+        let repo = git2::Repository::open(path).unwrap();
+        let mut opts = git2::StatusOptions::new();
+        opts.include_untracked(true).recurse_untracked_dirs(true);
+        let statuses = repo.statuses(Some(&mut opts)).unwrap();
+        statuses.iter().any(|entry| !entry.status().is_ignored())
+    }
+
+    /// Add a commit on top of current HEAD with the given file content,
+    /// advancing HEAD. Returns the new commit oid.
+    pub(crate) fn commit_file(
+        repo: &git2::Repository,
+        root: &Path,
+        name: &str,
+        content: &str,
+    ) -> git2::Oid {
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        fs::write(root.join(name), content).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(name)).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let parent = repo.head().unwrap().peel_to_commit().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "more", &tree, &[&parent])
+            .unwrap()
+    }
+
+    /// Set up a repo where `origin/main` (a remote-tracking ref) points at the
+    /// initial commit, then drift the local HEAD forward to a second commit.
+    /// Returns (repo, origin_main_oid).
+    pub(crate) fn repo_with_drifted_head(root: &Path) -> (git2::Repository, git2::Oid) {
+        let repo = init_repo_with_commit(root, &[("f.txt", "from-origin-main\n")]);
+        let origin_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference("refs/remotes/origin/main", origin_oid, false, "test")
+            .unwrap();
+        commit_file(&repo, root, "f.txt", "local-drift\n");
+        assert_ne!(
+            repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid,
+            "precondition: HEAD must differ from origin/main"
+        );
+        (repo, origin_oid)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::test_helpers::{
+        init_repo_with_commit, repo_is_dirty, repo_with_drifted_head, TestDir,
+    };
     use std::fs;
     use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Test: when worktree_name is None, resolve_agent_path returns base_path directly
     /// (i.e., no .claude/worktrees/ subdirectory)
@@ -613,70 +960,6 @@ mod tests {
     // artificial constraint. These tests document the underlying
     // capability and guard against it being re-broken.
     // -----------------------------------------------------------------
-
-    static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
-
-    /// Per-test scratch directory under %TEMP%, named uniquely so parallel
-    /// cargo test invocations don't collide. Removed on drop.
-    struct TestDir(PathBuf);
-    impl TestDir {
-        fn new(suffix: &str) -> Self {
-            let id = NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst);
-            let path = std::env::temp_dir().join(format!(
-                "buildmesh_wt_test_{}_{}_{}",
-                suffix,
-                std::process::id(),
-                id
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Init a repo with one initial commit containing the given files.
-    /// `path` is expected to exist (callers pass a `TestDir`).
-    fn init_repo_with_commit(path: &Path, files: &[(&str, &str)]) -> git2::Repository {
-        let repo = git2::Repository::init(path).unwrap();
-        let sig = git2::Signature::now("test", "test@example.com").unwrap();
-
-        let mut index = repo.index().unwrap();
-        for (name, content) in files {
-            let full = path.join(name);
-            fs::create_dir_all(full.parent().unwrap()).unwrap();
-            fs::write(&full, content).unwrap();
-            index.add_path(Path::new(name)).unwrap();
-        }
-        index.write().unwrap();
-        let tree_oid = index.write_tree().unwrap();
-        {
-            // Scope the Tree borrow so it's dropped before we return `repo`.
-            let tree = repo.find_tree(tree_oid).unwrap();
-            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
-                .unwrap();
-        }
-        repo
-    }
-
-    /// Returns true if the repo at `path` has any non-ignored working-tree
-    /// changes. Used as a precondition assertion by the dirty-parent tests
-    /// so a silent failure to dirty the repo doesn't make the test pass
-    /// for the wrong reason.
-    fn repo_is_dirty(path: &Path) -> bool {
-        let repo = git2::Repository::open(path).unwrap();
-        let mut opts = git2::StatusOptions::new();
-        opts.include_untracked(true).recurse_untracked_dirs(true);
-        let statuses = repo.statuses(Some(&mut opts)).unwrap();
-        statuses.iter().any(|entry| !entry.status().is_ignored())
-    }
 
     /// Acceptance criterion for #210: `create_git_worktree` must succeed in
     /// `branched` mode even when the parent repo has uncommitted changes.
@@ -795,38 +1078,6 @@ mod tests {
     // local HEAD. Without this, root drift (parked on a feature branch,
     // behind origin) is inherited by every new worktree.
     // -----------------------------------------------------------------
-
-    /// Add a commit on top of current HEAD with the given file content,
-    /// advancing HEAD. Returns the new commit oid.
-    fn commit_file(repo: &git2::Repository, root: &Path, name: &str, content: &str) -> git2::Oid {
-        let sig = git2::Signature::now("test", "test@example.com").unwrap();
-        fs::write(root.join(name), content).unwrap();
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new(name)).unwrap();
-        index.write().unwrap();
-        let tree_oid = index.write_tree().unwrap();
-        let parent = repo.head().unwrap().peel_to_commit().unwrap();
-        let tree = repo.find_tree(tree_oid).unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "more", &tree, &[&parent])
-            .unwrap()
-    }
-
-    /// Set up a repo where `origin/main` (a remote-tracking ref) points at the
-    /// initial commit, then drift the local HEAD forward to a second commit.
-    /// Returns (repo, origin_main_oid).
-    fn repo_with_drifted_head(root: &Path) -> (git2::Repository, git2::Oid) {
-        let repo = init_repo_with_commit(root, &[("f.txt", "from-origin-main\n")]);
-        let origin_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
-        repo.reference("refs/remotes/origin/main", origin_oid, false, "test")
-            .unwrap();
-        commit_file(&repo, root, "f.txt", "local-drift\n");
-        assert_ne!(
-            repo.head().unwrap().peel_to_commit().unwrap().id(),
-            origin_oid,
-            "precondition: HEAD must differ from origin/main"
-        );
-        (repo, origin_oid)
-    }
 
     #[test]
     fn resolve_base_commit_head_returns_mesh_root_head() {

@@ -410,8 +410,27 @@ pub async fn spawn_agent_inner(
         // docs/adr/0002-allow-branched-worktree-creation-on-dirty-mesh.md).
         let host_path = std::path::Path::new(&resolved.host_path);
         if !host_path.exists() {
+            // Auto-sync the parent **Mesh** before we cut a new worktree
+            // (issue #213). The sync is best-effort: a network failure or
+            // a non-fast-forwardable history is surfaced as a `mesh-sync-
+            // warning` Tauri event so the frontend can show a non-fatal
+            // toast, but spawn always proceeds from the local HEAD.
+            // Skips (dirty parent, no origin remote, already up to date)
+            // are silent — the user doesn't need to know about them.
             let root = node.path.clone();
-            tokio::task::spawn_blocking(move || env::fetch_origin(&root)).await.ok();
+            let sync_result = tokio::task::spawn_blocking(move || env::fetch_origin(&root))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "spawn_agent_inner: fetch_origin task panicked: {}",
+                        e
+                    );
+                    Err(env::FetchError::FetchFailed(format!(
+                        "sync task panicked: {}",
+                        e
+                    )))
+                });
+            emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
             if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode, base_ref)
@@ -505,6 +524,118 @@ pub async fn spawn_agent_inner(
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
     tracing::info!("spawn_agent_inner: complete");
     Ok(())
+}
+
+/// Map an `env::fetch_origin` outcome to either a silent `tracing` log
+/// or a `mesh-sync-warning` Tauri event. The frontend's `App.tsx`
+/// listens for the event and shows a non-fatal warning toast.
+///
+/// Per issue #213:
+/// - `SkippedDirty`, `SkippedNoRemote`, `UpToDate`, `Synced` are silent.
+/// - `FetchedButDiverged`, `FetchFailed`, `RepoUnusable` emit a
+///   warning so the user knows the spawn fell back to local HEAD.
+///
+/// Spawn proceeds either way; the event is purely informational.
+fn emit_sync_outcome_event(
+    app: &tauri::AppHandle,
+    session_id: i64,
+    mesh_path: &str,
+    outcome: Result<env::FetchOutcome, env::FetchError>,
+) {
+    let (event_name, payload) = match outcome {
+        Ok(env::FetchOutcome::SkippedDirty) => {
+            tracing::info!(
+                "spawn_agent_inner: auto-sync skipped (parent dirty) for session {}",
+                session_id
+            );
+            return;
+        }
+        Ok(env::FetchOutcome::SkippedNoRemote) => {
+            tracing::info!(
+                "spawn_agent_inner: auto-sync skipped (no origin) for session {}",
+                session_id
+            );
+            return;
+        }
+        Ok(env::FetchOutcome::UpToDate) => {
+            tracing::info!(
+                "spawn_agent_inner: auto-sync up-to-date for session {}",
+                session_id
+            );
+            return;
+        }
+        Ok(env::FetchOutcome::Synced { new_commits }) => {
+            tracing::info!(
+                "spawn_agent_inner: auto-sync pulled {} commit(s) for session {}",
+                new_commits,
+                session_id
+            );
+            return;
+        }
+        Ok(env::FetchOutcome::FetchedButDiverged { new_commits, reason }) => {
+            // Diverged is informational, not an error — the fetch
+            // succeeded, the new commits are visible locally, we just
+            // can't auto-apply them without a real merge. The user
+            // should know so they can decide whether to `git pull`
+            // themselves or rebase.
+            let message = format!(
+                "Fetched {} new commit(s) from origin, but local history has diverged ({}). Spawning from local HEAD — pull manually to sync.",
+                new_commits, reason
+            );
+            tracing::warn!("spawn_agent_inner: {}", message);
+            (
+                "mesh-sync-warning",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "mesh_path": mesh_path,
+                    "outcome": "diverged",
+                    "new_commits": new_commits,
+                    "message": message,
+                }),
+            )
+        }
+        Err(env::FetchError::RepoUnusable(reason)) => {
+            let message = format!(
+                "Couldn't auto-sync the mesh — repository is unusable: {}. Spawning from local HEAD instead.",
+                reason
+            );
+            tracing::warn!("spawn_agent_inner: {}", message);
+            (
+                "mesh-sync-warning",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "mesh_path": mesh_path,
+                    "outcome": "repo_unusable",
+                    "message": message,
+                }),
+            )
+        }
+        Err(env::FetchError::FetchFailed(reason)) => {
+            // The most common case: network down. We don't try to
+            // distinguish "no network" from "auth failure" — both look
+            // the same to `git fetch`. The user knows whether they
+            // have connectivity; we just tell them we couldn't sync.
+            let message = if reason.is_empty() {
+                "Couldn't auto-sync the mesh (fetch failed). Spawning from local HEAD instead.".to_string()
+            } else {
+                format!(
+                    "Couldn't auto-sync the mesh ({}). Spawning from local HEAD instead.",
+                    reason
+                )
+            };
+            tracing::warn!("spawn_agent_inner: {}", message);
+            (
+                "mesh-sync-warning",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "mesh_path": mesh_path,
+                    "outcome": "fetch_failed",
+                    "message": message,
+                }),
+            )
+        }
+    };
+    let _ = app.emit(event_name, payload);
 }
 
 #[cfg(test)]

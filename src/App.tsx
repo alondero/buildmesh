@@ -236,6 +236,28 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
+  // The auto-sync (issue #213) couldn't fully reconcile the parent
+  // mesh with origin — either the fetch failed (network down) or
+  // the local history has diverged from the remote. The Agent Node
+  // is still being spawned from the local HEAD; this is a heads-up,
+  // not an error. The label is `Sync` to keep it distinct from
+  // `provider-error` (red, fatal-ish) and `Worktree` (cleanup
+  // failures). All three share the same toast stack — only the
+  // provider label differs — so the user gets a consistent visual
+  // treatment for any non-blocking runtime issue.
+  useEffect(() => {
+    const unlisten = listen<{
+      session_id: number;
+      mesh_path: string;
+      outcome: 'diverged' | 'fetch_failed' | 'repo_unusable';
+      new_commits?: number;
+      message: string;
+    }>('mesh-sync-warning', (event) => {
+      addToast('Sync', event.payload.message);
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
   // Auto-dismiss toasts after TOAST_TTL_MS. A 1s tick is coarse
   // enough that it won't fight React's render cycle, fine enough
   // that the user sees the toast disappear in real time.
