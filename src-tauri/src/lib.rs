@@ -5,6 +5,7 @@ pub mod agent;
 mod commands;
 mod db;
 mod env;
+mod git;
 mod http;
 mod http_server;
 pub mod models;

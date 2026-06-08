@@ -7,6 +7,9 @@
 //! Run with: cd src-tauri && cargo test prune
 
 use super::*;
+// `remove_one_worktree` moved to the git module (ADR 0007); these removal
+// regression tests exercise it from here, alongside the worktree enumeration.
+use crate::git::worktree::remove_one_worktree;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};

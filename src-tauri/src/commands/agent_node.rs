@@ -3,7 +3,7 @@
 use crate::db;
 use crate::models::AgentNode;
 use crate::services;
-use crate::services::agent_node::WorktreeCloseSafety;
+use crate::git::worktree::WorktreeCloseSafety;
 use tauri::{command, Emitter};
 
 /// Create a new agent node

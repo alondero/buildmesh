@@ -5,10 +5,11 @@
 //! one piece that crosses into application state: a worktree is "active" when
 //! a non-archived agent node points at its path.
 
-use git2::{BranchType, Repository, StatusOptions, WorktreePruneOptions};
+use git2::{BranchType, Repository};
 
 use crate::db;
 use crate::env::to_host_path;
+use crate::git::primitives;
 use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
 /// Discover all local branches, worktrees, and remote-tracking branches for
@@ -74,7 +75,7 @@ pub async fn delete_worktrees(worktree_paths: Vec<String>) -> Result<(), String>
 fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
     let mut errors: Vec<String> = Vec::new();
     for path in worktree_paths {
-        if let Err(e) = remove_one_worktree(path) {
+        if let Err(e) = crate::git::worktree::remove_one_worktree(path) {
             errors.push(format!("{}: {}", path, e));
         }
     }
@@ -105,87 +106,6 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<(), String> 
 
 // ── Internals (DB-free, unit-testable against real temp repos) ──────────────
 
-/// How many times to attempt the working-tree removal, and how long to wait
-/// between tries. Windows releases a just-killed process's directory handles
-/// asynchronously, so the removal can briefly fail with "being used by another
-/// process" even after the agent is gone; a short backoff rides that out.
-const WORKTREE_REMOVE_ATTEMPTS: u32 = 5;
-const WORKTREE_REMOVE_BACKOFF_MS: u64 = 100;
-
-pub(crate) fn remove_one_worktree(path: &str) -> Result<(), String> {
-    let host_path = to_host_path(path);
-
-    // An already-gone working directory is nothing to remove. The node may have
-    // been gutted by a previous interrupted close (#239); treat it as success so
-    // the close can still proceed rather than erroring on a missing repo.
-    if !std::path::Path::new(&host_path).exists() {
-        return Ok(());
-    }
-
-    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
-    let worktree = git2::Worktree::open_from_repository(&repo)
-        .map_err(|e| format!("not a removable worktree: {}", e))?;
-
-    // Delete the working directory ourselves first. git2's prune removes the
-    // admin gitdir before the working tree, so if its rmdir loses the race with
-    // a just-killed agent's handle release it leaves a dangling, un-prunable
-    // worktree. Owning the removal lets us retry through that window; git2 then
-    // only does the admin-entry bookkeeping, which never touches locked files.
-    remove_worktree_dir_with_retry(&host_path)?;
-
-    let mut opts = WorktreePruneOptions::new();
-    opts.valid(true).locked(true);
-    worktree.prune(Some(&mut opts)).map_err(|e| e.to_string())
-}
-
-/// Remove a worktree's working directory *all-or-nothing*, retrying with backoff
-/// to absorb the brief window where a just-killed process's handles are still
-/// being released by the OS (the Windows close-node failure mode).
-///
-/// We can't delete in place: `fs::remove_dir_all` walks entries one at a time,
-/// so a live agent's locked file makes it gut everything it *can* delete (the
-/// source tree and the `.git` gitlink) before it fails — leaving a broken stub
-/// that can't be opened as a repo, so the node can never be closed (#239).
-/// Instead we rename the whole directory to a sibling staging name first: on
-/// Windows that rename fails atomically while any descendant handle is open, so
-/// a failure leaves the worktree fully intact. Only once the rename succeeds —
-/// proving nothing pins the tree — do we delete the staged copy, where a
-/// partial failure can no longer harm the live worktree path.
-fn remove_worktree_dir_with_retry(path: &str) -> Result<(), String> {
-    if !std::path::Path::new(path).exists() {
-        return Ok(());
-    }
-
-    let staging = format!("{}.removing", path.trim_end_matches(['/', '\\']));
-    // Clear any staging dir left by a previous interrupted removal; by
-    // definition it holds no live handles, so this can't gut the live worktree.
-    let _ = std::fs::remove_dir_all(&staging);
-
-    let mut last_err = String::new();
-    for attempt in 0..WORKTREE_REMOVE_ATTEMPTS {
-        match std::fs::rename(path, &staging) {
-            Ok(()) => return std::fs::remove_dir_all(&staging).map_err(|e| e.to_string()),
-            Err(e) => {
-                last_err = e.to_string();
-                if attempt + 1 < WORKTREE_REMOVE_ATTEMPTS {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        WORKTREE_REMOVE_BACKOFF_MS,
-                    ));
-                }
-            }
-        }
-    }
-    Err(last_err)
-}
-
-/// The branch a worktree's HEAD points at, read from HEAD's symbolic target so
-/// it survives the branch being deleted. Returns None for a detached HEAD.
-fn head_branch_name(repo: &Repository) -> Option<String> {
-    let head = repo.find_reference("HEAD").ok()?;
-    let target = head.symbolic_target()?;
-    target.strip_prefix("refs/heads/").map(|s| s.to_string())
-}
-
 /// Resolve the tip commit of the repo's `main` (or `master`) branch, if any.
 fn main_branch_oid(repo: &Repository) -> Option<git2::Oid> {
     for candidate in ["main", "master"] {
@@ -202,18 +122,6 @@ fn format_commit_time(time: git2::Time) -> Option<String> {
     chrono::DateTime::from_timestamp(time.seconds(), 0).map(|dt| dt.to_rfc3339())
 }
 
-/// Whether the repo's working tree has any non-ignored changes.
-fn repo_has_uncommitted(repo: &Repository) -> bool {
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    match repo.statuses(Some(&mut opts)) {
-        Ok(statuses) => statuses
-            .iter()
-            .any(|e| !e.status().is_ignored() && e.status() != git2::Status::CURRENT),
-        Err(_) => false,
-    }
-}
-
 /// Pure enumeration: given a repo path and the set of active node paths,
 /// build the prune info. No DB access — the caller supplies `active_paths`.
 fn collect_prune_info(
@@ -223,7 +131,7 @@ fn collect_prune_info(
     let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
 
     let main_oid = main_branch_oid(&repo);
-    let head_dirty = repo_has_uncommitted(&repo);
+    let head_dirty = primitives::is_dirty(&repo).unwrap_or(false);
 
     // ── Local branches ──────────────────────────────────────────────────
     let mut local_branches: Vec<BranchInfo> = Vec::new();
@@ -261,7 +169,7 @@ fn collect_prune_info(
                         if let (Some(local), Some(up)) =
                             (branch_oid, up_ref.target())
                         {
-                            if let Ok((a, b)) = repo.graph_ahead_behind(local, up) {
+                            if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
                                 ahead = a as u64;
                                 behind = b as u64;
                             }
@@ -297,7 +205,7 @@ fn collect_prune_info(
 
     if let Some(workdir) = repo.workdir() {
         let path = workdir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
-        let branch = head_branch_name(&repo);
+        let branch = primitives::head_branch_name(&repo);
         worktrees.push(WorktreeInfo {
             is_active: path_is_active(&path, active_paths),
             is_stale: branch_is_stale(&branch, &local_names),
@@ -315,7 +223,7 @@ fn collect_prune_info(
             let path = wt.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
             let branch = Repository::open(wt.path())
                 .ok()
-                .and_then(|r| head_branch_name(&r));
+                .and_then(|r| primitives::head_branch_name(&r));
             worktrees.push(WorktreeInfo {
                 is_active: path_is_active(&path, active_paths),
                 is_stale: branch_is_stale(&branch, &local_names),
@@ -347,16 +255,8 @@ fn collect_prune_info(
 }
 
 fn path_is_active(path: &str, active_paths: &[String]) -> bool {
-    let norm = normalize_path(path);
-    active_paths.iter().any(|p| normalize_path(p) == norm)
-}
-
-fn normalize_path(p: &str) -> String {
-    let host = to_host_path(p);
-    let trimmed = host.trim_end_matches(['/', '\\']);
-    std::fs::canonicalize(trimmed)
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| trimmed.replace('\\', "/"))
+    let norm = primitives::normalize_for_compare(path);
+    active_paths.iter().any(|p| primitives::normalize_for_compare(p) == norm)
 }
 
 /// A worktree is stale when it points at a branch that no longer exists

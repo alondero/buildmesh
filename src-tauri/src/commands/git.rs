@@ -9,7 +9,8 @@ use tauri::Emitter;
 
 use crate::db;
 use crate::env::to_host_path;
-use crate::models::{HoldingWorktree, MeshHealth};
+use crate::git::{health, primitives};
+use crate::models::MeshHealth;
 use crate::process_util::command_no_window;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,8 +101,7 @@ pub struct GitBranchStatus {
 /// (see commands/prune.rs for the same pattern).
 #[command]
 pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
-    let host_path = to_host_path(&path);
-    let repo = match Repository::open(&host_path) {
+    let repo = match primitives::open_from_host_path(&path) {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -120,27 +120,18 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 
     let local_oid = head.target();
 
-    // short_id() respects the repo's `core.abbreviate` (default 7). For unborn
-    // HEAD the OID is None; we leave short_sha empty rather than fabricate.
+    // For unborn HEAD the OID is None; we leave short_sha empty rather than fabricate.
     let short_sha = local_oid
-        .and_then(|oid| repo.find_object(oid, None).ok())
-        .and_then(|obj| obj.short_id().ok())
-        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .map(|oid| primitives::short_sha(&repo, oid))
         .unwrap_or_default();
 
-    let mut ahead = 0u32;
-    let mut behind = 0u32;
-    let refname = format!("refs/heads/{}", name);
-    if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
-        if let Some(upstream_ref) = upstream_buf.as_str() {
-            if let Ok(up_ref) = repo.find_reference(upstream_ref) {
-                if let (Some(local), Some(up)) = (local_oid, up_ref.target()) {
-                    if let Ok((a, b)) = repo.graph_ahead_behind(local, up) {
-                        ahead = a as u32;
-                        behind = b as u32;
-                    }
-                }
-            }
+    let (mut ahead, mut behind) = (0u32, 0u32);
+    if let (Some(local), Some(up)) =
+        (local_oid, primitives::upstream_oid_for_branch(&repo, &name))
+    {
+        if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
+            ahead = a;
+            behind = b;
         }
     }
 
@@ -156,8 +147,7 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 /// line additions/deletions for all uncommitted changes.
 #[command]
 pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
-    let host_path = to_host_path(&path);
-    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
+    let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
@@ -207,8 +197,7 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
 /// Get aggregate git change summary for a directory
 #[command]
 pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
-    let host_path = to_host_path(&path);
-    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
+    let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
@@ -306,18 +295,16 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
         });
     }
 
-    // Step 2: Count how many commits we're behind. We compute this via
-    // git2's `graph_ahead_behind` rather than shelling out to
-    // `git rev-list --count HEAD..@{u}` because the `@{u}` syntax fails
-    // on Windows when spawned via `std::process::Command::args` — the
-    // curly braces are stripped during command-line construction and
-    // git sees `HEAD..@u`, which it rejects as ambiguous. Using git2
-    // (already imported in this file) sidesteps the brace issue at its
-    // source rather than working around it in the subprocess arg.
-    let behind_count: u32 = count_commits_behind(&host_path).unwrap_or_else(|e| {
-        tracing::warn!("git_sync: failed to count commits behind upstream: {}", e);
-        0
-    });
+    // Step 2: Count how many commits we're behind, via the shared
+    // `git::sync::commits_behind_upstream` (git2's `graph_ahead_behind`, which
+    // avoids the Windows `@{u}` brace-stripping bug).
+    let behind_count: u32 = Repository::open(&host_path)
+        .map_err(|e| e.to_string())
+        .and_then(|repo| crate::git::sync::commits_behind_upstream(&repo))
+        .unwrap_or_else(|e| {
+            tracing::warn!("git_sync: failed to count commits behind upstream: {}", e);
+            0
+        });
 
     if behind_count == 0 {
         return Ok(GitSyncResult {
@@ -328,9 +315,12 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
         });
     }
 
-    // Step 3: git pull --ff-only
+    // Step 3: git pull --ff-only --no-rebase. The explicit --no-rebase defeats a
+    // user's global pull.rebase=true, which would otherwise turn this into a
+    // rebase and write conflict markers on diverged history (same policy as the
+    // auto-sync fetch_origin — see [[buildmesh-pull-rebase-default]]).
     let pull_output = command_no_window("git")
-        .args(["pull", "--ff-only"])
+        .args(["pull", "--ff-only", "--no-rebase"])
         .current_dir(&host_path)
         .output()
         .map_err(|e| format!("Failed to run git pull: {}", e))?;
@@ -362,51 +352,6 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     })
 }
 
-/// How many commits the current branch is behind its upstream.
-/// Returns `Ok(0)` when the branch has no upstream configured.
-/// Uses git2 to avoid the `@{u}` brace issue with `std::process::Command::args` on Windows.
-fn count_commits_behind(host_path: &str) -> Result<u32, String> {
-    let repo = Repository::open(host_path)
-        .map_err(|e| format!("Failed to open repository at {}: {}", host_path, e))?;
-
-    let head_oid = repo
-        .head()
-        .map_err(|e| format!("Failed to read HEAD: {}", e))?
-        .peel_to_commit()
-        .map_err(|e| format!("HEAD is not a commit: {}", e))?
-        .id();
-
-    // Find the upstream remote-tracking ref for the current branch.
-    // `branch_upstream_name` returns something like "refs/remotes/main/main"
-    // when the local branch tracks `main/main`.
-    let branch_name = repo
-        .head()
-        .map_err(|e| format!("Failed to read HEAD: {}", e))?
-        .shorthand()
-        .ok_or_else(|| "HEAD is not on a branch".to_string())?
-        .to_string();
-    let local_refname = format!("refs/heads/{}", branch_name);
-    let upstream_name = repo
-        .branch_upstream_name(&local_refname)
-        .map_err(|e| format!("no upstream configured for {}: {:?}", local_refname, e))?
-        .as_str()
-        .ok_or_else(|| "upstream name is not valid UTF-8".to_string())?
-        .to_string();
-    let upstream_oid = repo
-        .find_reference(&upstream_name)
-        .map_err(|e| format!("Failed to find upstream ref {}: {}", upstream_name, e))?
-        .target()
-        .ok_or_else(|| "upstream ref has no target".to_string())?;
-
-    let (_ahead, behind) = repo
-        .graph_ahead_behind(head_oid, upstream_oid)
-        .map_err(|e| format!("graph_ahead_behind failed: {}", e))?;
-    // `graph_ahead_behind` returns usize; on a 32-bit platform this could
-    // overflow u32, but on any realistic repo it won't. Saturate rather
-    // than panic.
-    Ok(behind.try_into().unwrap_or(u32::MAX))
-}
-
 // ── Mesh health detection (issue #231) ──────────────────────────────────────
 
 /// Result of a successful `restore_mesh_to_base` invocation. `restored` is
@@ -427,454 +372,6 @@ pub struct FreeResult {
     pub detached_at_sha: String,
 }
 
-/// Derive the local branch name from a configured `base_ref` string.
-///
-/// Accepts the four observed forms:
-///   - `main`                        → `Some("main")`
-///   - `origin/main`                 → `Some("main")`
-///   - `refs/heads/main`             → `Some("main")`
-///   - `origin/feature/auth`         → `Some("feature/auth")` (strip the remote, keep nested branch)
-///   - `refs/heads/feature/auth`     → `Some("feature/auth")` (branch can contain slashes)
-///   - `refs/remotes/origin/feature/auth` → `Some("feature/auth")`
-///
-/// Returns `None` for:
-///   - empty / whitespace-only strings
-///   - `HEAD` (case-insensitive) — anywhere it appears as the branch part
-///   - `FETCH_HEAD`
-///
-/// **Limitation:** when `base_ref` is a plain nested branch name like
-/// `feature/auth` (no remote prefix, no `refs/heads/` prefix), this helper
-/// can't tell the difference between a remote prefix and a nested branch
-/// — it strips `feature/` and returns `auth`. To disambiguate, use the
-/// full `refs/heads/feature/auth` form. The buildmesh DB default
-/// (`origin/main`) and the common short forms (`main`, `develop`,
-/// `origin/develop`) all resolve correctly.
-///
-/// Callers must treat `None` as "no base branch configured" — the badge
-/// and the recovery button are both suppressed in that case.
-pub(crate) fn parse_local_branch(base_ref: &str) -> Option<String> {
-    let trimmed = base_ref.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    // Path 1: full branch ref `refs/heads/<branch>` — the branch can
-    // contain slashes (e.g. `refs/heads/feature/auth`).
-    if let Some(branch) = trimmed.strip_prefix("refs/heads/") {
-        return finalize_branch(branch);
-    }
-    // Path 2: full remote-tracking ref `refs/remotes/<remote>/<branch>` —
-    // strip the remote (first segment) and keep the rest, which may
-    // contain slashes.
-    if let Some(after) = trimmed.strip_prefix("refs/remotes/") {
-        let branch = after.split_once('/').map(|(_, b)| b).unwrap_or(after);
-        return finalize_branch(branch);
-    }
-    // Path 3: short form. Either `<branch>` (no slashes — easy) or
-    // `<remote>/<branch>` (the buildmesh DB default `origin/main`).
-    // Without a repo we can't tell them apart, so we split on the first
-    // slash and treat the first segment as the remote. See the function-
-    // level doc for the nested-branch-no-remote case.
-    let local = match trimmed.split_once('/') {
-        Some((_remote, rest)) if !rest.is_empty() => rest,
-        _ => trimmed,
-    };
-    finalize_branch(local)
-}
-
-/// Reject empty / HEAD / FETCH_HEAD and lowercase-normalize the result.
-fn finalize_branch(local: &str) -> Option<String> {
-    if local.is_empty()
-        || local.eq_ignore_ascii_case("HEAD")
-        || local.eq_ignore_ascii_case("FETCH_HEAD")
-    {
-        return None;
-    }
-    Some(local.to_string())
-}
-
-/// Pure helper: compute a MeshHealth snapshot from an already-open `Repository`.
-/// No DB access, no Tauri command. `base_ref` is the mesh's configured
-/// `base_ref` (typically `origin/main`); pass an empty string or `HEAD`
-/// when the mesh has no base configured and every field will reflect that.
-///
-/// `base_branch_holder` is always `None` from this helper — the Tauri
-/// command fills it in via `find_base_branch_holder` (which needs the
-/// agent-node active-paths list, not available here).
-pub(crate) fn compute_mesh_health(
-    repo: &Repository,
-    base_ref: &str,
-) -> Result<MeshHealth, String> {
-    let local_base_branch = parse_local_branch(base_ref);
-
-    // Read HEAD state. `head()` errors on an unborn HEAD (no commits yet).
-    let (current_branch, current_short_sha, is_detached) = match repo.head() {
-        Ok(_) => {
-            let detached = repo.head_detached().unwrap_or(false);
-            let name = if detached {
-                Some("HEAD".to_string())
-            } else {
-                repo.head()
-                    .ok()
-                    .and_then(|h| h.shorthand().map(|s| s.to_string()))
-            };
-            let oid = repo.head().ok().and_then(|h| h.target());
-            let short_sha = oid
-                .and_then(|o| repo.find_object(o, None).ok())
-                .and_then(|obj| obj.short_id().ok())
-                .map(|buf| String::from_utf8_lossy(&buf).into_owned())
-                .unwrap_or_default();
-            (name, short_sha, detached)
-        }
-        Err(_) => (None, String::new(), false),
-    };
-
-    let is_dirty = repo_is_dirty(repo);
-    let (has_upstream, unpushed_ahead) =
-        compute_unpushed(repo, current_branch.as_deref(), local_base_branch.as_deref());
-    let is_drifted = compute_is_drifted(
-        repo,
-        current_branch.as_deref(),
-        is_detached,
-        local_base_branch.as_deref(),
-        base_ref,
-    );
-
-    Ok(MeshHealth {
-        base_ref: base_ref.to_string(),
-        local_base_branch,
-        current_branch,
-        current_short_sha,
-        is_detached,
-        is_dirty,
-        unpushed_ahead,
-        has_upstream,
-        is_drifted,
-        base_branch_holder: None,
-    })
-}
-
-/// `unpushed_ahead` semantics: the number of commits on the current
-/// branch's tip that would be stranded by a `git checkout base_branch`.
-///
-/// - When the branch has an upstream configured: standard ahead-of-upstream
-///   count via `graph_ahead_behind`.
-/// - When it has no upstream: ahead-of-local-base-branch count. A branch
-///   with the same tip as the local base (a fresh branch with no local
-///   commits) reports 0 — it has nothing to lose.
-///
-/// Returns `(has_upstream, unpushed_ahead)`.
-fn compute_unpushed(
-    repo: &Repository,
-    current_branch: Option<&str>,
-    local_base_branch: Option<&str>,
-) -> (bool, u32) {
-    let Some(branch) = current_branch else {
-        return (false, 0);
-    };
-    let refname = format!("refs/heads/{}", branch);
-
-    // Try the configured upstream first. We use git2's `graph_ahead_behind`
-    // for the same Windows-brace-stripping reason as `get_git_branch_status`:
-    // `git rev-list --count HEAD..@{u}` is mangled by `Command::args` on
-    // Windows, so we go through libgit2.
-    if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
-        if let Some(upstream_ref) = upstream_buf.as_str() {
-            if let Ok(up_ref) = repo.find_reference(upstream_ref) {
-                if let (Some(head_oid), Some(up_oid)) = (
-                    repo.head().ok().and_then(|h| h.target()),
-                    up_ref.target(),
-                ) {
-                    if let Ok((a, _)) = repo.graph_ahead_behind(head_oid, up_oid) {
-                        return (true, a.try_into().unwrap_or(u32::MAX));
-                    }
-                }
-            }
-        }
-        // Upstream configured but we couldn't resolve OIDs.
-        return (true, 0);
-    }
-
-    // No upstream: count commits on the current tip not on the local base.
-    if let Some(base) = local_base_branch {
-        let base_oid = repo
-            .find_branch(base, git2::BranchType::Local)
-            .ok()
-            .and_then(|b| b.get().peel_to_commit().ok())
-            .map(|c| c.id());
-        let head_oid = repo.head().ok().and_then(|h| h.target());
-        if let (Some(b), Some(h)) = (base_oid, head_oid) {
-            if b == h {
-                return (false, 0);
-            }
-            if let Ok((a, _)) = repo.graph_ahead_behind(h, b) {
-                return (false, a.try_into().unwrap_or(u32::MAX));
-            }
-        }
-    }
-
-    (false, 0)
-}
-
-/// `is_drifted` rules, in priority order:
-/// 1. `local_base_branch.is_none()` (no base configured)       → `false`
-/// 2. base branch absent from the repo (e.g. default `origin/main`
-///    against a `master`-trunk repo)                           → `false`
-/// 3. `current_branch == Some(local_base_branch)`              → `false` (on base)
-/// 4. Detached HEAD at the base branch's OID                   → `false` (close enough)
-/// 5. Otherwise                                                → `true`
-///
-/// Rule 2 is the key guard against false positives: the buildmesh DB
-/// defaults every Mesh's `base_ref` to `origin/main`, so a repo whose
-/// trunk is `master` (or any other name) would otherwise be reported as
-/// permanently "drifted" off a `main` branch that does not exist. We only
-/// claim drift when there is a real base to drift *from*.
-///
-/// Among the remaining cases we still return `true` when OID equality for a
-/// detached HEAD cannot be determined — better a possibly-false badge than
-/// a missed real drift, once we know the base genuinely exists.
-fn compute_is_drifted(
-    repo: &Repository,
-    current_branch: Option<&str>,
-    is_detached: bool,
-    local_base_branch: Option<&str>,
-    base_ref: &str,
-) -> bool {
-    let Some(local) = local_base_branch else {
-        return false;
-    };
-    if !base_branch_present(repo, local, base_ref) {
-        return false;
-    }
-    if !is_detached {
-        return current_branch != Some(local);
-    }
-    // Detached: compare OIDs. A detached HEAD at the same OID as the local
-    // base branch is "close enough" — no badge.
-    let base_oid = repo
-        .find_branch(local, git2::BranchType::Local)
-        .ok()
-        .and_then(|b| b.get().peel_to_commit().ok())
-        .map(|c| c.id());
-    let head_oid = repo.head().ok().and_then(|h| h.target());
-    match (base_oid, head_oid) {
-        (Some(b), Some(h)) => b != h,
-        _ => true,
-    }
-}
-
-/// Does the configured base branch actually exist in this repo? A Mesh
-/// carrying the default `origin/main` base_ref against a repo whose trunk
-/// is `master` has no `main` to compare against — drift detection must
-/// treat that as "no base", not "permanently drifted".
-///
-/// Resolution order: a local branch with the parsed name is the strongest
-/// signal; failing that, the raw `base_ref` may name a remote-tracking
-/// branch (`origin/main`) that `revparse` can resolve even with no local
-/// branch present.
-fn base_branch_present(repo: &Repository, local_base_branch: &str, base_ref: &str) -> bool {
-    if repo
-        .find_branch(local_base_branch, git2::BranchType::Local)
-        .is_ok()
-    {
-        return true;
-    }
-    repo.revparse_single(base_ref).is_ok()
-}
-
-/// Read the symbolic branch name from a worktree repo's HEAD. Returns
-/// `None` for a detached HEAD (no symbolic target). Mirrors
-/// `commands::prune::head_branch_name` — kept private here to avoid
-/// cross-module coupling.
-fn head_branch_name_local(repo: &Repository) -> Option<String> {
-    let head = repo.find_reference("HEAD").ok()?;
-    let target = head.symbolic_target()?;
-    target.strip_prefix("refs/heads/").map(|s| s.to_string())
-}
-
-/// Path comparison helper. `canonicalize` is best-effort: on Windows a
-/// held-handle error falls back to a normalised string compare. The
-/// `to_host_path` conversion first lets WSL-stored paths compare
-/// correctly against host-side paths.
-fn normalize_holder_path(p: &str) -> String {
-    let host = to_host_path(p);
-    let trimmed = host.trim_end_matches(['/', '\\']);
-    std::fs::canonicalize(trimmed)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| trimmed.replace('\\', "/"))
-}
-
-/// Which *linked* worktree currently has the Base Ref's branch checked
-/// out, holding it hostage from the Mesh root? Returns the first match.
-///
-/// The Mesh root (the main worktree) is deliberately NOT considered: the
-/// root sitting on the base branch is the healthy, desired state, not a
-/// hostage — git only blocks a `git checkout <base>` from the root when a
-/// *different* worktree already holds that branch. Treating the root as a
-/// holder produced a false "base held by <repo>" badge for every healthy
-/// Mesh (#265 follow-up).
-///
-/// `active_paths` is the set of agent-node worktree paths; a holder whose
-/// path matches an entry in the list is marked `is_active = true` so
-/// the UI can warn the user before detaching a live agent's worktree.
-pub(crate) fn find_base_branch_holder(
-    repo: &Repository,
-    local_base_branch: &str,
-    active_paths: &[String],
-) -> Option<HoldingWorktree> {
-    // Linked worktrees only — the main worktree (root) is never a hostage.
-    if let Ok(names) = repo.worktrees() {
-        for wt_name in names.iter().flatten() {
-            if let Ok(wt) = repo.find_worktree(wt_name) {
-                let path = wt.path();
-                if let Ok(wt_repo) = Repository::open(path) {
-                    if head_branch_name_local(&wt_repo).as_deref() == Some(local_base_branch) {
-                        return Some(make_holder(&path.to_string_lossy(), active_paths));
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-fn make_holder(path: &str, active_paths: &[String]) -> HoldingWorktree {
-    let norm = normalize_holder_path(path);
-    let is_active = active_paths.iter().any(|p| normalize_holder_path(p) == norm);
-    let name = std::path::Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path)
-        .to_string();
-    HoldingWorktree {
-        path: path.to_string(),
-        name,
-        is_active,
-    }
-}
-
-/// Pure helper for the "is the working tree dirty?" check. Mirrors the
-/// pattern at `commands::prune::repo_has_uncommitted` (5 lines, kept
-/// private rather than re-exported to keep modules decoupled).
-fn repo_is_dirty(repo: &Repository) -> bool {
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    match repo.statuses(Some(&mut opts)) {
-        Ok(statuses) => statuses.iter().any(|e| !e.status().is_ignored()),
-        Err(_) => false,
-    }
-}
-
-// ── Recovery (issue #231) ───────────────────────────────────────────────────
-
-/// Pure helper for `restore_mesh_to_base`. Runs the full guard chain
-/// then shells out to `git checkout <base_branch>` when all guards
-/// pass. Returns `Ok(true)` when HEAD actually moved and `Ok(false)`
-/// for the already-on-base no-op case.
-///
-/// Guard order (first failure short-circuits with a user-readable `Err`):
-/// 1. `is_dirty`                       — uncommitted changes block
-/// 2. `unpushed_ahead > 0`             — local commits would be lost
-/// 3. `find_base_branch_holder` is Some — branch is checked out elsewhere
-/// 4. `is_detached` on a non-base OID  — silent-data-loss via reflog only
-/// 5. already on base                  — no-op, returns `Ok(false)`
-pub(crate) fn restore_to_base_impl(
-    repo: &Repository,
-    base_branch: &str,
-) -> Result<bool, String> {
-    // Use base_branch as the base_ref too — `parse_local_branch` is idempotent
-    // for both `main` and `origin/main`, and we need `local_base_branch` set
-    // for the unpushed-ahead and drift calculations to be correct.
-    let health = compute_mesh_health(repo, base_branch)?;
-
-    if health.is_dirty {
-        return Err("root has uncommitted changes — commit or stash first".to_string());
-    }
-    if health.unpushed_ahead > 0 {
-        let branch = health.current_branch.as_deref().unwrap_or("HEAD");
-        let hint = if health.has_upstream { "push" } else { "push or branch" };
-        return Err(format!(
-            "{} unpushed commit(s) on {} — {}, branch, or reset first",
-            health.unpushed_ahead, branch, hint
-        ));
-    }
-    // Already on base → no-op. This must come BEFORE the hostage check:
-    // the root worktree itself "holds" the base branch whenever it's on it,
-    // and that's not a hostage — it's the desired state.
-    if health.current_branch.as_deref() == Some(base_branch) {
-        return Ok(false);
-    }
-    // Hostage check uses empty active_paths; the Tauri command refines
-    // `is_active` separately. Detecting the hostage at all is what blocks
-    // the restore — the user is told which worktree holds the branch.
-    if let Some(holder) = find_base_branch_holder(repo, base_branch, &[]) {
-        return Err(format!(
-            "branch {} is held by worktree at {} — free it first",
-            base_branch, holder.path
-        ));
-    }
-
-    // All guards pass — run `git checkout`.
-    let host_path = repo
-        .workdir()
-        .ok_or_else(|| "repo has no working directory".to_string())?
-        .to_string_lossy()
-        .to_string();
-    let output = command_no_window("git")
-        .args(["checkout", base_branch])
-        .current_dir(&host_path)
-        .output()
-        .map_err(|e| format!("failed to run git checkout: {}", e))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
-    }
-    Ok(true)
-}
-
-/// Pure helper for `free_base_branch`. Detaches the worktree's HEAD at
-/// its current commit (preserves the commit in reflog, releases the
-/// branch lock). Idempotent: re-running on a worktree that is already
-/// detached returns the current HEAD OID without making any changes.
-/// Returns the 7-char short SHA of the detached commit on success.
-pub(crate) fn free_base_branch_impl(
-    host_worktree_path: &str,
-    local_base_branch: &str,
-) -> Result<String, String> {
-    let repo = Repository::open(host_worktree_path)
-        .map_err(|e| format!("failed to open worktree at {}: {}", host_worktree_path, e))?;
-
-    let current_branch = head_branch_name_local(&repo);
-    let already_detached = current_branch.is_none();
-
-    if !already_detached && current_branch.as_deref() != Some(local_base_branch) {
-        return Err(format!(
-            "worktree at {} does not hold base branch '{}' (current branch: {})",
-            host_worktree_path,
-            local_base_branch,
-            current_branch.unwrap_or_else(|| "detached".to_string())
-        ));
-    }
-
-    let head_oid = repo
-        .head()
-        .map_err(|e| format!("worktree HEAD is unborn: {}", e))?
-        .peel_to_commit()
-        .map_err(|e| format!("worktree HEAD is not a commit: {}", e))?
-        .id();
-
-    if !already_detached {
-        repo.set_head_detached(head_oid)
-            .map_err(|e| format!("set_head_detached failed: {}", e))?;
-    }
-
-    let obj = repo
-        .find_object(head_oid, None)
-        .map_err(|e| format!("find_object failed: {}", e))?;
-    let short = obj
-        .short_id()
-        .map_err(|e| format!("short_id failed: {}", e))?;
-    Ok(String::from_utf8_lossy(&short).into_owned())
-}
-
 // ── Tauri commands (issue #231) ─────────────────────────────────────────────
 
 /// Compute a `MeshHealth` snapshot for the given mesh. The snapshot is
@@ -890,7 +387,7 @@ pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
     let repo = Repository::open(&host_path)
         .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
 
-    let mut health = compute_mesh_health(&repo, &mesh.base_ref)?;
+    let mut health = health::compute_mesh_health(&repo, &mesh.base_ref)?;
 
     // Refine the holder: compute the holder with live active-paths so
     // `is_active` reflects whether an agent node points at the worktree.
@@ -901,7 +398,7 @@ pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
             .map(|n| n.path)
             .collect();
         health.base_branch_holder =
-            find_base_branch_holder(&repo, &local_base, &active_paths);
+            health::find_base_branch_holder(&repo, &local_base, &active_paths);
     }
 
     Ok(health)
@@ -923,10 +420,10 @@ pub async fn restore_mesh_to_base(
     let host_path = to_host_path(&mesh.path);
     let repo = Repository::open(&host_path)
         .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
-    let local_base = parse_local_branch(&mesh.base_ref)
+    let local_base = health::parse_local_branch(&mesh.base_ref)
         .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
 
-    let moved = restore_to_base_impl(&repo, &local_base)?;
+    let moved = health::restore_to_base_impl(&repo, &local_base)?;
     let message = if moved {
         format!("checked out {}", local_base)
     } else {
@@ -958,11 +455,11 @@ pub async fn free_base_branch(
 ) -> Result<FreeResult, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
-    let local_base = parse_local_branch(&mesh.base_ref)
+    let local_base = health::parse_local_branch(&mesh.base_ref)
         .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
 
     let host_wt_path = to_host_path(&worktree_path);
-    let detached_at_sha = free_base_branch_impl(&host_wt_path, &local_base)?;
+    let detached_at_sha = health::free_base_branch_impl(&host_wt_path, &local_base)?;
 
     // Notify the frontend so the panel refreshes. The freed worktree's
     // `path` is what `get_git_prune_info` and the worktree list use to
@@ -978,6 +475,3 @@ pub async fn free_base_branch(
     Ok(FreeResult { detached_at_sha })
 }
 
-#[cfg(test)]
-#[path = "mesh_health_tests.rs"]
-mod mesh_health_tests;

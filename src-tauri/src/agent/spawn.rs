@@ -460,7 +460,7 @@ pub async fn spawn_agent_inner(
             let root = node.path.clone();
             let base_ref_owned = base_ref.to_string();
             let sync_result = tokio::task::spawn_blocking(move || {
-                env::fetch_origin(&root, &base_ref_owned)
+                crate::git::sync::fetch_origin(&root, &base_ref_owned)
             })
             .await
             .unwrap_or_else(|e| {
@@ -468,7 +468,7 @@ pub async fn spawn_agent_inner(
                     "spawn_agent_inner: fetch_origin task panicked: {}",
                     e
                 );
-                Err(env::FetchError::FetchFailed(format!(
+                Err(crate::git::sync::FetchError::FetchFailed(format!(
                     "sync task panicked: {}",
                     e
                 )))
@@ -476,7 +476,7 @@ pub async fn spawn_agent_inner(
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
-            if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode, base_ref)
+            if let Err(e) = crate::git::worktree::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode, base_ref)
             {
                 let msg = format!("Failed to create git worktree: {}", e);
                 tracing::error!("spawn_agent_inner: {}", msg);
@@ -484,7 +484,7 @@ pub async fn spawn_agent_inner(
             }
         }
 
-        if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
             tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
         }
     }
@@ -558,7 +558,7 @@ pub async fn spawn_agent_inner(
     Ok(())
 }
 
-/// Map an `env::fetch_origin` outcome to either a silent `tracing` log
+/// Map an `crate::git::sync::fetch_origin` outcome to either a silent `tracing` log
 /// or a `mesh-sync-warning` Tauri event. The frontend's `App.tsx`
 /// listens for the event and shows a non-fatal warning toast.
 ///
@@ -572,31 +572,31 @@ fn emit_sync_outcome_event(
     app: &tauri::AppHandle,
     session_id: i64,
     mesh_path: &str,
-    outcome: Result<env::FetchOutcome, env::FetchError>,
+    outcome: Result<crate::git::sync::FetchOutcome, crate::git::sync::FetchError>,
 ) {
     let (event_name, payload) = match outcome {
-        Ok(env::FetchOutcome::SkippedDirty) => {
+        Ok(crate::git::sync::FetchOutcome::SkippedDirty) => {
             tracing::info!(
                 "spawn_agent_inner: auto-sync skipped (parent dirty) for session {}",
                 session_id
             );
             return;
         }
-        Ok(env::FetchOutcome::SkippedNoRemote) => {
+        Ok(crate::git::sync::FetchOutcome::SkippedNoRemote) => {
             tracing::info!(
                 "spawn_agent_inner: auto-sync skipped (no origin) for session {}",
                 session_id
             );
             return;
         }
-        Ok(env::FetchOutcome::UpToDate) => {
+        Ok(crate::git::sync::FetchOutcome::UpToDate) => {
             tracing::info!(
                 "spawn_agent_inner: auto-sync up-to-date for session {}",
                 session_id
             );
             return;
         }
-        Ok(env::FetchOutcome::Synced { new_commits }) => {
+        Ok(crate::git::sync::FetchOutcome::Synced { new_commits }) => {
             tracing::info!(
                 "spawn_agent_inner: auto-sync pulled {} commit(s) for session {}",
                 new_commits,
@@ -604,7 +604,7 @@ fn emit_sync_outcome_event(
             );
             return;
         }
-        Ok(env::FetchOutcome::FetchedButDiverged { new_commits, reason }) => {
+        Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { new_commits, reason }) => {
             // Diverged is informational, not an error — the fetch
             // succeeded, the new commits are visible locally, we just
             // can't auto-apply them without a real merge. The user
@@ -626,7 +626,7 @@ fn emit_sync_outcome_event(
                 }),
             )
         }
-        Err(env::FetchError::RepoUnusable(reason)) => {
+        Err(crate::git::sync::FetchError::RepoUnusable(reason)) => {
             let message = format!(
                 "Couldn't auto-sync the mesh — repository is unusable: {}. Spawning from local HEAD instead.",
                 reason
@@ -642,7 +642,7 @@ fn emit_sync_outcome_event(
                 }),
             )
         }
-        Err(env::FetchError::FetchFailed(reason)) => {
+        Err(crate::git::sync::FetchError::FetchFailed(reason)) => {
             // The most common case: network down. We don't try to
             // distinguish "no network" from "auth failure" — both look
             // the same to `git fetch`. The user knows whether they
