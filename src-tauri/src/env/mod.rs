@@ -9,6 +9,7 @@ use once_cell::sync::Lazy;
 use std::env;
 
 use crate::process_util::command_no_window;
+use crate::git::primitives;
 
 /// The default WSL distro name (e.g., "Ubuntu"), cached after first detection
 static DETECTED_DISTRO: Lazy<Option<String>> = Lazy::new(get_default_wsl_distro_impl);
@@ -622,14 +623,10 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
     // itself fails (corrupt index, permission denied on .git), we
     // treat the repo as dirty and skip rather than try to pull into
     // a state we couldn't even read.
-    let mut status_opts = git2::StatusOptions::new();
-    status_opts
-        .include_untracked(true)
-        .recurse_untracked_dirs(true);
-    let is_dirty = repo
-        .statuses(Some(&mut status_opts))
-        .map(|s| s.iter().any(|e| !e.status().is_ignored()))
-        .unwrap_or(true);
+    // Fail closed: if we can't even read status (corrupt index, permission
+    // denied on .git), treat the repo as dirty and skip rather than pull into
+    // a state we couldn't read.
+    let is_dirty = primitives::is_dirty(&repo).unwrap_or(true);
     if is_dirty {
         tracing::info!(
             "fetch_origin: {} has uncommitted changes; skipping auto-sync",
@@ -758,11 +755,10 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
     Ok(FetchOutcome::Synced { new_commits })
 }
 
-/// How many commits the current branch is behind its upstream. Used
-/// by `fetch_origin` to decide whether a `git pull --ff-only` would do
-/// anything. Mirrors the helper of the same name in
-/// `commands::git::count_commits_behind` but takes an already-open
-/// `Repository` so we don't pay the cost of re-opening it here.
+/// How many commits the current branch is behind its upstream. Used by
+/// `fetch_origin` to decide whether a `git pull --ff-only` would do anything.
+/// Returns `Err` when there's no upstream to compare against — the caller
+/// treats that as "nothing to pull".
 fn count_commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
     let head_oid = repo
         .head()
@@ -777,23 +773,12 @@ fn count_commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String>
         .shorthand()
         .ok_or_else(|| "HEAD is not on a branch".to_string())?
         .to_string();
-    let local_refname = format!("refs/heads/{}", branch_name);
-    let upstream_name = repo
-        .branch_upstream_name(&local_refname)
-        .map_err(|e| format!("no upstream configured for {}: {:?}", local_refname, e))?
-        .as_str()
-        .ok_or_else(|| "upstream name is not valid UTF-8".to_string())?
-        .to_string();
-    let upstream_oid = repo
-        .find_reference(&upstream_name)
-        .map_err(|e| format!("Failed to find upstream ref {}: {}", upstream_name, e))?
-        .target()
-        .ok_or_else(|| "upstream ref has no target".to_string())?;
+    let upstream_oid = primitives::upstream_oid_for_branch(repo, &branch_name)
+        .ok_or_else(|| format!("no upstream configured for refs/heads/{}", branch_name))?;
 
-    let (_ahead, behind) = repo
-        .graph_ahead_behind(head_oid, upstream_oid)
+    let (_ahead, behind) = primitives::ahead_behind(repo, head_oid, upstream_oid)
         .map_err(|e| format!("graph_ahead_behind failed: {}", e))?;
-    Ok(behind.try_into().unwrap_or(u32::MAX))
+    Ok(behind)
 }
 
 /// Create a new Git worktree at the specified path and honor .worktreeinclude.

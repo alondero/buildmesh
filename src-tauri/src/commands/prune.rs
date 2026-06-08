@@ -5,10 +5,11 @@
 //! one piece that crosses into application state: a worktree is "active" when
 //! a non-archived agent node points at its path.
 
-use git2::{BranchType, Repository, StatusOptions, WorktreePruneOptions};
+use git2::{BranchType, Repository, WorktreePruneOptions};
 
 use crate::db;
 use crate::env::to_host_path;
+use crate::git::primitives;
 use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
 /// Discover all local branches, worktrees, and remote-tracking branches for
@@ -178,14 +179,6 @@ fn remove_worktree_dir_with_retry(path: &str) -> Result<(), String> {
     Err(last_err)
 }
 
-/// The branch a worktree's HEAD points at, read from HEAD's symbolic target so
-/// it survives the branch being deleted. Returns None for a detached HEAD.
-fn head_branch_name(repo: &Repository) -> Option<String> {
-    let head = repo.find_reference("HEAD").ok()?;
-    let target = head.symbolic_target()?;
-    target.strip_prefix("refs/heads/").map(|s| s.to_string())
-}
-
 /// Resolve the tip commit of the repo's `main` (or `master`) branch, if any.
 fn main_branch_oid(repo: &Repository) -> Option<git2::Oid> {
     for candidate in ["main", "master"] {
@@ -202,18 +195,6 @@ fn format_commit_time(time: git2::Time) -> Option<String> {
     chrono::DateTime::from_timestamp(time.seconds(), 0).map(|dt| dt.to_rfc3339())
 }
 
-/// Whether the repo's working tree has any non-ignored changes.
-fn repo_has_uncommitted(repo: &Repository) -> bool {
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    match repo.statuses(Some(&mut opts)) {
-        Ok(statuses) => statuses
-            .iter()
-            .any(|e| !e.status().is_ignored() && e.status() != git2::Status::CURRENT),
-        Err(_) => false,
-    }
-}
-
 /// Pure enumeration: given a repo path and the set of active node paths,
 /// build the prune info. No DB access — the caller supplies `active_paths`.
 fn collect_prune_info(
@@ -223,7 +204,7 @@ fn collect_prune_info(
     let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
 
     let main_oid = main_branch_oid(&repo);
-    let head_dirty = repo_has_uncommitted(&repo);
+    let head_dirty = primitives::is_dirty(&repo).unwrap_or(false);
 
     // ── Local branches ──────────────────────────────────────────────────
     let mut local_branches: Vec<BranchInfo> = Vec::new();
@@ -261,7 +242,7 @@ fn collect_prune_info(
                         if let (Some(local), Some(up)) =
                             (branch_oid, up_ref.target())
                         {
-                            if let Ok((a, b)) = repo.graph_ahead_behind(local, up) {
+                            if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
                                 ahead = a as u64;
                                 behind = b as u64;
                             }
@@ -297,7 +278,7 @@ fn collect_prune_info(
 
     if let Some(workdir) = repo.workdir() {
         let path = workdir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
-        let branch = head_branch_name(&repo);
+        let branch = primitives::head_branch_name(&repo);
         worktrees.push(WorktreeInfo {
             is_active: path_is_active(&path, active_paths),
             is_stale: branch_is_stale(&branch, &local_names),
@@ -315,7 +296,7 @@ fn collect_prune_info(
             let path = wt.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
             let branch = Repository::open(wt.path())
                 .ok()
-                .and_then(|r| head_branch_name(&r));
+                .and_then(|r| primitives::head_branch_name(&r));
             worktrees.push(WorktreeInfo {
                 is_active: path_is_active(&path, active_paths),
                 is_stale: branch_is_stale(&branch, &local_names),
@@ -347,16 +328,8 @@ fn collect_prune_info(
 }
 
 fn path_is_active(path: &str, active_paths: &[String]) -> bool {
-    let norm = normalize_path(path);
-    active_paths.iter().any(|p| normalize_path(p) == norm)
-}
-
-fn normalize_path(p: &str) -> String {
-    let host = to_host_path(p);
-    let trimmed = host.trim_end_matches(['/', '\\']);
-    std::fs::canonicalize(trimmed)
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| trimmed.replace('\\', "/"))
+    let norm = primitives::normalize_for_compare(path);
+    active_paths.iter().any(|p| primitives::normalize_for_compare(p) == norm)
 }
 
 /// A worktree is stale when it points at a branch that no longer exists

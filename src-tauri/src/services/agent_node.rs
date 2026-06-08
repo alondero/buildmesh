@@ -2,8 +2,9 @@
 
 use crate::db;
 use crate::env;
+use crate::git::primitives;
 use crate::models::{AgentNode, PendingWorktreeRemoval, Provider, SessionStatus};
-use git2::{Oid, Repository, StatusOptions};
+use git2::{Oid, Repository};
 use serde::Serialize;
 
 /// Error type for agent node service operations
@@ -233,7 +234,9 @@ fn close_safety_for_worktree_path(path: &str) -> WorktreeCloseSafety {
         return nothing_to_remove;
     };
 
-    let has_uncommitted = repo_has_uncommitted(&repo);
+    // Fail closed: an unreadable status means we can't prove the worktree is
+    // safe to remove, so treat it as having work to protect.
+    let has_uncommitted = primitives::is_dirty(&repo).unwrap_or(true);
     let is_detached = !head.is_branch();
     let has_unpushed = head
         .target()
@@ -245,17 +248,6 @@ fn close_safety_for_worktree_path(path: &str) -> WorktreeCloseSafety {
         has_uncommitted,
         has_unpushed,
         is_detached,
-    }
-}
-
-fn repo_has_uncommitted(repo: &Repository) -> bool {
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    match repo.statuses(Some(&mut opts)) {
-        Ok(statuses) => statuses
-            .iter()
-            .any(|entry| !entry.status().is_ignored() && entry.status() != git2::Status::CURRENT),
-        Err(_) => true,
     }
 }
 
@@ -279,8 +271,7 @@ fn head_has_unpushed_or_unmerged_commits(
                 let Some(upstream_oid) = upstream_ref.target() else {
                     return true;
                 };
-                return repo
-                    .graph_ahead_behind(head_oid, upstream_oid)
+                return primitives::ahead_behind(repo, head_oid, upstream_oid)
                     .map(|(ahead, _)| ahead > 0)
                     .unwrap_or(true);
             }

@@ -9,6 +9,7 @@ use tauri::Emitter;
 
 use crate::db;
 use crate::env::to_host_path;
+use crate::git::primitives;
 use crate::models::{HoldingWorktree, MeshHealth};
 use crate::process_util::command_no_window;
 
@@ -100,8 +101,7 @@ pub struct GitBranchStatus {
 /// (see commands/prune.rs for the same pattern).
 #[command]
 pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
-    let host_path = to_host_path(&path);
-    let repo = match Repository::open(&host_path) {
+    let repo = match primitives::open_from_host_path(&path) {
         Ok(r) => r,
         Err(_) => return Ok(None),
     };
@@ -120,27 +120,18 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 
     let local_oid = head.target();
 
-    // short_id() respects the repo's `core.abbreviate` (default 7). For unborn
-    // HEAD the OID is None; we leave short_sha empty rather than fabricate.
+    // For unborn HEAD the OID is None; we leave short_sha empty rather than fabricate.
     let short_sha = local_oid
-        .and_then(|oid| repo.find_object(oid, None).ok())
-        .and_then(|obj| obj.short_id().ok())
-        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+        .map(|oid| primitives::short_sha(&repo, oid))
         .unwrap_or_default();
 
-    let mut ahead = 0u32;
-    let mut behind = 0u32;
-    let refname = format!("refs/heads/{}", name);
-    if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
-        if let Some(upstream_ref) = upstream_buf.as_str() {
-            if let Ok(up_ref) = repo.find_reference(upstream_ref) {
-                if let (Some(local), Some(up)) = (local_oid, up_ref.target()) {
-                    if let Ok((a, b)) = repo.graph_ahead_behind(local, up) {
-                        ahead = a as u32;
-                        behind = b as u32;
-                    }
-                }
-            }
+    let (mut ahead, mut behind) = (0u32, 0u32);
+    if let (Some(local), Some(up)) =
+        (local_oid, primitives::upstream_oid_for_branch(&repo, &name))
+    {
+        if let Ok((a, b)) = primitives::ahead_behind(&repo, local, up) {
+            ahead = a;
+            behind = b;
         }
     }
 
@@ -156,8 +147,7 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 /// line additions/deletions for all uncommitted changes.
 #[command]
 pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
-    let host_path = to_host_path(&path);
-    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
+    let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
@@ -207,8 +197,7 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
 /// Get aggregate git change summary for a directory
 #[command]
 pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
-    let host_path = to_host_path(&path);
-    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
+    let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
     opts.include_untracked(true)
@@ -363,8 +352,8 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
 }
 
 /// How many commits the current branch is behind its upstream.
-/// Returns `Ok(0)` when the branch has no upstream configured.
-/// Uses git2 to avoid the `@{u}` brace issue with `std::process::Command::args` on Windows.
+/// Returns `Err` when the branch has no upstream configured (the caller
+/// treats that as "nothing to pull").
 fn count_commits_behind(host_path: &str) -> Result<u32, String> {
     let repo = Repository::open(host_path)
         .map_err(|e| format!("Failed to open repository at {}: {}", host_path, e))?;
@@ -376,35 +365,18 @@ fn count_commits_behind(host_path: &str) -> Result<u32, String> {
         .map_err(|e| format!("HEAD is not a commit: {}", e))?
         .id();
 
-    // Find the upstream remote-tracking ref for the current branch.
-    // `branch_upstream_name` returns something like "refs/remotes/main/main"
-    // when the local branch tracks `main/main`.
     let branch_name = repo
         .head()
         .map_err(|e| format!("Failed to read HEAD: {}", e))?
         .shorthand()
         .ok_or_else(|| "HEAD is not on a branch".to_string())?
         .to_string();
-    let local_refname = format!("refs/heads/{}", branch_name);
-    let upstream_name = repo
-        .branch_upstream_name(&local_refname)
-        .map_err(|e| format!("no upstream configured for {}: {:?}", local_refname, e))?
-        .as_str()
-        .ok_or_else(|| "upstream name is not valid UTF-8".to_string())?
-        .to_string();
-    let upstream_oid = repo
-        .find_reference(&upstream_name)
-        .map_err(|e| format!("Failed to find upstream ref {}: {}", upstream_name, e))?
-        .target()
-        .ok_or_else(|| "upstream ref has no target".to_string())?;
+    let upstream_oid = primitives::upstream_oid_for_branch(&repo, &branch_name)
+        .ok_or_else(|| format!("no upstream configured for {}", branch_name))?;
 
-    let (_ahead, behind) = repo
-        .graph_ahead_behind(head_oid, upstream_oid)
+    let (_ahead, behind) = primitives::ahead_behind(&repo, head_oid, upstream_oid)
         .map_err(|e| format!("graph_ahead_behind failed: {}", e))?;
-    // `graph_ahead_behind` returns usize; on a 32-bit platform this could
-    // overflow u32, but on any realistic repo it won't. Saturate rather
-    // than panic.
-    Ok(behind.try_into().unwrap_or(u32::MAX))
+    Ok(behind)
 }
 
 // ── Mesh health detection (issue #231) ──────────────────────────────────────
@@ -518,17 +490,13 @@ pub(crate) fn compute_mesh_health(
                     .and_then(|h| h.shorthand().map(|s| s.to_string()))
             };
             let oid = repo.head().ok().and_then(|h| h.target());
-            let short_sha = oid
-                .and_then(|o| repo.find_object(o, None).ok())
-                .and_then(|obj| obj.short_id().ok())
-                .map(|buf| String::from_utf8_lossy(&buf).into_owned())
-                .unwrap_or_default();
+            let short_sha = oid.map(|o| primitives::short_sha(repo, o)).unwrap_or_default();
             (name, short_sha, detached)
         }
         Err(_) => (None, String::new(), false),
     };
 
-    let is_dirty = repo_is_dirty(repo);
+    let is_dirty = primitives::is_dirty(repo).unwrap_or(false);
     let (has_upstream, unpushed_ahead) =
         compute_unpushed(repo, current_branch.as_deref(), local_base_branch.as_deref());
     let is_drifted = compute_is_drifted(
@@ -577,6 +545,9 @@ fn compute_unpushed(
     // for the same Windows-brace-stripping reason as `get_git_branch_status`:
     // `git rev-list --count HEAD..@{u}` is mangled by `Command::args` on
     // Windows, so we go through libgit2.
+    // `branch_upstream_name` succeeding is what tells us an upstream is
+    // *configured* (distinct from resolvable), so we keep that check here for
+    // the `has_upstream` flag and use the primitive only for the count.
     if let Ok(upstream_buf) = repo.branch_upstream_name(&refname) {
         if let Some(upstream_ref) = upstream_buf.as_str() {
             if let Ok(up_ref) = repo.find_reference(upstream_ref) {
@@ -584,8 +555,8 @@ fn compute_unpushed(
                     repo.head().ok().and_then(|h| h.target()),
                     up_ref.target(),
                 ) {
-                    if let Ok((a, _)) = repo.graph_ahead_behind(head_oid, up_oid) {
-                        return (true, a.try_into().unwrap_or(u32::MAX));
+                    if let Ok((ahead, _)) = primitives::ahead_behind(repo, head_oid, up_oid) {
+                        return (true, ahead);
                     }
                 }
             }
@@ -606,8 +577,8 @@ fn compute_unpushed(
             if b == h {
                 return (false, 0);
             }
-            if let Ok((a, _)) = repo.graph_ahead_behind(h, b) {
-                return (false, a.try_into().unwrap_or(u32::MAX));
+            if let Ok((ahead, _)) = primitives::ahead_behind(repo, h, b) {
+                return (false, ahead);
             }
         }
     }
@@ -681,28 +652,6 @@ fn base_branch_present(repo: &Repository, local_base_branch: &str, base_ref: &st
     repo.revparse_single(base_ref).is_ok()
 }
 
-/// Read the symbolic branch name from a worktree repo's HEAD. Returns
-/// `None` for a detached HEAD (no symbolic target). Mirrors
-/// `commands::prune::head_branch_name` — kept private here to avoid
-/// cross-module coupling.
-fn head_branch_name_local(repo: &Repository) -> Option<String> {
-    let head = repo.find_reference("HEAD").ok()?;
-    let target = head.symbolic_target()?;
-    target.strip_prefix("refs/heads/").map(|s| s.to_string())
-}
-
-/// Path comparison helper. `canonicalize` is best-effort: on Windows a
-/// held-handle error falls back to a normalised string compare. The
-/// `to_host_path` conversion first lets WSL-stored paths compare
-/// correctly against host-side paths.
-fn normalize_holder_path(p: &str) -> String {
-    let host = to_host_path(p);
-    let trimmed = host.trim_end_matches(['/', '\\']);
-    std::fs::canonicalize(trimmed)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| trimmed.replace('\\', "/"))
-}
-
 /// Which *linked* worktree currently has the Base Ref's branch checked
 /// out, holding it hostage from the Mesh root? Returns the first match.
 ///
@@ -727,7 +676,7 @@ pub(crate) fn find_base_branch_holder(
             if let Ok(wt) = repo.find_worktree(wt_name) {
                 let path = wt.path();
                 if let Ok(wt_repo) = Repository::open(path) {
-                    if head_branch_name_local(&wt_repo).as_deref() == Some(local_base_branch) {
+                    if primitives::head_branch_name(&wt_repo).as_deref() == Some(local_base_branch) {
                         return Some(make_holder(&path.to_string_lossy(), active_paths));
                     }
                 }
@@ -738,8 +687,8 @@ pub(crate) fn find_base_branch_holder(
 }
 
 fn make_holder(path: &str, active_paths: &[String]) -> HoldingWorktree {
-    let norm = normalize_holder_path(path);
-    let is_active = active_paths.iter().any(|p| normalize_holder_path(p) == norm);
+    let norm = primitives::normalize_for_compare(path);
+    let is_active = active_paths.iter().any(|p| primitives::normalize_for_compare(p) == norm);
     let name = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -749,18 +698,6 @@ fn make_holder(path: &str, active_paths: &[String]) -> HoldingWorktree {
         path: path.to_string(),
         name,
         is_active,
-    }
-}
-
-/// Pure helper for the "is the working tree dirty?" check. Mirrors the
-/// pattern at `commands::prune::repo_has_uncommitted` (5 lines, kept
-/// private rather than re-exported to keep modules decoupled).
-fn repo_is_dirty(repo: &Repository) -> bool {
-    let mut opts = StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
-    match repo.statuses(Some(&mut opts)) {
-        Ok(statuses) => statuses.iter().any(|e| !e.status().is_ignored()),
-        Err(_) => false,
     }
 }
 
@@ -842,7 +779,7 @@ pub(crate) fn free_base_branch_impl(
     let repo = Repository::open(host_worktree_path)
         .map_err(|e| format!("failed to open worktree at {}: {}", host_worktree_path, e))?;
 
-    let current_branch = head_branch_name_local(&repo);
+    let current_branch = primitives::head_branch_name(&repo);
     let already_detached = current_branch.is_none();
 
     if !already_detached && current_branch.as_deref() != Some(local_base_branch) {
@@ -866,13 +803,7 @@ pub(crate) fn free_base_branch_impl(
             .map_err(|e| format!("set_head_detached failed: {}", e))?;
     }
 
-    let obj = repo
-        .find_object(head_oid, None)
-        .map_err(|e| format!("find_object failed: {}", e))?;
-    let short = obj
-        .short_id()
-        .map_err(|e| format!("short_id failed: {}", e))?;
-    Ok(String::from_utf8_lossy(&short).into_owned())
+    Ok(primitives::short_sha(&repo, head_oid))
 }
 
 // ── Tauri commands (issue #231) ─────────────────────────────────────────────
