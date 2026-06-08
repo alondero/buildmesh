@@ -9,3 +9,4 @@
 //! stay in `commands/`. See ADR 0007.
 
 pub mod primitives;
+pub mod worktree;

@@ -210,7 +210,7 @@ pub async fn build_run(
         validate_worktree_exists(&resolved, spawn_worktree_name)?;
 
         // Sanitize .git file to ensure proper worktree isolation across environments
-        if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
             tracing::warn!("build_run: failed to sanitize worktree .git file: {}", e);
         }
     }

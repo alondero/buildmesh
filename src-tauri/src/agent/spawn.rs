@@ -442,7 +442,7 @@ pub async fn spawn_agent_inner(
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
-            if let Err(e) = env::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode, base_ref)
+            if let Err(e) = crate::git::worktree::create_git_worktree(&node.path, &resolved.host_path, wt_name, worktree_mode, base_ref)
             {
                 let msg = format!("Failed to create git worktree: {}", e);
                 tracing::error!("spawn_agent_inner: {}", msg);
@@ -450,7 +450,7 @@ pub async fn spawn_agent_inner(
             }
         }
 
-        if let Err(e) = env::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
             tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
         }
     }
