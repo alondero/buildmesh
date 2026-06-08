@@ -5,7 +5,7 @@
  * Uses HTTP test server on port 1991 to call Tauri commands.
  */
 import { test, expect, Page } from '@playwright/test';
-import { waitForTauriReady, createTestSessionViaHttp } from './e2e/utils/tauri-http';
+import { waitForTauriReady, createTestSessionViaHttp } from './utils/tauri-http';
 
 async function waitForTerminalFit(page: Page, _sessionId: number, timeout = 300): Promise<void> {
   await page.waitForTimeout(timeout);
