@@ -8,6 +8,7 @@
 //! single definition those callers now share; the thin `#[command]` adapters
 //! stay in `commands/`. See ADR 0007.
 
+pub mod health;
 pub mod primitives;
 pub mod sync;
 pub mod worktree;
