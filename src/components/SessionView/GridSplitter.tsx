@@ -148,7 +148,9 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
                 const isActive = node.id === activeNodeId;
                 const borderClass = node.status === 'awaiting_input'
                   ? 'border-status-warning animate-border-pulse'
-                  : isActive ? 'border-accent-cyan/60' : 'border-border-default hover:border-accent-cyan/50';
+                  : isActive
+                    ? 'border-accent-cyan shadow-[0_0_0_2px_var(--color-accent-cyan),0_0_16px_3px_var(--color-accent-cyan-dim)]'
+                    : 'border-border-default hover:border-accent-cyan/50';
 
                 const colStyle: React.CSSProperties = {
                   width: `calc(${colWidths[colIdx]}% - ${totalHandleWidthPct / cols}%)`,
@@ -159,7 +161,7 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
                   <div key={node.id} className="flex" style={colStyle}>
                     <div
                       onClick={() => { if (!isActive) setActiveNode(node.id); }}
-                      className={`flex-1 flex flex-col bg-bg-card border rounded-sm overflow-hidden group transition-colors ${borderClass}`}
+                      className={`flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-colors ${borderClass}`}
                     >
                       <GridNodeHeader node={node} onBuildRun={onBuildRun} />
                       <div className="flex-1 flex flex-col overflow-hidden bg-black">
