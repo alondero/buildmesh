@@ -143,13 +143,18 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
 export function SessionView() {
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   const meshesById = useMeshStore(state => state.meshesById);
-  const {
-    agentNodes,
-    getActiveNode,
-    setActiveNode,
-  } = useAgentNodeStore();
+  // Granular selectors: subscribing to the whole store (useAgentNodeStore())
+  // re-rendered SessionView on every unrelated change — including each
+  // attention status flip — even though only agentNodes/activeNodeId affect
+  // this view.
+  const agentNodes = useAgentNodeStore(state => state.agentNodes);
+  const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
+  const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
 
-  const activeNode = getActiveNode();
+  const activeNode = useMemo(
+    () => agentNodes.find(s => s.id === activeNodeId) ?? null,
+    [agentNodes, activeNodeId],
+  );
 
   const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
   const closeFileExplorer = useUIStore(state => state.closeFileExplorer);

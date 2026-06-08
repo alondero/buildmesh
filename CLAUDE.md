@@ -31,6 +31,6 @@ A PreToolUse hook (`.claude/hooks/guard-antipatterns.mjs`) blocks edits that vio
 ## Pointers
 - Architecture & anti-patterns (detailed): `docs/knowledge-primer.md`
 - Domain language and mental model: `CONTEXT.md`
-- DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`, `checkpoints`.
+- DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`.
 - Verification: `/verify` — see `.claude/skills/verify/skill.md`
 - Issues (`alondero/buildmesh`): `docs/agents/issue-tracker.md`; triage labels: `docs/agents/triage-labels.md`

@@ -18,7 +18,6 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 ### Productivity
 - **Attention hook**: agents raise a notification when they need your input. Buildmesh listens for `idle_prompt` events on the Claude Code side and surfaces a "needs input" badge in the sidebar — no polling, no timers.
 - **Auto-named nodes**: agent nodes are auto-named from their first turn (LLM-generated slug) so a 10-agent swarm stays readable.
-- **Git-ref checkpoints**: after every prompt, Buildmesh auto-snapshots progress as a Git ref. Rewind any node to a previous turn.
 - **Session resume**: surviving processes and stored `cli_session_id`s mean a restart resumes where you left off. Crash recovery marks `Running` nodes as `Suspended` on startup.
 - **Build & run**: per-mesh build/run commands with auto-detection for Rust, Node, Tauri, JVM, Go, and Python projects.
 
@@ -44,7 +43,7 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 
 - **Frontend** — React 19, Zustand 5, xterm.js 6, Tailwind 4, TypeScript ~5.8, Vite 7
 - **Backend** — Tauri 2, Rust, `portable-pty`, `rusqlite` (SQLite), `git2`
-- **Persistence** — local SQLite (`app_settings`, `meshes`, `agent_nodes`, `checkpoints`)
+- **Persistence** — local SQLite (`app_settings`, `meshes`, `agent_nodes`)
 - **Runtime** — Windows 10/11, with optional WSL2 support
 - **Testing** — Vitest (unit + integration) + Playwright (e2e)
 

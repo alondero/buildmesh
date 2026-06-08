@@ -39,15 +39,6 @@ mod tests {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                node_id INTEGER NOT NULL REFERENCES agent_nodes(id),
-                git_ref TEXT NOT NULL,
-                turn_index INTEGER NOT NULL,
-                message TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-
             CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
             "
         )?;
