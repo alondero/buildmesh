@@ -33,12 +33,28 @@ mod tests {
         }
     }
 
+    /// Windows-native (non-WSL) resolution — the path where cwrap providers are
+    /// launched through `cwrap.cmd` → cmd.exe and a multi-line `--prefill` argv
+    /// would be truncated at the first newline.
+    fn windows_resolved() -> ResolvedPath {
+        ResolvedPath {
+            host_path: SPAWN_PATH.to_string(),
+            spawn_path: SPAWN_PATH.to_string(),
+            env_type: EnvType::Windows,
+        }
+    }
+
     /// Collect a CommandBuilder's argv as plain strings.
     fn argv(cmd: &portable_pty::CommandBuilder) -> Vec<String> {
         cmd.get_argv()
             .iter()
             .map(|s| s.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// Read a single env var the spawn command will set on the child process.
+    fn env_of(cmd: &portable_pty::CommandBuilder, key: &str) -> Option<String> {
+        cmd.get_env(key).map(|v| v.to_string_lossy().into_owned())
     }
 
     /// The Anthropic recipe is the one piece of expected data that varies by host:
@@ -227,6 +243,67 @@ mod tests {
                 "cwrap",
                 &["--minimax", "--prefill", "Title\n\nLine 1\nLine 2\nLine 3"]
             )
+        );
+    }
+
+    /// On the Windows-native cwrap path, multi-line prefill is delivered through
+    /// the `BUILDMESH_PREFILL` environment variable — NOT as a `--prefill` CLI
+    /// arg. The `cwrap.cmd` → cmd.exe launcher truncates a multi-line argv at the
+    /// first newline (cmd.exe's command line is line-oriented), so an agent
+    /// seeded with a handover/issue body would only ever see its first line. The
+    /// environment block is inherited intact by every shell layer, so cwrap reads
+    /// the full text from `$BUILDMESH_PREFILL` and forwards it to `claude`.
+    ///
+    /// Also asserts CRLF / bare-CR normalisation still applies to the env value.
+    #[test]
+    fn prefill_for_cwrap_goes_via_env_on_windows_native() {
+        let cmd = build_spawn_command(
+            &windows_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            Some("Title\r\n\r\nLine 1\r\nLine 2\rLine 3"),
+        );
+
+        assert_eq!(
+            env_of(&cmd, "BUILDMESH_PREFILL").as_deref(),
+            Some("Title\n\nLine 1\nLine 2\nLine 3"),
+            "multi-line prefill must be delivered via the environment on the cwrap Windows path"
+        );
+
+        let args = argv(&cmd);
+        assert!(
+            !args.iter().any(|a| a == "--prefill"),
+            "prefill must NOT be passed as a CLI flag on the cwrap Windows path (cmd.exe truncates it): {:?}",
+            args
+        );
+    }
+
+    /// WSL keeps the `--prefill` CLI arg: `wsl.exe` passes a multi-line argv
+    /// through intact (no cmd.exe in the chain), and a Windows env var does not
+    /// cross into the WSL environment without `WSLENV`. So the env transport must
+    /// NOT engage for WSL spawns.
+    #[test]
+    fn prefill_stays_argv_for_wsl() {
+        let cmd = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Minimax,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            Some("hello world"),
+        );
+
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl("cwrap", &["--minimax", "--prefill", "hello world"])
+        );
+        assert!(
+            env_of(&cmd, "BUILDMESH_PREFILL").is_none(),
+            "the WSL path must not set the prefill env var"
         );
     }
 
