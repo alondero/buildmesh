@@ -295,18 +295,16 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
         });
     }
 
-    // Step 2: Count how many commits we're behind. We compute this via
-    // git2's `graph_ahead_behind` rather than shelling out to
-    // `git rev-list --count HEAD..@{u}` because the `@{u}` syntax fails
-    // on Windows when spawned via `std::process::Command::args` — the
-    // curly braces are stripped during command-line construction and
-    // git sees `HEAD..@u`, which it rejects as ambiguous. Using git2
-    // (already imported in this file) sidesteps the brace issue at its
-    // source rather than working around it in the subprocess arg.
-    let behind_count: u32 = count_commits_behind(&host_path).unwrap_or_else(|e| {
-        tracing::warn!("git_sync: failed to count commits behind upstream: {}", e);
-        0
-    });
+    // Step 2: Count how many commits we're behind, via the shared
+    // `git::sync::commits_behind_upstream` (git2's `graph_ahead_behind`, which
+    // avoids the Windows `@{u}` brace-stripping bug).
+    let behind_count: u32 = Repository::open(&host_path)
+        .map_err(|e| e.to_string())
+        .and_then(|repo| crate::git::sync::commits_behind_upstream(&repo))
+        .unwrap_or_else(|e| {
+            tracing::warn!("git_sync: failed to count commits behind upstream: {}", e);
+            0
+        });
 
     if behind_count == 0 {
         return Ok(GitSyncResult {
@@ -317,9 +315,12 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
         });
     }
 
-    // Step 3: git pull --ff-only
+    // Step 3: git pull --ff-only --no-rebase. The explicit --no-rebase defeats a
+    // user's global pull.rebase=true, which would otherwise turn this into a
+    // rebase and write conflict markers on diverged history (same policy as the
+    // auto-sync fetch_origin — see [[buildmesh-pull-rebase-default]]).
     let pull_output = command_no_window("git")
-        .args(["pull", "--ff-only"])
+        .args(["pull", "--ff-only", "--no-rebase"])
         .current_dir(&host_path)
         .output()
         .map_err(|e| format!("Failed to run git pull: {}", e))?;
@@ -349,34 +350,6 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
             if behind_count == 1 { "" } else { "s" }
         ),
     })
-}
-
-/// How many commits the current branch is behind its upstream.
-/// Returns `Err` when the branch has no upstream configured (the caller
-/// treats that as "nothing to pull").
-fn count_commits_behind(host_path: &str) -> Result<u32, String> {
-    let repo = Repository::open(host_path)
-        .map_err(|e| format!("Failed to open repository at {}: {}", host_path, e))?;
-
-    let head_oid = repo
-        .head()
-        .map_err(|e| format!("Failed to read HEAD: {}", e))?
-        .peel_to_commit()
-        .map_err(|e| format!("HEAD is not a commit: {}", e))?
-        .id();
-
-    let branch_name = repo
-        .head()
-        .map_err(|e| format!("Failed to read HEAD: {}", e))?
-        .shorthand()
-        .ok_or_else(|| "HEAD is not on a branch".to_string())?
-        .to_string();
-    let upstream_oid = primitives::upstream_oid_for_branch(&repo, &branch_name)
-        .ok_or_else(|| format!("no upstream configured for {}", branch_name))?;
-
-    let (_ahead, behind) = primitives::ahead_behind(&repo, head_oid, upstream_oid)
-        .map_err(|e| format!("graph_ahead_behind failed: {}", e))?;
-    Ok(behind)
 }
 
 // ── Mesh health detection (issue #231) ──────────────────────────────────────
