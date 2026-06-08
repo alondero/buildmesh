@@ -8,7 +8,6 @@ use once_cell::sync::Lazy;
 use syntect::highlighting::ThemeSet;
 use syntect::html::highlighted_html_for_string;
 use syntect::parsing::SyntaxSet;
-use std::path::PathBuf;
 use std::fs;
 use tauri::command;
 
@@ -507,94 +506,6 @@ pub async fn diff_node_file_against_base(
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     let base_ref = node_base_ref(&node);
     diff_against_base(&node_repo_path(&node), &base_ref, Some(&file_path))
-}
-
-/// Diff session files against a checkpoint
-#[command]
-pub async fn diff_session_checkpoint(
-    session_id: i64,
-    checkpoint_id: i64,
-) -> Result<DiffResult, String> {
-    let node = db::get_agent_node_by_id(session_id)
-        .map_err(|e| e.to_string())?;
-    let checkpoint = db::get_checkpoint_by_id(checkpoint_id)
-        .map_err(|e| e.to_string())?;
-    let ref_name = format!("refs/heads/conductor/checkpoints/c{}", checkpoint.turn_index);
-
-    let repo = git2::Repository::open(&node.path)
-        .map_err(|e| e.to_string())?;
-
-    let reference = repo.find_reference(&ref_name)
-        .map_err(|e| e.to_string())?;
-    let commit = reference.peel_to_commit()
-        .map_err(|e| e.to_string())?;
-    let tree = commit.as_object().peel_to_tree()
-        .map_err(|e| e.to_string())?;
-
-    let mut files = Vec::new();
-    let current_path = PathBuf::from(&node.path);
-
-    if let Ok(entries) = fs::read_dir(&current_path) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.is_file() {
-                let file_path = path.to_string_lossy().to_string();
-                let rel_path = path.file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                let current_content = fs::read_to_string(&path).unwrap_or_default();
-
-                if let Ok(blob) = tree.get_path(std::path::Path::new(&rel_path)) {
-                    let checkpoint_content = match blob.to_object(&repo) {
-                        Ok(o) => {
-                            if let Some(b) = o.as_blob() {
-                                String::from_utf8_lossy(b.content()).to_string()
-                            } else {
-                                String::new()
-                            }
-                        }
-                        Err(_) => String::new(),
-                    };
-                    if current_content != checkpoint_content {
-                        let lines = compute_file_diff(&checkpoint_content, &current_content);
-                        let (old_highlighted, new_highlighted) = build_sides(&lines);
-                        let old_hl = highlight_content(&old_highlighted, &file_path);
-                        let new_hl = highlight_content(&new_highlighted, &file_path);
-                        let hunks = vec![DiffHunk {
-                            old_start: 1,
-                            old_lines: lines.iter().filter(|l| l.line_type == "remove").count(),
-                            new_start: 1,
-                            new_lines: lines.iter().filter(|l| l.line_type == "add").count(),
-                            old_highlighted: old_hl,
-                            new_highlighted: new_hl,
-                            lines,
-                            ..Default::default()
-                        }];
-                        files.push(FileDiff { path: file_path, hunks, ..Default::default() });
-                    }
-                } else {
-                    let lines = compute_file_diff("", &current_content);
-                    let (old_highlighted, new_highlighted) = build_sides(&lines);
-                    let old_hl = highlight_content(&old_highlighted, &file_path);
-                    let new_hl = highlight_content(&new_highlighted, &file_path);
-                    let hunks = vec![DiffHunk {
-                        old_start: 0,
-                        old_lines: 0,
-                        new_start: 1,
-                        new_lines: lines.len(),
-                        old_highlighted: old_hl,
-                        new_highlighted: new_hl,
-                        lines,
-                        ..Default::default()
-                    }];
-                    files.push(FileDiff { path: file_path, hunks, ..Default::default() });
-                }
-            }
-        }
-    }
-
-    Ok(DiffResult { files })
 }
 
 #[cfg(test)]

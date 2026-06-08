@@ -42,7 +42,6 @@ describe('useAgentNodeStore', () => {
     useAgentNodeStore.setState({
       agentNodes: [],
       activeNodeId: null,
-      checkpoints: [],
       loading: false,
       error: null,
     });
@@ -149,23 +148,21 @@ describe('useAgentNodeStore', () => {
   });
 
   describe('setActiveNode', () => {
-    it('fetches checkpoints when setting active node', async () => {
-      const checkpoints = [{ id: 1, node_id: 5, git_ref: 'abc', turn_index: 1, message: '', created_at: '' }];
-      mockInvoke.mockResolvedValueOnce(checkpoints);
-
-      await useAgentNodeStore.getState().setActiveNode(5);
+    it('switches activeNodeId synchronously, with no backend round-trip', () => {
+      // The click must feel instant: the active node flips immediately and the
+      // UI (highlight, terminal focus, file-watch) reacts without any IPC.
+      useAgentNodeStore.getState().setActiveNode(5);
 
       expect(useAgentNodeStore.getState().activeNodeId).toBe(5);
-      expect(useAgentNodeStore.getState().checkpoints).toEqual(checkpoints);
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('clears checkpoints when setting null', async () => {
-      useAgentNodeStore.setState({ checkpoints: [{ id: 1, node_id: 5, git_ref: '', turn_index: 0, message: '', created_at: '' }] });
+    it('clears the active node when setting null', () => {
+      useAgentNodeStore.setState({ activeNodeId: 5 });
 
-      await useAgentNodeStore.getState().setActiveNode(null);
+      useAgentNodeStore.getState().setActiveNode(null);
 
       expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
-      expect(useAgentNodeStore.getState().checkpoints).toEqual([]);
     });
   });
 

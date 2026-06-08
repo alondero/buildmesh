@@ -166,8 +166,6 @@ pub fn run() {
             commands::agent::list_providers,
             commands::agent::spawn_issue_agent,
             commands::agent::spawn_handover_agent,
-            // Checkpoint
-            commands::checkpoint::create_checkpoint,
             // Build/Run
             commands::build_run::build_run,
             commands::build_run::get_mesh_config,
@@ -184,12 +182,8 @@ pub fn run() {
             commands::mesh_config::update_mesh_use_worktree,
             // Project detection (presets)
             commands::project_detect::detect_mesh_project,
-            commands::checkpoint::list_checkpoints,
-            commands::checkpoint::revert_to_checkpoint,
-            commands::checkpoint::diff_checkpoints,
             // Diff
             commands::diff::diff_files,
-            commands::diff::diff_session_checkpoint,
             commands::diff::diff_file_against_head,
             commands::diff::diff_node_against_base,
             commands::diff::diff_node_file_against_base,

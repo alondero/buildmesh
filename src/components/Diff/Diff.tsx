@@ -5,8 +5,8 @@ import type { DiffHunk, DiffLine, FileDiff, FileDiffStatus } from '../../lib/tau
  * Shared diff renderer: a GitHub-style stacked, unified, syntax-highlighted
  * view. One `<FileDiffCard>` per changed file, each collapsible, with a hunk
  * header (`@@ … @@`) between change regions and per-line highlighting fed by
- * the backend's `lines_highlighted`. Used by the desktop review panel; the
- * checkpoint modal and mobile keep their own layouts.
+ * the backend's `lines_highlighted`. Used by the desktop review panel; mobile
+ * keeps its own layout.
  */
 
 interface StatusMeta {

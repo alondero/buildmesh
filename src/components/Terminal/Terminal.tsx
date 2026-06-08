@@ -6,6 +6,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
+import { getHandoverProviderLabel } from './handoverProviderCache';
 
 export { type TerminalInstance } from './TerminalRegistry';
 export const terminalManager = new TerminalRegistry();
@@ -37,9 +38,12 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [handoverProviderLabel, setHandoverProviderLabel] = useState<string | null>(null);
   const spawnAgent = useAgentNodeStore(state => state.spawnAgent);
-  const agentNodes = useAgentNodeStore(state => state.agentNodes);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
-  const node = agentNodes.find(s => s.id === sessionId);
+  // Subscribe to *this* node only. Selecting the whole agentNodes array would
+  // re-render every open pane whenever any node's status flips (attention
+  // events fire constantly while agents work); find() returns the same object
+  // reference unless this specific node changed, so Zustand skips the render.
+  const node = useAgentNodeStore(state => state.agentNodes.find(s => s.id === sessionId));
 
   // OS file drops (Explorer / Finder) are handled window-level in
   // useFileDropToTerminal — Tauri intercepts the native drop before the DOM, so
@@ -208,13 +212,19 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     }
   }, [activeNodeId, sessionId]);
 
+  // Attach/detach the xterm element. Keyed on sessionId ONLY. It used to also
+  // depend on node.status, which meant every attention flip (running ↔
+  // awaiting_input, many per minute while an agent works) tore the terminal
+  // element out of the DOM and re-appended it — a visible reflow and a
+  // micro-hang. The status-driven auto-spawn lives in its own effect below so
+  // it no longer drags the DOM lifecycle with it.
   useEffect(() => {
     if (!containerRef.current) return;
     const cancelled = { current: false };
     const container = containerRef.current;
     setAtBottom(true);
 
-    terminalManager.attach(sessionId, container).then(async (inst) => {
+    terminalManager.attach(sessionId, container).then((inst) => {
       if (cancelled.current || !inst) return;
       instRef.current = inst;
       inst.onFindRequest = () => setSearchOpen(true);
@@ -223,21 +233,12 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
         const buf = inst.term.buffer.active;
         setAtBottom(buf.viewportY >= buf.baseY);
       };
-      scrollDisposableRef.current?.dispose();
+      scrollDisposableRef.current?.dispose(); // allow-dispose — scroll listener, not the xterm terminal
       scrollDisposableRef.current = inst.term.onScroll(updateAtBottom);
       updateAtBottom();
 
       if (sessionId === activeNodeId) {
         inst.term.focus();
-      }
-
-      if (node && node.provider && node.status === 'idle') {
-        const dims = inst.fitAddon.proposeDimensions();
-        try {
-          await spawnAgent(sessionId, node.provider, dims?.rows, dims?.cols);
-        } catch (e) {
-          console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
-        }
       }
     });
 
@@ -245,22 +246,47 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       cancelled.current = true;
       const inst = terminalManager.getInstance(sessionId);
       if (inst) inst.onFindRequest = null;
-      scrollDisposableRef.current?.dispose();
+      scrollDisposableRef.current?.dispose(); // allow-dispose — scroll listener, not the xterm terminal
       scrollDisposableRef.current = null;
       terminalManager.detach(sessionId);
     };
-  }, [sessionId, node?.status]);
+  // activeNodeId is read once at attach time for the initial focus; the
+  // dedicated focus effect above handles later changes, so it's intentionally
+  // not a dependency here.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
-  // Pre-fetch the default provider label for the handover menu item
+  // Auto-spawn the agent for a freshly created (idle) node. Separated from the
+  // attach effect so it can react to the status becoming 'idle' without
+  // re-attaching the DOM. getOrCreate returns the already-attached instance, so
+  // proposeDimensions reflects the real pane size.
+  useEffect(() => {
+    if (!node || !node.provider || node.status !== 'idle') return;
+    let cancelled = false;
+    (async () => {
+      const inst = await terminalManager.getOrCreate(sessionId);
+      if (cancelled || !inst) return;
+      const dims = inst.fitAddon.proposeDimensions();
+      try {
+        await spawnAgent(sessionId, node.provider, dims?.rows, dims?.cols);
+      } catch (e) {
+        console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [sessionId, node?.provider, node?.status, spawnAgent]);
+
+  // Resolve the default provider label for the handover menu item. The lookups
+  // are memoised per process / per mesh (see handoverProviderCache), so the N
+  // panes of a mesh share one get_default_provider + one list_providers call
+  // instead of firing 2×N IPC calls on every mesh switch.
   useEffect(() => {
     if (!node) return;
-    invoke<string>('get_default_provider', { meshId: node.mesh_id })
-      .then(async (defProvider) => {
-        const providers = await invoke<{ id: string; label: string }[]>('list_providers');
-        const info = providers.find(p => p.id === defProvider);
-        setHandoverProviderLabel(info?.label ?? defProvider);
-      })
-      .catch(() => setHandoverProviderLabel('Default'));
+    let cancelled = false;
+    getHandoverProviderLabel(node.mesh_id).then(label => {
+      if (!cancelled) setHandoverProviderLabel(label);
+    });
+    return () => { cancelled = true; };
   }, [node?.mesh_id]);
 
   return (

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AgentNode, Checkpoint } from '../stores/agentNodeStore';
+import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { WorktreeCloseSafety } from './worktreeClose';
 
@@ -91,25 +91,9 @@ export const isAgentRunning = (sessionId: number) =>
 export const sendToAgent = (sessionId: number, input: string) =>
   invoke('send_to_agent', { sessionId, input });
 
-// Checkpoint
-export const createCheckpoint = (sessionId: number, turnIndex: number, message?: string) =>
-  invoke<Checkpoint>('create_checkpoint', { sessionId, turnIndex, message });
-
-export const listCheckpoints = (sessionId: number) =>
-  invoke<Checkpoint[]>('list_checkpoints', { sessionId });
-
-export const revertToCheckpoint = (checkpointId: number) =>
-  invoke('revert_to_checkpoint', { checkpointId });
-
-export const diffCheckpoints = (checkpointAId: number, checkpointBId: number) =>
-  invoke<string>('diff_checkpoints', { checkpointAId, checkpointBId });
-
 // Diff
 export const diffFiles = (oldPath: string, newPath: string) =>
   invoke<DiffResult>('diff_files', { oldPath, newPath });
-
-export const diffSessionCheckpoint = (sessionId: number, checkpointId: number) =>
-  invoke<DiffResult>('diff_session_checkpoint', { sessionId, checkpointId });
 
 export const diffFileAgainstHead = (sessionPath: string, filePath: string) =>
   invoke<DiffResult>('diff_file_against_head', { sessionPath, filePath });

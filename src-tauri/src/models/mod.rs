@@ -181,17 +181,6 @@ pub struct AgentNode {
     pub created_at: DateTime<Utc>,
 }
 
-/// A checkpoint — git ref snapshot of node state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Checkpoint {
-    pub id: i64,
-    pub node_id: i64,
-    pub git_ref: String,      // e.g., "conductor/checkpoints/c1"
-    pub turn_index: i32,      // which turn this was created at
-    pub message: String,     // optional description
-    pub created_at: DateTime<Utc>,
-}
-
 /// A worktree whose node is already closed but whose on-disk directory still
 /// needs removing. Recording the intent durably lets the slow, retry-prone
 /// removal run in the background (or resume on next launch) without the node
@@ -229,7 +218,7 @@ pub struct FileChange {
     pub kind: String, // "created" | "modified" | "deleted"
 }
 
-/// Diff result between two checkpoints or files
+/// Diff result — a set of per-file diffs
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiffResult {
     pub files: Vec<FileDiff>,
@@ -274,7 +263,7 @@ pub struct DiffHunk {
     /// Per-line highlighted inline HTML, aligned 1:1 with `lines`. Lets the
     /// unified view colour each row with syntax highlighting while keeping its
     /// own add/remove background and gutter. Empty for producers that only feed
-    /// the side-by-side view (e.g. the checkpoint diff).
+    /// the side-by-side view.
     #[serde(default)]
     pub lines_highlighted: Vec<String>,
 }

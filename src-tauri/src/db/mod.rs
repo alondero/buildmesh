@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 11;
+const SCHEMA_VERSION: i32 = 12;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -67,15 +67,6 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
-        CREATE TABLE IF NOT EXISTS checkpoints (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            node_id INTEGER NOT NULL REFERENCES agent_nodes(id),
-            git_ref TEXT NOT NULL,
-            turn_index INTEGER NOT NULL,
-            message TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
         CREATE TABLE IF NOT EXISTS pending_worktree_removals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             worktree_path TEXT NOT NULL UNIQUE,
@@ -92,6 +83,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_mesh_config_columns(&conn)?;
     ensure_agent_node_source_issue(&conn)?;
     ensure_agent_node_use_worktree(&conn)?;
+    ensure_checkpoints_dropped(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
     Ok(())
@@ -248,6 +240,16 @@ pub(crate) fn ensure_agent_node_use_worktree(conn: &Connection) -> SqlResult<()>
         conn.execute("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1", [])?;
         tracing::warn!("ensure_agent_node_use_worktree: added missing use_worktree column");
     }
+    Ok(())
+}
+
+/// Safety net (v12): drop the obsolete `checkpoints` table. The checkpoint
+/// feature was removed, so the table is dead. This runs every init() rather
+/// than as a version-gated migration because the gated branch only fires for
+/// pre-v6 DBs (it's guarded on the legacy `projects` table); v6+ DBs rely on
+/// these `ensure_*` nets instead. `DROP TABLE IF EXISTS` is fully idempotent.
+pub(crate) fn ensure_checkpoints_dropped(conn: &Connection) -> SqlResult<()> {
+    conn.execute("DROP TABLE IF EXISTS checkpoints", [])?;
     Ok(())
 }
 
@@ -408,13 +410,12 @@ fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
         conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
         conn.execute("ALTER TABLE sessions RENAME TO agent_nodes", [])?;
         conn.execute("ALTER TABLE agent_nodes RENAME COLUMN project_id TO mesh_id", [])?;
-        conn.execute("ALTER TABLE checkpoints RENAME COLUMN session_id TO node_id", [])?;
         conn.execute("COMMIT", [])?;
         Ok(())
     })();
     match result {
         Ok(()) => {
-            tracing::info!("Migrated to v6: projects→meshes, sessions→agent_nodes, project_id→mesh_id, session_id→node_id");
+            tracing::info!("Migrated to v6: projects→meshes, sessions→agent_nodes, project_id→mesh_id");
         }
         Err(e) => {
             conn.execute("ROLLBACK", [])?;
@@ -908,76 +909,3 @@ pub fn delete_pending_worktree_removal(path: &str) -> SqlResult<()> {
     delete_pending_worktree_removal_inner(&db, path)
 }
 
-// --- Checkpoint operations ---
-
-pub fn create_checkpoint(
-    node_id: i64,
-    git_ref: &str,
-    turn_index: i32,
-    message: Option<&str>,
-) -> SqlResult<Checkpoint> {
-    let db = get().lock().unwrap();
-    db.execute(
-        "INSERT INTO checkpoints (node_id, git_ref, turn_index, message) VALUES (?1, ?2, ?3, ?4)",
-        params![node_id, git_ref, turn_index, message],
-    )?;
-    let id = db.last_insert_rowid();
-
-    let mut stmt = db.prepare(
-        "SELECT id, node_id, git_ref, turn_index, message, created_at
-         FROM checkpoints WHERE id = ?1"
-    )?;
-    stmt.query_row(params![id], |row| {
-        Ok(Checkpoint {
-            id: row.get(0)?,
-            node_id: row.get(1)?,
-            git_ref: row.get(2)?,
-            turn_index: row.get(3)?,
-            message: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        })
-    })
-}
-
-pub fn get_checkpoint_by_id(id: i64) -> SqlResult<Checkpoint> {
-    let db = get().lock().unwrap();
-    let mut stmt = db.prepare(
-        "SELECT id, node_id, git_ref, turn_index, message, created_at
-         FROM checkpoints WHERE id = ?1"
-    )?;
-    stmt.query_row(params![id], |row| {
-        Ok(Checkpoint {
-            id: row.get(0)?,
-            node_id: row.get(1)?,
-            git_ref: row.get(2)?,
-            turn_index: row.get(3)?,
-            message: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        })
-    })
-}
-
-pub fn list_checkpoints(node_id: i64) -> SqlResult<Vec<Checkpoint>> {
-    let db = get().lock().unwrap();
-    let mut stmt = db.prepare(
-        "SELECT id, node_id, git_ref, turn_index, message, created_at
-         FROM checkpoints WHERE node_id = ?1 ORDER BY turn_index ASC"
-    )?;
-    let rows = stmt.query_map(params![node_id], |row| {
-        Ok(Checkpoint {
-            id: row.get(0)?,
-            node_id: row.get(1)?,
-            git_ref: row.get(2)?,
-            turn_index: row.get(3)?,
-            message: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(5)?)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now()),
-        })
-    })?;
-    rows.collect()
-}
