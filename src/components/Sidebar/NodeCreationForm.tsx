@@ -38,7 +38,7 @@ export function NodeCreationForm({
   const handleAddNode = async (altKey: boolean) => {
     const defaultProvider = await getDefaultProvider(mesh.id);
     // Pass undefined on a normal click so the backend falls back to
-    // mesh.use_worktree (the authoritative value from mesh.toml / DB).
+    // mesh.use_worktree (the authoritative DB column on the mesh row).
     // Alt-click is the explicit override to spawn the node in the mesh root,
     // regardless of the mesh default.
     onSelectProvider(mesh, defaultProvider, altKey ? false : undefined);

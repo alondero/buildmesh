@@ -109,12 +109,12 @@ pub fn default_provider() -> Option<String> {
 /// Pure precedence resolver — kept separate from `load()` so it can be
 /// unit-tested without touching disk. The order is:
 ///   1. `explicit` (e.g. caller-passed argument)
-///   2. `per_mesh` (mesh.toml / DB)
+///   2. `per_mesh` (DB column on `meshes.default_provider`)
 ///   3. `app_wide` (buildmesh-wide preference)
 ///   4. `"anthropic"` hardcoded fallback
 ///
 /// Empty strings are treated as absent at every layer so a blank entry in
-/// the DB or in mesh.toml does not block lower layers from being consulted.
+/// the DB does not block lower layers from being consulted.
 pub fn resolve_default_provider(
     explicit: Option<String>,
     per_mesh: Option<String>,

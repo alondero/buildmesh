@@ -157,15 +157,17 @@ mod tests {
     /// treated as a single string literal — not parsed as separate PowerShell
     /// statements line-by-line.
     ///
-    /// Regression originally surfaced when issue-spawn shipped full markdown
-    /// bodies through prefill ("Unexpected token '`mesh.toml'"); the issue path
-    /// no longer does that (just a URL + title — see memory:
-    /// buildmesh-issue-spawn-url-only), but the handover path still ships
-    /// arbitrary multi-line text so the guarantee still matters.
+    /// Regression originally surfaced when an early issue-spawn prefill body
+    /// contained backticks (PowerShell's line-continuation character), which
+    /// PowerShell parsed as the start of a new statement and rejected with
+    /// `Unexpected token '<word>'`. The issue path now ships just a URL +
+    /// title — see memory: buildmesh-issue-spawn-url-only — but the handover
+    /// path still ships arbitrary multi-line text, so this guarantee still
+    /// matters.
     #[test]
     fn format_powershell_command_quotes_multiline_prefill_safely() {
         let body = "Currently, when spawning a new agent...\n\
-                    1. `mesh.toml [agent] default_provider` (per-mesh override)\n\
+                    1. `default_provider` (per-mesh override)\n\
                     2. Buildmesh-wide default\n\
                     3. Anthropic (hardcoded fallback)";
         let args = vec!["--anthropic".to_string(), "--prefill".to_string(), body.to_string()];

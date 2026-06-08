@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
 /// Default `worktree_mode` when the mesh config leaves it unset. The UI
-/// default in `MeshPropertiesPanel.tsx` and the example in `mesh.toml.example`
-/// must agree. See `docs/knowledge-primer.md` (Worktree Support) for the
-/// branched-vs-detached rationale.
+/// default in `MeshPropertiesPanel.tsx` and the Rust constant below must
+/// agree (paired-constants pattern — see [[feedback_cross-language-default-coupling]]).
+/// See `docs/knowledge-primer.md` (Worktree Support) for the branched-vs-detached rationale.
 pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 
 /// Binary name the cwrap provider launcher resolves to (Anthropic/Minimax/Kimi).

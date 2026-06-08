@@ -40,9 +40,9 @@ function setup(overrides: Partial<React.ComponentProps<typeof NodeCreationForm>>
 describe('NodeCreationForm', () => {
   it('adds a node with the default provider when + is clicked, deferring use_worktree to the mesh default', async () => {
     // Regression: a normal click must NOT force use_worktree=true, because
-    // meshes with use_worktree=false in mesh.toml would otherwise get a worktree
-    // node and the wrong "worktree" pill / "Build from worktree" label.
-    // Passing undefined lets the backend fall back to mesh.use_worktree.
+    // meshes with `use_worktree = false` would otherwise get a worktree node
+    // and the wrong "worktree" pill / "Build from worktree" label. Passing
+    // undefined lets the backend fall back to `meshes.use_worktree`.
     const { onSelectProvider, getDefaultProvider } = setup();
 
     await userEvent.click(screen.getByTitle('Add agent node'));

@@ -1,5 +1,7 @@
 # Build/Run System — PRD
 
+> **Superseded config-storage section.** The original "Decision: `mesh.toml` at mesh root" below is no longer accurate — `build_command`, `run_command`, `model`, `effort`, `worktree_mode`, `default_provider`, and `use_worktree` all live as columns on the `meshes` table (see `src-tauri/src/db/mod.rs` `SCHEMA_VERSION`, and the IPC surface in `src-tauri/src/commands/mesh_config.rs` and `src-tauri/src/commands/build_run.rs:303`). This PRD is kept for the build/run **flow** (drawer, terminal, worktree context), which is still accurate. Treat the two `mesh.toml` Decision lines as historical.
+
 ## Overview
 
 The Build/Run system allows users to execute build and run commands directly from an agent node's worktree context, without leaving the agent context. It provides a configurable per-mesh build/run terminal that streams output in a drawer-style overlay.
@@ -12,17 +14,9 @@ The Build/Run system allows users to execute build and run commands directly fro
 
 ### Config Storage
 
-**Decision:** `mesh.toml` at mesh root, TOML format, per-mesh (not per-agent-node).
+**Decision (superseded — see banner above):** `mesh.toml` at mesh root, TOML format, per-mesh (not per-agent-node). The current implementation stores `build.command`, `run.command`, and the agent defaults (`model`, `effort`, `worktree_mode`, `default_provider`, `use_worktree`) as columns on the `meshes` SQLite row, surfaced via `get_mesh_properties` / `update_mesh_field` (`src-tauri/src/commands/mesh_config.rs`). Edited from Mesh Properties in the UI; read at build/run time by `commands::build_run::build_run_inner` via `MeshConfig::from(&mesh)`.
 
-**Rationale:** All agent nodes under a mesh share the same build/run commands. Explicit config file is deterministic, version-controlled, and portable.
-
-```toml
-[build]
-command = "cargo build --release"
-
-[run]
-command = "./target/release/myapp"
-```
+**Historical rationale:** All agent nodes under a mesh share the same build/run commands. Explicit config file is deterministic, version-controlled, and portable.
 
 ### Build Context
 
@@ -48,9 +42,9 @@ command = "./target/release/myapp"
 
 ### Config File Format
 
-**Decision:** TOML (`mesh.toml`) at mesh root.
+**Decision (superseded — see banner above):** TOML (`mesh.toml`) at mesh root.
 
-**Current limitation:** Parsing uses hand-rolled regex extraction. Does not handle TOML edge cases (trailing comments, multi-line values). MVP-acceptable; post-MVP: switch to a proper TOML parser.
+**Historical note:** Parsing used hand-rolled regex extraction that did not handle TOML edge cases (trailing comments, multi-line values). MVP-acceptable at the time; the `toml` crate was never adopted. The parser is now gone — the storage is the `meshes` table.
 
 ---
 
@@ -60,32 +54,28 @@ command = "./target/release/myapp"
 
 **Commands:**
 - `build_run(node_id, mode)` — spawns PTY, runs command from worktree, emits output events
-- `get_mesh_config(mesh_id)` — parses and returns mesh.toml contents
+- `get_mesh_config(mesh_id)` — returns `MeshConfig` derived from the `meshes` row (build/run command + agent defaults)
 - `close_build_run(node_id)` — cleans up PTY process
 
 **Process flow:**
-1. Load `mesh.toml` from mesh path (via `agent_nodes.mesh_id` → `meshes.path`)
-2. Parse config to extract `build.command` or `run.command`
-3. Resolve worktree path via `git worktree list --porcelain`
-4. Detect environment (WSL vs Windows) using `env::env_for_path`
-5. Spawn shell via `portable-pty` with appropriate working directory
-6. Write command to PTY stdin
-7. Stream PTY output to frontend via `build-run-output-{node_id}` event
-8. Track process in `BuildRunRegistry` (separate from `ProcessRegistry`)
+1. Load the `meshes` row via `db::get_mesh_by_id(mesh_id)` and derive `MeshConfig::from(&mesh)` (build/run commands + agent defaults)
+2. Resolve worktree path via `git worktree list --porcelain`
+3. Detect environment (WSL vs Windows) using `env::env_for_path`
+4. Spawn shell via `portable-pty` with appropriate working directory
+5. Write command to PTY stdin
+6. Stream PTY output to frontend via `build-run-output-{node_id}` event
+7. Track process in `BuildRunRegistry` (separate from `ProcessRegistry`)
 
 **Error handling:**
-- `mesh.toml` missing → returns error string
-- `mesh.toml` malformed → returns parse error
 - Worktree doesn't exist → returns error suggesting agent hasn't been spawned
-- Command not configured → returns error with helpful message
+- Command not configured (i.e. `build_command`/`run_command` is null on the `meshes` row) → returns error with helpful message
 
 ### Frontend (`src/components/BuildRun/`, `src/components/Terminal/BuildRunTerminal.tsx`)
 
 **BuildRunDropdown:**
 - Single dropdown button in `GridNodeHeader` (before close button)
-- Options: "Build from worktree", "Run from worktree", separator, "Open mesh.toml"
+- Options: "Build from worktree", "Run from worktree"
 - Calls `onBuildRun(nodeId, mode)` callback on Build/Run selection
-- "Open mesh.toml" handled directly in frontend via `window.open()`
 
 **BuildRunTerminal:**
 - xterm.js terminal with same theme as `AgentTerminal`
@@ -103,7 +93,7 @@ command = "./target/release/myapp"
 
 ## User Flow
 
-1. User creates a mesh and configures `mesh.toml` at the mesh root
+1. User creates a mesh and configures the build/run commands (and any agent defaults) via Mesh Properties — written to the `meshes` row.
 2. User spawns an agent in that mesh (creates a git worktree at `worktrees/agent-{node_id}/`)
 3. User makes code changes in the worktree
 4. User clicks "Build" dropdown → selects "Build from worktree"
