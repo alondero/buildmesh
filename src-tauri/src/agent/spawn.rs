@@ -9,7 +9,7 @@ use crate::agent::provider::Platform;
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
-use crate::models::{AgentNode, Provider, SessionStatus};
+use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,6 +21,22 @@ use tauri::Emitter;
 /// must agree. See `docs/knowledge-primer.md` (Worktree Support) for the
 /// branched-vs-detached rationale.
 pub const DEFAULT_WORKTREE_MODE: &str = "branched";
+
+/// Binary name the cwrap provider launcher resolves to (Anthropic/Minimax/Kimi).
+/// Mirrors the `binary: "cwrap"` declared in those adapters' spawn recipes; kept
+/// here as the single point the prefill-transport gate matches against.
+const CWRAP_BINARY: &str = "cwrap";
+
+/// Environment variable carrying prefill text to a cwrap-launched provider.
+///
+/// cwrap reads `$BUILDMESH_PREFILL` and forwards it to `claude --prefill`. We use
+/// the environment rather than a CLI arg because on Windows the cwrap providers
+/// are launched through `cwrap.cmd` → `cmd.exe`, whose command line is truncated
+/// at the first newline — so a multi-line prefill passed as an argv element loses
+/// everything after line one (the exact "only the first line is pre-filled"
+/// symptom). The process environment block is inherited intact by every shell
+/// layer, so the full text survives. See `build_spawn_command`.
+pub const PREFILL_ENV_VAR: &str = "BUILDMESH_PREFILL";
 
 /// Options for spawning or resuming an agent process.
 pub struct SpawnOptions {
@@ -114,13 +130,31 @@ pub fn build_spawn_command(
         }
     }
 
+    // Prefill transport. cwrap providers launched on a non-WSL host receive the
+    // prefill through `$BUILDMESH_PREFILL` rather than a `--prefill` CLI arg,
+    // because the `cwrap.cmd` → cmd.exe launcher on Windows truncates a
+    // multi-line argv at the first newline (see PREFILL_ENV_VAR). WSL keeps the
+    // CLI arg: `wsl.exe` passes multi-line argv through intact, and a Windows env
+    // var does not cross into the WSL environment without `WSLENV`. Direct
+    // `claude`/`codex` spawns (macOS, Codex) also stay on the CLI arg.
+    let mut prefill_via_env: Option<String> = None;
     if adapter.supports_prefill() {
         if let Some(text) = prefill.filter(|s| !s.is_empty()) {
-            recipe.base_args.extend(adapter.prefill_args(&normalize_prefill_newlines(text)));
+            let normalized = normalize_prefill_newlines(text);
+            if recipe.binary == CWRAP_BINARY && resolved.env_type != EnvType::Wsl {
+                prefill_via_env = Some(normalized);
+            } else {
+                recipe.base_args.extend(adapter.prefill_args(&normalized));
+            }
         }
     }
 
-    spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id)
+    let mut cmd =
+        spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id);
+    if let Some(text) = prefill_via_env {
+        cmd.env(PREFILL_ENV_VAR, text);
+    }
+    cmd
 }
 
 /// Spawn the child process.
