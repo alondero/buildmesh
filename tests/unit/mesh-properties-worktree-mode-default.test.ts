@@ -8,8 +8,8 @@ describe('MeshPropertiesPanel worktree mode default', () => {
   // `DEFAULT_WORKTREE_MODE` in `src-tauri/src/agent/spawn.rs` is pinned by
   // its own unit test; this test catches a flip of the TS constant. The two
   // sides are coupled by convention (matching the `(default)` radio label
-  // in `WORKTREE_MODE_OPTIONS` and the example in `mesh.toml.example`) — a
-  // cross-language drift would need a manual check.
+  // in `WORKTREE_MODE_OPTIONS`) — a cross-language drift would need a
+  // manual check. See [[feedback_cross-language-default-coupling]].
   it('uses branched as the default worktree mode', () => {
     expect(DEFAULT_WORKTREE_MODE).toBe('branched');
   });

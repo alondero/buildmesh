@@ -116,7 +116,7 @@ pub async fn get_local_ip() -> Result<String, String> {
 }
 
 /// Get the default provider for a mesh, applying the precedence chain:
-///   1. per-mesh DB `default_provider` (set via mesh.toml or Mesh Properties)
+///   1. per-mesh DB `default_provider` (set via Mesh Properties)
 ///   2. buildmesh-wide `preferences::default_provider` (set via Settings)
 ///   3. hardcoded `anthropic` fallback
 #[command]
