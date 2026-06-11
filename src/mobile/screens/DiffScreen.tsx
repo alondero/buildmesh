@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { AgentNode, DiffResult, diffFile } from "../api";
+import { AgentNode, DiffHunk, DiffResult, diffFile } from "../api";
+import { AppBar, CenterNote, PulseDots } from "../ui";
 
 type Props = {
   node: AgentNode;
@@ -29,67 +30,39 @@ export default function DiffScreen({ node, filePath, onBack }: Props) {
   }, [node.id, filePath]);
 
   return (
-    <div
-      data-testid="diff-screen"
-      style={{ display: "flex", flexDirection: "column", flex: 1 }}
-    >
-      <div
-        style={{
-          background: "#1a1a1a",
-          padding: "10px 12px",
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          borderBottom: "1px solid #333",
-        }}
-      >
-        <button
-          onClick={onBack}
-          aria-label="Back"
-          data-testid="diff-back"
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "#aaa",
-            fontSize: 22,
-            cursor: "pointer",
-            padding: 4,
-            lineHeight: 1,
-          }}
-        >
-          ←
-        </button>
-        <span
-          style={{
-            fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
-            fontSize: 13,
-            color: "#fff",
-            flex: 1,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {filePath}
-        </span>
-      </div>
+    <div data-testid="diff-screen" className="screen">
+      <AppBar
+        onBack={onBack}
+        backTestId="diff-back"
+        title={
+          <span
+            style={{
+              fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
+              fontSize: 13,
+              fontWeight: 400,
+            }}
+          >
+            {filePath}
+          </span>
+        }
+      />
 
       <div
         style={{
           flex: 1,
           overflow: "auto",
-          background: "#0f0f0f",
+          background: "var(--bg)",
           padding: 8,
         }}
       >
         {error && (
-          <div style={{ color: "#f44336", padding: 16, fontSize: 13 }}>
+          <div style={{ color: "var(--red)", padding: 16, fontSize: 13 }}>
             {error}
           </div>
         )}
         {!error && diff === null && (
-          <div style={{ color: "#666", padding: 16, fontSize: 13 }}>
-            Loading diff…
+          <div style={{ padding: 24, textAlign: "center" }}>
+            <PulseDots />
           </div>
         )}
         {diff && <DiffBody diff={diff} />}
@@ -101,15 +74,9 @@ export default function DiffScreen({ node, filePath, onBack }: Props) {
 function DiffBody({ diff }: { diff: DiffResult }) {
   if (diff.files.length === 0 || diff.files[0].hunks.length === 0) {
     return (
-      <div
-        data-testid="diff-empty"
-        style={{ color: "#666", padding: 16, fontSize: 13 }}
-      >
-        No diff (file matches HEAD).
-      </div>
+      <CenterNote testId="diff-empty">No diff (file matches HEAD).</CenterNote>
     );
   }
-  const lines = diff.files[0].hunks.flatMap((h) => h.lines);
   return (
     <pre
       data-testid="diff-body"
@@ -124,7 +91,33 @@ function DiffBody({ diff }: { diff: DiffResult }) {
         // so users see exact bytes rather than artificial breaks.
       }}
     >
-      {lines.map((l, i) => {
+      {diff.files[0].hunks.map((h, hi) => (
+        <Hunk key={hi} hunk={h} />
+      ))}
+    </pre>
+  );
+}
+
+function Hunk({ hunk }: { hunk: DiffHunk }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {/* Hunk header keeps the reader oriented in the file — without it,
+          consecutive hunks run together as one misleading block. */}
+      <div
+        data-testid="hunk-header"
+        style={{
+          color: "#7aa2c4",
+          background: "rgba(33, 150, 243, 0.08)",
+          padding: "3px 8px",
+          fontSize: 11,
+          borderRadius: 4,
+          marginBottom: 2,
+        }}
+      >
+        @@ -{hunk.old_start},{hunk.old_lines} +{hunk.new_start},{hunk.new_lines}{" "}
+        @@
+      </div>
+      {hunk.lines.map((l, i) => {
         const bg =
           l.line_type === "add"
             ? "rgba(76, 175, 80, 0.12)"
@@ -156,6 +149,6 @@ function DiffBody({ diff }: { diff: DiffResult }) {
           </div>
         );
       })}
-    </pre>
+    </div>
   );
 }

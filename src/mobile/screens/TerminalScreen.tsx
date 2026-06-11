@@ -5,6 +5,8 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { AgentNode, terminalWsUrl } from "../api";
 import { attachTouchPan } from "./attachTouchPan";
+import { QUICK_KEYS } from "./quickKeys";
+import { AppBar } from "../ui";
 
 const MAX_RECONNECT = 5;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
@@ -22,12 +24,39 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
+  const countdownRef = useRef<number | null>(null);
   const closedByUserRef = useRef(false);
 
   const [reconnectIn, setReconnectIn] = useState<number | null>(null);
   const [atBottom, setAtBottom] = useState(true);
   const [copyMode, setCopyMode] = useState(false);
   const [bufferText, setBufferText] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [draft, setDraft] = useState("");
+
+  function sendToPty(data: string): boolean {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(data);
+      return true;
+    }
+    return false;
+  }
+
+  // The composer sends a whole line at once — far friendlier than typing
+  // into xterm's hidden textarea, which fights mobile IMEs (autocorrect,
+  // swipe input, composition events). An empty submit sends a bare Enter,
+  // handy for confirming agent prompts.
+  function sendDraft() {
+    if (!draft) {
+      sendToPty("\r");
+      return;
+    }
+    if (sendToPty(draft) && sendToPty("\r")) {
+      setDraft("");
+      termRef.current?.scrollToBottom();
+    }
+  }
 
   function enterCopyMode() {
     const term = termRef.current;
@@ -40,7 +69,42 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     }
     while (lines.length && lines[lines.length - 1] === "") lines.pop();
     setBufferText(lines.join("\n"));
+    setCopied(false);
     setCopyMode(true);
+  }
+
+  async function copyAll() {
+    let ok = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(bufferText);
+        ok = true;
+      }
+    } catch {
+      /* fall through to selection fallback */
+    }
+    if (!ok) {
+      // The async clipboard API needs a secure context, and the embedded
+      // server is plain http over LAN — select the buffer so execCommand
+      // (or the native copy callout) can take over.
+      const pre = document.querySelector('[data-testid="copy-buffer"]');
+      const sel = window.getSelection();
+      if (pre && sel) {
+        sel.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(pre);
+        sel.addRange(range);
+        try {
+          ok = document.execCommand("copy");
+        } catch {
+          ok = false;
+        }
+      }
+    }
+    if (ok) {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    }
   }
 
   useEffect(() => {
@@ -71,6 +135,7 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
 
     let detachTouchPan: (() => void) | undefined;
     let detachScroll: (() => void) | null = null;
+    let resizeObserver: ResizeObserver | null = null;
 
     if (termHostRef.current) {
       term.open(termHostRef.current);
@@ -90,7 +155,7 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
       };
       const scrollDisposable = term.onScroll(updateAtBottom);
       updateAtBottom();
-      detachScroll = () => scrollDisposable.dispose();
+      detachScroll = () => scrollDisposable.dispose(); // allow-dispose — event-listener disposable, not the terminal
     }
 
     term.onData((data) => {
@@ -105,21 +170,33 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
       }
     });
 
+    // Refit whenever the host box changes — covers rotation, the soft
+    // keyboard shrinking --app-height, and the reconnect banner appearing.
+    // A window resize listener misses the keyboard case on iOS.
     const onWindowResize = () => fitRef.current?.fit();
-    window.addEventListener("resize", onWindowResize);
+    if (typeof ResizeObserver !== "undefined" && termHostRef.current) {
+      resizeObserver = new ResizeObserver(onWindowResize);
+      resizeObserver.observe(termHostRef.current);
+    } else {
+      window.addEventListener("resize", onWindowResize);
+    }
 
     connect();
 
     return () => {
       closedByUserRef.current = true;
       window.removeEventListener("resize", onWindowResize);
+      resizeObserver?.disconnect();
       detachTouchPan?.();
       detachScroll?.();
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
       }
+      if (countdownRef.current) {
+        clearInterval(countdownRef.current);
+      }
       wsRef.current?.close();
-      term.dispose();
+      term.dispose(); // allow-dispose — mobile SPA owns this per-mount xterm; no TerminalManager here
       termRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -180,79 +257,55 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
 
     // Tick the countdown each second so the user sees something happening.
     let remaining = Math.ceil(delayMs / 1000);
-    const interval = window.setInterval(() => {
+    countdownRef.current = window.setInterval(() => {
       remaining--;
       setReconnectIn(remaining > 0 ? remaining : 0);
-      if (remaining <= 0) window.clearInterval(interval);
+      if (remaining <= 0 && countdownRef.current) {
+        window.clearInterval(countdownRef.current);
+        countdownRef.current = null;
+      }
     }, 1000);
 
     reconnectTimerRef.current = window.setTimeout(() => {
-      window.clearInterval(interval);
+      if (countdownRef.current) {
+        window.clearInterval(countdownRef.current);
+        countdownRef.current = null;
+      }
       reconnectTimerRef.current = null;
       setReconnectIn(null);
       connect();
     }, delayMs);
   }
 
+  function retryNow() {
+    if (reconnectTimerRef.current) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (countdownRef.current) {
+      window.clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    reconnectAttemptRef.current = 0;
+    setReconnectIn(null);
+    connect();
+  }
+
   return (
-    <div
-      data-testid="terminal-screen"
-      style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
-    >
-      <div
-        style={{
-          background: "#1a1a1a",
-          padding: "10px 12px",
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          borderBottom: "1px solid #333",
-          flexShrink: 0,
-        }}
+    <div data-testid="terminal-screen" className="screen">
+      <AppBar
+        onBack={onBack}
+        backTestId="terminal-back"
+        title={node.name}
+        subtitle={
+          node.branch ? `${node.provider} · ⎇ ${node.branch}` : node.provider
+        }
       >
-        <button
-          onClick={onBack}
-          aria-label="Back"
-          data-testid="terminal-back"
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "#aaa",
-            fontSize: 22,
-            cursor: "pointer",
-            lineHeight: 1,
-            padding: 4,
-          }}
-        >
-          ←
-        </button>
-        <span
-          style={{
-            fontSize: 14,
-            fontWeight: 600,
-            color: "#fff",
-            flex: 1,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {node.name}
-        </span>
         <button
           onClick={enterCopyMode}
           aria-label="Copy text"
           data-testid="terminal-copy"
-          title="Select and copy text"
-          style={{
-            background: "transparent",
-            border: "1px solid #333",
-            borderRadius: 6,
-            color: "#aaa",
-            fontSize: 12,
-            padding: "6px 10px",
-            cursor: "pointer",
-          }}
+          className="chip-btn"
         >
           Copy
         </button>
@@ -261,21 +314,28 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
             onClick={onOpenChanges}
             aria-label="Changes"
             data-testid="terminal-open-changes"
-            title="View changes"
-            style={{
-              background: "transparent",
-              border: "1px solid #333",
-              borderRadius: 6,
-              color: "#aaa",
-              fontSize: 12,
-              padding: "6px 10px",
-              cursor: "pointer",
-            }}
+            className="chip-btn"
           >
-            Δ
+            Changes
           </button>
         )}
-      </div>
+      </AppBar>
+
+      {reconnectIn !== null && (
+        <div
+          data-testid="reconnect-overlay"
+          className={`banner ${reconnectIn < 0 ? "error" : "warn"}`}
+        >
+          <span style={{ flex: 1 }}>
+            {reconnectIn < 0
+              ? "Connection lost."
+              : `Connection lost — reconnecting in ${reconnectIn}s…`}
+          </span>
+          <button className="chip-btn" onClick={retryNow} data-testid="reconnect-now">
+            {reconnectIn < 0 ? "Retry" : "Now"}
+          </button>
+        </div>
+      )}
 
       <div
         style={{
@@ -318,51 +378,81 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
         )}
       </div>
 
+      <div className="term-footer">
+        <div className="qk-row" data-testid="quick-keys">
+          {QUICK_KEYS.map((k) => (
+            <button
+              key={k.id}
+              className="qk-btn"
+              data-testid={`qk-${k.id}`}
+              aria-label={k.id}
+              // preventDefault keeps focus (and the soft keyboard) where it
+              // is — tapping a key must not blur the composer or terminal.
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => sendToPty(k.seq)}
+            >
+              {k.label}
+            </button>
+          ))}
+        </div>
+        <form
+          className="input-row"
+          onSubmit={(e) => {
+            e.preventDefault();
+            sendDraft();
+          }}
+        >
+          <input
+            className="field"
+            style={{ flex: 1, background: "var(--bg)" }}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="Message the agent…"
+            enterKeyHint="send"
+            autoCapitalize="sentences"
+            data-testid="terminal-input"
+          />
+          <button
+            type="submit"
+            className="btn-primary"
+            style={{ padding: "11px 16px", fontSize: 13 }}
+            data-testid="terminal-send"
+            aria-label="Send"
+          >
+            Send
+          </button>
+        </form>
+      </div>
+
       {copyMode && (
         <div
           data-testid="copy-overlay"
           style={{
-            position: "fixed",
+            position: "absolute",
             inset: 0,
-            background: "#0f0f0f",
+            background: "var(--bg)",
             zIndex: 200,
             display: "flex",
             flexDirection: "column",
           }}
         >
-          <div
-            style={{
-              background: "#1a1a1a",
-              padding: "10px 12px",
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              borderBottom: "1px solid #333",
-              flexShrink: 0,
-            }}
-          >
-            <span
-              style={{
-                flex: 1,
-                fontSize: 13,
-                color: "#aaa",
-              }}
-            >
-              Long-press to select, then Copy
+          <div className="appbar">
+            <span style={{ flex: 1, fontSize: 13, color: "var(--text-dim)" }}>
+              Long-press to select, or copy everything
             </span>
+            <button
+              onClick={copyAll}
+              data-testid="copy-all"
+              className="chip-btn"
+              style={copied ? { color: "var(--green)", borderColor: "var(--green)" } : undefined}
+            >
+              {copied ? "Copied ✓" : "Copy all"}
+            </button>
             <button
               onClick={() => setCopyMode(false)}
               data-testid="copy-done"
-              style={{
-                background: "#2196f3",
-                border: "none",
-                borderRadius: 6,
-                color: "#fff",
-                fontSize: 13,
-                fontWeight: 500,
-                padding: "6px 14px",
-                cursor: "pointer",
-              }}
+              className="btn-primary"
+              style={{ padding: "8px 14px", fontSize: 13 }}
             >
               Done
             </button>
@@ -380,8 +470,8 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
                 '"JetBrains Mono", "Cascadia Code", "Fira Code", monospace',
               fontSize: 13,
               lineHeight: 1.4,
-              color: "#e0e0e0",
-              background: "#0f0f0f",
+              color: "var(--text)",
+              background: "var(--bg)",
               userSelect: "text",
               WebkitUserSelect: "text",
               WebkitTouchCallout: "default",
@@ -389,61 +479,6 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
           >
             {bufferText}
           </pre>
-        </div>
-      )}
-
-      {reconnectIn !== null && (
-        <div
-          data-testid="reconnect-overlay"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.85)",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 12,
-            color: "#fff",
-          }}
-        >
-          {reconnectIn < 0 ? (
-            <>
-              <h2 style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>
-                Connection lost
-              </h2>
-              <p style={{ color: "#888", fontSize: 13 }}>
-                Maximum retries reached.
-              </p>
-              <button
-                onClick={() => {
-                  reconnectAttemptRef.current = 0;
-                  setReconnectIn(null);
-                  connect();
-                }}
-                style={{
-                  background: "#2196f3",
-                  border: "none",
-                  borderRadius: 8,
-                  padding: "10px 20px",
-                  color: "#fff",
-                  fontSize: 14,
-                  cursor: "pointer",
-                }}
-              >
-                Retry
-              </button>
-            </>
-          ) : (
-            <>
-              <h2 style={{ fontSize: 18, fontWeight: 500, margin: 0 }}>
-                Reconnecting…
-              </h2>
-              <p style={{ color: "#888", fontSize: 13 }}>
-                Retrying in {reconnectIn}s
-              </p>
-            </>
-          )}
         </div>
       )}
     </div>

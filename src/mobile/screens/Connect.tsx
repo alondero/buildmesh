@@ -1,13 +1,17 @@
 import { useEffect, useState } from "react";
-import { readStoredToken, rememberToken } from "../api";
+import { readStoredToken, rememberToken, validateToken } from "../api";
 
 type Props = {
   onConnected: () => void;
+  /// Optional one-line explanation of why the user landed here
+  /// (e.g. "Session expired").
+  notice?: string | null;
 };
 
-export default function Connect({ onConnected }: Props) {
+export default function Connect({ onConnected, notice }: Props) {
   const [tokenInput, setTokenInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const stored = readStoredToken();
 
   // If the page was opened with `?token=` (initial QR code scan), persist it
@@ -22,27 +26,39 @@ export default function Connect({ onConnected }: Props) {
     }
   }, [onConnected]);
 
+  // Probe the token against the API first: navigating straight to ?token=
+  // with a bad token would land on the server's raw 401 page with no way
+  // back to this form. Only reload (to get the HttpOnly cookie set) once we
+  // know the token is good.
+  const connectWith = async (token: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const ok = await validateToken(token);
+      if (!ok) {
+        setError("Invalid token — re-scan the QR code from the desktop app.");
+        setBusy(false);
+        return;
+      }
+      rememberToken(token);
+      window.location.href =
+        window.location.pathname + "?token=" + encodeURIComponent(token);
+    } catch {
+      setError(
+        "Can't reach the desktop app. Is Buildmesh running and on the same network?",
+      );
+      setBusy(false);
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!tokenInput.trim()) {
+    const token = tokenInput.trim();
+    if (!token) {
       setError("Enter a token");
       return;
     }
-    rememberToken(tokenInput.trim());
-    // The cookie will be set when the page reloads with ?token=, so reload
-    // rather than just calling onConnected — that ensures the next /api call
-    // succeeds even if cookies were the only thing we were missing.
-    window.location.href =
-      window.location.pathname +
-      "?token=" +
-      encodeURIComponent(tokenInput.trim());
-  };
-
-  const useStored = () => {
-    if (!stored) return;
-    // Same reasoning: reload via ?token= so the cookie gets set on this load.
-    window.location.href =
-      window.location.pathname + "?token=" + encodeURIComponent(stored);
+    connectWith(token);
   };
 
   return (
@@ -58,20 +74,52 @@ export default function Connect({ onConnected }: Props) {
         gap: 12,
       }}
     >
+      <div
+        aria-hidden
+        style={{
+          width: 56,
+          height: 56,
+          borderRadius: 16,
+          background: "linear-gradient(135deg, #2196f3, #0d47a1)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 26,
+          marginBottom: 4,
+        }}
+      >
+        ⬡
+      </div>
       <h1 style={{ fontSize: 22, fontWeight: 600, color: "#fff", margin: 0 }}>
         Buildmesh Remote
       </h1>
       <p
         style={{
-          color: "#888",
+          color: "var(--text-dim)",
           fontSize: 13,
           textAlign: "center",
           maxWidth: 320,
           margin: 0,
+          lineHeight: 1.5,
         }}
       >
         Scan the QR code from your desktop app, or paste the token below.
       </p>
+
+      {notice && (
+        <p
+          data-testid="connect-notice"
+          style={{
+            color: "#ffb74d",
+            fontSize: 12,
+            textAlign: "center",
+            maxWidth: 320,
+            margin: 0,
+          }}
+        >
+          {notice}
+        </p>
+      )}
 
       <form
         onSubmit={handleSubmit}
@@ -97,51 +145,34 @@ export default function Connect({ onConnected }: Props) {
             setError(null);
           }}
           data-testid="token-input"
-          style={{
-            background: "#1a1a1a",
-            border: "1px solid #333",
-            borderRadius: 8,
-            padding: "12px 14px",
-            color: "#e0e0e0",
-            fontSize: 14,
-            outline: "none",
-          }}
+          className="field"
         />
         {error && (
-          <span style={{ color: "#f44336", fontSize: 12 }}>{error}</span>
+          <span
+            data-testid="connect-error"
+            style={{ color: "var(--red)", fontSize: 12 }}
+          >
+            {error}
+          </span>
         )}
         <button
           type="submit"
+          disabled={busy}
           data-testid="connect-submit"
-          style={{
-            background: "#2196f3",
-            border: "none",
-            borderRadius: 8,
-            padding: "12px 24px",
-            color: "#fff",
-            fontSize: 14,
-            fontWeight: 500,
-            cursor: "pointer",
-          }}
+          className="btn-primary"
+          style={{ padding: "12px 24px" }}
         >
-          Connect
+          {busy ? "Connecting…" : "Connect"}
         </button>
       </form>
 
       {stored && (
         <button
-          onClick={useStored}
+          onClick={() => connectWith(stored)}
+          disabled={busy}
           data-testid="use-saved"
-          style={{
-            marginTop: 12,
-            background: "transparent",
-            border: "1px solid #333",
-            borderRadius: 8,
-            padding: "10px 20px",
-            color: "#aaa",
-            fontSize: 13,
-            cursor: "pointer",
-          }}
+          className="btn-ghost"
+          style={{ marginTop: 12 }}
         >
           Use saved session
         </button>
