@@ -288,6 +288,7 @@ fn start_reader(
     reader: Box<dyn std::io::Read + Send>,
     spawned_at: std::time::Instant,
     reader_alive: Arc<AtomicBool>,
+    is_plain_terminal: bool,
 ) {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -320,24 +321,34 @@ fn start_reader(
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 
-        // Detect early exit (likely a failed --resume)
-        let elapsed = spawned_at.elapsed();
-        if elapsed < std::time::Duration::from_secs(3) {
-            tracing::warn!(
-                "Node {} reader exited after {:?} — likely resume failure",
-                session_id,
-                elapsed
-            );
-            let _ = db::update_agent_node_status(session_id, SessionStatus::Error);
-            let _ = app_clone.emit(
-                "resume-failed",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "error": "Agent exited immediately after spawn — session may have expired"
-                }),
-            );
-        } else {
+        if is_plain_terminal {
+            // A plain terminal's shell exiting — whether via `exit`, the
+            // user closing the window, or the process being killed — is
+            // a normal Idle state, never an Error. Skip the LLM-specific
+            // 3-second "resume-failed" early-exit warning and event: a
+            // shell is not a --resume, so a fast exit isn't a resume
+            // signal; emitting one would confuse the frontend.
             let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
+        } else {
+            // Detect early exit (likely a failed --resume)
+            let elapsed = spawned_at.elapsed();
+            if elapsed < std::time::Duration::from_secs(3) {
+                tracing::warn!(
+                    "Node {} reader exited after {:?} — likely resume failure",
+                    session_id,
+                    elapsed
+                );
+                let _ = db::update_agent_node_status(session_id, SessionStatus::Error);
+                let _ = app_clone.emit(
+                    "resume-failed",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "error": "Agent exited immediately after spawn — session may have expired"
+                    }),
+                );
+            } else {
+                let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
+            }
         }
 
         tracing::debug!("PTY reader thread exited for session {}", session_id);
@@ -569,7 +580,15 @@ pub async fn spawn_agent_inner(
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     crate::http_server::ensure_pty_channel(session_id);
     let needs_session_capture = adapter.self_assigns_session_id() && node.cli_session_id.is_none();
-    start_reader(app.clone(), session_id, needs_session_capture, reader, spawned_at, reader_alive);
+    start_reader(
+        app.clone(),
+        session_id,
+        needs_session_capture,
+        reader,
+        spawned_at,
+        reader_alive,
+        adapter.is_plain_terminal(),
+    );
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;

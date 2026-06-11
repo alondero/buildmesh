@@ -49,12 +49,29 @@ function KimiIcon({ className, title }: { className?: string; title?: string }) 
   );
 }
 
+function TerminalIcon({ className, title }: { className?: string; title?: string }) {
+  // A filled `>` chevron + a small `_` cursor block, both placed so the
+  // cursor sits directly to the right of the chevron tip (the prior
+  // version dropped the cursor in the viewBox's bottom-right corner
+  // where it rendered as a sub-pixel smudge at the 12-14px sizes used
+  // in the sidebar/dropdown). Monochrome via `currentColor` so it picks
+  // up the surrounding text colour like the other inline icons.
+  return (
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <title>{title}</title>
+      <path fill="currentColor" d="M3 5l9 7-9 7V5z" />
+      <path fill="currentColor" d="M14 17h7v3h-7z" />
+    </svg>
+  );
+}
+
 type InlineIconProps = { className?: string; title?: string };
 const INLINE_ICONS: Record<string, (props: InlineIconProps) => React.JSX.Element> = {
   anthropic: ClaudeCodeIcon,
   codex: OpenAIIcon,
   opencode: OpenCodeIcon,
   kimi: KimiIcon,
+  terminal: TerminalIcon,
 };
 
 const COLORED_IMAGES: Record<string, string> = {

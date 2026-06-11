@@ -144,4 +144,16 @@ pub trait AgentProvider: Send + Sync {
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec!["--prefill".into(), text.into()]
     }
+
+    /// True for plain shell providers (e.g. a node whose PTY runs
+    /// `powershell.exe` / `sh` directly, with no LLM agent loop).
+    /// When `true`, `start_reader` skips the LLM-specific EOF tail:
+    /// PTY exit becomes `SessionStatus::Idle` (never `Error`), and the
+    /// 3-second "resume-failed" early-exit warning and event are
+    /// suppressed. Other LLM-specific skips in `spawn_agent_inner` are
+    /// already gated by the existing capability flags this adapter also
+    /// returns `false` for.
+    fn is_plain_terminal(&self) -> bool {
+        false
+    }
 }
