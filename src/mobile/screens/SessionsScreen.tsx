@@ -6,6 +6,7 @@ import {
   discoverSessions,
   importAndResume,
 } from "../api";
+import { AppBar, CenterNote, PulseDots } from "../ui";
 
 type Props = {
   mesh: Mesh;
@@ -13,17 +14,28 @@ type Props = {
   onResumed: (node: AgentNode) => void;
 };
 
+/// Newest activity first; sessions without a timestamp sink to the bottom.
+export function sortSessions(sessions: DiscoveredSession[]): DiscoveredSession[] {
+  return [...sessions].sort((a, b) =>
+    (b.last_active_at ?? "").localeCompare(a.last_active_at ?? ""),
+  );
+}
+
 export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
   const [sessions, setSessions] = useState<DiscoveredSession[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  // Resuming imports the session and spawns a real agent — expensive enough
+  // that a stray tap shouldn't trigger it. First tap expands the card,
+  // the explicit Resume button commits.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     discoverSessions(mesh.id)
       .then((s) => {
-        if (!cancelled) setSessions(s);
+        if (!cancelled) setSessions(sortSessions(s));
       })
       .catch((e) => {
         if (!cancelled) setError((e as Error).message);
@@ -57,154 +69,102 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
   });
 
   return (
-    <div
-      data-testid="sessions-screen"
-      style={{ display: "flex", flexDirection: "column", flex: 1 }}
-    >
-      <Header title="Previous Sessions" subtitle={mesh.name} onBack={onBack} />
-      <input
-        placeholder="Search by message, branch, worktree…"
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        data-testid="sessions-filter"
-        style={{
-          margin: "12px",
-          background: "#1a1a1a",
-          border: "1px solid #333",
-          borderRadius: 6,
-          padding: "10px 12px",
-          color: "#e0e0e0",
-          fontSize: 14,
-          outline: "none",
-        }}
-      />
-      <div style={{ flex: 1, overflowY: "auto", padding: "0 12px 12px" }}>
+    <div data-testid="sessions-screen" className="screen">
+      <AppBar onBack={onBack} title="Previous Sessions" subtitle={mesh.name} />
+      <div style={{ padding: 12, paddingBottom: 0 }}>
+        <input
+          placeholder="Search by message, branch, worktree…"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          data-testid="sessions-filter"
+          className="field"
+        />
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", padding: 12 }}>
         {error && (
-          <div style={{ color: "#f44336", padding: 12, fontSize: 13 }}>
+          <div style={{ color: "var(--red)", padding: 12, fontSize: 13 }}>
             {error}
           </div>
         )}
         {!error && sessions === null && (
-          <div style={{ color: "#666", padding: 16, fontSize: 13, textAlign: "center" }}>
-            Loading…
+          <div style={{ padding: 24, textAlign: "center" }}>
+            <PulseDots />
           </div>
         )}
         {sessions !== null && filtered.length === 0 && (
-          <div
-            data-testid="sessions-empty"
-            style={{ color: "#555", padding: 24, textAlign: "center", fontSize: 13 }}
-          >
+          <CenterNote testId="sessions-empty">
             {sessions.length === 0
               ? "No discoverable sessions for this mesh."
               : "No matches."}
-          </div>
+          </CenterNote>
         )}
-        {filtered.map((s) => (
-          <button
-            key={s.cli_session_id}
-            onClick={() => resume(s)}
-            disabled={busyId !== null}
-            data-testid={`session-${s.cli_session_id}`}
-            style={{
-              width: "100%",
-              textAlign: "left",
-              background: "#1a1a1a",
-              border: "1px solid transparent",
-              borderRadius: 8,
-              padding: 12,
-              marginBottom: 6,
-              cursor: busyId ? "wait" : "pointer",
-              color: "inherit",
-            }}
-          >
+        {filtered.map((s) => {
+          const open = selectedId === s.cli_session_id;
+          const busy = busyId === s.cli_session_id;
+          return (
             <div
+              key={s.cli_session_id}
+              role="button"
+              tabIndex={0}
+              onClick={() => setSelectedId(open ? null : s.cli_session_id)}
+              data-testid={`session-${s.cli_session_id}`}
+              className="card"
               style={{
-                fontSize: 13,
-                color: "#fff",
-                fontWeight: 500,
-                marginBottom: 4,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
+                display: "block",
+                borderColor: open ? "var(--border-strong)" : "transparent",
               }}
             >
-              {s.first_message?.trim() || "(no first message)"}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                gap: 10,
-                fontSize: 11,
-                color: "#666",
-              }}
-            >
-              {s.branch && <span>⎇ {s.branch}</span>}
-              {s.worktree_name && <span>wt: {s.worktree_name}</span>}
-              <span>{s.provider}</span>
-              {s.last_active_at && (
-                <span style={{ marginLeft: "auto" }}>{timeAgo(s.last_active_at)}</span>
+              <div
+                style={{
+                  fontSize: 13,
+                  color: "#fff",
+                  fontWeight: 500,
+                  marginBottom: 4,
+                  overflow: "hidden",
+                  ...(open
+                    ? { whiteSpace: "pre-wrap" as const, overflowWrap: "anywhere" as const }
+                    : { textOverflow: "ellipsis", whiteSpace: "nowrap" as const }),
+                }}
+              >
+                {s.first_message?.trim() || "(no first message)"}
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  fontSize: 11,
+                  color: "var(--text-faint)",
+                  flexWrap: "wrap",
+                }}
+              >
+                {s.branch && <span>⎇ {s.branch}</span>}
+                {s.worktree_name && <span>wt: {s.worktree_name}</span>}
+                <span>{s.provider}</span>
+                {s.last_active_at && (
+                  <span style={{ marginLeft: "auto" }}>
+                    {timeAgo(s.last_active_at)}
+                  </span>
+                )}
+              </div>
+              {open && (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ marginTop: 12 }}
+                >
+                  <button
+                    className="btn-primary"
+                    style={{ width: "100%" }}
+                    disabled={busyId !== null}
+                    data-testid={`session-resume-${s.cli_session_id}`}
+                    onClick={() => resume(s)}
+                  >
+                    {busy ? "Resuming…" : "Resume session"}
+                  </button>
+                </div>
               )}
             </div>
-            {busyId === s.cli_session_id && (
-              <div style={{ color: "#2196f3", fontSize: 11, marginTop: 6 }}>
-                Resuming…
-              </div>
-            )}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function Header({
-  title,
-  subtitle,
-  onBack,
-}: {
-  title: string;
-  subtitle: string;
-  onBack: () => void;
-}) {
-  return (
-    <div
-      style={{
-        background: "#1a1a1a",
-        padding: "10px 12px",
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        borderBottom: "1px solid #333",
-      }}
-    >
-      <button
-        onClick={onBack}
-        aria-label="Back"
-        style={{
-          background: "transparent",
-          border: "none",
-          color: "#aaa",
-          fontSize: 22,
-          cursor: "pointer",
-          padding: 4,
-          lineHeight: 1,
-        }}
-      >
-        ←
-      </button>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: "#fff" }}>{title}</div>
-        <div
-          style={{
-            fontSize: 11,
-            color: "#666",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {subtitle}
-        </div>
+          );
+        })}
       </div>
     </div>
   );

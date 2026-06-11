@@ -1,8 +1,9 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import "./styles.css";
-import { AgentNode, Mesh, readStoredToken } from "./api";
+import { AgentNode, Mesh, clearStoredToken, readStoredToken } from "./api";
 import Connect from "./screens/Connect";
 import NodeList from "./screens/NodeList";
+import { ScreenLoading } from "./ui";
 
 // Terminal pulls in xterm.js + FitAddon (~90 KB gzipped). Most mobile
 // sessions look at the node list and don't open a terminal; defer the
@@ -14,7 +15,7 @@ const CreatePrSheet = lazy(() => import("./screens/CreatePrSheet"));
 const SessionsScreen = lazy(() => import("./screens/SessionsScreen"));
 const IssuesScreen = lazy(() => import("./screens/IssuesScreen"));
 
-type Screen =
+export type Screen =
   | { kind: "connect" }
   | { kind: "list" }
   | { kind: "terminal"; node: AgentNode }
@@ -22,6 +23,26 @@ type Screen =
   | { kind: "diff"; node: AgentNode; filePath: string }
   | { kind: "sessions"; mesh: Mesh }
   | { kind: "issues"; mesh: Mesh };
+
+/// Where one step "back" lands from each screen. The popstate handler uses
+/// this instead of stored history payloads, so the OS back gesture, the
+/// Android back button, and in-app ← buttons all converge on the same
+/// hierarchy regardless of how a screen was reached (e.g. a terminal entered
+/// laterally from the sessions screen still backs out to the list).
+export function parentOf(s: Screen): Screen {
+  switch (s.kind) {
+    case "terminal":
+    case "sessions":
+    case "issues":
+      return { kind: "list" };
+    case "changes":
+      return { kind: "terminal", node: s.node };
+    case "diff":
+      return { kind: "changes", node: s.node };
+    default:
+      return s;
+  }
+}
 
 export default function App() {
   // If the URL has ?token=, the server has already set bm_session and we
@@ -35,11 +56,65 @@ export default function App() {
 
   const [screen, setScreen] = useState<Screen>(initial);
   const [offline, setOffline] = useState(false);
+  // Remount key for NodeList: "Try again" bumps it to force an immediate
+  // refetch instead of waiting out the 5-second poll.
+  const [listKey, setListKey] = useState(0);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
   const [prSheet, setPrSheet] = useState<{
     node: AgentNode;
     branch: string;
   } | null>(null);
   const [prCreatedUrl, setPrCreatedUrl] = useState<string | null>(null);
+
+  const prSheetRef = useRef(prSheet);
+  prSheetRef.current = prSheet;
+
+  // Forward navigation pushes a history entry so back gestures walk back
+  // through screens instead of leaving the app entirely.
+  const navigate = useCallback((next: Screen) => {
+    window.history.pushState({ bm: true }, "");
+    setScreen(next);
+  }, []);
+
+  const goBack = useCallback(() => {
+    window.history.back();
+  }, []);
+
+  useEffect(() => {
+    const onPop = () => {
+      // A sheet counts as the topmost "screen": back closes it first.
+      if (prSheetRef.current) {
+        setPrSheet(null);
+        return;
+      }
+      setScreen((cur) => parentOf(cur));
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // Track the visual viewport so the layout (and any sheet/composer pinned
+  // to its bottom) shrinks above the soft keyboard rather than hiding
+  // behind it. #root's height reads --app-height (styles.css).
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => {
+      document.documentElement.style.setProperty(
+        "--app-height",
+        `${Math.round(vv.height)}px`,
+      );
+      // iOS scrolls the layout viewport when the keyboard opens even with
+      // overflow:hidden; pin it back so the app chrome stays on-screen.
+      window.scrollTo(0, 0);
+    };
+    apply();
+    vv.addEventListener("resize", apply);
+    return () => {
+      vv.removeEventListener("resize", apply);
+      document.documentElement.style.removeProperty("--app-height");
+    };
+  }, []);
 
   // Clean the token out of the URL once we've taken it from the query string
   // — the server set the cookie, so it's no longer needed there.
@@ -56,99 +131,85 @@ export default function App() {
     }
   }, []);
 
+  const handleAuthFailed = useCallback(() => {
+    clearStoredToken();
+    setAuthNotice("Session expired — scan the QR code again to reconnect.");
+    setScreen({ kind: "connect" });
+  }, []);
+
+  const openPrSheet = useCallback((node: AgentNode, branch: string) => {
+    window.history.pushState({ bm: true }, "");
+    setPrSheet({ node, branch });
+  }, []);
+
   return (
     <>
       {screen.kind === "connect" && (
-        <Connect onConnected={() => setScreen({ kind: "list" })} />
+        <Connect
+          notice={authNotice}
+          onConnected={() => setScreen({ kind: "list" })}
+        />
       )}
       {screen.kind === "list" && (
         <NodeList
-          onOpenNode={(node) => setScreen({ kind: "terminal", node })}
-          onOpenSessions={(mesh) => setScreen({ kind: "sessions", mesh })}
-          onOpenIssues={(mesh) => setScreen({ kind: "issues", mesh })}
+          key={listKey}
+          onOpenNode={(node) => navigate({ kind: "terminal", node })}
+          onOpenSessions={(mesh) => navigate({ kind: "sessions", mesh })}
+          onOpenIssues={(mesh) => navigate({ kind: "issues", mesh })}
           onOffline={() => setOffline(true)}
+          onAuthFailed={handleAuthFailed}
         />
       )}
       {screen.kind === "terminal" && (
         <Suspense
           fallback={
-            <div
-              data-testid="terminal-loading"
-              style={{
-                flex: 1,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#888",
-                fontSize: 13,
-              }}
-            >
-              Loading terminal…
-            </div>
+            <ScreenLoading testId="terminal-loading" label="Loading terminal…" />
           }
         >
           <TerminalScreen
             node={screen.node}
-            onBack={() => setScreen({ kind: "list" })}
+            onBack={goBack}
             onOpenChanges={() =>
-              setScreen({ kind: "changes", node: screen.node })
+              navigate({ kind: "changes", node: screen.node })
             }
           />
         </Suspense>
       )}
       {screen.kind === "changes" && (
-        <Suspense
-          fallback={
-            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
-          }
-        >
+        <Suspense fallback={<ScreenLoading />}>
           <ChangesScreen
             node={screen.node}
-            onBack={() => setScreen({ kind: "terminal", node: screen.node })}
+            onBack={goBack}
             onOpenDiff={(filePath) =>
-              setScreen({ kind: "diff", node: screen.node, filePath })
+              navigate({ kind: "diff", node: screen.node, filePath })
             }
-            onOpenPr={(branch) =>
-              setPrSheet({ node: screen.node, branch })
-            }
+            onOpenPr={(branch) => openPrSheet(screen.node, branch)}
           />
         </Suspense>
       )}
       {screen.kind === "diff" && (
-        <Suspense
-          fallback={
-            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
-          }
-        >
+        <Suspense fallback={<ScreenLoading />}>
           <DiffScreen
             node={screen.node}
             filePath={screen.filePath}
-            onBack={() => setScreen({ kind: "changes", node: screen.node })}
+            onBack={goBack}
           />
         </Suspense>
       )}
       {screen.kind === "sessions" && (
-        <Suspense
-          fallback={
-            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
-          }
-        >
+        <Suspense fallback={<ScreenLoading />}>
           <SessionsScreen
             mesh={screen.mesh}
-            onBack={() => setScreen({ kind: "list" })}
+            onBack={goBack}
             onResumed={(node) => setScreen({ kind: "terminal", node })}
           />
         </Suspense>
       )}
       {screen.kind === "issues" && (
-        <Suspense
-          fallback={
-            <div style={{ flex: 1, padding: 16, color: "#666" }}>Loading…</div>
-          }
-        >
+        <Suspense fallback={<ScreenLoading />}>
           <IssuesScreen
             mesh={screen.mesh}
-            onBack={() => setScreen({ kind: "list" })}
+            onBack={goBack}
             onSpawned={(node) => setScreen({ kind: "terminal", node })}
           />
         </Suspense>
@@ -158,35 +219,19 @@ export default function App() {
           <CreatePrSheet
             meshId={prSheet.node.mesh_id}
             currentBranch={prSheet.branch}
-            onClose={() => setPrSheet(null)}
+            onClose={goBack}
             onCreated={(url) => {
-              setPrSheet(null);
               setPrCreatedUrl(url);
+              window.history.back(); // pops the sheet's history entry
             }}
           />
         </Suspense>
       )}
       {prCreatedUrl && (
-        <div
-          data-testid="pr-success-toast"
-          style={{
-            position: "fixed",
-            bottom: 16,
-            left: 16,
-            right: 16,
-            background: "#1e3a2c",
-            color: "#a5d6a7",
-            border: "1px solid #2e7d32",
-            borderRadius: 8,
-            padding: 12,
-            zIndex: 300,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            fontSize: 13,
-          }}
-        >
-          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+        <div data-testid="pr-success-toast" className="toast success">
+          <span
+            style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}
+          >
             PR created:{" "}
             <a
               href={prCreatedUrl}
@@ -199,13 +244,14 @@ export default function App() {
           </span>
           <button
             onClick={() => setPrCreatedUrl(null)}
+            aria-label="Dismiss"
             style={{
               background: "transparent",
               border: "none",
               color: "#a5d6a7",
               fontSize: 18,
               cursor: "pointer",
-              padding: 0,
+              padding: "0 4px",
             }}
           >
             ×
@@ -216,9 +262,10 @@ export default function App() {
         <div
           data-testid="offline-overlay"
           style={{
-            position: "fixed",
+            position: "absolute",
             inset: 0,
-            background: "#0f0f0f",
+            zIndex: 400,
+            background: "var(--bg)",
             display: "flex",
             flexDirection: "column",
             alignItems: "center",
@@ -226,34 +273,29 @@ export default function App() {
             gap: 12,
             color: "#fff",
             padding: 24,
+            textAlign: "center",
           }}
         >
-          <h2 style={{ fontSize: 18, color: "#f44336", margin: 0 }}>
-            Desktop app is offline
-          </h2>
+          <div style={{ fontSize: 32 }}>📡</div>
+          <h2 style={{ fontSize: 18, margin: 0 }}>Can't reach the desktop app</h2>
           <p
             style={{
-              color: "#666",
+              color: "var(--text-faint)",
               fontSize: 13,
-              textAlign: "center",
-              maxWidth: 280,
+              maxWidth: 300,
+              margin: 0,
+              lineHeight: 1.5,
             }}
           >
-            Start buildmesh on your computer to continue.
+            Make sure Buildmesh is running on your computer and this phone is
+            on the same network.
           </p>
           <button
+            className="btn-primary"
+            style={{ marginTop: 8 }}
             onClick={() => {
               setOffline(false);
-            }}
-            style={{
-              marginTop: 8,
-              background: "#2196f3",
-              border: "none",
-              borderRadius: 8,
-              padding: "10px 20px",
-              color: "#fff",
-              fontSize: 14,
-              cursor: "pointer",
+              setListKey((k) => k + 1);
             }}
           >
             Try again

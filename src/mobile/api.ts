@@ -79,6 +79,14 @@ class ApiError extends Error {
   }
 }
 
+function fallbackMessage(status: number): string {
+  if (status === 401 || status === 403) {
+    return "Not authorized — reconnect with a fresh token from the desktop app.";
+  }
+  if (status >= 500) return "The desktop app hit an error handling this request.";
+  return `Request failed (${status}).`;
+}
+
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   // The cookie handles auth for browsers that obey credentials:include. We
   // also append ?token=... when available so the very first request after
@@ -93,9 +101,34 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
     ...init,
   });
   if (!resp.ok) {
-    throw new ApiError(resp.status, `API ${resp.status} on ${path}`);
+    // Routes report failures as {"error": "..."} — surface that text to the
+    // user instead of a bare status code when it's available.
+    let detail = "";
+    try {
+      const j = (await resp.json()) as { error?: unknown };
+      if (typeof j?.error === "string") detail = j.error;
+    } catch {
+      /* non-JSON body */
+    }
+    throw new ApiError(resp.status, detail || fallbackMessage(resp.status));
   }
   return resp;
+}
+
+export function isAuthError(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 401 || e.status === 403);
+}
+
+/// Probe a token against the API before committing to the full-page
+/// ?token= reload — a bad token would otherwise dead-end on the server's
+/// raw 401 page with no way back to the connect form.
+export async function validateToken(token: string): Promise<boolean> {
+  const resp = await fetch("/api/meshes?token=" + encodeURIComponent(token), {
+    credentials: "include",
+  });
+  if (resp.status === 401 || resp.status === 403) return false;
+  if (!resp.ok) throw new ApiError(resp.status, fallbackMessage(resp.status));
+  return true;
 }
 
 export async function listNodes(): Promise<AgentNode[]> {

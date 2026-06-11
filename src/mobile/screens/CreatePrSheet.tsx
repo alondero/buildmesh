@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { createPr } from "../api";
+import { Sheet } from "../ui";
 
 type Props = {
   meshId: number;
@@ -38,145 +39,101 @@ export default function CreatePrSheet({
   };
 
   return (
-    <div
-      data-testid="create-pr-sheet"
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 200,
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <div
-        onClick={onClose}
-        style={{ flex: 1, background: "rgba(0,0,0,0.6)" }}
-      />
-      <div
+    <Sheet onClose={onClose} testId="create-pr-sheet">
+      <h3
         style={{
-          background: "#1a1a1a",
-          borderRadius: "16px 16px 0 0",
-          padding: 20,
-          paddingBottom: "max(20px, env(safe-area-inset-bottom))",
+          fontSize: 15,
+          fontWeight: 600,
+          color: "#fff",
+          margin: 0,
+          marginBottom: 12,
         }}
       >
-        <h3
-          style={{
-            fontSize: 15,
-            fontWeight: 600,
-            color: "#fff",
-            margin: 0,
-            marginBottom: 12,
-          }}
-        >
-          Create Pull Request
-        </h3>
-        <p
-          style={{
-            fontSize: 12,
-            color: "#777",
-            margin: 0,
-            marginBottom: 12,
-          }}
-        >
-          From <code style={{ color: "#aaa" }}>{currentBranch}</code> into{" "}
-          <input
-            value={base}
-            onChange={(e) => setBase(e.target.value)}
-            style={{
-              background: "#2a2a2a",
-              border: "1px solid #444",
-              borderRadius: 4,
-              color: "#e0e0e0",
-              padding: "2px 6px",
-              fontSize: 12,
-              width: 80,
-              fontFamily:
-                '"JetBrains Mono", "Cascadia Code", monospace',
-            }}
-          />
-        </p>
+        Create Pull Request
+      </h3>
+      <p
+        style={{
+          fontSize: 12,
+          color: "var(--text-dim)",
+          margin: 0,
+          marginBottom: 12,
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          flexWrap: "wrap",
+        }}
+      >
+        From{" "}
+        <code style={{ color: "#ccc", overflowWrap: "anywhere" }}>
+          {currentBranch}
+        </code>{" "}
+        into
         <input
-          placeholder="Title"
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          data-testid="pr-title"
+          value={base}
+          onChange={(e) => setBase(e.target.value)}
+          aria-label="Base branch"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          className="field"
           style={{
-            width: "100%",
-            background: "#2a2a2a",
-            border: "1px solid #444",
+            width: 110,
+            padding: "4px 8px",
             borderRadius: 6,
-            padding: "10px 12px",
-            color: "#e0e0e0",
-            fontSize: 14,
-            outline: "none",
-            marginBottom: 8,
+            background: "var(--surface-2)",
+            fontFamily: '"JetBrains Mono", "Cascadia Code", monospace',
           }}
         />
-        <textarea
-          placeholder="Body (optional)"
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          rows={4}
-          data-testid="pr-body"
-          style={{
-            width: "100%",
-            background: "#2a2a2a",
-            border: "1px solid #444",
-            borderRadius: 6,
-            padding: "10px 12px",
-            color: "#e0e0e0",
-            fontSize: 14,
-            outline: "none",
-            marginBottom: 12,
-            resize: "vertical",
-            fontFamily: "inherit",
-          }}
-        />
-        {error && (
-          <div
-            style={{ color: "#f44336", fontSize: 12, marginBottom: 8 }}
-            data-testid="pr-error"
-          >
-            {error}
-          </div>
-        )}
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
-            onClick={onClose}
-            disabled={submitting}
-            style={{
-              flex: 1,
-              background: "transparent",
-              border: "1px solid #444",
-              borderRadius: 6,
-              padding: "10px 16px",
-              color: "#aaa",
-              fontSize: 14,
-              cursor: "pointer",
-            }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={submit}
-            disabled={submitting}
-            data-testid="pr-submit"
-            style={{
-              flex: 1,
-              background: submitting ? "#1565c0" : "#2196f3",
-              border: "none",
-              borderRadius: 6,
-              padding: "10px 16px",
-              color: "#fff",
-              fontSize: 14,
-              cursor: submitting ? "wait" : "pointer",
-            }}
-          >
-            {submitting ? "Creating…" : "Create PR"}
-          </button>
+      </p>
+      <input
+        placeholder="Title"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        autoFocus
+        data-testid="pr-title"
+        className="field"
+        style={{ background: "var(--surface-2)", marginBottom: 8 }}
+      />
+      <textarea
+        placeholder="Body (optional)"
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        rows={4}
+        data-testid="pr-body"
+        className="field"
+        style={{
+          background: "var(--surface-2)",
+          marginBottom: 12,
+          resize: "vertical",
+        }}
+      />
+      {error && (
+        <div
+          style={{ color: "var(--red)", fontSize: 12, marginBottom: 8 }}
+          data-testid="pr-error"
+        >
+          {error}
         </div>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={onClose}
+          disabled={submitting}
+          className="btn-ghost"
+          style={{ flex: 1 }}
+        >
+          Cancel
+        </button>
+        <button
+          onClick={submit}
+          disabled={submitting || !title.trim()}
+          data-testid="pr-submit"
+          className="btn-primary"
+          style={{ flex: 1 }}
+        >
+          {submitting ? "Creating…" : "Create PR"}
+        </button>
       </div>
-    </div>
+    </Sheet>
   );
 }

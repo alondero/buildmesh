@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   AgentNode,
   GitStatusEntry,
@@ -8,6 +8,7 @@ import {
   gitStatus,
   gitSummary,
 } from "../api";
+import { AppBar, CenterNote, PulseDots } from "../ui";
 
 type Props = {
   node: AgentNode;
@@ -28,8 +29,9 @@ export default function ChangesScreen({
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     let cancelled = false;
+    setError(null);
     Promise.all([
       gitStatus(node.id),
       gitSummary(node.id),
@@ -51,97 +53,65 @@ export default function ChangesScreen({
     };
   }, [node.id]);
 
+  useEffect(() => load(), [load]);
+
   return (
-    <div
-      data-testid="changes-screen"
-      style={{ display: "flex", flexDirection: "column", flex: 1 }}
-    >
-      <div
-        style={{
-          background: "#1a1a1a",
-          padding: "10px 12px",
-          display: "flex",
-          alignItems: "center",
-          gap: 12,
-          borderBottom: "1px solid #333",
-        }}
-      >
-        <button
-          onClick={onBack}
-          aria-label="Back"
-          data-testid="changes-back"
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "#aaa",
-            fontSize: 22,
-            cursor: "pointer",
-            padding: 4,
-            lineHeight: 1,
-          }}
-        >
-          ←
-        </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            style={{
-              fontSize: 14,
-              fontWeight: 600,
-              color: "#fff",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {node.name}
-          </div>
-          {branch !== null && (
-            <div
-              style={{
-                fontSize: 11,
-                color: "#666",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
+    <div data-testid="changes-screen" className="screen">
+      <AppBar
+        onBack={onBack}
+        backTestId="changes-back"
+        title={node.name}
+        subtitle={
+          branch !== null ? (
+            <>
               {branch || "(detached HEAD)"}
               {summary && (
                 <>
                   {" · "}
-                  <span style={{ color: "#4caf50" }}>+{summary.added}</span>{" "}
-                  <span style={{ color: "#2196f3" }}>~{summary.modified}</span>{" "}
-                  <span style={{ color: "#f44336" }}>-{summary.deleted}</span>
+                  <span style={{ color: "var(--green)" }}>+{summary.added}</span>{" "}
+                  <span style={{ color: "var(--accent)" }}>~{summary.modified}</span>{" "}
+                  <span style={{ color: "var(--red)" }}>-{summary.deleted}</span>
                 </>
               )}
-            </div>
-          )}
-        </div>
+            </>
+          ) : undefined
+        }
+      >
+        <button
+          onClick={load}
+          aria-label="Refresh changes"
+          data-testid="changes-refresh"
+          className="chip-btn"
+        >
+          ↻
+        </button>
         <button
           onClick={() => branch && onOpenPr(branch)}
           disabled={ghOk !== true || !branch}
           data-testid="open-create-pr"
-          style={{
-            background: ghOk ? "#2196f3" : "#333",
-            border: "none",
-            borderRadius: 6,
-            padding: "8px 12px",
-            color: ghOk ? "#fff" : "#666",
-            fontSize: 13,
-            cursor: ghOk ? "pointer" : "not-allowed",
-          }}
-          title={ghOk ? "" : "gh CLI not authenticated on host"}
+          className="btn-primary"
+          style={{ padding: "9px 14px", fontSize: 13 }}
         >
           PR
         </button>
-      </div>
+      </AppBar>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 12px" }}>
+        {ghOk === false && (
+          <div
+            className="banner warn"
+            data-testid="gh-hint"
+            style={{ borderRadius: 8, marginBottom: 8, border: "1px solid #3e3120" }}
+          >
+            PR creation disabled — the GitHub CLI isn't authenticated on the
+            desktop.
+          </div>
+        )}
         {error && (
           <div
             data-testid="changes-error"
             style={{
-              color: "#f44336",
+              color: "var(--red)",
               fontSize: 13,
               padding: 16,
               textAlign: "center",
@@ -151,38 +121,24 @@ export default function ChangesScreen({
           </div>
         )}
         {!error && status === null && (
-          <div style={{ color: "#666", padding: 16, textAlign: "center" }}>
-            Loading changes…
+          <div style={{ padding: 24, textAlign: "center" }}>
+            <PulseDots />
           </div>
         )}
         {status !== null && status.length === 0 && (
-          <div
-            data-testid="changes-empty"
-            style={{ color: "#555", padding: 24, textAlign: "center", fontSize: 13 }}
-          >
+          <CenterNote testId="changes-empty">
             No changes — tree is clean.
-          </div>
+          </CenterNote>
         )}
         {status && status.length > 0 && (
           <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {status.map((entry) => (
-              <li key={entry.path} style={{ marginBottom: 4 }}>
+              <li key={entry.path}>
                 <button
                   onClick={() => onOpenDiff(entry.path)}
                   data-testid={`changes-file-${entry.path}`}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    width: "100%",
-                    padding: "10px 12px",
-                    background: "#1a1a1a",
-                    border: "1px solid transparent",
-                    borderRadius: 8,
-                    cursor: "pointer",
-                    textAlign: "left",
-                    color: "inherit",
-                  }}
+                  className="card"
+                  style={{ padding: "10px 12px", gap: 10 }}
                 >
                   <StatusBadge code={entry.status} />
                   <span
@@ -195,6 +151,10 @@ export default function ChangesScreen({
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
                       flex: 1,
+                      // Keep the filename readable when the path is long —
+                      // the tail (basename) is the part that matters.
+                      direction: "rtl",
+                      textAlign: "left",
                     }}
                   >
                     {entry.path}

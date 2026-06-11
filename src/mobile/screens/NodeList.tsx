@@ -7,25 +7,28 @@ import {
   Provider,
   createNode,
   eventsWsUrl,
+  isAuthError,
   listMeshes,
   listNodes,
   listProviders,
 } from "../api";
+import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
   onOpenSessions: (mesh: Mesh) => void;
   onOpenIssues: (mesh: Mesh) => void;
   onOffline: () => void;
+  onAuthFailed: () => void;
 };
 
-const STATUS_COLORS: Record<NodeStatus, string> = {
-  idle: "#2196f3",
-  running: "#4caf50",
-  suspended: "#9e9e9e",
-  error: "#f44336",
-  awaiting_input: "#ff9800",
-  archived: "#555",
+export const STATUS_META: Record<NodeStatus, { color: string; label: string }> = {
+  idle: { color: "#2196f3", label: "idle" },
+  running: { color: "#4caf50", label: "running" },
+  suspended: { color: "#9e9e9e", label: "suspended" },
+  error: { color: "#f44336", label: "error" },
+  awaiting_input: { color: "#ff9800", label: "needs input" },
+  archived: { color: "#555", label: "archived" },
 };
 
 const FALLBACK_PROVIDERS: Provider[] = [
@@ -41,6 +44,7 @@ export default function NodeList({
   onOpenSessions,
   onOpenIssues,
   onOffline,
+  onAuthFailed,
 }: Props) {
   const [meshes, setMeshes] = useState<Mesh[] | null>(null);
   const [nodes, setNodes] = useState<AgentNode[] | null>(null);
@@ -48,16 +52,20 @@ export default function NodeList({
   const [providers, setProviders] = useState<Provider[]>(FALLBACK_PROVIDERS);
   const [creating, setCreating] = useState<number | null>(null);
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const [m, n] = await Promise.all([listMeshes(), listNodes()]);
       setMeshes(m);
       setNodes(n);
-    } catch {
-      onOffline();
+    } catch (e) {
+      // A 401 means the token was revoked/expired — bounce to Connect
+      // instead of claiming the desktop is offline.
+      if (isAuthError(e)) onAuthFailed();
+      else onOffline();
     }
-  }, [onOffline]);
+  }, [onOffline, onAuthFailed]);
 
   useEffect(() => {
     refresh();
@@ -81,186 +89,163 @@ export default function NodeList({
   const handleCreate = async (meshId: number, providerId: string) => {
     setPickerMeshId(null);
     setCreating(meshId);
+    setError(null);
     try {
       const node = await createNode({ mesh_id: meshId, provider: providerId });
       setCreating(null);
       onOpenNode(node);
     } catch (e) {
       setCreating(null);
-      alert((e as Error).message);
+      setError((e as Error).message);
     }
   };
 
-  if (meshes === null) {
-    return (
-      <div
-        data-testid="nodelist-loading"
-        style={{ padding: 24, color: "#666", textAlign: "center" }}
-      >
-        Loading…
-      </div>
-    );
-  }
-
-  if (meshes.length === 0) {
-    return (
-      <div style={{ padding: 24, color: "#666", textAlign: "center" }}>
-        No meshes configured. Add a mesh on your desktop app to get started.
-      </div>
-    );
-  }
+  // Archived nodes are history, not actionable work — hide them on mobile.
+  const visibleNodes = (nodes ?? []).filter((n) => n.status !== "archived");
 
   const nodesByMesh = new Map<number, AgentNode[]>();
-  for (const node of nodes ?? []) {
+  for (const node of visibleNodes) {
     if (!nodesByMesh.has(node.mesh_id)) nodesByMesh.set(node.mesh_id, []);
     nodesByMesh.get(node.mesh_id)!.push(node);
   }
 
   // Mobile-only QoL: pin awaiting-input nodes at the top so attention
   // is one tap away no matter how many meshes you have configured.
-  const attentionNodes = (nodes ?? [])
+  const attentionNodes = visibleNodes
     .filter((n) => n.status === "awaiting_input")
     .sort((a, b) => a.id - b.id);
 
   return (
-    <div
-      data-testid="node-list"
-      style={{ flex: 1, overflowY: "auto", padding: "0 8px 8px" }}
-    >
-      {attentionNodes.length > 0 && (
-        <section
-          data-testid="attention-section"
-          style={{ marginBottom: 8 }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              padding: "10px 12px 6px",
-              gap: 8,
-            }}
-          >
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 600,
-                color: "#ff9800",
-                textTransform: "uppercase",
-                letterSpacing: "0.05em",
-                flex: 1,
-              }}
-            >
-              Needs attention
-            </span>
-          </div>
-          {attentionNodes.map((node) => (
-            <NodeRow
-              key={`attn-${node.id}`}
-              node={node}
-              onClick={() => onOpenNode(node)}
-            />
-          ))}
-        </section>
-      )}
-      {meshes.map((mesh) => {
-        const meshNodes = nodesByMesh.get(mesh.id) ?? [];
-        return (
-          <section key={mesh.id} style={{ marginBottom: 4 }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                padding: "10px 12px 6px",
-                gap: 8,
-              }}
-            >
-              <span
-                style={{
-                  fontSize: 10,
-                  fontWeight: 600,
-                  color: "#555",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.05em",
-                  flex: 1,
-                }}
-              >
-                {mesh.name}
-              </span>
-              <button
-                onClick={() => setPickerMeshId(mesh.id)}
-                aria-label={`New node in ${mesh.name}`}
-                data-testid={`new-node-${mesh.id}`}
-                style={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: 6,
-                  background: "#2a2a2a",
-                  border: "1px solid #444",
-                  color: "#888",
-                  fontSize: 18,
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                +
-              </button>
-              <button
-                onClick={() => setMeshActions(mesh)}
-                aria-label={`More actions for ${mesh.name}`}
-                data-testid={`mesh-actions-${mesh.id}`}
-                style={{
-                  width: 28,
-                  height: 28,
-                  borderRadius: 6,
-                  background: "#2a2a2a",
-                  border: "1px solid #444",
-                  color: "#888",
-                  fontSize: 16,
-                  cursor: "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                ⋯
-              </button>
-            </div>
+    <div className="screen">
+      <AppBar
+        title="Buildmesh"
+        subtitle={
+          meshes === null
+            ? undefined
+            : `${meshes.length} ${meshes.length === 1 ? "mesh" : "meshes"} · ${visibleNodes.length} ${visibleNodes.length === 1 ? "node" : "nodes"}`
+        }
+      />
 
-            {creating === mesh.id ? (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "#2196f3",
-                  padding: "8px 12px 12px",
-                }}
-              >
-                Creating node…
-              </div>
-            ) : meshNodes.length === 0 ? (
-              <div
-                style={{
-                  fontSize: 12,
-                  color: "#444",
-                  padding: "8px 12px 12px",
-                  fontStyle: "italic",
-                }}
-              >
-                No nodes
-              </div>
-            ) : (
-              meshNodes.map((node) => (
+      {meshes === null ? (
+        <div
+          data-testid="nodelist-loading"
+          style={{
+            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <PulseDots />
+        </div>
+      ) : meshes.length === 0 ? (
+        <CenterNote>
+          No meshes configured. Add a mesh on your desktop app to get started.
+        </CenterNote>
+      ) : (
+        <div
+          data-testid="node-list"
+          style={{ flex: 1, overflowY: "auto", padding: "0 8px 8px" }}
+        >
+          {attentionNodes.length > 0 && (
+            <section data-testid="attention-section" style={{ marginBottom: 8 }}>
+              <SectionHeading color="var(--amber)">
+                Needs attention
+              </SectionHeading>
+              {attentionNodes.map((node) => (
                 <NodeRow
-                  key={node.id}
+                  key={`attn-${node.id}`}
                   node={node}
                   onClick={() => onOpenNode(node)}
                 />
-              ))
-            )}
-          </section>
-        );
-      })}
+              ))}
+            </section>
+          )}
+          {meshes.map((mesh) => {
+            const meshNodes = nodesByMesh.get(mesh.id) ?? [];
+            return (
+              <section key={mesh.id} style={{ marginBottom: 4 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    padding: "10px 12px 6px",
+                    gap: 8,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 600,
+                      color: "var(--text-faint)",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                      flex: 1,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {mesh.name}
+                  </span>
+                  <button
+                    onClick={() => setPickerMeshId(mesh.id)}
+                    aria-label={`New node in ${mesh.name}`}
+                    data-testid={`new-node-${mesh.id}`}
+                    className="chip-btn"
+                    style={{ width: 38, padding: "8px 0", textAlign: "center", fontSize: 16, lineHeight: 1 }}
+                  >
+                    +
+                  </button>
+                  <button
+                    onClick={() => setMeshActions(mesh)}
+                    aria-label={`More actions for ${mesh.name}`}
+                    data-testid={`mesh-actions-${mesh.id}`}
+                    className="chip-btn"
+                    style={{ width: 38, padding: "8px 0", textAlign: "center", fontSize: 14, lineHeight: 1 }}
+                  >
+                    ⋯
+                  </button>
+                </div>
+
+                {creating === mesh.id ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      fontSize: 12,
+                      color: "var(--accent)",
+                      padding: "8px 12px 12px",
+                    }}
+                  >
+                    <PulseDots /> Creating node…
+                  </div>
+                ) : meshNodes.length === 0 ? (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "var(--text-faint)",
+                      padding: "8px 12px 12px",
+                      fontStyle: "italic",
+                    }}
+                  >
+                    No nodes — tap + to start an agent
+                  </div>
+                ) : (
+                  meshNodes.map((node) => (
+                    <NodeRow
+                      key={node.id}
+                      node={node}
+                      onClick={() => onOpenNode(node)}
+                    />
+                  ))
+                )}
+              </section>
+            );
+          })}
+        </div>
+      )}
 
       {pickerMeshId !== null && (
         <ProviderPicker
@@ -286,6 +271,50 @@ export default function NodeList({
           }}
         />
       )}
+
+      {error && (
+        <div className="toast error" data-testid="create-error">
+          <span style={{ flex: 1 }}>{error}</span>
+          <button
+            onClick={() => setError(null)}
+            aria-label="Dismiss"
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "inherit",
+              fontSize: 18,
+              cursor: "pointer",
+              padding: "0 4px",
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SectionHeading({
+  children,
+  color,
+}: {
+  children: React.ReactNode;
+  color: string;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", padding: "10px 12px 6px" }}>
+      <span
+        style={{
+          fontSize: 10,
+          fontWeight: 600,
+          color,
+          textTransform: "uppercase",
+          letterSpacing: "0.05em",
+        }}
+      >
+        {children}
+      </span>
     </div>
   );
 }
@@ -302,58 +331,33 @@ function MeshActionsSheet({
   onOpenIssues: () => void;
 }) {
   return (
-    <div
-      data-testid="mesh-actions-sheet"
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 100,
-        display: "flex",
-        alignItems: "flex-end",
-      }}
-    >
-      <div
-        onClick={onClose}
-        style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)" }}
-      />
-      <div
+    <Sheet onClose={onClose} testId="mesh-actions-sheet">
+      <h3
         style={{
-          position: "relative",
-          width: "100%",
-          background: "#1a1a1a",
-          borderRadius: "16px 16px 0 0",
-          padding: 20,
-          paddingBottom: "max(20px, env(safe-area-inset-bottom))",
-          zIndex: 1,
+          fontSize: 13,
+          fontWeight: 600,
+          color: "var(--text-dim)",
+          textTransform: "uppercase",
+          letterSpacing: "0.05em",
+          margin: 0,
+          marginBottom: 12,
         }}
       >
-        <h3
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: "#888",
-            textTransform: "uppercase",
-            letterSpacing: "0.05em",
-            margin: 0,
-            marginBottom: 12,
-          }}
-        >
-          {mesh.name}
-        </h3>
-        <SheetButton
-          onClick={onOpenSessions}
-          testId="mesh-sheet-sessions"
-          label="Previous Sessions"
-          hint="Resume an existing CLI session"
-        />
-        <SheetButton
-          onClick={onOpenIssues}
-          testId="mesh-sheet-issues"
-          label="GitHub Issues"
-          hint="Spawn an agent prefilled with an issue"
-        />
-      </div>
-    </div>
+        {mesh.name}
+      </h3>
+      <SheetButton
+        onClick={onOpenSessions}
+        testId="mesh-sheet-sessions"
+        label="Previous Sessions"
+        hint="Resume an existing CLI session"
+      />
+      <SheetButton
+        onClick={onOpenIssues}
+        testId="mesh-sheet-issues"
+        label="GitHub Issues"
+        hint="Spawn an agent prefilled with an issue"
+      />
+    </Sheet>
   );
 }
 
@@ -372,56 +376,32 @@ function SheetButton({
     <button
       onClick={onClick}
       data-testid={testId}
-      style={{
-        display: "block",
-        width: "100%",
-        textAlign: "left",
-        padding: "14px 16px",
-        borderRadius: 10,
-        background: "#2a2a2a",
-        border: "1px solid transparent",
-        marginBottom: 8,
-        cursor: "pointer",
-        color: "inherit",
-      }}
+      className="card"
+      style={{ display: "block", background: "var(--surface-2)" }}
     >
       <div style={{ fontSize: 14, fontWeight: 500, color: "#fff" }}>{label}</div>
-      <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>{hint}</div>
+      <div style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}>
+        {hint}
+      </div>
     </button>
   );
 }
 
-function NodeRow({
-  node,
-  onClick,
-}: {
-  node: AgentNode;
-  onClick: () => void;
-}) {
+function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => void }) {
+  const meta = STATUS_META[node.status] ?? { color: "#555", label: node.status };
+  const needsInput = node.status === "awaiting_input";
   return (
     <button
       onClick={onClick}
       data-testid={`node-${node.id}`}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: 12,
-        background: "#1a1a1a",
-        border: "1px solid transparent",
-        borderRadius: 8,
-        marginBottom: 6,
-        cursor: "pointer",
-        width: "100%",
-        textAlign: "left",
-        color: "inherit",
-      }}
+      className="card"
+      style={needsInput ? { borderColor: "rgba(255, 152, 0, 0.4)" } : undefined}
     >
       <div
         style={{
-          width: 32,
-          height: 32,
-          borderRadius: 6,
+          width: 34,
+          height: 34,
+          borderRadius: 8,
           background: providerColor(node.provider),
           display: "flex",
           alignItems: "center",
@@ -450,22 +430,35 @@ function NodeRow({
         <div
           style={{
             fontSize: 11,
-            color: "#666",
+            color: "var(--text-faint)",
             marginTop: 2,
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
             overflow: "hidden",
-            textOverflow: "ellipsis",
             whiteSpace: "nowrap",
           }}
         >
-          {node.provider} · {node.status}
+          {node.provider} ·
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: "50%",
+              background: meta.color,
+              flexShrink: 0,
+              display: "inline-block",
+            }}
+          />
+          <span style={{ color: meta.color }}>{meta.label}</span>
         </div>
       </div>
       <div
         style={{
           width: 3,
-          height: 32,
+          height: 34,
           borderRadius: 2,
-          background: STATUS_COLORS[node.status] ?? "#555",
+          background: meta.color,
           flexShrink: 0,
         }}
       />
@@ -483,84 +476,47 @@ function ProviderPicker({
   onCancel: () => void;
 }) {
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 100,
-        display: "flex",
-        alignItems: "flex-end",
-      }}
-      data-testid="provider-picker"
-    >
-      <div
-        onClick={onCancel}
-        style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)" }}
-      />
-      <div
+    <Sheet onClose={onCancel} testId="provider-picker">
+      <h3
         style={{
-          position: "relative",
-          width: "100%",
-          background: "#1a1a1a",
-          borderRadius: "16px 16px 0 0",
-          padding: 20,
-          paddingBottom: "max(20px, env(safe-area-inset-bottom))",
-          zIndex: 1,
+          fontSize: 15,
+          fontWeight: 600,
+          color: "#fff",
+          margin: 0,
+          marginBottom: 14,
         }}
       >
-        <h3
-          style={{
-            fontSize: 15,
-            fontWeight: 600,
-            color: "#fff",
-            margin: 0,
-            marginBottom: 14,
-          }}
+        New Agent Node
+      </h3>
+      {providers.map((p) => (
+        <button
+          key={p.id}
+          onClick={() => onPick(p)}
+          data-testid={`provider-${p.id}`}
+          className="card"
+          style={{ background: "var(--surface-2)" }}
         >
-          New Agent Node
-        </h3>
-        {providers.map((p) => (
-          <button
-            key={p.id}
-            onClick={() => onPick(p)}
-            data-testid={`provider-${p.id}`}
+          <div
             style={{
+              width: 34,
+              height: 34,
+              borderRadius: 8,
+              background: p.color,
+              color: "#fff",
               display: "flex",
               alignItems: "center",
-              gap: 12,
-              padding: "14px 16px",
-              borderRadius: 10,
-              background: "#2a2a2a",
-              border: "1px solid transparent",
-              marginBottom: 8,
-              cursor: "pointer",
-              width: "100%",
-              textAlign: "left",
-              color: "inherit",
+              justifyContent: "center",
+              fontSize: 14,
+              fontWeight: 700,
+              flexShrink: 0,
             }}
           >
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: 6,
-                background: p.color,
-                color: "#fff",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                fontSize: 14,
-                fontWeight: 700,
-                flexShrink: 0,
-              }}
-            >
-              {p.icon}
-            </div>
-            <span style={{ fontSize: 15, color: "#e0e0e0" }}>{p.label}</span>
-          </button>
-        ))}
-      </div>
-    </div>
+            {p.icon}
+          </div>
+          <span style={{ fontSize: 15, color: "var(--text)" }}>{p.label}</span>
+        </button>
+      ))}
+    </Sheet>
   );
 }
 
