@@ -3,7 +3,7 @@
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
-use crate::models::{AgentNode, PendingWorktreeRemoval, Provider, SessionStatus};
+use crate::models::{AgentNode, PendingWorktreeRemoval, Provider};
 
 /// Error type for agent node service operations
 #[derive(Debug)]
@@ -181,13 +181,6 @@ fn process_removals(
     failures
 }
 
-/// Update agent node status from a string representation.
-pub fn update_status(session_id: i64, status: &str) -> Result<(), AgentNodeError> {
-    let status = SessionStatus::from_db_str(status);
-    db::update_agent_node_status(session_id, status)?;
-    Ok(())
-}
-
 fn worktree_path_for_node(node: &AgentNode) -> Option<String> {
     if !node.use_worktree {
         return None;
@@ -204,7 +197,7 @@ fn worktree_path_for_node(node: &AgentNode) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AgentNode, EnvType, Provider};
+    use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
     use chrono::Utc;
     use std::fs;
     use std::path::{Path, PathBuf};

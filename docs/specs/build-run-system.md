@@ -120,7 +120,7 @@ The Build/Run system allows users to execute build and run commands directly fro
 
 1. **Hand-rolled TOML parsing** — `extract_toml_value()` uses string search and will break on TOML edge cases. Switch to `toml` crate.
 
-2. **Duplicate PTY infrastructure** — `build_run.rs` re-implements the entire PTY pipeline instead of reusing `terminal.rs`'s `spawn_pty()`. Refactor to call existing command.
+2. ~~**Duplicate PTY infrastructure**~~ — resolved by deletion: the unused `terminal.rs` PTY command family (`spawn_pty` & co.) was removed; `build_run.rs` is now the only generic-PTY pipeline.
 
 3. **No caching** — `parse_mesh_config()` reads from disk on every call. `resolve_worktree_path()` spawns `git worktree list` on every call. Add module-level caching with invalidation.
 

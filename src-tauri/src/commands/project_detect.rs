@@ -119,7 +119,8 @@ fn detect_in_dir(dir: &Path) -> DetectedProject {
     DetectedProject::empty()
 }
 
-#[command]
+// `(async)` — probes the filesystem for marker files; off the main thread.
+#[command(async)]
 pub fn detect_mesh_project(mesh_path: String) -> Result<DetectedProject, String> {
     let host_path = env::to_host_path(&mesh_path);
     let path_obj = Path::new(&host_path);

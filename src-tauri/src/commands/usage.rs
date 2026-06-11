@@ -28,24 +28,31 @@ fn cached_or_fetch(provider: &str, force_refresh: bool, prefs: &AppPreferences) 
 }
 
 #[command]
-pub async fn get_provider_usage(
-    provider: String,
-    force_refresh: bool,
-) -> Result<ProviderUsage, String> {
-    if !PROVIDERS.contains(&provider.as_str()) {
-        return Err(format!("Unknown provider: {}", provider));
-    }
-    let prefs = preferences::load()?;
-    Ok(cached_or_fetch(&provider, force_refresh, &prefs))
-}
-
-#[command]
 pub async fn get_all_provider_usage(force_refresh: bool) -> Result<Vec<ProviderUsage>, String> {
     let prefs = preferences::load()?;
-    Ok(PROVIDERS
+    // Each fetch is a blocking HTTP round-trip to a different vendor; running
+    // them serially made the Accounts & Usage panel wait for the sum of all
+    // four. Fan out on blocking threads and collect in PROVIDERS order.
+    let handles: Vec<_> = PROVIDERS
         .iter()
-        .map(|p| cached_or_fetch(p, force_refresh, &prefs))
-        .collect())
+        .map(|p| {
+            let provider = p.to_string();
+            let prefs = prefs.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                cached_or_fetch(&provider, force_refresh, &prefs)
+            })
+        })
+        .collect();
+
+    let mut results = Vec::with_capacity(handles.len());
+    for handle in handles {
+        results.push(
+            handle
+                .await
+                .map_err(|e| format!("usage fetch task failed: {}", e))?,
+        );
+    }
+    Ok(results)
 }
 
 #[command]

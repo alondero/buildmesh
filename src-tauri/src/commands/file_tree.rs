@@ -64,7 +64,8 @@ fn read_dir_recursive(path: &Path, base_path: &str, host_base: &str, depth: usiz
 }
 
 /// List a directory as a tree structure
-#[command]
+// `(async)` — a recursive directory walk on a worker thread, not the main thread.
+#[command(async)]
 pub fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode, String> {
     let host_path = env::to_host_path(&path);
     let path_obj = Path::new(&host_path);
@@ -87,7 +88,8 @@ pub fn to_host_path(path: String) -> String {
 }
 
 /// Open a file in the system default editor (VS Code)
-#[command]
+// `(async)` — spawns an external process; keep that latency off the main thread.
+#[command(async)]
 pub fn open_in_editor(path: String) -> Result<(), String> {
     let host_path = env::to_host_path(&path);
 
@@ -114,7 +116,8 @@ pub fn open_in_editor(path: String) -> Result<(), String> {
 /// the user's default file manager on Linux). The path must point to a
 /// directory — opening a file in a file manager isn't useful and would render
 /// the parent folder instead, which is surprising.
-#[command]
+// `(async)` — spawns an external process; keep that latency off the main thread.
+#[command(async)]
 pub fn open_in_file_manager(path: String) -> Result<(), String> {
     let host_path = env::to_host_path(&path);
     let path_obj = Path::new(&host_path);

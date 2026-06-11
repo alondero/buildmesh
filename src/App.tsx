@@ -189,9 +189,9 @@ function App() {
   useEffect(() => {
     const init = async () => {
       try {
-        await initAttentionListeners();
-        await fetchMeshes();
-        await fetchAgentNodes();
+        // No data dependency between these — run the IPC round-trips
+        // concurrently so first paint isn't gated on three serial calls.
+        await Promise.all([initAttentionListeners(), fetchMeshes(), fetchAgentNodes()]);
         setIsReady(true);
 
         // Auto-resume suspended sessions after a brief delay to ensure

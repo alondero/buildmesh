@@ -99,7 +99,10 @@ pub struct GitBranchStatus {
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list HEAD..@{u}`: the
 /// brace syntax is silently mangled by `Command::args` on Windows
 /// (see commands/prune.rs for the same pattern).
-#[command]
+// `(async)` runs the command on a worker thread: git2 work (repo open, status
+// walk, diffs) can take hundreds of ms on large repos, and a bare `#[command]`
+// would execute it on the main thread, stalling the UI and every other IPC call.
+#[command(async)]
 pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
     let repo = match primitives::open_from_host_path(&path) {
         Ok(r) => r,
@@ -145,7 +148,7 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 
 /// Get git status for a directory — returns list of changed files with per-file
 /// line additions/deletions for all uncommitted changes.
-#[command]
+#[command(async)]
 pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
@@ -195,7 +198,7 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
 }
 
 /// Get aggregate git change summary for a directory
-#[command]
+#[command(async)]
 pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
@@ -237,7 +240,7 @@ pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
 }
 
 /// Check whether a path is a valid git repository
-#[command]
+#[command(async)]
 pub fn check_is_git_repo(path: String) -> bool {
     git2::Repository::open(&path).is_ok()
 }
@@ -245,7 +248,7 @@ pub fn check_is_git_repo(path: String) -> bool {
 /// Get the default branch name for the remote named "origin".
 /// Reads the local symbolic ref (populated by clone/fetch) to avoid a network round-trip.
 /// Falls back to "main" if no remote is configured or HEAD ref is missing.
-#[command]
+#[command(async)]
 pub fn get_default_branch(path: String) -> String {
     let repo = match Repository::open(&path) {
         Ok(r) => r,
