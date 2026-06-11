@@ -487,7 +487,7 @@ mod tests {
         assert!(Provider::Anthropic.adapter().supports_resume());
         assert!(Provider::Minimax.adapter().supports_resume());
         assert!(Provider::Kimi.adapter().supports_resume());
-        assert!(!Provider::Agy.adapter().supports_resume());
+        assert!(Provider::Agy.adapter().supports_resume());
         assert!(!Provider::OpenCode.adapter().supports_resume());
         assert!(Provider::Codex.adapter().supports_resume());
     }

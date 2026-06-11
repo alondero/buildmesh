@@ -323,11 +323,9 @@ mod tests {
         assert_eq!(argv(&cmd), expected_wsl("cwrap", &["--minimax"]));
     }
 
-    /// Agy self-assigns session IDs and ignores model/prefill overrides:
-    /// even when a caller passes those, the args must NOT appear.
-    /// Guards against a mutation that drops the capability gating.
+    /// Agy applies model and prefill overrides when passed.
     #[test]
-    fn agy_ignores_model_override_and_prefill() {
+    fn agy_applies_model_override_and_prefill() {
         let cmd = build_spawn_command(
             &wsl_resolved(),
             Provider::Agy,
@@ -339,15 +337,21 @@ mod tests {
         );
 
         let args = argv(&cmd);
-        assert_eq!(args, expected_wsl("agy", &["--dangerously-skip-permissions"]));
-        for forbidden in ["--model", "--effort", "--prefill", "--session-id", "--resume", "opus", "high", "prefill text"] {
-            assert!(
-                !args.iter().any(|a| a == forbidden),
-                "agy should not emit {:?}, got {:?}",
-                forbidden,
-                args
-            );
-        }
+        assert_eq!(
+            args,
+            expected_wsl(
+                "agy",
+                &[
+                    "--dangerously-skip-permissions",
+                    "--model",
+                    "opus",
+                    "--effort",
+                    "high",
+                    "--prompt-interactive",
+                    "prefill text"
+                ]
+            )
+        );
     }
 
     /// Agy self-assigns session IDs — Assign mode must NOT inject `--session-id`.

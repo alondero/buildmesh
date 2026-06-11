@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 static CODEX_SESSION_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)session[:\s]+([0-9a-f]{6,8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
+    Regex::new(r"(?i)(?:session|conversation(?:\s+id)?)[:\s]+([0-9a-f]{6,8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})")
         .unwrap()
 });
 
