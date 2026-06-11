@@ -104,15 +104,25 @@ pub async fn get_local_ip() -> Result<String, String> {
             let interfaces = local_ip_address::list_afinet_netifas()
                 .map_err(|e| format!("failed to list interfaces: {}", e))?;
 
-            if let Some(ip) = find_first_lan_ip(&interfaces, &[0xC0, 0xA8, 0x0A]) {
-                return Ok(ip);
-            }
-
-            Err("no suitable LAN interface found".to_string())
+            pick_best_lan_ip(&interfaces).ok_or_else(|| "no suitable LAN interface found".to_string())
         }
     )
     .await
     .map_err(|_| "timeout detecting network interfaces (5s exceeded)".to_string())?
+}
+
+/// Pick the best LAN IP for the mobile QR code. Prefers 192.168.x.x (common
+/// home/office LAN) over 10.x.x.x (often VPN/corporate), because the QR is
+/// scanned by a phone on the same Wi-Fi as the hub — a VPN address is useless.
+///
+/// Two-pass scan: any 192.168.x.x match wins outright; only fall through to
+/// 10.x.x.x if no 192.168.x.x interface is present. See commit 66ed767 for
+/// the original priority fix and 410cee8 for the regression that collapsed it.
+fn pick_best_lan_ip(interfaces: &[(String, std::net::IpAddr)]) -> Option<String> {
+    if let Some(ip) = find_first_lan_ip(interfaces, &[0xC0, 0xA8]) {
+        return Some(ip);
+    }
+    find_first_lan_ip(interfaces, &[0x0A])
 }
 
 /// Get the default provider for a mesh, applying the precedence chain:
@@ -179,4 +189,92 @@ fn _iface_addr_in_lan_range(_name: &str, ip: &std::net::IpAddr, prefixes: &[u8])
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the LAN IP picker used by the mobile QR code.
+    //!
+    //! Regression context: when the OS returns a 10.x interface (VPN, corporate
+    //! client, Docker host network) BEFORE any 192.168.x interface, the QR code
+    //! must still encode the 192.168 LAN address — otherwise the phone can't
+    //! reach the hub. Originally fixed in #56 (commit 66ed767), regressed in
+    //! #104 (commit 410cee8) when the two-pass scan was collapsed into one.
+    use super::*;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    fn iface(name: &str, ip: &str) -> (String, IpAddr) {
+        (name.to_string(), IpAddr::from_str(ip).unwrap())
+    }
+
+    /// The headline regression test: 10.x appearing first in OS order must NOT
+    /// beat a later 192.168.x entry. With the bug, this returns "10.20.30.40".
+    /// Uses 10.20.x (not 10.0.0.x) to avoid the separate tunnel-exclusion rule.
+    #[test]
+    fn pick_best_prefers_192_168_when_10_appears_first() {
+        let interfaces = vec![
+            iface("vpn0", "10.20.30.40"),
+            iface("docker0", "172.17.0.1"),
+            iface("eth0", "192.168.1.100"),
+        ];
+        assert_eq!(
+            pick_best_lan_ip(&interfaces).as_deref(),
+            Some("192.168.1.100")
+        );
+    }
+
+    /// No 192.168 available → must fall back to 10.x.
+    #[test]
+    fn pick_best_falls_back_to_10_when_no_192_168() {
+        let interfaces = vec![
+            iface("vpn0", "10.20.30.40"),
+            iface("docker0", "172.17.0.1"),
+        ];
+        assert_eq!(pick_best_lan_ip(&interfaces).as_deref(), Some("10.20.30.40"));
+    }
+
+    #[test]
+    fn pick_best_returns_none_when_nothing_matches() {
+        let interfaces = vec![
+            iface("docker0", "172.17.0.1"),
+            iface("vboxnet0", "192.168.56.1"), // VirtualBox Host-Only — excluded
+            iface("tun0", "10.0.0.1"),         // Tunnel — excluded
+        ];
+        assert_eq!(pick_best_lan_ip(&interfaces), None);
+    }
+
+    #[test]
+    fn find_first_lan_ip_skips_loopback_and_wildcard() {
+        let interfaces = vec![
+            iface("lo", "127.0.0.1"),
+            iface("eth0", "0.0.0.0"),
+            iface("eth1", "192.168.1.50"),
+        ];
+        assert_eq!(
+            find_first_lan_ip(&interfaces, &[0xC0, 0xA8]).as_deref(),
+            Some("192.168.1.50")
+        );
+    }
+
+    #[test]
+    fn find_first_lan_ip_skips_docker_bridge_in_10_pass() {
+        // 172.16-31 is Docker's default bridge range — must never be returned.
+        let interfaces = vec![iface("docker0", "172.17.0.1")];
+        assert_eq!(find_first_lan_ip(&interfaces, &[0x0A]), None);
+    }
+
+    #[test]
+    fn find_first_lan_ip_skips_virtualbox_host_only() {
+        // 192.168.56.x is VirtualBox Host-Only — not a real LAN.
+        let interfaces = vec![iface("vboxnet0", "192.168.56.1")];
+        assert_eq!(find_first_lan_ip(&interfaces, &[0xC0, 0xA8]), None);
+    }
+
+    #[test]
+    fn find_first_lan_ip_skips_tunnel_range() {
+        // 10.0.0.x is sometimes a tunnel pseudo-interface — must be excluded.
+        let interfaces = vec![iface("tun0", "10.0.0.1")];
+        assert_eq!(find_first_lan_ip(&interfaces, &[0x0A]), None);
+    }
 }
