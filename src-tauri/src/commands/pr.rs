@@ -1,7 +1,8 @@
 //! GitHub workflow via direct REST API calls (no `gh` CLI dependency)
 
 use crate::db;
-use crate::models::SessionStatus;
+use crate::env;
+use crate::models::{AgentNode, SessionStatus};
 use crate::services::github::{self, GitHubClient, PullRequest};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
@@ -66,9 +67,10 @@ pub fn create_pr(
         .map_err(|e| e.to_string())?;
 
     let base_branch = &node.branch;
-    let path = &node.path;
 
-    let info = repo_info(path)?;
+    // Read the branch from the worktree (if any) — the mesh root is on the
+    // base branch for worktree nodes, which would create a "main → main" PR.
+    let info = repo_info(&node_working_path(&node))?;
     if info.branch.is_empty() {
         return Err("Could not determine current branch".to_string());
     }
@@ -120,7 +122,9 @@ pub fn get_current_branch(session_id: i64) -> Result<String, String> {
     let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
-    Ok(repo_info(&node.path)?.branch)
+    // Route through the worktree (if any) — the mesh root is on the base
+    // branch for worktree nodes. See `node_working_path` for the rationale.
+    Ok(repo_info(&node_working_path(&node))?.branch)
 }
 
 /// Open PR summary for an agent node — shape matches the TS `OpenPr` type.
@@ -153,7 +157,11 @@ pub fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
         return Ok(None);
     }
 
-    let info = match repo_info(&node.path) {
+    // Worktree nodes: open the worktree directory, not the mesh root.
+    // The mesh root is on the base branch while the agent's HEAD is on the
+    // worktree's branch — see `node_working_path` for the rationale and the
+    // matching frontend helper (`getNodeGitPath`).
+    let info = match repo_info(&node_working_path(&node)) {
         Ok(i) => i,
         Err(_) => return Ok(None),
     };
@@ -221,6 +229,28 @@ fn resolve_open_pr(
     client
         .find_open_pr_for_branch(&owner, &repo, &info.branch)
         .map_err(|e| e.to_string())
+}
+
+/// Return the git working path for an agent node — the worktree directory
+/// when the node runs in a worktree, otherwise the mesh root itself.
+///
+/// This is the path the agent's HEAD is actually checked out on, so it's
+/// the right input for `repo_info` whenever we need the agent's branch
+/// (PR lookup, PR creation). Using `node.path` directly is wrong for
+/// worktree nodes because the mesh root stays on the base branch while
+/// the agent's work happens in `.claude/worktrees/<name>`.
+///
+/// Mirrors the frontend's `getNodeGitPath` in `src/lib/paths.ts:1` — keep
+/// them in sync if the layout ever changes (see [[buildmesh-use-worktree-derivation]]).
+fn node_working_path(node: &AgentNode) -> String {
+    if node.use_worktree {
+        if let Some(name) = node.worktree_name.as_deref() {
+            if !name.is_empty() {
+                return env::resolve_agent_path(&node.path, Some(name)).host_path;
+            }
+        }
+    }
+    node.path.clone()
 }
 
 /// Open the repo once and extract both the current branch and origin URL.
@@ -311,11 +341,81 @@ fn parse_pr_url(url: &str) -> Option<(String, String, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env::test_helpers::init_repo_with_commit as init_repo_for_test;
+    use crate::git::worktree::create_git_worktree;
+    use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
+    use chrono::Utc;
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    /// Build a `TempGitRepo` and an `AgentNode` that uses a branched worktree
+    /// under `<root>/.claude/worktrees/<name>`. The mesh root stays on
+    /// `main`; the worktree is on `<name>` (matching the production
+    /// `add_worktree_impl` branched-mode behaviour). Caller MUST hold
+    /// `TempGitRepo` for the node's lifetime, otherwise Drop wipes the dir.
+    fn make_worktree_node() -> (TempGitRepo, String, AgentNode) {
+        let tmp = TempGitRepo::new();
+        let root = tmp.path().to_path_buf();
+        init_repo_for_test(&root, &[("README.md", "init\n")]);
+
+        // The .claude/worktrees/ layout is what production uses — see
+        // `env::resolve_agent_path`. Keep tests faithful so the path
+        // resolution helper finds the worktree the same way production does.
+        let wt_dir = root.join(".claude").join("worktrees").join("agent-1");
+        create_git_worktree(
+            root.to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+            "agent-1",
+            "branched",
+            "HEAD",
+        )
+        .expect("worktree creation must succeed");
+
+        let node = AgentNode {
+            id: 1,
+            mesh_id: 1,
+            name: "agent-1".into(),
+            path: root.to_string_lossy().into_owned(),
+            branch: "main".into(), // The base branch (NOT the agent's branch)
+            env: EnvType::Windows,
+            provider: Provider::Anthropic,
+            status: SessionStatus::Idle,
+            cli_session_id: None,
+            worktree_name: Some("agent-1".into()),
+            use_worktree: true,
+            source_issue: None,
+            created_at: Utc::now(),
+        };
+        (tmp, wt_dir.to_string_lossy().into_owned(), node)
+    }
+
+    /// Build a non-worktree `AgentNode` — agent runs in the mesh root.
+    /// `path` is what the agent works in; no `.claude/worktrees/`.
+    fn make_root_node() -> (TempGitRepo, String, AgentNode) {
+        let tmp = TempGitRepo::new();
+        let root = tmp.path().to_path_buf();
+        init_repo_for_test(&root, &[("README.md", "init\n")]);
+
+        let node = AgentNode {
+            id: 2,
+            mesh_id: 1,
+            name: "root-agent".into(),
+            path: root.to_string_lossy().into_owned(),
+            branch: "main".into(),
+            env: EnvType::Windows,
+            provider: Provider::Anthropic,
+            status: SessionStatus::Idle,
+            cli_session_id: None,
+            worktree_name: None,
+            use_worktree: false,
+            source_issue: None,
+            created_at: Utc::now(),
+        };
+        (tmp, root.to_string_lossy().into_owned(), node)
+    }
 
     /// RAII guard — deletes the temp dir on drop so tests don't leave state behind.
     /// The guard must be held by the TEST (not the helper) for as long as the
@@ -409,6 +509,72 @@ mod tests {
         // and the public accessor surfaces the original error wording
         let err = info.owner_repo().unwrap_err();
         assert!(err.contains("unrecognized remote URL"), "got: {}", err);
+    }
+
+    /// The agent's HEAD is on the worktree's branch (NOT the mesh root's branch).
+    /// `repo_info` previously opened `node.path` (= mesh root) and got `main`,
+    /// so the PR chip was looking for `head=alondero:main` instead of the
+    /// agent's actual branch. The `node_working_path` helper routes to the
+    /// worktree directory; the chip then resolves the right branch.
+    #[test]
+    fn node_working_path_resolves_to_worktree_dir_for_worktree_nodes() {
+        let (_guard, _wt_path, node) = make_worktree_node();
+        let resolved = node_working_path(&node);
+        // `resolve_agent_path` builds the path with `/` separators, so on
+        // Windows we may see mixed slashes — git2 handles that fine, so we
+        // assert on the canonical path components rather than the raw string.
+        let canonical = std::fs::canonicalize(&resolved).expect("worktree path must exist");
+        let canonical_str = canonical.to_string_lossy();
+        assert!(
+            canonical_str.contains(".claude")
+                && canonical_str.contains("worktrees")
+                && canonical_str.contains("agent-1"),
+            "expected the canonical worktree path under .claude/worktrees/agent-1, got: {}",
+            canonical_str,
+        );
+    }
+
+    /// Non-worktree nodes have no worktree subdirectory — the agent works in
+    /// the mesh root itself, so the helper should return `node.path` unchanged.
+    #[test]
+    fn node_working_path_resolves_to_mesh_path_for_root_nodes() {
+        let (_guard, _root_path, node) = make_root_node();
+        let resolved = node_working_path(&node);
+        assert_eq!(resolved, node.path, "non-worktree node must resolve to its own path");
+        assert!(!resolved.contains("worktrees"), "must NOT add a worktree subdir for root nodes");
+    }
+
+    /// End-to-end: with a real worktree on branch `agent-1` and the mesh root
+    /// on `main`, reading `repo_info(working_path)` should give `agent-1`.
+    /// This is the exact bug the PR chip had: previously it read `main`.
+    #[test]
+    fn repo_info_via_working_path_returns_worktree_branch_not_root_branch() {
+        let (_guard, _wt_path, node) = make_worktree_node();
+        let resolved = node_working_path(&node);
+        let info = repo_info(&resolved).expect("worktree repo must open");
+        assert_eq!(
+            info.branch, "agent-1",
+            "PR chip looks up head=<branch>; the agent's working branch is the worktree name, not the mesh's base branch"
+        );
+        // And — for the bug regression — opening the MESH ROOT itself gives
+        // `main`, not `agent-1`. This is the exact mismatch that hid the chip.
+        let root_info = repo_info(&node.path).expect("mesh root must open");
+        assert_eq!(
+            root_info.branch, "main",
+            "sanity: mesh root is on the base branch; this is what the bug used to read"
+        );
+    }
+
+    /// `get_current_branch` is the mobile REST route's backing command; for a
+    /// worktree node it must report the worktree's branch, not the mesh's
+    /// base branch. Same bug class as the PR chip.
+    #[test]
+    fn get_current_branch_via_working_path_returns_worktree_branch() {
+        let (_guard, _wt_path, node) = make_worktree_node();
+        let branch = repo_info(&node_working_path(&node))
+            .expect("worktree repo must open")
+            .branch;
+        assert_eq!(branch, "agent-1", "must read the worktree's HEAD, not the mesh root's");
     }
 
     /// Opt-in live test — runs only with `cargo test -- --ignored` and a valid
