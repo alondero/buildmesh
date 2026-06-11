@@ -129,16 +129,9 @@ pub fn run() {
             // Agent Node
             commands::agent_node::create_session,
             commands::agent_node::list_sessions,
-            commands::agent_node::list_sessions_by_project,
-            commands::agent_node::list_all_sessions,
             commands::agent_node::get_session,
-            commands::agent_node::archive_session,
-            commands::agent_node::restore_session,
-            commands::agent_node::update_session_status,
             commands::agent_node::delete_session,
             commands::agent_node::get_worktree_close_safety,
-            commands::agent_node::set_cli_session_id,
-            commands::agent_node::set_active_session,
             commands::agent_node::rename_session,
             // Mesh
             commands::mesh::add_project,
@@ -209,12 +202,6 @@ pub fn run() {
             commands::prune::delete_branches,
             commands::prune::delete_worktrees,
             commands::prune::prune_remote_tracking,
-            // Terminal
-            commands::terminal::spawn_pty,
-            commands::terminal::resize_pty,
-            commands::terminal::write_pty,
-            commands::terminal::close_pty,
-            commands::terminal::spawn_shell,
             // File watcher
             commands::file_watcher::watch_session,
             commands::file_watcher::unwatch_session,
@@ -243,7 +230,6 @@ pub fn run() {
             commands::session_discovery::discover_sessions,
             commands::session_discovery::import_discovered_session,
             // Usage
-            commands::usage::get_provider_usage,
             commands::usage::get_all_provider_usage,
             commands::usage::set_minimax_api_key,
         ])

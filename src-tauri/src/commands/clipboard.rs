@@ -6,7 +6,8 @@
 
 use tauri::command;
 
-#[command]
+// `(async)` — spawns `pbpaste` on macOS; keep the wait off the main thread.
+#[command(async)]
 pub fn read_clipboard() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {

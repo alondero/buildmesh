@@ -42,7 +42,8 @@ pub struct AiContextStatus {
 }
 
 /// Detect the Claude AI context for a mesh path and report what can be ported.
-#[command]
+// `(async)` — filesystem probing; off the main thread.
+#[command(async)]
 pub fn detect_ai_context(mesh_path: String) -> Result<AiContextStatus, String> {
     let host = to_host_path(&mesh_path);
     let root = Path::new(&host);
@@ -72,7 +73,8 @@ pub fn detect_ai_context(mesh_path: String) -> Result<AiContextStatus, String> {
 /// Build the portability commit and open a PR for review.
 ///
 /// Returns the GitHub PR URL on success.
-#[command]
+// `(async)` — git object writes plus a GitHub network round-trip; off the main thread.
+#[command(async)]
 pub fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let host_path = to_host_path(&mesh.path);

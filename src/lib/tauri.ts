@@ -106,19 +106,6 @@ export const diffNodeAgainstBase = (nodeId: number) =>
 export const diffNodeFileAgainstBase = (nodeId: number, filePath: string) =>
   invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
 
-// Terminal
-export const spawnPty = (command: string, args: string[], cwd: string, ptyId: string) =>
-  invoke('spawn_pty', { command, args, cwd, ptyId });
-
-export const writePty = (ptyId: string, data: string) =>
-  invoke('write_pty', { ptyId, data });
-
-export const closePty = (ptyId: string) =>
-  invoke('close_pty', { ptyId });
-
-export const spawnShell = (ptyId: string, isWsl: boolean, cwd: string) =>
-  invoke('spawn_shell', { ptyId, isWsl, cwd });
-
 // File watcher
 export const watchSession = (sessionId: number) =>
   invoke('watch_session', { sessionId });

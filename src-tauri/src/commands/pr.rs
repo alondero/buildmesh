@@ -15,7 +15,11 @@ pub struct GitHubIssue {
 }
 
 /// Check whether the user has a valid GitHub token (env var or gh config).
-#[command]
+///
+/// Every command in this module talks to the GitHub REST API (blocking HTTP);
+/// `(async)` moves them to a worker thread so a slow or offline network never
+/// freezes the main thread (which would stall the whole UI and all other IPC).
+#[command(async)]
 pub fn check_gh_auth() -> bool {
     match GitHubClient::new() {
         Ok(client) => client.check_auth(),
@@ -28,7 +32,7 @@ pub fn check_gh_auth() -> bool {
 /// resolving one), with a `warn!` capturing the reason. The modal degrades
 /// gracefully — see [`resolve_github_owner_repo`] for the error wording the
 /// sibling spawn endpoint surfaces directly.
-#[command]
+#[command(async)]
 pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
@@ -52,7 +56,7 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
 }
 
 /// Create a PR for the node
-#[command]
+#[command(async)]
 pub fn create_pr(
     session_id: i64,
     title: String,
@@ -77,7 +81,7 @@ pub fn create_pr(
 
 /// Create a PR directly from a mesh directory path (no node required).
 /// Detects the current branch via git2, then creates a PR targeting `base_branch`.
-#[command]
+#[command(async)]
 pub fn create_pr_for_mesh(
     mesh_path: String,
     title: String,
@@ -100,7 +104,7 @@ pub fn create_pr_for_mesh(
 
 /// Merge a PR (squash + delete branch).
 /// Accepts a full GitHub PR URL like `https://github.com/owner/repo/pull/123`.
-#[command]
+#[command(async)]
 pub fn merge_pr(pr_url: String) -> Result<String, String> {
     let (owner, repo, pr_number) = parse_pr_url(&pr_url)
         .ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
@@ -111,7 +115,7 @@ pub fn merge_pr(pr_url: String) -> Result<String, String> {
 }
 
 /// Get the current branch for a node
-#[command]
+#[command(async)]
 pub fn get_current_branch(session_id: i64) -> Result<String, String> {
     let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
@@ -137,7 +141,7 @@ pub struct OpenPr {
 ///   - GitHub has no open PR for that branch (the common case)
 ///
 /// Returns `Err(_)` only for true internal failures (DB lookup blows up, etc.).
-#[command]
+#[command(async)]
 pub fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| e.to_string())?;

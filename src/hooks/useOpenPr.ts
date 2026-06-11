@@ -12,10 +12,15 @@ const cache = new Map<number, OpenPr | null>();
 const pendingFetches = new Map<number, Promise<OpenPr | null>>();
 
 // Subscribers keyed by git path (because `GIT_CHANGED` carries a path).
-// Each callback closes over its own `nodeId` and compares on fire; the sentinel
-// `0` means "broadcast" — every subscriber re-checks, since the path→node
-// mapping isn't knowable here. Cache dedup keeps this cheap.
-const pathSubscribers = new Map<string, Set<(nodeId: number) => void>>();
+// Each subscriber records its `nodeId` so the listener can invalidate the
+// node-keyed cache before notifying — without the invalidation, `fetchPr`
+// would serve the stale cache entry and the chip would never refresh.
+interface PathSubscriber {
+  nodeId: number;
+  notify: () => void;
+}
+
+const pathSubscribers = new Map<string, Set<PathSubscriber>>();
 
 let listenerInstalled = false;
 
@@ -27,18 +32,26 @@ function installListener() {
     const { path, internal_path } = event.payload as { path: string; internal_path?: string };
     [path, internal_path].filter(Boolean).forEach(p => {
       const subs = pathSubscribers.get(p!);
-      if (subs) subs.forEach(cb => cb(0)); // 0 = broadcast
+      if (!subs) return;
+      // Invalidate every affected node first, then notify. The first notify
+      // starts a fetch (registering a pendingFetch); later subscribers of the
+      // same node then dedup onto it instead of refetching.
+      subs.forEach(s => {
+        cache.delete(s.nodeId);
+        pendingFetches.delete(s.nodeId);
+      });
+      subs.forEach(s => s.notify());
     });
   });
 }
 
-function subscribeByPath(path: string, cb: (nodeId: number) => void): () => void {
+function subscribeByPath(path: string, subscriber: PathSubscriber): () => void {
   if (!pathSubscribers.has(path)) pathSubscribers.set(path, new Set());
-  pathSubscribers.get(path)!.add(cb);
+  pathSubscribers.get(path)!.add(subscriber);
   return () => {
     const subs = pathSubscribers.get(path);
     if (subs) {
-      subs.delete(cb);
+      subs.delete(subscriber);
       if (subs.size === 0) pathSubscribers.delete(path);
     }
   };
@@ -117,16 +130,15 @@ export function useOpenPr(nodeId: number, gitPath: string | null): {
     fetchPr(nodeId);
   }, [nodeId, fetchPr]);
 
-  // Subscribe to invalidation events for this node's git path.
-  // The callback only refetches when the fired nodeId matches our own —
-  // otherwise the broadcast is a no-op for us.
+  // Subscribe to invalidation events for this node's git path. The listener
+  // has already evicted our cache entry by the time notify fires, so this
+  // fetch hits the backend (or dedups onto a sibling subscriber's fetch).
   useEffect(() => {
     if (!gitPath || !nodeId) return;
     const myId = nodeId;
-    const unsubscribe = subscribeByPath(gitPath, (changedId) => {
-      if (changedId === 0 || changedId === myId) {
-        fetchPr(myId);
-      }
+    const unsubscribe = subscribeByPath(gitPath, {
+      nodeId: myId,
+      notify: () => fetchPr(myId),
     });
     return unsubscribe;
   }, [gitPath, nodeId, fetchPr]);

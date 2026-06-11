@@ -1,4 +1,4 @@
-//! Real-PTY integration test for the agent spawn pipeline (issue #154).
+﻿//! Real-PTY integration test for the agent spawn pipeline (issue #154).
 //!
 //! The unit tests mock `invoke` or re-implement the arg-vector logic locally, so
 //! nothing in CI exercises a real spawn. This test drives the actual production
@@ -51,17 +51,31 @@ impl Read for ChunkedReader {
 }
 
 /// Spawn `recipe` under a real PTY, drain its output through the production read
-/// loop, wait for the child to exit, and clean up the registry. Returns the
-/// captured output and whether the child exited successfully.
-fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe) -> (String, bool) {
+/// loop, wait for the child to exit and `expected` to arrive, then close the
+/// PTY and clean up the registry. Returns the captured output and whether the
+/// child exited successfully.
+///
+/// `expected` is the output marker to wait for after the child exits. ConPTY on
+/// current Windows builds (observed 10.0.28120, 2026-06) no longer EOFs the
+/// master read pipe when the child exits — conhost holds it open until the
+/// pseudoconsole itself is closed — so the reader thread only finishes once we
+/// drop the master. We therefore drain until `expected` shows up (bounded),
+/// close the PTY the way `kill_agent` does (dropping the registry entry), and
+/// only then join the reader.
+fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) -> (String, bool) {
     // `wrap` applies the OS-axis shell wrapping. `EnvType::Windows` keeps us on
     // the `windows_shell` branch on Windows; on Unix that branch falls through
     // to a direct spawn of the binary, which is what we want for `/bin/sh`.
     let cwd = std::env::current_dir().unwrap();
     let cmd = spawn_environment::wrap(recipe, EnvType::Windows, &cwd.to_string_lossy(), session_id);
 
+    // Stage markers (visible with --nocapture) so a hang in the ConPTY stack
+    // points at the exact call rather than reading as a silent stall.
+    eprintln!("[pty-test {session_id}] opening pty pair");
     let pair = open_pty_pair(24, 80).expect("open pty pair");
+    eprintln!("[pty-test {session_id}] spawning child");
     let child = spawn_child(&pair, cmd).expect("spawn child");
+    eprintln!("[pty-test {session_id}] child spawned, wiring io");
 
     let reader = pair.master.try_clone_reader().expect("clone reader");
     let writer = pair.master.take_writer().expect("take writer");
@@ -96,23 +110,41 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe) -> (String, bool
     // Wait for the child to exit. A trivial echo command exits promptly; if it
     // ever hangs, the test stalls loudly rather than passing silently.
     let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
+    eprintln!("[pty-test {session_id}] waiting for child exit");
     let exit_ok = {
         let mut child = entry.child.lock().unwrap();
         child.wait().map(|s| s.success()).unwrap_or(false)
     };
     drop(entry);
 
-    reader_handle.join().expect("reader thread joins");
-    assert!(
-        !reader_alive.load(Ordering::SeqCst),
-        "reader should report not-alive after the child exits (production -> SessionStatus::Idle)"
-    );
+    // The child has exited, but conhost may still be flushing its output
+    // through the pipe. Wait (bounded) for the expected marker before tearing
+    // the PTY down, so closing the pseudoconsole can't race the flush. On
+    // timeout we fall through — the caller's assertion then reports whatever
+    // output actually arrived.
+    eprintln!("[pty-test {session_id}] child exited (ok={exit_ok}), draining output");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !String::from_utf8_lossy(&collected.lock().unwrap()).contains(expected)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 
-    // Clean up the registry the same way `kill_agent` does, then assert it's gone.
+    // Close the PTY the same way `kill_agent` does — dropping the registry
+    // entry drops the master, which closes the pseudoconsole and EOFs the
+    // reader. (Pre-2026-06 Windows builds EOF'd on child exit by themselves;
+    // current conhost only releases the pipe when the pseudoconsole closes.)
     PROCESS_REGISTRY.remove(&session_id);
     assert!(
         !PROCESS_REGISTRY.contains(&session_id),
         "PROCESS_REGISTRY entry for session {session_id} should be cleaned up"
+    );
+
+    eprintln!("[pty-test {session_id}] pty closed, joining reader");
+    reader_handle.join().expect("reader thread joins");
+    assert!(
+        !reader_alive.load(Ordering::SeqCst),
+        "reader should report not-alive after the PTY closes (production -> SessionStatus::Idle)"
     );
 
     let out = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
@@ -139,7 +171,7 @@ fn unix_sh_echo_through_real_pty() {
         base_args: vec!["-c".into(), "echo hello".into()],
         windows_shell: WindowsShell::Direct,
     };
-    let (out, exit_ok) = run_recipe_through_pty(-915_4001, recipe);
+    let (out, exit_ok) = run_recipe_through_pty(-915_4001, recipe, "hello");
     assert!(out.contains("hello"), "expected 'hello' in PTY output, got: {out:?}");
     assert!(exit_ok, "child should exit cleanly");
 }
@@ -153,7 +185,7 @@ fn windows_direct_echo_through_real_pty() {
         base_args: vec!["/c".into(), "echo".into(), "hello".into()],
         windows_shell: WindowsShell::Direct,
     };
-    let (out, exit_ok) = run_recipe_through_pty(-915_4002, recipe);
+    let (out, exit_ok) = run_recipe_through_pty(-915_4002, recipe, "hello");
     assert!(out.contains("hello"), "expected 'hello' in PTY output, got: {out:?}");
     assert!(exit_ok, "child should exit cleanly");
 }
@@ -169,7 +201,7 @@ fn windows_powershell_encoded_echo_through_real_pty() {
         base_args: vec!["/c".into(), "echo".into(), "hello".into()],
         windows_shell: WindowsShell::PowerShell,
     };
-    let (out, exit_ok) = run_recipe_through_pty(-915_4003, recipe);
+    let (out, exit_ok) = run_recipe_through_pty(-915_4003, recipe, "hello");
     assert!(
         out.contains("hello"),
         "PowerShell -EncodedCommand spawn produced no 'hello' (BOM regression?): {out:?}"
@@ -192,7 +224,7 @@ fn windows_cmd_batch_echo_through_real_pty() {
         base_args: vec![],
         windows_shell: WindowsShell::Cmd,
     };
-    let (out, exit_ok) = run_recipe_through_pty(-915_4004, recipe);
+    let (out, exit_ok) = run_recipe_through_pty(-915_4004, recipe, "hello");
     std::fs::remove_file(&batch).ok();
     assert!(
         out.contains("hello"),
