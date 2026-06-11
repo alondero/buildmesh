@@ -291,11 +291,29 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
 pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
     PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
 
-    if data.bytes().any(|b| b == b'\n' || b == b'\r') {
+    if data.bytes().any(|b| b == b'\n' || b == b'\r')
+        && !should_skip_attention_signals(session_id)
+    {
         db::update_agent_node_status(session_id, SessionStatus::Running).ok();
         let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
     }
     Ok(())
+}
+
+/// Returns true if a newline in `write_to_agent` should NOT flip the
+/// node to `Running` and should NOT emit `attention-cleared`. A plain
+/// terminal's "Enter" is just shell input — the node has no LLM
+/// attention state to clear, and flipping status would render a
+/// spurious cyan "Running" badge for a shell sitting at a prompt.
+fn should_skip_attention_signals(session_id: i64) -> bool {
+    db::get_agent_node_by_id(session_id)
+        .ok()
+        .map(|n| provider_is_plain_terminal(n.provider))
+        .unwrap_or(false)
+}
+
+fn provider_is_plain_terminal(provider: Provider) -> bool {
+    provider.adapter().is_plain_terminal()
 }
 
 #[command]
@@ -364,5 +382,33 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
         renamed_sessions: 0,
         buffers_size_bytes: buffers_size,
         turn_counters_entries: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::Provider;
+
+    #[test]
+    fn plain_terminal_provider_skips_attention_signals() {
+        assert!(provider_is_plain_terminal(Provider::Terminal));
+    }
+
+    #[test]
+    fn llm_providers_do_emit_attention_signals() {
+        for p in [
+            Provider::Anthropic,
+            Provider::Minimax,
+            Provider::Kimi,
+            Provider::Agy,
+            Provider::OpenCode,
+            Provider::Codex,
+        ] {
+            assert!(
+                !provider_is_plain_terminal(p),
+                "LLM provider {p:?} should not skip attention signals"
+            );
+        }
     }
 }

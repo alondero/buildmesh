@@ -13,6 +13,7 @@ export function colorClassForProvider(providerId: string): string {
     kimi: 'bg-cyan-500',
     agy: 'bg-emerald-500',
     opencode: 'bg-amber-500',
+    terminal: 'bg-gray-500',
   };
   return map[providerId] ?? 'bg-gray-500';
 }

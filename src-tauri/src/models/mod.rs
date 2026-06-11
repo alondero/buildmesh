@@ -50,6 +50,10 @@ pub enum Provider {
     OpenCode,
     Codex,
     Kimi,
+    /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
+    /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
+    /// See `agent::provider::adapters::terminal`.
+    Terminal,
 }
 
 impl Provider {
@@ -62,6 +66,7 @@ impl Provider {
             Provider::OpenCode,
             Provider::Codex,
             Provider::Kimi,
+            Provider::Terminal,
         ]
     }
 
@@ -74,6 +79,7 @@ impl Provider {
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
             "kimi" => Provider::Kimi,
+            "terminal" => Provider::Terminal,
             _ => Provider::Anthropic,
         }
     }
@@ -89,6 +95,7 @@ impl Provider {
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
             Provider::Kimi => &adapters::KIMI,
+            Provider::Terminal => &adapters::TERMINAL,
         }
     }
 }
@@ -102,6 +109,7 @@ impl std::fmt::Display for Provider {
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
             Provider::Kimi => write!(f, "kimi"),
+            Provider::Terminal => write!(f, "terminal"),
         }
     }
 }
@@ -474,6 +482,9 @@ mod tests {
         assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows).binary, "agy");
         assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
         assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows).binary, "codex");
+        // Plain terminal spawns the OS-preferred shell directly — powershell.exe on Windows
+        // host, routed through wsl.exe by spawn_environment::wrap when env_type is WSL.
+        assert_eq!(Provider::Terminal.adapter().spawn_recipe(Platform::Windows).binary, "powershell.exe");
     }
 
     #[test]
@@ -519,6 +530,7 @@ mod tests {
         assert_eq!(format!("{}", Provider::OpenCode), "opencode");
         assert_eq!(format!("{}", Provider::Codex), "codex");
         assert_eq!(format!("{}", Provider::Kimi), "kimi");
+        assert_eq!(format!("{}", Provider::Terminal), "terminal");
     }
 
     #[test]
@@ -546,6 +558,24 @@ mod tests {
         assert!(!Provider::Anthropic.adapter().self_assigns_session_id());
         assert!(!Provider::Minimax.adapter().self_assigns_session_id());
         assert!(!Provider::Kimi.adapter().self_assigns_session_id());
+    }
+
+    /// `is_plain_terminal` is the single trait method that switches the
+    /// spawn pipeline's reader EOF handling. Only the Terminal provider
+    /// overrides the default `false`. This test guards against accidental
+    /// flipping by future refactors — if any LLM provider were ever to
+    /// claim "plain terminal" semantics, the spawn path would silently
+    /// stop emitting `resume-failed` events for it, breaking a real
+    /// LLM-resume signal.
+    #[test]
+    fn is_plain_terminal_only_for_terminal() {
+        assert!(Provider::Terminal.adapter().is_plain_terminal());
+        assert!(!Provider::Anthropic.adapter().is_plain_terminal());
+        assert!(!Provider::Minimax.adapter().is_plain_terminal());
+        assert!(!Provider::Agy.adapter().is_plain_terminal());
+        assert!(!Provider::OpenCode.adapter().is_plain_terminal());
+        assert!(!Provider::Codex.adapter().is_plain_terminal());
+        assert!(!Provider::Kimi.adapter().is_plain_terminal());
     }
 
     #[test]

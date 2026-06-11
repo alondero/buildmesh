@@ -17,6 +17,13 @@ describe('colorClassForProvider', () => {
   it('falls back to gray for unknown providers', () => {
     expect(colorClassForProvider('mystery')).toBe('bg-gray-500');
   });
+
+  it('maps the plain terminal provider to the gray badge colour', () => {
+    // The new "Terminal" provider is intentionally a neutral grey: a
+    // shell is not branded. Pin the colour here so the explicit map
+    // entry (vs the unknown-provider fallback) stays in place.
+    expect(colorClassForProvider('terminal')).toBe('bg-gray-500');
+  });
 });
 
 describe('ProviderDropdown', () => {
