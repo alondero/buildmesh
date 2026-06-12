@@ -21,35 +21,65 @@ import { loadUnicode11Widths, EXTRA_WIDE_EMOJI_LOOKUP } from '../../src/componen
 interface FakeProvider {
   version: string;
   wcwidth(cp: number): number;
+  // The addon's `charProperties` calls `this.wcwidth(...)` internally, so
+  // the production code now `.bind`s it to the provider object. Mocks
+  // that omit `charProperties` will crash the helper at the bind call
+  // — see the runtime-shape test for the real-xterm contract.
+  charProperties(cp: number, preceding: number): number;
 }
 
 function makeMockTerm(addonWcwidth: (cp: number) => number = () => 1) {
-  const providers: Record<string, FakeProvider> = {};
+  // Mirror the real @xterm/xterm shape: the user-facing `unicode` is a
+  // thin proxy whose `register` delegates to the internal
+  // `UnicodeService`; the addon writes to the internal service during
+  // activate. See tests/unit/load-unicode11-widths.runtime-shape.test.ts
+  // for the full rationale and the exact API contract.
+  const internalProviders: Record<string, FakeProvider> = {};
   let activeVersion = '6';
-  const registerSpy = vi.fn((p: FakeProvider) => {
-    providers[p.version] = p;
+  const addonProvider: FakeProvider = {
+    version: '11',
+    wcwidth: addonWcwidth,
+    charProperties: () => 0,
+  };
+  internalProviders['11'] = addonProvider;
+
+  const internalService = {
+    _providers: internalProviders,
+    register: vi.fn((p: FakeProvider) => {
+      internalProviders[p.version] = p;
+    }),
+  };
+  // Simulate what `loadAddon(new Unicode11Addon())` does: the addon's
+  // activate calls the internal service's register(). We do it via a
+  // loadAddon mock so the test exercises the same side effect.
+  const loadAddon = vi.fn(() => {
+    internalService.register(addonProvider);
   });
-  // Simulate Unicode11Addon.activate: it calls unicode.register({version: '11', wcwidth}).
-  const addonProvider: FakeProvider = { version: '11', wcwidth: addonWcwidth };
-  providers['11'] = addonProvider;
+  // The user-facing register is a passthrough to the internal service —
+  // mirrors the one-liner in real xterm source:
+  //   register(e) { this._core.unicodeService.register(e) }
+  const registerSpy = vi.fn((p: FakeProvider) => internalService.register(p));
 
   const term = {
-    loadAddon: vi.fn(),
+    loadAddon,
     unicode: {
       get activeVersion() {
         return activeVersion;
       },
       set activeVersion(v: string) {
-        if (!providers[v]) throw new Error(`unknown Unicode version "${v}"`);
+        if (!internalProviders[v]) throw new Error(`unknown Unicode version "${v}"`);
         activeVersion = v;
       },
       register: registerSpy,
-      // Production helper reads term.unicode._providers (an xterm internal —
-      // a Record<versionString, provider> that register() writes into).
-      _providers: providers,
     },
+    _core: { unicodeService: internalService },
   };
-  return { term, providers, activeVersionFn: () => activeVersion, registerSpy };
+  return {
+    term,
+    providers: internalProviders,
+    activeVersionFn: () => activeVersion,
+    registerSpy,
+  };
 }
 
 describe('loadUnicode11Widths', () => {

@@ -43,31 +43,41 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 // Mock Terminal class - must work with 'new Terminal(options)'
 vi.mock('@xterm/xterm', () => {
-  // Fake unicode service: the real xterm has `term.unicode.register(p)` which
-  // writes into `term.unicode._providers` keyed by `p.version`, plus a
-  // setter on `activeVersion` that activates one of those providers. The
-  // loadUnicode11Widths helper reads `_providers['11'].wcwidth` AND
-  // `_providers['11'].charProperties` after loadAddon, so the mock has to
-  // honour that contract. Tests that don't care about widths (most of
-  // them) just check `activeVersion === '11'`.
-  // We can't make loadAddon() invoke addon.activate() because the other
-  // addons the registry loads (SearchAddon, SerializeAddon, WebLinksAddon)
-  // need real terminal methods our mock doesn't provide — so we pre-seed
-  // the '11' provider in the constructor instead, which is the only state
-  // loadUnicode11Widths actually reads. The helper immediately replaces
-  // this entry with its own wrapper, so the seed values are placeholders.
+  // Mirror the real @xterm/xterm shape: the user-facing `unicode` is a thin
+  // proxy whose `register` delegates to the internal `UnicodeService` and
+  // which exposes `activeVersion` via getter/setter. The real provider map
+  // (`_providers`) lives on the internal service behind `_core`, NOT on
+  // the user-facing `unicode` — modelling it correctly here is what
+  // prevented the loadUnicode11Widths regression from passing its tests.
+  // The mock's `loadAddon` is a no-op because we can't synthesise the
+  // addon's `activate` (other addons in the registry need real terminal
+  // methods we don't provide) — the helper itself pre-seeds the slot it
+  // expects to read from. Tests that care about the wrapper's behaviour
+  // exercise it via a dedicated mock in load-unicode11-widths.*.test.ts.
   const mockProviders: Record<string, {
     version: string;
     wcwidth: (cp: number) => number;
     charProperties: (cp: number, preceding: number) => number;
   }> = {
-    // The addon's own wcwidth/charProperties would normally populate this
-    // key, but the mock short-circuits loadAddon. The helper immediately
-    // replaces this entry with its own wrapper, so its identity is
-    // irrelevant — what matters is that the keys exist.
+    // Pre-seed the '11' provider so getInternalService(...)._providers['11']
+    // exists when loadUnicode11Widths reads it (the real addon's activate
+    // populates this slot; in the mock we skip activate and seed directly).
+    // The helper replaces this entry with its own wrapper, so the seed
+    // values are placeholders.
     '11': { version: '11', wcwidth: () => 1, charProperties: () => 0 },
   };
   let mockActive = '11';
+
+  const internalService = {
+    _providers: mockProviders,
+    register: vi.fn((p: {
+      version: string;
+      wcwidth: (cp: number) => number;
+      charProperties: (cp: number, preceding: number) => number;
+    }) => {
+      mockProviders[p.version] = p;
+    }),
+  };
 
   class MockTerminal {
     write = vi.fn();
@@ -84,15 +94,14 @@ vi.mock('@xterm/xterm', () => {
     scrollToBottom = vi.fn();
     refresh = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
+    // User-facing proxy: NO `_providers`, has `register` (a passthrough to
+    // the internal service) and `activeVersion` getter/setter.
     unicode = {
-      _providers: mockProviders,
       register: vi.fn((p: {
         version: string;
         wcwidth: (cp: number) => number;
         charProperties: (cp: number, preceding: number) => number;
-      }) => {
-        mockProviders[p.version] = p;
-      }),
+      }) => internalService.register(p)),
       get activeVersion() {
         return mockActive;
       },
@@ -103,6 +112,8 @@ vi.mock('@xterm/xterm', () => {
         mockActive = v;
       },
     };
+    // The internal service lives behind `_core.unicodeService` in real xterm.
+    _core = { unicodeService: internalService };
     rows = 24;
     cols = 80;
     element: HTMLElement | null = null;
