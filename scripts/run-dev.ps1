@@ -5,7 +5,19 @@ $ErrorActionPreference = "Stop"
 
 Set-Location "$PSScriptRoot\.."
 
-$Binary = "src-tauri\target\release\buildmesh-dev.exe"
+# The dev profile must NOT share src-tauri\target\release\ with the stable
+# hub: cargo's binary output filename is fixed by the crate's [[bin]] name
+# ("buildmesh"), so both profiles would write to buildmesh.exe. With the
+# stable hub holding that file open, the dev build fails with "Access is
+# denied" on every incremental link. Pointing CARGO_TARGET_DIR at a
+# separate release-dev/ subdir gives the dev build its own buildmesh-dev.exe
+# (via Tauri's mainBinaryName overlay) and keeps the lock contention away
+# from the hub.
+$env:CARGO_TARGET_DIR = Join-Path (Resolve-Path "src-tauri") "target\release-dev"
+# When CARGO_TARGET_DIR is set, cargo nests the profile subdir
+# (`<target>/<profile>/<binary>`), so the release build drops the exe at
+# release-dev\release\buildmesh-dev.exe — not directly under release-dev.
+$Binary = Join-Path $env:CARGO_TARGET_DIR "release\buildmesh-dev.exe"
 $LogPath = "$env:APPDATA\com.alond.buildmesh.dev\logs\buildmesh.log"
 
 # 1. Kill existing DEV instances only. 'buildmesh-dev' is an exact process-name
@@ -18,7 +30,7 @@ if ($existing) {
 }
 
 # 2. Build the dev profile (frontend + Rust, dev overlay config)
-Write-Output "Building (dev profile)..."
+Write-Output "Building (dev profile) into $env:CARGO_TARGET_DIR ..."
 npm run tauri:build:dev
 if ($LASTEXITCODE -ne 0) {
     Write-Output "ERROR: Build failed"

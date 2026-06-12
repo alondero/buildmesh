@@ -23,11 +23,13 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 vi.mock('@xterm/xterm', () => {
-  // See tests/setup/vitest.setup.ts for why the unicode service needs
-  // _providers + a real register method (loadUnicode11Widths reads from it).
-  // We pre-seed _providers['11'] so loadUnicode11Widths can read from it
-  // after its (no-op) loadAddon() call. Both `wcwidth` AND
-  // `charProperties` are read by the production helper.
+  // Mirror the real @xterm/xterm shape: the user-facing `unicode` is a
+  // thin proxy whose `register` delegates to the internal UnicodeService
+  // on `_core.unicodeService` (which holds the `_providers` map). The
+  // pre-seeded `mockProviders['11']` stands in for what the addon's
+  // `activate` populates in production. See
+  // tests/unit/load-unicode11-widths.runtime-shape.test.ts for the full
+  // contract this mock is satisfying.
   const mockProviders: Record<string, {
     version: string;
     wcwidth: (cp: number) => number;
@@ -36,6 +38,17 @@ vi.mock('@xterm/xterm', () => {
     '11': { version: '11', wcwidth: () => 1, charProperties: () => 0 },
   };
   let mockActive = '11';
+
+  const internalService = {
+    _providers: mockProviders,
+    register: vi.fn((p: {
+      version: string;
+      wcwidth: (cp: number) => number;
+      charProperties: (cp: number, preceding: number) => number;
+    }) => {
+      mockProviders[p.version] = p;
+    }),
+  };
 
   class MockTerminal {
     write = vi.fn();
@@ -50,15 +63,14 @@ vi.mock('@xterm/xterm', () => {
     refresh = vi.fn();
     resize = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
+    // User-facing proxy: NO `_providers`, has `register` (a passthrough to
+    // the internal service) and `activeVersion` getter/setter.
     unicode = {
-      _providers: mockProviders,
       register: vi.fn((p: {
         version: string;
         wcwidth: (cp: number) => number;
         charProperties: (cp: number, preceding: number) => number;
-      }) => {
-        mockProviders[p.version] = p;
-      }),
+      }) => internalService.register(p)),
       get activeVersion() {
         return mockActive;
       },
@@ -69,6 +81,8 @@ vi.mock('@xterm/xterm', () => {
         mockActive = v;
       },
     };
+    // The internal service lives behind `_core.unicodeService` in real xterm.
+    _core = { unicodeService: internalService };
     rows = 24;
     cols = 80;
     element: HTMLElement | null = null;

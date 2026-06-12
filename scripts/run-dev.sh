@@ -6,7 +6,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-BINARY="src-tauri/target/release/buildmesh-dev"
+# The dev profile must NOT share src-tauri/target/release/ with the stable
+# hub: cargo's binary output filename is fixed by the crate's [[bin]] name
+# ("buildmesh"), so both profiles would write to buildmesh.exe. On Windows
+# the stable hub holds that file open and the dev build fails with
+# "Access is denied"; on macOS/Linux a parallel collision is still
+# possible. Pointing CARGO_TARGET_DIR at a separate release-dev/ subdir
+# gives the dev build its own buildmesh-dev binary (via Tauri's
+# mainBinaryName overlay) and keeps the lock contention away from the hub.
+# When CARGO_TARGET_DIR is set, cargo nests the profile subdir
+# (`<target>/<profile>/<binary>`), so the release build drops the exe at
+# release-dev/release/buildmesh-dev — not directly under release-dev/.
+export CARGO_TARGET_DIR="src-tauri/target/release-dev"
+BINARY="$CARGO_TARGET_DIR/release/buildmesh-dev"
 
 if [[ "$(uname)" == "Darwin" ]]; then
   LOG_PATH="$HOME/Library/Application Support/com.alond.buildmesh.dev/logs/buildmesh.log"

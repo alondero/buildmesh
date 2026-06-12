@@ -35,6 +35,27 @@ interface UnicodeProvider {
 }
 
 /**
+ * The user-facing `term.unicode` is a thin proxy whose only state is
+ * `register` (a one-line passthrough to `_core.unicodeService.register`)
+ * and `activeVersion` (a getter/setter). The real `UnicodeService` and its
+ * `_providers` map live on `term._core.unicodeService`, which the addon's
+ * `activate` writes to directly (the core terminal exposes `unicode` as a
+ * getter that returns that same service). Reaching for `_providers` on
+ * `term.unicode` would be a bug — the proxy has no such property.
+ */
+function getInternalService(term: Terminal): {
+  _providers: Record<string, UnicodeProvider>;
+  register(p: UnicodeProvider): void;
+} {
+  // `_core` and the UnicodeService singleton behind it are stable xterm
+  // internals: they're how every other addon in the registry (Fit, Search,
+  // Serialize, WebLinks) reaches the core services it needs.
+  return (term as unknown as {
+    _core: { unicodeService: { _providers: Record<string, UnicodeProvider>; register(p: UnicodeProvider): void } };
+  })._core.unicodeService;
+}
+
+/**
  * Activate xterm's Unicode 11 width table with a small patch layer that fills
  * in the BMP emoji the upstream table undercounts. Use this at every terminal
  * construction site (agent registry, build/run terminal, mobile screen)
@@ -48,27 +69,38 @@ interface UnicodeProvider {
  * misclassifies — the smallest possible diff to fix the alignment bug.
  */
 export function loadUnicode11Widths(term: Terminal): void {
-  // Loading the addon registers a `version: '11'` provider on the unicode
-  // service. We need to capture that provider's `wcwidth` by reference so
-  // our wrapper can call it directly — going through `term.unicode.wcwidth`
-  // would recurse through whatever provider is currently active (us, after
-  // we register below).
-  //
-  // `_providers` is a stable xterm internal: the unicode service has exposed
-  // it as a `Record<versionString, provider>` since the addon API was added,
-  // and the public `register(provider)` API itself is `_providers[v] = p`
-  // — i.e. we're reading back the same map the addon just wrote into.
-  const providers = (term.unicode as unknown as {
-    _providers: Record<string, UnicodeProvider>;
-  })._providers;
-
+  // 1. Load the addon first: its `activate` calls
+  //    `coreTerm.unicode.register(new UnicodeV11)` against the INTERNAL
+  //    service, populating `internalService._providers['11']`. We must
+  //    load the addon before reading the addon's wcwidth back out, since
+  //    the addon constructs its provider inside `activate`.
   term.loadAddon(new Unicode11Addon());
-  const addonWcwidth = providers['11'].wcwidth;
-  const addonCharProperties = providers['11'].charProperties;
 
-  // `register` replaces any existing provider for the same version, so this
-  // shadows the addon's provider at key `'11'`. The setter on
-  // `activeVersion` re-activates the (now ours) provider.
+  // 2. Capture the addon's provider by reference. The user-facing
+  //    `term.unicode` is a proxy with no `_providers` — the real provider
+  //    map lives on the internal service. Going through
+  //    `term.unicode.register(ourWrapper)` later would route through that
+  //    same internal service, so the reference we capture here is exactly
+  //    the function our wrapper will shadow in step 3.
+  //
+  //    The addon's `charProperties` calls `this.wcwidth(...)` internally
+  //    (combining the two tables into the single property bitmap xterm
+  //    reads). Destructuring the method strips the `this` binding; calling
+  //    the bare function reference would throw
+  //    "Cannot read properties of undefined (reading 'wcwidth')" when xterm
+  //    dispatches a char. `.bind(addonProvider)` preserves the receiver so
+  //    the addon's `this.wcwidth` lookup resolves to the same UnicodeV11
+  //    instance.
+  const internalService = getInternalService(term);
+  const addonProvider = internalService._providers['11'];
+  const addonWcwidth = addonProvider.wcwidth.bind(addonProvider);
+  const addonCharProperties = addonProvider.charProperties.bind(addonProvider);
+
+  // 3. Register our wrapper via the public `term.unicode.register` API
+  //    (one-line passthrough to the internal service). `register` replaces
+  //    the existing provider for the same version, so this shadows the
+  //    addon's provider at key `'11'`. The setter on `activeVersion`
+  //    re-activates the (now ours) provider.
   term.unicode.register({
     version: '11',
     wcwidth(cp: number): 0 | 1 | 2 {
