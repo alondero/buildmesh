@@ -32,6 +32,20 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 vi.mock('@xterm/xterm', () => {
+  // See tests/setup/vitest.setup.ts for why the unicode service needs
+  // _providers + a real register method (loadUnicode11Widths reads from it).
+  // We pre-seed _providers['11'] so loadUnicode11Widths can read from it
+  // after its (no-op) loadAddon() call. Both `wcwidth` AND
+  // `charProperties` are read by the production helper.
+  const mockProviders: Record<string, {
+    version: string;
+    wcwidth: (cp: number) => number;
+    charProperties: (cp: number, preceding: number) => number;
+  }> = {
+    '11': { version: '11', wcwidth: () => 1, charProperties: () => 0 },
+  };
+  let mockActive = '11';
+
   class MockTerminal {
     write = vi.fn();
     onData = vi.fn();
@@ -45,7 +59,25 @@ vi.mock('@xterm/xterm', () => {
     refresh = vi.fn();
     resize = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
-    unicode = { activeVersion: '6' };
+    unicode = {
+      _providers: mockProviders,
+      register: vi.fn((p: {
+        version: string;
+        wcwidth: (cp: number) => number;
+        charProperties: (cp: number, preceding: number) => number;
+      }) => {
+        mockProviders[p.version] = p;
+      }),
+      get activeVersion() {
+        return mockActive;
+      },
+      set activeVersion(v: string) {
+        if (!mockProviders[v]) {
+          throw new Error(`unknown Unicode version "${v}"`);
+        }
+        mockActive = v;
+      },
+    };
     rows = 24;
     cols = 80;
     element: HTMLElement | null = null;

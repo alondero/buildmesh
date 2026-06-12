@@ -43,6 +43,32 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 // Mock Terminal class - must work with 'new Terminal(options)'
 vi.mock('@xterm/xterm', () => {
+  // Fake unicode service: the real xterm has `term.unicode.register(p)` which
+  // writes into `term.unicode._providers` keyed by `p.version`, plus a
+  // setter on `activeVersion` that activates one of those providers. The
+  // loadUnicode11Widths helper reads `_providers['11'].wcwidth` AND
+  // `_providers['11'].charProperties` after loadAddon, so the mock has to
+  // honour that contract. Tests that don't care about widths (most of
+  // them) just check `activeVersion === '11'`.
+  // We can't make loadAddon() invoke addon.activate() because the other
+  // addons the registry loads (SearchAddon, SerializeAddon, WebLinksAddon)
+  // need real terminal methods our mock doesn't provide — so we pre-seed
+  // the '11' provider in the constructor instead, which is the only state
+  // loadUnicode11Widths actually reads. The helper immediately replaces
+  // this entry with its own wrapper, so the seed values are placeholders.
+  const mockProviders: Record<string, {
+    version: string;
+    wcwidth: (cp: number) => number;
+    charProperties: (cp: number, preceding: number) => number;
+  }> = {
+    // The addon's own wcwidth/charProperties would normally populate this
+    // key, but the mock short-circuits loadAddon. The helper immediately
+    // replaces this entry with its own wrapper, so its identity is
+    // irrelevant — what matters is that the keys exist.
+    '11': { version: '11', wcwidth: () => 1, charProperties: () => 0 },
+  };
+  let mockActive = '11';
+
   class MockTerminal {
     write = vi.fn();
     onData = vi.fn();
@@ -53,11 +79,30 @@ vi.mock('@xterm/xterm', () => {
     dispose = vi.fn();
     focus = vi.fn();
     loadAddon = vi.fn();
+    registerCharacterJoiner = vi.fn();
     attachCustomKeyEventHandler = vi.fn();
     scrollToBottom = vi.fn();
     refresh = vi.fn();
     buffer = { active: { getWindow: vi.fn() } };
-    unicode = { activeVersion: '6' };
+    unicode = {
+      _providers: mockProviders,
+      register: vi.fn((p: {
+        version: string;
+        wcwidth: (cp: number) => number;
+        charProperties: (cp: number, preceding: number) => number;
+      }) => {
+        mockProviders[p.version] = p;
+      }),
+      get activeVersion() {
+        return mockActive;
+      },
+      set activeVersion(v: string) {
+        if (!mockProviders[v]) {
+          throw new Error(`unknown Unicode version "${v}"`);
+        }
+        mockActive = v;
+      },
+    };
     rows = 24;
     cols = 80;
     element: HTMLElement | null = null;

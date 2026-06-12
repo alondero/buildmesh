@@ -3,7 +3,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import { SerializeAddon } from '@xterm/addon-serialize';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -12,6 +11,7 @@ import { resolveKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
 import { FontSizeManager } from './FontSizeManager';
+import { loadUnicode11Widths } from './loadUnicode11Widths';
 
 export interface TerminalInstance {
   term: Terminal;
@@ -194,9 +194,10 @@ export class TerminalRegistry {
       // Align glyph widths with the Unicode 11+ tables that modern agent CLIs
       // (string-width) use to lay out tables/box-drawing. Without this, xterm
       // falls back to Unicode 6 widths and emoji rows shear their borders.
-      // Requires allowProposedApi (set in terminalConfig BASE_TERMINAL_OPTIONS).
-      term.loadAddon(new Unicode11Addon());
-      term.unicode.activeVersion = '11';
+      // loadUnicode11Widths also patches the small set of BMP emoji the
+      // upstream @xterm/addon-unicode11 ships with the wrong width (notably
+      // ⚠ U+26A0) — see loadUnicode11Widths.ts for the rationale.
+      loadUnicode11Widths(term);
 
       const instance: TerminalInstance = {
         term,
