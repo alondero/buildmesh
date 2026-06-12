@@ -1,11 +1,11 @@
 import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import { Unicode11Addon } from '@xterm/addon-unicode11';
 import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { TERMINAL_OPTIONS } from './terminalConfig';
+import { loadUnicode11Widths } from './loadUnicode11Widths';
 
 interface BuildRunTerminalProps {
   sessionId: number;
@@ -56,9 +56,10 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
     term.loadAddon(fitAddon);
     // Match modern CLIs' Unicode 11+ glyph widths so emoji output doesn't shear
     // box-drawing borders (xterm defaults to Unicode 6 widths). TERMINAL_OPTIONS
-    // sets allowProposedApi, which this addon requires.
-    term.loadAddon(new Unicode11Addon());
-    term.unicode.activeVersion = '11';
+    // sets allowProposedApi, which this addon requires. loadUnicode11Widths
+    // also patches the small set of BMP emoji the upstream addon ships with
+    // the wrong width (notably ⚠ U+26A0) — see loadUnicode11Widths.ts.
+    loadUnicode11Widths(term);
 
     term.open(containerRef.current);
     fitAddon.fit();

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 import { AgentNode, terminalWsUrl } from "../api";
 import { attachTouchPan } from "./attachTouchPan";
 import { QUICK_KEYS } from "./quickKeys";
 import { AppBar } from "../ui";
+import { loadUnicode11Widths } from "../../components/Terminal/loadUnicode11Widths";
 
 const MAX_RECONNECT = 5;
 const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 16000];
@@ -128,8 +128,10 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     term.loadAddon(fit);
     // Match modern agent CLIs' Unicode 11+ widths so emoji rows don't shear
     // table borders (xterm defaults to Unicode 6 widths otherwise).
-    term.loadAddon(new Unicode11Addon());
-    term.unicode.activeVersion = "11";
+    // loadUnicode11Widths also patches the small set of BMP emoji the
+    // upstream addon ships with the wrong width (notably ⚠ U+26A0) — see
+    // loadUnicode11Widths.ts.
+    loadUnicode11Widths(term);
     termRef.current = term;
     fitRef.current = fit;
 
