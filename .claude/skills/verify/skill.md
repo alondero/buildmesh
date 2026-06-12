@@ -41,7 +41,7 @@ Run in order; on any failure, enter hill-climb (see below). All steps must pass 
 
 1–5 above, plus:
 
-6. `npm run tauri:build:dev` — produces the **dev profile** bundle at `src-tauri\target\release\buildmesh-dev.exe` (identity `com.alond.buildmesh.dev`, ports 2991/2992). Building the dev binary never file-locks the stable hub's `buildmesh.exe`.
+6. `npm run tauri:build:dev` — produces the **dev profile** bundle at `src-tauri\target\release-dev\release\buildmesh-dev.exe` (identity `com.alond.buildmesh.dev`, ports 2991/2992). The dev build sets `CARGO_TARGET_DIR=src-tauri\target\release-dev` (via `scripts\run-dev.ps1` on Windows / `scripts\run-dev.sh` elsewhere) so it lands in a separate target dir from the stable hub and never file-locks the hub's `buildmesh.exe`. Cargo nests the profile subdir, hence the `release-dev\release\` two-level path.
 7. Launch the app via `scripts\run-dev.ps1`. The script kills any existing `buildmesh-dev` process (**never** the stable hub), verifies the binary, records the pre-launch log line count, starts the binary, and confirms startup.
 8. **Strict log scan** of `%APPDATA%\com.alond.buildmesh.dev\logs\buildmesh.log` against the line count captured before launch — see rules below.
 9. `npm run test:e2e` — Playwright e2e. Playwright's `webServer` config (`playwright.config.ts`) boots its own `npm run tauri dev`, which uses the **base** identity and ports **1991/1992** (not the dev profile). If a stable hub is running it holds 1991, so pause the hub for this step or run e2e separately. The dev exe launched in steps 6–8 uses 2991/2992 and does not collide with Playwright's dev server.
