@@ -1,6 +1,24 @@
-export type SessionStatus = 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
+export type SessionStatus =
+  | 'pending'
+  | 'running'
+  | 'idle'
+  | 'awaiting_input'
+  | 'error'
+  | 'suspended';
 
 export const STATUS_CONFIG = {
+  // Node row exists but the slow stage-2 of spawn (git fetch, worktree
+  // create, PTY spawn) has not yet completed. The two-stage spawn flow
+  // (create_issue_node → start_node_background) flips this to 'running'
+  // on stage-2 success or 'error' on failure. Visually pulses so the
+  // user sees something is happening; the dot character is a hollow
+  // circle (◌) to distinguish from the filled idle circle (○).
+  pending: {
+    color: 'text-text-muted animate-pulse-fast',
+    bgColor: 'bg-text-muted animate-pulse-fast',
+    dot: '◌',
+    label: 'Starting…',
+  },
   running: {
     color: 'status-running',
     bgColor: 'bg-accent-cyan',

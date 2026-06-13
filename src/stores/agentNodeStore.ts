@@ -13,7 +13,7 @@ export interface AgentNode {
   branch: string;
   env: 'windows' | 'wsl';
   provider: 'anthropic' | 'minimax' | 'kimi' | 'agy' | 'opencode' | 'codex' | 'terminal';
-  status: 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
+  status: 'pending' | 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
   cli_session_id?: string;
   worktree_name?: string;
   use_worktree: boolean;
@@ -118,9 +118,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
           }));
         });
 
-        // Listen for session-created events from test server (HTTP-based E2E tests)
+        // Listen for session-created events. Two sources emit this:
+        //   1. The two-stage desktop spawn flow: `create_issue_node` emits it
+        //      after creating the `pending` node, so the sidebar picks up the
+        //      new node before stage-2 (start_node_background) finishes.
+        //   2. The HTTP-based E2E test server, which creates sessions out of band.
+        // In both cases the cleanest recovery is to refetch the full list — the
+        // row is already committed by the time the event fires, so we can never
+        // lose a node by racing the IPC.
         await listen<{ id: number }>('session-created', async () => {
-          // Refetch agentNodes via invoke since they were created via HTTP test server
           await get().fetchAgentNodes();
         });
 
@@ -128,6 +134,30 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         await listen<{ session_id: number }>('session-activated', (event) => {
           const nodeId = event.payload.session_id;
           set({ activeNodeId: nodeId });
+        });
+
+        // Two-stage spawn completion: the backend emits this when stage-2
+        // (`start_node_background`) finishes the slow work and the agent
+        // process is up. Flips the node from 'pending' to 'running'.
+        await listen<{ node_id: number }>('node-spawn-completed', (event) => {
+          const nodeId = event.payload.node_id;
+          set((state) => ({
+            agentNodes: state.agentNodes.map((s) =>
+              s.id === nodeId ? { ...s, status: 'running' as const } : s
+            ),
+          }));
+        });
+
+        // Two-stage spawn failure: backend already updated the node's DB
+        // status to 'error' before emitting — we mirror it in the store so
+        // the sidebar/title-bar renders the red badge without a refetch.
+        await listen<{ node_id: number; error: string }>('node-spawn-failed', (event) => {
+          const nodeId = event.payload.node_id;
+          set((state) => ({
+            agentNodes: state.agentNodes.map((s) =>
+              s.id === nodeId ? { ...s, status: 'error' as const } : s
+            ),
+          }));
         });
       },
     };

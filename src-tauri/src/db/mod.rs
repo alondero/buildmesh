@@ -814,10 +814,19 @@ pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     Ok(())
 }
 
+/// Flip any nodes that cannot be running on startup to `suspended`.
+///
+/// Covers three states that all mean "we expected this node to be live but
+/// its process is gone":
+/// - `running` / `awaiting_input`: the agent process died with the app.
+/// - `pending`: the two-stage spawn flow created the row in stage-1 but the
+///   app crashed before stage-2 (`start_node_background`) could spawn the
+///   process. Without this, a stuck `pending` row would render as a
+///   perpetual "◌ Starting…" badge with no way to recover.
 pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
     let db = get().lock().unwrap();
     let count = db.execute(
-        "UPDATE agent_nodes SET status = 'suspended' WHERE status IN ('running', 'awaiting_input')",
+        "UPDATE agent_nodes SET status = 'suspended' WHERE status IN ('running', 'awaiting_input', 'pending')",
         [],
     )?;
     Ok(count)

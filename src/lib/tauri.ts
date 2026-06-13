@@ -285,6 +285,33 @@ export const getRepoIssues = (meshId: number) =>
 export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
   invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });
 
+/// Two-stage spawn (issue flow) — stage 1 of 2.
+///
+/// `create_issue_node` is the fast DB-only half of the two-stage spawn
+/// flow: it creates a `pending` agent node row and returns it with the
+/// prefill string the caller must pass to `startNodeBackground`. Returns
+/// in ~20ms (vs. 5-10s for the old synchronous `spawn_issue_agent`),
+/// so the modal can close and the new node can appear almost
+/// immediately. The original `spawnIssueAgent` is kept for the mobile
+/// HTTP route, which has no interactive UI to keep responsive.
+export interface IssueNodeDraft extends AgentNode {
+  prefill: string;
+}
+
+export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
+  invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider });
+
+/// Two-stage spawn (issue flow) — stage 2 of 2.
+///
+/// `start_node_background` runs the slow work (git fetch, worktree
+/// create, PTY spawn, workspace-trust + attention-hook write) on a
+/// background task. Fire-and-forget — the IPC returns immediately.
+/// On completion the backend emits `node-spawn-completed`; on failure,
+/// `node-spawn-failed` (with the node's status already flipped to
+/// `error` in the DB).
+export const startNodeBackground = (nodeId: number, prefill?: string) =>
+  invoke<void>('start_node_background', { nodeId, prefill });
+
 export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: string) =>
   invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
 
