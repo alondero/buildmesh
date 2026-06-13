@@ -6,6 +6,8 @@ import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { TERMINAL_OPTIONS } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
+import { TerminalWriter } from './TerminalWriter';
+import { decodeBase64Bytes } from '../../lib/base64';
 
 interface BuildRunTerminalProps {
   sessionId: number;
@@ -16,15 +18,6 @@ interface BuildRunTerminalProps {
 
 interface BuildRunOutputPayload {
   data: string;
-}
-
-function decodeBase64Bytes(data: string): Uint8Array {
-  const binary = globalThis.atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 function modeLabel(mode: 'build' | 'run' | 'terminal'): string {
@@ -91,12 +84,23 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
     });
     resizeObserver.observe(containerRef.current);
 
+    // Coalesce inbound output via the same RAF-batched writer the agent
+    // path uses (TerminalRegistry's `writer`). Without this, a verbose
+    // build (`cargo build -v`, `tsc --watch`, etc.) turns every compiler
+    // line into a separate xterm render pass and pegs CPU. We keep our
+    // own writer instance instead of borrowing the registry's because the
+    // registry is keyed by node id and the agent terminal has already
+    // claimed that slot — sharing would route agent output to this xterm.
+    // See issue #303 and tests/unit/build-run-terminal-raf-batching.test.tsx.
+    const writer = new TerminalWriter();
+    writer.register(sessionId, (data) => term.write(data));
+
     const eventName = `build-run-output-${sessionId}`;
     listen<string | BuildRunOutputPayload>(eventName, (event) => {
       if (typeof event.payload === 'string') {
-        term.write(event.payload);
+        writer.append(sessionId, event.payload);
       } else {
-        term.write(decodeBase64Bytes(event.payload.data));
+        writer.append(sessionId, decodeBase64Bytes(event.payload.data));
       }
     }).then(unlisten => {
       if (cancelled) {
@@ -116,6 +120,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
       cancelled = true;
       resizeObserver.disconnect();
       unlistenRef.current?.();
+      writer.unregister(sessionId);
       term.dispose(); // allow-dispose — BuildRunTerminal is a one-shot panel, not the agent-terminal singleton
       invoke('close_build_run', { nodeId: sessionId }).catch(() => {});
     };

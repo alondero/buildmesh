@@ -12,6 +12,7 @@ import { isMac } from '../../lib/platform';
 import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
 import { FontSizeManager } from './FontSizeManager';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
+import { decodeBase64Bytes } from '../../lib/base64';
 
 export interface TerminalInstance {
   term: Terminal;
@@ -29,15 +30,6 @@ interface AgentOutputPayload {
   session_id: number;
   data?: string;
   line?: string;
-}
-
-function decodeBase64Bytes(data: string): Uint8Array {
-  const binary = globalThis.atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData | null {
