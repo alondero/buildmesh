@@ -571,6 +571,7 @@ pub async fn spawn_agent_inner(
     tracing::info!("spawn_agent_inner: stored agent process");
 
     // 11. Inject attention hook
+    crate::agent::workspace_trust::ensure_trusted(&resolved);
     if adapter.requires_attention_hook() {
         inject_attention_hook(std::path::Path::new(&resolved.host_path));
     }
