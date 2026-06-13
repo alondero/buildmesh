@@ -48,3 +48,35 @@ This explicitly **supersedes the inline "kept decoupled" rationale** at the thre
 - **Test fixtures move.** `env/mod.rs`'s `test_helpers` (shared by the worktree and fetch suites) relocate alongside the code under test; this is mechanical but touches ~700 lines of tests. Windows worktree cargo-test staleness applies (see [[buildmesh-cargo-test-incremental-staleness]]) — a `cargo clean -p` may be needed for moved `#[test]` fns to actually run.
 - **ADR 0001 (auto-sync) and ADR 0003 (Buildmesh owns worktree creation) are unaffected in behaviour** — this is a relocation/deduplication of their *mechanism*, not a change to what they do.
 - **Doc debt:** `docs/knowledge-primer.md` references `create_git_worktree`/`fetch_origin` at `env/mod.rs` paths that will move; those pointers must be updated when the code lands.
+
+## Amendment (2026-06-13): worktree *checkout* shells out to the git CLI
+
+`git/worktree.rs::add_worktree_impl` is the **one deliberate exception** to the
+"all git access via libgit2" rule above: it spawns `git worktree add` instead of
+calling `repo.worktree()`.
+
+**Why.** Profiling the two-stage spawn (PR #308 follow-up) showed worktree
+creation, not `fetch_origin`, dominated agent-spawn latency (12.4s of 14.5s). A
+timing harness (`git/worktree.rs`, gated on `BUILDMESH_WT_TIMING_REPO`) pinned
+**97% of that to `repo.worktree()`** — open/resolve/branch are <40ms combined.
+The *identical* worktree add via the `git` CLI takes ~0.4s: a 10–30× gap for the
+same 324-file result on the same disk. The cost is **libgit2's per-file checkout
+write path (~8× slower than git's on Windows)**, confirmed by a FORCE-vs-SAFE
+`checkout_tree` probe — it is not a directory or safety scan, and **no
+`checkout_options`/`GIT_CHECKOUT_*` flag closes the gap** (the write-everything
+path is the slow one). git2 0.20's safe `WorktreeAddOptions` exposes no checkout
+knob anyway, so a git2-only fix would mean adding a raw `libgit2-sys` FFI
+dependency to set a flag that the probe shows wouldn't help.
+
+**Scope of the exception.** Only the *checkout* shells out. We still resolve
+`base_ref` → a concrete commit via libgit2 (`resolve_base_commit`, fast, keeps
+the offline-fallback semantics) and pass git the 40-char SHA — never a ref like
+`@{u}`, which dodges the Windows `Command::args` `{}`-stripping trap. Worktree
+metadata pruning, close-safety, and removal stay on libgit2. The behaviour
+contract (branched branch-at-base, detached HEAD-at-base, parent never dirtied)
+is unchanged and still covered by the existing `git::worktree::tests` suite.
+
+**Cost accepted.** This re-introduces a process spawn + stderr parsing in the
+one module ADR 0007 consolidated, and a hard runtime dependency on `git` being
+on `PATH` for spawn (already true in practice). Justified by making a freshly
+spawned Agent Node usable in ~2s instead of ~14s — a win libgit2 cannot match.

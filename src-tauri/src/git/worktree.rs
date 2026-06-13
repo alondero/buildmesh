@@ -14,6 +14,13 @@ use crate::env::to_host_path;
 use crate::git::primitives;
 use crate::models::EnvType;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+// Suppress the transient console window git.exe would otherwise pop under a
+// GUI-subsystem Tauri process (CREATE_NO_WINDOW). No winapi dep needed.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 // ── Create ──────────────────────────────────────────────────────────────────
 
 /// Resolve the base commit a new worktree should be created from.
@@ -56,6 +63,23 @@ fn resolve_base_commit<'r>(
 
 /// Add a worktree to the repo — branched (new branch) or detached — based on
 /// the commit resolved from `base_ref` (see [`resolve_base_commit`]).
+///
+/// This is the one deliberate exception to ADR 0007's "all git access via
+/// libgit2" rule: it shells out to `git worktree add`. libgit2's per-file
+/// checkout write path is ~8× slower than git's on Windows, and that checkout
+/// is 97% of worktree-create — 324 files took 3–12s via `repo.worktree()`
+/// versus ~0.4s via the CLI (PR #308 follow-up). No git2 checkout flag closes
+/// the gap (the write-everything path is the slow one), so the only fix that
+/// makes a freshly-spawned Agent Node usable in ~2s instead of ~14s is the
+/// CLI. See docs/adr/0007 for the amendment.
+///
+/// We still resolve `base_ref` → a concrete commit via libgit2 (fast, and it
+/// keeps `resolve_base_commit`'s offline-fallback semantics) and hand git the
+/// 40-char hex SHA. Passing a SHA — never a ref like `@{u}` — also sidesteps
+/// the Windows `Command::args` `{}`-stripping trap (see the curly-brace-arg
+/// memory). `-b <name>` gives branched mode a real branch at the base; detached
+/// mode uses `--detach` and creates no branch at all (cleaner than the old
+/// create-branch-then-detach-and-delete dance).
 fn add_worktree_impl(
     repo: &git2::Repository,
     branch_name: &str,
@@ -63,30 +87,30 @@ fn add_worktree_impl(
     use_branched: bool,
     base_ref: &str,
 ) -> Result<(), String> {
-    let base_commit = resolve_base_commit(repo, base_ref)?;
+    let base_sha = resolve_base_commit(repo, base_ref)?.id().to_string();
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "cannot add a worktree to a bare repository".to_string())?;
 
-    // Both modes create a branch at the resolved base so the worktree checks
-    // out that commit (not the Mesh root's current HEAD). Detached mode then
-    // detaches the worktree's HEAD and removes the temporary branch.
-    let branch = repo
-        .branch(branch_name, &base_commit, false)
-        .map_err(|e| format!("Failed to create branch '{}': {}", branch_name, e))?;
-    let reference = branch.into_reference();
-    let mut opts = git2::WorktreeAddOptions::new();
-    opts.reference(Some(&reference));
-    repo.worktree(branch_name, host_path, Some(&opts))
-        .map_err(|e| format!("Git worktree add failed: {}", e))?;
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(workdir).arg("worktree").arg("add");
+    if use_branched {
+        cmd.arg("-b").arg(branch_name);
+    } else {
+        cmd.arg("--detach");
+    }
+    cmd.arg(host_path).arg(&base_sha);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
 
-    if !use_branched {
-        let wt_repo = git2::Repository::open(host_path)
-            .map_err(|e| format!("Failed to open worktree repo: {}", e))?;
-        wt_repo
-            .set_head_detached(base_commit.id())
-            .map_err(|e| format!("Failed to detach HEAD in worktree: {}", e))?;
-
-        if let Ok(mut branch) = repo.find_branch(branch_name, git2::BranchType::Local) {
-            let _ = branch.delete();
-        }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run `git worktree add`: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -446,6 +470,60 @@ mod tests {
         )
         .expect("worktree creation must succeed");
         wt
+    }
+
+    // End-to-end: time the *production* `create_git_worktree` (now a git-CLI
+    // shell-out) against a real repo. Confirms the fix through the actual code
+    // path, not a hand-inlined libgit2 reproduction.
+    //   cargo test -p buildmesh --lib timing_create_git_worktree_e2e -- --ignored --nocapture
+    #[test]
+    #[ignore = "timing harness; set BUILDMESH_WT_TIMING_REPO=<repo> to run"]
+    fn timing_create_git_worktree_e2e() {
+        use std::time::Instant;
+
+        let repo_root = match std::env::var("BUILDMESH_WT_TIMING_REPO") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("SKIP: set BUILDMESH_WT_TIMING_REPO to a real repo to run");
+                return;
+            }
+        };
+        let wt_name = "wt-e2e-probe";
+        let wt_path = Path::new(&repo_root)
+            .join(".claude")
+            .join("worktrees")
+            .join(wt_name);
+        let wt_path_str = wt_path.to_str().unwrap().to_string();
+
+        // Clean residue, then drop any stale branch/metadata of the same name.
+        let _ = remove_worktree_dir_with_retry(&wt_path_str);
+        let repo = git2::Repository::open(&repo_root).expect("open repo");
+        prune_stale_worktrees(&repo);
+        if let Ok(mut b) = repo.find_branch(wt_name, git2::BranchType::Local) {
+            let _ = b.delete();
+        }
+
+        // Loop a few times to separate a systematic cost from disk/Defender
+        // noise (the libgit2 numbers swung 3.7↔12.4s, so a single sample lies).
+        for i in 0..3 {
+            let t = Instant::now();
+            create_git_worktree(&repo_root, &wt_path_str, wt_name, "branched", "HEAD")
+                .expect("create_git_worktree must succeed");
+            eprintln!("[e2e] run {} create_git_worktree (git CLI): {:?}", i, t.elapsed());
+
+            // Cleanup between runs.
+            let _ = remove_worktree_dir_with_retry(&wt_path_str);
+            prune_stale_worktrees(&repo);
+            if let Ok(wt) = repo.find_worktree(wt_name) {
+                let mut po = git2::WorktreePruneOptions::new();
+                po.valid(true).working_tree(true);
+                let _ = wt.prune(Some(&mut po));
+            }
+            let branch_to_delete = repo.find_branch(wt_name, git2::BranchType::Local);
+            if let Ok(mut b) = branch_to_delete {
+                let _ = b.delete();
+            }
+        }
     }
 
     // ── create (#210: dirty parent allowed) ──────────────────────────────────
