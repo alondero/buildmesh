@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
+import { useMeshStore } from '../../stores/meshStore';
+import { useGridLayoutStore, resolveLayout } from '../../stores/gridLayoutStore';
 import { AgentTerminal, terminalManager } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { GridNodeHeader } from './GridNodeHeader';
-import { getGridLayout, equalSizes } from '../../hooks/useGridLayout';
+import { getGridRows, equalSizes } from '../../hooks/useGridLayout';
 
 const MIN_PANE_PX = 300;
 const HANDLE_PX = 5;
@@ -18,20 +20,41 @@ interface GridSplitterProps {
 type DragAxis = 'col' | 'row';
 
 export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: GridSplitterProps) {
-  const { cols, rows } = getGridLayout(nodes.length);
+  const rowCounts = getGridRows(nodes.length);
+  const rows = rowCounts.length;
+  const rowKey = rowCounts.join(',');
+
+  const selectedMeshId = useMeshStore(state => state.selectedMeshId);
+
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 1000, height: 600 });
 
-  const [colWidths, setColWidths] = useState<number[]>(() => equalSizes(cols));
-  const [rowHeights, setRowHeights] = useState<number[]>(() => equalSizes(rows));
+  // colWidths is jagged: one width array per row, so a vertical handle only
+  // resizes its own row. Heights stay one-per-row. Initialise from the per-mesh
+  // store, shape-validated against the current layout (falls back to equal).
+  const [colWidths, setColWidths] = useState<number[][]>(
+    () => resolveLayout(useGridLayoutStore.getState().byMesh[selectedMeshId!], rowCounts).colWidths,
+  );
+  const [rowHeights, setRowHeights] = useState<number[]>(
+    () => resolveLayout(useGridLayoutStore.getState().byMesh[selectedMeshId!], rowCounts).rowHeights,
+  );
 
   const colWidthsRef = useRef(colWidths);
   const rowHeightsRef = useRef(rowHeights);
+  const selectedMeshIdRef = useRef(selectedMeshId);
   colWidthsRef.current = colWidths;
   rowHeightsRef.current = rowHeights;
+  selectedMeshIdRef.current = selectedMeshId;
 
-  useEffect(() => { setColWidths(equalSizes(cols)); }, [cols]);
-  useEffect(() => { setRowHeights(equalSizes(rows)); }, [rows]);
+  // Re-load when the active mesh OR the grid shape changes. Reading via
+  // getState() (not a subscription) keeps the mouse-up persist below from
+  // retriggering this effect into a loop.
+  useEffect(() => {
+    const l = resolveLayout(useGridLayoutStore.getState().byMesh[selectedMeshId!], getGridRows(nodes.length));
+    setColWidths(l.colWidths);
+    setRowHeights(l.rowHeights);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedMeshId, rowKey]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -49,21 +72,22 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
 
   const dragRef = useRef<{
     axis: DragAxis;
-    index: number;
+    row: number;       // which row's colWidths to edit (col axis only)
+    index: number;     // separator index within that array
     startPos: number;
     startSizes: number[];
     containerSize: number;
   } | null>(null);
 
-  const handleMouseDown = useCallback((e: ReactMouseEvent, axis: DragAxis, index: number) => {
+  const handleMouseDown = useCallback((e: ReactMouseEvent, axis: DragAxis, index: number, row = 0) => {
     e.preventDefault();
     const container = containerRef.current;
     if (!container) return;
     const rect = container.getBoundingClientRect();
     const size = axis === 'col' ? rect.width : rect.height;
     const startPos = axis === 'col' ? e.clientX : e.clientY;
-    const startSizes = axis === 'col' ? [...colWidthsRef.current] : [...rowHeightsRef.current];
-    dragRef.current = { axis, index, startPos, startSizes, containerSize: size };
+    const startSizes = axis === 'col' ? [...colWidthsRef.current[row]] : [...rowHeightsRef.current];
+    dragRef.current = { axis, row, index, startPos, startSizes, containerSize: size };
   }, []);
 
   useEffect(() => {
@@ -96,7 +120,7 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
         newSizes[i] = newLeft;
         newSizes[i + 1] = newRight;
 
-        if (drag.axis === 'col') setColWidths(newSizes);
+        if (drag.axis === 'col') setColWidths(prev => prev.map((r, idx) => idx === drag.row ? newSizes : r));
         else setRowHeights(newSizes);
       });
     };
@@ -105,6 +129,13 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
       if (dragRef.current) {
         dragRef.current = null;
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+        const meshId = selectedMeshIdRef.current;
+        if (meshId != null) {
+          useGridLayoutStore.getState().setLayout(meshId, {
+            colWidths: colWidthsRef.current,
+            rowHeights: rowHeightsRef.current,
+          });
+        }
         terminalManager.fitAll();
       }
     };
@@ -121,7 +152,6 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
 
-  const totalHandleWidthPct = ((cols - 1) * HANDLE_PX / containerSize.width) * 100;
   const totalHandleHeightPct = ((rows - 1) * HANDLE_PX / containerSize.height) * 100;
 
   const needsScroll = rows * MIN_PANE_PX + (rows - 1) * HANDLE_PX > containerSize.height;
@@ -132,18 +162,20 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
       className="flex-1 flex flex-col p-1 bg-bg-surface overflow-x-hidden"
       style={{ overflowY: needsScroll ? 'auto' : 'hidden' }}
     >
-      {Array.from({ length: rows }, (_, rowIdx) => {
+      {rowCounts.map((rowCount, rowIdx) => {
         const rowHeight = needsScroll
           ? `${MIN_PANE_PX}px`
-          : `calc(${rowHeights[rowIdx]}% - ${totalHandleHeightPct / rows}%)`;
+          : `calc(${rowHeights[rowIdx] ?? 100 / rows}% - ${totalHandleHeightPct / rows}%)`;
+
+        const widths = colWidths[rowIdx] ?? equalSizes(rowCount);
+        const totalHandleWidthPct = ((rowCount - 1) * HANDLE_PX / containerSize.width) * 100;
+        const startIdx = rowCounts.slice(0, rowIdx).reduce((a, b) => a + b, 0);
 
         return (
           <div key={`row-${rowIdx}`} className="flex flex-col" style={{ height: rowHeight, flexShrink: needsScroll ? 0 : undefined }}>
             <div className="flex flex-1 overflow-hidden">
-              {Array.from({ length: cols }, (_, colIdx) => {
-                const nodeIdx = rowIdx * cols + colIdx;
-                if (nodeIdx >= nodes.length) return <div key={`empty-${colIdx}`} className="flex-1" />;
-                const node = nodes[nodeIdx];
+              {Array.from({ length: rowCount }, (_, colIdx) => {
+                const node = nodes[startIdx + colIdx];
                 const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
                 const isActive = node.id === activeNodeId;
                 const borderClass = node.status === 'awaiting_input'
@@ -153,7 +185,7 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
                     : 'border-border-default hover:border-accent-cyan/50';
 
                 const colStyle: React.CSSProperties = {
-                  width: `calc(${colWidths[colIdx]}% - ${totalHandleWidthPct / cols}%)`,
+                  width: `calc(${widths[colIdx] ?? 100 / rowCount}% - ${totalHandleWidthPct / rowCount}%)`,
                   flexShrink: 0,
                 };
 
@@ -178,9 +210,9 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
                         )}
                       </div>
                     </div>
-                    {colIdx < cols - 1 && nodeIdx < nodes.length - 1 && (
+                    {colIdx < rowCount - 1 && (
                       <div
-                        onMouseDown={(e) => handleMouseDown(e, 'col', colIdx)}
+                        onMouseDown={(e) => handleMouseDown(e, 'col', colIdx, rowIdx)}
                         className="cursor-col-resize hover:bg-accent-cyan/30 active:bg-accent-cyan/50 transition-colors shrink-0 self-stretch rounded-sm"
                         style={{ width: HANDLE_PX }}
                       />
