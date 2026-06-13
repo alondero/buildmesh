@@ -167,78 +167,6 @@ pub fn spawn_child(
         .map_err(|e| format!("failed to spawn agent: {}", e))
 }
 
-/// Automatically add the project path (worktree path) to the list of trusted workspaces
-/// in the global settings files of both Claude Code and Antigravity CLI.
-pub fn auto_trust_workspace(project_path: &std::path::Path) {
-    let path_str = project_path.to_string_lossy().to_string();
-
-    let home = match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
-        Ok(h) => std::path::PathBuf::from(h),
-        Err(_) => return,
-    };
-
-    let agy_settings_path = home.join(".gemini").join("antigravity-cli").join("settings.json");
-    let claude_settings_path = home.join(".claude").join("settings.json");
-
-    for settings_path in &[agy_settings_path, claude_settings_path] {
-        if !settings_path.exists() {
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(settings_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let mut settings: serde_json::Value = match serde_json::from_str(&content) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let trusted_workspaces = match settings.get_mut("trustedWorkspaces") {
-            Some(v) => {
-                if !v.is_array() {
-                    *v = serde_json::Value::Array(Vec::new());
-                }
-                v.as_array_mut().unwrap()
-            }
-            None => {
-                settings["trustedWorkspaces"] = serde_json::Value::Array(Vec::new());
-                settings.get_mut("trustedWorkspaces").unwrap().as_array_mut().unwrap()
-            }
-        };
-
-        let normalized_path = if cfg!(target_os = "windows") {
-            path_str.replace('/', "\\")
-        } else {
-            path_str.clone()
-        };
-
-        let already_trusted = trusted_workspaces.iter().any(|v| {
-            if let Some(s) = v.as_str() {
-                s.to_lowercase() == normalized_path.to_lowercase()
-            } else {
-                false
-            }
-        });
-
-        if !already_trusted {
-            tracing::info!(
-                "auto_trust_workspace: adding {:?} to {:?}",
-                normalized_path,
-                settings_path
-            );
-            trusted_workspaces.push(serde_json::Value::String(normalized_path));
-
-            if let Ok(new_content) = serde_json::to_string_pretty(&settings) {
-                if let Err(e) = std::fs::write(settings_path, new_content) {
-                    tracing::warn!("auto_trust_workspace: failed to write settings: {}", e);
-                }
-            }
-        }
-    }
-}
-
 /// Ensures the Notification hook exists in `{project}/.claude/settings.local.json`.
 pub fn inject_attention_hook(project_path: &std::path::Path) {
     let claude_dir = project_path.join(".claude");
@@ -643,7 +571,7 @@ pub async fn spawn_agent_inner(
     tracing::info!("spawn_agent_inner: stored agent process");
 
     // 11. Inject attention hook
-    auto_trust_workspace(std::path::Path::new(&resolved.host_path));
+    crate::agent::workspace_trust::ensure_trusted(&resolved);
     if adapter.requires_attention_hook() {
         inject_attention_hook(std::path::Path::new(&resolved.host_path));
     }
