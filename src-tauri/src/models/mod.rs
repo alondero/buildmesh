@@ -194,6 +194,7 @@ pub struct AgentNode {
     pub worktree_name: Option<String>,   // git worktree name (same as name for cwrap providers)
     pub use_worktree: bool,  // true = commands run in worktree, false = repo root
     pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
+    pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,
 }
 

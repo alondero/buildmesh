@@ -71,6 +71,14 @@ pub fn drain_pending_removals(app: tauri::AppHandle) {
     });
 }
 
+/// Persist new grid positions for a batch of agent nodes (drag-to-reorder).
+/// The frontend sends the full new ordering for the affected mesh so the DB
+/// stays in sync with its optimistic update. Mirrors `update_project_positions`.
+#[command]
+pub async fn update_session_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
+    db::update_agent_node_positions_batch(&updates).map_err(|e| e.to_string())
+}
+
 /// Check whether the node's worktree can be removed safely on close.
 #[command]
 pub async fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety, String> {

@@ -15,11 +15,19 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 interface GridNodeHeaderProps {
   node: AgentNode;
   onBuildRun: (nodeId: number, mode: 'build' | 'run' | 'terminal') => void;
+  /// dnd-kit drag listeners/attributes that turn the whole title bar into the
+  /// reorder/swap drag handle. Undefined when dragging is disabled (e.g. the
+  /// maximized solo view, or in isolation tests).
+  dragHandleProps?: Record<string, unknown>;
 }
 
-export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
+export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
   const toggleFileExplorer = useUIStore(state => state.toggleFileExplorer);
   const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
+  // Boolean selector (not the raw id) so only the two headers whose maximized
+  // status actually flips re-render on a toggle — not every header in the grid.
+  const isMaximized = useUIStore(state => state.maximizedNodeId === node.id);
+  const toggleMaximizedNode = useUIStore(state => state.toggleMaximizedNode);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   const renameAgentNode = useAgentNodeStore(state => state.renameAgentNode);
   const meshesById = useMeshStore(state => state.meshesById);
@@ -44,13 +52,28 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
 
   return (
     <div
-      className="flex items-center justify-between px-2.5 py-1.5 border-b border-border-default"
+      {...dragHandleProps}
+      onDoubleClick={() => toggleMaximizedNode(node.id)}
+      title={isMaximized ? 'Double-click to restore grid' : 'Double-click to maximize'}
+      className={`flex items-center justify-between px-2.5 py-1.5 border-b border-border-default ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}40` }}
     >
       <div className="flex items-center gap-2 overflow-hidden">
+        {dragHandleProps && (
+          <span
+            aria-hidden="true"
+            title="Drag to reorder, or onto another node to swap"
+            className="text-text-muted text-[11px] leading-none opacity-0 group-hover:opacity-60 transition-opacity select-none"
+          >
+            ⠿
+          </span>
+        )}
         <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
         <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 drop-shadow-sm" />
-        <span className="text-[12px] font-semibold text-text-primary truncate font-sans drop-shadow-sm">
+        <span
+          onPointerDown={(e) => e.stopPropagation()}
+          className="text-[12px] font-semibold text-text-primary truncate font-sans drop-shadow-sm"
+        >
           <InlineEditableText
             value={node.name}
             onCommit={(next) => renameAgentNode(node.id, next)}
@@ -71,6 +94,7 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
         </span>
         {summary && (
           <span
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); toggleFileExplorer({ type: 'agent', nodeId: node.id, path: gitPath }); }}
             className="text-[11px] font-mono font-semibold cursor-pointer flex items-center gap-1.5 drop-shadow-sm hover:brightness-125"
             title="Click to see changes"
@@ -98,6 +122,7 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
             is a draft, the tooltip is suffixed so the user knows. */}
         {openPr && (
           <span
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               openUrl(openPr.url).catch(console.error);
@@ -109,8 +134,24 @@ export function GridNodeHeader({ node, onBuildRun }: GridNodeHeaderProps) {
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
+        <button
+          onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
+          className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+          title={isMaximized ? 'Restore grid' : 'Maximize'}
+          aria-label={isMaximized ? 'Restore grid layout' : 'Maximize agent node'}
+        >
+          {isMaximized ? (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
+            </svg>
+          ) : (
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
+            </svg>
+          )}
+        </button>
         <button
           onClick={handleClose}
           className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors text-[10px]"

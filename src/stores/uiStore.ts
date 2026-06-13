@@ -26,6 +26,12 @@ interface UIState {
   // "drop file to paste path" overlay; set by the window-level drop listener.
   dragTargetNodeId: number | null;
   setDragTargetNodeId: (nodeId: number | null) => void;
+
+  // Node maximized to fill the whole grid area (#65), or null for the normal
+  // grid. Double-clicking a node header toggles this; Escape clears it.
+  maximizedNodeId: number | null;
+  toggleMaximizedNode: (nodeId: number) => void;
+  clearMaximizedNode: () => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -103,6 +109,18 @@ export const useUIStore = create<UIState>((set, get) => ({
   setDragTargetNodeId: (nodeId: number | null) => {
     if (get().dragTargetNodeId !== nodeId) {
       set({ dragTargetNodeId: nodeId });
+    }
+  },
+
+  maximizedNodeId: null,
+
+  toggleMaximizedNode: (nodeId: number) => {
+    set({ maximizedNodeId: get().maximizedNodeId === nodeId ? null : nodeId });
+  },
+
+  clearMaximizedNode: () => {
+    if (get().maximizedNodeId !== null) {
+      set({ maximizedNodeId: null });
     }
   },
 }));

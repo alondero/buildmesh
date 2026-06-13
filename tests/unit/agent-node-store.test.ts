@@ -15,7 +15,7 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
     id: 1, mesh_id: 1, name: 'bold-keen-brook', path: '/a', branch: 'main',
     env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
-    use_worktree: true,
+    use_worktree: true, position: 0,
     ...overrides,
   };
 }
@@ -341,6 +341,104 @@ describe('useAgentNodeStore', () => {
       // No invoke call was made and the store is untouched.
       expect(mockInvoke).not.toHaveBeenCalled();
       expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+    });
+  });
+
+  describe('reorderAgentNode', () => {
+    // Three nodes in one mesh, positions 0,1,2.
+    const seed = () => useAgentNodeStore.setState({
+      agentNodes: [
+        makeNode({ id: 1, position: 0 }),
+        makeNode({ id: 2, position: 1 }),
+        makeNode({ id: 3, position: 2 }),
+      ],
+    });
+    const order = () => useAgentNodeStore.getState().agentNodes.map(n => n.id);
+
+    it('moves a node forward and renumbers positions contiguously', async () => {
+      seed();
+      mockInvoke.mockResolvedValue(undefined);
+
+      // Move node 1 to the end (insert at flat index 3).
+      await useAgentNodeStore.getState().reorderAgentNode(1, 3);
+
+      expect(order()).toEqual([2, 3, 1]);
+      const positions = useAgentNodeStore.getState().agentNodes.map(n => n.position);
+      expect(positions).toEqual([0, 1, 2]);
+      // Persists the full new ordering for the mesh.
+      expect(mockInvoke).toHaveBeenCalledWith('update_session_positions', {
+        updates: [[2, 0], [3, 1], [1, 2]],
+      });
+    });
+
+    it('moves a node backward (insert before an earlier node)', async () => {
+      seed();
+      mockInvoke.mockResolvedValue(undefined);
+
+      // Move node 3 to the front (insert at flat index 0).
+      await useAgentNodeStore.getState().reorderAgentNode(3, 0);
+
+      expect(order()).toEqual([3, 1, 2]);
+    });
+
+    it('is a no-op when the drop lands on the node’s own slot', async () => {
+      seed();
+      mockInvoke.mockResolvedValue(undefined);
+
+      await useAgentNodeStore.getState().reorderAgentNode(2, 1); // already at index 1
+
+      expect(order()).toEqual([1, 2, 3]);
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('rolls back via a refetch when persistence fails', async () => {
+      seed();
+      const serverTruth = [makeNode({ id: 1, position: 0 }), makeNode({ id: 2, position: 1 }), makeNode({ id: 3, position: 2 })];
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'update_session_positions') return Promise.reject(new Error('db locked'));
+        if (cmd === 'list_sessions') return Promise.resolve(serverTruth);
+        return Promise.resolve(undefined);
+      });
+
+      await useAgentNodeStore.getState().reorderAgentNode(1, 3);
+
+      // The optimistic move is discarded: we resync from the backend's truth
+      // (the refetch clears the transient error as it reloads).
+      expect(order()).toEqual([1, 2, 3]);
+      expect(mockInvoke).toHaveBeenCalledWith('list_sessions');
+    });
+  });
+
+  describe('swapAgentNodes', () => {
+    it('exchanges two nodes’ positions and persists just those two', async () => {
+      useAgentNodeStore.setState({
+        agentNodes: [
+          makeNode({ id: 1, position: 0 }),
+          makeNode({ id: 2, position: 1 }),
+          makeNode({ id: 3, position: 2 }),
+        ],
+      });
+      mockInvoke.mockResolvedValue(undefined);
+
+      await useAgentNodeStore.getState().swapAgentNodes(1, 3);
+
+      expect(useAgentNodeStore.getState().agentNodes.map(n => n.id)).toEqual([3, 2, 1]);
+      expect(mockInvoke).toHaveBeenCalledWith('update_session_positions', {
+        updates: expect.arrayContaining([[1, 2], [3, 0]]),
+      });
+    });
+
+    it('refuses to swap nodes that live in different meshes', async () => {
+      useAgentNodeStore.setState({
+        agentNodes: [
+          makeNode({ id: 1, mesh_id: 1, position: 0 }),
+          makeNode({ id: 2, mesh_id: 2, position: 0 }),
+        ],
+      });
+
+      await useAgentNodeStore.getState().swapAgentNodes(1, 2);
+
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
   });
 });

@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 13;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -64,6 +64,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             cli_session_id TEXT,
             worktree_name TEXT,
             use_worktree INTEGER NOT NULL DEFAULT 1,
+            position INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -83,6 +84,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_mesh_config_columns(&conn)?;
     ensure_agent_node_source_issue(&conn)?;
     ensure_agent_node_use_worktree(&conn)?;
+    ensure_agent_node_position(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
@@ -239,6 +241,46 @@ pub(crate) fn ensure_agent_node_use_worktree(conn: &Connection) -> SqlResult<()>
     if !has_col {
         conn.execute("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1", [])?;
         tracing::warn!("ensure_agent_node_use_worktree: added missing use_worktree column");
+    }
+    Ok(())
+}
+
+/// Safety net (v13): ensure the `position` column exists on agent_nodes, used
+/// for drag-to-reorder grid order within a mesh. On first add, backfill each
+/// node's position as its 0-based rank by `created_at` within its own mesh, so
+/// existing nodes keep the order they already render in (lists previously
+/// sorted by `created_at ASC`). Ties broken by `id` for determinism.
+pub(crate) fn ensure_agent_node_position(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'position'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute("ALTER TABLE agent_nodes ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
+        conn.execute(
+            "UPDATE agent_nodes SET position = (
+                 SELECT COUNT(*) FROM agent_nodes AS earlier
+                 WHERE earlier.mesh_id = agent_nodes.mesh_id
+                   AND (earlier.created_at < agent_nodes.created_at
+                        OR (earlier.created_at = agent_nodes.created_at AND earlier.id < agent_nodes.id))
+             )",
+            [],
+        )?;
+        tracing::warn!("ensure_agent_node_position: added missing position column and backfilled per-mesh order");
     }
     Ok(())
 }
@@ -620,7 +662,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -636,6 +678,7 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         worktree_name: row.get(9)?,
         use_worktree: row.get::<_, i32>(12)? != 0,
         source_issue: row.get(11)?,
+        position: row.get(13)?,
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -747,9 +790,16 @@ pub fn create_agent_node(
     use_worktree: bool,
 ) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
+    // Append at the end of this mesh's grid order. New nodes land last so an
+    // existing arrangement isn't disturbed by a fresh spawn.
+    let next_position: i64 = db.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM agent_nodes WHERE mesh_id = ?1",
+        params![mesh_id],
+        |row| row.get(0),
+    )?;
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, use_worktree)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9)",
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, use_worktree, position)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10)",
         params![
             mesh_id,
             name,
@@ -759,11 +809,27 @@ pub fn create_agent_node(
             provider.to_string(),
             worktree_name,
             source_issue,
-            if use_worktree { 1 } else { 0 }
+            if use_worktree { 1 } else { 0 },
+            next_position
         ],
     )?;
     let id = db.last_insert_rowid();
     get_agent_node_by_id_inner(&db, id)
+}
+
+/// Persist new grid positions for a batch of agent nodes (drag-to-reorder).
+/// Callers send the full new ordering for the affected mesh so the DB stays in
+/// sync with the frontend's optimistic update. Mirrors `update_mesh_positions_batch`.
+pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
+    if updates.is_empty() { return Ok(()); }
+    let db = get().lock().unwrap();
+    for (id, pos) in updates {
+        db.execute(
+            "UPDATE agent_nodes SET position = ?1 WHERE id = ?2",
+            params![pos, id],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
@@ -783,7 +849,7 @@ pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {
 pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE status != 'archived' ORDER BY created_at ASC", AGENT_NODE_COLUMNS)
+        &format!("SELECT {} FROM agent_nodes WHERE status != 'archived' ORDER BY mesh_id ASC, position ASC, created_at ASC", AGENT_NODE_COLUMNS)
     )?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
@@ -792,7 +858,7 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
 pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY created_at ASC", AGENT_NODE_COLUMNS)
+        &format!("SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC", AGENT_NODE_COLUMNS)
     )?;
     let rows = stmt.query_map(params![mesh_id], map_agent_node_row)?;
     rows.collect()

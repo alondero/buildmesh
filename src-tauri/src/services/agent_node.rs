@@ -311,6 +311,7 @@ mod tests {
             worktree_name: worktree_name.map(str::to_string),
             use_worktree: worktree_name.is_some(),
             source_issue: None,
+            position: 0,
             created_at: Utc::now(),
         }
     }
