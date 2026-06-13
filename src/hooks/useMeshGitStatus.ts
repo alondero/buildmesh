@@ -8,6 +8,7 @@ import {
   type GitStatus,
 } from '../lib/tauri';
 import { GIT_CHANGED } from '../lib/events';
+import { pathMatchesGitEvent } from '../lib/paths';
 
 export interface MeshGitStatus {
   files: GitStatus[];
@@ -85,9 +86,11 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
     const unlisten = listen<{ path: string; internal_path?: string }>(
       GIT_CHANGED,
       (event) => {
-        const matchPath = event.payload.path === meshPath;
-        const matchInternal = event.payload.internal_path === meshPath;
-        if (matchPath || matchInternal) {
+        // Issue #304: the watcher emits the worktree subdir path, not the
+        // mesh root, so a strict `===` against `meshPath` never matches.
+        // The helper also normalizes back/forward-slash and case
+        // differences for the WSL UNC path case.
+        if (pathMatchesGitEvent(event.payload, meshPath)) {
           refresh();
         }
       }

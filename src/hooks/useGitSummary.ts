@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getGitSummary, type GitSummary } from '../lib/tauri';
 import { GIT_CHANGED } from '../lib/events';
+import { pathMatchesGitEvent } from '../lib/paths';
 
 // Module-level shared cache (keyed by git path)
 const cache = new Map<string, GitSummary>();
@@ -18,19 +19,20 @@ function installListener() {
   listenerInstalled = true;
 
   listen(GIT_CHANGED, (event) => {
-    const { path, internal_path } = event.payload as { path: string; internal_path?: string };
-    // Invalidate both the host path (UNC) and internal path (Linux) for this watched directory
-    cache.delete(path);
-    if (internal_path) cache.delete(internal_path);
-    pendingFetches.delete(path);
-    if (internal_path) pendingFetches.delete(internal_path);
-    // Notify all subscribers watching either path
-    [path, internal_path].filter(Boolean).forEach(p => {
-      const subs = subscribers.get(p!);
-      if (subs) {
-        subs.forEach(cb => cb());
+    const payload = event.payload as { path: string; internal_path?: string };
+    // Issue #304: the watcher emits the worktree subdir path (and on WSL a
+    // UNC backslash form), but subscribers register with the worktree path
+    // produced by getNodeGitPath — so the strict `===` lookup misses both
+    // the slash-mismatch case and any future subdir events. Iterate all
+    // subscribers and use the shared helper for each. N is small (the
+    // number of mounted hook instances), so the O(N) scan is fine.
+    for (const [key, subs] of subscribers) {
+      if (pathMatchesGitEvent(payload, key)) {
+        cache.delete(key);
+        pendingFetches.delete(key);
+        subs.forEach((cb) => cb());
       }
-    });
+    }
   });
 }
 
