@@ -1,13 +1,17 @@
 import { Fragment, useEffect, useMemo, useState, useRef, type MouseEvent as ReactMouseEvent } from 'react';
+import {
+  DndContext, DragOverlay, PointerSensor, useSensor, useSensors, pointerWithin,
+  type DragStartEvent, type DragMoveEvent, type DragEndEvent,
+} from '@dnd-kit/core';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
-import { AgentTerminal, terminalManager } from '../Terminal/Terminal';
-import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
+import { terminalManager } from '../Terminal/Terminal';
 import { FileExplorerPanel } from '../FileTree/FileExplorerPanel';
 import { watchSession, unwatchSession } from '../../lib/tauri';
-import { GridNodeHeader } from './GridNodeHeader';
 import { GridSplitter } from './GridSplitter';
+import { NodeCard, type BuildRunState } from './NodeCard';
+import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
 
 const MIN_PANE_PERCENT = 15;
@@ -95,38 +99,20 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
       className={`flex-1 flex overflow-hidden ${isMultiPane ? 'p-1 bg-bg-surface' : 'flex-col'}`}
     >
       {nodes.map((node, idx) => {
-        const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
-        const isActive = node.id === activeNodeId;
-        const borderClass = node.status === 'awaiting_input'
-          ? 'border-status-warning animate-border-pulse'
-          : isActive
-            ? 'border-accent-cyan shadow-[0_0_0_2px_var(--color-accent-cyan),0_0_16px_3px_var(--color-accent-cyan-dim)]'
-            : 'border-border-default hover:border-accent-cyan/50';
         return (
           <Fragment key={node.id}>
             <div
               className="flex flex-col overflow-hidden"
               style={isMultiPane ? { width: `${widths[idx]}%`, flex: '0 0 auto' } : { flex: '1 1 0%' }}
             >
-              <div
-                onClick={() => { if (!isActive) setActiveNode(node.id); }}
-                className={`flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-colors ${borderClass}`}
-              >
-                <GridNodeHeader node={node} onBuildRun={onBuildRun} />
-                <div className="flex-1 flex flex-col overflow-hidden bg-black">
-                  <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
-                    <AgentTerminal sessionId={node.id} />
-                  </div>
-                  {isBuildRunOpen && (
-                    <BuildRunTerminal
-                      sessionId={node.id}
-                      mode={isBuildRunOpen}
-                      useWorktree={node.use_worktree}
-                      onClose={() => setBuildRunOpen(null)}
-                    />
-                  )}
-                </div>
-              </div>
+              <NodeCard
+                node={node}
+                isActive={node.id === activeNodeId}
+                onActivate={setActiveNode}
+                onBuildRun={onBuildRun}
+                buildRunOpen={buildRunOpen}
+                setBuildRunOpen={setBuildRunOpen}
+              />
             </div>
             {isMultiPane && idx < nodes.length - 1 && (
               <div
@@ -152,6 +138,8 @@ export function SessionView() {
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
+  const reorderAgentNode = useAgentNodeStore(state => state.reorderAgentNode);
+  const swapAgentNodes = useAgentNodeStore(state => state.swapAgentNodes);
 
   const activeNode = useMemo(
     () => agentNodes.find(s => s.id === activeNodeId) ?? null,
@@ -160,8 +148,10 @@ export function SessionView() {
 
   const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
   const closeFileExplorer = useUIStore(state => state.closeFileExplorer);
+  const maximizedNodeId = useUIStore(state => state.maximizedNodeId);
+  const clearMaximizedNode = useUIStore(state => state.clearMaximizedNode);
   const [fileExplorerWidth, setFileExplorerWidth] = useState(360);
-  const [openBuildRun, setOpenBuildRun] = useState<{ nodeId: number; mode: 'build' | 'run' | 'terminal' } | null>(null);
+  const [openBuildRun, setOpenBuildRun] = useState<BuildRunState>(null);
 
   const filteredNodes = useMemo(() => {
     if (selectedMeshId === null) {
@@ -169,6 +159,15 @@ export function SessionView() {
     }
     return agentNodes.filter(s => s.mesh_id === selectedMeshId);
   }, [agentNodes, selectedMeshId]);
+
+  // The node to solo, if maximize is active AND that node is visible in the
+  // current mesh filter. Deriving it (rather than trusting maximizedNodeId
+  // blindly) means a node that's closed or filtered out simply falls back to
+  // the grid — the auto-clear effect below then tidies the stale id.
+  const maximizedNode = useMemo(
+    () => (maximizedNodeId == null ? null : filteredNodes.find(n => n.id === maximizedNodeId) ?? null),
+    [maximizedNodeId, filteredNodes],
+  );
 
   // Get node for file explorer context
   const fileExplorerNode = useMemo(() => {
@@ -220,6 +219,106 @@ export function SessionView() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeNode?.id]);
 
+  // Escape exits maximize. Only bound while something is maximized so we don't
+  // intercept Escape (e.g. agent CLIs read it) during normal grid use.
+  useEffect(() => {
+    if (maximizedNode == null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') clearMaximizedNode();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [maximizedNode, clearMaximizedNode]);
+
+  // If the maximized node disappears (closed, or filtered out by a mesh
+  // switch), drop the stale id so it doesn't suppress the grid on return.
+  useEffect(() => {
+    if (maximizedNodeId != null && maximizedNode == null) {
+      clearMaximizedNode();
+    }
+  }, [maximizedNodeId, maximizedNode, clearMaximizedNode]);
+
+  // Reflow the terminal grid whenever we enter or leave maximize: the soloed
+  // terminal grows to fill the area, and on restore every pane shrinks back.
+  // fitAll covers both directions. Never dispose — the singleton survives this.
+  useEffect(() => {
+    terminalManager.fitAll();
+  }, [maximizedNode?.id]);
+
+  // After a drag reorder/swap, nodes move into slots that may be a different
+  // size, so refit. Keyed on the id sequence so it fires only when order
+  // actually changes (status flips reuse ids → no refit). Never disposes.
+  const orderKey = useMemo(() => filteredNodes.map(n => n.id).join(','), [filteredNodes]);
+  useEffect(() => {
+    terminalManager.fitAll();
+  }, [orderKey]);
+
+  // --- Drag-to-reorder / swap -------------------------------------------------
+  // The title bar is the drag handle; collision is pointer-based (pointerWithin)
+  // so the xterm canvas in a node body never blocks a drop. Drop intent (insert
+  // vs swap) is decided from where the pointer sits across the target node.
+  const [activeDragNodeId, setActiveDragNodeId] = useState<number | null>(null);
+  const [dropIntent, setDropIntent] = useState<DropIntent>(null);
+  const activatorXRef = useRef(0);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+  );
+
+  const activeDragNode = useMemo(
+    () => (activeDragNodeId == null ? null : agentNodes.find(n => n.id === activeDragNodeId) ?? null),
+    [activeDragNodeId, agentNodes],
+  );
+
+  const intentFromEvent = (e: DragMoveEvent | DragEndEvent): DropIntent => {
+    const data = e.active.data.current as { nodeId: number; meshId: number } | undefined;
+    if (!data) return null;
+    const overData = e.over?.data.current as { nodeId: number; meshId: number } | undefined;
+    return computeDropIntent({
+      overNodeId: overData?.nodeId ?? null,
+      overMeshId: overData?.meshId ?? null,
+      overRectLeft: e.over?.rect.left ?? 0,
+      overRectWidth: e.over?.rect.width ?? 0,
+      pointerX: activatorXRef.current + e.delta.x,
+      draggedId: data.nodeId,
+      draggedMeshId: data.meshId,
+    });
+  };
+
+  const handleDragStart = (e: DragStartEvent) => {
+    const data = e.active.data.current as { nodeId: number; meshId: number } | undefined;
+    if (!data) return;
+    activatorXRef.current = (e.activatorEvent as PointerEvent).clientX ?? 0;
+    setActiveDragNodeId(data.nodeId);
+    setDropIntent(null);
+  };
+
+  const handleDragMove = (e: DragMoveEvent) => {
+    setDropIntent(intentFromEvent(e));
+  };
+
+  const handleDragEnd = (e: DragEndEvent) => {
+    const data = e.active.data.current as { nodeId: number; meshId: number } | undefined;
+    const intent = intentFromEvent(e);
+    setActiveDragNodeId(null);
+    setDropIntent(null);
+    if (!data || !intent) return;
+    if (intent.kind === 'swap') {
+      swapAgentNodes(data.nodeId, intent.targetNodeId);
+      return;
+    }
+    const meshNodes = useAgentNodeStore.getState().agentNodes
+      .filter(n => n.mesh_id === data.meshId)
+      .sort((a, b) => a.position - b.position);
+    const targetIdx = meshNodes.findIndex(n => n.id === intent.targetNodeId);
+    if (targetIdx === -1) return;
+    reorderAgentNode(data.nodeId, intent.kind === 'insert-before' ? targetIdx : targetIdx + 1);
+  };
+
+  const handleDragCancel = () => {
+    setActiveDragNodeId(null);
+    setDropIntent(null);
+  };
+
   return (
     <div className="flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
       <div className="flex-1 flex overflow-hidden">
@@ -234,8 +333,29 @@ export function SessionView() {
           />
         )}
 
+        <DndContext
+          sensors={sensors}
+          collisionDetection={pointerWithin}
+          onDragStart={handleDragStart}
+          onDragMove={handleDragMove}
+          onDragEnd={handleDragEnd}
+          onDragCancel={handleDragCancel}
+        >
+        <DropIntentContext.Provider value={dropIntent}>
         <div className="flex-1 flex overflow-hidden">
-          {filteredNodes.length === 0 ? (
+          {maximizedNode ? (
+            <div className="flex-1 flex flex-col p-1 bg-bg-surface overflow-hidden">
+              <NodeCard
+                node={maximizedNode}
+                isActive={maximizedNode.id === activeNodeId}
+                onActivate={setActiveNode}
+                onBuildRun={(nodeId, mode) => setOpenBuildRun({ nodeId, mode })}
+                buildRunOpen={openBuildRun}
+                setBuildRunOpen={setOpenBuildRun}
+                draggable={false}
+              />
+            </div>
+          ) : filteredNodes.length === 0 ? (
             <div className="flex-1 flex items-center justify-center text-text-muted">
               <div className="text-center max-w-sm">
                 <p className="text-xl mb-2 text-text-primary font-sans font-semibold">Buildmesh</p>
@@ -271,6 +391,11 @@ export function SessionView() {
             />
           )}
         </div>
+        </DropIntentContext.Provider>
+        <DragOverlay dropAnimation={null}>
+          {activeDragNode ? <NodeDragPreview node={activeDragNode} /> : null}
+        </DragOverlay>
+        </DndContext>
       </div>
     </div>
   );

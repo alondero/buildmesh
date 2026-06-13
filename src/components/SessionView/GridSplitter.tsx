@@ -2,9 +2,8 @@ import { useEffect, useRef, useState, useCallback, type MouseEvent as ReactMouse
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useGridLayoutStore, resolveLayout } from '../../stores/gridLayoutStore';
-import { AgentTerminal, terminalManager } from '../Terminal/Terminal';
-import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
-import { GridNodeHeader } from './GridNodeHeader';
+import { terminalManager } from '../Terminal/Terminal';
+import { NodeCard } from './NodeCard';
 import { getGridRows, equalSizes } from '../../hooks/useGridLayout';
 
 const MIN_PANE_PX = 300;
@@ -176,13 +175,6 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
             <div className="flex flex-1 overflow-hidden">
               {Array.from({ length: rowCount }, (_, colIdx) => {
                 const node = nodes[startIdx + colIdx];
-                const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
-                const isActive = node.id === activeNodeId;
-                const borderClass = node.status === 'awaiting_input'
-                  ? 'border-status-warning animate-border-pulse'
-                  : isActive
-                    ? 'border-accent-cyan shadow-[0_0_0_2px_var(--color-accent-cyan),0_0_16px_3px_var(--color-accent-cyan-dim)]'
-                    : 'border-border-default hover:border-accent-cyan/50';
 
                 const colStyle: React.CSSProperties = {
                   width: `calc(${widths[colIdx] ?? 100 / rowCount}% - ${totalHandleWidthPct / rowCount}%)`,
@@ -191,25 +183,14 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
 
                 return (
                   <div key={node.id} className="flex" style={colStyle}>
-                    <div
-                      onClick={() => { if (!isActive) setActiveNode(node.id); }}
-                      className={`flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-colors ${borderClass}`}
-                    >
-                      <GridNodeHeader node={node} onBuildRun={onBuildRun} />
-                      <div className="flex-1 flex flex-col overflow-hidden bg-black">
-                        <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
-                          <AgentTerminal sessionId={node.id} />
-                        </div>
-                        {isBuildRunOpen && (
-                          <BuildRunTerminal
-                            sessionId={node.id}
-                            mode={isBuildRunOpen}
-                            useWorktree={node.use_worktree}
-                            onClose={() => setBuildRunOpen(null)}
-                          />
-                        )}
-                      </div>
-                    </div>
+                    <NodeCard
+                      node={node}
+                      isActive={node.id === activeNodeId}
+                      onActivate={setActiveNode}
+                      onBuildRun={onBuildRun}
+                      buildRunOpen={buildRunOpen}
+                      setBuildRunOpen={setBuildRunOpen}
+                    />
                     {colIdx < rowCount - 1 && (
                       <div
                         onMouseDown={(e) => handleMouseDown(e, 'col', colIdx, rowIdx)}

@@ -17,7 +17,31 @@ export interface AgentNode {
   cli_session_id?: string;
   worktree_name?: string;
   use_worktree: boolean;
+  position: number;
   created_at: string;
+}
+
+/// Apply a mesh's re-positioned nodes optimistically and persist them. The
+/// updated nodes replace that mesh's entries; the whole array is re-sorted by
+/// (mesh_id, position) so the in-memory order matches `list_agent_nodes`. On a
+/// backend error we resync from the DB rather than leave the UI out of step.
+async function persistPositions(
+  set: (partial: Partial<AgentNodeState>) => void,
+  get: () => AgentNodeState,
+  updatedMeshNodes: AgentNode[],
+) {
+  const byId = new Map(updatedMeshNodes.map(n => [n.id, n]));
+  const merged = get().agentNodes
+    .map(n => byId.get(n.id) ?? n)
+    .sort((x, y) => x.mesh_id - y.mesh_id || x.position - y.position);
+  set({ agentNodes: merged });
+  try {
+    const updates = updatedMeshNodes.map(n => [n.id, n.position] as [number, number]);
+    await invoke('update_session_positions', { updates });
+  } catch (e) {
+    set({ error: String(e) });
+    await get().fetchAgentNodes();
+  }
 }
 
 type WorktreeCloseActionResolver = (
@@ -48,6 +72,8 @@ interface AgentNodeState {
   createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   renameAgentNode: (id: number, name: string) => Promise<void>;
+  reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
+  swapAgentNodes: (aId: number, bId: number) => Promise<void>;
   setActiveNode: (id: number | null) => void;
   spawnAgent: (nodeId: number, provider: string, rows?: number, cols?: number) => Promise<void>;
   spawnHandoverAgent: (meshId: number, prefill: string, provider?: string) => Promise<AgentNode>;
@@ -216,6 +242,50 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       }));
       throw e;
     }
+  },
+
+  // Drag-to-reorder: move `nodeId` to flat `insertIndex` within its own mesh's
+  // ordered list, renumber positions 0..n-1, and persist. Optimistic so the
+  // grid rearranges instantly; a backend failure resyncs from the DB. Order is
+  // mesh-scoped — other meshes' nodes are never touched (matches the
+  // same-mesh-only drag guard in the UI). The merged array is re-sorted by
+  // (mesh_id, position) to mirror `list_agent_nodes`' ordering exactly.
+  reorderAgentNode: async (nodeId, insertIndex) => {
+    const dragged = get().agentNodes.find(n => n.id === nodeId);
+    if (!dragged) return;
+    const meshId = dragged.mesh_id;
+
+    const meshNodes = get().agentNodes
+      .filter(n => n.mesh_id === meshId)
+      .sort((a, b) => a.position - b.position);
+    const from = meshNodes.findIndex(n => n.id === nodeId);
+    if (from === -1) return;
+
+    let to = insertIndex;
+    meshNodes.splice(from, 1);
+    if (from < to) to -= 1; // removing an earlier element shifts the target left
+    to = Math.max(0, Math.min(to, meshNodes.length));
+    meshNodes.splice(to, 0, dragged);
+    if (from === to) return; // no-op (e.g. dropped on its own boundary)
+
+    const renumbered = meshNodes.map((n, i) => ({ ...n, position: i }));
+    await persistPositions(set, get, renumbered);
+  },
+
+  // Swap the grid slots of two nodes in the same mesh by exchanging their
+  // `position` values. Only those two rows change, so we send just two updates.
+  swapAgentNodes: async (aId, bId) => {
+    if (aId === bId) return;
+    const a = get().agentNodes.find(n => n.id === aId);
+    const b = get().agentNodes.find(n => n.id === bId);
+    if (!a || !b || a.mesh_id !== b.mesh_id) return;
+
+    const swapped = get().agentNodes
+      .filter(n => n.mesh_id === a.mesh_id)
+      .map(n => n.id === aId ? { ...n, position: b.position }
+                : n.id === bId ? { ...n, position: a.position }
+                : n);
+    await persistPositions(set, get, swapped);
   },
 
   setActiveNode: (id) => {

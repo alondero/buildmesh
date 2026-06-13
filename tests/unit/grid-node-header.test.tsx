@@ -53,6 +53,7 @@ const NODE: AgentNode = {
   provider: 'anthropic',
   status: 'running',
   use_worktree: false,
+  position: 0,
   created_at: new Date(0).toISOString(),
 };
 
@@ -141,6 +142,39 @@ describe('GridNodeHeader worktree/root pill', () => {
 
     rerender(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     expect(container.querySelector('[title="Agent runs in the repository root"]')).toBeTruthy();
+  });
+});
+
+describe('GridNodeHeader maximize (#65)', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    useUIStore.setState({ fileExplorerContext: null, maximizedNodeId: null });
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+  });
+
+  it('double-clicking the header maximizes this node', () => {
+    const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    // The header root carries the double-click handler.
+    fireEvent.doubleClick(container.firstChild as Element);
+    expect(useUIStore.getState().maximizedNodeId).toBe(NODE.id);
+  });
+
+  it('double-clicking again restores the grid', () => {
+    const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    fireEvent.doubleClick(container.firstChild as Element);
+    fireEvent.doubleClick(container.firstChild as Element);
+    expect(useUIStore.getState().maximizedNodeId).toBe(null);
+  });
+
+  it('the explicit button toggles maximize and flips its label', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    fireEvent.click(getByLabelText('Maximize agent node'));
+    expect(useUIStore.getState().maximizedNodeId).toBe(NODE.id);
+    // Once maximized, the same control offers "restore".
+    fireEvent.click(getByLabelText('Restore grid layout'));
+    expect(useUIStore.getState().maximizedNodeId).toBe(null);
   });
 });
 

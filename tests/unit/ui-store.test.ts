@@ -51,4 +51,33 @@ describe('useUIStore', () => {
       expect(useUIStore.getState().changedFilesOpen).toBe(false);
     });
   });
+
+  describe('maximizedNode (#65)', () => {
+    beforeEach(() => {
+      useUIStore.setState({ maximizedNodeId: null });
+    });
+
+    it('toggles a node into maximized state', () => {
+      useUIStore.getState().toggleMaximizedNode(7);
+      expect(useUIStore.getState().maximizedNodeId).toBe(7);
+    });
+
+    it('toggling the same node again restores the grid', () => {
+      useUIStore.getState().toggleMaximizedNode(7);
+      useUIStore.getState().toggleMaximizedNode(7);
+      expect(useUIStore.getState().maximizedNodeId).toBe(null);
+    });
+
+    it('toggling a different node switches the solo target', () => {
+      useUIStore.getState().toggleMaximizedNode(7);
+      useUIStore.getState().toggleMaximizedNode(9);
+      expect(useUIStore.getState().maximizedNodeId).toBe(9);
+    });
+
+    it('clearMaximizedNode exits maximize (Escape path)', () => {
+      useUIStore.getState().toggleMaximizedNode(7);
+      useUIStore.getState().clearMaximizedNode();
+      expect(useUIStore.getState().maximizedNodeId).toBe(null);
+    });
+  });
 });
