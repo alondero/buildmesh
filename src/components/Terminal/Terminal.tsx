@@ -269,6 +269,15 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       const dims = inst.fitAddon.proposeDimensions();
       try {
         await spawnAgent(sessionId, node.provider, dims?.rows, dims?.cols);
+        // The attach-time fit raced ahead of the agent process: its resize_agent
+        // was swallowed as "Agent not running", and if proposeDimensions was
+        // undefined the PTY started at the 80x24 fallback. Now that the agent is
+        // up, push the term's real size so it doesn't wrap at 80 cols in a wide
+        // pane. Unconditional (not guarded by `cancelled`): spawnAgent's internal
+        // fetchAgentNodes flips status idle->running, which re-runs this effect
+        // and may set cancelled before we get here. syncPtySize is self-guarding
+        // (no-op if the instance is gone/detached), so calling it is always safe.
+        terminalManager.syncPtySize(sessionId);
       } catch (e) {
         console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
       }
