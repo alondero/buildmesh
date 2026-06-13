@@ -42,13 +42,14 @@ pub const PREFILL_ENV_VAR: &str = "BUILDMESH_PREFILL";
 /// `checkpoint(name)` call and at the end via `total()`. Output goes to
 /// `buildmesh.log` via the existing `tracing` setup — no extra plumbing.
 ///
-/// This is part of the spawn-latency investigation (5-10s lag between
-/// clicking "Spawn" in the GitHub Issues dialog and visible UI feedback).
-/// The checkpoints validate which step dominates the wall-clock time —
-/// the prime suspect is `git::sync::fetch_origin` (network-bound) but we
-/// want hard data before the two-stage spawn refactor lands. Once the
-/// refactor is stable, this can be removed; the only consumer is the
-/// `tracing` log file.
+/// Born of the spawn-latency investigation (5-10s lag between clicking
+/// "Spawn" and visible UI feedback). The checkpoints proved the bottleneck
+/// was NOT the hypothesised `git::sync::fetch_origin` (network) but
+/// `worktree_create` — 97% of which was libgit2's checkout. That checkout
+/// now shells out to `git worktree add` (~20× faster; ADR 0007 amendment),
+/// so a fresh node is usable in ~2s instead of ~14s. The timer is kept as a
+/// cheap spawn-latency regression guard; its only consumer is the `tracing`
+/// log file.
 struct SpawnTimer {
     start: std::time::Instant,
     session_id: i64,
