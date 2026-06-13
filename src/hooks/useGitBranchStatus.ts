@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
 import { GIT_CHANGED } from '../lib/events';
+import { pathMatchesGitEvent } from '../lib/paths';
 
 /**
  * Tracks the current Git branch (name, ahead/behind, short SHA) of an arbitrary
@@ -39,13 +40,15 @@ export function useGitBranchStatus(gitPath: string | null): {
     fetch(gitPath);
   }, [gitPath, fetch]);
 
-  // Refetch when the file watcher reports a change for this path
+  // Refetch when the file watcher reports a change for this path.
+  // Issue #304: the watcher emits the worktree subdir (or a WSL UNC form
+  // with backslashes) — `pathMatchesGitEvent` normalizes both.
   useEffect(() => {
     if (!gitPath) return;
     const unlisten = listen<{ path: string; internal_path?: string }>(
       GIT_CHANGED,
       (event) => {
-        if (event.payload.path === gitPath || event.payload.internal_path === gitPath) {
+        if (pathMatchesGitEvent(event.payload, gitPath)) {
           refresh();
         }
       },

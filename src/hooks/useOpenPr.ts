@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getOpenPrForNode, type OpenPr } from '../lib/tauri';
 import { GIT_CHANGED } from '../lib/events';
+import { pathMatchesGitEvent } from '../lib/paths';
 
 // Module-level shared cache (keyed by nodeId). null is a real state
 // ("no open PR"), so we use `has` to disambiguate "uncached" from "cached null".
@@ -29,10 +30,13 @@ function installListener() {
   listenerInstalled = true;
 
   listen(GIT_CHANGED, (event) => {
-    const { path, internal_path } = event.payload as { path: string; internal_path?: string };
-    [path, internal_path].filter(Boolean).forEach(p => {
-      const subs = pathSubscribers.get(p!);
-      if (!subs) return;
+    const payload = event.payload as { path: string; internal_path?: string };
+    // Issue #304: same pattern as useGitSummary — iterate all path-keyed
+    // subscribers and use the shared helper. The previous
+    // `[path, internal_path].filter(Boolean)` lookup missed the WSL UNC
+    // slash-mismatch case and any future worktree-subdir events.
+    for (const [key, subs] of pathSubscribers) {
+      if (!pathMatchesGitEvent(payload, key)) continue;
       // Invalidate every affected node first, then notify. The first notify
       // starts a fetch (registering a pendingFetch); later subscribers of the
       // same node then dedup onto it instead of refetching.
@@ -41,7 +45,7 @@ function installListener() {
         pendingFetches.delete(s.nodeId);
       });
       subs.forEach(s => s.notify());
-    });
+    }
   });
 }
 

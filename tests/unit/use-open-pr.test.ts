@@ -4,6 +4,14 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import type { useOpenPr as UseOpenPr } from '../../src/hooks/useOpenPr';
 
+// Force the helper to behave as on Windows so the slash-normalization
+// and case-insensitive branches run, regardless of the host running the
+// suite.
+vi.mock('../../src/lib/platform', () => ({
+  isMac: false,
+  isWindows: true,
+}));
+
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 
 const PR_A = { number: 11, url: 'https://github.com/o/r/pull/11', title: 'first', draft: false };
@@ -56,5 +64,31 @@ describe('useOpenPr', () => {
     const second = renderHook(() => useOpenPr(7, GIT_PATH));
     await waitFor(() => expect(second.result.current.pr).toEqual(PR_A));
     expect(mockInvoke.mock.calls.length).toBe(callsBefore);
+  });
+
+  // Regression for issue #304: the helper-based listener iterates all
+  // subscribers and asks `pathMatchesGitEvent` for each, so a future
+  // GIT_CHANGED event shape (e.g. worktree-subdir events the file_watcher
+  // doesn't emit today) won't silently strand the cache invalidation.
+  // The hook-level contract — that a refetch happens for a matching event
+  // — is already covered by the second test above; the slash/case
+  // normalization is pinned by `tests/unit/paths.test.ts`. Keeping this
+  // test as a smoke check for the listener's wiring.
+  it('refetches when GIT_CHANGED fires for an event whose internal_path matches the worktree path', async () => {
+    mockInvoke.mockResolvedValue(PR_A);
+    const { result } = renderHook(() => useOpenPr(7, GIT_PATH));
+    await waitFor(() => expect(result.current.pr).toEqual(PR_A));
+
+    mockInvoke.mockResolvedValue(PR_B);
+    await act(async () => {
+      await emit('git-changed', {
+        // UNC form the WSL host_path produces — should be normalized away
+        // by pathMatchesGitEvent.
+        path: '\\\\wsl$\\Ubuntu\\home\\user\\repo\\.claude\\worktrees\\gentle-fox',
+        internal_path: GIT_PATH,
+      });
+    });
+
+    await waitFor(() => expect(result.current.pr).toEqual(PR_B));
   });
 });

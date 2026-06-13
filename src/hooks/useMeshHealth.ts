@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
 import { GIT_CHANGED } from '../lib/events';
+import { pathMatchesGitEvent } from '../lib/paths';
 
 /**
  * Tracks the Mesh Git-health snapshot (issue #231) for a given mesh.
@@ -49,15 +50,16 @@ export function useMeshHealth(
   // Refetch on GIT_CHANGED for this mesh path (file-watcher driven).
   // The mesh health depends on the root's HEAD ref and the worktree set;
   // any git-changed event for the root path or any of the worktree paths
-  // could invalidate the snapshot.
+  // could invalidate the snapshot. Issue #304: the watcher emits the
+  // *worktree* subdir path, not the mesh root, so a strict `===` against
+  // `meshPath` never matched. `pathMatchesGitEvent` also recognizes
+  // `<meshPath>/.claude/worktrees/<name>` as a match.
   useEffect(() => {
     if (meshId == null || meshPath == null) return;
     const unlisten = listen<{ path: string; internal_path?: string }>(
       GIT_CHANGED,
       (event) => {
-        const changed = event.payload.path === meshPath;
-        const internalMatches = event.payload.internal_path === meshPath;
-        if (changed || internalMatches) refresh();
+        if (pathMatchesGitEvent(event.payload, meshPath)) refresh();
       },
     );
     return () => {

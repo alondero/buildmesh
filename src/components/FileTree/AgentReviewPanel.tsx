@@ -6,6 +6,7 @@ import {
   type DiffResult,
 } from '../../lib/tauri';
 import { GIT_CHANGED } from '../../lib/events';
+import { pathMatchesGitEvent } from '../../lib/paths';
 import { Diff, diffTotals } from '../Diff/Diff';
 import { FileTree } from './FileTree';
 
@@ -65,14 +66,15 @@ export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
   // the diff whenever the file watcher reports a change in *this* node's
   // worktree. Mirrors how the title-bar git summary chip stays live
   // (useGitSummary) — without this the panel silently goes stale and disagrees
-  // with the chip.
+  // with the chip. Issue #304: the watcher emits the worktree subdir path
+  // (and a WSL UNC backslash form) — `pathMatchesGitEvent` normalizes both.
   useEffect(() => {
     const unlisten = listen(GIT_CHANGED, (event) => {
-      const { path, internal_path } = event.payload as {
+      const payload = event.payload as {
         path: string;
         internal_path?: string;
       };
-      if (path === rootPath || internal_path === rootPath) {
+      if (pathMatchesGitEvent(payload, rootPath)) {
         fetchDiff({ background: true });
       }
     });
