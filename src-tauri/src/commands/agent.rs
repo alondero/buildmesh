@@ -187,6 +187,164 @@ pub(crate) fn format_issue_prefill(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Two-stage issue spawn (fast stage-1 + background stage-2)
+//
+// These two commands split the original `spawn_issue_agent` into a fast DB
+// write and a slow background task. The intent is to remove the 5-10s lag
+// between clicking "Spawn" in the GitHub Issues dialog and the modal
+// closing: the desktop frontend calls `create_issue_node` (which only
+// touches the DB) and immediately closes the modal, then fires
+// `start_node_background` (which does the slow git/worktree/PTY work)
+// without awaiting. The original synchronous `spawn_issue_agent` is kept
+// for the mobile HTTP route — its callers tolerate the wait because they
+// have no interactive UI to keep responsive.
+// ---------------------------------------------------------------------------
+
+/// A new agent node draft returned from the fast stage-1 spawn command.
+/// The frontend holds onto `prefill` and passes it back to
+/// `start_node_background` (no DB round-trip for the prefill — it's
+/// transient and <500 bytes).
+#[derive(serde::Serialize)]
+pub struct IssueNodeDraft {
+    #[serde(flatten)]
+    pub node: crate::models::AgentNode,
+    pub prefill: String,
+}
+
+/// Fast stage-1 of the GitHub-issue spawn flow. Creates a `Pending` agent
+/// node row, returns the row + the prefill the caller must pass to
+/// `start_node_background`. Does NOT touch the network, the worktree, or
+/// the process tree — so it returns in ~20ms instead of 5-10s.
+#[command]
+pub fn create_issue_node(
+    app: AppHandle,
+    mesh_id: i64,
+    issue_number: i64,
+    issue_title: String,
+    provider: Option<String>,
+) -> Result<IssueNodeDraft, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+        .map_err(|e| format!("{} — cannot derive issue URL", e))?;
+    let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
+
+    let effective_provider = crate::preferences::resolve_default_provider(
+        provider,
+        mesh.default_provider.clone(),
+        crate::preferences::default_provider(),
+    );
+    let branch = crate::commands::git::get_default_branch(mesh.path.clone());
+
+    let node = crate::services::agent_node::create_pending(
+        mesh.id,
+        &mesh.path,
+        &branch,
+        Some(&effective_provider),
+        Some(issue_number),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Reuse the existing semantic event so the frontend's `session-created`
+    // listener (which already triggers `fetchAgentNodes`) picks up the
+    // new node without us adding a new event-name coupling.
+    let _ = app.emit(
+        "session-created",
+        serde_json::json!({ "id": node.id }),
+    );
+
+    tracing::info!(
+        "create_issue_node: created pending node {} for issue #{} on mesh {}",
+        node.id,
+        issue_number,
+        mesh_id
+    );
+
+    Ok(IssueNodeDraft { node, prefill })
+}
+
+/// Slow stage-2 of the two-stage spawn flow. Runs the existing
+/// `spawn_agent_inner` pipeline (git fetch, worktree create, PTY spawn,
+/// workspace-trust + attention-hook write, reader thread) for a node
+/// row that already exists. Fire-and-forget — the Tauri command
+/// returns immediately; the work happens on a background task.
+///
+/// Emits `node-spawn-completed` on success and `node-spawn-failed` on
+/// failure. On failure, the node's status is updated to `Error` so the
+/// UI shows a red badge and the user can close the node normally.
+#[command]
+pub fn start_node_background(
+    app: AppHandle,
+    node_id: i64,
+    prefill: Option<String>,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn(async move {
+        let result = start_node_inner(&app, node_id, prefill.as_deref()).await;
+        match result {
+            Ok(()) => {
+                let _ = app.emit(
+                    "node-spawn-completed",
+                    serde_json::json!({ "node_id": node_id }),
+                );
+                tracing::info!("start_node_background: node {} ready", node_id);
+            }
+            Err(e) => {
+                tracing::error!(
+                    "start_node_background: node {} failed: {}",
+                    node_id,
+                    e
+                );
+                let _ = db::update_agent_node_status(node_id, SessionStatus::Error);
+                let _ = app.emit(
+                    "node-spawn-failed",
+                    serde_json::json!({ "node_id": node_id, "error": e }),
+                );
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Body of stage-2: load the node, optionally filter the prefill through
+/// the provider's `supports_prefill()` check, and delegate to the
+/// existing `spawn_agent_inner`. The same function is reused by
+/// `auto_resume_sessions` (via `spawn_agent_inner` directly) and the
+/// handover path (via `spawn_handover_agent`); this is the issue-spawn
+/// entry point.
+async fn start_node_inner(
+    app: &AppHandle,
+    node_id: i64,
+    prefill: Option<&str>,
+) -> Result<(), String> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    let provider = node.provider;
+    let prefill_text = if provider.adapter().supports_prefill() {
+        prefill.filter(|s| !s.is_empty()).map(String::from)
+    } else {
+        if prefill.is_some() {
+            tracing::warn!(
+                "start_node_inner: --prefill not supported for provider '{:?}', skipping",
+                provider
+            );
+        }
+        None
+    };
+
+    crate::agent::spawn::spawn_agent_inner(
+        app,
+        crate::agent::spawn::SpawnOptions {
+            session_id: node_id,
+            provider,
+            resume: None,
+            rows: 24,
+            cols: 80,
+            prefill: prefill_text,
+            node: Some(node),
+        },
+    )
+    .await
+}
+
 /// Spawn a new agent node pre-filled with selected text from a parent terminal.
 /// Used by the "Handover to new Node" context menu option.
 #[command]

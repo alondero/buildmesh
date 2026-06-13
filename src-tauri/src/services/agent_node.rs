@@ -3,7 +3,7 @@
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
-use crate::models::{AgentNode, PendingWorktreeRemoval, Provider};
+use crate::models::{AgentNode, PendingWorktreeRemoval, Provider, SessionStatus};
 
 /// Error type for agent node service operations
 #[derive(Debug)]
@@ -68,6 +68,32 @@ pub fn create(
         use_worktree,
     )?;
 
+    Ok(node)
+}
+
+/// Like `create`, but sets the initial status to [`SessionStatus::Pending`]
+/// so the frontend can distinguish "node row exists, stage-2 not yet
+/// started" from "node row exists, agent is idle and ready to re-spawn".
+///
+/// This is the fast stage-1 of the two-stage issue-spawn flow. The caller
+/// is expected to invoke `start_node_background` (or a future
+/// fire-and-forget equivalent) to do the slow work — git fetch, worktree
+/// create, PTY spawn — and update the status to `Running` on success or
+/// `Error` on failure.
+pub fn create_pending(
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+) -> Result<AgentNode, AgentNodeError> {
+    let mut node = create(mesh_id, path, branch, provider, source_issue, None)?;
+    // Two writes (insert + status update) is one extra ~1ms SQLite round
+    // trip. Acceptable: this function is on the fast path, and the second
+    // write is the whole point — without it the new node would look
+    // identical to a freshly-closed, ready-to-resume idle node.
+    db::update_agent_node_status(node.id, SessionStatus::Pending)?;
+    node.status = SessionStatus::Pending;
     Ok(node)
 }
 

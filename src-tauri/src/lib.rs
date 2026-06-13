@@ -160,6 +160,8 @@ pub fn run() {
             commands::agent::list_providers,
             commands::agent::spawn_issue_agent,
             commands::agent::spawn_handover_agent,
+            commands::agent::create_issue_node,
+            commands::agent::start_node_background,
             // Build/Run
             commands::build_run::build_run,
             commands::build_run::get_mesh_config,

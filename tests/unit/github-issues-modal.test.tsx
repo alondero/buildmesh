@@ -5,17 +5,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { GitHubIssuesModal } from '../../src/components/GitHubIssues/GitHubIssuesModal';
 import type { ProviderEntry } from '../../src/components/Sidebar/ProviderDropdown';
 
-// The modal calls useAgentNodeStore.getState().fetchAgentNodes() after a
-// successful spawn. Stub that single method so we don't pull the real store
-// (and its Terminal.tsx import chain) into this test.
-vi.mock('../../src/stores/agentNodeStore', () => ({
-  useAgentNodeStore: {
-    getState: () => ({
-      fetchAgentNodes: vi.fn().mockResolvedValue(undefined),
-    }),
-  },
-}));
-
 const ISSUES = [
   { number: 101, title: 'Add dark mode', body: 'body of #101' },
   { number: 102, title: 'Refactor auth', body: '' },
@@ -30,10 +19,22 @@ const PROVIDERS: ProviderEntry[] = [
   { id: 'codex', label: 'Codex', color: 'bg-gray-500' },
 ];
 
+/// A minimal IssueNodeDraft that satisfies the TypeScript return type. The
+/// real Rust backend returns the full AgentNode row + the prefill string;
+/// these tests only assert the call shape and the modal's UI behavior, so
+/// the minimal shape is enough.
+const DRAFT = {
+  id: 999,
+  mesh_id: 1,
+  status: 'pending',
+  prefill: 'Please work on GitHub issue #101 — Add dark mode\nhttps://github.com/example/repo/issues/101',
+};
+
 function mockIssues(issues = ISSUES) {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
     if (cmd === 'get_repo_issues') return Promise.resolve(issues);
-    if (cmd === 'spawn_issue_agent') return Promise.resolve({ id: 999, mesh_id: 1 });
+    if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
+    if (cmd === 'start_node_background') return Promise.resolve(undefined);
     return Promise.resolve({});
   });
 }
@@ -78,14 +79,22 @@ describe('GitHubIssuesModal split spawn button', () => {
     const spawnBtn = await screen.findByRole('button', { name: 'Spawn' });
     await userEvent.click(spawnBtn);
 
+    // Two-stage flow: stage-1 (create_issue_node) is awaited; stage-2
+    // (start_node_background) is fire-and-forget. The modal closes as
+    // soon as stage-1 returns.
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
-        'spawn_issue_agent',
+        'create_issue_node',
         { meshId: 1, issueNumber: 101, issueTitle: 'Add dark mode', provider: 'kimi' },
       );
     });
     expect(getDefaultProvider).toHaveBeenCalledWith(1);
-    // Spawn closes the modal on success.
+    // Stage-2 was fired (fire-and-forget) with the prefill from stage-1.
+    expect(invoke).toHaveBeenCalledWith(
+      'start_node_background',
+      { nodeId: DRAFT.id, prefill: DRAFT.prefill },
+    );
+    // Spawn closes the modal on stage-1 success.
     expect(onClose).toHaveBeenCalled();
   });
 
@@ -113,13 +122,18 @@ describe('GitHubIssuesModal split spawn button', () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
-        'spawn_issue_agent',
+        'create_issue_node',
         { meshId: 1, issueNumber: 101, issueTitle: 'Add dark mode', provider: 'agy' },
       );
     });
     // When the user picks explicitly, we don't need to ask the backend for the default.
     expect(getDefaultProvider).not.toHaveBeenCalled();
     expect(onClose).toHaveBeenCalled();
+    // Stage-2 also fired.
+    expect(invoke).toHaveBeenCalledWith(
+      'start_node_background',
+      { nodeId: DRAFT.id, prefill: DRAFT.prefill },
+    );
   });
 
   it('only opens the dropdown for the issue whose chevron was clicked', async () => {
@@ -139,11 +153,14 @@ describe('GitHubIssuesModal split spawn button', () => {
     expect(screen.getAllByRole('button', { name: 'Agy' })).toHaveLength(1);
   });
 
-  it('clears the spawning state when spawn fails, so the user can retry', async () => {
+  it('clears the spawning state when stage-1 fails, so the user can retry', async () => {
+    // Regression: if stage-1 (create_issue_node) rejects, the modal
+    // must stay open and the Spawn button must re-enable. Stage-2 is
+    // never fired in that case (we never have a draft.id to pass).
     mockIssues([ISSUES[0]]);
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_repo_issues') return Promise.resolve([ISSUES[0]]);
-      if (cmd === 'spawn_issue_agent') return Promise.reject(new Error('boom'));
+      if (cmd === 'create_issue_node') return Promise.reject(new Error('boom'));
       return Promise.resolve({});
     });
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -155,13 +172,16 @@ describe('GitHubIssuesModal split spawn button', () => {
     await waitFor(() => {
       expect(onClose).not.toHaveBeenCalled();
     });
+    // Stage-2 must not have been fired — without a draft we have no
+    // prefill to send.
+    expect(invoke).not.toHaveBeenCalledWith('start_node_background', expect.anything());
     expect((await screen.findByRole('button', { name: 'Spawn' })).hasAttribute('disabled')).toBe(false);
     consoleError.mockRestore();
   });
 
   it('survives a getDefaultProvider rejection without leaving the UI stuck', async () => {
     // Regression: the primary Spawn button awaits getDefaultProvider before
-    // spawnIssueAgent. If the IPC call rejects, we must still reset spawning
+    // create_issue_node. If the IPC call rejects, we must still reset spawning
     // and leave the modal open so the user can retry.
     mockIssues([ISSUES[0]]);
     const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -186,7 +206,40 @@ describe('GitHubIssuesModal split spawn button', () => {
     await waitFor(() => {
       expect(onClose).not.toHaveBeenCalled();
     });
+    // Stage-1 was never reached, so stage-2 was never fired either.
+    expect(invoke).not.toHaveBeenCalledWith('start_node_background', expect.anything());
     expect((await screen.findByRole('button', { name: 'Spawn' })).hasAttribute('disabled')).toBe(false);
     consoleError.mockRestore();
+  });
+
+  it('closes the modal after stage-1 even when stage-2 is in flight', async () => {
+    // The whole point of the two-stage refactor: the modal must close
+    // as soon as stage-1 returns, not when stage-2 finishes. To prove
+    // this we make `start_node_background` a never-resolving promise —
+    // any code path that awaited stage-2 would hang this test. The
+    // assertion is then: onClose fires despite stage-2 still pending,
+    // and start_node_background was invoked exactly once with the
+    // draft from stage-1.
+    mockIssues([ISSUES[0]]);
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return Promise.resolve([ISSUES[0]]);
+      if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
+      if (cmd === 'start_node_background') return new Promise(() => {}); // never resolves
+      return Promise.resolve({});
+    });
+    const { onClose } = setup();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Spawn' }));
+
+    // Modal closed — proves the React component did NOT await stage-2.
+    await waitFor(() => {
+      expect(onClose).toHaveBeenCalled();
+    });
+    // Stage-2 was fired exactly once, with the prefill from stage-1.
+    const startCalls = vi.mocked(invoke).mock.calls.filter(
+      ([cmd]) => cmd === 'start_node_background',
+    );
+    expect(startCalls).toHaveLength(1);
+    expect(startCalls[0][1]).toEqual({ nodeId: DRAFT.id, prefill: DRAFT.prefill });
   });
 });

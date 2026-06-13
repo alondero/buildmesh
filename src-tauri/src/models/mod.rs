@@ -124,6 +124,12 @@ pub enum SessionStatus {
     Error,
     Archived,
     Suspended,
+    /// Node row exists but the slow stage-2 of spawn (git sync, worktree
+    /// create, PTY spawn) has not yet completed. The user sees this in
+    /// the UI as a pulsing "Starting…" badge. Set on creation by
+    /// `create_issue_node` / `create_pending`; flipped to `Running` on
+    /// stage-2 success or `Error` on stage-2 failure.
+    Pending,
 }
 
 /// Parse a session status from a DB string column
@@ -135,6 +141,7 @@ impl SessionStatus {
             "error" => SessionStatus::Error,
             "archived" => SessionStatus::Archived,
             "suspended" => SessionStatus::Suspended,
+            "pending" => SessionStatus::Pending,
             _ => SessionStatus::Idle,
         }
     }
@@ -147,6 +154,7 @@ impl SessionStatus {
             SessionStatus::Error => "error",
             SessionStatus::Archived => "archived",
             SessionStatus::Suspended => "suspended",
+            SessionStatus::Pending => "pending",
         }
     }
 }
@@ -452,6 +460,7 @@ mod tests {
     #[test]
     fn session_status_round_trip_all_variants() {
         let variants = [
+            SessionStatus::Pending,
             SessionStatus::Running,
             SessionStatus::Idle,
             SessionStatus::AwaitingInput,

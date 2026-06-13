@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getRepoIssues, spawnIssueAgent, type GitHubIssue } from '../../lib/tauri';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
+import { getRepoIssues, createIssueNode, startNodeBackground, type GitHubIssue } from '../../lib/tauri';
 import { ProviderDropdown, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
 interface GitHubIssuesModalProps {
@@ -57,13 +56,24 @@ export function GitHubIssuesModal({ meshId, meshPath, providerList, getDefaultPr
     return () => document.removeEventListener('mousedown', handleClick);
   }, [openDropdown]);
 
+  // Two-stage spawn: stage-1 (`create_issue_node`) is a fast DB-only
+  // IPC (~20ms) that returns a `pending` node + the prefill to hand
+  // off to stage-2. We close the modal as soon as stage-1 returns, so
+  // the user sees the modal vanish and the new node appear with a
+  // pulsing "Starting…" badge in well under 500ms. Stage-2
+  // (`startNodeBackground`) is fire-and-forget — the slow work
+  // (git fetch, worktree create, PTY spawn) runs in the background,
+  // and the node flips to 'running' (or 'error' on failure) via the
+  // `node-spawn-completed` / `node-spawn-failed` store listeners.
   const handleSpawn = async (issue: GitHubIssue, providerId: string) => {
     setSpawning(issue.number);
     try {
-      await spawnIssueAgent(meshId, issue.number, issue.title, providerId);
+      const draft = await createIssueNode(meshId, issue.number, issue.title, providerId);
       setOpenDropdown(null);
-      await useAgentNodeStore.getState().fetchAgentNodes();
+      setSpawning(null);
       onClose();
+      // Intentionally NOT awaited — stage-2 runs in the background.
+      startNodeBackground(draft.id, draft.prefill);
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
       setSpawning(null);
@@ -72,7 +82,7 @@ export function GitHubIssuesModal({ meshId, meshPath, providerList, getDefaultPr
 
   // Primary "Spawn" button uses the mesh's resolved default provider —
   // explicit > per-mesh > app-wide > "anthropic" fallback is enforced
-  // server-side by spawn_new_agent_impl when we pass `provider`.
+  // server-side by resolve_default_provider when we pass `provider`.
   // We mark `spawning` BEFORE awaiting getDefaultProvider so the split
   // button's `disabled` immediately blocks a second click on the same
   // issue (e.g. picking a different provider in the still-open dropdown)
@@ -81,10 +91,13 @@ export function GitHubIssuesModal({ meshId, meshPath, providerList, getDefaultPr
     setSpawning(issue.number);
     try {
       const defaultProvider = await getDefaultProvider(meshId);
-      await spawnIssueAgent(meshId, issue.number, issue.title, defaultProvider);
+      const draft = await createIssueNode(meshId, issue.number, issue.title, defaultProvider);
       setOpenDropdown(null);
-      await useAgentNodeStore.getState().fetchAgentNodes();
+      setSpawning(null);
       onClose();
+      // Fire-and-forget: stage-2 runs in the background; the store
+      // listener flips the node from 'pending' to 'running' / 'error'.
+      startNodeBackground(draft.id, draft.prefill);
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
       setSpawning(null);

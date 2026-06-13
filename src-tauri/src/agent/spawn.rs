@@ -38,6 +38,48 @@ const CWRAP_BINARY: &str = "cwrap";
 /// layer, so the full text survives. See `build_spawn_command`.
 pub const PREFILL_ENV_VAR: &str = "BUILDMESH_PREFILL";
 
+/// Per-spawn timing log. Records elapsed milliseconds at each
+/// `checkpoint(name)` call and at the end via `total()`. Output goes to
+/// `buildmesh.log` via the existing `tracing` setup — no extra plumbing.
+///
+/// This is part of the spawn-latency investigation (5-10s lag between
+/// clicking "Spawn" in the GitHub Issues dialog and visible UI feedback).
+/// The checkpoints validate which step dominates the wall-clock time —
+/// the prime suspect is `git::sync::fetch_origin` (network-bound) but we
+/// want hard data before the two-stage spawn refactor lands. Once the
+/// refactor is stable, this can be removed; the only consumer is the
+/// `tracing` log file.
+struct SpawnTimer {
+    start: std::time::Instant,
+    session_id: i64,
+}
+
+impl SpawnTimer {
+    fn new(session_id: i64) -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            session_id,
+        }
+    }
+
+    fn checkpoint(&self, name: &str) {
+        tracing::info!(
+            "spawn_timing: session={} checkpoint={} elapsed={}ms",
+            self.session_id,
+            name,
+            self.start.elapsed().as_millis()
+        );
+    }
+
+    fn total(&self) {
+        tracing::info!(
+            "spawn_timing: session={} TOTAL elapsed={}ms",
+            self.session_id,
+            self.start.elapsed().as_millis()
+        );
+    }
+}
+
 /// Options for spawning or resuming an agent process.
 pub struct SpawnOptions {
     pub session_id: i64,
@@ -375,6 +417,8 @@ pub async fn spawn_agent_inner(
         rows
     );
 
+    let timer = SpawnTimer::new(session_id);
+
     // 1. Check if already running
     if is_agent_already_running(&session_id) {
         return Ok(());
@@ -394,6 +438,7 @@ pub async fn spawn_agent_inner(
         })?,
     };
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
+    timer.checkpoint("after_node_db_read");
 
     let adapter = provider.adapter();
 
@@ -429,6 +474,8 @@ pub async fn spawn_agent_inner(
         .as_ref()
         .and_then(|c| c.base_ref.as_deref())
         .unwrap_or("origin/main");
+
+    timer.checkpoint("after_mesh_config_read");
 
     // 6. Compute spawn path
     let spawn_worktree_name = if use_worktree {
@@ -470,6 +517,7 @@ pub async fn spawn_agent_inner(
             // a `'static` closure.
             let root = node.path.clone();
             let base_ref_owned = base_ref.to_string();
+            timer.checkpoint("before_fetch_origin");
             let sync_result = tokio::task::spawn_blocking(move || {
                 crate::git::sync::fetch_origin(&root, &base_ref_owned)
             })
@@ -484,6 +532,7 @@ pub async fn spawn_agent_inner(
                     e
                 )))
             });
+            timer.checkpoint("after_fetch_origin");
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
@@ -496,6 +545,7 @@ pub async fn spawn_agent_inner(
                 worktree_mode.to_string(),
                 base_ref.to_string(),
             );
+            timer.checkpoint("before_worktree_create");
             let created = tokio::task::spawn_blocking(move || {
                 crate::git::worktree::create_git_worktree(
                     &create_args.0,
@@ -507,6 +557,7 @@ pub async fn spawn_agent_inner(
             })
             .await
             .unwrap_or_else(|e| Err(format!("worktree creation task panicked: {}", e)));
+            timer.checkpoint("after_worktree_create");
             if let Err(e) = created {
                 let msg = format!("Failed to create git worktree: {}", e);
                 tracing::error!("spawn_agent_inner: {}", msg);
@@ -546,6 +597,7 @@ pub async fn spawn_agent_inner(
     })?;
 
     tracing::info!("spawn_agent_inner: process spawned successfully");
+    timer.checkpoint("after_pty_spawn");
 
     // Contain the whole process tree in a Job Object straight away, before the
     // shell launches the agent CLI — so any process the agent later detaches
@@ -572,9 +624,11 @@ pub async fn spawn_agent_inner(
 
     // 11. Inject attention hook
     crate::agent::workspace_trust::ensure_trusted(&resolved);
+    timer.checkpoint("after_workspace_trust");
     if adapter.requires_attention_hook() {
         inject_attention_hook(std::path::Path::new(&resolved.host_path));
     }
+    timer.checkpoint("after_inject_hook");
 
     // 12. Start reader thread
     let spawned_at = std::time::Instant::now();
@@ -594,6 +648,7 @@ pub async fn spawn_agent_inner(
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
     tracing::info!("spawn_agent_inner: complete");
+    timer.total();
     Ok(())
 }
 
