@@ -387,6 +387,7 @@ mod tests {
             worktree_name: Some("agent-1".into()),
             use_worktree: true,
             source_issue: None,
+            position: 0,
             created_at: Utc::now(),
         };
         (tmp, wt_dir.to_string_lossy().into_owned(), node)
@@ -412,6 +413,7 @@ mod tests {
             worktree_name: None,
             use_worktree: false,
             source_issue: None,
+            position: 0,
             created_at: Utc::now(),
         };
         (tmp, root.to_string_lossy().into_owned(), node)

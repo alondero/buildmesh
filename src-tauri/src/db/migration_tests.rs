@@ -146,6 +146,62 @@ mod tests {
         std::fs::remove_file(&db_path).ok();
     }
 
+    /// v12→v13: `ensure_agent_node_position` must add the `position` column and
+    /// backfill each node's position as its 0-based rank by `created_at` WITHIN
+    /// its own mesh — so existing nodes keep the order they already render in
+    /// (lists used to sort purely by `created_at ASC`). Ranks restart per mesh.
+    #[test]
+    fn ensure_agent_node_position_backfills_per_mesh_rank() {
+        let conn = Connection::open_in_memory().unwrap();
+        // v12-shape agent_nodes: everything except the new `position` column.
+        conn.execute_batch(
+            "
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            -- Interleave meshes and insert out of created_at order so the test
+            -- proves we rank by created_at, not by insert/id order.
+            INSERT INTO agent_nodes (mesh_id, name, path, created_at) VALUES
+                (1, 'm1-b', '/b', '2020-01-02T00:00:00Z'),
+                (2, 'm2-a', '/d', '2020-01-01T00:00:00Z'),
+                (1, 'm1-a', '/a', '2020-01-01T00:00:00Z'),
+                (1, 'm1-c', '/c', '2020-01-03T00:00:00Z'),
+                (2, 'm2-b', '/e', '2020-01-02T00:00:00Z');
+            "
+        ).unwrap();
+
+        // Precondition: no position column yet.
+        let has_before: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'position'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(!has_before, "PRECONDITION: position column must not exist in v12 schema");
+
+        // Act
+        crate::db::ensure_agent_node_position(&conn).unwrap();
+
+        // Assert: column exists and ranks are per-mesh, ordered by created_at.
+        let pos = |name: &str| -> i64 {
+            conn.query_row(
+                "SELECT position FROM agent_nodes WHERE name = ?1",
+                [name], |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(pos("m1-a"), 0, "mesh 1, earliest");
+        assert_eq!(pos("m1-b"), 1, "mesh 1, middle");
+        assert_eq!(pos("m1-c"), 2, "mesh 1, latest");
+        assert_eq!(pos("m2-a"), 0, "mesh 2 ranks restart at 0");
+        assert_eq!(pos("m2-b"), 1, "mesh 2, second");
+
+        // Idempotent: a second call (column present) must not renumber anything.
+        crate::db::ensure_agent_node_position(&conn).unwrap();
+        assert_eq!(pos("m1-c"), 2, "second call must be a no-op");
+    }
+
     #[test]
     fn test_migration_is_idempotent_when_column_exists() {
         let temp_dir = std::env::temp_dir();

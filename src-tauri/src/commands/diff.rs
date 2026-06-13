@@ -952,6 +952,7 @@ mod tests {
             worktree_name: worktree_name.map(|s| s.to_string()),
             use_worktree,
             source_issue: None,
+            position: 0,
             created_at: chrono::Utc::now(),
         }
     }

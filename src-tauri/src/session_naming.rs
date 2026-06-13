@@ -874,6 +874,7 @@ mod tests {
                 worktree_name: None,
                 use_worktree: false,
                 source_issue: None,
+                position: 0,
                 created_at: chrono::Utc::now(),
             })
         }
