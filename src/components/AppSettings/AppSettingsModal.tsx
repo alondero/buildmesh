@@ -30,6 +30,11 @@ interface ProviderUsage {
   error: string | null;
 }
 
+interface CoordinatorStatus {
+  enabled: boolean;
+  has_token: boolean;
+}
+
 const NO_OVERRIDE = '__no_override__';
 
 export function UsageBar({ window }: { window: UsageWindow }) {
@@ -64,18 +69,26 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [usageLoading, setUsageLoading] = useState(false);
   const [minimaxKey, setMinimaxKey] = useState('');
   const [minimaxKeySaving, setMinimaxKeySaving] = useState(false);
+  const [coordEnabled, setCoordEnabled] = useState(false);
+  const [coordHasToken, setCoordHasToken] = useState(false);
+  const [coordToken, setCoordToken] = useState<string | null>(null);
+  const [coordBusy, setCoordBusy] = useState(false);
+  const [coordCopied, setCoordCopied] = useState(false);
 
   useEffect(() => {
     const init = async () => {
       try {
-        const [prefs, providerList] = await Promise.all([
+        const [prefs, providerList, coord] = await Promise.all([
           invoke<AppPreferences>('get_app_preferences'),
           invoke<ProviderInfo[]>('list_providers'),
+          invoke<CoordinatorStatus>('get_coordinator_status'),
         ]);
         setProviders(providerList);
         const stored = prefs.default_provider;
         setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
         setMinimaxKey(prefs.minimax_api_key || '');
+        setCoordEnabled(coord.enabled);
+        setCoordHasToken(coord.has_token);
         setLoaded(true);
         fetchUsage();
       } catch (e) {
@@ -126,6 +139,52 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       console.error('Failed to save MiniMax key:', e);
     } finally {
       setMinimaxKeySaving(false);
+    }
+  };
+
+  // Flip the master kill-switch. Optimistic, with rollback on failure so the
+  // toggle never lies about the backend's real state.
+  const handleToggleCoordinator = async (enabled: boolean) => {
+    const previous = coordEnabled;
+    setCoordEnabled(enabled);
+    setCoordBusy(true);
+    setError(null);
+    try {
+      await invoke('set_coordinator_api_enabled', { enabled });
+    } catch (e) {
+      setCoordEnabled(previous);
+      setError(String(e));
+    } finally {
+      setCoordBusy(false);
+    }
+  };
+
+  // Mint (or replace) the read token. The value is returned exactly once, here —
+  // get_coordinator_status only ever reports whether one exists, never its value.
+  const handleGenerateToken = async () => {
+    setCoordBusy(true);
+    setCoordCopied(false);
+    setError(null);
+    try {
+      const token = await invoke<string>('generate_coordinator_read_token');
+      setCoordToken(token);
+      setCoordHasToken(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setCoordBusy(false);
+    }
+  };
+
+  const handleCopyToken = async () => {
+    if (!coordToken) return;
+    try {
+      await navigator.clipboard.writeText(coordToken);
+      setCoordCopied(true);
+      // Let the "Copied!" confirmation fade back so a second copy reads clearly.
+      setTimeout(() => setCoordCopied(false), 2000);
+    } catch (e) {
+      setError(String(e));
     }
   };
 
@@ -265,8 +324,67 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         </div>
 
         <div className="mt-8 pt-5 border-t border-border-subtle">
+          <h3 className="text-xl font-semibold text-text-primary mb-2">Coordinator Read API</h3>
+          <p className="text-base text-text-muted mb-4">
+            A read-only HTTP view of every node's status for an external coordinator.
+            Off by default. It binds to loopback and your LAN only — reaching it from
+            anywhere else is your own tunnel (Tailscale, Cloudflare, WireGuard).
+          </p>
+
+          <label className="flex items-center gap-3 text-lg text-text-primary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={coordEnabled}
+              disabled={!loaded || coordBusy}
+              onChange={e => handleToggleCoordinator(e.target.checked)}
+              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+            />
+            <span>Enable coordinator read API</span>
+          </label>
+
+          {coordEnabled && (
+            <div className="mt-4 border border-border-subtle rounded-lg p-5">
+              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded px-3 py-2 mb-4">
+                <span className="text-base text-text-secondary">
+                  Anyone who can reach this machine on the LAN <span className="font-medium">and</span>{' '}
+                  holds the token can read your node statuses. The token is shown once, when
+                  minted — copy it now; regenerating invalidates the old one.
+                </span>
+              </div>
+
+              <div className="flex gap-3">
+                <input
+                  type="text"
+                  readOnly
+                  value={coordToken ?? (coordHasToken ? '••••••••  (a token has already been minted)' : '')}
+                  placeholder="No token yet — generate one to copy"
+                  className="flex-1 bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base font-mono text-text-primary focus:outline-none focus:border-accent-cyan"
+                />
+                {coordToken && (
+                  <button
+                    onClick={handleCopyToken}
+                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30"
+                  >
+                    {coordCopied ? 'Copied!' : 'Copy'}
+                  </button>
+                )}
+                <button
+                  onClick={handleGenerateToken}
+                  disabled={coordBusy}
+                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
+                >
+                  {coordBusy ? 'Working…' : coordHasToken ? 'Regenerate token' : 'Generate token'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="mt-8 pt-5 border-t border-border-subtle">
           <p className="text-base text-text-muted">
-            Stored in your app data directory at <span className="font-mono">preferences.json</span>.
+            Provider defaults are stored in your app data directory at{' '}
+            <span className="font-mono">preferences.json</span>; coordinator settings live in
+            the app database.
           </p>
         </div>
       </div>
