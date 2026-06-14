@@ -89,7 +89,7 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
         {filtered.map((issue) => {
           const open = selectedIssue === issue.number;
           const busy = busyIssue === issue.number;
-          const body = (issue.body ?? "").trim();
+          const body = issue.body.trim();
           return (
             <div
               key={issue.number}
@@ -129,6 +129,24 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
                   {issue.title}
                 </span>
               </div>
+              {issue.labels.length > 0 && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {issue.labels.map((l) => (
+                    <span
+                      key={l}
+                      style={{
+                        fontSize: 10,
+                        color: "var(--text-dim)",
+                        background: "var(--surface-2)",
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                      }}
+                    >
+                      {l}
+                    </span>
+                  ))}
+                </div>
+              )}
               {open && (
                 <div onClick={(e) => e.stopPropagation()}>
                   {body && (
@@ -170,10 +188,17 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
                     >
                       {busy ? "Spawning agent…" : "Start agent on this issue"}
                     </button>
-                    {/* No "View ↗" link: the Rust `GitHubIssue` struct doesn't
-                        serialise an issue URL, so the generated type has no
-                        `url` field. It returns automatically once the backend
-                        widens the struct (see src-tauri/src/commands/pr.rs). */}
+                    <a
+                      href={issue.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={(e) => e.stopPropagation()}
+                      className="btn-ghost"
+                      data-testid={`issue-view-${issue.number}`}
+                      style={{ textDecoration: "none", lineHeight: 1.2 }}
+                    >
+                      View ↗
+                    </a>
                   </div>
                 </div>
               )}

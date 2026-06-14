@@ -58,6 +58,11 @@ interface AgentNodeState {
   activeNodeId: number | null;
   loading: boolean;
   error: string | null;
+  // Nodes whose close is in flight. The slow part of closing is the worktree
+  // safety check (a git status + ref walk) that must run *before* we can drop
+  // the row, so we flag the node here the instant the user clicks and let
+  // NodeItem show a spinner instead of looking frozen.
+  closingNodeIds: Set<number>;
 
   // Derived getters
   getActiveNode: () => AgentNode | null;
@@ -83,6 +88,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   activeNodeId: null,
   loading: false,
   error: null,
+  closingNodeIds: new Set(),
 
   getActiveNode: () => {
     const { agentNodes, activeNodeId } = get();
@@ -198,6 +204,22 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   },
 
   deleteAgentNode: async (id) => {
+    // A close already in flight owns this node's teardown; a second click
+    // (common while the safety check makes the row look unresponsive) must not
+    // fire a duplicate safety/kill/delete round-trip.
+    if (get().closingNodeIds.has(id)) return;
+
+    // Flag the node closing *synchronously* so the click registers instantly.
+    // We can't drop the row yet — the safety check below decides whether to
+    // prompt about uncommitted/unpushed work — so until it resolves NodeItem
+    // shows a spinner over the still-present row instead of looking frozen.
+    set((state) => ({ closingNodeIds: new Set(state.closingNodeIds).add(id) }));
+    const clearClosing = () => set((state) => {
+      const next = new Set(state.closingNodeIds);
+      next.delete(id);
+      return { closingNodeIds: next };
+    });
+
     try {
       const node = get().agentNodes.find(s => s.id === id);
       const safety = await invoke<WorktreeCloseSafety>('get_worktree_close_safety', { sessionId: id });
@@ -208,7 +230,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
           throw new Error(`Agent node ${id} is not loaded, cannot confirm worktree removal`);
         }
         const action = await worktreeCloseActionResolver(node, safety);
-        if (action === 'cancel') return;
+        if (action === 'cancel') { clearClosing(); return; }
         removeWorktree = action === 'remove';
       }
 
@@ -218,10 +240,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // failed cleanup surfaces later via the 'worktree-cleanup-failed' event
       // rather than holding the node on screen while the slow delete runs.
       disposeTerminal(id);
-      set((state) => ({
-        agentNodes: state.agentNodes.filter(s => s.id !== id),
-        activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
-      }));
+      set((state) => {
+        const closing = new Set(state.closingNodeIds);
+        closing.delete(id);
+        return {
+          agentNodes: state.agentNodes.filter(s => s.id !== id),
+          activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
+          closingNodeIds: closing,
+        };
+      });
 
       try {
         // kill_agent tears the process down before its bookkeeping (a DB status
@@ -239,6 +266,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         set({ error: String(e) });
       }
     } catch (e) {
+      // A failed safety check (or prompt) must release the closing flag so the
+      // row isn't stranded dimmed — the node is still on screen and retryable.
+      clearClosing();
       set({ error: String(e) });
     }
   },

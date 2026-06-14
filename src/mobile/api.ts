@@ -230,13 +230,12 @@ export async function createPr(
 import type { DiscoveredSession } from "../types/generated/DiscoveredSession";
 export type { DiscoveredSession };
 
-/// Wire shape of the `GET /api/meshes/{id}/issues` response, generated from
-/// the Rust `GitHubIssue` struct (src-tauri/src/commands/pr.rs) — the same
-/// struct the desktop Tauri path serialises. Previously this was hand-declared
-/// with forward-compat `url`/`state`/`labels` slots the backend never sent,
-/// which crashed the mobile render (blank page, #360). The generated type now
-/// states exactly what crosses the wire; those fields return automatically the
-/// day the Rust struct serialises them. Issue #359.
+// Generated from the Rust `GitHubIssue` struct (src-tauri/src/commands/pr.rs) —
+// the same struct the desktop Tauri path serialises (issue #359). #358 widened
+// the struct to carry url/state/labels (guaranteed present — the upstream
+// `services::github::Issue` deserialiser uses `#[serde(default)]`), so the
+// generated type now includes them and IssuesScreen renders the labels and the
+// "View ↗" link directly. No hand-maintained interface, no drift.
 import type { GitHubIssue } from "../types/generated/GitHubIssue";
 export type { GitHubIssue };
 

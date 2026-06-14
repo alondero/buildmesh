@@ -178,6 +178,44 @@ pub fn on_spawn() -> String {
     format!("{}-{}-{}", adj1, adj2, noun)
 }
 
+/// Build the initial node name for a node spawned from a GitHub issue.
+///
+/// Composes `gh{issue_number}-{slug_from_title}` so the user can spot the
+/// origin in the mesh list from the moment the spawn modal closes (e.g.
+/// issue #123 "fix this feature" → `gh123-fix-this-feature`). The prefix is
+/// the same on both spawn paths (`spawn_issue_agent` for the mobile HTTP
+/// route and `create_issue_node` for the desktop two-stage flow).
+///
+/// Behaviour:
+/// - Re-uses `slugify_issue_title` for the title → slug step, so all the
+///   rules there (lowercase, hyphenation, 50-char cap, fallback to a
+///   random default when the title is unslugifyable) carry over.
+/// - Prepends `gh{n}-`. If the combined string is still under 50 chars the
+///   result is final; otherwise it's truncated to 50 with a trailing-hyphen
+///   re-trim (mirroring `slugify_issue_title`'s truncation step).
+/// - Validates the final result against `SLUG_REGEX`. The only realistic
+///   failure mode is a truncation that lands mid-token and yields something
+///   that no longer matches (e.g. trailing punctuation in the digit run);
+///   in that case we fall back to a plain random name so the caller always
+///   gets a valid slug (an empty string would break worktree creation).
+pub fn issue_node_name(issue_number: i64, title: &str) -> String {
+    let slug = slugify_issue_title(title);
+    let mut full = format!("gh{}-{}", issue_number, slug);
+
+    if full.len() > 50 {
+        full.truncate(50);
+        while full.ends_with('-') {
+            full.pop();
+        }
+    }
+
+    if SLUG_REGEX.is_match(&full) {
+        full
+    } else {
+        on_spawn()
+    }
+}
+
 /// Derive a node name from a GitHub issue title (issue #111).
 ///
 /// Pipeline: lowercase → spaces/underscores become hyphens → strip
@@ -792,6 +830,154 @@ mod tests {
     fn is_default_name_positive() {
         assert!(is_default_name("bold-keen-brook"));
         assert!(is_default_name("calm-deep-oak"));
+    }
+
+    // --- issue_node_name (gh{N}- prefix) ---
+
+    /// Happy path: the issue number is prepended as `gh{N}-` and the title
+    /// slugifies in the same way `slugify_issue_title` already documents.
+    /// This is the user-facing change — `fix-this-feature` becomes
+    /// `gh123-fix-this-feature`.
+    #[test]
+    fn issue_node_name_prefixes_with_gh_number() {
+        assert_eq!(
+            issue_node_name(123, "fix this feature"),
+            "gh123-fix-this-feature"
+        );
+    }
+
+    /// Underscores in the title become hyphens (inherited from
+    /// `slugify_issue_title`).
+    #[test]
+    fn issue_node_name_hyphenates_underscored_title() {
+        assert_eq!(
+            issue_node_name(7, "fix_oauth_callback"),
+            "gh7-fix-oauth-callback"
+        );
+    }
+
+    /// Punctuation in the title is stripped (inherited behaviour). The
+    /// `gh` prefix is preserved even when the title collapses to nothing
+    /// because the result still has the `gh{N}-` prefix attached to the
+    /// random fallback name.
+    #[test]
+    fn issue_node_name_preserves_prefix_when_title_has_punctuation() {
+        let result = issue_node_name(42, "Bug: something's broken!");
+        assert!(
+            result.starts_with("gh42-"),
+            "prefix must survive punctuation stripping: {:?}",
+            result
+        );
+        assert!(
+            SLUG_REGEX.is_match(&result),
+            "must still match SLUG_REGEX: {:?}",
+            result
+        );
+    }
+
+    /// When the title is empty / unslugifyable, `slugify_issue_title` falls
+    /// back to a random adj-adj-noun. The prefix must still be applied so
+    /// the user can tell which issue the node came from.
+    #[test]
+    fn issue_node_name_keeps_prefix_when_title_is_empty() {
+        let result = issue_node_name(5, "");
+        assert!(
+            result.starts_with("gh5-"),
+            "empty title must still produce the gh-prefix: {:?}",
+            result
+        );
+        assert!(
+            SLUG_REGEX.is_match(&result),
+            "must still match SLUG_REGEX: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn issue_node_name_keeps_prefix_when_title_is_punctuation_only() {
+        let result = issue_node_name(99, "!!!---???");
+        assert!(
+            result.starts_with("gh99-"),
+            "punctuation-only title must still produce the gh-prefix: {:?}",
+            result
+        );
+        assert!(
+            SLUG_REGEX.is_match(&result),
+            "must still match SLUG_REGEX: {:?}",
+            result
+        );
+    }
+
+    /// Total length is capped at 50 chars (matching `SLUG_REGEX`'s upper
+    /// bound). The truncation must not leave a trailing hyphen (a 51-char
+    /// name after stripping a hyphen would round-trip to 50, but a 50-char
+    /// name with a trailing hyphen is still rejected by `SLUG_REGEX`).
+    #[test]
+    fn issue_node_name_caps_total_length_at_50() {
+        let long_title = "a-very-long-issue-title-that-exceeds-fifty-characters-yes-indeed";
+        let result = issue_node_name(123, long_title);
+        assert!(
+            result.len() <= 50,
+            "name must be <= 50 chars: len={} {:?}",
+            result.len(),
+            result
+        );
+        assert!(
+            !result.ends_with('-'),
+            "trailing hyphen would fail SLUG_REGEX: {:?}",
+            result
+        );
+        assert!(
+            SLUG_REGEX.is_match(&result),
+            "must match SLUG_REGEX: {:?}",
+            result
+        );
+    }
+
+    /// Contract: the result is ALWAYS a valid SLUG_REGEX match. This is
+    /// the invariant `services::agent_node::create` relies on when it
+    /// stores the name as the worktree directory.
+    #[test]
+    fn issue_node_name_always_produces_valid_slug() {
+        let cases = [
+            ("Fix OAuth callback", 1i64),
+            ("Add dark mode to settings", 4242),
+            ("fix terminal flash on resize", 7),
+            ("  ", 99),
+            ("", 12),
+            ("!!!", 3),
+            ("123-abc", 5),
+            ("---", 8),
+            ("中文 issue", 11),
+        ];
+        for (title, n) in &cases {
+            let result = issue_node_name(*n, title);
+            assert!(
+                SLUG_REGEX.is_match(&result),
+                "issue_node_name({:?}, {:?}) = {:?} does not match SLUG_REGEX",
+                n,
+                title,
+                result
+            );
+        }
+    }
+
+    /// Larger issue numbers must still produce a valid slug. Issue numbers
+    /// can be quite large on long-running repos; the cap is the 50-char
+    /// total, not the digit count.
+    #[test]
+    fn issue_node_name_handles_large_issue_numbers() {
+        let result = issue_node_name(987654, "fix something");
+        assert!(
+            result.starts_with("gh987654-"),
+            "large issue number must still appear in full: {:?}",
+            result
+        );
+        assert!(
+            SLUG_REGEX.is_match(&result),
+            "must match SLUG_REGEX: {:?}",
+            result
+        );
     }
 
     #[test]

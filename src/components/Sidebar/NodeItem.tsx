@@ -17,6 +17,10 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
   const config = getStatusConfig(node.status);
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
+  // Closing a node first runs a worktree safety check that can take seconds on
+  // a large repo; until it resolves the row stays on screen, so show a spinner
+  // (and stop reacting to clicks) rather than letting the click look ignored.
+  const isClosing = useAgentNodeStore((s) => s.closingNodeIds.has(node.id));
   // 'error' is the false-positive status the app-exit / post-pump race
   // leaves behind (see agent/spawn.rs:419-438 vs lib.rs:247-253) — the
   // user never got a chance to actually use the node, so the
@@ -28,10 +32,12 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
     <div
       data-session-item
       data-session-id={node.id}
-      onClick={onSelect}
+      onClick={isClosing ? undefined : onSelect}
+      aria-busy={isClosing}
       style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}40` }}
       className={`
-        pl-3 pr-1 py-1.5 rounded cursor-pointer text-[12px] mb-0.5 flex items-center gap-2 group/node
+        pl-3 pr-1 py-1.5 rounded text-[12px] mb-0.5 flex items-center gap-2 group/node
+        ${isClosing ? 'opacity-50 pointer-events-none cursor-default' : 'cursor-pointer'}
         ${isActive ? 'border border-accent-cyan/50' : 'hover:brightness-125 border border-transparent'}
       `}
     >
@@ -62,13 +68,23 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
           ↻
         </button>
       )}
-      <button
-        onClick={onDelete}
-        className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
-        title="Delete node"
-      >
-        ×
-      </button>
+      {isClosing ? (
+        <span
+          className="text-text-muted text-xs px-1 flex items-center"
+          title="Closing…"
+          aria-label="Closing"
+        >
+          <span className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" />
+        </span>
+      ) : (
+        <button
+          onClick={onDelete}
+          className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
+          title="Delete node"
+        >
+          ×
+        </button>
+      )}
     </div>
   );
 }

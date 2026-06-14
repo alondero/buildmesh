@@ -1,14 +1,17 @@
 /**
- * IssuesScreen: renders the real Rust `GitHubIssue` shape (number, title,
- * body). Since #359 the TS type is generated from the Rust struct, so it can
- * no longer declare `labels`/`url`/`state` fields the backend never sends —
- * the screen's old `issue.labels.map(...)` / `issue.url` dead branches are
- * gone with them.
+ * IssuesScreen: wire shape contract with the Rust backend.
  *
- * Regression guarded: the mobile screen used to do `issue.labels.length` and
- * `issue.labels.map(...)` against a hand-declared interface; with the real
- * 3-field payload both threw `TypeError: Cannot read properties of undefined`,
- * the React render crashed, and the user saw a blank page below the filter.
+ * History:
+ *  - The Rust `GitHubIssue` struct used to only serialise
+ *    `{number, title, body}`. The mobile TS interface declared
+ *    `{labels, url, state}` too, so the screen was defensively coded
+ *    (`issue.labels ?? []`, `issue.url && (<a.../>)`) — and the View
+ *    link was hidden because `url` was never present.
+ *  - Issue #358 widened the Rust struct + `services::github::Issue`
+ *    so all six fields ship on the wire. The screen now reads them
+ *    straight, and the regression test below pins the contract:
+ *    the link IS visible and points at the issue URL, label chips
+ *    render from the `labels[]` array.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -23,14 +26,35 @@ const mesh: Mesh = {
   created_at: "2026-06-11T00:00:00Z",
 };
 
-/// Realistic backend payload: matches `src-tauri/src/commands/pr.rs`
-/// `pub struct GitHubIssue { number, title, body }`. The generated
-/// `GitHubIssue` type is now exactly these three fields, so this is the
-/// whole shape — no `labels`/`url`/`state`.
+/// Full wire shape — matches the Rust `GitHubIssue` struct in
+/// `src-tauri/src/commands/pr.rs` and the upstream `services::github::Issue`
+/// deserialiser. Every field is now guaranteed present on the wire, so
+/// the test uses the strict `GitHubIssue` type (no `Pick`/`?` elision).
 const BACKEND_ISSUES: GitHubIssue[] = [
-  { number: 101, title: "Add dark mode", body: "Please support dark themes." },
-  { number: 102, title: "Refactor auth", body: "" },
-  { number: 103, title: "Crash on launch", body: "Stack trace attached." },
+  {
+    number: 101,
+    title: "Add dark mode",
+    body: "Please support dark themes.",
+    url: "https://github.com/alondero/buildmesh/issues/101",
+    state: "open",
+    labels: ["enhancement", "good first issue"],
+  },
+  {
+    number: 102,
+    title: "Refactor auth",
+    body: "",
+    url: "https://github.com/alondero/buildmesh/issues/102",
+    state: "open",
+    labels: [],
+  },
+  {
+    number: 103,
+    title: "Crash on launch",
+    body: "Stack trace attached.",
+    url: "https://github.com/alondero/buildmesh/issues/103",
+    state: "open",
+    labels: ["bug"],
+  },
 ];
 
 /// Match only the list endpoint, not the per-issue spawn endpoint
@@ -40,7 +64,7 @@ const BACKEND_ISSUES: GitHubIssue[] = [
 /// response" and navigate to a bogus empty node.
 const LIST_ISSUES_PATH = /^\/api\/meshes\/1\/issues(\?|$)/;
 
-function mockListIssues(issues: typeof BACKEND_ISSUES) {
+function mockListIssues(issues: GitHubIssue[]) {
   const fn = vi.fn().mockImplementation(async (url: string) => {
     if (LIST_ISSUES_PATH.test(url)) {
       return { ok: true, status: 200, json: async () => issues };
@@ -62,7 +86,7 @@ describe("IssuesScreen", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders the issue list when the backend returns the 3-field Rust shape (no labels/url/state)", async () => {
+  it("renders the full wire shape: list, label chips, and expanded body", async () => {
     mockListIssues(BACKEND_ISSUES);
 
     render(
@@ -73,39 +97,60 @@ describe("IssuesScreen", () => {
       />,
     );
 
-    // Regression: the page must NOT go blank. All three issues must render.
+    // All three issues must render.
     await waitFor(() => {
       expect(screen.getByTestId("issue-101")).toBeTruthy();
     });
     expect(screen.getByTestId("issue-102")).toBeTruthy();
     expect(screen.getByTestId("issue-103")).toBeTruthy();
 
-    // Filter input must still be there (the user-visible part of the page
-    // that survived before the bug was fixed).
+    // Filter input must still be there.
     expect(screen.getByTestId("issues-filter")).toBeTruthy();
 
-    // Pin the no-labels render path: the Rust payload omits `labels`, so
-    // no label chips should render anywhere on the page. If a future
-    // regression drops the `(issue.labels ?? [])` guard, this assertion
-    // still passes (the page won't crash because the issue list itself
-    // is the trigger), but the body assertion below catches the next
-    // place `issue.body` is touched. Together they cover the two
-    // crash sites.
-    expect(screen.queryByText(/^bug$/)).toBeNull();
-    expect(screen.queryByText(/^enhancement$/)).toBeNull();
+    // Label chips render from the `labels[]` array. #101 has two,
+    // #103 has one, #102 has none — exercising both the populated and
+    // empty branches.
+    expect(screen.getByText("enhancement")).toBeTruthy();
+    expect(screen.getByText("good first issue")).toBeTruthy();
+    expect(screen.getByText("bug")).toBeTruthy();
+    // #102 has no labels — its card must not render any label chip.
+    const card102 = screen.getByTestId("issue-102");
+    expect(card102.textContent).not.toMatch(/enhancement|bug/);
 
-    // Tapping an issue must expand it without crashing — the expanded view
-    // is the second place `issue.body` and `issue.url` are touched, so this
-    // catches a partial fix that handles the list view but not the
-    // expanded card.
+    // Tapping an issue must expand it without crashing.
     await userEvent.click(screen.getByTestId("issue-101"));
     expect(screen.getByTestId("issue-body-101")).toBeTruthy();
+  });
 
-    // The "View ↗" link must NOT render when the backend omits `url` —
-    // it was previously rendered as a dead button. With url missing, the
-    // link is hidden, so the only way the user can act on the expanded
-    // issue is the Spawn button.
-    expect(screen.queryByTestId("issue-view-101")).toBeNull();
+  it("renders the 'View ↗' link for every issue, pointing at issue.url", async () => {
+    // Issue #358: the link used to be hidden because the Rust struct didn't
+    // serialise `url`. Now that the backend ships it, the link must be
+    // unconditionally visible and point at the right URL.
+    mockListIssues(BACKEND_ISSUES);
+
+    render(
+      <IssuesScreen
+        mesh={mesh}
+        onBack={noop}
+        onSpawned={noop}
+      />,
+    );
+
+    // Wait for the list to load, then expand issue #101.
+    await waitFor(() => {
+      expect(screen.getByTestId("issue-101")).toBeTruthy();
+    });
+    await userEvent.click(screen.getByTestId("issue-101"));
+
+    const link = screen.getByTestId("issue-view-101") as HTMLAnchorElement;
+    expect(link).toBeTruthy();
+    expect(link.tagName).toBe("A");
+    expect(link.getAttribute("href")).toBe(
+      "https://github.com/alondero/buildmesh/issues/101",
+    );
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toBe("noreferrer");
+    expect(link.textContent).toMatch(/View/);
   });
 
   it("filters the list by title and shows the 'no matches' state", async () => {

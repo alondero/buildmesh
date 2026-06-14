@@ -46,6 +46,43 @@ pub struct Issue {
     pub title: String,
     #[serde(default)]
     pub body: String,
+    /// Absolute GitHub URL for the issue (`html_url` in the API response).
+    /// The mobile "View ↗" link opens this directly; the desktop modal
+    /// currently ignores it. `#[serde(default)]` so a partial response
+    /// (older / cached) still parses — the value is then `""`.
+    #[serde(default)]
+    pub html_url: String,
+    /// Issue state — `"open"` or `"closed"`. The list_issues_only endpoint
+    /// filters to open today, but we keep the field so the modal can render
+    /// a closed chip if a future endpoint widens to both. `#[serde(default)]`
+    /// is the safety net for partial responses.
+    #[serde(default)]
+    pub state: String,
+    /// Label names. GitHub's wire format is `[{id, name, color, ...}]` — we
+    /// flatten to `Vec<String>` so the wire shape matches the TS type
+    /// (`string[]`) one-to-one, eliminating the need for defensive `?? []`
+    /// defaults in the mobile screen. Empty when the issue has no labels.
+    #[serde(default, deserialize_with = "deserialize_label_names")]
+    pub labels: Vec<String>,
+}
+
+/// Private GitHub wire shape for a single label entry. The public API only
+/// needs the `name`; we discard `id`, `color`, `default`, `description` etc.
+#[derive(Deserialize)]
+struct RawLabel {
+    name: String,
+}
+
+/// Flatten `Vec<{id, name, color, ...}>` → `Vec<String>` at deserialise time
+/// so the `Issue` struct's `labels` field is the natural `Vec<String>` the
+/// rest of the codebase already expects. `#[serde(default)]` on the field
+/// means this fn is only called when the key is present; an absent `labels`
+/// key leaves the field at its default `vec![]`.
+fn deserialize_label_names<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<RawLabel>::deserialize(deserializer).map(|v| v.into_iter().map(|l| l.name).collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,5 +504,120 @@ mod tests {
     oauth_token: gho_wrong
 "#;
         assert_eq!(parse_gh_hosts_yaml(content), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue deserialisation — covers the wider wire shape (html_url, state,
+    // labels[].name) the mobile "View ↗" link and label chips depend on.
+    // Issue #358: previously the struct only kept number/title/body, so the
+    // mobile screen had to defensively default `issue.labels` and hide the
+    // link when `url` was missing. These tests pin the new wire contract.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn issue_deserialises_full_github_search_shape() {
+        // Realistic GitHub `/search/issues` item — keys GitHub always sends.
+        // `labels` arrives as `[{id, name, color, ...}]`; we flatten to names.
+        let json = r#"{
+            "number": 358,
+            "title": "Widen Rust GitHubIssue",
+            "body": "Expose url/labels/state on the wire",
+            "html_url": "https://github.com/alondero/buildmesh/issues/358",
+            "state": "open",
+            "labels": [
+                {"id": 1, "name": "bug", "color": "d73a4a", "default": true},
+                {"id": 2, "name": "good first issue", "color": "7057ff", "default": false}
+            ]
+        }"#;
+        let issue: Issue = serde_json::from_str(json).expect("full shape must parse");
+        assert_eq!(issue.number, 358);
+        assert_eq!(issue.title, "Widen Rust GitHubIssue");
+        assert_eq!(issue.body, "Expose url/labels/state on the wire");
+        assert_eq!(issue.html_url, "https://github.com/alondero/buildmesh/issues/358");
+        assert_eq!(issue.state, "open");
+        assert_eq!(issue.labels, vec!["bug".to_string(), "good first issue".to_string()]);
+    }
+
+    #[test]
+    fn issue_deserialises_with_missing_url_state_and_labels() {
+        // Partial / older response: the mobile screen must not see `undefined`
+        // or an unwrapping panic. `#[serde(default)]` on each new field is the
+        // safety net — html_url/state become "" and labels becomes vec![].
+        let json = r#"{
+            "number": 7,
+            "title": "Legacy issue"
+        }"#;
+        let issue: Issue = serde_json::from_str(json).expect("partial shape must parse");
+        assert_eq!(issue.number, 7);
+        assert_eq!(issue.title, "Legacy issue");
+        assert_eq!(issue.body, "", "body is #[serde(default)]");
+        assert_eq!(issue.html_url, "", "missing html_url defaults to empty");
+        assert_eq!(issue.state, "", "missing state defaults to empty");
+        assert!(issue.labels.is_empty(), "missing labels defaults to empty vec");
+    }
+
+    #[test]
+    fn issue_deserialises_with_empty_labels_array() {
+        // An issue with no labels still sends `"labels": []` — make sure that
+        // path is exercised separately from the "key absent" path.
+        let json = r#"{
+            "number": 9,
+            "title": "No labels",
+            "html_url": "https://github.com/x/y/issues/9",
+            "state": "closed",
+            "labels": []
+        }"#;
+        let issue: Issue = serde_json::from_str(json).expect("empty labels must parse");
+        assert!(issue.labels.is_empty());
+        assert_eq!(issue.state, "closed");
+        assert_eq!(issue.html_url, "https://github.com/x/y/issues/9");
+    }
+
+    #[test]
+    fn issue_deserialises_label_entry_missing_name_field() {
+        // A label entry missing `name` is malformed (GitHub always sends it),
+        // but the deserialiser should still fail loud with a useful error
+        // — not panic or silently drop the whole issue. This pins the
+        // `Vec<RawLabel>` shape so a future refactor that switches to
+        // `#[serde(flatten)]` doesn't accidentally swallow this error.
+        let json = r#"{
+            "number": 11,
+            "title": "x",
+            "labels": [{"id": 1, "color": "d73a4a"}]
+        }"#;
+        let result: Result<Issue, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "label entry without `name` must fail to parse");
+    }
+
+    #[test]
+    fn issue_deserialisation_via_search_result_wraps_items_array() {
+        // End-to-end-ish: the search response wraps `items: [Issue, ...]`.
+        // Mirrors the shape `list_issues_only` parses from GitHub.
+        let json = r#"{
+            "total_count": 2,
+            "incomplete_results": false,
+            "items": [
+                {
+                    "number": 1,
+                    "title": "First",
+                    "html_url": "https://github.com/x/y/issues/1",
+                    "state": "open",
+                    "labels": [{"name": "bug"}]
+                },
+                {
+                    "number": 2,
+                    "title": "Second",
+                    "html_url": "https://github.com/x/y/issues/2",
+                    "state": "open",
+                    "labels": []
+                }
+            ]
+        }"#;
+        #[derive(Deserialize)]
+        struct SearchResult { items: Vec<Issue> }
+        let result: SearchResult = serde_json::from_str(json).expect("search result must parse");
+        assert_eq!(result.items.len(), 2);
+        assert_eq!(result.items[0].labels, vec!["bug".to_string()]);
+        assert!(result.items[1].labels.is_empty());
     }
 }

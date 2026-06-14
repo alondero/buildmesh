@@ -12,12 +12,6 @@ use crate::coordinator::node_digest;
 use crate::db;
 use crate::services::transcript_reader;
 
-/// Transcript tail length read purely to derive a digest's enrichment. The
-/// digest only carries the last assistant message — which `transcript_reader`
-/// derives from the *whole* transcript regardless of tail — so we ask for the
-/// smallest window and discard the returned turns.
-const DIGEST_ENRICHMENT_TAIL: usize = 1;
-
 /// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each
 /// digest is the always-available spine plus a transcript-derived rich layer;
 /// for a provider with no readable transcript the enrichment is explicitly
@@ -32,15 +26,20 @@ pub fn list_nodes_json() -> String {
                 .map(|(node, mesh, changed)| {
                     // Read the transcript only for providers that produce one;
                     // `None` is the unsupported signal `node_digest` degrades on.
+                    // Issue #341: digest enrichment only needs `last_assistant_message`,
+                    // so we use the cheap bounded reader instead of the full `read_tail`
+                    // (which parses every line just to derive it). For `GET /nodes`
+                    // over many cwrap nodes with long histories this turns N full-file
+                    // parses into N bounded-tail parses — bounded to DIGEST_TAIL_BYTES
+                    // (256 KiB) regardless of transcript size.
                     let tail = node
                         .provider
                         .adapter()
                         .produces_readable_transcript()
                         .then(|| {
-                            transcript_reader::read_tail(
+                            transcript_reader::read_last_assistant_message(
                                 node.cli_session_id.as_deref(),
                                 &node.path,
-                                DIGEST_ENRICHMENT_TAIL,
                             )
                         });
                     node_digest::layered(node, mesh, *changed, tail.as_ref())

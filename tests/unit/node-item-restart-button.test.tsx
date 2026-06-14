@@ -112,3 +112,35 @@ describe('NodeItem restart button', () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 });
+
+describe('NodeItem closing state', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({
+      agentNodes: [],
+      activeNodeId: null,
+      loading: false,
+      error: null,
+      closingNodeIds: new Set(),
+    });
+    vi.clearAllMocks();
+  });
+
+  it('shows a closing spinner and hides the delete button while the node is closing', () => {
+    // Closing a node first runs a (potentially slow) worktree safety check
+    // before the row can be removed. During that window the row must look
+    // busy rather than frozen, so the × is swapped for a spinner.
+    const node = makeNode({ id: 77, status: 'idle' });
+    useAgentNodeStore.setState({ closingNodeIds: new Set([77]) });
+    renderNode(node);
+
+    expect(screen.getByTitle('Closing…')).toBeTruthy();
+    expect(screen.queryByTitle('Delete node')).toBeNull();
+  });
+
+  it('shows the delete button (not a spinner) when the node is not closing', () => {
+    renderNode(makeNode({ id: 77, status: 'idle' }));
+
+    expect(screen.getByTitle('Delete node')).toBeTruthy();
+    expect(screen.queryByTitle('Closing…')).toBeNull();
+  });
+});

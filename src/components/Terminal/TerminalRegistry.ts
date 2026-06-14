@@ -51,6 +51,40 @@ export class TerminalRegistry {
   private listeners = new Set<() => void>();
   private writer = new TerminalWriter();
   private fontSizeManager = new FontSizeManager();
+  // unlisten handles for module-level listeners (e.g. the agent-spawned
+  // reconcile), collected so destroy() can release them. The per-instance
+  // `instance.unlisten` already covers the agent-output / serialize-request
+  // listeners and is released by dispose().
+  private unlistenFns: UnlistenFn[] = [];
+
+  constructor() {
+    // Post-spawn PTY-size reconcile (issue #332). The backend emits
+    // `agent-spawned` after an async-spawn path (auto-resume on startup,
+    // fresh auto-spawn, handover, etc.) finishes registering the agent
+    // in PROCESS_REGISTRY. By that point the agent is up and the
+    // attach-fit's `resize_agent` IPC — which was swallowed earlier as
+    // "Agent not running" — will now succeed, so we re-push the term's
+    // real dimensions. `syncPtySize` is self-guarding: a no-op for
+    // missing/detached instances, and it silently swallows the
+    // "Agent not running" rejection in case of a race.
+    this.registerListener<{ session_id: number; rows: number; cols: number }>(
+      'agent-spawned',
+      (event) => {
+        this.syncPtySize(event.payload.session_id);
+      },
+    );
+  }
+
+  private registerListener<T>(event: string, handler: (event: { payload: T }) => void): void {
+    const unlistenPromise = listen<T>(event, handler);
+    // Capture the unlisten function once listen() resolves. We don't
+    // await here so the constructor stays synchronous — the unlisten
+    // will be available by the time destroy() runs because the promise
+    // resolves on the same microtask queue as the listener registration.
+    unlistenPromise.then((unlisten) => {
+      this.unlistenFns.push(unlisten);
+    }).catch(console.error);
+  }
 
   getInstance(nodeId: number): TerminalInstance | undefined {
     return this.instances.get(nodeId);
@@ -320,8 +354,12 @@ export class TerminalRegistry {
 
   destroy(): void {
     for (const nodeId of this.instances.keys()) {
-      this.dispose(nodeId);
+      this.dispose(nodeId); // allow-dispose — destroy() only runs at app-exit / test teardown
     }
     this.fontSizeManager.destroy();
+    for (const unlisten of this.unlistenFns) {
+      unlisten();
+    }
+    this.unlistenFns = [];
   }
 }
