@@ -70,12 +70,17 @@ pub async fn spawn_agent(
 /// Takes a pre-fetched `&Mesh` and a fully-formatted prefill string. Source-specific
 /// shaping (e.g. GitHub issue → URL+title) happens in the caller before this is
 /// called, so the impl is just: resolve provider → create node → spawn.
+///
+/// `initial_name` lets the caller seed the node with a meaningful name (e.g.
+/// the issue-title slug for `spawn_issue_agent`); handover leaves it `None`
+/// and falls back to a random default.
 async fn spawn_new_agent_impl(
     app: &AppHandle,
     mesh: &crate::models::Mesh,
     prefill: String,
     provider: Option<String>,
     source_issue: Option<i64>,
+    initial_name: Option<String>,
 ) -> Result<crate::models::AgentNode, String> {
     let effective_provider = crate::preferences::resolve_default_provider(
         provider,
@@ -92,6 +97,7 @@ async fn spawn_new_agent_impl(
         Some(&effective_provider),
         source_issue,
         None,
+        initial_name.as_deref(),
     ).map_err(|e| e.to_string())?;
 
     // Parse once and reuse — the from_db_str allocation isn't free, and any
@@ -146,6 +152,11 @@ pub async fn spawn_issue_agent(
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
 
     let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
+    // Issue #111: seed the node with a slugified issue title so the user can
+    // identify it in the mesh list from the moment the modal closes (instead
+    // of waiting on the LLM rename). Falls back to a random default name if
+    // the title doesn't yield a valid `SLUG_REGEX` match.
+    let initial_name = crate::session_naming::slugify_issue_title(&issue_title);
 
     let node = spawn_new_agent_impl(
         &app,
@@ -153,6 +164,7 @@ pub async fn spawn_issue_agent(
         prefill,
         provider,
         Some(issue_number),
+        Some(initial_name),
     ).await?;
 
     tracing::info!("spawn_issue_agent: spawned node {} for issue #{}", node.id, issue_number);
@@ -232,6 +244,11 @@ pub fn create_issue_node(
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
     let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
+    // Issue #111: seed the node with a slugified issue title (mirrors
+    // `spawn_issue_agent` so the desktop modal and mobile route produce
+    // identical names). Falls back to a random default if the title doesn't
+    // yield a valid slug.
+    let initial_name = crate::session_naming::slugify_issue_title(&issue_title);
 
     let effective_provider = crate::preferences::resolve_default_provider(
         provider,
@@ -246,6 +263,7 @@ pub fn create_issue_node(
         &branch,
         Some(&effective_provider),
         Some(issue_number),
+        Some(&initial_name),
     )
     .map_err(|e| e.to_string())?;
 
@@ -364,6 +382,7 @@ pub async fn spawn_handover_agent(
         &mesh,
         prefill,
         provider,
+        None,
         None,
     ).await?;
 

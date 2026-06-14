@@ -178,6 +178,54 @@ pub fn on_spawn() -> String {
     format!("{}-{}-{}", adj1, adj2, noun)
 }
 
+/// Derive a node name from a GitHub issue title (issue #111).
+///
+/// Pipeline: lowercase → spaces/underscores become hyphens → strip
+/// non-alphanumeric characters (keeping hyphens) → trim leading and trailing
+/// hyphens → cap at 50 chars (with another trailing-hyphen trim in case
+/// truncation lands on one). If the result is empty, starts with a digit, or
+/// otherwise fails `SLUG_REGEX`, fall back to a random default name from
+/// `on_spawn()` so the caller always gets a valid name — an empty string
+/// would break the worktree directory creation downstream.
+///
+/// Pure function — exposed for `spawn_issue_agent` / `create_issue_node` to
+/// give issue-spawned nodes a meaningful initial identifier, and unit-tested
+/// here so the rules stay pinned.
+///
+/// Note on rename interaction: the result is a non-default slug, so the LLM
+/// rename path's `is_default_name` guard will see it as already-named and
+/// skip the LLM rename for issue-spawned nodes. The user can still manually
+/// rename via `rename_session`; making the LLM fire on issue-derived names
+/// is tracked as a follow-up (would need a separate "rename_locked" column
+/// to distinguish user/prior-LLM renames from issue-derived slugs).
+pub fn slugify_issue_title(title: &str) -> String {
+    // 1. lowercase, 2. spaces + underscores → hyphens
+    let mut s: String = title
+        .to_lowercase()
+        .replace([' ', '_'], "-");
+
+    // 3. strip non-alphanumeric, keeping hyphens
+    s.retain(|c| c.is_ascii_alphanumeric() || c == '-');
+
+    // 4. trim leading and trailing hyphens
+    s = s.trim_matches('-').to_string();
+
+    // 5. cap at 50 chars (re-trim trailing hyphens if truncation split a word)
+    if s.len() > 50 {
+        s.truncate(50);
+        while s.ends_with('-') {
+            s.pop();
+        }
+    }
+
+    // 6. validate against SLUG_REGEX; fall back to a random default if invalid
+    if SLUG_REGEX.is_match(&s) {
+        s
+    } else {
+        on_spawn()
+    }
+}
+
 /// Buffer PTY output for a node. Accumulates in the node's `buffer` once its
 /// gate (`buffering_ready`) is open (which only happens after the first
 /// `on_turn`, so startup chrome is dropped).
@@ -618,6 +666,126 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert!(parts.iter().all(|p| !p.is_empty()));
         assert!(name.chars().all(|c| c.is_ascii_lowercase() || c == '-'));
+    }
+
+    // --- slugify_issue_title ---
+
+    /// Happy path: a multi-word issue title lowercases, hyphenates, and stays
+    /// under the 50-char limit. The result must round-trip as a valid
+    /// `SLUG_REGEX` match — that's the contract spawn_issue_agent relies on.
+    #[test]
+    fn slugify_issue_title_happy_path() {
+        assert_eq!(
+            slugify_issue_title("Fix terminal flash on resize"),
+            "fix-terminal-flash-on-resize"
+        );
+    }
+
+    /// Underscores in the title become hyphens (the spec explicitly calls
+    /// underscores out alongside spaces).
+    #[test]
+    fn slugify_issue_title_underscores_become_hyphens() {
+        assert_eq!(slugify_issue_title("fix_oauth_callback"), "fix-oauth-callback");
+        assert_eq!(
+            slugify_issue_title("with_mixed AND_separators"),
+            "with-mixed-and-separators"
+        );
+    }
+
+    /// Punctuation that isn't part of a word gets stripped (colons, apostrophes,
+    /// exclamation marks). The remaining alphanumeric runs join with hyphens.
+    /// The spec is "strip" not "replace with hyphen" — so punctuation between
+    /// two word-runs collapses them (e.g. `Foo::Bar` → `foobar`). The result
+    /// still matches `SLUG_REGEX` and the user can manually rename if they
+    /// want a different boundary.
+    #[test]
+    fn slugify_issue_title_strips_non_alphanumeric() {
+        assert_eq!(
+            slugify_issue_title("Bug: something's broken!"),
+            "bug-somethings-broken"
+        );
+        // `::` between words is stripped; the two words collapse into one run.
+        assert_eq!(
+            slugify_issue_title("Refactor session_naming::on_turn"),
+            "refactor-session-namingon-turn"
+        );
+    }
+
+    /// Leading and trailing whitespace and hyphens are trimmed.
+    #[test]
+    fn slugify_issue_title_trims_leading_and_trailing_hyphens() {
+        assert_eq!(slugify_issue_title("   hello world   "), "hello-world");
+        assert_eq!(slugify_issue_title("---hello---"), "hello");
+        assert_eq!(slugify_issue_title("  --fix bug--  "), "fix-bug");
+    }
+
+    /// Titles over 50 chars get truncated. The truncation must not leave a
+    /// dangling trailing hyphen (it would otherwise be one char over the cap
+    /// when stripped).
+    #[test]
+    fn slugify_issue_title_truncates_to_50_chars() {
+        let long = "a-very-long-issue-title-that-exceeds-fifty-characters-yes-indeed";
+        let result = slugify_issue_title(long);
+        assert!(result.len() <= 50, "got len={}: {:?}", result.len(), result);
+        assert!(!result.ends_with('-'), "trailing hyphen: {:?}", result);
+        assert!(SLUG_REGEX.is_match(&result), "regex mismatch: {:?}", result);
+    }
+
+    /// When the input produces an invalid slug (empty, all-punctuation, starts
+    /// with a digit, too short), the function MUST fall back to a default
+    /// adj-adj-noun name. The caller relies on always getting back a valid
+    /// node name — an empty string would break worktree creation.
+    #[test]
+    fn slugify_issue_title_falls_back_to_default_for_empty_input() {
+        let result = slugify_issue_title("");
+        let parts: Vec<&str> = result.split('-').collect();
+        assert_eq!(parts.len(), 3, "fallback must be adj-adj-noun");
+        assert!(SLUG_REGEX.is_match(&result), "fallback must match SLUG_REGEX: {:?}", result);
+    }
+
+    #[test]
+    fn slugify_issue_title_falls_back_for_only_punctuation() {
+        let result = slugify_issue_title("!!!---???");
+        let parts: Vec<&str> = result.split('-').collect();
+        assert_eq!(parts.len(), 3, "fallback must be adj-adj-noun, got: {:?}", result);
+    }
+
+    #[test]
+    fn slugify_issue_title_falls_back_when_starts_with_digit() {
+        // SLUG_REGEX requires the first char to be a letter, so "123-foo-bar"
+        // cannot be a valid slug. Must fall back to a default name.
+        let result = slugify_issue_title("123-something-here");
+        let parts: Vec<&str> = result.split('-').collect();
+        assert_eq!(parts.len(), 3, "digit-prefixed must fall back, got: {:?}", result);
+    }
+
+    /// Contract: the result is ALWAYS a valid SLUG_REGEX match. This is the
+    /// invariant `services::agent_node::create` relies on when it stores the
+    /// name as the worktree directory.
+    #[test]
+    fn slugify_issue_title_always_produces_valid_slug() {
+        let cases = [
+            "Fix OAuth callback",
+            "Add dark mode to settings",
+            "fix terminal flash on resize",
+            "  ",
+            "",
+            "!!!",
+            "123-abc",
+            "a",
+            "ab",
+            "---",
+            "中文 issue",   // non-ASCII filter-stripped; falls back
+        ];
+        for case in &cases {
+            let result = slugify_issue_title(case);
+            assert!(
+                SLUG_REGEX.is_match(&result),
+                "slugify({:?}) = {:?} does not match SLUG_REGEX",
+                case,
+                result
+            );
+        }
     }
 
     #[test]

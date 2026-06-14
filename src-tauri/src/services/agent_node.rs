@@ -34,11 +34,19 @@ pub fn create(
     provider: Option<&str>,
     source_issue: Option<i64>,
     use_worktree_override: Option<bool>,
+    name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let use_worktree = use_worktree_override.unwrap_or(mesh.use_worktree);
 
-    let session_name = crate::session_naming::on_spawn();
+    // Caller may supply a pre-derived name (e.g. `slugify_issue_title` for the
+    // GitHub-issue spawn path). Validation/fallback is the caller's job — by
+    // the time we get here, the name is assumed to be a valid `SLUG_REGEX`
+    // match, which is also a safe directory name.
+    let session_name = match name_override {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => crate::session_naming::on_spawn(),
+    };
     tracing::debug!(
         "agent_node::create: mesh_id={}, name={}, path={}, branch={}, provider={:?}, use_worktree={}",
         mesh_id, session_name, path, branch, provider, use_worktree
@@ -86,8 +94,9 @@ pub fn create_pending(
     branch: &str,
     provider: Option<&str>,
     source_issue: Option<i64>,
+    name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
-    let mut node = create(mesh_id, path, branch, provider, source_issue, None)?;
+    let mut node = create(mesh_id, path, branch, provider, source_issue, None, name_override)?;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
     // write is the whole point — without it the new node would look
