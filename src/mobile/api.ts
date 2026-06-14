@@ -8,33 +8,20 @@
 
 const TOKEN_STORAGE_KEY = "buildmesh_token";
 
-export interface Mesh {
-  id: number;
-  name: string;
-  path: string;
-  created_at: string;
-}
+// Mesh, AgentNode and the SessionStatus union are generated from the Rust
+// structs (issue #359) — the same structs the desktop Tauri path serialises.
+// The mobile SPA reads only a subset of their fields, but the type now states
+// the full wire shape, so a missing or renamed field becomes a compile error
+// instead of a blank page (#360). NodeStatus is kept as an alias of the
+// generated SessionStatus so existing mobile call sites keep working.
+import type { Mesh } from "../types/generated/Mesh";
+import type { AgentNode } from "../types/generated/AgentNode";
+import type { SessionStatus } from "../types/generated/SessionStatus";
+export type { Mesh, AgentNode };
+export type NodeStatus = SessionStatus;
 
-export interface AgentNode {
-  id: number;
-  mesh_id: number;
-  name: string;
-  path: string;
-  branch: string | null;
-  provider: string;
-  status: NodeStatus;
-  cli_session_id: string | null;
-  created_at: string;
-}
-
-export type NodeStatus =
-  | "idle"
-  | "running"
-  | "suspended"
-  | "error"
-  | "awaiting_input"
-  | "archived";
-
+/** UI metadata for a provider chip — distinct from the generated `Provider`
+ *  string union; this is fetched from the providers list endpoint. */
 export interface Provider {
   id: string;
   label: string;
@@ -154,10 +141,13 @@ export async function createNode(req: CreateNodeRequest): Promise<AgentNode> {
 
 // --- Stage 4: review & ship -------------------------------------------------
 
-export interface GitStatusEntry {
-  path: string;
-  status: string; // M / A / D / ?? / etc — git porcelain code
-}
+// Generated from the Rust `GitStatus` struct (issue #359); the mobile
+// `/git/status` route serialises the same struct the desktop uses. Previously
+// hand-declared as 2 fields ({path, status}), which dropped the line-count
+// fields the wire sends and mislabelled `status` as a porcelain code (it is a
+// word: "modified" | "added" | "deleted" | "renamed" | "untracked").
+import type { GitStatus } from "../types/generated/GitStatus";
+export type GitStatusEntry = GitStatus;
 
 export interface GitSummary {
   added: number;
@@ -232,30 +222,23 @@ export async function createPr(
 
 // --- Stage 5: kick off new tasks --------------------------------------------
 
-export interface DiscoveredSession {
-  cli_session_id: string;
-  first_message: string | null;
-  branch: string | null;
-  worktree_name: string | null;
-  last_active_at: string | null;
-  provider: string;
-}
+// Generated from the Rust `DiscoveredSession` struct (issue #359). The mobile
+// SPA previously hand-declared `cli_session_id`/`last_active_at`/`provider` —
+// none of which the wire sends (it sends `session_id` and `timestamp`, and no
+// provider field at all), so those reads were always `undefined`. The generated
+// type is the real wire shape.
+import type { DiscoveredSession } from "../types/generated/DiscoveredSession";
+export type { DiscoveredSession };
 
-/// Wire shape of the `GET /api/meshes/{id}/issues` response. The Rust
-/// `GitHubIssue` struct (src-tauri/src/commands/pr.rs) currently only
-/// serialises `number`, `title`, `body`; the rest are forward-compat slots
-/// for the day the backend exposes them. Mark them optional and let the
-/// screen default them — a missing `labels` array previously crashed the
-/// mobile render (blank page) because the screen called `.length` on it.
-/// The "View ↗" link in IssuesScreen hides itself when `url` is missing.
-export interface GitHubIssue {
-  number: number;
-  title: string;
-  body: string;
-  url?: string;
-  state?: string;
-  labels?: string[];
-}
+/// Wire shape of the `GET /api/meshes/{id}/issues` response, generated from
+/// the Rust `GitHubIssue` struct (src-tauri/src/commands/pr.rs) — the same
+/// struct the desktop Tauri path serialises. Previously this was hand-declared
+/// with forward-compat `url`/`state`/`labels` slots the backend never sent,
+/// which crashed the mobile render (blank page, #360). The generated type now
+/// states exactly what crosses the wire; those fields return automatically the
+/// day the Rust struct serialises them. Issue #359.
+import type { GitHubIssue } from "../types/generated/GitHubIssue";
+export type { GitHubIssue };
 
 export async function discoverSessions(
   meshId: number,
@@ -274,10 +257,13 @@ export async function importAndResume(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        cli_session_id: session.cli_session_id,
+        // The request key stays `cli_session_id` (the backend's expected body
+        // field); the source is the session's `session_id` (issue #359 — the
+        // mobile type used to read a non-existent `cli_session_id`).
+        cli_session_id: session.session_id,
         branch: session.branch ?? "main",
         worktree_name: session.worktree_name ?? undefined,
-        provider: provider ?? session.provider,
+        provider,
       }),
     },
   );

@@ -7,9 +7,16 @@ use crate::services::github::{self, GitHubClient, PullRequest};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use tauri::command;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Wire shape of `get_repo_issues` (desktop Tauri) and `GET /api/meshes/{id}/issues`
+/// (mobile HTTP) — both serialise this exact struct. The TS type is generated from
+/// here (issue #359); `i64` fields carry `#[ts(as = "i32")]` because serde_json
+/// emits them as JS numbers, not the `bigint` ts-rs would default to.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitHubIssue.ts")]
 pub struct GitHubIssue {
+    #[ts(as = "i32")]
     pub number: i64,
     pub title: String,
     pub body: String,

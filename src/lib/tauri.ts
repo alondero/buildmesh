@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
+import type { GitHubIssue } from '../types/generated/GitHubIssue';
 import type { WorktreeCloseSafety } from './worktreeClose';
 
 export type DiffLineType = 'context' | 'add' | 'remove';
@@ -133,13 +134,12 @@ export const openInFileManager = (path: string) =>
 export const getUserConfigDir = () =>
   invoke<string>('get_user_config_dir');
 
-// Git
-export interface GitStatus {
-  path: string;
-  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked';
-  additions: number;
-  deletions: number;
-}
+// Git — `GitStatus` is generated from the Rust struct (issue #359).
+// The Rust `status` field is a plain `String`, so the generated type widens
+// the old `'added' | 'modified' | ...` union to `string`; consumers that
+// switch on it still compare fine.
+import type { GitStatus } from '../types/generated/GitStatus';
+export type { GitStatus };
 
 export const getGitStatus = (path: string) =>
   invoke<GitStatus[]>('get_git_status', { path });
@@ -272,12 +272,11 @@ export interface OpenPr {
 export const getOpenPrForNode = (nodeId: number) =>
   invoke<OpenPr | null>('get_open_pr_for_node', { nodeId });
 
-// GitHub Issues
-export interface GitHubIssue {
-  number: number;
-  title: string;
-  body: string;
-}
+// GitHub Issues — `GitHubIssue` is generated from the Rust struct
+// (src-tauri/src/commands/pr.rs) into src/types/generated/; see top import.
+// Re-exported here so existing `import { GitHubIssue } from '../lib/tauri'`
+// call sites keep working. Issue #359.
+export type { GitHubIssue };
 
 export const getRepoIssues = (meshId: number) =>
   invoke<GitHubIssue[]>('get_repo_issues', { meshId });

@@ -2,10 +2,12 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Runtime environment — Windows or WSL
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "EnvType.ts")]
 pub enum EnvType {
     Windows,
     Wsl,
@@ -41,8 +43,9 @@ impl EnvType {
 }
 
 /// Agent provider type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export, export_to = "Provider.ts")]
 pub enum Provider {
     Anthropic,
     Minimax,
@@ -130,8 +133,14 @@ impl std::fmt::Display for Provider {
 }
 
 /// Session status
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+//
+// `rename_all = "snake_case"` (not "lowercase") so the multi-word `AwaitingInput`
+// variant serialises to "awaiting_input" — matching `to_db_str` and every
+// frontend comparison. Under "lowercase" it became "awaitinginput", a value no
+// consumer matched (issue #359). Single-word variants are identical either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "SessionStatus.ts")]
 pub enum SessionStatus {
     Running,
     Idle,
@@ -174,13 +183,20 @@ impl SessionStatus {
     }
 }
 
-/// A mesh — top-level folder containing agent nodes
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A mesh — top-level folder containing agent nodes.
+///
+/// Generated to src/types/generated/Mesh.ts (issue #359). `i64` fields carry
+/// `#[ts(as = "i32")]` so they emit `number` (serde_json sends JS numbers, not
+/// the `bigint` ts-rs defaults to for 64-bit ints).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "Mesh.ts")]
 pub struct Mesh {
+    #[ts(as = "i32")]
     pub id: i64,
     pub name: String,
     pub path: String, // absolute path to mesh root
     pub layout: String, // 'grid' or 'single'
+    #[ts(as = "i32")]
     pub position: i64, // sort order in sidebar
     pub created_at: DateTime<Utc>,
     // Mesh-level config (see MeshConfig for the canonical typed view)
@@ -194,10 +210,18 @@ pub struct Mesh {
     pub base_ref: String, // default "origin/main"
 }
 
-/// An agent node — isolated agent working directory
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// An agent node — isolated agent working directory.
+///
+/// Generated to src/types/generated/AgentNode.ts (issue #359); references the
+/// generated `EnvType`/`Provider`/`SessionStatus` enums. `i64` fields use
+/// `#[ts(as = "i32")]` / `Option<i32>` so they emit `number` / `number | null`
+/// rather than ts-rs's default `bigint`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "AgentNode.ts")]
 pub struct AgentNode {
+    #[ts(as = "i32")]
     pub id: i64,
+    #[ts(as = "i32")]
     pub mesh_id: i64,
     pub name: String,
     pub path: String,         // absolute path to node directory
@@ -208,7 +232,9 @@ pub struct AgentNode {
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
     pub worktree_name: Option<String>,   // git worktree name (same as name for cwrap providers)
     pub use_worktree: bool,  // true = commands run in worktree, false = repo root
+    #[ts(as = "Option<i32>")]
     pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
+    #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,
 }
@@ -493,6 +519,34 @@ mod tests {
     }
 
     #[test]
+    fn session_status_serializes_to_wire_as_its_db_string() {
+        // `AgentNode` is serialised straight from the serde derive on both the
+        // Tauri and HTTP transports, so the JSON wire value of `status` MUST
+        // equal the DB string (which the frontend also compares against).
+        // `rename_all = "lowercase"` silently emitted "awaitinginput" (no
+        // underscore) for the one multi-word variant — a value no consumer
+        // ever matched, masked because the UI sets that status client-side.
+        // Issue #359.
+        let variants = [
+            SessionStatus::Pending,
+            SessionStatus::Running,
+            SessionStatus::Idle,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Error,
+            SessionStatus::Archived,
+            SessionStatus::Suspended,
+        ];
+        for status in variants {
+            let wire = serde_json::to_value(status).unwrap();
+            assert_eq!(
+                wire,
+                serde_json::Value::String(status.to_db_str().to_string()),
+                "wire serialization of {status:?} must match its DB string",
+            );
+        }
+    }
+
+    #[test]
     fn session_status_unknown_string_defaults_to_idle() {
         assert_eq!(SessionStatus::from_db_str("garbage"), SessionStatus::Idle);
         assert_eq!(SessionStatus::from_db_str(""), SessionStatus::Idle);
@@ -738,9 +792,15 @@ mod tests {
     }
 
     #[test]
-    fn session_status_serde_json_lowercase() {
+    fn session_status_serde_json_snake_case() {
+        // Was `session_status_serde_json_lowercase`, which asserted the buggy
+        // "awaitinginput" — it pinned the wire format without ever checking it
+        // against the "awaiting_input" the DB and frontend use. Issue #359
+        // switched the enum to snake_case; see
+        // `session_status_serializes_to_wire_as_its_db_string` for the full
+        // per-variant guard.
         let json = serde_json::to_string(&SessionStatus::AwaitingInput).unwrap();
-        assert_eq!(json, "\"awaitinginput\"");
+        assert_eq!(json, "\"awaiting_input\"");
         let json = serde_json::to_string(&SessionStatus::Running).unwrap();
         assert_eq!(json, "\"running\"");
     }

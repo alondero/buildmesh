@@ -12,8 +12,13 @@ use serde::Serialize;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize)]
+/// A resumable Claude-Code session found on disk. Generated to
+/// src/types/generated/DiscoveredSession.ts (issue #359) — the same struct the
+/// desktop Tauri (`discover_sessions`) and mobile HTTP routes both serialise.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "DiscoveredSession.ts")]
 pub struct DiscoveredSession {
     pub session_id: String,
     pub first_message: String,

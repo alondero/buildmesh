@@ -1,0 +1,4 @@
+# Generated ts-rs bindings are written with LF (issue #359). Pin them to LF so
+# the CI drift gate (`git diff --exit-code src/types/generated`) never trips on
+# a CRLF/LF mismatch on Windows runners where core.autocrlf may be enabled.
+src/types/generated/*.ts text eol=lf

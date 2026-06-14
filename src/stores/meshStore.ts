@@ -1,14 +1,12 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import type { Mesh } from '../types/generated/Mesh';
 
-export interface Mesh {
-  id: number;
-  name: string;
-  path: string;
-  layout: 'grid' | 'single';
-  position: number;
-  created_at: string;
-}
+// `Mesh` is generated from the Rust `models::Mesh` struct (issue #359).
+// Re-exported here so the many `import { Mesh } from '../stores/meshStore'`
+// call sites keep working. The generated type is the full 14-field wire shape,
+// not the 6-field subset this store used to hand-declare.
+export type { Mesh };
 
 interface MeshState {
   meshes: Mesh[];

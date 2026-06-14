@@ -204,10 +204,10 @@ function TreeNode({
         </span>
         {showGitStatus && status && (
           <span
-            className={`font-bold ${statusMeta(status as GitStatus['status']).color}`}
-            title={statusMeta(status as GitStatus['status']).label}
+            className={`font-bold ${statusMeta(status as Parameters<typeof statusMeta>[0]).color}`}
+            title={statusMeta(status as Parameters<typeof statusMeta>[0]).label}
           >
-            {statusMeta(status as GitStatus['status']).letter}
+            {statusMeta(status as Parameters<typeof statusMeta>[0]).letter}
           </span>
         )}
       </div>

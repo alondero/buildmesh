@@ -1,6 +1,9 @@
 import { isWindows } from './platform';
 
-export function getNodeGitPath(node: { path: string; worktree_name?: string; use_worktree?: boolean }): string {
+// `worktree_name` is `string | null` (the generated `AgentNode` shape — ts-rs
+// emits Rust `Option<String>` as `string | null`, issue #359); `null` is falsy
+// so the guard below handles it the same as the old `undefined`.
+export function getNodeGitPath(node: { path: string; worktree_name?: string | null; use_worktree?: boolean }): string {
   if (node.use_worktree !== false && node.worktree_name) {
     return `${node.path}/.claude/worktrees/${node.worktree_name}`;
   }

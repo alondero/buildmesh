@@ -47,5 +47,5 @@ CLAUDE.local.md
 coverage/
 coverage/
 .worktrees/
-bash.exe.stackdump
-.stackdump
+# Git-bash / Cygwin crash dumps (sh.exe.stackdump, bash.exe.stackdump, …)
+*.stackdump

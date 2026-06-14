@@ -1,13 +1,14 @@
 /**
- * IssuesScreen: must render without crashing when the backend returns the
- * real Rust `GitHubIssue` shape (number, title, body) — which is missing
- * the `labels`, `url`, and `state` fields the mobile TS interface declares.
+ * IssuesScreen: renders the real Rust `GitHubIssue` shape (number, title,
+ * body). Since #359 the TS type is generated from the Rust struct, so it can
+ * no longer declare `labels`/`url`/`state` fields the backend never sends —
+ * the screen's old `issue.labels.map(...)` / `issue.url` dead branches are
+ * gone with them.
  *
- * Regression: the mobile screen used to do `issue.labels.length` and
- * `issue.labels.map(...)` directly; with the server response both threw
- * `TypeError: Cannot read properties of undefined`, the React render
- * crashed, and the user was left looking at a blank page below the
- * filter input.
+ * Regression guarded: the mobile screen used to do `issue.labels.length` and
+ * `issue.labels.map(...)` against a hand-declared interface; with the real
+ * 3-field payload both threw `TypeError: Cannot read properties of undefined`,
+ * the React render crashed, and the user saw a blank page below the filter.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -23,10 +24,10 @@ const mesh: Mesh = {
 };
 
 /// Realistic backend payload: matches `src-tauri/src/commands/pr.rs`
-/// `pub struct GitHubIssue { number, title, body }`. Note: no `labels`,
-/// no `url`, no `state` — those are declared in the TS interface but
-/// the Rust side does not serialise them.
-const BACKEND_ISSUES: Pick<GitHubIssue, "number" | "title" | "body">[] = [
+/// `pub struct GitHubIssue { number, title, body }`. The generated
+/// `GitHubIssue` type is now exactly these three fields, so this is the
+/// whole shape — no `labels`/`url`/`state`.
+const BACKEND_ISSUES: GitHubIssue[] = [
   { number: 101, title: "Add dark mode", body: "Please support dark themes." },
   { number: 102, title: "Refactor auth", body: "" },
   { number: 103, title: "Crash on launch", body: "Stack trace attached." },

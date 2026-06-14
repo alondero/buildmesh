@@ -39,6 +39,32 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Typecheck the frontend against the committed bindings, and build just
+      # the mobile bundle (a Rust test asserts dist/mobile/index.html exists).
+      # The full shippable build runs once via tauri's beforeBuildCommand below,
+      # so we deliberately don't run the whole `npm run build` twice here.
+      - name: Typecheck frontend + build mobile bundle
+        run: npx tsc --noEmit && npm run build:mobile
+
+      # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
+      # them from `#[derive(TS)]` during `cargo test`). Issue #359.
+      - name: Rust tests + regenerate TS bindings
+        run: cargo test
+        working-directory: src-tauri
+
+      # Fail CI if the committed bindings drift from what the Rust structs now
+      # generate — wire-shape drift becomes a red build, not a runtime crash.
+      - name: Check Rust↔TS type bindings are up to date
+        shell: bash
+        run: |
+          # --intent-to-add surfaces any brand-new binding (a type whose .ts
+          # was never committed) in `git diff`, not just edits to tracked files.
+          git add --intent-to-add src/types/generated
+          if ! git diff --exit-code -- src/types/generated; then
+            echo "::error::Generated TS bindings are out of date. Run 'cargo test' in src-tauri/ and commit the changes under src/types/generated/."
+            exit 1
+          fi
+
       - name: Build Tauri app
         run: npm run tauri build
 

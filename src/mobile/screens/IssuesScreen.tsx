@@ -90,13 +90,6 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
           const open = selectedIssue === issue.number;
           const busy = busyIssue === issue.number;
           const body = (issue.body ?? "").trim();
-          // Defensive: the Rust backend currently doesn't serialise
-          // `labels` on GitHubIssue (see api.ts interface comment). The
-          // previous `issue.labels.length` and `.map()` calls crashed
-          // the whole render when the server payload was the real
-          // 3-field shape — leaving the user looking at a blank page
-          // below the filter input.
-          const labels = issue.labels ?? [];
           return (
             <div
               key={issue.number}
@@ -136,24 +129,6 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
                   {issue.title}
                 </span>
               </div>
-              {labels.length > 0 && (
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  {labels.map((l) => (
-                    <span
-                      key={l}
-                      style={{
-                        fontSize: 10,
-                        color: "var(--text-dim)",
-                        background: "var(--surface-2)",
-                        padding: "2px 6px",
-                        borderRadius: 4,
-                      }}
-                    >
-                      {l}
-                    </span>
-                  ))}
-                </div>
-              )}
               {open && (
                 <div onClick={(e) => e.stopPropagation()}>
                   {body && (
@@ -195,25 +170,10 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
                     >
                       {busy ? "Spawning agent…" : "Start agent on this issue"}
                     </button>
-                    {/* The Rust GitHubIssue struct doesn't serialise `url`
-                        yet (see src-tauri/src/commands/pr.rs). Rather than
-                        render a dead "View ↗" link with href=undefined, we
-                        hide the link until the backend exposes the field.
-                        Follow-up: widen services::github::Issue to keep
-                        html_url/labels and pipe them through pr.rs. */}
-                    {issue.url && (
-                      <a
-                        href={issue.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        className="btn-ghost"
-                        data-testid={`issue-view-${issue.number}`}
-                        style={{ textDecoration: "none", lineHeight: 1.2 }}
-                      >
-                        View ↗
-                      </a>
-                    )}
+                    {/* No "View ↗" link: the Rust `GitHubIssue` struct doesn't
+                        serialise an issue URL, so the generated type has no
+                        `url` field. It returns automatically once the backend
+                        widens the struct (see src-tauri/src/commands/pr.rs). */}
                   </div>
                 </div>
               )}
