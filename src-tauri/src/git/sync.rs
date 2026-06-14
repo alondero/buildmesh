@@ -120,6 +120,60 @@ fn is_valid_remote_segment(s: &str) -> bool {
         && !s.eq_ignore_ascii_case("FETCH_HEAD")
 }
 
+/// Derive the *branch* portion of a configured `base_ref`, so the fetch can
+/// be narrowed to a single refspec (`git fetch <remote> <branch>`) instead of
+/// the default "fetch every remote branch". Pure string parsing — the mirror
+/// of [`parse_remote_for_base_ref`], which extracts the remote half.
+///
+/// Why this matters for latency: the default `git fetch <remote>` negotiates
+/// *all* remote refs. Buildmesh's branched-worktree mode pushes a branch per
+/// agent node, so that ref count grows without bound and every cold spawn pays
+/// for it (measured at 7–36s on a repo with ~250 refs). The worktree is always
+/// cut from `base_ref`, so fetching only that one branch keeps the worktree
+/// exactly as fresh while skipping the all-refs negotiation.
+///
+/// Returns `Some(branch)` for:
+///   - `origin/main`                  → `Some("main")`
+///   - `upstream/feature/auth`        → `Some("feature/auth")`
+///   - `refs/remotes/origin/main`     → `Some("main")`
+///   - `refs/heads/main`              → `Some("main")`
+///   - bare `main` / `develop`        → `Some("main")` / `Some("develop")`
+///
+/// Returns `None` (caller falls back to a bare, all-refs `git fetch`) for:
+///   - `HEAD` / `FETCH_HEAD` / empty / whitespace-only
+///
+/// Like its remote-parsing sibling, a plain nested name such as `feature/auth`
+/// is treated as `<remote>/<branch>` (→ `Some("auth")`); harmless because the
+/// remote lookup for `feature` then fails and the whole sync skips before any
+/// fetch runs.
+fn parse_branch_for_base_ref(base_ref: &str) -> Option<String> {
+    let trimmed = base_ref.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("HEAD")
+        || trimmed.eq_ignore_ascii_case("FETCH_HEAD")
+    {
+        return None;
+    }
+    if let Some(after) = trimmed.strip_prefix("refs/remotes/") {
+        // refs/remotes/<remote>/<branch...> — branch is everything past the remote.
+        return after
+            .split_once('/')
+            .map(|(_, branch)| branch.to_string())
+            .filter(|b| !b.is_empty());
+    }
+    if let Some(branch) = trimmed.strip_prefix("refs/heads/") {
+        return (!branch.is_empty()).then(|| branch.to_string());
+    }
+    // Short `<remote>/<branch>` form: drop the leading remote segment.
+    if let Some((remote, rest)) = trimmed.split_once('/') {
+        if !rest.is_empty() && is_valid_remote_segment(remote) {
+            return Some(rest.to_string());
+        }
+    }
+    // Bare branch name (`main`, `develop`): the whole string is the branch.
+    Some(trimmed.to_string())
+}
+
 /// Look up the upstream remote configured for the current branch.
 /// Used as a fallback when `base_ref` doesn't name a remote in its
 /// string form (e.g. `refs/heads/main` or a bare `main`).
@@ -235,16 +289,45 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
         return Ok(FetchOutcome::SkippedNoRemote);
     }
 
-    // Step 5: `git fetch <remote>`. If this fails (network down,
-    // auth, remote deleted between the has-remote check and the
-    // fetch) we return FetchFailed and the caller surfaces a toast.
+    // Step 5: `git fetch <remote> [<branch>]`. We narrow the fetch to the
+    // single branch named by `base_ref` (the one the new worktree is cut
+    // from) rather than the default all-remote-refs fetch — on a repo with
+    // hundreds of branches (Buildmesh pushes one per agent node) the all-refs
+    // negotiation dominates cold-spawn latency. Falls back to a bare,
+    // all-refs fetch when `base_ref` doesn't name a branch (HEAD/empty). If
+    // this fails (network down, auth, remote deleted between the has-remote
+    // check and the fetch) we return FetchFailed and the caller surfaces a toast.
+    //
+    // `git fetch <remote> <branch>` performs git's opportunistic update of
+    // `refs/remotes/<remote>/<branch>` (git ≥1.8.4, default refspec), so the
+    // remote-tracking ref the worktree is cut from (`resolve_base_commit`)
+    // ends up exactly as fresh as the old all-refs fetch made it. Two
+    // deliberate, accepted behaviour deltas vs that old fetch — both only
+    // affect the *parent mesh's* sync, never the worktree base commit:
+    //   1. If `base_ref` names a branch that no longer exists on the remote,
+    //      the narrow fetch fails ("couldn't find remote ref") and surfaces a
+    //      sync-warning toast where the all-refs fetch was silent. That's a
+    //      genuine misconfiguration worth flagging — the worktree falls back
+    //      to local HEAD either way.
+    //   2. The behind-count + ff-pull below act on the mesh's *currently
+    //      checked-out* branch. When that differs from `base_ref`'s branch,
+    //      only `base_ref`'s tracking ref was refreshed, so the current
+    //      branch reads as up-to-date and its ff-pull is skipped. This is
+    //      preferable: auto-sync shouldn't fast-forward a user's unrelated
+    //      feature branch, and the worktree is still cut fresh from base_ref.
+    let fetch_branch = parse_branch_for_base_ref(base_ref);
     tracing::info!(
-        "fetch_origin: running git fetch {} in {}",
+        "fetch_origin: running git fetch {} {} in {}",
         remote_name,
+        fetch_branch.as_deref().unwrap_or("(all refs)"),
         host_root
     );
-    let fetch_output = match command_no_window("git")
-        .args(["fetch", &remote_name])
+    let mut fetch_builder = command_no_window("git");
+    fetch_builder.arg("fetch").arg(&remote_name);
+    if let Some(ref branch) = fetch_branch {
+        fetch_builder.arg(branch);
+    }
+    let fetch_output = match fetch_builder
         .current_dir(&host_root)
         .output()
     {
@@ -474,6 +557,85 @@ mod tests {
         assert_eq!(
             parse_remote_for_base_ref("  upstream/main  "),
             Some("upstream".to_string())
+        );
+    }
+
+    // parse_branch_for_base_ref — the branch half, used to narrow the fetch
+    // refspec to a single branch (latency fix). Mirrors the remote-parser
+    // cases above so the two stay symmetric.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parse_branch_accepts_short_remote_form() {
+        // The buildmesh DB default and the upstream variant.
+        assert_eq!(
+            parse_branch_for_base_ref("origin/main"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            parse_branch_for_base_ref("upstream/develop"),
+            Some("develop".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_branch_keeps_slashes_in_nested_branch() {
+        // "upstream/feature/auth" — remote is `upstream`, branch keeps its slashes.
+        assert_eq!(
+            parse_branch_for_base_ref("upstream/feature/auth"),
+            Some("feature/auth".to_string())
+        );
+        assert_eq!(
+            parse_branch_for_base_ref("origin/release/v1.0"),
+            Some("release/v1.0".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_branch_accepts_refs_forms() {
+        assert_eq!(
+            parse_branch_for_base_ref("refs/remotes/origin/main"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            parse_branch_for_base_ref("refs/remotes/upstream/feature/auth"),
+            Some("feature/auth".to_string())
+        );
+        assert_eq!(
+            parse_branch_for_base_ref("refs/heads/main"),
+            Some("main".to_string())
+        );
+        assert_eq!(
+            parse_branch_for_base_ref("refs/heads/feature/auth"),
+            Some("feature/auth".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_branch_accepts_bare_branch_name() {
+        // A bare `main` is the branch itself; the remote comes from the
+        // caller's fallback chain (branch.<current>.remote / origin).
+        assert_eq!(parse_branch_for_base_ref("main"), Some("main".to_string()));
+        assert_eq!(
+            parse_branch_for_base_ref("develop"),
+            Some("develop".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_branch_returns_none_for_head_and_empty() {
+        // No branch to narrow to → caller falls back to a bare all-refs fetch.
+        assert_eq!(parse_branch_for_base_ref("HEAD"), None);
+        assert_eq!(parse_branch_for_base_ref("FETCH_HEAD"), None);
+        assert_eq!(parse_branch_for_base_ref(""), None);
+        assert_eq!(parse_branch_for_base_ref("   "), None);
+    }
+
+    #[test]
+    fn parse_branch_trims_whitespace() {
+        assert_eq!(
+            parse_branch_for_base_ref("  origin/main  "),
+            Some("main".to_string())
         );
     }
 }

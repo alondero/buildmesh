@@ -88,7 +88,13 @@ pub fn wrap(
                 let cmd_str = format_powershell_command(recipe.binary, &recipe.base_args);
                 let encoded = encode_for_powershell(&cmd_str);
                 let mut c = CommandBuilder::new("powershell.exe");
-                c.args(["-NoLogo", "-EncodedCommand", &encoded]);
+                // -NoProfile skips loading the user's PowerShell profile, which
+                // can add hundreds of ms (modules, prompt frameworks) to *every*
+                // agent spawn. This shell only needs to relay the agent CLI's
+                // ANSI output through ConPTY — it never touches profile state,
+                // and the agent binary (cwrap/node/claude) is resolved from the
+                // process environment's PATH, not the profile.
+                c.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encoded]);
                 c
             }
             WindowsShell::Cmd => {

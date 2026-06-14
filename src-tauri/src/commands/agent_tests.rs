@@ -506,6 +506,40 @@ mod tests {
         );
     }
 
+    /// On a Windows-native host a cwrap provider is launched through
+    /// `powershell.exe -NoLogo -NoProfile -EncodedCommand <base64>`. The
+    /// `-NoProfile` flag is load-bearing for spawn latency: without it every
+    /// agent spawn first runs the user's PowerShell profile (modules, prompt
+    /// frameworks) before cwrap, adding hundreds of ms per node. This shell
+    /// only relays ANSI output, so the profile is dead weight.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn windows_powershell_launcher_uses_no_profile() {
+        let cmd = build_spawn_command(
+            &windows_resolved(),
+            Provider::Anthropic,
+            &SessionIdMode::Assign("ps-1".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+        );
+
+        let args = argv(&cmd);
+        assert_eq!(
+            &args[..4],
+            &[
+                "powershell.exe".to_string(),
+                "-NoLogo".to_string(),
+                "-NoProfile".to_string(),
+                "-EncodedCommand".to_string(),
+            ],
+            "cwrap PowerShell launcher must pass -NoProfile to skip the user profile: {:?}",
+            args
+        );
+        assert_eq!(args.len(), 5, "expected the Base64 payload as the 5th arg: {:?}", args);
+    }
+
     /// The wrapper sets the spawn cwd and the BUILDMESH_SESSION_ID / BUILDMESH_PORT
     /// env vars that the agent and its hooks rely on.
     #[test]
