@@ -6,6 +6,7 @@ use git2::{DiffOptions, Patch, Repository, StatusOptions};
 use serde::{Deserialize, Serialize};
 use tauri::command;
 use tauri::Emitter;
+use ts_rs::TS;
 
 use crate::db;
 use crate::env::to_host_path;
@@ -21,11 +22,18 @@ pub struct GitSummary {
     pub deleted: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One changed file in a git status listing. Generated to
+/// src/types/generated/GitStatus.ts (issue #359); the same struct backs the
+/// desktop `get_git_status` Tauri command and the mobile `/git/status` HTTP
+/// route. `usize` counts carry `#[ts(as = "i32")]` so they emit `number`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitStatus.ts")]
 pub struct GitStatus {
     pub path: String,
     pub status: String, // "modified" | "added" | "deleted" | "renamed" | "untracked"
+    #[ts(as = "i32")]
     pub additions: usize,
+    #[ts(as = "i32")]
     pub deletions: usize,
 }
 

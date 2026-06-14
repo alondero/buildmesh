@@ -101,19 +101,23 @@ describe("DiffScreen", () => {
 
 describe("sortSessions", () => {
   it("sorts newest first, sessions without a timestamp last", () => {
+    // Fields match the generated `DiscoveredSession` (issue #359): the sort
+    // key is `timestamp`, and sessions are identified by `session_id` — not
+    // the phantom `last_active_at`/`cli_session_id` the mobile type used to
+    // declare (which the wire never sends).
     const s = (id: string, ts: string | null): DiscoveredSession => ({
-      cli_session_id: id,
-      first_message: null,
+      session_id: id,
+      first_message: "",
       branch: null,
+      cwd: null,
+      timestamp: ts,
       worktree_name: null,
-      last_active_at: ts,
-      provider: "anthropic",
     });
     const sorted = sortSessions([
       s("old", "2026-06-01T00:00:00Z"),
       s("none", null),
       s("new", "2026-06-10T00:00:00Z"),
     ]);
-    expect(sorted.map((x) => x.cli_session_id)).toEqual(["new", "old", "none"]);
+    expect(sorted.map((x) => x.session_id)).toEqual(["new", "old", "none"]);
   });
 });

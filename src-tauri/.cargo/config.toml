@@ -1,0 +1,6 @@
+# ts-rs (issue #359) writes generated .ts bindings here when `cargo test` runs.
+# ts-rs joins this onto the crate root (src-tauri/), so the files land in the
+# frontend at src/types/generated/. Cargo applies [env] to the test binaries it
+# runs, which is when ts-rs's generated export tests fire.
+[env]
+TS_RS_EXPORT_DIR = "../src/types/generated"

@@ -45,6 +45,11 @@ parking_lot = "0.12"
 local-ip-address = "0.6"
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 rust-embed = "8"
+# Shared Rust→TS type generation (issue #359). `#[derive(TS)]` on wire structs
+# emits .ts files into ../src/types/generated/ via `cargo test`; a CI gate
+# (`git diff --exit-code`) then fails on drift. chrono-impl maps DateTime<Utc>
+# to `string`; serde-compat (default) honours #[serde(rename_all = ...)].
+ts-rs = { version = "12", features = ["chrono-impl"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"

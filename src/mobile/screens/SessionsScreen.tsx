@@ -17,7 +17,7 @@ type Props = {
 /// Newest activity first; sessions without a timestamp sink to the bottom.
 export function sortSessions(sessions: DiscoveredSession[]): DiscoveredSession[] {
   return [...sessions].sort((a, b) =>
-    (b.last_active_at ?? "").localeCompare(a.last_active_at ?? ""),
+    (b.timestamp ?? "").localeCompare(a.timestamp ?? ""),
   );
 }
 
@@ -46,7 +46,7 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
   }, [mesh.id]);
 
   const resume = async (s: DiscoveredSession) => {
-    setBusyId(s.cli_session_id);
+    setBusyId(s.session_id);
     setError(null);
     try {
       const node = await importAndResume(mesh.id, s);
@@ -99,15 +99,15 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
           </CenterNote>
         )}
         {filtered.map((s) => {
-          const open = selectedId === s.cli_session_id;
-          const busy = busyId === s.cli_session_id;
+          const open = selectedId === s.session_id;
+          const busy = busyId === s.session_id;
           return (
             <div
-              key={s.cli_session_id}
+              key={s.session_id}
               role="button"
               tabIndex={0}
-              onClick={() => setSelectedId(open ? null : s.cli_session_id)}
-              data-testid={`session-${s.cli_session_id}`}
+              onClick={() => setSelectedId(open ? null : s.session_id)}
+              data-testid={`session-${s.session_id}`}
               className="card"
               style={{
                 display: "block",
@@ -139,10 +139,9 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
               >
                 {s.branch && <span>⎇ {s.branch}</span>}
                 {s.worktree_name && <span>wt: {s.worktree_name}</span>}
-                <span>{s.provider}</span>
-                {s.last_active_at && (
+                {s.timestamp && (
                   <span style={{ marginLeft: "auto" }}>
-                    {timeAgo(s.last_active_at)}
+                    {timeAgo(s.timestamp)}
                   </span>
                 )}
               </div>
@@ -155,7 +154,7 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
                     className="btn-primary"
                     style={{ width: "100%" }}
                     disabled={busyId !== null}
-                    data-testid={`session-resume-${s.cli_session_id}`}
+                    data-testid={`session-resume-${s.session_id}`}
                     onClick={() => resume(s)}
                   >
                     {busy ? "Resuming…" : "Resume session"}

@@ -5,21 +5,16 @@ import { disposeTerminal } from '../components/Terminal/Terminal';
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
 import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
 
-export interface AgentNode {
-  id: number;
-  mesh_id: number;
-  name: string;
-  path: string;
-  branch: string;
-  env: 'windows' | 'wsl';
-  provider: 'anthropic' | 'minimax' | 'kimi' | 'agy' | 'opencode' | 'codex' | 'terminal';
-  status: 'pending' | 'running' | 'idle' | 'awaiting_input' | 'error' | 'suspended';
-  cli_session_id?: string;
-  worktree_name?: string;
-  use_worktree: boolean;
-  position: number;
-  created_at: string;
-}
+// `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
+// #359), along with the `EnvType`/`Provider`/`SessionStatus` unions it
+// references. Imported for local use and re-exported so existing
+// `import { AgentNode } from '../stores/agentNodeStore'` call sites keep
+// working. The generated type is the full wire shape: nullable
+// `cli_session_id`/`worktree_name` are `string | null` (not `?: string`), and
+// it adds `env`, `source_issue`, and the `archived` status the hand-written
+// interface omitted.
+import type { AgentNode } from '../types/generated/AgentNode';
+export type { AgentNode };
 
 /// Apply a mesh's re-positioned nodes optimistically and persist them. The
 /// updated nodes replace that mesh's entries; the whole array is re-sorted by

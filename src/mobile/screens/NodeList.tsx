@@ -30,6 +30,9 @@ export const STATUS_META: Record<NodeStatus, { color: string; label: string }> =
   error: { color: "#f44336", label: "error" },
   awaiting_input: { color: "#ff9800", label: "needs input" },
   archived: { color: "#555", label: "archived" },
+  // `pending` is now part of the generated SessionStatus union (issue #359);
+  // the two-stage spawn flow sets it while stage-2 (worktree + PTY) runs.
+  pending: { color: "#9c27b0", label: "starting" },
 };
 
 const FALLBACK_PROVIDERS: Provider[] = [
