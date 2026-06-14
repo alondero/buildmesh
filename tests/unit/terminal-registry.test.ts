@@ -279,12 +279,17 @@ describe('TerminalRegistry', () => {
   });
 
   describe('syncPtySize', () => {
-    // Regression for the spawn-time PTY/term size desync: the attach-fit fires
-    // resize_agent BEFORE the agent process exists ("Agent not running",
-    // swallowed), and spawn falls back to 80x24. Once the agent is up, nothing
-    // re-pushes the term's real size — so the PTY stayed at 80 cols inside a
-    // wide pane and the agent wrapped its output / input early. syncPtySize is
-    // the post-spawn reconcile that closes the gap.
+    // Post-spawn PTY-size reconcile. The attach-fit fires resize_agent BEFORE
+    // the agent process exists ("Agent not running", swallowed), and spawn
+    // falls back to 80x24. Once the agent is up, nothing re-pushes the term's
+    // real size — so the PTY stayed at 80 cols inside a wide pane and the
+    // agent wrapped its output / input early. syncPtySize closes that gap.
+    //
+    // The constructor's `agent-spawned` listener (issue #332) is the
+    // production caller; the dedicated wiring test lives in
+    // terminal-registry-agent-spawned.test.ts. The unit tests below pin the
+    // method's contract — re-push the term's current dimensions to the PTY,
+    // no-op for detached / unknown nodes — independent of who calls it.
     it('re-sends the terminal\'s current dimensions to the PTY', async () => {
       const container = document.createElement('div');
       const inst = await registry.attach(1, container);

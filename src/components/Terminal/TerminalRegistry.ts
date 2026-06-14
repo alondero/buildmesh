@@ -191,6 +191,13 @@ export class TerminalRegistry {
    * fires, so nothing re-pushes the real size. The agent ends up wrapping its
    * output and input at 80 cols inside a much wider pane. This unconditional
    * re-send closes that gap once the agent is definitely up.
+   *
+   * The constructor's `agent-spawned` listener (issue #332) is the canonical
+   * caller, covering all async-spawn paths uniformly: auto-resume on startup,
+   * fresh auto-spawn, handover. The method stays public for the same reason
+   * the regression test in terminal-registry.test.ts pins it: the contract
+   * ("re-push the term's real dimensions to the PTY once the agent is up")
+   * is load-bearing and worth a named entry point.
    */
   syncPtySize(nodeId: number): void {
     const inst = this.instances.get(nodeId);
