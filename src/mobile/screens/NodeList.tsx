@@ -583,19 +583,29 @@ function useWsEvents(onEvent: () => void) {
   }, []);
 }
 
-function providerIcon(provider: string): string {
-  return ({ anthropic: "A", minimax: "M", kimi: "K", agy: "G", opencode: "O" } as Record<
-    string,
-    string
-  >)[provider] ?? "?";
+// Glyph + colour for the avatar badge shown on each NodeRow. The mobile
+// picker drives its labels from the `listProviders()` IPC payload, but the
+// badge needs a synchronous lookup at render time, so we mirror the
+// relevant `UiMeta` fields here (#295). Long-term: replace with a live
+// lookup against the IPC payload (#328). Pinned by
+// tests/unit/mobile-node-list-provider-maps.test.ts — the test's
+// `EXPECTED_BADGES` table is the canonical pairing for these values.
+const PROVIDER_BADGE = {
+  anthropic: { icon: "A", color: "#1d7cfc" },
+  minimax:   { icon: "M", color: "#6366f1" },
+  kimi:      { icon: "K", color: "#00c4c4" },
+  agy:       { icon: "G", color: "#10b981" },
+  opencode:  { icon: "O", color: "#f59e0b" },
+  // mirror: src-tauri/.../adapters/terminal.rs → Provider::Terminal::ui()
+  terminal:  { icon: "T", color: "#9ca3af" },
+  // mirror: src-tauri/.../adapters/codex.rs → Provider::Codex::ui()
+  codex:     { icon: "X", color: "#10a37f" },
+} as const;
+
+export function providerIcon(provider: string): string {
+  return (PROVIDER_BADGE as Record<string, { icon: string; color: string }>)[provider]?.icon ?? "?";
 }
 
-function providerColor(provider: string): string {
-  return ({
-    anthropic: "#1d7cfc",
-    minimax: "#6366f1",
-    kimi: "#00c4c4",
-    agy: "#10b981",
-    opencode: "#f59e0b",
-  } as Record<string, string>)[provider] ?? "#555";
+export function providerColor(provider: string): string {
+  return (PROVIDER_BADGE as Record<string, { icon: string; color: string }>)[provider]?.color ?? "#555";
 }
