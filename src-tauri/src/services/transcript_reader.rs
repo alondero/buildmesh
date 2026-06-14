@@ -153,8 +153,15 @@ impl Turn {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnavailableReason {
-    /// The node has no captured CLI session id — e.g. it never spawned, or its
-    /// provider doesn't produce a Claude Code transcript.
+    /// The provider doesn't produce a readable transcript at all (capability
+    /// flag off — e.g. OpenCode, Codex). Distinct from `NoSession` so a
+    /// Coordinator can tell "this provider never has a transcript" from "this
+    /// supported provider hasn't captured a session yet". The reader never
+    /// emits this itself; a route gates on the provider capability and returns
+    /// it before reading.
+    Unsupported,
+    /// The node has no captured CLI session id — e.g. a supported provider that
+    /// never spawned or whose session id wasn't captured yet.
     NoSession,
     /// No transcript file exists at the expected on-disk location.
     NoTranscript,
