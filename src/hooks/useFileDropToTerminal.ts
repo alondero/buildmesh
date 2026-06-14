@@ -1,8 +1,8 @@
-import { useEffect } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { terminalManager } from '../components/Terminal/Terminal';
 import { useUIStore } from '../stores/uiStore';
 import { nodeIdFromPoint, pasteDropPaths } from '../lib/fileDropPaste';
+import { useAsyncEffect } from './useAsyncEffect';
 
 /**
  * Register a single window-level listener for OS file drops (Explorer / Finder).
@@ -15,9 +15,8 @@ import { nodeIdFromPoint, pasteDropPaths } from '../lib/fileDropPaste';
  * Mount exactly once (from `App`).
  */
 export function useFileDropToTerminal(): void {
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     let unlisten: (() => void) | null = null;
-    let cancelled = false;
     const setDragTargetNodeId = useUIStore.getState().setDragTargetNodeId;
 
     // Tauri reports the drop position in physical pixels; elementFromPoint wants
@@ -52,13 +51,12 @@ export function useFileDropToTerminal(): void {
         );
       })
       .then((fn) => {
-        if (cancelled) fn();
+        if (signal.aborted) fn();
         else unlisten = fn;
       })
       .catch((err) => console.error('[useFileDropToTerminal] listener setup failed:', err));
 
     return () => {
-      cancelled = true;
       unlisten?.();
       setDragTargetNodeId(null);
     };
