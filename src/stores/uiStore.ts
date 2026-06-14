@@ -41,6 +41,14 @@ interface UIState {
   openProbeTab: (tab: ProbeTab) => void;
   openDiff: (file: string) => void;
   closeDiff: () => void;
+  /**
+   * Open the Probe Panel on the Mesh Properties tab (issue #375). Used by
+   * the sidebar's right-click context menu and the drift `!` badge so the
+   * two entry points converge on the same surface. The legacy
+   * `openPropertiesPanel` (right-rail drawer) is preserved during the
+   * transition but no longer wired to those triggers.
+   */
+  openPropertiesProbe: () => void;
 
   // ---- Legacy (preserved for migration) ----
   // `fileExplorerContext` and `propertiesPanelMeshId` predate the unified
@@ -106,6 +114,10 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   closeDiff: () => {
     set({ activeDiffFile: null });
+  },
+
+  openPropertiesProbe: () => {
+    set({ probeTab: 'properties', probeOpen: true });
   },
 
   toggleChangedFiles: (nodeId: number) => {

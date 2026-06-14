@@ -67,6 +67,16 @@ export function Sidebar() {
   const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
   const handleToggleDropdown = (mesh: Mesh) => setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
 
+  // Issue #375 — the right-click "Properties" entry and the drift `!` badge
+  // both open the Probe Panel on the ⚙️ Mesh Properties tab. We select the
+  // mesh first so `useProbeContext` resolves to the right row, then flip the
+  // probe open. The legacy `openPropertiesPanel` (right-rail drawer) is
+  // preserved in the store but is no longer wired to either entry point.
+  const handleOpenPropertiesProbe = (meshId: number) => {
+    selectMesh(meshId);
+    openProbeTab('properties');
+  };
+
   const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
     setOpenDropdownFor(null);
     try {
@@ -167,6 +177,7 @@ export function Sidebar() {
                       onSelectProvider={handleSelectProvider}
                       onOpenProperties={openPropertiesPanel}
                       onOpenFilesProbe={() => openProbeTab('files')}
+                      onOpenPropertiesProbe={handleOpenPropertiesProbe}
                       meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id)}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}

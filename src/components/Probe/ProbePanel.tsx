@@ -21,6 +21,7 @@ import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { ProjectFilesTab } from './ProjectFilesTab';
 import { AgentChangesTab } from './AgentChangesTab';
+import { MeshPropertiesTab } from './MeshPropertiesTab';
 
 interface ProbeTabDef {
   tab: ProbeTab;
@@ -176,10 +177,14 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
     );
   }
 
-  // The two tabs that already have real content (#376) — the rest of the
-  // dock still shows the scaffold placeholder pending their own issues.
+  // Real content for the three tabs whose issues have landed. Routed
+  // before the placeholder so the empty-state guards above (no mesh
+  // selected, no node focused) still apply uniformly.
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
+  if (tab === 'properties') {
+    return <MeshPropertiesTab />;
+  }
 
   return <ProbeTabPlaceholder tab={tab} />;
 }

@@ -56,6 +56,14 @@ interface MeshItemProps {
   onOpenGitHubIssues: (meshId: number) => void;
   onOpenSessionBrowser: (meshId: number) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
+  /**
+   * Issue #375 — the right-click "Properties" item and the drift `!` badge
+   * both jump straight to the Probe Panel on the ⚙️ Mesh Properties tab
+   * instead of the legacy right-rail drawer. The handler is responsible
+   * for selecting the mesh (so `useProbeContext` resolves to the right
+   * row) before flipping the probe open.
+   */
+  onOpenPropertiesProbe: (meshId: number) => void;
 }
 
 export function MeshItem({
@@ -76,6 +84,7 @@ export function MeshItem({
   onOpenGitHubIssues,
   onOpenSessionBrowser,
   getDefaultProvider,
+  onOpenPropertiesProbe,
 }: MeshItemProps) {
   const {
     setNodeRef,
@@ -164,7 +173,7 @@ export function MeshItem({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                onOpenProperties(mesh.id);
+                onOpenPropertiesProbe(mesh.id);
               }}
               title={buildDriftTooltip(health)}
               className="text-[11px] font-bold text-status-warning bg-status-warning-bg/15 hover:bg-status-warning-bg/30 rounded px-1.5 leading-[18px] transition-colors"
@@ -234,7 +243,7 @@ export function MeshItem({
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button
-            onClick={() => { setContextMenu(null); onOpenProperties(mesh.id); }}
+            onClick={() => { setContextMenu(null); onOpenPropertiesProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

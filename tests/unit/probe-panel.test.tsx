@@ -180,4 +180,19 @@ describe('ProbePanel', () => {
       expect(invoke).toHaveBeenCalledWith('diff_node_against_base', { nodeId: NODE.id });
     });
   });
+
+  it('renders the Mesh Properties form (issue #375) when the ⚙️ tab is open', () => {
+    // Sanity check on the wiring: the properties tab now hosts the new
+    // `<MeshPropertiesTab>` (config form), not the legacy placeholder
+    // "coming soon" message. A specific input label is enough to prove
+    // the form mounted.
+    useUIStore.setState({ probeOpen: true, probeTab: 'properties' });
+    render(<ProbePanel />);
+
+    // `getByLabelText` would race the form's load effect; `findBy*`
+    // awaits the first render after the `get_mesh_properties` mock
+    // resolves, matching the new tab's mount semantics.
+    expect(screen.queryByText('Loading…')).toBeTruthy();
+    expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
+  });
 });
