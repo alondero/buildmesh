@@ -367,7 +367,22 @@ fn start_reader(
     let session_captured = AtomicBool::new(!needs_session_capture);
 
     std::thread::spawn(move || {
+        // The SpawnTimer in spawn_agent_inner stops at process *creation*
+        // (`after_pty_spawn`), so the PowerShell → cwrap → Node → agent-CLI
+        // boot tail is invisible to it. Log the gap from spawn to the first
+        // byte of PTY output here — that first byte is the earliest signal the
+        // agent process is actually alive and producing a UI. Same
+        // `spawn_timing:` prefix so it sits alongside the other checkpoints.
+        let mut first_chunk = true;
         pump_pty_output(reader, |data| {
+            if first_chunk {
+                first_chunk = false;
+                tracing::info!(
+                    "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (process spawn → first output; agent CLI boot tail)",
+                    session_id,
+                    spawned_at.elapsed().as_millis()
+                );
+            }
             let text = String::from_utf8_lossy(data);
             crate::session_naming::on_output(session_id, &text);
 
