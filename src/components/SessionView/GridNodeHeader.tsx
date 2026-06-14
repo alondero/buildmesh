@@ -22,14 +22,31 @@ interface GridNodeHeaderProps {
 }
 
 export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
-  const toggleFileExplorer = useUIStore(state => state.toggleFileExplorer);
-  const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
+  // Issue #376: the chip now opens the unified Probe Panel on the 🔍
+  // (Agent Changes) tab for this node, rather than toggling the legacy
+  // FileExplorerPanel in the SessionView left pane.
+  const openProbeTab = useUIStore(state => state.openProbeTab);
+  const probeOpen = useUIStore(state => state.probeOpen);
+  const probeTab = useUIStore(state => state.probeTab);
   // Boolean selector (not the raw id) so only the two headers whose maximized
   // status actually flips re-render on a toggle — not every header in the grid.
   const isMaximized = useUIStore(state => state.maximizedNodeId === node.id);
   const toggleMaximizedNode = useUIStore(state => state.toggleMaximizedNode);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   const renameAgentNode = useAgentNodeStore(state => state.renameAgentNode);
+  // The chip's click focuses the node before opening the probe — the
+  // `AgentChangesTab` reads `useProbeContext().activeNodeId` to pick
+  // which node's review to render, so without this the user could land
+  // on a different terminal's review if a different node was already
+  // focused. (The legacy `toggleFileExplorer` was per-node by passing
+  // an explicit nodeId; the new probe context derivation makes focus
+  // the natural way to express "review THIS node".)
+  const setActiveNode = useAgentNodeStore((state) => state.setActiveNode);
+  // The cyan chip highlight (post-#376) signals "the probe is showing
+  // this node's review right now". `AgentChangesTab` reads `activeNodeId`
+  // from this store to pick which node's review to render, so we compare
+  // the same value to keep the highlight and the body in sync.
+  const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === node.id);
   const meshesById = useMeshStore(state => state.meshesById);
   const meshColor = getMeshColor(node.mesh_id);
 
@@ -42,8 +59,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   const { summary } = useGitSummary(gitPath || null);
   const { pr: openPr } = useOpenPr(node.id, gitPath || null);
 
-  const isPanelNode =
-    fileExplorerContext?.type === 'agent' && fileExplorerContext.nodeId === node.id;
+  const isPanelNode = probeOpen && probeTab === 'review' && isReviewingThisNode;
 
   const meshLabel = useMemo(() => {
     const m = meshesById.get(node.mesh_id);
@@ -95,7 +111,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         {summary && (
           <span
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => { e.stopPropagation(); toggleFileExplorer({ type: 'agent', nodeId: node.id, path: gitPath }); }}
+            onClick={(e) => { e.stopPropagation(); setActiveNode(node.id); openProbeTab('review'); }}
             className="text-[11px] font-mono font-semibold cursor-pointer flex items-center gap-1.5 drop-shadow-sm hover:brightness-125"
             title="Click to see changes"
           >

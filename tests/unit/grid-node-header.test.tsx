@@ -94,16 +94,43 @@ describe('GridNodeHeader git-summary chip', () => {
     expect(getByText('-0').className).toContain('text-text-muted');
   });
 
-  it('overrides per-status colour with cyan when this node owns the agent file-explorer panel', () => {
+  it('overrides per-status colour with cyan when the probe is showing this node\'s review (#376)', () => {
+    // Issue #376 — the cyan "this is the node being reviewed" highlight
+    // now follows the Probe Panel state (probeOpen + probeTab === 'review'
+    // + activeNodeId === node.id), not the legacy `fileExplorerContext`
+    // (which is being phased out as the FileExplorerPanel consumers
+    // migrate to the probe).
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
+    prMock.mockReturnValue(null);
     useUIStore.setState({
-      fileExplorerContext: { type: 'agent', nodeId: NODE.id, path: '/repo' },
+      probeOpen: true,
+      probeTab: 'review',
+      fileExplorerContext: null,
     });
+    useAgentNodeStore.setState({ activeNodeId: NODE.id });
     const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
 
     expect(getByText('+3').className).toContain('text-accent-cyan');
     expect(getByText('~2').className).toContain('text-accent-cyan');
     expect(getByText('-1').className).toContain('text-accent-cyan');
+  });
+
+  it('keeps the per-status colours when the probe is on review but a different node is focused', () => {
+    // The cyan override is per-node: it should only fire for the node
+    // whose review the probe is actually showing.
+    summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
+    prMock.mockReturnValue(null);
+    useUIStore.setState({
+      probeOpen: true,
+      probeTab: 'review',
+      fileExplorerContext: null,
+    });
+    useAgentNodeStore.setState({ activeNodeId: 999 /* not this node */ });
+    const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+
+    expect(getByText('+3').className).toContain('text-green-400');
+    expect(getByText('~2').className).toContain('text-amber-400');
+    expect(getByText('-1').className).toContain('text-red-400');
   });
 });
 
@@ -222,6 +249,55 @@ describe('GridNodeHeader PR chip', () => {
 
     fireEvent.click(getByText('PR #123'));
     expect(openUrlMock).toHaveBeenCalledWith(url);
+  });
+
+  it('opens the probe panel on the review tab when the git-summary chip is clicked (#376)', () => {
+    // Issue #376 — clicking the +/~/- chip used to call the legacy
+    // `toggleFileExplorer` (which opened the FileExplorerPanel in the
+    // SessionView left pane). After the port it opens the unified Probe
+    // Panel on the 🔍 tab so the user lands on the active agent's
+    // AgentReviewPanel.
+    summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
+    prMock.mockReturnValue(null);
+    useUIStore.setState({
+      probeOpen: false,
+      probeTab: 'files',
+      fileExplorerContext: null,
+    });
+    const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+
+    fireEvent.click(getByText('+3'));
+
+    const state = useUIStore.getState();
+    expect(state.probeOpen).toBe(true);
+    expect(state.probeTab).toBe('review');
+    // The legacy `fileExplorerContext` must NOT be touched any more — it's
+    // reserved for the in-flight migration of FileExplorerPanel consumers.
+    expect(state.fileExplorerContext).toBeNull();
+  });
+
+  it('focuses this node when the chip is clicked, so the review tab shows THIS node\'s diff', () => {
+    // Regression guard: the legacy `toggleFileExplorer` was per-node
+    // (passed an explicit nodeId). The new flow routes through
+    // `AgentChangesTab` which reads `useProbeContext().activeNodeId`, so
+    // if the chip click doesn't also focus this node, the user lands on
+    // whichever node was last focused — a different terminal's review.
+    summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
+    prMock.mockReturnValue(null);
+    useUIStore.setState({
+      probeOpen: false,
+      probeTab: 'files',
+      fileExplorerContext: null,
+    });
+    // Pre-focus a DIFFERENT node (not NODE) — if the chip click doesn't
+    // also set activeNodeId, the probe would render that other node's
+    // review instead of NODE's.
+    useAgentNodeStore.setState({ activeNodeId: 999 });
+    const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+
+    fireEvent.click(getByText('+3'));
+
+    expect(useAgentNodeStore.getState().activeNodeId).toBe(NODE.id);
   });
 
   it('prefixes the title with "Draft" when the PR is a draft', () => {

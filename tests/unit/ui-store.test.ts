@@ -163,5 +163,44 @@ describe('useUIStore', () => {
         expect(useUIStore.getState().activeDiffFile).toBeNull();
       });
     });
+
+    describe('openProbeTab (#376)', () => {
+      // One-call helper so the sidebar "File Explorer" menu and the agent
+      // node git-summary chip can both open the probe on a specific tab
+      // without each one re-implementing "set tab + open if closed". The
+      // "click active tab to collapse" UX is left to ProbePanel's own click
+      // handler, so this stays a pure "make the tab visible" action.
+      it('opens the panel on the requested tab when it is closed', () => {
+        useUIStore.setState({ probeOpen: false, probeTab: 'files' });
+        useUIStore.getState().openProbeTab('review');
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('review');
+      });
+
+      it('switches to a different tab while keeping the panel open', () => {
+        useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+        useUIStore.getState().openProbeTab('review');
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('review');
+      });
+
+      it('is idempotent on the active tab (no toggle-off)', () => {
+        // The legacy `toggleFileExplorer` semantics closed the panel on a
+        // second click. `openProbeTab` is "make this tab visible" — closing
+        // stays a separate concern (the activity-bar's click handler does
+        // that), so the second call must not collapse the panel.
+        useUIStore.setState({ probeOpen: true, probeTab: 'review' });
+        useUIStore.getState().openProbeTab('review');
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('review');
+      });
+
+      it('opens on the requested tab from a different starting tab', () => {
+        useUIStore.setState({ probeOpen: false, probeTab: 'properties' });
+        useUIStore.getState().openProbeTab('files');
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('files');
+      });
+    });
   });
 });

@@ -1,9 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import type { DiffResult, FileNode, GitStatus } from '../../src/lib/tauri';
 
 const MESH: Mesh = {
   id: 1,
@@ -42,6 +44,30 @@ function tabButton(label: string): HTMLElement {
   return screen.getByRole('button', { name: label });
 }
 
+const FILES: GitStatus[] = [
+  { path: 'src/app.ts', status: 'modified', additions: 2, deletions: 1 },
+];
+
+const TREE: FileNode = {
+  name: 'repo',
+  path: '/repo',
+  is_dir: true,
+  children: [
+    { name: 'app.ts', path: '/repo/app.ts', is_dir: false, children: [] },
+  ],
+};
+
+const DIFF: DiffResult = {
+  files: [
+    {
+      path: 'src/app.ts',
+      hunks: [
+        { old_start: 1, old_lines: 1, new_start: 1, new_lines: 2, lines: ['-old', '+new'] },
+      ],
+    },
+  ],
+};
+
 describe('ProbePanel', () => {
   beforeEach(() => {
     // Default to a context with both a selected mesh and a focused node so the
@@ -50,6 +76,14 @@ describe('ProbePanel', () => {
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_git_status') return Promise.resolve(FILES);
+      if (cmd === 'list_directory') return Promise.resolve(TREE);
+      if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);
+      if (cmd === 'diff_node_against_base') return Promise.resolve(DIFF);
+      if (cmd === 'get_git_branch_status') return Promise.resolve(null);
+      return Promise.resolve({});
+    });
   });
 
   it('renders an activity-bar button for all six tabs even when collapsed', () => {
@@ -119,5 +153,31 @@ describe('ProbePanel', () => {
     render(<ProbePanel />);
 
     expect(screen.getByText('No active agent node')).toBeTruthy();
+  });
+
+  it('renders the Project Files tab body (Changed Files + File Tree) when the 📁 tab is active', async () => {
+    // Issue #376 — the 📁 tab no longer shows a "coming soon" placeholder,
+    // it shows the same ChangedFilesSection + collapsible FileTree that
+    // FileExplorerPanel used to render for a mesh context.
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    expect(await screen.findByText('Changed Files')).toBeTruthy();
+    expect(screen.getByText('File Tree')).toBeTruthy();
+  });
+
+  it('renders the Agent Changes tab body for the focused node when the 🔍 tab is active', async () => {
+    // Issue #376 — the 🔍 tab delegates to AgentReviewPanel for the focused
+    // node. The summary bar's "1 file changed" is the canary that the
+    // diffNodeAgainstBase call landed.
+    useUIStore.setState({ probeOpen: true, probeTab: 'review' });
+    render(<ProbePanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/1 file changed/)).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('diff_node_against_base', { nodeId: NODE.id });
+    });
   });
 });
