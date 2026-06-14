@@ -3,6 +3,7 @@
 
 pub mod agent;
 mod commands;
+mod coordinator;
 mod db;
 mod env;
 mod git;
@@ -148,6 +149,10 @@ pub fn run() {
             // App preferences (buildmesh-wide)
             commands::preferences::get_app_preferences,
             commands::preferences::set_app_default_provider,
+            // Coordinator read API (ADR-0008)
+            commands::coordinator::get_coordinator_status,
+            commands::coordinator::set_coordinator_api_enabled,
+            commands::coordinator::generate_coordinator_read_token,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

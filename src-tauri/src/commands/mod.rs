@@ -7,6 +7,7 @@ pub mod agent_tests;
 pub mod ai_context;
 pub mod attention;
 pub mod build_run;
+pub mod coordinator;
 pub mod diff;
 pub mod file_tree;
 pub mod file_watcher;
