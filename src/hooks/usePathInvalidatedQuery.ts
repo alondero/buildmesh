@@ -9,7 +9,7 @@
  *
  * Footguns already-fixed (do not re-introduce):
  * 1. **Subscribe `onInvalidate` race** — the subscribe effect guards its
- *    `setData` / `setLoading` with a `cancelled` flag, just like the
+ *    `setData` / `setLoading` with `signal.aborted`, just like the
  *    mount-refetch effect. Without it, a `GIT_CHANGED` that fired in the
  *    gap between unsubscribe and remount could resolve a stale key's data
  *    into the new key's component.
@@ -20,9 +20,10 @@
  *    spinner next to the cached value.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { QueryClient } from '../lib/pathInvalidatedCache';
+import { useAsyncEffect } from './useAsyncEffect';
 
 export interface UsePathInvalidatedQueryResult<V> {
   data: V | null;
@@ -78,31 +79,26 @@ export function usePathInvalidatedQuery<K, V>(
   });
 
   // Mount / key change: read from cache, otherwise fetch (unless the
-  // caller opted out via `enabled: false`). The cancelled flag protects
-  // against the classic async-race where a key changes (or the component
-  // unmounts) while a fetch is in flight.
-  useEffect(() => {
-    let cancelled = false;
-
+  // caller opted out via `enabled: false`). The signal protects against
+  // the classic async-race where a key changes (or the component
+  // unmounts) while a fetch is in flight — issue #349.
+  useAsyncEffect((signal) => {
     if (key == null) {
       setData(null);
       setLoading(false);
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
 
     if (!enabled) {
       // Caller is responsible for the initial fetch (typically via a
       // sibling effect that runs a precondition check first). Seed
       // loading from the cache so we don't show a perpetual spinner.
+      if (signal.aborted) return;
       const cached = client.read(key);
-      if (cancelled) return;
+      if (signal.aborted) return;
       setData(cached === undefined ? null : cached);
       setLoading(false);
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
 
     const cached = client.read(key);
@@ -112,67 +108,57 @@ export function usePathInvalidatedQuery<K, V>(
       // spinner next to the cached value.
       setData(cached);
       setLoading(false);
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
 
     setLoading(true);
     client.refresh(key).then((result) => {
-      if (cancelled) return;
+      if (signal.aborted) return;
       setData(result);
       setLoading(false);
     });
-
-    return () => {
-      cancelled = true;
-    };
   }, [key, client, enabled]);
 
   // Subscribe to GIT_CHANGED invalidation. The bus already evicted the
   // cache entry for `key` by the time `notify` fires, so this refresh hits
   // the backend (or dedups onto a sibling subscriber's in-flight fetch).
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (key == null || !path) return;
-    let cancelled = false;
     const unsubscribe = client.subscribe(key, path, () => {
-      if (cancelled) return;
+      if (signal.aborted) return;
       setLoading(true);
       client.refresh(key).then((result) => {
-        if (cancelled) return;
+        if (signal.aborted) return;
         setData(result);
         setLoading(false);
       });
     });
     return () => {
-      cancelled = true;
       unsubscribe();
     };
   }, [key, path, client]);
 
-  // Optional: refetch when the window regains focus. Same cancelled-flag guard
-  // as the subscribe effect, so a focus event firing during a key change can't
-  // resolve a stale key's data into the new render.
-  useEffect(() => {
+  // Optional: refetch when the window regains focus. Same signal guard as
+  // the subscribe effect, so a focus event firing during a key change
+  // can't resolve a stale key's data into the new render.
+  useAsyncEffect((signal) => {
     if (key == null || !refetchOnFocus) return;
-    let cancelled = false;
     let unlisten: (() => void) | null = null;
     getCurrentWindow()
       .onFocusChanged(({ payload: focused }) => {
-        if (!focused || cancelled) return;
+        if (!focused || signal.aborted) return;
         setLoading(true);
         client.refresh(key).then((result) => {
-          if (cancelled) return;
+          if (signal.aborted) return;
           setData(result);
           setLoading(false);
         });
       })
       .then((fn) => {
-        if (cancelled) fn();
+        if (signal.aborted) fn();
         else unlisten = fn;
       });
     return () => {
-      cancelled = true;
       if (unlisten) unlisten();
     };
   }, [key, client, refetchOnFocus]);

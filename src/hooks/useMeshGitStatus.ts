@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   checkIsGitRepo,
   checkGhAuth,
@@ -6,6 +6,7 @@ import {
   type GitStatus,
 } from '../lib/tauri';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
+import { useAsyncEffect } from './useAsyncEffect';
 import { gitStatusClient } from './useChangedFiles';
 
 export interface MeshGitStatus {
@@ -43,7 +44,7 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
   // Repo-ness, GitHub auth, and the default branch are stable per panel
   // session — fetch once per path. Re-running checkGhAuth (a GitHub
   // network round-trip) on every file save was pure waste.
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (!meshPath) return;
     // Issue #343: when `meshPath` changes within the same mount (e.g. user
     // switches meshes in the sidebar), the effect re-runs but the local
@@ -57,7 +58,6 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
     setIsGitRepo(null);
     setIsAuthenticated(false);
     setDefaultBranch('main');
-    let cancelled = false;
     (async () => {
       try {
         const [repoOk, ghOk, branchResult] = await Promise.all([
@@ -65,7 +65,7 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
           checkGhAuth(),
           getDefaultBranch(meshPath),
         ]);
-        if (cancelled) return;
+        if (signal.aborted) return;
         if (!repoOk) {
           setIsGitRepo(false);
           return;
@@ -78,12 +78,9 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
         // GIT_CHANGED after this point will refetch via the bus.
         refresh();
       } catch {
-        if (!cancelled) setIsGitRepo(false);
+        if (!signal.aborted) setIsGitRepo(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
   }, [meshPath, refresh]);
 
   if (isGitRepo === null) return null;

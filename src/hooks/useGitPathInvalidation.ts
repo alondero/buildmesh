@@ -9,9 +9,9 @@
  * (e.g. user switches nodes), the effect cleanup unsubscribes the old
  * path and re-subscribes the new one. If a `GIT_CHANGED` event fires in
  * the gap, the OLD `cb` runs against the NEW component. The hook side
- * (`usePathInvalidatedQuery`) already fixes this with a `cancelled` flag
- * that guards the `setData` / `setLoading` in the subscribe effect's
- * closure. The components that used `subscribeGitPathInvalidation`
+ * (`usePathInvalidatedQuery`) already fixes this with the AbortSignal
+ * passed by `useAsyncEffect` (issue #349) that the bus callback
+ * short-circuits on. The components that used `subscribeGitPathInvalidation`
  * directly (`AgentReviewPanel`, `ChangedFilesPanel`) had the same
  * pre-existing footgun.
  *
@@ -30,8 +30,9 @@
  * rebuild the global bus subscription on every parent re-render.
  */
 
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { subscribeGitPathInvalidation } from '../lib/pathInvalidatedCache';
+import { useAsyncEffect } from './useAsyncEffect';
 
 export function useGitPathInvalidation(
   path: string | null | undefined,
@@ -46,15 +47,13 @@ export function useGitPathInvalidation(
   const cbRef = useRef(cb);
   cbRef.current = cb;
 
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (!path) return;
-    let cancelled = false;
     const unsubscribe = subscribeGitPathInvalidation(path, () => {
-      if (cancelled) return;
+      if (signal.aborted) return;
       cbRef.current();
     });
     return () => {
-      cancelled = true;
       unsubscribe();
     };
   }, [path]);
