@@ -4,7 +4,7 @@ import {
   openInEditor,
   type DiffResult,
 } from '../../lib/tauri';
-import { subscribeGitPathInvalidation } from '../../lib/pathInvalidatedCache';
+import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
 import { Diff, diffTotals } from '../Diff/Diff';
 import { FileTree } from './FileTree';
 
@@ -66,12 +66,11 @@ export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
   // (useGitSummary) — without this the panel silently goes stale and disagrees
   // with the chip. Issue #304: the watcher emits the worktree subdir path
   // (and a WSL UNC backslash form) — `pathMatchesGitEvent` inside the
-  // primitive normalizes both.
-  useEffect(() => {
-    return subscribeGitPathInvalidation(rootPath, () => {
-      fetchDiff({ background: true });
-    });
-  }, [rootPath, fetchDiff]);
+  // primitive normalizes both. Issue #357: this now goes through the
+  // cancelled-flag-guarded hook so an event that races a path change
+  // (e.g. user switches nodes mid-fetch) is dropped before it can write
+  // into the new component's state.
+  useGitPathInvalidation(rootPath, () => fetchDiff({ background: true }));
 
   if (loading) {
     return (
