@@ -3,6 +3,11 @@
 
 use crate::db;
 use crate::env;
+// The Claude-Code JSONL primitives (path encoding, synthetic-injection
+// skipping, content-text extraction) live in `transcript_reader` so this
+// discovery scan and the coordinator's transcript reader share one source of
+// Claude-Code-format truth (ADR-0008). A format change breaks in one place.
+use crate::services::transcript_reader::{concat_text_blocks, encode_path, is_synthetic_message};
 use serde::Serialize;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -16,18 +21,6 @@ pub struct DiscoveredSession {
     pub cwd: Option<String>,
     pub timestamp: Option<String>,
     pub worktree_name: Option<String>,
-}
-
-/// Encode a filesystem path the same way Claude Code does: replace every
-/// non-alphanumeric character with `-`. On Windows this includes the drive
-/// colon (`:`) and `\` separators; on Unix it covers `/`. It also matches
-/// Claude Code's handling of `.` in worktree paths (e.g. `.claude` →
-/// `-claude`), so `X:\src\buildmesh\.claude\worktrees\foo` round-trips to
-/// `X--src-buildmesh--claude-worktrees-foo`.
-fn encode_path(path: &str) -> String {
-    path.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
 }
 
 /// Extract the worktree name from an encoded project directory name.
@@ -66,13 +59,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Returns true if the raw message text is a synthetic Claude Code injection
-/// rather than genuine user input (e.g. local-command-caveat wrappers).
-fn is_synthetic_message(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.starts_with("<local-command-caveat>")
-}
-
 /// Parse a JSONL session file to extract the first real user message and metadata.
 /// Skips synthetic injected messages (e.g. local-command-caveat) and reads until
 /// it finds a genuine user-authored entry.
@@ -93,23 +79,7 @@ fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<
                 if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
                     continue;
                 }
-                let content = msg.get("content");
-                let text = match content {
-                    Some(serde_json::Value::String(s)) => s.clone(),
-                    Some(serde_json::Value::Array(arr)) => {
-                        arr.iter()
-                            .filter_map(|block| {
-                                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    block.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-                                } else {
-                                    None
-                                }
-                            })
-                            .next()
-                            .unwrap_or_default()
-                    }
-                    _ => String::new(),
-                };
+                let text = concat_text_blocks(msg.get("content"));
 
                 if is_synthetic_message(&text) {
                     continue;
