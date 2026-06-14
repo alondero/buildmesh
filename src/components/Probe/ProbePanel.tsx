@@ -21,18 +21,23 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 interface ProbeTabDef {
   tab: ProbeTab;
   icon: string;
+  /** Full descriptive name — used for the header title, tooltip, and the
+   *  button's accessible name (aria-label). */
   label: string;
+  /** Single-word caption shown under the icon in the narrow activity bar, so
+   *  it stays legible at a readable size without wrapping. */
+  short: string;
 }
 
 // Display order follows the PRD's activity-bar order (issue #374), which is
 // deliberately different from the `ProbeTab` union's declaration order.
 const PROBE_TABS: ProbeTabDef[] = [
-  { tab: 'files', icon: '📁', label: 'Project Files' },
-  { tab: 'review', icon: '🔍', label: 'Agent Changes' },
-  { tab: 'worktrees', icon: '🌳', label: 'Worktree Manager' },
-  { tab: 'properties', icon: '⚙️', label: 'Mesh Properties' },
-  { tab: 'issues', icon: '🐙', label: 'Git Issues' },
-  { tab: 'sessions', icon: '🕒', label: 'Session History' },
+  { tab: 'files', icon: '📁', label: 'Project Files', short: 'Files' },
+  { tab: 'review', icon: '🔍', label: 'Agent Changes', short: 'Changes' },
+  { tab: 'worktrees', icon: '🌳', label: 'Worktree Manager', short: 'Worktrees' },
+  { tab: 'properties', icon: '⚙️', label: 'Mesh Properties', short: 'Properties' },
+  { tab: 'issues', icon: '🐙', label: 'Git Issues', short: 'Issues' },
+  { tab: 'sessions', icon: '🕒', label: 'Session History', short: 'History' },
 ];
 
 const PROBE_BODY_WIDTH = 360;
@@ -110,7 +115,7 @@ export function ProbePanel() {
         aria-label="Probe tabs"
         className="flex flex-col w-16 shrink-0 py-1 border-l border-border-subtle bg-bg-surface"
       >
-        {PROBE_TABS.map(({ tab, icon, label }) => {
+        {PROBE_TABS.map(({ tab, icon, label, short }) => {
           const isActive = probeOpen && probeTab === tab;
           return (
             <button
@@ -123,13 +128,13 @@ export function ProbePanel() {
               className={`flex flex-col items-center gap-1 px-1 py-2.5 transition-colors border-l-2 ${
                 isActive
                   ? 'text-accent-cyan border-accent-cyan bg-bg-highlight'
-                  : 'text-text-muted border-transparent hover:text-text-secondary hover:bg-bg-card/40'
+                  : 'text-text-secondary border-transparent hover:text-text-primary hover:bg-bg-card/40'
               }`}
             >
-              <span className="text-lg leading-none" aria-hidden="true">
+              <span className="text-xl leading-none" aria-hidden="true">
                 {icon}
               </span>
-              <span className="text-[9px] leading-tight text-center">{label}</span>
+              <span className="text-xs font-medium leading-tight text-center">{short}</span>
             </button>
           );
         })}
