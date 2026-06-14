@@ -232,9 +232,105 @@ impl ProcessRegistryApi for AgentProcessRegistry {
 pub static PROCESS_REGISTRY: once_cell::sync::Lazy<Arc<AgentProcessRegistry>> =
     once_cell::sync::Lazy::new(|| Arc::new(AgentProcessRegistry::new()));
 
+/// Low-frequency poller that drops the PTY master as soon as the child
+/// process has exited.
+///
+/// On Windows ConPTY (10.0.28120, June 2026 update) the master read pipe
+/// no longer EOFs when the child exits — conhost holds it open until the
+/// pseudoconsole itself is closed (the `MasterPty` is dropped). The PTY
+/// reader thread is therefore blocked on `read()` long after the agent
+/// CLI has gone, which means `reader_alive` stays `true`, the node
+/// status never flips to `Idle`, and `is_agent_already_running` blocks
+/// respawning the node (issue #287).
+///
+/// This helper spawns a thread that polls `child.try_wait()` every
+/// `POLL_INTERVAL` and, on first detection of child exit, takes the
+/// master out of its `Option`, dropping the `Box<dyn MasterPty>`. The
+/// pseudoconsole closes, the reader's `read()` returns EOF, the reader
+/// sets `reader_alive = false`, and the post-pump path updates DB
+/// status to `Idle`.
+///
+/// **Why `try_wait` and not `wait`:** `AgentProcess.child` is behind a
+/// `Mutex` that `kill_session` also locks. A blocked `wait()` would hold
+/// the mutex indefinitely and deadlock the close path. `try_wait` is
+/// non-blocking; if the lock is contended (kill in progress) we skip
+/// the tick and try again next round. The watcher makes no attempt to
+/// kill the child itself — it just detects the natural exit.
+///
+/// Returns the `JoinHandle` so a test can wait for the watcher to
+/// finish. Production code can ignore it; the thread self-terminates
+/// after the first detected exit.
+pub fn watch_child_exit(
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+        loop {
+            std::thread::sleep(POLL_INTERVAL);
+
+            // try_lock, NOT lock: never block the kill path. If
+            // kill_session is holding the child mutex, skip this
+            // tick and try again next round. A poisoned mutex means
+            // another lock-holder panicked; a silent skip would
+            // leave the reader wedged, so propagate loudly
+            // (consistent with kill_session's panic on poison).
+            let mut child_guard = match child.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => {
+                    panic!("watch_child_exit: child mutex poisoned: {}", p);
+                }
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+            };
+            let exited = match child_guard.try_wait() {
+                Ok(Some(_status)) => true,
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!("watch_child_exit: try_wait error: {}", e);
+                    false
+                }
+            };
+            // Release the child lock before touching the master —
+            // mirrors kill_session's order and avoids holding both
+            // mutexes simultaneously.
+            drop(child_guard);
+
+            if !exited {
+                continue;
+            }
+
+            // Child has exited. Drop the master to EOF the reader.
+            // try_lock on the master too — symmetric with the child
+            // lock above. If kill_session is mid-step-1 (which also
+            // holds master briefly) we yield; kill_session will
+            // close the master for us, and the next watcher tick
+            // (or this watcher's exit) makes the EOF happen. A
+            // poisoned master mutex is a kill_session / resize_pty
+            // panic we cannot recover from; propagate loudly.
+            match master.try_lock() {
+                Ok(mut master_guard) => {
+                    master_guard.take();
+                }
+                Err(std::sync::TryLockError::Poisoned(p)) => {
+                    panic!("watch_child_exit: master mutex poisoned: {}", p);
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // kill_session is mid-flight. It'll take the
+                    // master for us; nothing for us to do here.
+                }
+            }
+            return;
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::provider::{SpawnRecipe, WindowsShell};
+    use crate::agent::spawn::{open_pty_pair, spawn_child};
+    use crate::agent::spawn_environment;
+    use crate::models::EnvType;
 
     #[test]
     fn insert_and_get() {
@@ -262,5 +358,64 @@ mod tests {
     fn is_alive_false_for_missing() {
         let registry = AgentProcessRegistry::new();
         assert!(!registry.is_alive(&999));
+    }
+
+    /// Regression guard for issue #287: when the agent CLI exits
+    /// naturally, the watcher must drop the master within ~1s of the
+    /// exit so the reader thread can EOF and `reader_alive` can flip
+    /// to `false`. Without this, a Windows 28120 ConPTY build leaves
+    /// the node stuck "running" until the app restarts.
+    ///
+    /// Platform-agnostic by design: we drive a real portable-pty child
+    /// (so the types match production exactly) but only assert the
+    /// watcher's observable contract — that it takes the master once
+    /// the child has exited.
+    #[test]
+    fn watcher_drops_master_after_child_exit() {
+        // Trivial command: exit immediately, no output. The watcher
+        // is what we're testing, not the child's output, so a 0-byte
+        // recipe keeps the test focused.
+        let recipe = SpawnRecipe {
+            binary: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" },
+            base_args: if cfg!(windows) {
+                vec!["/c".into(), "exit".into(), "0".into()]
+            } else {
+                vec!["-c".into(), "exit 0".into()]
+            },
+            windows_shell: WindowsShell::Direct,
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let cmd = spawn_environment::wrap(
+            recipe,
+            EnvType::Windows,
+            &cwd.to_string_lossy(),
+            -915_4001,
+        );
+
+        let pair = open_pty_pair(24, 80).expect("open pty pair");
+        let child = spawn_child(&pair, cmd).expect("spawn child");
+
+        let child_arc: Arc<Mutex<Box<dyn Child + Send + Sync>>> = Arc::new(Mutex::new(child));
+        let master_arc: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>> =
+            Arc::new(Mutex::new(Some(pair.master)));
+
+        let watcher = watch_child_exit(child_arc.clone(), master_arc.clone());
+
+        // The watcher polls every 500ms. With a 0-byte command the
+        // child exits well inside the first poll, so the master
+        // should be dropped well within 2s.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while master_arc.lock().unwrap().is_some() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            master_arc.lock().unwrap().is_none(),
+            "watch_child_exit should drop the master within 2s of child exit (issue #287: \
+             without this, a Windows 28120 ConPTY build leaves nodes stuck 'running')"
+        );
+
+        // The watcher self-terminates after taking the master; this
+        // join is best-effort and just keeps the test process clean.
+        let _ = watcher.join();
     }
 }

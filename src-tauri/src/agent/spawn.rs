@@ -698,6 +698,19 @@ pub async fn spawn_agent_inner(
         adapter.is_plain_terminal(),
     );
 
+    // 13b. Start natural-exit watcher (issue #287). On Windows ConPTY
+    //      10.0.28120 the master read pipe no longer EOFs on child
+    //      exit, so the reader thread stays blocked in `read()` until
+    //      the pseudoconsole itself is closed. This poller drops the
+    //      master within ~500ms of the child exiting, EOFing the
+    //      reader, which then sets `reader_alive = false` and flips
+    //      the node status to `Idle`. The watcher uses `try_wait` +
+    //      `try_lock` on the child so it never blocks kill_session
+    //      (which also locks that mutex).
+    if let Some(entry) = PROCESS_REGISTRY.get(&session_id) {
+        crate::agent::process::watch_child_exit(entry.child.clone(), entry.master.clone());
+    }
+
     // 14. Stash the JoinHandle on the registered entry. `kill_session`
     //     reads it under a Mutex so the concurrent kill_session path
     //     is race-free (see `process.rs::kill_session`).
