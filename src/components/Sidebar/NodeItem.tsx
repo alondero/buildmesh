@@ -16,6 +16,14 @@ interface NodeItemProps {
 export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: NodeItemProps) {
   const config = getStatusConfig(node.status);
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
+  const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
+  // 'error' is the false-positive status the app-exit / post-pump race
+  // leaves behind (see agent/spawn.rs:419-438 vs lib.rs:247-253) — the
+  // user never got a chance to actually use the node, so the
+  // meaningful action is "retry the spawn", not "delete". The store's
+  // spawnAgent passes `cli_session_id` as the resume argument, so a
+  // click re-attempts the same --resume the failed auto-resume tried.
+  const showRestart = node.status === 'error';
   return (
     <div
       data-session-item
@@ -40,6 +48,20 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
         onCommit={(next) => renameAgentNode(node.id, next)}
         className="flex-1 truncate text-text-secondary font-sans text-left"
       />
+      {showRestart && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            spawnAgent(node.id, node.provider).catch((err) => {
+              console.error('[NodeItem] Restart failed:', err);
+            });
+          }}
+          className="text-text-muted hover:text-status-warning text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
+          title="Restart agent"
+        >
+          ↻
+        </button>
+      )}
       <button
         onClick={onDelete}
         className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
