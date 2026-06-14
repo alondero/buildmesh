@@ -1,5 +1,5 @@
 import { useDraggable, useDroppable } from '@dnd-kit/core';
-import { type AgentNode } from '../../stores/agentNodeStore';
+import { type AgentNode, useAgentNodeStore } from '../../stores/agentNodeStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { BuildRunTerminal } from '../Terminal/BuildRunTerminal';
 import { GridNodeHeader } from './GridNodeHeader';
@@ -31,6 +31,10 @@ interface NodeCardProps {
 /// (a DragOverlay renders the moving preview) and just dim the source instead.
 export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen, setBuildRunOpen, draggable = true }: NodeCardProps) {
   const isBuildRunOpen = buildRunOpen?.nodeId === node.id ? buildRunOpen.mode : null;
+  // Closing a node runs a worktree safety check that can take seconds; until it
+  // resolves the card stays mounted, so cover its viewport with a clear
+  // "Closing…" overlay rather than leaving the terminal looking live but inert.
+  const isClosing = useAgentNodeStore((s) => s.closingNodeIds.has(node.id));
 
   const dragData = { nodeId: node.id, meshId: node.mesh_id };
   const { setNodeRef: setDragRef, listeners, attributes, isDragging } = useDraggable({
@@ -76,6 +80,15 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
         )}
       </div>
       {draggable && <NodeDropCue nodeId={node.id} />}
+      {isClosing && (
+        <div
+          className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-bg-card/80 backdrop-blur-sm"
+          aria-busy="true"
+        >
+          <span className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-text-muted border-t-transparent" />
+          <span className="text-text-secondary text-sm font-sans">Closing…</span>
+        </div>
+      )}
     </div>
   );
 }

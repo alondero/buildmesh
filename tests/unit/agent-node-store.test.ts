@@ -44,6 +44,7 @@ describe('useAgentNodeStore', () => {
       activeNodeId: null,
       loading: false,
       error: null,
+      closingNodeIds: new Set(),
     });
     vi.clearAllMocks();
     setWorktreeCloseActionResolverForTests();
@@ -286,6 +287,71 @@ describe('useAgentNodeStore', () => {
         removeWorktree: true,
       });
       expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+    });
+
+    it('marks the node closing synchronously, before the slow safety check resolves', async () => {
+      // The whole point of the close UX fix: the safety check is a git status
+      // + ref walk that can take seconds on a large repo, and it has to run
+      // BEFORE we can drop the row (its result decides whether to prompt about
+      // uncommitted work). Without an immediate "closing" flag the click looks
+      // ignored for those seconds. This pins that the flag flips the instant
+      // the user clicks — before any IPC resolves.
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 30 })], activeNodeId: 30 });
+      let resolveSafety!: (s: WorktreeCloseSafety) => void;
+      const safetyPending = new Promise<WorktreeCloseSafety>((r) => { resolveSafety = r; });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return safetyPending;
+        return Promise.resolve(undefined);
+      });
+
+      const closePromise = useAgentNodeStore.getState().deleteAgentNode(30);
+
+      // Synchronously after the call: node is still visible (we can't know yet
+      // whether to prompt) but it is flagged closing so the UI can show a
+      // spinner instead of looking frozen.
+      expect(useAgentNodeStore.getState().closingNodeIds.has(30)).toBe(true);
+      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+
+      resolveSafety(makeSafety());
+      await closePromise;
+
+      // Once the (clean) check resolves the node is gone and the flag is cleared.
+      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+      expect(useAgentNodeStore.getState().closingNodeIds.has(30)).toBe(false);
+    });
+
+    it('clears the closing flag when the prompt cancels the close', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 31 })], activeNodeId: 31 });
+      mockDeleteFlow(makeSafety({ has_uncommitted: true }));
+      setWorktreeCloseActionResolverForTests(vi.fn().mockResolvedValue('cancel'));
+
+      await useAgentNodeStore.getState().deleteAgentNode(31);
+
+      // Cancel keeps the node, and must not leave it stuck in the dimmed
+      // "closing" state forever.
+      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+      expect(useAgentNodeStore.getState().closingNodeIds.has(31)).toBe(false);
+    });
+
+    it('ignores a repeat close while one is already in flight', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 32 })], activeNodeId: 32 });
+      let resolveSafety!: (s: WorktreeCloseSafety) => void;
+      const safetyPending = new Promise<WorktreeCloseSafety>((r) => { resolveSafety = r; });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return safetyPending;
+        return Promise.resolve(undefined);
+      });
+
+      const first = useAgentNodeStore.getState().deleteAgentNode(32);
+      // A double-click while the safety check is still pending must not fire a
+      // second safety check / kill / delete round-trip.
+      const second = useAgentNodeStore.getState().deleteAgentNode(32);
+
+      resolveSafety(makeSafety());
+      await Promise.all([first, second]);
+
+      const safetyCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'get_worktree_close_safety');
+      expect(safetyCalls).toHaveLength(1);
     });
 
     it('does not request worktree removal when the node has no worktree path', async () => {
