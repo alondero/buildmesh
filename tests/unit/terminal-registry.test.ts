@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import { TerminalRegistry } from '../../src/components/Terminal/TerminalRegistry';
 
 globalThis.ResizeObserver = class {
@@ -274,6 +275,44 @@ describe('TerminalRegistry', () => {
 
     it('is idempotent', () => {
       expect(() => registry.dispose(999)).not.toThrow();
+    });
+  });
+
+  describe('syncPtySize', () => {
+    // Regression for the spawn-time PTY/term size desync: the attach-fit fires
+    // resize_agent BEFORE the agent process exists ("Agent not running",
+    // swallowed), and spawn falls back to 80x24. Once the agent is up, nothing
+    // re-pushes the term's real size — so the PTY stayed at 80 cols inside a
+    // wide pane and the agent wrapped its output / input early. syncPtySize is
+    // the post-spawn reconcile that closes the gap.
+    it('re-sends the terminal\'s current dimensions to the PTY', async () => {
+      const container = document.createElement('div');
+      const inst = await registry.attach(1, container);
+      // Simulate the term having been fit to a wide pane (e.g. a full-width
+      // partial row in the fluid grid) while the PTY is still at the 80x24
+      // spawn fallback.
+      inst!.term.cols = 180;
+      inst!.term.rows = 50;
+      vi.mocked(invoke).mockClear();
+
+      registry.syncPtySize(1);
+
+      expect(invoke).toHaveBeenCalledWith('resize_agent', { sessionId: 1, rows: 50, cols: 180 });
+    });
+
+    it('does nothing for a detached terminal', async () => {
+      await registry.getOrCreate(1);
+      vi.mocked(invoke).mockClear();
+
+      registry.syncPtySize(1);
+
+      expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it('is safe for a non-existent node', () => {
+      vi.mocked(invoke).mockClear();
+      expect(() => registry.syncPtySize(999)).not.toThrow();
+      expect(invoke).not.toHaveBeenCalled();
     });
   });
 

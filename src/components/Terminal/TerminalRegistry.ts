@@ -145,6 +145,31 @@ export class TerminalRegistry {
     }
   }
 
+  /**
+   * Reconcile the PTY size to the terminal's *current* dimensions. Call this
+   * right after an agent spawns.
+   *
+   * The attach-time fit runs before the agent process exists, so the
+   * `resize_agent` it triggers via `term.onResize` is rejected as "Agent not
+   * running" and swallowed — and spawn itself falls back to 80x24 when
+   * `proposeDimensions()` returns undefined (term not yet laid out). Because
+   * `term.cols` is by then already the fitted value, no further `onResize`
+   * fires, so nothing re-pushes the real size. The agent ends up wrapping its
+   * output and input at 80 cols inside a much wider pane. This unconditional
+   * re-send closes that gap once the agent is definitely up.
+   */
+  syncPtySize(nodeId: number): void {
+    const inst = this.instances.get(nodeId);
+    if (!inst || !inst.attachedContainer) return;
+    measureAndFit(inst);
+    const { cols, rows } = inst.term;
+    invoke('resize_agent', { sessionId: nodeId, rows, cols }).catch((err) => {
+      if (err !== 'Agent not running') {
+        console.error(`[TerminalRegistry] PTY size sync failed for node ${nodeId}:`, err);
+      }
+    });
+  }
+
   dispose(nodeId: number): void {
     const instance = this.instances.get(nodeId);
     if (instance) {
