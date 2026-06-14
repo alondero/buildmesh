@@ -360,6 +360,32 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         return;
     }
 
+    // Coordinator read API (ADR-0008): GET /nodes/{id}/log?tail=N — the
+    // on-demand drill-in returning a node's raw recent transcript turns. Same
+    // read-scoped token as GET /nodes. An unknown node id is a 404; every other
+    // degrade (no session, missing/unreadable transcript) is a 200 carrying a
+    // typed unavailable envelope, so a Coordinator never sees a bare error.
+    if method == "GET" {
+        if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/log") {
+            if !crate::coordinator::authenticate_read(&headers, token.clone()) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let tail = query_param(&path_with_query, "tail")
+                .and_then(|t| t.parse::<usize>().ok())
+                .unwrap_or(0);
+            match routes::coordinator::log_json(node_id, tail) {
+                Some(body) => {
+                    let _ = request::write_json(&mut lines, "200 OK", &body).await;
+                }
+                None => {
+                    let _ = request::write_status_only(&mut lines, "404 Not Found").await;
+                }
+            }
+            return;
+        }
+    }
+
     // Attention webhook: POST /api/attention/{session_id}
     // Called by Claude Code's Stop hook — no token required (localhost-only).
     if method == "POST" && path_without_query.starts_with("/api/attention/") {
@@ -725,6 +751,15 @@ mod tests {
         // valid-token → list path is covered by the coordinator integration
         // test against an in-memory connection.
         assert_eq!(get_request("/nodes").await, 401);
+    }
+
+    #[tokio::test]
+    async fn coordinator_node_log_rejects_without_token() {
+        // The drill-in endpoint shares the read-scoped auth gate: no token →
+        // 401, short-circuited before the node lookup. The tail query param
+        // must not change that.
+        assert_eq!(get_request("/nodes/42/log").await, 401);
+        assert_eq!(get_request("/nodes/42/log?tail=5").await, 401);
     }
 
     #[test]

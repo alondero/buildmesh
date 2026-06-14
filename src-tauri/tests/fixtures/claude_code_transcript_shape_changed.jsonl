@@ -1,0 +1,4 @@
+{"kind":"user","payload":{"role":"user","content":"Fix the login redirect bug"},"uuid":"u1"}
+{"type":"assistant","msg":{"id":"msg_A","role":"assistant","content":[{"type":"text","text":"I'll look into it."}]},"uuid":"a1"}
+{"type":"assistant","message":{"id":"msg_A","author":"assistant","blocks":[{"kind":"text","value":"renamed everything"}]},"uuid":"a2"}
+{"type":"user","message":{"sender":"user","content":"shape changed beyond recognition"},"uuid":"u2"}
