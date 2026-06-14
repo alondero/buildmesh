@@ -881,7 +881,7 @@ pub fn list_coordinator_node_rows_inner(
     rows.collect()
 }
 
-fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
+pub(crate) fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
     let mut stmt = conn.prepare(
         &format!("SELECT {} FROM agent_nodes WHERE id = ?1", AGENT_NODE_COLUMNS)
     )?;

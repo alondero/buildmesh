@@ -10,6 +10,7 @@ mod git;
 mod http;
 mod http_server;
 pub mod models;
+mod node_turn;
 mod preferences;
 pub mod process_util;
 mod pty;

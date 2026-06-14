@@ -22,6 +22,10 @@ An Agent Node operating directly on the parent Mesh's root directory, bypassing 
 The directory an Agent Node's work physically lives in: its Worktree Node dir (`.claude/worktrees/<name>`) for a Worktree Node, or the Mesh root for a Root Node. The canonical "where is this node's stuff" rule (resolve `use_worktree` + a trimmed, non-empty `worktree_name`) lives in one place; callers pick the host form (Windows git2) or the spawn form (the path as the agent saw it — Linux for a WSL node, which is the form Claude Code encodes for its on-disk transcript directory).
 _Avoid_: working path, repo path, node dir
 
+**Node Turn**:
+The point at which an Agent Node yields control back to the user — its agent has stopped and is waiting. Claude Code surfaces this as several hooks (the Stop hook = awaiting input, plus the catch-all Notification hook = idle prompt or permission prompt); Buildmesh treats them as one undifferentiated signal, because all are yields. A Node Turn is the single inbound fact that fans out to two independent reactions: marking the node for attention (status → `awaiting_input`, emit `attention-needed`) and considering an AI rename (session naming). The trigger is a clock tick, not a content source — naming's summary comes from the buffered PTY output, so the *kind* of yield never changes what gets named.
+_Avoid_: turn signal, stop event, attention event, notification
+
 **File Explorer Panel**:
 A collapsible side panel displaying files and changes for a given Mesh or Agent Node.
 _Avoid_: File tree panel, sidebar drawer
@@ -58,6 +62,7 @@ _Avoid_: Node summary, status payload, snapshot
 
 - A **Mesh** can have one or more **Agent Nodes**
 - An **Agent Node** operates on a child worktree or branch of its parent **Mesh**
+- An **Agent Node** emits a **Node Turn** each time its agent yields control back to the user; attention-marking and session naming react to it independently
 - A **File Explorer Panel** shows context for either a **Mesh** or an **Agent Node**
 - A **Mesh** can have a **drifted root** if its root HEAD is not on the Base Ref's branch
 - A **Mesh** can be in a **base branch hostage** state when one of its worktrees holds the Base Ref's branch
