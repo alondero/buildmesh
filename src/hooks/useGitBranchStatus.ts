@@ -1,81 +1,34 @@
-import { useEffect, useState, useCallback } from 'react';
-import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
+import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
-import { GIT_CHANGED } from '../lib/events';
-import { pathMatchesGitEvent } from '../lib/paths';
+
+// Module-level shared client, keyed by repo path. `MeshItem` (mesh root) and
+// `FileExplorerPanel` (node path) both read through this hook, so two views of
+// the same path dedupe onto one fetch + one GIT_CHANGED subscription.
+const branchStatusClient = createPathInvalidatedCache<string, GitBranchStatus>({
+  fetcher: getGitBranchStatus,
+  name: 'gitBranchStatus',
+});
 
 /**
  * Tracks the current Git branch (name, ahead/behind, short SHA) of an arbitrary
  * repository path — mesh root, agent worktree, etc.
  *
- * Refetches on mount, on window focus (the user may have pulled in a terminal
- * while away), and on GIT_CHANGED events for this path (file-watcher driven).
- * Returns null branch status for non-git paths or before the first fetch.
+ * Refetches on mount, on GIT_CHANGED for this path (file-watcher driven), and
+ * on window focus (the user may have pulled in a terminal while away) — all via
+ * the path-invalidated cache primitive, which also handles the worktree-subdir +
+ * WUNC path matching and in-flight dedupe. Returns null branch status for
+ * non-git paths or before the first fetch.
  */
 export function useGitBranchStatus(gitPath: string | null): {
   branchStatus: GitBranchStatus | null;
   refresh: () => void;
 } {
-  const [branchStatus, setBranchStatus] = useState<GitBranchStatus | null>(null);
-
-  const fetch = useCallback(async (path: string) => {
-    try {
-      setBranchStatus(await getGitBranchStatus(path));
-    } catch {
-      setBranchStatus(null);
-    }
-  }, []);
-
-  const refresh = useCallback(() => {
-    if (gitPath) fetch(gitPath);
-  }, [gitPath, fetch]);
-
-  // Fetch on mount / path change
-  useEffect(() => {
-    if (!gitPath) {
-      setBranchStatus(null);
-      return;
-    }
-    fetch(gitPath);
-  }, [gitPath, fetch]);
-
-  // Refetch when the file watcher reports a change for this path.
-  // Issue #304: the watcher emits the worktree subdir (or a WSL UNC form
-  // with backslashes) — `pathMatchesGitEvent` normalizes both.
-  useEffect(() => {
-    if (!gitPath) return;
-    const unlisten = listen<{ path: string; internal_path?: string }>(
-      GIT_CHANGED,
-      (event) => {
-        if (pathMatchesGitEvent(event.payload, gitPath)) {
-          refresh();
-        }
-      },
-    );
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [gitPath, refresh]);
-
-  // Refetch when the window regains focus
-  useEffect(() => {
-    if (!gitPath) return;
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    getCurrentWindow()
-      .onFocusChanged(({ payload: focused }) => {
-        if (focused) refresh();
-      })
-      .then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      });
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-  }, [gitPath, refresh]);
-
-  return { branchStatus, refresh };
+  const { data, refresh } = usePathInvalidatedQuery(
+    branchStatusClient,
+    gitPath,
+    gitPath,
+    { refetchOnFocus: true },
+  );
+  return { branchStatus: data, refresh };
 }

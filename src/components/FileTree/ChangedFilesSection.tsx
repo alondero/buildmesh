@@ -1,10 +1,6 @@
-import { useState, useEffect } from 'react';
-import {
-  getGitStatus,
-  diffFileAgainstHead,
-  type GitStatus,
-  type DiffResult,
-} from '../../lib/tauri';
+import { useState } from 'react';
+import { diffFileAgainstHead, type DiffResult } from '../../lib/tauri';
+import { useChangedFiles } from '../../hooks/useChangedFiles';
 
 interface ChangedFilesSectionProps {
   /** Repo root whose uncommitted changes we list. */
@@ -36,29 +32,12 @@ export function ChangedFilesSection({
   selectedFile,
   onChangedFileSelect,
 }: ChangedFilesSectionProps) {
-  const [files, setFiles] = useState<GitStatus[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Shared git-status cache: dedupes the fetch with FileTree / useMeshGitStatus
+  // and refreshes on GIT_CHANGED (the old hand-rolled fetch did neither — it
+  // went stale until remount). A fetch failure surfaces as an empty list, the
+  // same as a clean repo, matching the rest of the git-status consumers.
+  const { files, loading } = useChangedFiles(rootPath || null);
   const [expanded, setExpanded] = useState(true);
-
-  useEffect(() => {
-    if (!rootPath) return;
-    let cancelled = false;
-    setLoading(true);
-    setError(null);
-    getGitStatus(rootPath)
-      .then((status) => {
-        if (cancelled) return;
-        setFiles(status);
-        setLoading(false);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setError(String(e));
-        setLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [rootPath]);
 
   // get_git_status returns paths relative to the repo root, which is exactly
   // what diff_file_against_head expects — no conversion needed.
@@ -87,8 +66,6 @@ export function ChangedFilesSection({
         <div className="pb-1">
           {loading ? (
             <div className="px-3 py-1.5 text-text-muted text-xs">Loading…</div>
-          ) : error ? (
-            <div className="px-3 py-1.5 text-accent-red text-xs">Error: {error}</div>
           ) : files.length === 0 ? (
             <div className="px-3 py-1.5 text-text-muted text-xs">No changes</div>
           ) : (

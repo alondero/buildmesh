@@ -2,11 +2,10 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   listDirectory,
   type FileNode,
-  getGitStatus,
-  type GitStatus,
   diffFileAgainstHead,
   type DiffResult,
 } from '../../lib/tauri';
+import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { statusMeta } from '../Diff/Diff';
 
 interface FileTreeProps {
@@ -32,7 +31,6 @@ export function FileTree({
   onFileSelect,
 }: FileTreeProps) {
   const [treeState, setTreeState] = useState<FileNode | null>(null);
-  const [gitStatusState, setGitStatusState] = useState<GitStatus[]>([]);
   const [loadingState, setLoadingState] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
 
@@ -41,17 +39,12 @@ export function FileTree({
     setLoadingState(true);
     setErrorState(null);
     setTreeState(null);
-    setGitStatusState([]);
 
     let cancelled = false;
-    Promise.all([
-      listDirectory(rootPath, 4),
-      showGitStatus ? getGitStatus(rootPath) : Promise.resolve(null),
-    ])
-      .then(([treeData, status]) => {
+    listDirectory(rootPath, 4)
+      .then((treeData) => {
         if (cancelled) return;
         setTreeState(treeData);
-        if (status) setGitStatusState(status);
         setLoadingState(false);
       })
       .catch((e) => {
@@ -60,7 +53,15 @@ export function FileTree({
         setLoadingState(false);
       });
     return () => { cancelled = true; };
-  }, [rootPath, showGitStatus]);
+  }, [rootPath]);
+
+  // Git status badges come from the shared cache (dedupes with
+  // ChangedFilesSection + useMeshGitStatus, and refreshes on GIT_CHANGED — the
+  // old combined fetch did neither). Gate the loading view on both so a file's
+  // changed/unchanged state is settled before the user can click it.
+  const { files: gitFiles, loading: gitLoading } = useChangedFiles(
+    showGitStatus ? rootPath || null : null,
+  );
 
   const handleFileClick = useCallback(
     async (path: string, relPath: string, isChanged: boolean) => {
@@ -81,7 +82,7 @@ export function FileTree({
     [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect]
   );
 
-  if (loadingState) {
+  if (loadingState || gitLoading) {
     return (
       <div className="flex items-center justify-center h-20 text-text-muted text-xs">
         Loading...
@@ -108,7 +109,7 @@ export function FileTree({
   // list_directory returns absolute node paths; get_git_status returns paths
   // relative to the repo root. Key the map by the relative path and reconcile
   // each node by stripping rootPath, so changed files are badged correctly.
-  const gitStatusMap = new Map(gitStatusState.map((s) => [normalizePath(s.path), s.status]));
+  const gitStatusMap = new Map(gitFiles.map((s) => [normalizePath(s.path), s.status]));
 
   return (
     <div className="text-xs font-mono">

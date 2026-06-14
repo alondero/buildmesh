@@ -1,5 +1,3 @@
-import { useEffect } from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
@@ -33,28 +31,11 @@ export function useMeshHealth(
   meshId: number | null,
   meshPath: string | null,
 ): { health: MeshHealth | null; refresh: () => void } {
-  const { data, refresh } = usePathInvalidatedQuery(healthClient, meshId, meshPath);
-
-  // Refetch when the window regains focus. The primitive already covers
-  // GIT_CHANGED (file-watcher driven), so this is the only hook-specific
-  // subscription left in this file.
-  useEffect(() => {
-    if (meshId == null) return;
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    getCurrentWindow()
-      .onFocusChanged(({ payload: focused }) => {
-        if (focused) refresh();
-      })
-      .then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      });
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-  }, [meshId, refresh]);
+  // `refetchOnFocus` covers the "user ran git checkout in a terminal while
+  // away" case; GIT_CHANGED (file-watcher driven) is covered by the primitive.
+  const { data, refresh } = usePathInvalidatedQuery(healthClient, meshId, meshPath, {
+    refetchOnFocus: true,
+  });
 
   return { health: data, refresh };
 }
