@@ -79,35 +79,89 @@ const COLORED_IMAGES: Record<string, string> = {
   agy: antigravityLogo,
 };
 
+// Single source of truth for the avatar-chip background colour. Mirrors
+// the backend's `UiMeta::color` field in src-tauri/.../adapters/*.rs#ui().
+// Used by the mobile `NodeRow` (via the `withBackground` prop) and by
+// any other surface that needs the provider's brand colour as a fill.
+const PROVIDER_CHIP_COLORS: Record<string, string> = {
+  anthropic: '#1d7cfc',
+  minimax:   '#6366f1',
+  kimi:      '#00c4c4',
+  agy:       '#10b981',
+  opencode:  '#f59e0b',
+  terminal:  '#9ca3af',
+  codex:     '#10a37f',
+};
+
 interface ProviderIconProps {
   providerId: string;
   /** Tailwind size class, e.g. "h-3.5 w-3.5" for 14px. Defaults to 12px. */
   className?: string;
   /** Title for accessibility; defaults to the provider id. */
   title?: string;
+  /**
+   * Wrap the icon in a 34×34 colored chip. The mobile `NodeRow` uses
+   * this for the per-node avatar; the desktop sidebar/grid/header/
+   * settings uses the bare icon (no chip). Unknown providers get a
+   * neutral gray chip so the row's left edge still has consistent
+   * rhythm.
+   */
+  withBackground?: boolean;
+  /**
+   * `data-testid` applied to the chip wrapper when `withBackground` is
+   * set. Optional — the chip itself is purely presentational.
+   */
+  chipTestId?: string;
 }
 
-export function ProviderIcon({ providerId, className = 'h-3 w-3', title }: ProviderIconProps) {
+export function ProviderIcon({
+  providerId,
+  className = 'h-3 w-3',
+  title,
+  withBackground,
+  chipTestId,
+}: ProviderIconProps) {
   const label = title ?? providerId;
 
   const InlineIcon = INLINE_ICONS[providerId];
-  if (InlineIcon) {
-    return <InlineIcon className={className} title={label} />;
-  }
+  const inner = (() => {
+    if (InlineIcon) {
+      return <InlineIcon className={className} title={label} />;
+    }
+    const src = COLORED_IMAGES[providerId];
+    if (src) {
+      return (
+        <img
+          src={src}
+          alt=""
+          title={label}
+          className={className}
+          draggable={false}
+        />
+      );
+    }
+    // Fallback: a neutral dot for unknown providers.
+    return <span aria-hidden="true" title={label} className={`${className} bg-gray-500 rounded-full inline-block shrink-0`} />;
+  })();
 
-  const src = COLORED_IMAGES[providerId];
-  if (src) {
-    return (
-      <img
-        src={src}
-        alt=""
-        title={label}
-        className={className}
-        draggable={false}
-      />
-    );
-  }
+  if (!withBackground) return inner;
 
-  // Fallback: a neutral dot for unknown providers.
-  return <span aria-hidden="true" title={label} className={`${className} bg-gray-500 rounded-full inline-block shrink-0`} />;
+  return (
+    <div
+      data-testid={chipTestId}
+      style={{
+        width: 34,
+        height: 34,
+        borderRadius: 8,
+        background: PROVIDER_CHIP_COLORS[providerId] ?? '#555',
+        color: '#fff',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+    >
+      {inner}
+    </div>
+  );
 }
