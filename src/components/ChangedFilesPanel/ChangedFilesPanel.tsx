@@ -1,8 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { getGitStatus, diffFileAgainstHead, type GitStatus, type DiffResult } from '../../lib/tauri';
-import { GIT_CHANGED } from '../../lib/events';
-import { pathMatchesGitEvent } from '../../lib/paths';
+import { subscribeGitPathInvalidation } from '../../lib/pathInvalidatedCache';
 
 interface ChangedFilesPanelProps {
   projectPath: string;
@@ -70,16 +68,13 @@ export function ChangedFilesPanel({ projectPath, isOpen, width, onWidthChange, o
 
   useEffect(() => {
     if (!isOpen || !projectPath) return;
-    const unlisten = listen<{ path: string; internal_path?: string }>(GIT_CHANGED, (event) => {
-      // Issue #304: the watcher emits the worktree subdir path (or a WSL
-      // UNC backslash form) — `pathMatchesGitEvent` normalizes both
-      // `path` and `internal_path` and also catches worktree-subdir
-      // matches for callers that pass the mesh root.
-      if (pathMatchesGitEvent(event.payload, projectPath)) {
-        fetchStatus();
-      }
+    // Issue #304: the watcher emits the worktree subdir path (or a WSL
+    // UNC backslash form) — `pathMatchesGitEvent` inside the primitive
+    // normalizes both `path` and `internal_path` and also catches
+    // worktree-subdir matches for callers that pass the mesh root.
+    return subscribeGitPathInvalidation(projectPath, () => {
+      fetchStatus();
     });
-    return () => { unlisten.then(fn => fn()); };
   }, [isOpen, projectPath]);
 
   const handleFileClick = async (file: GitStatus) => {

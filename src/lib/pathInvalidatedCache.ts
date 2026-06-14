@@ -5,6 +5,12 @@
  * cache + in-flight dedupe + path-keyed subscription patterns that lived in
  * `useGitSummary`, `useOpenPr`, `useMeshHealth`, and `useMeshGitStatus`.
  *
+ * Also exposes a component-level subscription API (`subscribeGitPathInvalidation`,
+ * issue #345) so React components that only need the invalidation callback
+ * (no key, no cache) can share the same bus + `pathMatchesGitEvent` plumbing
+ * without hand-rolling their own `listen(GIT_CHANGED, ...)` + cleanup pair.
+ * Used by `AgentReviewPanel` and `ChangedFilesPanel`.
+ *
  * Architecture
  * ------------
  * - ONE module-level `GIT_CHANGED` listener is installed the first time any
@@ -20,6 +26,10 @@
  *   it calls **that subscriber's owning client's handler** (via
  *   `busHandlers.get(sub.clientId)`), not a global "invalidate every key in
  *   every client" sweep.
+ * - The callback-only subscribers from `subscribeGitPathInvalidation` share
+ *   a single `NOOP_CLIENT_ID` + stateless handler (`sub.notify()`), so
+ *   they ride the same dispatch without per-callback entries in
+ *   `busHandlers`.
  *
  * Why the clientId-scoped dispatch matters (Footgun 1)
  * ----------------------------------------------------
@@ -42,6 +52,17 @@ import { GIT_CHANGED } from './events';
 import { pathMatchesGitEvent } from './paths';
 
 const HAS_NULL = Symbol('pathInvalidatedCache.has-null');
+// Single shared clientId for all "callback-only" subscribers (see
+// `subscribeGitPathInvalidation` below). The handler registered for it is
+// stateless — it just calls `sub.notify()` — so one entry in `busHandlers`
+// serves every such caller. Generating a fresh symbol per call would be
+// functionally equivalent but would bloat `busHandlers` for no benefit.
+const NOOP_CLIENT_ID = Symbol('subscribeGitPathInvalidation');
+// Stateless: dispatches to whichever subscriber the bus matched, regardless
+// of which `subscribeGitPathInvalidation` call added it. Hoisted to a const
+// so we register the SAME function reference in `busHandlers` on every call
+// (no fresh arrow allocation per component mount).
+const NOOP_HANDLER: BusHandler = (sub) => sub.notify();
 
 export interface PathInvalidatedCacheOptions<K, V> {
   /** Loads the value for a given key. Resolves to `null` for "known empty". */
@@ -206,5 +227,59 @@ export function createPathInvalidatedCache<K, V>(
         if (live.size === 0) pathSubscribers.delete(path);
       };
     },
+  };
+}
+
+/**
+ * Subscribes `cb` to `GIT_CHANGED` events that match `path` (using the
+ * same `pathMatchesGitEvent` helper the hook-backed clients use, so the
+ * worktree-subdir + WUNC + cross-platform case rules apply). Returns a
+ * synchronous unsubscribe function.
+ *
+ * Use this from components that need the invalidation callback but don't
+ * have a key+cache to manage — i.e. consumers for whom
+ * `createPathInvalidatedCache` is overkill. Used directly by
+ * `AgentReviewPanel` and `ChangedFilesPanel`; intentionally NOT used by
+ * the `usePathInvalidatedQuery` hook (which subscribes via the
+ * cache-bearing `client.subscribe(key, path, cb)` on its own client).
+ * Issue #345.
+ *
+ * Compared to the hand-rolled `listen(GIT_CHANGED, ...) + pathMatchesGitEvent`
+ * pattern this replaces:
+ *   - ONE global listener is still installed by the primitive, so adding
+ *     a subscriber never multiplies Tauri's per-event handler cost.
+ *   - The worktree-subdir + WUNC path matching is shared, not duplicated.
+ *   - The unsubscribe is synchronous, so the React effect's cleanup
+ *     doesn't have to chase a Promise (the hand-rolled pattern did
+ *     `unlisten.then(u => u())`, which leaks a microtask per unmount).
+ *
+ * `cb` is invoked with no arguments — the bus payload is the same shape
+ * the hook subscribers see, but callback-only consumers have always
+ * ignored it; pass an arrow if you need to capture component state.
+ */
+export function subscribeGitPathInvalidation(
+  path: string,
+  cb: () => void,
+): () => void {
+  installListener();
+  // The noop handler is stateless and shared across every
+  // `subscribeGitPathInvalidation` caller. We re-register on every call so
+  // the bus keeps working after `resetPathInvalidatedCacheForTests` wipes
+  // `busHandlers` between tests (matches the same idempotency contract the
+  // factory's `subscribe` upholds).
+  busHandlers.set(NOOP_CLIENT_ID, NOOP_HANDLER);
+
+  let set = pathSubscribers.get(path);
+  if (!set) {
+    set = new Set();
+    pathSubscribers.set(path, set);
+  }
+  const sub: PathSubscriber = { clientId: NOOP_CLIENT_ID, key: undefined, notify: cb };
+  set.add(sub);
+  return () => {
+    const live = pathSubscribers.get(path);
+    if (!live) return;
+    live.delete(sub);
+    if (live.size === 0) pathSubscribers.delete(path);
   };
 }

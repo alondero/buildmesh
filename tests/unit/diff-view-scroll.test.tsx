@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { FileExplorerPanel } from '../../src/components/FileTree/FileExplorerPanel';
 import { GIT_CHANGED } from '../../src/lib/events';
+import { resetPathInvalidatedCacheForTests } from '../../src/lib/pathInvalidatedCache';
 import type { DiffResult, GitBranchStatus } from '../../src/lib/tauri';
 
 // A two-file change set with a tall first file, so the review surface must
@@ -98,6 +99,13 @@ describe('Agent review surface', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     mockBackend();
+    // The path-invalidated cache primitive installs ONE process-wide
+    // `GIT_CHANGED` listener for its lifetime. The global test setup
+    // (vitest.setup.ts) calls `mockListeners.clear()` in its own
+    // `beforeEach` to isolate per-test listeners, which removes the
+    // primitive's listener too. Reset the primitive so the next mount
+    // re-installs it. See issue #345.
+    resetPathInvalidatedCacheForTests();
   });
 
   it('fetches the whole change set against the merge-base in one call', async () => {
@@ -149,6 +157,10 @@ describe('Agent review surface', () => {
 describe('Agent review surface — live refresh on GIT_CHANGED', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
+    // See the matching reset in the "Agent review surface" describe
+    // block above for the rationale (setup's `mockListeners.clear()`
+    // wipes the primitive's process-wide listener).
+    resetPathInvalidatedCacheForTests();
   });
 
   it('re-fetches the diff when a GIT_CHANGED event fires for the node path', async () => {
