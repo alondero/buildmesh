@@ -13,6 +13,7 @@ import {
   listProviders,
 } from "../api";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
+import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
@@ -387,7 +388,7 @@ function SheetButton({
   );
 }
 
-function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => void }) {
+export function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => void }) {
   const meta = STATUS_META[node.status] ?? { color: "#555", label: node.status };
   const needsInput = node.status === "awaiting_input";
   return (
@@ -397,23 +398,13 @@ function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => void }) {
       className="card"
       style={needsInput ? { borderColor: "rgba(255, 152, 0, 0.4)" } : undefined}
     >
-      <div
-        style={{
-          width: 34,
-          height: 34,
-          borderRadius: 8,
-          background: providerColor(node.provider),
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          fontSize: 14,
-          fontWeight: 700,
-          color: "#fff",
-          flexShrink: 0,
-        }}
-      >
-        {providerIcon(node.provider)}
-      </div>
+      <ProviderIcon
+        providerId={node.provider}
+        withBackground
+        chipTestId="node-avatar"
+        className="h-5 w-5"
+        title={node.provider}
+      />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
@@ -581,31 +572,4 @@ function useWsEvents(onEvent: () => void) {
       }
     };
   }, []);
-}
-
-// Glyph + colour for the avatar badge shown on each NodeRow. The mobile
-// picker drives its labels from the `listProviders()` IPC payload, but the
-// badge needs a synchronous lookup at render time, so we mirror the
-// relevant `UiMeta` fields here (#295). Long-term: replace with a live
-// lookup against the IPC payload (#328). Pinned by
-// tests/unit/mobile-node-list-provider-maps.test.ts — the test's
-// `EXPECTED_BADGES` table is the canonical pairing for these values.
-const PROVIDER_BADGE = {
-  anthropic: { icon: "A", color: "#1d7cfc" },
-  minimax:   { icon: "M", color: "#6366f1" },
-  kimi:      { icon: "K", color: "#00c4c4" },
-  agy:       { icon: "G", color: "#10b981" },
-  opencode:  { icon: "O", color: "#f59e0b" },
-  // mirror: src-tauri/.../adapters/terminal.rs → Provider::Terminal::ui()
-  terminal:  { icon: "T", color: "#9ca3af" },
-  // mirror: src-tauri/.../adapters/codex.rs → Provider::Codex::ui()
-  codex:     { icon: "X", color: "#10a37f" },
-} as const;
-
-export function providerIcon(provider: string): string {
-  return (PROVIDER_BADGE as Record<string, { icon: string; color: string }>)[provider]?.icon ?? "?";
-}
-
-export function providerColor(provider: string): string {
-  return (PROVIDER_BADGE as Record<string, { icon: string; color: string }>)[provider]?.color ?? "#555";
 }
