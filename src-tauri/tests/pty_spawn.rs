@@ -89,9 +89,13 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
-            master: Arc::new(Mutex::new(master)),
+            master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
             job: None,
+            // The natural-exit helper drains via the master drop in
+            // `PROCESS_REGISTRY.remove` and joins the local `reader_handle`
+            // below; we never give the registry the real handle.
+            reader_handle: Mutex::new(None),
         },
     );
 
@@ -231,4 +235,209 @@ fn windows_cmd_batch_echo_through_real_pty() {
         "cmd.exe /c batch spawn produced no 'hello' (npm-batch regression?): {out:?}"
     );
     assert!(exit_ok, "child should exit cleanly");
+}
+
+/// Spawn a long-running child under a real PTY, register it in
+/// `PROCESS_REGISTRY` with a real reader thread, then kill it via
+/// `kill_session` + `remove` and assert the reader thread reports
+/// not-alive within 2 seconds. The point: on Windows ConPTY the
+/// master read pipe does not EOF on child exit (#287 / #300), so a
+/// fix that doesn't close the master would leave the reader wedged
+/// on `read()` until the 2s budget elapses.
+#[cfg(unix)]
+#[test]
+fn unix_kill_mid_session_unblocks_reader() {
+    // `sleep 60` is the cheapest "child that will be alive when we
+    // kill it" available on the test image. The kill happens well
+    // before the 60s wall clock is up.
+    let recipe = SpawnRecipe {
+        binary: "/bin/sh",
+        base_args: vec!["-c".into(), "sleep 60".into()],
+        windows_shell: WindowsShell::Direct,
+    };
+    run_kill_mid_session_test(-915_4101, recipe);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_kill_mid_session_unblocks_reader() {
+    // 60 pings × 1s = ~60s. Way longer than the 2s budget we give the
+    // reader to unblock, so any test failure is a kill path bug, not
+    // a natural-exit coincidence.
+    let recipe = SpawnRecipe {
+        binary: "ping",
+        base_args: vec![
+            "127.0.0.1".into(),
+            "-n".into(),
+            "60".into(),
+        ],
+        windows_shell: WindowsShell::Direct,
+    };
+    run_kill_mid_session_test(-915_4102, recipe);
+}
+
+fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
+    let cwd = std::env::current_dir().unwrap();
+    let cmd = spawn_environment::wrap(
+        recipe,
+        EnvType::Windows,
+        &cwd.to_string_lossy(),
+        session_id,
+    );
+
+    let pair = open_pty_pair(24, 80).expect("open pty pair");
+    let child = spawn_child(&pair, cmd).expect("spawn child");
+
+    let reader = pair.master.try_clone_reader().expect("clone reader");
+    let writer = pair.master.take_writer().expect("take writer");
+    let master = pair.master;
+    drop(pair.slave);
+
+    let reader_alive = Arc::new(AtomicBool::new(true));
+    let reader_alive_t = reader_alive.clone();
+    let reader_handle = std::thread::spawn(move || {
+        pump_pty_output(reader, |_| {});
+        // Mirror the production reader's tail so the test asserts
+        // the same observable liveness signal the UI does.
+        reader_alive_t.store(false, Ordering::SeqCst);
+    });
+
+    PROCESS_REGISTRY.insert(
+        session_id,
+        AgentProcess {
+            child: Arc::new(Mutex::new(child)),
+            writer: Arc::new(Mutex::new(writer)),
+            master: Arc::new(Mutex::new(Some(master))),
+            reader_alive: reader_alive.clone(),
+            job: None,
+            reader_handle: Mutex::new(Some(reader_handle)),
+        },
+    );
+
+    // Give the reader a moment to be actively blocked on `read()`
+    // (this is the state the bug wedges it in).
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    assert!(
+        reader_alive.load(Ordering::SeqCst),
+        "reader should be alive before kill_session (it is, after all, blocked on read)"
+    );
+
+    // Production order: kill_session, then remove. Together they are
+    // the user-click-X path. (kill_agent / kill_all_agents / the
+    // service-layer delete all use this exact order.)
+    PROCESS_REGISTRY.kill_session(session_id);
+    PROCESS_REGISTRY.remove(&session_id);
+
+    // The reader is wedged in `read()` without the master close.
+    // The production kill_session takes the master, EOFs the reader,
+    // then joins with a 2s budget — so the `reader_alive` flag flips
+    // inside that 2s window. We assert the same observable: liveness
+    // is false within 2s of the kill.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while reader_alive.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !reader_alive.load(Ordering::SeqCst),
+        "reader thread should exit within 2s of kill_session \
+         (kill_session must drop the master to EOF the ConPTY pipe — #300)"
+    );
+    assert!(
+        !PROCESS_REGISTRY.contains(&session_id),
+        "registry entry should be cleaned up after remove"
+    );
+}
+
+/// Master `Arc` strong count drops to 0 (well, 1 — our local clone)
+/// after `kill_session` + `remove`, and the inner `Option<Box<MasterPty>>`
+/// is `None` after the kill. Proves the master is actually being closed
+/// (the `Box<dyn MasterPty>` dropped, closing the pseudoconsole) — not
+/// just orphaned to be dropped later when the registry entry vanishes.
+#[cfg(windows)]
+#[test]
+fn windows_kill_session_closes_master() {
+    let session_id = -915_4103;
+    let recipe = SpawnRecipe {
+        binary: "ping",
+        base_args: vec!["127.0.0.1".into(), "-n".into(), "60".into()],
+        windows_shell: WindowsShell::Direct,
+    };
+    let cwd = std::env::current_dir().unwrap();
+    let cmd = spawn_environment::wrap(
+        recipe,
+        EnvType::Windows,
+        &cwd.to_string_lossy(),
+        session_id,
+    );
+
+    let pair = open_pty_pair(24, 80).expect("open pty pair");
+    let child = spawn_child(&pair, cmd).expect("spawn child");
+    let reader = pair.master.try_clone_reader().expect("clone reader");
+    let writer = pair.master.take_writer().expect("take writer");
+    let master = pair.master;
+    drop(pair.slave);
+
+    let reader_alive = Arc::new(AtomicBool::new(true));
+    let reader_alive_t = reader_alive.clone();
+    let reader_handle = std::thread::spawn(move || {
+        pump_pty_output(reader, |_| {});
+        reader_alive_t.store(false, Ordering::SeqCst);
+    });
+
+    PROCESS_REGISTRY.insert(
+        session_id,
+        AgentProcess {
+            child: Arc::new(Mutex::new(child)),
+            writer: Arc::new(Mutex::new(writer)),
+            master: Arc::new(Mutex::new(Some(master))),
+            reader_alive: reader_alive.clone(),
+            job: None,
+            reader_handle: Mutex::new(Some(reader_handle)),
+        },
+    );
+
+    // Hold our own Arc clone of the master so we can probe its
+    // strong count after the kill + remove. Without this clone
+    // there'd be no way to read the count once the registry drops
+    // its reference.
+    let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
+    let master_arc = entry.master.clone();
+    drop(entry);
+    let count_before = Arc::strong_count(&master_arc);
+    assert!(
+        count_before >= 2,
+        "registry + our clone should hold the master Arc before kill, got {count_before}"
+    );
+    {
+        let guard = master_arc.lock().unwrap();
+        assert!(
+            guard.is_some(),
+            "master Box must be present before kill_session (pseudoconsole still open)"
+        );
+    }
+
+    PROCESS_REGISTRY.kill_session(session_id);
+    {
+        let guard = master_arc.lock().unwrap();
+        assert!(
+            guard.is_none(),
+            "kill_session must take() the master out — that's what closes the pseudoconsole"
+        );
+    }
+
+    PROCESS_REGISTRY.remove(&session_id);
+    let count_after = Arc::strong_count(&master_arc);
+    assert_eq!(
+        count_after, 1,
+        "only our local clone should hold the master Arc after remove; \
+         a higher count means the registry still has a reference (leak)"
+    );
+
+    // Best-effort: let the watchdog finish so the test process exits
+    // cleanly. The reader thread is detached either way (kill_session
+    // bounded the wait), so a long sleep here only delays test exit.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while reader_alive.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
