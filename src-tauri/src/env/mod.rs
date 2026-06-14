@@ -230,7 +230,7 @@ pub fn to_host_path(path: &str) -> String {
 // ResolvedPath — high-level path resolution for agent operations
 // ---------------------------------------------------------------------------
 
-use crate::models::EnvType;
+use crate::models::{AgentNode, EnvType};
 
 /// A fully-resolved set of paths for an agent node, ready for use by callers
 /// without needing to compose env detection + host conversion + worktree logic.
@@ -282,6 +282,42 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
         spawn_path,
         env_type,
     }
+}
+
+/// The trimmed, non-empty worktree name iff the node runs in a worktree — the
+/// single definition of "does this Agent Node have a Worktree Node dir".
+fn worktree_segment(node: &AgentNode) -> Option<&str> {
+    if !node.use_worktree {
+        return None;
+    }
+    node.worktree_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+}
+
+/// The [Node Working Directory](../../CONTEXT.md): the directory an Agent Node's
+/// work physically lives in — its Worktree Node dir for a worktree node, or the
+/// Mesh root for a Root Node. This is the one canonical home of the
+/// `use_worktree` + (trimmed, non-empty) `worktree_name` rule; diff, PR,
+/// close-safety, removal, and the coordinator transcript reader all resolve
+/// through here so every layer agrees on a node's directory. Callers pick the
+/// `host_path` (Windows git2 / file ops) or the `spawn_path` (the path as the
+/// agent saw it — the form Claude Code encodes for its on-disk transcript dir).
+///
+/// Mirrors the frontend's `getNodeGitPath` in `src/lib/paths.ts` — keep the two
+/// in sync if the worktree layout ever changes (paired cross-language defaults,
+/// not a single source; see [[buildmesh-use-worktree-derivation]] and
+/// [[feedback_cross-language-default-coupling]]).
+pub fn node_working_path(node: &AgentNode) -> ResolvedPath {
+    resolve_agent_path(&node.path, worktree_segment(node))
+}
+
+/// The node's Worktree Node dir — `Some` only for a Worktree Node, `None` for a
+/// Root Node. The `None` is load-bearing: close-safety and worktree removal skip
+/// Root Nodes through it (a Root Node has no worktree to inspect or delete).
+pub fn node_worktree_path(node: &AgentNode) -> Option<ResolvedPath> {
+    worktree_segment(node).map(|_| node_working_path(node))
 }
 
 /// Get the .claude directory for session storage in the correct environment
@@ -480,5 +516,90 @@ mod tests {
         // Should return a valid path without crashing
         assert!(!resolved.host_path.is_empty());
         assert!(!resolved.spawn_path.is_empty());
+    }
+
+    use crate::models::{Provider, SessionStatus};
+    use chrono::Utc;
+
+    /// Minimal Agent Node fixture; `use_worktree`/`worktree_name` are the only
+    /// fields the Node Working Directory rule reads.
+    fn node(use_worktree: bool, worktree_name: Option<&str>) -> AgentNode {
+        AgentNode {
+            id: 1,
+            mesh_id: 1,
+            name: "n".to_string(),
+            path: "/home/user/my-repo".to_string(),
+            branch: "main".to_string(),
+            env: EnvType::Wsl,
+            provider: Provider::Anthropic,
+            status: SessionStatus::Running,
+            cli_session_id: None,
+            worktree_name: worktree_name.map(str::to_string),
+            use_worktree,
+            source_issue: None,
+            position: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// A Worktree Node resolves into its `.claude/worktrees/<name>` dir.
+    #[test]
+    fn node_working_path_for_worktree_node_resolves_worktree_dir() {
+        let resolved = node_working_path(&node(true, Some("gentle-fox")));
+        assert!(
+            resolved.host_path.contains("worktrees") && resolved.host_path.contains("gentle-fox"),
+            "expected worktree dir, got: {}",
+            resolved.host_path
+        );
+    }
+
+    /// A Root Node resolves to the Mesh root — never a worktree subdir.
+    #[test]
+    fn node_working_path_for_root_node_resolves_mesh_root() {
+        let resolved = node_working_path(&node(false, Some("ignored")));
+        assert!(
+            !resolved.host_path.contains("worktrees"),
+            "root node must not resolve into a worktree, got: {}",
+            resolved.host_path
+        );
+    }
+
+    /// The canonical rule trims the worktree name. This is the behaviour
+    /// `pr::node_working_path` lacked (it fed an untrimmed name straight to
+    /// `resolve_agent_path`), so a name with stray whitespace resolved to a
+    /// different directory than diff/close-safety used. One resolver, one rule.
+    #[test]
+    fn node_working_path_trims_worktree_name() {
+        let trimmed = node_working_path(&node(true, Some("foo")));
+        let padded = node_working_path(&node(true, Some("  foo  ")));
+        assert_eq!(padded.host_path, trimmed.host_path);
+    }
+
+    /// A whitespace-only worktree name collapses to "no worktree".
+    #[test]
+    fn node_working_path_blank_worktree_name_is_root() {
+        let resolved = node_working_path(&node(true, Some("   ")));
+        assert!(!resolved.host_path.contains("worktrees"));
+    }
+
+    /// `node_worktree_path` is `Some` only for a Worktree Node; the `None` for a
+    /// Root Node is what close-safety and removal lean on to skip root nodes.
+    #[test]
+    fn node_worktree_path_is_some_for_worktree_none_for_root() {
+        assert!(node_worktree_path(&node(true, Some("gentle-fox"))).is_some());
+        assert!(node_worktree_path(&node(false, Some("gentle-fox"))).is_none());
+        assert!(node_worktree_path(&node(true, None)).is_none());
+        assert!(node_worktree_path(&node(true, Some("   "))).is_none());
+    }
+
+    /// When present, the worktree path agrees with the working path (it's the
+    /// same dir — `node_worktree_path` is just the `Option` view of it).
+    #[test]
+    fn node_worktree_path_agrees_with_working_path() {
+        let n = node(true, Some("gentle-fox"));
+        assert_eq!(
+            node_worktree_path(&n).map(|r| r.host_path),
+            Some(node_working_path(&n).host_path)
+        );
     }
 }
