@@ -36,6 +36,10 @@ impl AgentProvider for MinimaxAdapter {
         true
     }
 
+    fn produces_readable_transcript(&self) -> bool {
+        true
+    }
+
     fn supports_model_override(&self) -> bool {
         true
     }

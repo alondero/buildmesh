@@ -96,6 +96,19 @@ pub trait AgentProvider: Send + Sync {
     /// `.claude/settings.local.json` in the spawn cwd.
     fn requires_attention_hook(&self) -> bool;
 
+    /// Whether this provider writes a transcript the coordinator read API can
+    /// parse into a Node Digest's rich layer (ADR-0008). The Claude Code family
+    /// — everything launched through `cwrap` (Anthropic, MiniMax, Kimi) — runs
+    /// real Claude Code with a swapped backend, so it writes Claude Code's
+    /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
+    /// `services::transcript_reader` knows how to read. Providers with their own
+    /// transcript format (Codex) or none (OpenCode, Agy, Terminal) return
+    /// `false`; their digest degrades to spine-only with enrichment explicitly
+    /// flagged `unsupported`, never silently omitted.
+    fn produces_readable_transcript(&self) -> bool {
+        false
+    }
+
     /// Whether `--model <name>` / `--effort <level>` args from mesh config apply.
     fn supports_model_override(&self) -> bool;
 

@@ -529,6 +529,22 @@ mod tests {
         assert!(Provider::Codex.adapter().supports_resume());
     }
 
+    /// The "produces a readable transcript" capability (#317) — only the Claude
+    /// Code family (the three `cwrap` providers) writes a transcript the
+    /// coordinator read API can drill into. Everything else degrades to a
+    /// spine-only digest flagged `unsupported`, so this matrix is load-bearing.
+    #[test]
+    fn only_cwrap_providers_produce_a_readable_transcript() {
+        assert!(Provider::Anthropic.adapter().produces_readable_transcript());
+        assert!(Provider::Minimax.adapter().produces_readable_transcript());
+        assert!(Provider::Kimi.adapter().produces_readable_transcript());
+        // Codex has its own (non-Claude-Code) transcript format; the rest have none.
+        assert!(!Provider::Codex.adapter().produces_readable_transcript());
+        assert!(!Provider::Agy.adapter().produces_readable_transcript());
+        assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
+        assert!(!Provider::Terminal.adapter().produces_readable_transcript());
+    }
+
     #[test]
     fn provider_from_db_str_round_trip_for_known_values() {
         for &p in Provider::all() {
