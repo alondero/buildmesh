@@ -308,9 +308,16 @@ fn register_agent(
         AgentProcess {
             child: Arc::new(Mutex::new(child)),
             writer: Arc::new(Mutex::new(writer)),
-            master: Arc::new(Mutex::new(master)),
+            // Wrap the master in `Some` so `kill_session` can `take()` it
+            // out to drop the pseudoconsole (issue #300).
+            master: Arc::new(Mutex::new(Some(master))),
             reader_alive,
             job,
+            // The handle is set after the reader thread is spawned, via
+            // `AgentProcess::set_reader_handle`. We insert first so a
+            // concurrent `is_agent_already_running` sees the entry; the
+            // window between insert and setter is benign (see process.rs).
+            reader_handle: Mutex::new(None),
         },
     );
 }
@@ -343,7 +350,9 @@ pub fn pump_pty_output(
     }
 }
 
-/// Start the PTY reader thread.
+/// Start the PTY reader thread. Returns the `JoinHandle` so the caller
+/// can store it on `AgentProcess` and let `kill_session` join with a
+/// bounded timeout (issue #300).
 fn start_reader(
     app: tauri::AppHandle,
     session_id: i64,
@@ -352,7 +361,7 @@ fn start_reader(
     spawned_at: std::time::Instant,
     reader_alive: Arc<AtomicBool>,
     is_plain_terminal: bool,
-) {
+) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
     let session_captured = AtomicBool::new(!needs_session_capture);
@@ -415,7 +424,7 @@ fn start_reader(
         }
 
         tracing::debug!("PTY reader thread exited for session {}", session_id);
-    });
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -633,15 +642,11 @@ pub async fn spawn_agent_inner(
         );
     }
 
-    // 10. Setup IO and register
+    // 10. Setup IO
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let master = pair.master;
     let reader_alive = Arc::new(AtomicBool::new(true));
-
-    tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
-    register_agent(session_id, child, writer, master, reader_alive.clone(), job);
-    tracing::info!("spawn_agent_inner: stored agent process");
 
     // 11. Inject attention hook
     crate::agent::workspace_trust::ensure_trusted(&resolved);
@@ -651,12 +656,24 @@ pub async fn spawn_agent_inner(
     }
     timer.checkpoint("after_inject_hook");
 
-    // 12. Start reader thread
+    // 12. Register BEFORE starting the reader thread. The pre-#300 order
+    //     (register-then-start) is the one that closes the TOCTOU window
+    //     in `is_agent_already_running`: a concurrent spawn for the
+    //     same session_id sees the entry and bails. The `reader_handle`
+    //     is stashed via a setter after the thread is spawned — the
+    //     tiny window between insert and setter is benign (kill_session
+    //     arriving then sees `reader_handle = None` and skips the join,
+    //     matching the natural-exit test path).
+    tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
+    register_agent(session_id, child, writer, master, reader_alive.clone(), job);
+    tracing::info!("spawn_agent_inner: stored agent process");
+
+    // 13. Start reader thread
     let spawned_at = std::time::Instant::now();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     crate::http_server::ensure_pty_channel(session_id);
     let needs_session_capture = adapter.self_assigns_session_id() && node.cli_session_id.is_none();
-    start_reader(
+    let reader_handle = start_reader(
         app.clone(),
         session_id,
         needs_session_capture,
@@ -665,6 +682,13 @@ pub async fn spawn_agent_inner(
         reader_alive,
         adapter.is_plain_terminal(),
     );
+
+    // 14. Stash the JoinHandle on the registered entry. `kill_session`
+    //     reads it under a Mutex so the concurrent kill_session path
+    //     is race-free (see `process.rs::kill_session`).
+    if let Some(entry) = PROCESS_REGISTRY.get(&session_id) {
+        entry.set_reader_handle(reader_handle);
+    }
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
