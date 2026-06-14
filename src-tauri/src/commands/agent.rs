@@ -154,9 +154,13 @@ pub async fn spawn_issue_agent(
     let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
     // Issue #111: seed the node with a slugified issue title so the user can
     // identify it in the mesh list from the moment the modal closes (instead
-    // of waiting on the LLM rename). Falls back to a random default name if
-    // the title doesn't yield a valid `SLUG_REGEX` match.
-    let initial_name = crate::session_naming::slugify_issue_title(&issue_title);
+    // of waiting on the LLM rename). The name is prefixed with `gh{N}-` so
+    // the user can spot the originating issue at a glance (e.g. issue #123
+    // "Fix this feature" → `gh123-fix-this-feature`). Falls back to a random
+    // default name if the title doesn't yield a valid `SLUG_REGEX` match —
+    // the `gh` prefix is still applied to the fallback so the user always
+    // sees which issue the node came from.
+    let initial_name = crate::session_naming::issue_node_name(issue_number, &issue_title);
 
     let node = spawn_new_agent_impl(
         &app,
@@ -244,11 +248,12 @@ pub fn create_issue_node(
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
         .map_err(|e| format!("{} — cannot derive issue URL", e))?;
     let prefill = format_issue_prefill(&owner, &repo, issue_number, &issue_title);
-    // Issue #111: seed the node with a slugified issue title (mirrors
+    // Issue #111: seed the node with a `gh{N}-{slug}` name (mirrors
     // `spawn_issue_agent` so the desktop modal and mobile route produce
-    // identical names). Falls back to a random default if the title doesn't
-    // yield a valid slug.
-    let initial_name = crate::session_naming::slugify_issue_title(&issue_title);
+    // identical names). The `gh` prefix lets the user spot the originating
+    // issue at a glance. Falls back to a random default if the title doesn't
+    // yield a valid slug — the prefix is still applied in that case.
+    let initial_name = crate::session_naming::issue_node_name(issue_number, &issue_title);
 
     let effective_provider = crate::preferences::resolve_default_provider(
         provider,
