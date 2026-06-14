@@ -1,9 +1,16 @@
-import { useEffect, useState, useCallback } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useEffect } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
+import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
-import { GIT_CHANGED } from '../lib/events';
-import { pathMatchesGitEvent } from '../lib/paths';
+
+// Module-level shared client (keyed by meshId). The sidebar `!` badge and
+// the `BranchesWorktreesSection` health block both read from this hook;
+// they share one cache + one GIT_CHANGED subscription through the primitive.
+const healthClient = createPathInvalidatedCache<number, MeshHealth>({
+  fetcher: getMeshHealth,
+  name: 'useMeshHealth',
+});
 
 /**
  * Tracks the Mesh Git-health snapshot (issue #231) for a given mesh.
@@ -15,7 +22,9 @@ import { pathMatchesGitEvent } from '../lib/paths';
  * this hook so they cannot disagree about the mesh's state.
  *
  * Refetches on mount, when the file watcher reports a change for the mesh
- * path or any of its worktrees, and when the window regains focus.
+ * path or any of its worktrees (via the shared primitive), and when the
+ * window regains focus (the user may have run `git checkout` in a terminal
+ * while away).
  *
  * `meshId`/`meshPath` may be null during early render so the hook can
  * mount before the mesh is known.
@@ -24,51 +33,11 @@ export function useMeshHealth(
   meshId: number | null,
   meshPath: string | null,
 ): { health: MeshHealth | null; refresh: () => void } {
-  const [health, setHealth] = useState<MeshHealth | null>(null);
+  const { data, refresh } = usePathInvalidatedQuery(healthClient, meshId, meshPath);
 
-  const fetch = useCallback(async (id: number) => {
-    try {
-      setHealth(await getMeshHealth(id));
-    } catch {
-      setHealth(null);
-    }
-  }, []);
-
-  const refresh = useCallback(() => {
-    if (meshId != null) fetch(meshId);
-  }, [meshId, fetch]);
-
-  // Fetch on mount / meshId change
-  useEffect(() => {
-    if (meshId == null) {
-      setHealth(null);
-      return;
-    }
-    fetch(meshId);
-  }, [meshId, fetch]);
-
-  // Refetch on GIT_CHANGED for this mesh path (file-watcher driven).
-  // The mesh health depends on the root's HEAD ref and the worktree set;
-  // any git-changed event for the root path or any of the worktree paths
-  // could invalidate the snapshot. Issue #304: the watcher emits the
-  // *worktree* subdir path, not the mesh root, so a strict `===` against
-  // `meshPath` never matched. `pathMatchesGitEvent` also recognizes
-  // `<meshPath>/.claude/worktrees/<name>` as a match.
-  useEffect(() => {
-    if (meshId == null || meshPath == null) return;
-    const unlisten = listen<{ path: string; internal_path?: string }>(
-      GIT_CHANGED,
-      (event) => {
-        if (pathMatchesGitEvent(event.payload, meshPath)) refresh();
-      },
-    );
-    return () => {
-      unlisten.then((fn) => fn());
-    };
-  }, [meshId, meshPath, refresh]);
-
-  // Refetch when the window regains focus (the user may have run `git
-  // checkout` in a terminal while away).
+  // Refetch when the window regains focus. The primitive already covers
+  // GIT_CHANGED (file-watcher driven), so this is the only hook-specific
+  // subscription left in this file.
   useEffect(() => {
     if (meshId == null) return;
     let unlisten: (() => void) | null = null;
@@ -87,5 +56,5 @@ export function useMeshHealth(
     };
   }, [meshId, refresh]);
 
-  return { health, refresh };
+  return { health: data, refresh };
 }

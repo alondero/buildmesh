@@ -148,6 +148,11 @@ export function createPathInvalidatedCache<K, V>(
     pending.delete(k);
     sub.notify();
   };
+  // Register the handler at creation AND re-register on every `subscribe`
+  // (idempotently). The re-registration handles the test case where
+  // `resetPathInvalidatedCacheForTests()` cleared `busHandlers` between
+  // mounts; without it, an emit that fires after the reset would
+  // silently no-op because `busHandlers.get(sub.clientId)` is undefined.
   busHandlers.set(clientId, handler);
 
   return {
@@ -183,6 +188,9 @@ export function createPathInvalidatedCache<K, V>(
     },
 
     subscribe(key, path, onInvalidate) {
+      // Idempotent re-registration of the bus handler — see the comment
+      // at the factory-level `busHandlers.set` call above for why.
+      busHandlers.set(clientId, handler);
       installListener();
       let set = pathSubscribers.get(path);
       if (!set) {

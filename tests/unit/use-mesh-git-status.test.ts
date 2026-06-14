@@ -3,6 +3,7 @@ import { renderHook, waitFor, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import { useMeshGitStatus } from '../../src/hooks/useMeshGitStatus';
+import { resetPathInvalidatedCacheForTests } from '../../src/lib/pathInvalidatedCache';
 
 // Force the helper to behave as on Windows so the slash-normalization and
 // case-insensitive branches run, regardless of the host running the suite.
@@ -34,6 +35,13 @@ beforeEach(() => {
       default: return Promise.resolve(undefined);
     }
   });
+  // The primitive installs ONE global `GIT_CHANGED` listener for the whole
+  // process. The global vitest setup's `beforeEach` clears its mock listener
+  // set between tests, so without resetting the primitive's `listenerInstalled`
+  // flag the next test's `subscribe` calls would short-circuit and the
+  // listener would never be re-added to the mock set. This is the test
+  // counterpart of the "Test isolation pattern" note in the memory file.
+  resetPathInvalidatedCacheForTests();
 });
 
 describe('useMeshGitStatus', () => {
