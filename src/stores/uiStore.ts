@@ -5,6 +5,11 @@ export type FileExplorerContext =
   | { type: 'mesh'; meshId: number; path: string }
   | { type: 'userConfig'; path: string };
 
+// Tabs the Probe Panel can show. Kept as a string-literal union (not a
+// generated wire enum) because it's a pure UI concern — no backend serialises
+// it.
+export type ProbeTab = 'files' | 'review' | 'properties' | 'issues' | 'sessions' | 'worktrees';
+
 interface UIState {
   changedFilesOpen: boolean;
   changedFilesNodeId: number | null;
@@ -14,6 +19,29 @@ interface UIState {
   closeChangedFiles: () => void;
   setChangedFilesWidth: (width: number) => void;
 
+  // ---- Probe Panel (issue #373) ----
+  // The Probe Panel is a unified right-hand surface for a focused context
+  // (mesh + optional agent node): files, review, properties, issues, sessions,
+  // and worktrees all live behind the same dock and switch by tab. Visibility
+  // and active tab are stored here so every consumer (sidebar, global view
+  // card, keyboard shortcut) reads/writes the same source of truth.
+  probeOpen: boolean;
+  probeTab: ProbeTab;
+  // Path of the file currently being diffed in the probe's Review tab, or
+  // null when no file is open. Cleared by `closeDiff` and on tab change away
+  // from `review`.
+  activeDiffFile: string | null;
+  toggleProbe: () => void;
+  setProbeTab: (tab: ProbeTab) => void;
+  openDiff: (file: string) => void;
+  closeDiff: () => void;
+
+  // ---- Legacy (preserved for migration) ----
+  // `fileExplorerContext` and `propertiesPanelMeshId` predate the unified
+  // Probe Panel and are still read by the existing File Explorer / Mesh
+  // Properties components. They stay in the store verbatim so the in-flight
+  // migration can swap the consumers over one component at a time without
+  // breaking the build.
   fileExplorerContext: FileExplorerContext | null;
   toggleFileExplorer: (context: FileExplorerContext) => void;
   closeFileExplorer: () => void;
@@ -37,6 +65,35 @@ interface UIState {
 export const useUIStore = create<UIState>((set, get) => ({
   changedFilesOpen: false,
   changedFilesNodeId: null,
+
+  probeOpen: false,
+  probeTab: 'files',
+  activeDiffFile: null,
+
+  toggleProbe: () => {
+    set({ probeOpen: !get().probeOpen });
+  },
+
+  setProbeTab: (tab: ProbeTab) => {
+    // Switching away from `review` implicitly closes any open diff so the
+    // next visit to the tab starts blank — the previous file's diff would
+    // otherwise linger as stale state behind a non-review tab.
+    set((state) => ({
+      probeTab: tab,
+      activeDiffFile: tab === 'review' ? state.activeDiffFile : null,
+    }));
+  },
+
+  openDiff: (file: string) => {
+    // Open the diff for `file`: also flip the probe to the review tab and
+    // make sure the panel is visible, so a file picked from the file tree
+    // surfaces its diff without the user hunting for the tab.
+    set({ activeDiffFile: file, probeTab: 'review', probeOpen: true });
+  },
+
+  closeDiff: () => {
+    set({ activeDiffFile: null });
+  },
 
   toggleChangedFiles: (nodeId: number) => {
     const { changedFilesOpen, changedFilesNodeId } = get();

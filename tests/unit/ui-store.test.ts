@@ -3,7 +3,13 @@ import { useUIStore } from '../../src/stores/uiStore';
 
 describe('useUIStore', () => {
   beforeEach(() => {
-    useUIStore.setState({ changedFilesOpen: false, changedFilesNodeId: null });
+    useUIStore.setState({
+      changedFilesOpen: false,
+      changedFilesNodeId: null,
+      probeOpen: false,
+      probeTab: 'files',
+      activeDiffFile: null,
+    });
   });
 
   describe('toggleChangedFiles', () => {
@@ -78,6 +84,84 @@ describe('useUIStore', () => {
       useUIStore.getState().toggleMaximizedNode(7);
       useUIStore.getState().clearMaximizedNode();
       expect(useUIStore.getState().maximizedNodeId).toBe(null);
+    });
+  });
+
+  describe('Probe Panel (issue #373)', () => {
+    beforeEach(() => {
+      useUIStore.setState({
+        probeOpen: false,
+        probeTab: 'files',
+        activeDiffFile: null,
+      });
+    });
+
+    describe('toggleProbe', () => {
+      it('opens the panel when closed', () => {
+        useUIStore.getState().toggleProbe();
+        expect(useUIStore.getState().probeOpen).toBe(true);
+      });
+
+      it('closes the panel when open', () => {
+        useUIStore.getState().toggleProbe();
+        useUIStore.getState().toggleProbe();
+        expect(useUIStore.getState().probeOpen).toBe(false);
+      });
+    });
+
+    describe('setProbeTab', () => {
+      it('changes the active tab', () => {
+        useUIStore.getState().setProbeTab('review');
+        expect(useUIStore.getState().probeTab).toBe('review');
+      });
+
+      it('does NOT round-trip activeDiffFile: switching to review → files → review leaves it cleared', () => {
+        // Switching away from review is a one-way clear, even if the user
+        // comes back to review later. The test name matches the
+        // implementation: a switch-then-switch-back is NOT a round-trip —
+        // the user is expected to re-pick a file from the tree.
+        useUIStore.getState().openDiff('src/foo.ts');
+        useUIStore.getState().setProbeTab('files');
+        useUIStore.getState().setProbeTab('review');
+        expect(useUIStore.getState().activeDiffFile).toBeNull();
+      });
+
+      it('clears activeDiffFile when switching away from review', () => {
+        useUIStore.getState().openDiff('src/foo.ts');
+        expect(useUIStore.getState().activeDiffFile).toBe('src/foo.ts');
+        useUIStore.getState().setProbeTab('worktrees');
+        expect(useUIStore.getState().activeDiffFile).toBeNull();
+      });
+    });
+
+    describe('openDiff', () => {
+      it('sets the file, jumps to the review tab, and opens the panel', () => {
+        useUIStore.setState({ probeOpen: false, probeTab: 'files' });
+        useUIStore.getState().openDiff('src/baz.ts');
+        expect(useUIStore.getState().activeDiffFile).toBe('src/baz.ts');
+        expect(useUIStore.getState().probeTab).toBe('review');
+        expect(useUIStore.getState().probeOpen).toBe(true);
+      });
+
+      it('overwrites a previously-open diff', () => {
+        useUIStore.getState().openDiff('src/old.ts');
+        useUIStore.getState().openDiff('src/new.ts');
+        expect(useUIStore.getState().activeDiffFile).toBe('src/new.ts');
+      });
+    });
+
+    describe('closeDiff', () => {
+      it('clears the active diff file', () => {
+        useUIStore.getState().openDiff('src/foo.ts');
+        useUIStore.getState().closeDiff();
+        expect(useUIStore.getState().activeDiffFile).toBeNull();
+      });
+
+      it('is a no-op when no diff is open', () => {
+        expect(useUIStore.getState().activeDiffFile).toBeNull();
+        useUIStore.getState().closeDiff();
+        expect(useUIStore.getState().activeDiffFile).toBeNull();
+      });
     });
   });
 });
