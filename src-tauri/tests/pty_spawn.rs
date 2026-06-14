@@ -441,3 +441,88 @@ fn windows_kill_session_closes_master() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+
+/// End-to-end regression guard for issue #287. On Windows ConPTY
+/// 10.0.28120 the master read pipe does NOT EOF on child exit, so a
+/// reader thread blocked in `pump_pty_output` stays blocked until the
+/// master itself is closed. This test wires up a real portable-pty
+/// child, a real `pump_pty_output` reader, and the production
+/// `watch_child_exit` helper, then asserts the reader unblocks
+/// within a bounded budget after the child exits — i.e. the
+/// watcher successfully drives the master close that the broken
+/// ConPTY no longer does on its own.
+///
+/// Windows-only: on macOS/Linux the master EOFs naturally and the
+/// watcher is unnecessary, so the assertion would still pass without
+/// the helper and the test would not actually guard against the
+/// real regression.
+#[cfg(windows)]
+#[test]
+fn windows_natural_child_exit_unblocks_reader_via_watcher() {
+    use buildmesh_lib::agent::process::watch_child_exit;
+
+    // Trivial child: prints "hello" then exits. The "hello" is just
+    // sanity that the reader saw real output before the EOF.
+    let recipe = SpawnRecipe {
+        binary: "cmd.exe",
+        base_args: vec!["/c".into(), "echo".into(), "hello".into()],
+        windows_shell: WindowsShell::Direct,
+    };
+    let session_id = -915_4105;
+    let cwd = std::env::current_dir().unwrap();
+    let cmd = spawn_environment::wrap(
+        recipe,
+        EnvType::Windows,
+        &cwd.to_string_lossy(),
+        session_id,
+    );
+
+    let pair = open_pty_pair(24, 80).expect("open pty pair");
+    let child = spawn_child(&pair, cmd).expect("spawn child");
+
+    let reader = pair.master.try_clone_reader().expect("clone reader");
+    let writer = pair.master.take_writer().expect("take writer");
+    let master = pair.master;
+    drop(pair.slave);
+
+    let child_arc: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>> =
+        Arc::new(Mutex::new(child));
+    let master_arc: Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>> =
+        Arc::new(Mutex::new(Some(master)));
+
+    let reader_alive = Arc::new(AtomicBool::new(true));
+    let collected = Arc::new(Mutex::new(Vec::new()));
+    let collected_t = collected.clone();
+    let reader_alive_t = reader_alive.clone();
+    let reader_handle = std::thread::spawn(move || {
+        pump_pty_output(reader, |chunk| {
+            collected_t.lock().unwrap().extend_from_slice(chunk);
+        });
+        reader_alive_t.store(false, Ordering::SeqCst);
+    });
+
+    // Spawn the production watcher. This is the line that closes the
+    // master when the child exits naturally — the entire point of
+    // #287's fix.
+    let _watcher = watch_child_exit(child_arc.clone(), master_arc.clone());
+
+    // Wait for the reader to unblock. On Windows 28120 ConPTY this
+    // happens only after the watcher drops the master (≤ ~500ms
+    // after the child exits). 5s is a comfortable upper bound.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while reader_alive.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        !reader_alive.load(Ordering::SeqCst),
+        "reader thread should unblock within 5s of child exit. \
+         On Windows 28120 ConPTY the master read pipe does not EOF on \
+         child exit (#287) — only watch_child_exit dropping the master \
+         unblocks the reader. If this assertion fails, the watcher is \
+         not closing the master in time."
+    );
+
+    // Drop the writer + master so the test process exits cleanly.
+    drop(writer);
+    let _ = reader_handle.join();
+}
