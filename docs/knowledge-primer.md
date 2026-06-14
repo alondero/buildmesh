@@ -48,6 +48,20 @@ Wire types that cross the Tauri `invoke` boundary **or** the mobile HTTP server 
 - ❌ Lock the DB mutex in nested calls — causes deadlocks
 - ❌ Hand-declare a TS interface for a Rust wire type, or hand-edit a file in `src/types/generated/` — derive `TS` on the Rust struct and import the generated type instead (issue #359)
 
+## Coordinator Read API
+
+Buildmesh exposes a **read-only HTTP surface** for an external **Coordinator** (the user's remotely-hosted Hermes Agent first; a future in-app superagent second) to scan every Agent Node across every Mesh and drill into any one. Plain JSON over the existing embedded HTTP server, **off by default**, behind a separate read-scoped token distinct from the mobile root token, bound to loopback + LAN (the user owns the remote tunnel — Tailscale / Cloudflare / WireGuard). Hermes is one instance of a Coordinator, not the category.
+
+- **Architecture & rationale:** [`docs/adr/0008-coordinator-control-api.md`](adr/0008-coordinator-control-api.md). **Domain language:** *Coordinator*, *Node Digest* in [`CONTEXT.md`](../CONTEXT.md).
+- **User guide (how to enable + consume):** [`docs/development/coordinator-read-api.md`](development/coordinator-read-api.md). **Spec:** issue #312.
+- **Two endpoints (both authenticated with the read-scoped bearer token):**
+  - `GET /nodes` — array of layered Node Digests. Spine is always present (lifecycle `status`, `needs_feedback` = `awaiting_input`, `waiting_since`, `last_activity`); the transcript-derived rich layer is present for the Claude Code family (Anthropic, Minimax, Kimi) or explicitly flagged `unavailable` (degrade-and-flag, never a silent omission). Cheap to poll.
+  - `GET /nodes/{id}/log?tail=N` — on-demand raw recent turns (assistant text + tool calls) for one node. Content is **raw, not pre-summarised** — the Coordinator is itself an LLM. An unknown node id is a 404; every other degrade path is a 200 carrying a structured `unavailable` envelope.
+- **Module layout (do not split):** `src-tauri/src/coordinator/` (`node_digest.rs` is the pure digest builder; `enrichment.rs` is the impure owner of provider capability + path resolution + bounded transcript read); `src-tauri/src/services/transcript_reader.rs` quarantines all Claude-Code JSONL shape brittleness; `src-tauri/src/http/routes/coordinator.rs` is a thin transport skin; `src-tauri/src/http/mod.rs` enforces the off-by-default + read-token gate in the dispatcher.
+- **Contract test guard:** a real JSONL fixture in `src-tauri/src/services/transcript_reader.rs` test module makes a Claude Code shape change turn a local test red instead of silently degrading the Coordinator. This is the read-side form of the project's serde-default-fragility lesson.
+- **Drive is a separate PRD (#313).** The read token cannot drive nodes; driving adds a separate `drive` scope and depends on the `#178` `AgentDriver`. Do not conflate the two.
+- **Tunnels are the user's job.** Buildmesh never opens an internet port — the threat model for the coordinator surface is "coordinating agent on a machine I control, reached over my own tunnel", not "autonomous agent on a public VPS reachable from the open internet". Reaching the read surface from outside the LAN is a deliberate user choice, not a Buildmesh feature.
+
 ## Attention System
 
 ### How It Works
