@@ -1,4 +1,8 @@
-//! `POST /api/attention/{session_id}` — webhook from Claude Code's Stop hook.
+//! `POST /api/attention/{session_id}` — webhook for a Node Turn (see CONTEXT.md
+//! and `crate::node_turn`). Both Claude Code hooks point here: the Stop hook
+//! (turn finished, awaiting input) and the catch-all Notification hook (idle or
+//! permission prompt). All are yields, so the payload carries no discriminator;
+//! publishing the Node Turn fans out to attention-marking and session naming.
 //!
 //! No token required: the hook is configured locally and runs over localhost.
 
@@ -24,7 +28,7 @@ pub async fn handle_post(
         return;
     };
 
-    crate::commands::attention::mark_attention(session_id, app);
+    crate::node_turn::publish(session_id, app);
     crate::http::events::emit(crate::http::events::EventMsg::AttentionNeeded { session_id });
 
     let _ = request::write_status_only(lines, "200 OK").await;
