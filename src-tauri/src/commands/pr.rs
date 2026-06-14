@@ -13,6 +13,18 @@ pub struct GitHubIssue {
     pub number: i64,
     pub title: String,
     pub body: String,
+    /// Absolute GitHub URL for the issue. The mobile "View ↗" link opens
+    /// this directly. Always present — `services::github::Issue` carries
+    /// `#[serde(default)]` on `html_url`, so a partial response yields `""`
+    /// rather than failing to parse.
+    pub url: String,
+    /// `"open"` or `"closed"`. Currently always `"open"` because
+    /// `list_issues_only` filters to open issues; kept on the wire so a
+    /// future endpoint widening to both doesn't require a TS-side change.
+    pub state: String,
+    /// Label names (flattened from the GitHub API's `[{name, color, ...}]`).
+    /// Empty array when the issue has no labels.
+    pub labels: Vec<String>,
 }
 
 /// Check whether the user has a valid GitHub token (env var or gh config).
@@ -53,6 +65,9 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
         number: issue.number,
         title: issue.title,
         body: issue.body,
+        url: issue.html_url,
+        state: issue.state,
+        labels: issue.labels,
     }).collect())
 }
 

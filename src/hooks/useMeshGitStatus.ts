@@ -49,6 +49,18 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
   // network round-trip) on every file save was pure waste.
   useEffect(() => {
     if (!meshPath) return;
+    // Issue #343: when `meshPath` changes within the same mount (e.g. user
+    // switches meshes in the sidebar), the effect re-runs but the local
+    // `useState` values from the previous mesh linger until the new fetch
+    // resolves. Reset all three to their initial values up-front so the
+    // panel returns to its "loading" shape for a beat (mirroring a fresh
+    // mount) and downstream consumers never see stale auth/branch info.
+    // `isGitRepo → null` also re-engages the `if (isGitRepo === null)
+    // return null` early-return at the bottom of the hook, so the panel
+    // disappears until the new static check lands.
+    setIsGitRepo(null);
+    setIsAuthenticated(false);
+    setDefaultBranch('main');
     let cancelled = false;
     (async () => {
       try {

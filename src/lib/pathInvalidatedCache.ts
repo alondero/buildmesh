@@ -5,6 +5,12 @@
  * cache + in-flight dedupe + path-keyed subscription patterns that lived in
  * `useGitSummary`, `useOpenPr`, `useMeshHealth`, and `useMeshGitStatus`.
  *
+ * Also exposes a component-level subscription API (`subscribeGitPathInvalidation`,
+ * issue #345) so React components that only need the invalidation callback
+ * (no key, no cache) can share the same bus + `pathMatchesGitEvent` plumbing
+ * without hand-rolling their own `listen(GIT_CHANGED, ...)` + cleanup pair.
+ * Used by `AgentReviewPanel` and `ChangedFilesPanel`.
+ *
  * Architecture
  * ------------
  * - ONE module-level `GIT_CHANGED` listener is installed the first time any
@@ -20,6 +26,10 @@
  *   it calls **that subscriber's owning client's handler** (via
  *   `busHandlers.get(sub.clientId)`), not a global "invalidate every key in
  *   every client" sweep.
+ * - The callback-only subscribers from `subscribeGitPathInvalidation` share
+ *   a single `NOOP_CLIENT_ID` + stateless handler (`sub.notify()`), so
+ *   they ride the same dispatch without per-callback entries in
+ *   `busHandlers`.
  *
  * Why the clientId-scoped dispatch matters (Footgun 1)
  * ----------------------------------------------------
@@ -42,6 +52,17 @@ import { GIT_CHANGED } from './events';
 import { pathMatchesGitEvent } from './paths';
 
 const HAS_NULL = Symbol('pathInvalidatedCache.has-null');
+// Single shared clientId for all "callback-only" subscribers (see
+// `subscribeGitPathInvalidation` below). The handler registered for it is
+// stateless — it just calls `sub.notify()` — so one entry in `busHandlers`
+// serves every such caller. Generating a fresh symbol per call would be
+// functionally equivalent but would bloat `busHandlers` for no benefit.
+const NOOP_CLIENT_ID = Symbol('subscribeGitPathInvalidation');
+// Stateless: dispatches to whichever subscriber the bus matched, regardless
+// of which `subscribeGitPathInvalidation` call added it. Hoisted to a const
+// so we register the SAME function reference in `busHandlers` on every call
+// (no fresh arrow allocation per component mount).
+const NOOP_HANDLER: CallbackBusHandler = (sub) => sub.notify();
 
 export interface PathInvalidatedCacheOptions<K, V> {
   /** Loads the value for a given key. Resolves to `null` for "known empty". */
@@ -80,18 +101,49 @@ export interface QueryClient<K, V> {
   subscribe(key: K, path: string, onInvalidate: () => void): () => void;
 }
 
-interface PathSubscriber<K = unknown> {
+interface KeyedPathSubscriber<K> {
+  /** Discriminator — `'keyed'` means the subscriber carries a cache key and
+   * its `notify` will be routed through the owning client's
+   * `BusHandler` (which evicts `cache[key]` / `pending[key]`). */
+  kind: 'keyed';
   clientId: symbol;
   key: K;
   notify: () => void;
 }
 
-type BusHandler = (sub: PathSubscriber<unknown>) => void;
+interface CallbackPathSubscriber {
+  /** `'callback'` means the subscriber has no key and the bus dispatches
+   * `notify` directly — the owning clientId is used only to register a
+   * shared stateless handler (`NOOP_HANDLER`). */
+  kind: 'callback';
+  clientId: symbol;
+  notify: () => void;
+}
+
+type PathSubscriber = KeyedPathSubscriber<unknown> | CallbackPathSubscriber;
+
+function isCallbackSubscriber(sub: PathSubscriber): sub is CallbackPathSubscriber {
+  return sub.kind === 'callback';
+}
+
+// Per-variant handler types. The factory's `handler` only ever sees keyed
+// subscribers (it can't receive callback ones — they route via
+// NOOP_HANDLER), so it's typed as `KeyedBusHandler<K>`. NOOP_HANDLER is
+// typed as `CallbackBusHandler` for symmetry. Splitting them is what
+// kills the `as K` cast in the factory — issue #355.
+type KeyedBusHandler<K> = (sub: KeyedPathSubscriber<K>) => void;
+type CallbackBusHandler = (sub: CallbackPathSubscriber) => void;
 
 // Module-level globals — there is exactly one bus per process, regardless
 // of how many clients/subscribers exist.
 const pathSubscribers = new Map<string, Set<PathSubscriber>>();
-const busHandlers = new Map<symbol, BusHandler>();
+// `busHandlers` stores both keyed and callback handlers behind a single
+// `symbol` key. The bus dispatch calls whichever the subscriber's
+// `clientId` maps to. The value type widens to `KeyedBusHandler<any>` so
+// factories parameterised on any `K` can register without contravariance
+// complaints — the call site still narrows via the subscriber's `kind`
+// discriminator (issue #355).
+const busHandlers = new Map<symbol, KeyedBusHandler<any> | CallbackBusHandler>();
 let listenerInstalled = false;
 
 function installListener(): void {
@@ -109,7 +161,15 @@ function installListener(): void {
       // fetch that subsequent sibling subscribers dedup onto.
       for (const sub of subs) {
         const handler = busHandlers.get(sub.clientId);
-        if (handler) handler(sub);
+        if (!handler) continue;
+        // The `kind` tag narrows to the right handler signature. Without
+        // it the union of `KeyedBusHandler<unknown> | CallbackBusHandler`
+        // is not callable without a cast (issue #355).
+        if (isCallbackSubscriber(sub)) {
+          (handler as CallbackBusHandler)(sub);
+        } else {
+          (handler as KeyedBusHandler<unknown>)(sub);
+        }
       }
     }
   });
@@ -127,6 +187,44 @@ export function resetPathInvalidatedCacheForTests(): void {
   listenerInstalled = false;
 }
 
+/**
+ * Idempotently registers a bus handler for `clientId`. Called on every
+ * `subscribe` (and on every `createPathInvalidatedCache` factory call)
+ * so the bus keeps working after `resetPathInvalidatedCacheForTests`
+ * wipes `busHandlers` between tests. Issue #356: the contract used to
+ * be stated in three different comments; it now lives once here.
+ */
+function registerBusHandler(
+  clientId: symbol,
+  handler: KeyedBusHandler<any> | CallbackBusHandler,
+): void {
+  busHandlers.set(clientId, handler);
+}
+
+/**
+ * Adds `sub` to the path-keyed set, creating the set on first use, and
+ * returns an idempotent unsubscribe closure. The closure removes `sub`
+ * from the set; if that was the last subscriber, the (now-empty) set is
+ * also pruned from `pathSubscribers` so the global map doesn't accumulate
+ * dead entries. Issue #356: this used to be duplicated between
+ * `QueryClient.subscribe` and `subscribeGitPathInvalidation` — the prune
+ * was the most likely drift point.
+ */
+function addPathSubscriber(sub: PathSubscriber, path: string): () => void {
+  let set = pathSubscribers.get(path);
+  if (!set) {
+    set = new Set();
+    pathSubscribers.set(path, set);
+  }
+  set.add(sub);
+  return () => {
+    const live = pathSubscribers.get(path);
+    if (!live) return;
+    live.delete(sub);
+    if (live.size === 0) pathSubscribers.delete(path);
+  };
+}
+
 export function createPathInvalidatedCache<K, V>(
   options: PathInvalidatedCacheOptions<K, V>,
 ): QueryClient<K, V> {
@@ -138,22 +236,20 @@ export function createPathInvalidatedCache<K, V>(
   const cache = new Map<K, V | typeof HAS_NULL>();
   const pending = new Map<K, Promise<V | null>>();
 
-  // The bus calls this for every matched subscriber of THIS client. It
+  // The bus calls this for every matched KEYED subscriber of THIS client. It
   // evicts the cache (so the next read returns `undefined`) and clears the
   // in-flight (so the next refresh starts fresh instead of resolving to a
-  // stale value), then calls the subscriber's notify.
-  const handler: BusHandler = (sub) => {
-    const k = sub.key as K;
-    cache.delete(k);
-    pending.delete(k);
+  // stale value), then calls the subscriber's notify. Typed as
+  // `KeyedBusHandler<K>` so the `sub.key` reads/writes are checked
+  // against `K` — no `as K` cast (issue #355).
+  const handler: KeyedBusHandler<K> = (sub) => {
+    cache.delete(sub.key);
+    pending.delete(sub.key);
     sub.notify();
   };
-  // Register the handler at creation AND re-register on every `subscribe`
-  // (idempotently). The re-registration handles the test case where
-  // `resetPathInvalidatedCacheForTests()` cleared `busHandlers` between
-  // mounts; without it, an emit that fires after the reset would
-  // silently no-op because `busHandlers.get(sub.clientId)` is undefined.
-  busHandlers.set(clientId, handler);
+  // Re-register on every `subscribe` (idempotently). The contract lives on
+  // `registerBusHandler` (issue #356).
+  registerBusHandler(clientId, handler);
 
   return {
     read(key) {
@@ -188,23 +284,54 @@ export function createPathInvalidatedCache<K, V>(
     },
 
     subscribe(key, path, onInvalidate) {
-      // Idempotent re-registration of the bus handler — see the comment
-      // at the factory-level `busHandlers.set` call above for why.
-      busHandlers.set(clientId, handler);
+      // Re-register the handler (idempotent — see `registerBusHandler`)
+      // and install the global listener. Then add the subscriber via the
+      // shared helper. Issue #356.
+      registerBusHandler(clientId, handler);
       installListener();
-      let set = pathSubscribers.get(path);
-      if (!set) {
-        set = new Set();
-        pathSubscribers.set(path, set);
-      }
-      const sub: PathSubscriber<K> = { clientId, key, notify: onInvalidate };
-      set.add(sub as PathSubscriber);
-      return () => {
-        const live = pathSubscribers.get(path);
-        if (!live) return;
-        live.delete(sub as PathSubscriber);
-        if (live.size === 0) pathSubscribers.delete(path);
-      };
+      const sub: KeyedPathSubscriber<K> = { kind: 'keyed', clientId, key, notify: onInvalidate };
+      return addPathSubscriber(sub, path);
     },
   };
+}
+
+/**
+ * Subscribes `cb` to `GIT_CHANGED` events that match `path` (using the
+ * same `pathMatchesGitEvent` helper the hook-backed clients use, so the
+ * worktree-subdir + WUNC + cross-platform case rules apply). Returns a
+ * synchronous unsubscribe function.
+ *
+ * Use this from components that need the invalidation callback but don't
+ * have a key+cache to manage — i.e. consumers for whom
+ * `createPathInvalidatedCache` is overkill. Used directly by
+ * `AgentReviewPanel` and `ChangedFilesPanel`; intentionally NOT used by
+ * the `usePathInvalidatedQuery` hook (which subscribes via the
+ * cache-bearing `client.subscribe(key, path, cb)` on its own client).
+ * Issue #345.
+ *
+ * Compared to the hand-rolled `listen(GIT_CHANGED, ...) + pathMatchesGitEvent`
+ * pattern this replaces:
+ *   - ONE global listener is still installed by the primitive, so adding
+ *     a subscriber never multiplies Tauri's per-event handler cost.
+ *   - The worktree-subdir + WUNC path matching is shared, not duplicated.
+ *   - The unsubscribe is synchronous, so the React effect's cleanup
+ *     doesn't have to chase a Promise (the hand-rolled pattern did
+ *     `unlisten.then(u => u())`, which leaks a microtask per unmount).
+ *
+ * `cb` is invoked with no arguments — the bus payload is the same shape
+ * the hook subscribers see, but callback-only consumers have always
+ * ignored it; pass an arrow if you need to capture component state.
+ */
+export function subscribeGitPathInvalidation(
+  path: string,
+  cb: () => void,
+): () => void {
+  installListener();
+  // The noop handler is stateless and shared across every
+  // `subscribeGitPathInvalidation` caller. The re-register call
+  // (idempotent — see `registerBusHandler`) keeps the bus working after
+  // `resetPathInvalidatedCacheForTests` wipes `busHandlers` between tests.
+  registerBusHandler(NOOP_CLIENT_ID, NOOP_HANDLER);
+  const sub: CallbackPathSubscriber = { kind: 'callback', clientId: NOOP_CLIENT_ID, notify: cb };
+  return addPathSubscriber(sub, path);
 }

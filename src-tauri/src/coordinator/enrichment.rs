@@ -13,12 +13,6 @@ use crate::env;
 use crate::models::AgentNode;
 use crate::services::transcript_reader::{self, TranscriptTail, UnavailableReason};
 
-/// Transcript tail length read purely to derive a digest's enrichment. The
-/// digest only carries the last assistant message — which `transcript_reader`
-/// derives from the *whole* transcript regardless of tail — so we ask for the
-/// smallest window and discard the returned turns.
-const DIGEST_ENRICHMENT_TAIL: usize = 1;
-
 /// The directory the agent's transcript is keyed under — the
 /// [Node Working Directory](../../../CONTEXT.md) in its *spawn* form, because
 /// Claude Code encodes the path it actually ran in (the Worktree Node dir for a
@@ -51,13 +45,20 @@ pub fn transcript_tail(node: &AgentNode, tail: usize) -> TranscriptTail {
 /// provider-agnostic — it never learns the `Unsupported` reason), while a
 /// supported provider that simply has no transcript yet comes back as
 /// `Some(Unavailable{ NoSession | NoTranscript | … })`.
+///
+/// Uses the **bounded** reader (issue #341): a digest only needs the last
+/// assistant message, so this parses just the tail bytes of the transcript
+/// rather than the whole file. For a `GET /nodes` poll over many cwrap nodes
+/// with long histories that turns N full-file parses into N bounded ones. The
+/// full-tail [`transcript_tail`] is reserved for the on-demand `/log` drill-in.
 pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
-    match transcript_tail(node, DIGEST_ENRICHMENT_TAIL) {
-        TranscriptTail::Unavailable {
-            reason: UnavailableReason::Unsupported,
-        } => None,
-        other => Some(other),
+    if !node.provider.adapter().produces_readable_transcript() {
+        return None;
     }
+    Some(transcript_reader::read_last_assistant_message(
+        node.cli_session_id.as_deref(),
+        &transcript_dir(node),
+    ))
 }
 
 #[cfg(test)]

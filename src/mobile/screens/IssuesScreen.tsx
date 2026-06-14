@@ -89,7 +89,7 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
         {filtered.map((issue) => {
           const open = selectedIssue === issue.number;
           const busy = busyIssue === issue.number;
-          const body = (issue.body ?? "").trim();
+          const body = issue.body.trim();
           return (
             <div
               key={issue.number}
@@ -194,6 +194,7 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
                       rel="noreferrer"
                       onClick={(e) => e.stopPropagation()}
                       className="btn-ghost"
+                      data-testid={`issue-view-${issue.number}`}
                       style={{ textDecoration: "none", lineHeight: 1.2 }}
                     >
                       View ↗

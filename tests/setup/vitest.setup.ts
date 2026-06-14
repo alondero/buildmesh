@@ -155,7 +155,27 @@ vi.mock('@xterm/addon-fit', () => {
 // Global test utilities
 // ============================================================
 
-beforeEach(() => {
+beforeEach(async () => {
   mockListeners.clear();
   vi.clearAllMocks();
+  // The pathInvalidatedCache primitive installs ONE process-wide
+  // GIT_CHANGED listener (intentionally — it lives for the whole process
+  // in production). The setup's `mockListeners.clear()` above also wipes
+  // that listener from the mock set, but the primitive's own
+  // `listenerInstalled` flag stays true, so the next mount's `subscribe`
+  // would short-circuit and the bus would silently stop firing.
+  // Resetting the primitive alongside the mock listeners keeps the
+  // "primitive is fresh between tests" contract automatic. See issues
+  // #345, #354.
+  //
+  // Imported dynamically (rather than at the top of the file) so the
+  // primitive — and its transitive `paths.ts` → `platform.ts` chain —
+  // doesn't load before per-test `vi.mock` factories are hoisted. A
+  // top-level import would cause `platform.ts` to be cached with the
+  // real `navigator.platform` value, defeating the test files that
+  // mock it to force `isWindows = true` (issue #354 follow-up).
+  const { resetPathInvalidatedCacheForTests } = await import(
+    '../../src/lib/pathInvalidatedCache'
+  );
+  resetPathInvalidatedCacheForTests();
 });

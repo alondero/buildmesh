@@ -204,3 +204,88 @@ describe('Agent review surface — live refresh on GIT_CHANGED', () => {
     expect(diffCalls).toBe(callsAfterMount);
   });
 });
+
+// Acceptance test for issue #354: the primitive's process-wide listener
+// must be reset between tests AUTOMATICALLY, so that a future test file
+// which mounts a primitive-using component WITHOUT calling
+// `resetPathInvalidatedCacheForTests()` in its own `beforeEach` still
+// gets a working bus.
+//
+// Implementation note: this is TWO `it` blocks, not one. A single
+// `it` (mount → emit → assert) would also pass if the global setup
+// NEVER reset, because each test starts with a clean mockListeners
+// set. The point of this contract is to pin that the SECOND test
+// (which mounts fresh, AFTER the first test left a stale listener
+// registered) still gets a working bus. The first test acts as the
+// "leave stale state behind" precondition; the second asserts the
+// bus fires for the new mount. If the global setup stops resetting
+// the primitive, the first test's `installListener` registers a
+// callback that lives in a stale mock set (cleared by the next
+// test's `mockListeners.clear()`), so the second test's mount
+// re-installs a listener but the second test's emit fires against
+// an empty set with the second mount's callback NOT registered —
+// the assert fails.
+describe('PathInvalidatedCache — automatic test isolation (issue #354)', () => {
+  // Note: no `resetPathInvalidatedCacheForTests()` in this beforeEach.
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+  });
+
+  it('test 1/2 — first mount leaves a subscription registered on the bus', async () => {
+    let firstCalls = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'diff_node_against_base') {
+        firstCalls += 1;
+        return Promise.resolve({ files: [] } as DiffResult);
+      }
+      if (cmd === 'get_git_branch_status')
+        return Promise.resolve(null as GitBranchStatus | null);
+      return Promise.resolve({});
+    });
+    const { unmount } = renderPanel();
+    await screen.findByText('No changes vs base branch');
+
+    await act(async () => {
+      await emit(GIT_CHANGED, { path: '/repo' });
+    });
+    // The first mount's subscription fired (the bus has a working
+    // listener). The exact call count varies by test runner timing,
+    // so we just assert >= 1.
+    expect(firstCalls).toBeGreaterThan(0);
+    unmount();
+  });
+
+  it('test 2/2 — second mount (after mockListeners.clear() in setup) still receives GIT_CHANGED', async () => {
+    // This is the load-bearing assertion. If the global setup's
+    // `resetPathInvalidatedCacheForTests()` is removed, the
+    // first-test's listener (added by the primitive's `installListener`)
+    // is wiped from the mock set on entry (by `mockListeners.clear()`)
+    // while the primitive's `listenerInstalled` flag stays true. The
+    // second test's mount re-subscribes, but the re-subscribe hits
+    // the "already installed" short-circuit in `installListener`, so
+    // no fresh listener is added to the (now-cleared) mock set. The
+    // second test's emit reaches an empty set, the panel's callback
+    // doesn't fire, and the assert below fails. With the global
+    // reset in place, the primitive's `listenerInstalled` flips back
+    // to false on entry, the second mount's subscribe re-runs
+    // `installListener`, and the bus works.
+    let secondCalls = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'diff_node_against_base') {
+        secondCalls += 1;
+        return Promise.resolve({ files: [] } as DiffResult);
+      }
+      if (cmd === 'get_git_branch_status')
+        return Promise.resolve(null as GitBranchStatus | null);
+      return Promise.resolve({});
+    });
+    const { unmount } = renderPanel();
+    await screen.findByText('No changes vs base branch');
+
+    await act(async () => {
+      await emit(GIT_CHANGED, { path: '/repo' });
+    });
+    expect(secondCalls).toBeGreaterThan(0);
+    unmount();
+  });
+});

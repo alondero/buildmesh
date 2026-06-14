@@ -4,7 +4,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { terminalManager } from '../../src/components/Terminal/Terminal';
 
-const mockListeners = new Map<string, Set<(...args: unknown[]) => void>>();
+// `vi.hoisted` runs before the imports — necessary because the SUT import
+// above triggers the TerminalRegistry constructor, which now eagerly
+// subscribes to Tauri events (see issue #332 / agent-spawned reconcile).
+// Without hoisting, the factory's closure over `mockListeners` would hit
+// TDZ when the constructor calls listen() during module load.
+const mockListeners = vi.hoisted(() => new Map<string, Set<(...args: unknown[]) => void>>());
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockImplementation((event: string, callback: (event: { payload: unknown }) => void) => {

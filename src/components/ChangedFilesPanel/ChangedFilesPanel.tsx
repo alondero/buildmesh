@@ -1,8 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { getGitStatus, diffFileAgainstHead, type GitStatus, type DiffResult } from '../../lib/tauri';
-import { GIT_CHANGED } from '../../lib/events';
-import { pathMatchesGitEvent } from '../../lib/paths';
+import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
 
 interface ChangedFilesPanelProps {
   projectPath: string;
@@ -68,19 +66,20 @@ export function ChangedFilesPanel({ projectPath, isOpen, width, onWidthChange, o
     fetchStatus();
   }, [isOpen, projectPath]);
 
-  useEffect(() => {
-    if (!isOpen || !projectPath) return;
-    const unlisten = listen<{ path: string; internal_path?: string }>(GIT_CHANGED, (event) => {
-      // Issue #304: the watcher emits the worktree subdir path (or a WSL
-      // UNC backslash form) — `pathMatchesGitEvent` normalizes both
-      // `path` and `internal_path` and also catches worktree-subdir
-      // matches for callers that pass the mesh root.
-      if (pathMatchesGitEvent(event.payload, projectPath)) {
-        fetchStatus();
-      }
-    });
-    return () => { unlisten.then(fn => fn()); };
-  }, [isOpen, projectPath]);
+  // Live refresh: re-pull `getGitStatus` whenever the file watcher reports
+  // a change in *this* mesh's worktree. Issue #304: the watcher emits the
+  // worktree subdir path (or a WSL UNC backslash form) — `pathMatchesGitEvent`
+  // inside the primitive normalizes both `path` and `internal_path` and
+  // also catches worktree-subdir matches for callers that pass the mesh
+  // root. Issue #357: this goes through the cancelled-flag-guarded hook
+  // so an event that races a path change (e.g. user switches meshes
+  // mid-fetch) is dropped before it can write into the new component's
+  // state. Pass `null` while the panel is closed so the hook doesn't
+  // install a no-op listener.
+  useGitPathInvalidation(
+    isOpen && projectPath ? projectPath : null,
+    () => fetchStatus(),
+  );
 
   const handleFileClick = async (file: GitStatus) => {
     setDiffLoading(file.path);
