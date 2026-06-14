@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 13;
+const SCHEMA_VERSION: i32 = 14;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -65,7 +65,8 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             worktree_name TEXT,
             use_worktree INTEGER NOT NULL DEFAULT 1,
             position INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS pending_worktree_removals (
@@ -85,6 +86,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_issue(&conn)?;
     ensure_agent_node_use_worktree(&conn)?;
     ensure_agent_node_position(&conn)?;
+    ensure_agent_node_status_changed_at(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
@@ -281,6 +283,43 @@ pub(crate) fn ensure_agent_node_position(conn: &Connection) -> SqlResult<()> {
             [],
         )?;
         tracing::warn!("ensure_agent_node_position: added missing position column and backfilled per-mesh order");
+    }
+    Ok(())
+}
+
+/// Safety net (v14): ensure the `status_changed_at` column exists on
+/// agent_nodes. It records when a node last changed lifecycle status, which
+/// the coordinator read API (ADR-0008) turns into the digest's `last_activity`
+/// and — when the node is `awaiting_input` — `waiting_since`. On first add,
+/// backfill existing rows to `created_at` so a pre-v14 node reports a sane
+/// (if coarse) activity time instead of NULL. SQLite forbids a non-constant
+/// default on `ALTER TABLE ADD COLUMN`, hence the add-then-backfill two-step.
+pub(crate) fn ensure_agent_node_status_changed_at(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'status_changed_at'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute("ALTER TABLE agent_nodes ADD COLUMN status_changed_at TEXT", [])?;
+        conn.execute(
+            "UPDATE agent_nodes SET status_changed_at = created_at WHERE status_changed_at IS NULL",
+            [],
+        )?;
+        tracing::warn!("ensure_agent_node_status_changed_at: added column and backfilled from created_at");
     }
     Ok(())
 }
@@ -578,6 +617,99 @@ pub fn validate_root_token(token: &str) -> SqlResult<bool> {
     Ok(stored.as_deref().unwrap_or("") == token)
 }
 
+// --- Coordinator read API auth (ADR-0008) ---
+//
+// The coordinator surface is a SEPARATE, capability-scoped credential from the
+// mobile root token, gated behind a master enable switch that defaults OFF.
+// A read-scoped token can never be used to drive nodes (drive is a future
+// slice). All three keys live in app_settings alongside `remote_access_token`.
+const COORDINATOR_ENABLED_KEY: &str = "coordinator_api_enabled";
+const COORDINATOR_READ_TOKEN_KEY: &str = "coordinator_read_token";
+
+/// Is the coordinator read API enabled? Defaults to `false` (off) for a fresh
+/// install, so a naive setup is never an open endpoint.
+pub fn coordinator_api_enabled() -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    coordinator_api_enabled_inner(&db)
+}
+
+pub fn coordinator_api_enabled_inner(conn: &Connection) -> SqlResult<bool> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![COORDINATOR_ENABLED_KEY],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(value.as_deref() == Some("1"))
+}
+
+/// Flip the master enable switch for the coordinator read API.
+pub fn set_coordinator_api_enabled(enabled: bool) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    set_coordinator_api_enabled_inner(&db, enabled)
+}
+
+pub fn set_coordinator_api_enabled_inner(conn: &Connection, enabled: bool) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params![COORDINATOR_ENABLED_KEY, if enabled { "1" } else { "0" }],
+    )?;
+    Ok(())
+}
+
+/// Mint (or replace) the read-scoped coordinator token, returning it. Minting a
+/// fresh token invalidates any previously issued one.
+pub fn generate_coordinator_read_token() -> SqlResult<String> {
+    let db = get().lock().unwrap();
+    generate_coordinator_read_token_inner(&db)
+}
+
+pub fn generate_coordinator_read_token_inner(conn: &Connection) -> SqlResult<String> {
+    let token = generate_token();
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params![COORDINATOR_READ_TOKEN_KEY, &token],
+    )?;
+    Ok(token)
+}
+
+/// The stored read token, if one has been minted (and is non-empty). Used by
+/// the status command to report `has_token` without leaking the value.
+pub fn coordinator_read_token() -> SqlResult<Option<String>> {
+    let db = get().lock().unwrap();
+    coordinator_read_token_inner(&db)
+}
+
+pub fn coordinator_read_token_inner(conn: &Connection) -> SqlResult<Option<String>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![COORDINATOR_READ_TOKEN_KEY],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(value.filter(|v| !v.is_empty()))
+}
+
+/// Validate a presented token for READ access. Rejects unless the API is
+/// enabled AND the token matches the minted read token — so disabling the
+/// master switch instantly cuts off all read access even with a valid token.
+pub fn validate_coordinator_read_token(token: &str) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    validate_coordinator_read_token_inner(&db, token)
+}
+
+pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
+    if token.is_empty() || !coordinator_api_enabled_inner(conn)? {
+        return Ok(false);
+    }
+    match coordinator_read_token_inner(conn)? {
+        Some(stored) => Ok(stored == token),
+        None => Ok(false),
+    }
+}
+
 /// Exposes migrate_if_needed for integration testing.
 /// In tests, call this on an existing Connection to simulate schema upgrade.
 #[cfg(test)]
@@ -683,6 +815,70 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
     })
+}
+
+/// Parse a timestamp column that may be either RFC3339 (what Rust writes, e.g.
+/// `update_agent_node_status`) or SQLite's `datetime('now')` form
+/// (`YYYY-MM-DD HH:MM:SS`, what a column DEFAULT or backfill writes). Falls back
+/// to "now" on an unparseable value so a malformed row degrades to a fresh
+/// timestamp rather than erroring the whole query.
+fn parse_db_timestamp(s: &str) -> chrono::DateTime<chrono::Utc> {
+    use chrono::TimeZone;
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return dt.with_timezone(&chrono::Utc);
+    }
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return chrono::Utc.from_utc_datetime(&naive);
+    }
+    chrono::Utc::now()
+}
+
+/// Coordinator read API (ADR-0008): every non-archived Agent Node across all
+/// Meshes, joined with its Mesh name and `status_changed_at`, in the same
+/// order the grid renders. The two extra fields aren't on `AgentNode`, so we
+/// return them alongside it; `coordinator::node_digest::spine` turns each tuple
+/// into a Node Digest. Spine-only — no transcript enrichment in this slice.
+pub fn list_coordinator_node_rows()
+-> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
+    let db = get().lock().unwrap();
+    list_coordinator_node_rows_inner(&db)
+}
+
+pub fn list_coordinator_node_rows_inner(
+    conn: &Connection,
+) -> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
+    // Qualify AGENT_NODE_COLUMNS with the `a.` alias (derived, never drifts)
+    // so the join with `meshes` has no ambiguous `name`/`created_at`/`position`.
+    let qualified: String = AGENT_NODE_COLUMNS
+        .split(", ")
+        .map(|c| format!("a.{}", c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {qualified}, m.name, a.status_changed_at \
+         FROM agent_nodes a JOIN meshes m ON a.mesh_id = m.id \
+         WHERE a.status != 'archived' \
+         ORDER BY a.mesh_id ASC, a.position ASC, a.created_at ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], |row| {
+        // map_agent_node_row reads positional indices 0..13, which match the
+        // AGENT_NODE_COLUMNS order we selected first; mesh name and
+        // status_changed_at follow at 14 and 15.
+        let node = map_agent_node_row(row)?;
+        let mesh_name: String = row.get(14)?;
+        // Read as Option: a DB migrated from a pre-v14 schema added the column
+        // nullable, so any row inserted before `create_agent_node` started
+        // stamping it (or via some other path) can be NULL. A non-Option read
+        // would make rusqlite error the whole query on a single NULL row,
+        // blanking the endpoint. Fall back to the node's creation time.
+        let status_changed_at: Option<String> = row.get(15)?;
+        let status_changed_at = status_changed_at
+            .map(|s| parse_db_timestamp(&s))
+            .unwrap_or(node.created_at);
+        Ok((node, mesh_name, status_changed_at))
+    })?;
+    rows.collect()
 }
 
 fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
@@ -797,9 +993,13 @@ pub fn create_agent_node(
         params![mesh_id],
         |row| row.get(0),
     )?;
+    // Stamp `status_changed_at` explicitly rather than leaning on the column
+    // DEFAULT: a DB migrated from pre-v14 added the column nullable with NO
+    // default (SQLite can't ALTER-add a non-constant default), so an INSERT that
+    // omitted it would store NULL and break the coordinator digest query.
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, use_worktree, position)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10)",
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, use_worktree, position, status_changed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11)",
         params![
             mesh_id,
             name,
@@ -810,7 +1010,8 @@ pub fn create_agent_node(
             worktree_name,
             source_issue,
             if use_worktree { 1 } else { 0 },
-            next_position
+            next_position,
+            chrono::Utc::now().to_rfc3339()
         ],
     )?;
     let id = db.last_insert_rowid();
@@ -866,7 +1067,15 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
 
 pub fn update_agent_node_status(id: i64, status: SessionStatus) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    db.execute("UPDATE agent_nodes SET status = ?1 WHERE id = ?2", params![status.to_db_str(), id])?;
+    // Stamp `status_changed_at` on every transition — this is the single choke
+    // point all lifecycle changes flow through (including attention mark/clear),
+    // so the coordinator digest's `last_activity`/`waiting_since` stay accurate.
+    // Stored as RFC3339 (unambiguous, timezone-aware) rather than SQLite's
+    // space-separated `datetime('now')` form.
+    db.execute(
+        "UPDATE agent_nodes SET status = ?1, status_changed_at = ?2 WHERE id = ?3",
+        params![status.to_db_str(), chrono::Utc::now().to_rfc3339(), id],
+    )?;
     Ok(())
 }
 
@@ -891,6 +1100,10 @@ pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
 ///   perpetual "◌ Starting…" badge with no way to recover.
 pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
     let db = get().lock().unwrap();
+    // Deliberately does NOT touch `status_changed_at`: a restart-time suspend is
+    // bookkeeping, not agent activity, so the coordinator digest's
+    // `last_activity` should keep reporting when the node *actually* last did
+    // work (pre-crash), not the moment the app reopened. (See ADR-0008 spine.)
     let count = db.execute(
         "UPDATE agent_nodes SET status = 'suspended' WHERE status IN ('running', 'awaiting_input', 'pending')",
         [],

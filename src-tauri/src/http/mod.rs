@@ -345,6 +345,21 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         .unwrap_or(&path_with_query)
         .to_string();
 
+    // Coordinator read API (ADR-0008): GET /nodes — spine-only Node Digests.
+    // Distinct from the mobile `/api/nodes`: it authenticates with the
+    // off-by-default, read-scoped coordinator token (NOT the root token), so a
+    // disabled API or a missing/wrong token is rejected here. Loopback/LAN
+    // binding is inherited from the embedded server; no internet port is opened.
+    if method == "GET" && path_without_query == "/nodes" {
+        if !crate::coordinator::authenticate_read(&headers, token.clone()) {
+            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            return;
+        }
+        let body = routes::coordinator::list_nodes_json();
+        let _ = request::write_json(&mut lines, "200 OK", &body).await;
+        return;
+    }
+
     // Attention webhook: POST /api/attention/{session_id}
     // Called by Claude Code's Stop hook — no token required (localhost-only).
     if method == "POST" && path_without_query.starts_with("/api/attention/") {
@@ -701,6 +716,15 @@ mod tests {
     #[tokio::test]
     async fn gh_auth_requires_token() {
         assert_eq!(get_request("/api/gh/auth").await, 401);
+    }
+
+    #[tokio::test]
+    async fn coordinator_nodes_rejects_without_token() {
+        // Off-by-default + no token presented → 401, short-circuited before any
+        // DB lookup (the test binary never initialises the global DB). The
+        // valid-token → list path is covered by the coordinator integration
+        // test against an in-memory connection.
+        assert_eq!(get_request("/nodes").await, 401);
     }
 
     #[test]
