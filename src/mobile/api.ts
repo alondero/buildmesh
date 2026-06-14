@@ -241,20 +241,20 @@ export interface DiscoveredSession {
   provider: string;
 }
 
-/// Wire shape of the `GET /api/meshes/{id}/issues` response. The Rust
-/// `GitHubIssue` struct (src-tauri/src/commands/pr.rs) currently only
-/// serialises `number`, `title`, `body`; the rest are forward-compat slots
-/// for the day the backend exposes them. Mark them optional and let the
-/// screen default them — a missing `labels` array previously crashed the
-/// mobile render (blank page) because the screen called `.length` on it.
-/// The "View ↗" link in IssuesScreen hides itself when `url` is missing.
+/// Wire shape of the `GET /api/meshes/{id}/issues` response. Matches the
+/// Rust `GitHubIssue` struct in `src-tauri/src/commands/pr.rs` —
+/// `url`/`state`/`labels` are all guaranteed present because the upstream
+/// `services::github::Issue` deserialiser carries `#[serde(default)]` on
+/// each (so a partial response yields `""` / `""` / `vec![]` rather than
+/// failing). Issue #358 closed the schema-drift gap; the previous version
+/// marked these optional and forced the screen to defensively default.
 export interface GitHubIssue {
   number: number;
   title: string;
   body: string;
-  url?: string;
-  state?: string;
-  labels?: string[];
+  url: string;
+  state: string;
+  labels: string[];
 }
 
 export async function discoverSessions(
