@@ -720,6 +720,32 @@ pub async fn spawn_agent_inner(
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
+
+    // Emit the post-spawn reconcile trigger (issue #332). Async-spawn paths
+    // (auto-resume on startup, fresh auto-spawn, handover, etc.) race the
+    // frontend's attach-fit: term.onResize fires `resize_agent(real cols)`
+    // before the agent process exists, so the IPC returns "Agent not
+    // running" and is silently swallowed. The PTY was created at the
+    // caller-supplied `rows`/`cols` (80x24 for auto_resume_sessions), and
+    // because term.cols is already the fitted value no further onResize
+    // fires — the PTY stays at the spawn-time size and the agent wraps
+    // its first lines of output inside a wider pane. By emitting here
+    // (after the agent is registered AND the DB status flips to
+    // `Running`, so the frontend knows the term is mountable), we give
+    // the frontend a definitive "agent is up, push the real size now"
+    // signal that closes the race uniformly for all three paths.
+    // Frontend consumer: TerminalRegistry listens and calls syncPtySize,
+    // which is self-guarding (no-op on detached/missing terminals) and
+    // swallows the "Agent not running" rejection.
+    let _ = app.emit(
+        "agent-spawned",
+        serde_json::json!({
+            "session_id": session_id,
+            "rows": rows,
+            "cols": cols,
+        }),
+    );
+
     tracing::info!("spawn_agent_inner: complete");
     timer.total();
     Ok(())
