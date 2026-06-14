@@ -2,6 +2,7 @@
 
 use crate::db;
 use crate::env;
+use crate::models::AgentNode;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, Event};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,18 +19,16 @@ pub fn watch_session(
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
-    let resolved = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
-    let watch_path = resolved.host_path;
+    // The directory actually watched: the canonical Node Working Directory
+    // (host form), which gates on `use_worktree` and trims the name. Using the
+    // canonical resolver means a Root Node with a stale `worktree_name` watches
+    // the Mesh root, not a non-existent worktree subdir.
+    let watch_path = env::node_working_path(&node).host_path;
 
     let watch_path_for_callback = watch_path.clone();
     let last_emit = Arc::new(Mutex::new(Instant::now() - std::time::Duration::from_secs(1)));
 
-    // internal_path must match what getNodeGitPath() computes on the frontend:
-    // node.path for non-worktree nodes, node.path/.claude/worktrees/name for worktree nodes.
-    let internal_path = match node.worktree_name.as_deref() {
-        Some(wt) if !wt.is_empty() => format!("{}/.claude/worktrees/{}", node.path, wt),
-        _ => node.path.clone(),
-    };
+    let internal_path = node_internal_path(&node);
     let internal_path_for_callback = internal_path.clone();
 
     // Clone before the closure consumes app_handle — needed for the immediate emit below.
@@ -75,6 +74,27 @@ pub fn watch_session(
     Ok(())
 }
 
+/// The `internal_path` carried in the GIT_CHANGED payload. This is the RAW
+/// effective path (`node.path`, or `node.path/.claude/worktrees/<name>`), NOT
+/// the host form — it must match what the frontend's `getNodeGitPath()` computes
+/// (`src/lib/paths.ts`), because that's the string components subscribe with.
+///
+/// Like `getNodeGitPath`, it gates on `use_worktree` and does NOT trim the name.
+/// The `use_worktree` gate is the bug this fixes: without it, a Root Node
+/// (`use_worktree = false`) carrying a stale `worktree_name` emitted a worktree
+/// subdir the frontend never subscribes to, so its GIT_CHANGED never matched and
+/// the node's changed-files went stale until remount. (Trimming is a separate
+/// paired cross-language change — `getNodeGitPath` doesn't trim either, so the
+/// two must stay byte-identical and change together.)
+fn node_internal_path(node: &AgentNode) -> String {
+    match node.worktree_name.as_deref() {
+        Some(wt) if node.use_worktree && !wt.is_empty() => {
+            format!("{}/.claude/worktrees/{}", node.path, wt)
+        }
+        _ => node.path.clone(),
+    }
+}
+
 /// Stop watching a session
 #[command]
 pub fn unwatch_session(session_id: i64) -> Result<(), String> {
@@ -85,7 +105,10 @@ pub fn unwatch_session(session_id: i64) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use super::node_internal_path;
     use crate::env::resolve_agent_path;
+    use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
+    use chrono::Utc;
 
     #[test]
     fn test_watch_path_with_worktree_name() {
@@ -99,5 +122,55 @@ mod tests {
     fn test_watch_path_without_worktree_name() {
         let resolved = resolve_agent_path("/Users/adam/myproject", None);
         assert!(resolved.host_path.contains("/Users/adam/myproject"));
+    }
+
+    /// Minimal Agent Node fixture; only `use_worktree`/`worktree_name`/`path`
+    /// drive `node_internal_path`. Mirrors the `env` module's fixture.
+    fn node(use_worktree: bool, worktree_name: Option<&str>) -> AgentNode {
+        AgentNode {
+            id: 1,
+            mesh_id: 1,
+            name: "n".to_string(),
+            path: "/home/user/my-repo".to_string(),
+            branch: "main".to_string(),
+            env: EnvType::Wsl,
+            provider: Provider::Anthropic,
+            status: SessionStatus::Running,
+            cli_session_id: None,
+            worktree_name: worktree_name.map(str::to_string),
+            use_worktree,
+            source_issue: None,
+            position: 0,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// A Worktree Node's GIT_CHANGED `internal_path` is its worktree subdir —
+    /// matching `getNodeGitPath()`.
+    #[test]
+    fn internal_path_for_worktree_node_is_worktree_subdir() {
+        assert_eq!(
+            node_internal_path(&node(true, Some("gentle-fox"))),
+            "/home/user/my-repo/.claude/worktrees/gentle-fox"
+        );
+    }
+
+    /// Regression: a Root Node (`use_worktree = false`) with a STALE
+    /// `worktree_name` must emit the Mesh root, not the worktree subdir. Before
+    /// the `use_worktree` gate, it emitted the subdir — a path the frontend's
+    /// `getNodeGitPath()` (which gates on `use_worktree`) never subscribes to, so
+    /// the node's GIT_CHANGED never matched and its changed-files went stale.
+    #[test]
+    fn internal_path_for_root_node_ignores_stale_worktree_name() {
+        assert_eq!(
+            node_internal_path(&node(false, Some("gentle-fox"))),
+            "/home/user/my-repo"
+        );
+    }
+
+    /// No worktree name → Mesh root.
+    #[test]
+    fn internal_path_without_worktree_name_is_mesh_root() {
+        assert_eq!(node_internal_path(&node(true, None)), "/home/user/my-repo");
     }
 }
