@@ -269,17 +269,16 @@ describe('subscribeGitPathInvalidation — callback-only subscription (issue #34
   });
 
   it('dispatches the noop callback via its own clientId — hook client on the SAME path gets its OWN handler', async () => {
-    // The naive implementation would re-use the hook-style handler for
-    // the noop subscribers — that handler calls `cache.delete(sub.key)`,
-    // which would be a silent no-op today only because `sub.key` is
-    // `undefined`. Pin the stronger guarantee: when a noop subscriber
+    // Pin the stronger guarantee (post #355): when a noop subscriber
     // and a hook client BOTH subscribe to the same path, the bus
     // dispatches each via its OWN clientId-scoped handler. The hook
-    // client's cache for its own key is wiped (by the hook handler);
-    // the noop callback also fires (by the noop handler). A buggy
-    // implementation that ran the hook handler for the noop subscriber
-    // would call `hookClient.invalidate(undefined)` — a no-op — and the
-    // noop callback might not fire at all.
+    // client's cache for its own key is wiped (by the hook handler,
+    // which the bus dispatches for `kind: 'keyed'` subs); the noop
+    // callback also fires (by the noop handler, which the bus dispatches
+    // for `kind: 'callback'` subs). A buggy implementation that ran the
+    // hook handler for the noop subscriber would try to read
+    // `hookClient.cache.get(sub.key)` where `sub.key` doesn't exist
+    // (no-op today) AND would skip the noop callback entirely.
     const hookClient = createPathInvalidatedCache<number, string>({
       fetcher: vi.fn().mockResolvedValue('value-A'),
     });
