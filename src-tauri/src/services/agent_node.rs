@@ -109,7 +109,7 @@ pub fn create_pending(
 /// Return whether closing the node can remove its worktree without risking work.
 pub fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety, AgentNodeError> {
     let node = db::get_agent_node_by_id(session_id)?;
-    let Some(worktree_path) = worktree_path_for_node(&node) else {
+    let Some(worktree_path) = env::node_worktree_path(&node).map(|r| r.host_path) else {
         return Ok(WorktreeCloseSafety {
             worktree_path: None,
             has_uncommitted: false,
@@ -139,7 +139,7 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     let removal_path = if remove_worktree {
         crate::agent::process::PROCESS_REGISTRY.kill_session(session_id);
         crate::agent::process::PROCESS_REGISTRY.remove(&session_id);
-        worktree_path_for_node(&node)
+        env::node_worktree_path(&node).map(|r| r.host_path)
     } else {
         None
     };
@@ -216,24 +216,9 @@ fn process_removals(
     failures
 }
 
-fn worktree_path_for_node(node: &AgentNode) -> Option<String> {
-    if !node.use_worktree {
-        return None;
-    }
-
-    let worktree_name = node.worktree_name.as_deref()?.trim();
-    if worktree_name.is_empty() {
-        return None;
-    }
-
-    Some(env::resolve_agent_path(&node.path, Some(worktree_name)).host_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
-    use chrono::Utc;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -253,10 +238,6 @@ mod tests {
 
         fn path(&self) -> &Path {
             &self.0
-        }
-
-        fn path_str(&self) -> String {
-            self.0.to_string_lossy().to_string()
         }
     }
 
@@ -304,54 +285,6 @@ mod tests {
             )
             .unwrap();
         worktree_path
-    }
-
-    fn make_node(root: &TempDir, worktree_name: Option<&str>) -> AgentNode {
-        AgentNode {
-            id: 1,
-            mesh_id: 1,
-            name: worktree_name.unwrap_or("mesh-root").to_string(),
-            path: root.path_str(),
-            branch: "main".to_string(),
-            env: EnvType::Windows,
-            provider: Provider::Anthropic,
-            status: SessionStatus::Idle,
-            cli_session_id: None,
-            worktree_name: worktree_name.map(str::to_string),
-            use_worktree: worktree_name.is_some(),
-            source_issue: None,
-            position: 0,
-            created_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn worktree_path_for_node_resolves_named_worktree() {
-        let root = TempDir::new();
-        let node = make_node(&root, Some("wt-remove"));
-
-        let path = worktree_path_for_node(&node).expect("worktree node has a path");
-
-        assert!(path.ends_with("wt-remove"), "path points at the named worktree");
-    }
-
-    #[test]
-    fn worktree_path_for_node_is_none_without_worktree_name() {
-        // The mesh-root node has no worktree_name — closing it must never derive
-        // a removable path, or close would queue the mesh root for deletion.
-        let root = TempDir::new();
-        let node = make_node(&root, None);
-
-        assert_eq!(worktree_path_for_node(&node), None);
-    }
-
-    #[test]
-    fn worktree_path_for_node_is_none_when_use_worktree_false() {
-        let root = TempDir::new();
-        let mut node = make_node(&root, Some("wt-inplace"));
-        node.use_worktree = false;
-
-        assert_eq!(worktree_path_for_node(&node), None);
     }
 
     #[test]

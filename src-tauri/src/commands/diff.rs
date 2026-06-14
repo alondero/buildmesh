@@ -466,34 +466,13 @@ fn node_base_ref(node: &crate::models::AgentNode) -> String {
         .unwrap_or_else(|_| "origin/main".to_string())
 }
 
-/// The worktree-name part to feed `resolve_agent_path`: the node's worktree name
-/// when it runs in a worktree, else `None` (run in the repo root). Trimmed/empty
-/// names collapse to `None`. Mirrors the frontend `getNodeGitPath` and the
-/// backend `worktree_path_for_node` so every layer agrees on the node's dir.
-fn node_diff_worktree_name(use_worktree: bool, worktree_name: Option<&str>) -> Option<&str> {
-    if !use_worktree {
-        return None;
-    }
-    worktree_name.map(str::trim).filter(|n| !n.is_empty())
-}
-
-/// Resolve the directory a node's diff should inspect. A worktree node's edits
-/// live in `{path}/.claude/worktrees/{worktree_name}`, NOT the project root, so
-/// diffing `node.path` directly inspects the wrong tree (the root reads clean
-/// while the agent's work sits in the worktree). This realigns the diff with the
-/// title-bar git-summary chip, which already resolves the worktree path.
-fn node_repo_path(node: &crate::models::AgentNode) -> String {
-    let wt = node_diff_worktree_name(node.use_worktree, node.worktree_name.as_deref());
-    crate::env::resolve_agent_path(&node.path, wt).host_path
-}
-
 /// Diff every file an Agent Node changed since it branched (ADR 0005). One call
 /// returns the whole change set the review panel renders as a stacked view.
 #[command]
 pub async fn diff_node_against_base(node_id: i64) -> Result<DiffResult, String> {
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     let base_ref = node_base_ref(&node);
-    diff_against_base(&node_repo_path(&node), &base_ref, None)
+    diff_against_base(&crate::env::node_working_path(&node).host_path, &base_ref, None)
 }
 
 /// Diff a single file of an Agent Node against its merge-base — the per-file
@@ -505,7 +484,11 @@ pub async fn diff_node_file_against_base(
 ) -> Result<DiffResult, String> {
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     let base_ref = node_base_ref(&node);
-    diff_against_base(&node_repo_path(&node), &base_ref, Some(&file_path))
+    diff_against_base(
+        &crate::env::node_working_path(&node).host_path,
+        &base_ref,
+        Some(&file_path),
+    )
 }
 
 #[cfg(test)]
@@ -957,16 +940,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn node_diff_worktree_name_selects_only_for_worktree_nodes() {
-        assert_eq!(node_diff_worktree_name(true, Some("wt")), Some("wt"));
-        // Blank / whitespace names are not a worktree.
-        assert_eq!(node_diff_worktree_name(true, Some("   ")), None);
-        assert_eq!(node_diff_worktree_name(true, None), None);
-        // Root-mode node ignores any stored name.
-        assert_eq!(node_diff_worktree_name(false, Some("wt")), None);
-    }
-
     // Regression: the review surface diffed `node.path` (the project root), but a
     // worktree agent's edits live in `{path}/.claude/worktrees/{name}`. The root
     // read clean while the agent's work sat in the worktree — so the panel showed
@@ -979,7 +952,7 @@ mod tests {
         let _root_repo = init_repo_with_base(&root);
 
         let node = make_node(root.to_str().unwrap(), true, Some("wt"));
-        let wt_path = node_repo_path(&node);
+        let wt_path = crate::env::node_working_path(&node).host_path;
         assert!(
             wt_path.replace('\\', "/").ends_with("/.claude/worktrees/wt"),
             "expected the worktree path, got {wt_path}"

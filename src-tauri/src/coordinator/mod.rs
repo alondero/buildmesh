@@ -13,6 +13,7 @@
 //! - **Separate, capability-scoped token.** A read-scoped coordinator token,
 //!   distinct from the mobile root token, validated independently of it.
 
+pub mod enrichment;
 pub mod node_digest;
 
 /// Pull a bearer token out of an `Authorization: Bearer <token>` header. This
