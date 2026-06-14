@@ -129,8 +129,10 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   "http://127.0.0.1:1992/nodes/42/log?tail=10"
 ```
 
-- `tail` defaults to 10; the route is bounded so a 50 MB transcript cannot
-  stream out the HTTP socket.
+- `tail` defaults to **10** if absent, empty, unparseable, or `0` (a
+  zero-turn response is never what a caller wants, and `tail=0` is just
+  a wasted round trip); the route is bounded so a 50 MB transcript
+  cannot stream out the HTTP socket.
 - An unknown node id is a **404**. Every other degrade path (unsupported
   provider, no session, file missing/unreadable, JSONL shape change) is a
   **200** carrying the same `{"status":"unavailable",...}` envelope as
@@ -191,7 +193,14 @@ field is `reason`, which is one of:
 | `no_transcript` | A session id exists but no JSONL file was found on disk where Buildmesh looked. | Retry on the next poll. |
 | `unreadable` | The file exists but the I/O failed. | Retry, then page if persistent. |
 | `shape_changed` | The file was read but the Claude Code JSONL shape has changed (renamed/missing fields). | **Page** — this is a real format break, not a quiet node. |
-| `no_turns_yet` | The file parsed cleanly with no malformed lines, but it also contains no recognizable turns. Almost always a cold-start cwrap node whose JSONL has only `summary`/`mode`/`system` lines so far. | Retry on the next poll. **Not** a format break. |
+
+> **A sixth reason is queued** ([#339](https://github.com/alondero/buildmesh/issues/339)):
+> a cold-start cwrap node's first-seconds digest can currently read as
+> `shape_changed` before the first assistant turn lands. The fix is a
+> distinct `no_turns_yet` reason so a Coordinator can tell "the rich
+> layer is broken" from "the agent is still warming up". Until that
+> lands, treat a transient `shape_changed` for a very young node as a
+> warm-up, not a page.
 
 ### Transcript tail (`/nodes/{id}/log`)
 
@@ -282,9 +291,11 @@ Out of scope for this PRD, deferred by design (see ADR-0008):
 These do not block adoption, but a Coordinator may want to know about them:
 
 - **#339** — A fresh cwrap node's first-seconds digest can read as
-  `shape_changed` for a brief window before the first assistant turn lands.
-  The fix (a distinct `no_turns_yet` reason, already implemented) is
-  queued behind a real-format-break test.
+  `shape_changed` for a brief window before the first assistant turn
+  lands. The fix is a distinct `no_turns_yet` reason (now documented
+  as a queued reason above), not yet landed — until it does, treat a
+  transient `shape_changed` for a very young node as a warm-up, not a
+  page.
 - **#335** — Five-item follow-up from the R2 code review: empty-vs-shape-changed
   conflation (the headline is #339), large-file streaming, tool-call cap,
   multi-block discovery test, live-`curl` verification.

@@ -205,6 +205,19 @@ fn query_param(path_with_query: &str, name: &str) -> Option<String> {
     None
 }
 
+/// Parse the `?tail=N` parameter for `GET /nodes/{id}/log`. Defaults to
+/// [`DEFAULT_LOG_TAIL`] when the param is absent, empty, or unparseable —
+/// a zero-turn response to a default request is never what a caller wants,
+/// and a `tail=0` past-call is just a wasted round trip.
+const DEFAULT_LOG_TAIL: usize = 10;
+
+fn tail_param(path_with_query: &str) -> usize {
+    query_param(path_with_query, "tail")
+        .and_then(|t| t.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_LOG_TAIL)
+}
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.replace('+', " ");
     let mut out = Vec::with_capacity(bytes.len());
@@ -371,9 +384,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
                 let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
                 return;
             }
-            let tail = query_param(&path_with_query, "tail")
-                .and_then(|t| t.parse::<usize>().ok())
-                .unwrap_or(0);
+            let tail = tail_param(&path_with_query);
             match routes::coordinator::log_json(node_id, tail) {
                 Some(body) => {
                     let _ = request::write_json(&mut lines, "200 OK", &body).await;
@@ -806,6 +817,32 @@ mod tests {
         assert_eq!(percent_decode("hello+world"), "hello world");
         assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
         assert_eq!(percent_decode("clean"), "clean");
+    }
+
+    /// The default for `GET /nodes/{id}/log?tail=` must be a useful number of
+    /// recent turns — never zero. A caller who copies the user guide's
+    /// quickstart without `?tail=N` should get a real tail, not an empty
+    /// `{"turns":[]}` that looks like a quiet transcript. (Reviewed in PR #388:
+    /// the route originally parsed with `unwrap_or(0)` and the user guide
+    /// claimed a default of 10, but the code disagreed.)
+    #[test]
+    fn tail_param_defaults_to_a_useful_recent_turn_count() {
+        // No query string at all → default, NOT zero.
+        assert_eq!(tail_param("/nodes/42/log"), 10);
+        // Empty `?tail=` → default.
+        assert_eq!(tail_param("/nodes/42/log?tail="), 10);
+        // Unparseable `?tail=abc` → default.
+        assert_eq!(tail_param("/nodes/42/log?tail=abc"), 10);
+        // Explicit `?tail=0` → also default: a zero-turn response is never
+        // what a caller wants, and a `tail=0` past-call is just a wasted
+        // round trip.
+        assert_eq!(tail_param("/nodes/42/log?tail=0"), 10);
+    }
+
+    #[test]
+    fn tail_param_honours_an_explicit_positive_value() {
+        assert_eq!(tail_param("/nodes/42/log?tail=5"), 5);
+        assert_eq!(tail_param("/nodes/42/log?tail=25"), 25);
     }
 
     #[test]
