@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import {
   diffNodeAgainstBase,
   openInEditor,
   type DiffResult,
 } from '../../lib/tauri';
-import { GIT_CHANGED } from '../../lib/events';
-import { pathMatchesGitEvent } from '../../lib/paths';
+import { subscribeGitPathInvalidation } from '../../lib/pathInvalidatedCache';
 import { Diff, diffTotals } from '../Diff/Diff';
 import { FileTree } from './FileTree';
 
@@ -67,20 +65,12 @@ export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
   // worktree. Mirrors how the title-bar git summary chip stays live
   // (useGitSummary) — without this the panel silently goes stale and disagrees
   // with the chip. Issue #304: the watcher emits the worktree subdir path
-  // (and a WSL UNC backslash form) — `pathMatchesGitEvent` normalizes both.
+  // (and a WSL UNC backslash form) — `pathMatchesGitEvent` inside the
+  // primitive normalizes both.
   useEffect(() => {
-    const unlisten = listen(GIT_CHANGED, (event) => {
-      const payload = event.payload as {
-        path: string;
-        internal_path?: string;
-      };
-      if (pathMatchesGitEvent(payload, rootPath)) {
-        fetchDiff({ background: true });
-      }
+    return subscribeGitPathInvalidation(rootPath, () => {
+      fetchDiff({ background: true });
     });
-    return () => {
-      unlisten.then((u) => u());
-    };
   }, [rootPath, fetchDiff]);
 
   if (loading) {

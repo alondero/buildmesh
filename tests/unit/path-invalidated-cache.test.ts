@@ -3,6 +3,7 @@ import { listen, emit } from '@tauri-apps/api/event';
 import {
   createPathInvalidatedCache,
   resetPathInvalidatedCacheForTests,
+  subscribeGitPathInvalidation,
 } from '../../src/lib/pathInvalidatedCache';
 
 // The helper is the same one used by the four original hooks; force
@@ -206,5 +207,94 @@ describe('createPathInvalidatedCache — bus invalidates cache before notify', (
     });
     await emit('git-changed', { path: '/repo' });
     expect(client.read('k')).toBeUndefined();
+  });
+});
+
+describe('subscribeGitPathInvalidation — callback-only subscription (issue #345)', () => {
+  it('invokes the callback on a matching GIT_CHANGED event', async () => {
+    const cb = vi.fn();
+    subscribeGitPathInvalidation('/repo', cb);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT invoke the callback when the event path does not match', async () => {
+    const cb = vi.fn();
+    subscribeGitPathInvalidation('/repo', cb);
+    await emit('git-changed', { path: '/other' });
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('matches a worktree subdir against a mesh-root subscription (issue #304)', async () => {
+    // Mirrors the hook-side test above — the new component-level API must
+    // use the SAME `pathMatchesGitEvent` helper so the worktree-subdir
+    // rule applies uniformly across both subscribers. Slash/case details
+    // are pinned by `tests/unit/paths.test.ts`.
+    const cb = vi.fn();
+    subscribeGitPathInvalidation('/repo', cb);
+    await emit('git-changed', { path: '/repo/.claude/worktrees/swift-otter' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a synchronous unsubscribe that stops further notifications', async () => {
+    const cb = vi.fn();
+    const unsubscribe = subscribeGitPathInvalidation('/repo', cb);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+    // No `.then(...)` — the cleanup is sync, unlike the hand-rolled
+    // `listen()` pattern that produced a Promise<UnlistenFn>.
+    unsubscribe();
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports multiple subscribers on the same path — all are notified', async () => {
+    const cb1 = vi.fn();
+    const cb2 = vi.fn();
+    subscribeGitPathInvalidation('/repo', cb1);
+    subscribeGitPathInvalidation('/repo', cb2);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb1).toHaveBeenCalledTimes(1);
+    expect(cb2).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports subscribers on different paths — only the matching one fires', async () => {
+    const cbRepo = vi.fn();
+    const cbOther = vi.fn();
+    subscribeGitPathInvalidation('/repo', cbRepo);
+    subscribeGitPathInvalidation('/other', cbOther);
+    await emit('git-changed', { path: '/repo' });
+    expect(cbRepo).toHaveBeenCalledTimes(1);
+    expect(cbOther).not.toHaveBeenCalled();
+  });
+
+  it('dispatches the noop callback via its own clientId — hook client on the SAME path gets its OWN handler', async () => {
+    // The naive implementation would re-use the hook-style handler for
+    // the noop subscribers — that handler calls `cache.delete(sub.key)`,
+    // which would be a silent no-op today only because `sub.key` is
+    // `undefined`. Pin the stronger guarantee: when a noop subscriber
+    // and a hook client BOTH subscribe to the same path, the bus
+    // dispatches each via its OWN clientId-scoped handler. The hook
+    // client's cache for its own key is wiped (by the hook handler);
+    // the noop callback also fires (by the noop handler). A buggy
+    // implementation that ran the hook handler for the noop subscriber
+    // would call `hookClient.invalidate(undefined)` — a no-op — and the
+    // noop callback might not fire at all.
+    const hookClient = createPathInvalidatedCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('value-A'),
+    });
+    await hookClient.refresh(7);
+    expect(hookClient.read(7)).toBe('value-A');
+
+    const cb = vi.fn();
+    // Both subscribers are on /repoA — the event will match both, and
+    // each will be dispatched via its OWN clientId-scoped handler.
+    hookClient.subscribe(7, '/repoA', () => {});
+    subscribeGitPathInvalidation('/repoA', cb);
+
+    await emit('git-changed', { path: '/repoA' });
+    expect(cb).toHaveBeenCalledTimes(1);
+    // The hook handler ran for key=7 — its cache entry is now evicted.
+    expect(hookClient.read(7)).toBeUndefined();
   });
 });
