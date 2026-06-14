@@ -94,7 +94,11 @@ async fn spawn_new_agent_impl(
         None,
     ).map_err(|e| e.to_string())?;
 
-    let prefill_text = if Provider::from_db_str(&effective_provider).adapter().supports_prefill() {
+    // Parse once and reuse — the from_db_str allocation isn't free, and any
+    // future change to the parsing rule should only need to update one site.
+    let provider = Provider::from_db_str(&effective_provider);
+
+    let prefill_text = if provider.adapter().supports_prefill() {
         Some(prefill)
     } else {
         tracing::warn!(
@@ -107,7 +111,7 @@ async fn spawn_new_agent_impl(
     let node_id = node.id;
     crate::agent::spawn::spawn_agent_inner(app, SpawnOptions {
         session_id: node_id,
-        provider: Provider::from_db_str(&effective_provider),
+        provider,
         resume: None,
         rows: 24,
         cols: 80,
