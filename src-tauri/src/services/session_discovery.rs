@@ -7,7 +7,7 @@ use crate::env;
 // skipping, content-text extraction) live in `transcript_reader` so this
 // discovery scan and the coordinator's transcript reader share one source of
 // Claude-Code-format truth (ADR-0008). A format change breaks in one place.
-use crate::services::transcript_reader::{concat_text_blocks, encode_path, is_synthetic_message};
+use crate::services::transcript_reader::{encode_path, first_text_block, is_synthetic_message};
 use serde::Serialize;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -84,7 +84,12 @@ fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<
                 if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
                     continue;
                 }
-                let text = concat_text_blocks(msg.get("content"));
+                // A discovered-session title is the opening of the FIRST text
+                // block, kept single-line: joining all blocks (the transcript
+                // reader's `concat_text_blocks`) would splice a multi-block user
+                // message into a multi-line title that `strip_tags` won't
+                // collapse before the 80-char truncate (issue #335).
+                let text = first_text_block(msg.get("content"));
 
                 if is_synthetic_message(&text) {
                     continue;
@@ -285,5 +290,57 @@ mod tests {
         assert!(!is_synthetic_message("Fix the login bug"));
         assert!(!is_synthetic_message("  <p>some html</p>"));
         assert!(!is_synthetic_message(""));
+    }
+
+    /// Write a one-off JSONL session file in the temp dir, suffixed by pid +
+    /// name so parallel tests don't trample each other.
+    fn write_session(name: &str, body: &str) -> PathBuf {
+        let path = std::env::temp_dir()
+            .join(format!("buildmesh_discovery_{name}_{}.jsonl", std::process::id()));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn parse_session_file_uses_first_text_block_for_title() {
+        // A multi-text-block user message must yield a single-line title from the
+        // FIRST block, not all blocks joined with an interior newline (issue
+        // #335). Joining would have produced "Fix the login bug\nand the logout
+        // bug" — a newline strip_tags doesn't collapse — before the 80-char cut.
+        let body = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Fix the login bug"},{"type":"text","text":"and the logout bug"}]},"cwd":"/x","gitBranch":"main","timestamp":"2026-06-14T10:00:00Z","uuid":"u1"}
+"#;
+        let path = write_session("multiblock", body);
+        let parsed = parse_session_file(&path);
+        std::fs::remove_file(&path).ok();
+        let (title, branch, cwd, ts) = parsed.expect("multi-block user message should parse");
+        assert_eq!(title, "Fix the login bug", "title is the first text block only");
+        assert!(!title.contains('\n'), "title stays single-line");
+        assert_eq!(branch.as_deref(), Some("main"));
+        assert_eq!(cwd.as_deref(), Some("/x"));
+        assert_eq!(ts.as_deref(), Some("2026-06-14T10:00:00Z"));
+    }
+
+    #[test]
+    fn parse_session_file_single_block_is_unchanged() {
+        // The common single-block case is identical to the old concat behaviour.
+        let body = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Just one block"}]},"uuid":"u1"}
+"#;
+        let path = write_session("singleblock", body);
+        let parsed = parse_session_file(&path);
+        std::fs::remove_file(&path).ok();
+        let (title, _b, _c, _t) = parsed.expect("single-block message should parse");
+        assert_eq!(title, "Just one block");
+    }
+
+    #[test]
+    fn parse_session_file_skips_synthetic_then_takes_real_prompt() {
+        let body = r#"{"type":"user","message":{"role":"user","content":"<local-command-caveat>noise</local-command-caveat>"},"uuid":"u0"}
+{"type":"user","message":{"role":"user","content":"Real first prompt"},"cwd":"/x","uuid":"u1"}
+"#;
+        let path = write_session("synthetic", body);
+        let parsed = parse_session_file(&path);
+        std::fs::remove_file(&path).ok();
+        let (title, _b, _c, _t) = parsed.expect("should skip caveat and find the real prompt");
+        assert_eq!(title, "Real first prompt");
     }
 }
