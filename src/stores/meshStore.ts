@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
+import * as api from '../lib/tauri';
 import type { Mesh } from '../types/generated/Mesh';
 
 // `Mesh` is generated from the Rust `models::Mesh` struct (issue #359).
@@ -36,7 +36,7 @@ export const useMeshStore = create<MeshState>((set) => ({
   fetchMeshes: async () => {
     set({ loading: true, error: null });
     try {
-      const meshes = await invoke<Mesh[]>('list_projects');
+      const meshes = await api.listProjects();
       const meshesById = new Map(meshes.map((p) => [p.id, p]));
       set({ meshes, meshesById, loading: false });
     } catch (e) {
@@ -46,7 +46,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   addMesh: async () => {
     try {
-      const mesh = await invoke<Mesh>('add_project');
+      const mesh = await api.addProject();
       set((state) => ({
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]])
@@ -58,7 +58,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   addTestMesh: async (name) => {
     try {
-      const mesh = await invoke<Mesh>('create_test_project', { name });
+      const mesh = await api.createTestProject(name);
       set((state) => ({
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]])
@@ -72,7 +72,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   createMesh: async (name, path) => {
     try {
-      await invoke('create_project', { name, path });
+      await api.createProject(name, path);
       await useMeshStore.getState().fetchMeshes();
     } catch (e) {
       set({ error: String(e) });
@@ -81,7 +81,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   deleteMesh: async (id) => {
     try {
-      await invoke('delete_project', { projectId: id });
+      await api.deleteProject(id);
       await useMeshStore.getState().fetchMeshes();
     } catch (e) {
       set({ error: String(e) });
@@ -92,7 +92,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   updateMeshLayout: async (id, layout) => {
     try {
-      await invoke('update_project_layout', { projectId: id, layout });
+      await api.updateProjectLayout(id, layout);
       set((state) => {
         const existing = state.meshesById.get(id);
         if (!existing) return state;
@@ -123,7 +123,7 @@ export const useMeshStore = create<MeshState>((set) => ({
       // Send ALL meshes' positions so DB stays in sync with optimistic update
       const currentMeshes = updatedMeshes!;
       const updates = currentMeshes.map((p) => [p.id, p.position] as [number, number]);
-      await invoke('update_project_positions', { updates });
+      await api.updateProjectPositions(updates);
     } catch (e) {
       set({ error: String(e) });
       await useMeshStore.getState().fetchMeshes();
@@ -132,7 +132,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   updateMeshName: async (id, name) => {
     try {
-      await invoke('update_mesh_name', { meshId: id, name });
+      await api.updateMeshName(id, name);
       set((state) => {
         const existing = state.meshesById.get(id);
         if (!existing) return state;
@@ -149,7 +149,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   getDefaultProvider: async (meshId) => {
     try {
-      return await invoke<string>('get_default_provider', { meshId });
+      return await api.getDefaultProvider(meshId);
     } catch (e) {
       set({ error: String(e) });
       return 'anthropic';

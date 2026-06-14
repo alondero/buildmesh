@@ -66,6 +66,13 @@ export const getWorktreeCloseSafety = (sessionId: number) =>
 export const deleteSession = (sessionId: number, removeWorktree = false) =>
   invoke('delete_session', { sessionId, removeWorktree });
 
+export const renameSession = (sessionId: number, name: string) =>
+  invoke('rename_session', { sessionId, name });
+
+/** Persist new grid positions for a set of nodes: `[nodeId, position]` pairs. */
+export const updateSessionPositions = (updates: [number, number][]) =>
+  invoke('update_session_positions', { updates });
+
 // Mesh
 export const addProject = () =>
   invoke<Mesh>('add_project');
@@ -73,15 +80,36 @@ export const addProject = () =>
 export const createProject = (name: string, path: string) =>
   invoke<Mesh>('create_project', { name, path });
 
+export const createTestProject = (name: string) =>
+  invoke<Mesh>('create_test_project', { name });
+
 export const listProjects = () =>
   invoke<Mesh[]>('list_projects');
 
 export const deleteProject = (projectId: number) =>
   invoke('delete_project', { projectId });
 
+export const updateProjectLayout = (projectId: number, layout: 'grid' | 'single') =>
+  invoke('update_project_layout', { projectId, layout });
+
+/** Persist new sidebar positions for a set of meshes: `[meshId, position]` pairs. */
+export const updateProjectPositions = (updates: [number, number][]) =>
+  invoke('update_project_positions', { updates });
+
+export const updateMeshName = (meshId: number, name: string) =>
+  invoke('update_mesh_name', { meshId, name });
+
+export const getDefaultProvider = (meshId: number) =>
+  invoke<string>('get_default_provider', { meshId });
+
 // Agent
-export const spawnAgent = (sessionId: number, provider: string) =>
-  invoke('spawn_agent', { sessionId, provider });
+export const spawnAgent = (
+  sessionId: number,
+  provider: string,
+  resume?: string | null,
+  rows?: number,
+  cols?: number,
+) => invoke('spawn_agent', { sessionId, provider, resume, rows, cols });
 
 export const killAgent = (sessionId: number) =>
   invoke('kill_agent', { sessionId });
@@ -91,6 +119,10 @@ export const isAgentRunning = (sessionId: number) =>
 
 export const sendToAgent = (sessionId: number, input: string) =>
   invoke('send_to_agent', { sessionId, input });
+
+/** Raw write to the agent's PTY (no submit/newline handling — cf. `sendToAgent`). */
+export const writeToAgent = (sessionId: number, data: string) =>
+  invoke('write_to_agent', { sessionId, data });
 
 // Diff
 export const diffFiles = (oldPath: string, newPath: string) =>

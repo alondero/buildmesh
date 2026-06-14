@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
+import * as api from '../lib/tauri';
 import { listen } from '@tauri-apps/api/event';
 import { disposeTerminal } from '../components/Terminal/Terminal';
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
@@ -32,7 +32,7 @@ async function persistPositions(
   set({ agentNodes: merged });
   try {
     const updates = updatedMeshNodes.map(n => [n.id, n.position] as [number, number]);
-    await invoke('update_session_positions', { updates });
+    await api.updateSessionPositions(updates);
   } catch (e) {
     set({ error: String(e) });
     await get().fetchAgentNodes();
@@ -104,7 +104,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   fetchAgentNodes: async () => {
     set({ loading: true, error: null });
     try {
-      const agentNodes = await invoke<AgentNode[]>('list_sessions');
+      const agentNodes = await api.listSessions();
       set({ agentNodes, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -192,9 +192,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean): Promise<AgentNode> => {
     try {
-      const node = await invoke<AgentNode>('create_session', {
-        meshId, name, path, branch, provider, useWorktree
-      });
+      const node = await api.createSession(meshId, name, path, branch, provider, useWorktree);
       set((state) => ({ agentNodes: [...state.agentNodes, node] }));
       return node;
     } catch (e) {
@@ -222,7 +220,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
     try {
       const node = get().agentNodes.find(s => s.id === id);
-      const safety = await invoke<WorktreeCloseSafety>('get_worktree_close_safety', { sessionId: id });
+      const safety = await api.getWorktreeCloseSafety(id);
       let removeWorktree = Boolean(safety.worktree_path);
 
       if (safety.worktree_path && hasWorktreeCloseRisk(safety)) {
@@ -257,11 +255,11 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // from the UI while its row and worktree survive and resurrect on the
         // next fetch.
         try {
-          await invoke('kill_agent', { sessionId: id });
+          await api.killAgent(id);
         } catch (e) {
           console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
         }
-        await invoke('delete_session', { sessionId: id, removeWorktree });
+        await api.deleteSession(id, removeWorktree);
       } catch (e) {
         set({ error: String(e) });
       }
@@ -285,7 +283,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       ),
     }));
     try {
-      await invoke('rename_session', { sessionId: id, name });
+      await api.renameSession(id, name);
     } catch (e) {
       // Roll back the optimistic update so the UI shows the prior name
       // again. The user can retry or fix the input.
@@ -353,13 +351,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   spawnAgent: async (nodeId, provider, rows?: number, cols?: number) => {
     try {
       const node = get().agentNodes.find(s => s.id === nodeId);
-      await invoke('spawn_agent', {
-        sessionId: nodeId,
-        provider,
-        resume: node?.cli_session_id,
-        rows,
-        cols
-      });
+      await api.spawnAgent(nodeId, provider, node?.cli_session_id, rows, cols);
       await get().fetchAgentNodes();
     } catch (e) {
       console.error('[agentNodeStore] spawnAgent failed:', e);
@@ -370,7 +362,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   spawnHandoverAgent: async (meshId: number, prefill: string, provider?: string) => {
     try {
-      const node = await invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
+      const node = await api.spawnHandoverAgent(meshId, prefill, provider);
       set((state) => ({ agentNodes: [...state.agentNodes, node] }));
       await get().fetchAgentNodes();
       return node;
@@ -382,7 +374,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   killAgent: async (nodeId) => {
     try {
-      await invoke('kill_agent', { sessionId: nodeId });
+      await api.killAgent(nodeId);
       await get().fetchAgentNodes();
     } catch (e) {
       set({ error: String(e) });
@@ -391,7 +383,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   sendToAgent: async (nodeId, input) => {
     try {
-      await invoke('send_to_agent', { sessionId: nodeId, input });
+      await api.sendToAgent(nodeId, input);
     } catch (e) {
       set({ error: String(e) });
     }
@@ -399,7 +391,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   writeToAgent: async (nodeId, data) => {
     try {
-      await invoke('write_to_agent', { sessionId: nodeId, data });
+      await api.writeToAgent(nodeId, data);
     } catch (e) {
       set({ error: String(e) });
     }
