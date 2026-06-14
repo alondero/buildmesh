@@ -72,15 +72,30 @@ impl Provider {
 
     /// Parse the DB string column / Tauri arg into a typed `Provider`.
     /// Unknown strings fall back to `Anthropic` (matches previous behaviour).
+    ///
+    /// Inputs are trimmed and ASCII-lowercased before matching so callers
+    /// that hand-edit `preferences.json` (e.g. `default_provider = "Terminal"`)
+    /// get the variant they meant instead of a silent Anthropic default.
+    /// Genuinely-unrecognised non-empty strings emit a `tracing::warn!` so
+    /// the silent fallback shows up in the buildmesh.log file — empty strings
+    /// are treated as an intentional default and not logged.
     pub fn from_db_str(s: &str) -> Provider {
-        match s {
+        let normalized = s.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "" | "anthropic" => Provider::Anthropic,
             "minimax" => Provider::Minimax,
             "agy" => Provider::Agy,
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
             "kimi" => Provider::Kimi,
             "terminal" => Provider::Terminal,
-            _ => Provider::Anthropic,
+            _ => {
+                tracing::warn!(
+                    "Provider::from_db_str: unrecognized provider {:?}, falling back to Anthropic",
+                    s
+                );
+                Provider::Anthropic
+            }
         }
     }
 
@@ -416,6 +431,7 @@ pub struct MeshHealth {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn sample_mesh() -> Mesh {
         Mesh {
@@ -524,12 +540,116 @@ mod tests {
     /// Documents the intentional silent fallback: unknown DB values default to
     /// Anthropic rather than erroring. This preserves pre-refactor behaviour
     /// where the inline `match` in db/mod.rs had a `_ => Provider::Anthropic` arm.
-    /// If this fallback ever becomes a real correctness concern, consider
-    /// changing `from_db_str` to return `Result<Provider, _>`.
+    /// The fallback now also emits a `tracing::warn!` (covered by
+    /// `provider_from_db_str_unknown_logs_warning`).
     #[test]
     fn provider_from_db_str_unknown_falls_back_to_anthropic() {
         assert_eq!(Provider::from_db_str("garbage"), Provider::Anthropic);
         assert_eq!(Provider::from_db_str(""), Provider::Anthropic);
+    }
+
+    /// Regression test for #297: hand-edited `preferences.json` with a
+    /// capitalised value like `"Terminal"` previously silently resolved to
+    /// `Anthropic` while the DB persisted the capitalised string — a
+    /// particularly nasty mismatch. The fix lowercases + trims the input
+    /// so every recognised name resolves regardless of case.
+    #[test]
+    fn provider_from_db_str_is_case_insensitive() {
+        assert_eq!(Provider::from_db_str("Terminal"), Provider::Terminal);
+        assert_eq!(Provider::from_db_str("TERMINAL"), Provider::Terminal);
+        assert_eq!(Provider::from_db_str("TeRmInAl"), Provider::Terminal);
+        assert_eq!(Provider::from_db_str("ANTHROPIC"), Provider::Anthropic);
+        assert_eq!(Provider::from_db_str("Minimax"), Provider::Minimax);
+        assert_eq!(Provider::from_db_str("AGY"), Provider::Agy);
+        assert_eq!(Provider::from_db_str("OpenCode"), Provider::OpenCode);
+        assert_eq!(Provider::from_db_str("Codex"), Provider::Codex);
+        assert_eq!(Provider::from_db_str("Kimi"), Provider::Kimi);
+    }
+
+    /// Whitespace around the value shouldn't break matching either — a
+    /// hand-edited JSON file with `"Terminal "` (trailing space) should
+    /// still resolve correctly.
+    #[test]
+    fn provider_from_db_str_trims_whitespace() {
+        assert_eq!(Provider::from_db_str("  terminal  "), Provider::Terminal);
+        assert_eq!(Provider::from_db_str("\tminimax\n"), Provider::Minimax);
+    }
+
+    /// Capture-target for tracing events emitted inside `from_db_str`.
+    /// `tracing-subscriber`'s `MakeWriter` impl that appends to a shared
+    /// `Vec<u8>`, so each test can grep the captured output for the
+    /// expected log line.
+    #[derive(Clone, Default)]
+    struct VecWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for VecWriter {
+        type Writer = VecWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `body` under a subscriber that captures WARN-level tracing events
+    /// into a fresh `Vec<u8>`, returning the captured string. Used by the
+    /// `provider_from_db_str_*_warning` tests to assert on log output.
+    fn capture_warnings<F: FnOnce()>(body: F) -> String {
+        let buf = VecWriter::default();
+        let buf_for_assert = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf)
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, body);
+
+        // Clone into a local so the MutexGuard drops at end of `.clone()`,
+        // not at end of block — otherwise the lock outlives the return value.
+        let bytes = buf_for_assert.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    /// Issue #297: a misspelled provider id in `preferences.json` (e.g.
+    /// `"antropic"`, `"claude"`, `"gpt"`) used to be invisible. After the
+    /// fix the function emits a `warn!` so the silent fallback shows up in
+    /// `buildmesh.log` next to the offending value.
+    #[test]
+    fn provider_from_db_str_unknown_logs_warning() {
+        // Typo: missing the second 'h' — must fall back AND warn.
+        let captured = capture_warnings(|| {
+            assert_eq!(Provider::from_db_str("antropic"), Provider::Anthropic);
+        });
+        assert!(
+            captured.contains("unrecognized provider") && captured.contains("antropic"),
+            "expected warn! mentioning 'antropic', got: {}",
+            captured
+        );
+    }
+
+    /// Known values — even when capitalised — should NOT emit a warning;
+    /// the case-insensitive match is the intended path, not a fallback.
+    #[test]
+    fn provider_from_db_str_known_value_does_not_warn() {
+        let captured = capture_warnings(|| {
+            assert_eq!(Provider::from_db_str("Terminal"), Provider::Terminal);
+            assert_eq!(Provider::from_db_str("ANTHROPIC"), Provider::Anthropic);
+            assert_eq!(Provider::from_db_str("  kimi  "), Provider::Kimi);
+        });
+        assert!(
+            !captured.contains("unrecognized provider"),
+            "expected no warn! for known (case-insensitive) value, got: {}",
+            captured
+        );
     }
 
     #[test]
