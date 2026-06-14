@@ -3,11 +3,10 @@ import {
   checkIsGitRepo,
   checkGhAuth,
   getDefaultBranch,
-  getGitStatus,
   type GitStatus,
 } from '../lib/tauri';
-import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
+import { gitStatusClient } from './useChangedFiles';
 
 export interface MeshGitStatus {
   files: GitStatus[];
@@ -19,13 +18,10 @@ export interface MeshGitStatus {
 }
 
 // The variable part of the snapshot (the file list) is the only thing that
-// changes as the agent edits files. The primitive handles dedupe + cache
-// + GIT_CHANGED invalidation for it; the static part (repo-ness, auth,
-// default branch) is fetched once per path via a separate effect below.
-const filesClient = createPathInvalidatedCache<string, GitStatus[]>({
-  fetcher: getGitStatus,
-  name: 'useMeshGitStatus.files',
-});
+// changes as the agent edits files. The shared `gitStatusClient` handles dedupe
+// + cache + GIT_CHANGED invalidation for it (and shares one fetch with
+// ChangedFilesSection / FileTree); the static part (repo-ness, auth, default
+// branch) is fetched once per path via a separate effect below.
 
 export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null {
   const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null);
@@ -38,7 +34,7 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
   // option skips the mount-refetch so the static effect is the single
   // caller of the initial `refresh()`.
   const { data: files, loading, refresh } = usePathInvalidatedQuery(
-    filesClient,
+    gitStatusClient,
     meshPath,
     meshPath,
     { enabled: false },

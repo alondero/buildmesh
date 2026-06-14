@@ -146,6 +146,14 @@ const pathSubscribers = new Map<string, Set<PathSubscriber>>();
 const busHandlers = new Map<symbol, KeyedBusHandler<any> | CallbackBusHandler>();
 let listenerInstalled = false;
 
+// Test-only: every client registers a closure that clears its own `cache` +
+// `pending` Maps. `resetPathInvalidatedCacheForTests` calls them so per-client
+// state is wiped too — the bus globals above aren't enough, because a
+// module-level client's `cache` is closure state that would otherwise leak
+// values across tests that don't `vi.resetModules()` (e.g. component tests that
+// consume a shared client). Each client registers exactly once at construction.
+const clientCacheResets = new Set<() => void>();
+
 function installListener(): void {
   if (listenerInstalled) return;
   listenerInstalled = true;
@@ -185,6 +193,7 @@ export function resetPathInvalidatedCacheForTests(): void {
   pathSubscribers.clear();
   busHandlers.clear();
   listenerInstalled = false;
+  clientCacheResets.forEach((reset) => reset());
 }
 
 /**
@@ -235,6 +244,11 @@ export function createPathInvalidatedCache<K, V>(
   const clientId = Symbol('pathInvalidatedCache');
   const cache = new Map<K, V | typeof HAS_NULL>();
   const pending = new Map<K, Promise<V | null>>();
+  // Let `resetPathInvalidatedCacheForTests` wipe this client's state too.
+  clientCacheResets.add(() => {
+    cache.clear();
+    pending.clear();
+  });
 
   // The bus calls this for every matched KEYED subscriber of THIS client. It
   // evicts the cache (so the next read returns `undefined`) and clears the

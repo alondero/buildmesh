@@ -21,6 +21,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { QueryClient } from '../lib/pathInvalidatedCache';
 
 export interface UsePathInvalidatedQueryResult<V> {
@@ -43,6 +44,15 @@ export interface UsePathInvalidatedQueryOptions {
    * Defaults to `true` to match the other three hooks' semantics.
    */
   enabled?: boolean;
+  /**
+   * When `true`, also refetch whenever the OS window regains focus — the user
+   * may have run git in an external terminal while the app was unfocused.
+   * Opt-in so consumers that don't want it are unaffected. The cache dedupes,
+   * so a focus-driven refresh collapses onto any in-flight fetch for the key.
+   *
+   * Defaults to `false`.
+   */
+  refetchOnFocus?: boolean;
 }
 
 export function usePathInvalidatedQuery<K, V>(
@@ -51,7 +61,7 @@ export function usePathInvalidatedQuery<K, V>(
   path?: string | null,
   options: UsePathInvalidatedQueryOptions = {},
 ): UsePathInvalidatedQueryResult<V> {
-  const { enabled = true } = options;
+  const { enabled = true, refetchOnFocus = false } = options;
   const [data, setData] = useState<V | null>(() => {
     // Seed from cache so a remount serves the cached value without a
     // re-fetch. Mirrors the four original hooks' `useState(() => ...)` pattern.
@@ -139,6 +149,33 @@ export function usePathInvalidatedQuery<K, V>(
       unsubscribe();
     };
   }, [key, path, client]);
+
+  // Optional: refetch when the window regains focus. Same cancelled-flag guard
+  // as the subscribe effect, so a focus event firing during a key change can't
+  // resolve a stale key's data into the new render.
+  useEffect(() => {
+    if (key == null || !refetchOnFocus) return;
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }) => {
+        if (!focused || cancelled) return;
+        setLoading(true);
+        client.refresh(key).then((result) => {
+          if (cancelled) return;
+          setData(result);
+          setLoading(false);
+        });
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, [key, client, refetchOnFocus]);
 
   const refresh = useCallback(() => {
     if (key == null) return;
