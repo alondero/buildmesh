@@ -5,6 +5,7 @@ import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-sh
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
+import { ProbePanel } from './components/Probe/ProbePanel';
 import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshPropertiesPanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { useMeshStore } from './stores/meshStore';
@@ -292,6 +293,7 @@ function App() {
     <div className="flex h-screen w-screen overflow-hidden bg-[#09090f] text-[#e0e0e0]">
       <Sidebar />
       <SessionView />
+      <ProbePanel />
 
       {propertiesPanelMeshId != null && <MeshPropertiesPanel />}
       <WorktreeCloseDialog />

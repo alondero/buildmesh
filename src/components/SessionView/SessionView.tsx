@@ -150,6 +150,7 @@ export function SessionView() {
   const closeFileExplorer = useUIStore(state => state.closeFileExplorer);
   const maximizedNodeId = useUIStore(state => state.maximizedNodeId);
   const clearMaximizedNode = useUIStore(state => state.clearMaximizedNode);
+  const probeOpen = useUIStore(state => state.probeOpen);
   const [fileExplorerWidth, setFileExplorerWidth] = useState(360);
   const [openBuildRun, setOpenBuildRun] = useState<BuildRunState>(null);
 
@@ -244,6 +245,14 @@ export function SessionView() {
   useEffect(() => {
     terminalManager.fitAll();
   }, [maximizedNode?.id]);
+
+  // Refit when the Probe Panel expands/collapses: it shrinks/grows this view's
+  // width via the App flex row, but xterm doesn't re-measure on flex reflow on
+  // its own, so terminals would keep a stale column count (#374). Same
+  // never-dispose contract as the maximize refit above.
+  useEffect(() => {
+    terminalManager.fitAll();
+  }, [probeOpen]);
 
   // After a drag reorder/swap, nodes move into slots that may be a different
   // size, so refit. Keyed on the id sequence so it fires only when order
