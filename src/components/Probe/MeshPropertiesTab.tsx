@@ -116,23 +116,33 @@ export function MeshPropertiesTab() {
   }, [activeMeshId]);
 
   // Project-type detection: drives the "Looks like an X project" hint and
-  // which preset gets the ✓ marker in the dropdown.
+  // which preset gets the ✓ marker in the dropdown. Runs against the
+  // MESH ROOT, not the focused node's working directory — a Worktree
+  // Node's path is the worktree subdir (often missing Cargo.toml /
+  // package.json if the worktree only carries the agent's edits), so
+  // running detection against `activePath` would silently miss the
+  // mesh's actual project type whenever a node is focused.
+  const meshRoot = mesh?.path ?? null;
   useEffect(() => {
-    if (activeMeshId === null || !activePath) return;
+    if (activeMeshId === null || !meshRoot) return;
     setDetected(null);
-    detectMeshProject(activePath)
+    detectMeshProject(meshRoot)
       .then((d) => {
         if (mountedRef.current) setDetected(d);
       })
       .catch(() => {
         if (mountedRef.current) setDetected(null);
       });
-  }, [activeMeshId, activePath]);
+  }, [activeMeshId, meshRoot]);
 
   // Load the mesh's saved config every time the active mesh changes.
-  // The mesh row's `name` and the `mesh.toml` config can drift (e.g. the
-  // user just renamed the folder), so we fold the fallback chain
-  // "config.name → mesh.name → folder name" the legacy panel used.
+  // Intentionally depends on `activeMeshId` only — re-firing on
+  // `mesh?.name` would clobber the user's in-flight edits to Model,
+  // Build, Run, etc. with the just-saved values (the `updateMeshName`
+  // call mutates `meshesById` and would otherwise re-trigger this
+  // effect on every name save). The "config.name → mesh.name → folder
+  // name" fallback chain runs at mount only; the user can still rename
+  // later via the Name field.
   useEffect(() => {
     if (activeMeshId === null || !activePath) return;
     setLoading(true);
@@ -154,13 +164,17 @@ export function MeshPropertiesTab() {
       .catch(() => {
         if (mountedRef.current) setLoading(false);
       });
-  }, [activeMeshId, activePath, mesh?.name]);
+    // Dep array intentionally excludes `mesh?.name` (see comment above).
+    // `mesh` is captured at effect-run time, which is fine for the
+    // fallback chain — the user can rename later via the form itself.
+  }, [activeMeshId, activePath]);
 
   // Auto-save helpers — each returns a promise so callers can await then
   // refetch. The legacy panel reused `git.refresh()` after every save to
   // keep the sidebar drift badge in sync; the new tab skips the explicit
   // refresh because the `useMeshHealth` cache the sidebar consumes is
-  // already refetched by its own GIT_CHANGED / focus invalidate path.
+  // already refetched by its own GIT_CHANGED / focus invalidate path
+  // (and `mesh.toml` writes don't change git health anyway).
   const saveName = async (name: string) => {
     if (activeMeshId === null) return;
     if (name !== mesh?.name) {

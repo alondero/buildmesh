@@ -35,6 +35,7 @@ test-results/
 # the repo should live in docs/ or similar — pattern is anchored to root only.
 /review-diff.patch
 /*.patch.tmp
+/diff.tmp
 
 # Claude worktrees and local settings (local only)
 .claude/worktrees/

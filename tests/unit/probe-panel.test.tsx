@@ -196,3 +196,57 @@ describe('ProbePanel', () => {
     expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
   });
 });
+
+describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', () => {
+  beforeEach(() => {
+    useUIStore.setState({
+      probeOpen: false,
+      probeTab: 'files',
+      activeDiffFile: null,
+    });
+  });
+
+  it('is idempotent: second call with the same tab does not toggle', () => {
+    // The activity-bar owns the "click active to collapse" UX via
+    // `toggleProbe`. `openProbeTab` is pure "make visible" so call
+    // sites stay one-liners; a toggle semantic here would silently
+    // no-op repeated triggers (e.g. right-clicking a different mesh).
+    useUIStore.getState().openProbeTab('properties');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().probeTab).toBe('properties');
+
+    useUIStore.getState().openProbeTab('properties');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().probeTab).toBe('properties');
+  });
+
+  it('switches tab on a different argument while staying open', () => {
+    useUIStore.getState().openProbeTab('properties');
+    useUIStore.getState().openProbeTab('issues');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().probeTab).toBe('issues');
+  });
+
+  it('clears activeDiffFile when leaving the review tab', () => {
+    // Regression for a bug introduced when the new probe-tab entry
+    // point was added: opening a diff on Review, then right-clicking
+    // Properties, used to leave the diff file lingering in the store.
+    // `setProbeTab` already cleared it; `openProbeTab` routes through
+    // `setProbeTab` so the invariant is inherited.
+    useUIStore.setState({ probeTab: 'review', activeDiffFile: 'src/foo.ts' });
+    useUIStore.getState().openProbeTab('properties');
+    expect(useUIStore.getState().probeTab).toBe('properties');
+    expect(useUIStore.getState().probeOpen).toBe(true);
+    expect(useUIStore.getState().activeDiffFile).toBeNull();
+  });
+
+  it('preserves activeDiffFile when switching back to review', () => {
+    // The opposite direction: if a diff is set and we re-open review
+    // via `openProbeTab('review')`, the file must stay so the user
+    // doesn't lose the file they were just inspecting.
+    useUIStore.setState({ probeTab: 'files', activeDiffFile: 'src/foo.ts' });
+    useUIStore.getState().openProbeTab('review');
+    expect(useUIStore.getState().probeTab).toBe('review');
+    expect(useUIStore.getState().activeDiffFile).toBe('src/foo.ts');
+  });
+});
