@@ -2,9 +2,18 @@
 //!
 //! `fetch_origin` is the best-effort, never-blocking auto-sync that runs before
 //! a new Worktree Node is cut (ADR 0001). It used to live in `env`; it belongs
-//! with the rest of Buildmesh's git access (ADR 0007). `commits_behind_upstream`
-//! is shared with the manual `git_sync` command so both compute "behind" the
-//! same way.
+//! with the rest of Buildmesh's git access (ADR 0007).
+//!
+//! `do_sync` is the shared fetch+ff-pull algorithm (issue #274) used by both
+//! the spawn-time auto-sync (`fetch_origin`, with a remote-derivation wrapper
+//! around it) and the manual `git_sync` Tauri command in `commands/git.rs`
+//! (which resolves the remote from the current branch's upstream and passes
+//! it through). `commits_behind_upstream` is the shared "how far behind"
+//! helper consumed by `do_sync` itself.
+//!
+//! Keeping the algorithm in one place closed the latent bug where
+//! `git_sync` lacked `--no-rebase` (the #213 fix) and means future fixes
+//! to the fetch/pull logic land in one file.
 
 use crate::env::to_host_path;
 use crate::git::primitives;
@@ -53,6 +62,227 @@ pub enum FetchError {
     /// failure, or `origin` was removed between the no-remote check
     /// and the fetch). Carries stderr for the toast.
     FetchFailed(String),
+}
+
+/// The shared outcome of a fetch+fast-forward pull sync, used by both
+/// the spawn-time auto-sync (`fetch_origin`) and the manual `git_sync`
+/// command. The two callers each map this to their own contract shape
+/// (`FetchOutcome` / `FetchError` and `GitSyncResult` respectively) so
+/// the wire types stay distinct even though the algorithm is unified
+/// (issue #274).
+///
+/// All non-`Ok` cases — including the ones the callers treat as
+/// "error" — are folded into the enum (no `Result` wrapper). The
+/// callers decide what to do with each variant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SyncOutcome {
+    /// Repo has uncommitted changes; the pull is skipped per
+    /// issue #213's "skip if dirty" policy. Silent from the user's
+    /// perspective (the user knows the working tree is dirty; we
+    /// don't want to nag on every spawn or every Sync click).
+    SkippedDirty,
+    /// The named remote is not configured on the repo. A purely local
+    /// Mesh is a valid state; we don't surface a warning for that.
+    SkippedNoRemote,
+    /// Fetched; no new commits to pull.
+    UpToDate,
+    /// Fetched and fast-forwarded `new_commits` commits onto the
+    /// current branch.
+    Synced { new_commits: u32 },
+    /// Fetched `new_commits` commits but the fast-forward was rejected
+    /// (local history has diverged from upstream). The spawn still
+    /// proceeds from the local HEAD; callers surface a warning so the
+    /// user can decide what to do.
+    FetchedButDiverged { new_commits: u32, reason: String },
+    /// `git fetch` itself failed (most commonly: no network, auth
+    /// failure, or remote deleted between the has-remote check and
+    /// the fetch). Carries stderr.
+    FetchFailed { reason: String },
+    /// The path isn't a usable git repository. Unusual — a Mesh
+    /// without a repo is a misconfiguration — but spawn / sync
+    /// proceed anyway since the worker's behaviour on a non-repo
+    /// path is a separate concern.
+    RepoUnusable { reason: String },
+}
+
+/// The shared fetch+ff-pull algorithm used by the spawn-time auto-sync
+/// (`fetch_origin`, issue #213) and the manual `git_sync` Tauri
+/// command (issue #274). Steps:
+///
+/// 1. **Open the repo** at `host_path`. On failure → `RepoUnusable`.
+/// 2. **Dirty-check** (`unwrap_or(true)` = fail closed: an unreadable
+///    status call is treated as dirty, not as a green light to pull
+///    into a state we couldn't read). On dirty → `SkippedDirty`.
+/// 3. **Has-remote check.** If `find_remote(remote)` fails → `SkippedNoRemote`.
+/// 4. **`git fetch <remote> [<branch>]`.** On spawn failure or
+///    non-zero exit → `FetchFailed` with stderr. The `branch` arg
+///    narrows the fetch to a single refspec; pass `None` to fetch all
+///    remote refs. Narrowing is the spawn-time latency fix from
+///    `parse_branch_for_base_ref`; the manual `git_sync` passes `None`.
+/// 5. **Count-behind** via [`commits_behind_upstream`]. Treats "no
+///    upstream" as `UpToDate` (most common cause: a fresh local-only
+///    branch that just gained a remote via `git remote add` but
+///    hasn't been pushed).
+/// 6. **`git pull --ff-only --no-rebase`.** The explicit `--no-rebase`
+///    defeats a user's global `pull.rebase=true`, which would
+///    otherwise turn this into a rebase and write conflict markers
+///    on a diverged history (issue #213). The pull is the *only*
+///    point in the algorithm that mutates the local branch, so the
+///    `SkippedDirty` skip above exists to make sure this pull is
+///    never asked to merge into a dirty tree.
+///
+/// Caller responsibilities:
+/// - Open the repo / resolve the remote / decide whether to narrow
+///   the fetch. Both call sites have their own remote-resolution
+///   logic (`fetch_origin` derives from `base_ref`; `git_sync` uses
+///   the current branch's upstream).
+/// - Map `SyncOutcome` to their contract shape. The shape difference
+///   is load-bearing (the spawn path emits a `mesh-sync-warning`
+///   event; the manual path returns a `GitSyncResult` to the
+///   frontend), so we don't unify the wire types.
+pub(crate) fn do_sync(
+    host_path: &str,
+    remote: &str,
+    branch: Option<&str>,
+) -> SyncOutcome {
+    // Step 1: open the repo. If the path isn't a git repo, the helper
+    // bails with the same `RepoUnusable` variant the spawn-time caller
+    // already maps to its own `FetchError::RepoUnusable`.
+    let repo = match git2::Repository::open(host_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "do_sync: path {} is not a usable git repo ({}); skipping sync",
+                host_path,
+                e
+            );
+            return SyncOutcome::RepoUnusable {
+                reason: e.to_string(),
+            };
+        }
+    };
+
+    // Step 2: skip if dirty. Fail-closed: a corrupt index or perm
+    // denied on .git is treated as dirty rather than as a clean
+    // green light to pull.
+    if crate::git::primitives::is_dirty(&repo).unwrap_or(true) {
+        tracing::info!(
+            "do_sync: {} has uncommitted changes; skipping sync",
+            host_path
+        );
+        return SyncOutcome::SkippedDirty;
+    }
+
+    // Step 3: skip if the remote is missing. A Mesh may be a purely
+    // local repo (not yet pushed) and that's a valid state.
+    if repo.find_remote(remote).is_err() {
+        tracing::info!(
+            "do_sync: {} has no '{}' remote; skipping sync",
+            host_path,
+            remote
+        );
+        return SyncOutcome::SkippedNoRemote;
+    }
+
+    // Step 4: `git fetch <remote> [<branch>]`. Narrowing to a single
+    // branch keeps cold-spawn latency down on repos with hundreds of
+    // refs (the spawn-time call site always passes a branch; the
+    // manual `git_sync` passes `None` for the all-refs default).
+    tracing::info!(
+        "do_sync: running git fetch {} {} in {}",
+        remote,
+        branch.unwrap_or("(all refs)"),
+        host_path
+    );
+    let mut fetch_builder = command_no_window("git");
+    fetch_builder.arg("fetch").arg(remote);
+    if let Some(b) = branch {
+        fetch_builder.arg(b);
+    }
+    let fetch_output = match fetch_builder.current_dir(host_path).output() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("do_sync: failed to spawn git fetch: {}", e);
+            return SyncOutcome::FetchFailed {
+                reason: e.to_string(),
+            };
+        }
+    };
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        let trimmed = stderr.trim();
+        tracing::warn!("do_sync: git fetch {} failed: {}", remote, trimmed);
+        return SyncOutcome::FetchFailed {
+            reason: trimmed.to_string(),
+        };
+    }
+
+    // Step 5: count how many commits the local branch is behind. No
+    // upstream → treat as "nothing to pull" rather than an error.
+    // Other `commits_behind_upstream` errors (perm denied on .git/HEAD,
+    // corrupt object db, refdb lock contention) are real git2 errors
+    // and get a `warn!` so on-call can grep for them; the old
+    // `git_sync` did the same (pre-#274 used `warn!` unconditionally
+    // for this arm). The `info!` for the benign "no upstream" case is
+    // preserved so the noise floor on a typical spawn doesn't change.
+    let new_commits = match commits_behind_upstream(&repo) {
+        Ok(n) => n,
+        Err(e) => {
+            if e.starts_with("no upstream") {
+                tracing::info!(
+                    "do_sync: no upstream to compare against ({}); treating as up-to-date",
+                    e
+                );
+            } else {
+                tracing::warn!(
+                    "do_sync: failed to count commits behind upstream ({}); treating as up-to-date",
+                    e
+                );
+            }
+            return SyncOutcome::UpToDate;
+        }
+    };
+    if new_commits == 0 {
+        return SyncOutcome::UpToDate;
+    }
+
+    // Step 6: `git pull --ff-only --no-rebase`. The `--no-rebase` is
+    // the load-bearing part of the issue-#213 fix: a user's global
+    // `pull.rebase=true` would otherwise turn this into a rebase and
+    // write conflict markers on a diverged history.
+    tracing::info!(
+        "do_sync: running git pull --ff-only --no-rebase ({} new commit{} behind)",
+        new_commits,
+        if new_commits == 1 { "" } else { "s" }
+    );
+    let pull_output = match command_no_window("git")
+        .args(["pull", "--ff-only", "--no-rebase"])
+        .current_dir(host_path)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            return SyncOutcome::FetchedButDiverged {
+                new_commits,
+                reason: format!("git pull --ff-only failed to start: {}", e),
+            };
+        }
+    };
+    if !pull_output.status.success() {
+        let stderr = String::from_utf8_lossy(&pull_output.stderr);
+        let trimmed = stderr.trim();
+        tracing::warn!("do_sync: git pull --ff-only rejected: {}", trimmed);
+        return SyncOutcome::FetchedButDiverged {
+            new_commits,
+            reason: if trimmed.is_empty() {
+                "fast-forward rejected (likely local history diverged)".to_string()
+            } else {
+                trimmed.to_string()
+            },
+        };
+    }
+
+    SyncOutcome::Synced { new_commits }
 }
 
 /// Derive the remote name from a configured `base_ref` string, if the
@@ -183,7 +413,11 @@ fn parse_branch_for_base_ref(base_ref: &str) -> Option<String> {
 /// refname (which is `refs/remotes/<remote>/<branch>`) rather than
 /// shelling out, to keep the path git2-only and avoid a Windows
 /// CreateProcess round-trip.
-fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<String> {
+///
+/// `pub(crate)` so the manual `git_sync` Tauri command (issue #274)
+/// can resolve the configured upstream the same way `git fetch` with
+/// no arguments used to, without having to shell out to `git config`.
+pub(crate) fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<String> {
     let head = repo.head().ok()?;
     // Detached HEAD has no branch to look up upstream for. `is_branch`
     // returns false on detached HEAD.
@@ -203,6 +437,13 @@ fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<String> {
 /// Fetch from the configured upstream and fast-forward the parent
 /// **Mesh**'s current branch onto the remote tip.
 ///
+/// This is the spawn-time auto-sync (issue #213, refined by #276, now
+/// a thin wrapper over [`do_sync`] from issue #274). The wrapper's
+/// job is purely the spawn-time-specific bit: derive the remote and
+/// the fetch-narrowing branch from `base_ref`, then delegate the
+/// shared algorithm to `do_sync` and translate `SyncOutcome` back to
+/// the spawn-time `FetchOutcome` / `FetchError` contract.
+///
 /// The remote is derived from `base_ref` (issue #276), so a Mesh
 /// configured with `base_ref = "upstream/main"` syncs against
 /// `upstream` rather than the hardcoded `origin` that issue #213
@@ -215,17 +456,12 @@ fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<String> {
 /// 3. The literal string `"origin"` (preserves the issue #213
 ///    behaviour for `HEAD` / empty / detached cases).
 ///
-/// Behaviour (issue #213, refined by #276):
-/// 1. **Dirty parent → skip silently.** A repo with uncommitted
-///    changes returns `Ok(SkippedDirty)`. The user is in the middle
-///    of something; we don't want to surface a warning on every spawn.
-/// 2. **Derived remote missing → skip silently.** A purely local
-///    Mesh is valid; this returns `Ok(SkippedNoRemote)`.
-/// 3. **Clean repo with remote → fetch, then `git pull --ff-only`.**
-///    `Ok(UpToDate)` if nothing to pull, `Ok(Synced)` if commits were
-///    pulled, `Ok(FetchedButDiverged)` if the history has diverged
-///    (caller surfaces a warning toast), `Err(FetchFailed)` if the
-///    fetch itself failed (caller surfaces a warning toast).
+/// The fetch is narrowed to a single branch (parsed from `base_ref`)
+/// rather than the all-remote-refs default — on a repo with hundreds
+/// of branches the all-refs negotiation dominates cold-spawn
+/// latency. See [`parse_branch_for_base_ref`] for the narrow
+/// rules and the call-out on the two deliberate behaviour deltas vs
+/// an all-refs fetch.
 ///
 /// **This function never blocks the spawn.** The caller (`spawn.rs`)
 /// is expected to call it as a best-effort step and continue with
@@ -234,8 +470,12 @@ fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<String> {
 pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, FetchError> {
     let host_root = to_host_path(project_root);
 
-    // Step 1: open the repo. If the path isn't a git repo, we can't
-    // decide dirty / has-remote / pull — bail with a typed error.
+    // Open the repo up-front so we can resolve the remote via the
+    // branch's configured upstream. If the path isn't a git repo, we
+    // map straight to `FetchError::RepoUnusable` — the same outcome
+    // `do_sync` would produce internally if we let it open the path,
+    // but doing it here keeps the remote-resolution bookkeeping on
+    // the caller's side.
     let repo = match git2::Repository::open(&host_root) {
         Ok(r) => r,
         Err(e) => {
@@ -248,173 +488,30 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
         }
     };
 
-    // Step 2: skip if the working tree is dirty. Untracked files and
-    // staged-but-uncommitted changes both count. We deliberately do
-    // this BEFORE shelling out — no point spending a network round
-    // trip on a sync that we'd refuse to apply. The
-    // `unwrap_or(true)` is the safer fallback: if the status call
-    // itself fails (corrupt index, permission denied on .git), we
-    // treat the repo as dirty and skip rather than try to pull into
-    // a state we couldn't even read.
-    // Fail closed: if we can't even read status (corrupt index, permission
-    // denied on .git), treat the repo as dirty and skip rather than pull into
-    // a state we couldn't read.
-    let is_dirty = primitives::is_dirty(&repo).unwrap_or(true);
-    if is_dirty {
-        tracing::info!(
-            "fetch_origin: {} has uncommitted changes; skipping auto-sync",
-            host_root
-        );
-        return Ok(FetchOutcome::SkippedDirty);
-    }
-
-    // Step 3: derive the remote from `base_ref` (issue #276). The
-    // three-tier fallback is documented in the function-level comment;
-    // here we just apply it.
+    // Three-tier remote resolution (issue #276).
     let remote_name = parse_remote_for_base_ref(base_ref)
         .or_else(|| current_branch_upstream_remote(&repo))
         .unwrap_or_else(|| "origin".to_string());
 
-    // Step 4: skip if the derived remote is missing. A Mesh may be a
-    // purely local repo (not yet pushed) and that's a valid state —
-    // and a `base_ref = "upstream/main"` against a repo with no
-    // `upstream` configured is also valid; we just don't sync.
-    if repo.find_remote(&remote_name).is_err() {
-        tracing::info!(
-            "fetch_origin: {} has no '{}' remote (base_ref={:?}); skipping auto-sync",
-            host_root,
-            remote_name,
-            base_ref
-        );
-        return Ok(FetchOutcome::SkippedNoRemote);
-    }
-
-    // Step 5: `git fetch <remote> [<branch>]`. We narrow the fetch to the
-    // single branch named by `base_ref` (the one the new worktree is cut
-    // from) rather than the default all-remote-refs fetch — on a repo with
-    // hundreds of branches (Buildmesh pushes one per agent node) the all-refs
-    // negotiation dominates cold-spawn latency. Falls back to a bare,
-    // all-refs fetch when `base_ref` doesn't name a branch (HEAD/empty). If
-    // this fails (network down, auth, remote deleted between the has-remote
-    // check and the fetch) we return FetchFailed and the caller surfaces a toast.
-    //
-    // `git fetch <remote> <branch>` performs git's opportunistic update of
-    // `refs/remotes/<remote>/<branch>` (git ≥1.8.4, default refspec), so the
-    // remote-tracking ref the worktree is cut from (`resolve_base_commit`)
-    // ends up exactly as fresh as the old all-refs fetch made it. Two
-    // deliberate, accepted behaviour deltas vs that old fetch — both only
-    // affect the *parent mesh's* sync, never the worktree base commit:
-    //   1. If `base_ref` names a branch that no longer exists on the remote,
-    //      the narrow fetch fails ("couldn't find remote ref") and surfaces a
-    //      sync-warning toast where the all-refs fetch was silent. That's a
-    //      genuine misconfiguration worth flagging — the worktree falls back
-    //      to local HEAD either way.
-    //   2. The behind-count + ff-pull below act on the mesh's *currently
-    //      checked-out* branch. When that differs from `base_ref`'s branch,
-    //      only `base_ref`'s tracking ref was refreshed, so the current
-    //      branch reads as up-to-date and its ff-pull is skipped. This is
-    //      preferable: auto-sync shouldn't fast-forward a user's unrelated
-    //      feature branch, and the worktree is still cut fresh from base_ref.
+    // Narrow the fetch to the branch the worktree will be cut from
+    // (issue #276's latency fix). `None` means all-refs.
     let fetch_branch = parse_branch_for_base_ref(base_ref);
-    tracing::info!(
-        "fetch_origin: running git fetch {} {} in {}",
-        remote_name,
-        fetch_branch.as_deref().unwrap_or("(all refs)"),
-        host_root
-    );
-    let mut fetch_builder = command_no_window("git");
-    fetch_builder.arg("fetch").arg(&remote_name);
-    if let Some(ref branch) = fetch_branch {
-        fetch_builder.arg(branch);
-    }
-    let fetch_output = match fetch_builder
-        .current_dir(&host_root)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("fetch_origin: failed to spawn git fetch: {}", e);
-            return Err(FetchError::FetchFailed(e.to_string()));
-        }
-    };
-    if !fetch_output.status.success() {
-        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-        let trimmed = stderr.trim();
-        tracing::warn!(
-            "fetch_origin: git fetch {} failed: {}",
-            remote_name,
-            trimmed
-        );
-        return Err(FetchError::FetchFailed(trimmed.to_string()));
-    }
 
-    // Step 6: count how many commits the local branch is behind the
-    // upstream. If 0, we're already in sync. We use git2's
-    // `graph_ahead_behind` (not `git rev-list HEAD..@{u}`) to avoid
-    // the Windows `@{u}` brace-stripping bug — see the comment in
-    // commands/git.rs for the same pattern.
-    let new_commits = match commits_behind_upstream(&repo) {
-        Ok(n) => n,
-        Err(e) => {
-            // No upstream configured is the most common cause here
-            // (e.g. a fresh local-only branch that just gained a
-            // remote via `git remote add` but never pushed). Treat
-            // it as "nothing to pull" rather than a hard error.
-            tracing::info!(
-                "fetch_origin: no upstream to compare against ({}); treating as up-to-date",
-                e
-            );
-            return Ok(FetchOutcome::UpToDate);
+    // Delegate to the shared helper. The mapping from `SyncOutcome`
+    // back to `FetchOutcome` / `FetchError` is 1:1 — the variants
+    // were chosen so the spawn-time contract is a literal rename.
+    let outcome = do_sync(&host_root, &remote_name, fetch_branch.as_deref());
+    Ok(match outcome {
+        SyncOutcome::SkippedDirty => FetchOutcome::SkippedDirty,
+        SyncOutcome::SkippedNoRemote => FetchOutcome::SkippedNoRemote,
+        SyncOutcome::UpToDate => FetchOutcome::UpToDate,
+        SyncOutcome::Synced { new_commits } => FetchOutcome::Synced { new_commits },
+        SyncOutcome::FetchedButDiverged { new_commits, reason } => {
+            FetchOutcome::FetchedButDiverged { new_commits, reason }
         }
-    };
-    if new_commits == 0 {
-        return Ok(FetchOutcome::UpToDate);
-    }
-
-    // Step 7: `git pull --ff-only --no-rebase`. We pass --no-rebase
-    // explicitly because a user's global `pull.rebase=true` would
-    // otherwise turn this into a rebase — and rebase on a diverged
-    // history produces a merge conflict (write conflict markers to
-    // the working tree) instead of the clean "not fast-forwardable"
-    // rejection we want. The auto-sync is read-only by policy
-    // (issue #213: spawn never blocks, never mutates the local
-    // branch on failure), so we must never silently rebase.
-    tracing::info!(
-        "fetch_origin: running git pull --ff-only --no-rebase ({} new commit{} behind)",
-        new_commits,
-        if new_commits == 1 { "" } else { "s" }
-    );
-    let pull_output = match command_no_window("git")
-        .args(["pull", "--ff-only", "--no-rebase"])
-        .current_dir(&host_root)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            return Ok(FetchOutcome::FetchedButDiverged {
-                new_commits,
-                reason: format!("git pull --ff-only failed to start: {}", e),
-            });
-        }
-    };
-    if !pull_output.status.success() {
-        let stderr = String::from_utf8_lossy(&pull_output.stderr);
-        let trimmed = stderr.trim();
-        tracing::warn!(
-            "fetch_origin: git pull --ff-only rejected: {}",
-            trimmed
-        );
-        return Ok(FetchOutcome::FetchedButDiverged {
-            new_commits,
-            reason: if trimmed.is_empty() {
-                "fast-forward rejected (likely local history diverged)".to_string()
-            } else {
-                trimmed.to_string()
-            },
-        });
-    }
-
-    Ok(FetchOutcome::Synced { new_commits })
+        SyncOutcome::FetchFailed { reason } => return Err(FetchError::FetchFailed(reason)),
+        SyncOutcome::RepoUnusable { reason } => return Err(FetchError::RepoUnusable(reason)),
+    })
 }
 
 /// How many commits the current branch is behind its upstream. Shared by
