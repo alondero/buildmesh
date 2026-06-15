@@ -44,12 +44,10 @@ import {
 } from '../../lib/tauri';
 import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
-import { useUIStore } from '../../stores/uiStore';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
 export function GitIssuesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
-  const toggleProbe = useUIStore((s) => s.toggleProbe);
   // `getDefaultProvider` is mesh-scoped — the only call that needs the
   // meshId directly, since it resolves the per-mesh > app-wide > default
   // precedence chain server-side. The mesh path comes from the probe
@@ -133,27 +131,29 @@ export function GitIssuesTab() {
 
   // Two-stage spawn: stage-1 (`create_issue_node`) is a fast DB-only
   // IPC (~20ms) that returns a `pending` node + the prefill to hand
-  // off to stage-2. We close the dock as soon as stage-1 returns, so
-  // the user sees the dock vanish and the new node appear with a
-  // pulsing "Starting…" badge in well under 500ms — mirroring the
-  // legacy `GitHubIssuesModal`'s `onClose()` call. Stage-2
-  // (`startNodeBackground`) is fire-and-forget — the slow work
-  // (git fetch, worktree create, PTY spawn) runs in the background,
-  // and the node flips to 'running' (or 'error' on failure) via the
-  // `node-spawn-completed` / `node-spawn-failed` store listeners.
+  // off to stage-2. The dock stays open after a successful spawn so
+  // the user can fire off another issue without re-opening the
+  // context-menu → "Open Issues" route — the legacy modal's
+  // `onClose()` parity was a vestige from the one-shot dialog and
+  // doesn't fit a persistent dock. Stage-2 (`startNodeBackground`)
+  // is fire-and-forget — the slow work (git fetch, worktree create,
+  // PTY spawn) runs in the background, and the node flips to
+  // 'running' (or 'error' on failure) via the `node-spawn-completed`
+  // / `node-spawn-failed` store listeners. The user dismisses the
+  // dock with the activity-bar toggle (or by switching to a non-issues
+  // tab) when they're done.
   const handleSpawn = async (issue: GitHubIssue, providerId: string) => {
     if (activeMeshId === null) return;
     setSpawning(issue.number);
     try {
       const draft = await createIssueNode(activeMeshId, issue.number, issue.title, providerId);
       setOpenDropdown(null);
-      // Dispatch stage-2 BEFORE hiding the dock so the fire-and-forget
-      // IPC is on the wire by the time the user can navigate away. If
-      // the dock hides first, a fast user click could orphan the
-      // `pending` row in the DB.
+      // Dispatch stage-2 BEFORE clearing the busy state so the
+      // fire-and-forget IPC is on the wire before the same-row button
+      // re-enables for another click. We deliberately do NOT toggle
+      // the probe — the dock stays open so the user can spawn more.
       startNodeBackground(draft.id, draft.prefill);
       setSpawning(null);
-      toggleProbe();
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
       setSpawning(null);
@@ -168,7 +168,7 @@ export function GitIssuesTab() {
   // issue (e.g. picking a different provider in the still-open dropdown)
   // from racing with the in-flight default-resolution IPC. If
   // `getDefaultProvider` rejects, the catch clears `spawning` so the
-  // user can retry (parity with the legacy modal's behaviour).
+  // user can retry.
   const handleDefaultSpawn = async (issue: GitHubIssue) => {
     if (activeMeshId === null) return;
     setSpawning(issue.number);
@@ -176,11 +176,10 @@ export function GitIssuesTab() {
       const defaultProvider = await getDefaultProvider(activeMeshId);
       const draft = await createIssueNode(activeMeshId, issue.number, issue.title, defaultProvider);
       setOpenDropdown(null);
-      // Same ordering as `handleSpawn`: stage-2 IPC first, then hide
-      // the dock, then clear the busy state.
+      // Same ordering as `handleSpawn`: stage-2 IPC first, then clear
+      // the busy state. Dock stays open (see handleSpawn).
       startNodeBackground(draft.id, draft.prefill);
       setSpawning(null);
-      toggleProbe();
     } catch (e) {
       console.error('Failed to spawn issue agent:', e);
       setSpawning(null);
