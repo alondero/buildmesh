@@ -33,3 +33,11 @@ Adopt the hand-written wrapper everywhere and enforce it:
 - Adoption ratchets: the allowlist only shrinks, and CI fails if a new file reaches for raw `invoke`.
 - The wrapper stays a **pure typing seam** for now — it adds the typed command name and nothing else. Central IPC error logging (via the existing `frontendLog` bridge) is a deliberate follow-up the single chokepoint now makes possible; it is intentionally not bundled with this migration.
 - Adding a `#[command]` still means hand-adding a wrapper function. The drift test makes the omission visible the moment a consumer tries to call it raw, but it does not generate the function — that is the residual cost of choosing hand-written over codegen, accepted above.
+
+## Status: complete (issue #385)
+
+The component sweep finished in #385. The drift-test allowlist is now empty of *to-do* entries; one deliberate exemption remains and is documented in the test file:
+
+- **`src/lib/frontendLog.ts`** — peer of the wrapper, not a consumer. The wrapper may eventually call *it* (the deliberate follow-up above); routing it through the wrapper would risk a logging cycle. Keeps its own re-entrancy guard.
+
+Adding a new entry to the exemption list requires an ADR update.

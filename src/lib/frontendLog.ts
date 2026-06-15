@@ -16,6 +16,14 @@
  * - Re-entrancy guarded: if Tauri's invoke path itself calls console.error
  *   while we're mid-forward, we drop the recursive event.
  * - The original console functions still run, so devtools output is unchanged.
+ *
+ * **IPC-seam exemption (ADR-0010):** this file deliberately calls
+ * `@tauri-apps/api/core` `invoke` directly rather than routing through
+ * `src/lib/tauri.ts`. It is a *peer* of the wrapper, not a consumer: the
+ * wrapper may eventually call *it* for central IPC error logging (the
+ * "deliberate follow-up" noted in ADR-0010). Routing through the wrapper
+ * would risk a logging cycle. The seam guard in
+ * `tests/unit/tauri-ipc-seam.test.ts` pins this exemption explicitly.
  */
 
 import { invoke } from '@tauri-apps/api/core';

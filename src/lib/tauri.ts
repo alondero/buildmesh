@@ -487,3 +487,131 @@ export const importDiscoveredSession = (
   invoke<AgentNode>('import_discovered_session', {
     meshId, meshPath, cliSessionId, branch, worktreeName, provider
   });
+
+// ── App startup ────────────────────────────────────────────────────────────
+//
+// Re-attaches the in-process PTY for every node whose previous run was
+// interrupted (status === 'suspended'). Returns the ids of the nodes that
+// were actually resumed.
+export const autoResumeSessions = () =>
+  invoke<number[]>('auto_resume_sessions');
+
+// ── Paths & clipboard ──────────────────────────────────────────────────────
+//
+// `to_host_path` is a no-op for native paths and normalises WSL/Git-Bash
+// variants — used by the OS file-drop paste path.
+export const toHostPath = (path: string) =>
+  invoke<string>('to_host_path', { path });
+
+/** Native clipboard read. On macOS this bypasses the WKWebView
+ *  clipboard-permission popup by shelling to `pbpaste`; on other platforms it
+ *  may reject, and callers fall back to `navigator.clipboard.readText()`. */
+export const readClipboard = () =>
+  invoke<string>('read_clipboard');
+
+// ── Agent PTY transport ────────────────────────────────────────────────────
+//
+// `writeToAgent` is declared above next to the other agent IPCs; `resizeAgent`
+// here completes the PTY-side surface used by `TerminalRegistry`. It rejects
+// with the string `'Agent not running'` while the PTY isn't up yet — callers
+// match on that exact value to ignore the expected race (see
+// `TerminalRegistry.syncPtySize`).
+export const resizeAgent = (sessionId: number, rows: number, cols: number) =>
+  invoke('resize_agent', { sessionId, rows, cols });
+
+/** Reply to a remote-pane snapshot request from the HTTP server. The pair
+ *  (`request_id`, `data`) is matched against an in-flight promise on the
+ *  backend; the call returns immediately and has no result. */
+export const submitTerminalSnapshot = (requestId: string, data: string) =>
+  invoke<void>('submit_terminal_snapshot', { requestId, data });
+
+// ── Build/Run side-panel PTY ───────────────────────────────────────────────
+//
+// Separate PTY surface from the agent terminal — keeps a long-running build
+// or `npm run dev` independent of the agent's PTY lifecycle. `build_run`
+// returns once the child has been spawned; output flows via the
+// `build-run-output-<nodeId>` event.
+export const buildRun = (nodeId: number, mode: 'build' | 'run' | 'terminal') =>
+  invoke('build_run', { nodeId, mode });
+
+export const closeBuildRun = (nodeId: number) =>
+  invoke('close_build_run', { nodeId });
+
+export const writeToBuildRun = (nodeId: number, data: string) =>
+  invoke('write_to_build_run', { nodeId, data });
+
+export const resizeBuildRun = (nodeId: number, rows: number, cols: number) =>
+  invoke('resize_build_run', { nodeId, rows, cols });
+
+// ── App-wide preferences (`preferences.json`) ──────────────────────────────
+//
+// Hand-mirrored shape of `crate::preferences::AppPreferences` —
+// `google_cloud_project` is included to match the Rust struct in full even
+// though the current settings UI only reads two fields. Not generated; bump
+// this if the Rust struct grows. (Follow-up: derive `TS` per #359.)
+export interface AppPreferences {
+  default_provider: string | null;
+  minimax_api_key: string | null;
+  google_cloud_project?: string | null;
+}
+
+export const getAppPreferences = () =>
+  invoke<AppPreferences>('get_app_preferences');
+
+/** Pass `null` (or an empty string, which the backend filters out) to clear
+ *  the override and fall back to the hardcoded `anthropic` default. */
+export const setAppDefaultProvider = (provider: string | null) =>
+  invoke('set_app_default_provider', { provider });
+
+export const setMinimaxApiKey = (key: string | null) =>
+  invoke('set_minimax_api_key', { key });
+
+// ── Provider usage (Accounts & Usage panel) ────────────────────────────────
+//
+// Mirrors `crate::services::usage::{ProviderUsage, UsageWindow}`. Rust uses
+// `#[serde(rename = "...")]` on some fields, so the camelCase / snake_case
+// mix is exact — `usedPercent`/`resetsAt`/`loggedIn` are camelCase on the
+// wire, the rest are snake_case. Keep matching the Rust shape if it grows.
+export interface UsageWindow {
+  label: string;
+  usedPercent: number | null;
+  resetsAt: string | null;
+}
+
+export interface ProviderUsage {
+  provider: string;
+  loggedIn: boolean;
+  windows: UsageWindow[];
+  detail: string | null;
+  error: string | null;
+}
+
+export const getAllProviderUsage = (forceRefresh: boolean) =>
+  invoke<ProviderUsage[]>('get_all_provider_usage', { forceRefresh });
+
+// ── Coordinator read API control (ADR-0008) ────────────────────────────────
+//
+// `has_token` reports presence without ever leaking the token value — the
+// token is only ever surfaced once, by `generateCoordinatorReadToken`.
+export interface CoordinatorStatus {
+  enabled: boolean;
+  has_token: boolean;
+}
+
+export const getCoordinatorStatus = () =>
+  invoke<CoordinatorStatus>('get_coordinator_status');
+
+export const setCoordinatorApiEnabled = (enabled: boolean) =>
+  invoke('set_coordinator_api_enabled', { enabled });
+
+/** Mint (or replace) the read-scoped token and return it for the user to copy.
+ *  Replacing invalidates the previously issued token; the value is shown once. */
+export const generateCoordinatorReadToken = () =>
+  invoke<string>('generate_coordinator_read_token');
+
+// ── Remote access (mobile QR) ──────────────────────────────────────────────
+export const getLocalIp = () =>
+  invoke<string>('get_local_ip');
+
+export const getRootToken = () =>
+  invoke<string>('get_root_token');
