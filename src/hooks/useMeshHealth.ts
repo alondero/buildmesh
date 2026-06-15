@@ -3,8 +3,13 @@ import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
 
 // Module-level shared client (keyed by meshId). The sidebar `!` badge and
-// the `BranchesWorktreesSection` health block both read from this hook;
-// they share one cache + one GIT_CHANGED subscription through the primitive.
+// the 🌳 Worktree Manager tab's `WorktreeManagerTab` HealthBlock both read
+// from this hook; they share one cache + one GIT_CHANGED subscription
+// through the primitive. (#377 deleted the legacy `BranchesWorktreesSection`
+// that used to live inside `MeshPropertiesPanel.tsx`; the unmounted parent
+// panel is kept on disk for the `DEFAULT_WORKTREE_MODE` constant pinned by
+// `tests/unit/mesh-properties-worktree-mode-default.test.ts` and the
+// `AiContextSection` still consumed by `MeshPropertiesTab`.)
 const healthClient = createPathInvalidatedCache<number, MeshHealth>({
   fetcher: getMeshHealth,
   name: 'useMeshHealth',
@@ -16,7 +21,7 @@ const healthClient = createPathInvalidatedCache<number, MeshHealth>({
  * The snapshot includes drift detection (HEAD not on the Base Ref's branch),
  * the base-branch hostage (a worktree holding the Base Ref's branch checked
  * out), unpushed-ahead count, and the dirty working-tree flag. The sidebar
- * `!` badge and the `BranchesWorktreesSection` health block both read from
+ * `!` badge and the `WorktreeManagerTab` health block both read from
  * this hook so they cannot disagree about the mesh's state.
  *
  * Refetches on mount, when the file watcher reports a change for the mesh
