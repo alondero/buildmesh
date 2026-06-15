@@ -374,6 +374,36 @@ export interface ProviderInfo {
   icon: string;
 }
 
+// Mesh properties (the ⚙️ Probe tab — issue #375)
+export interface MeshProperties {
+  name: string | null;
+  build_command: string | null;
+  run_command: string | null;
+  model: string | null;
+  effort: string | null;
+  base_ref: string | null;
+  use_worktree: boolean;
+  worktree_mode?: string | null;
+  default_provider: string | null;
+}
+
+export const getMeshProperties = (meshId: number) =>
+  invoke<MeshProperties>('get_mesh_properties', { meshId });
+
+export const updateMeshField = (
+  meshId: number,
+  section: 'agent' | 'build' | 'run',
+  key: string,
+  value: string,
+) => invoke<void>('update_mesh_field', { meshId, section, key, value });
+
+export const detectMeshProject = (meshPath: string) =>
+  invoke<{
+    preset_id: string | null;
+    label: string | null;
+    node_scripts: { build: string | null; run: string | null; has_tauri_cli: boolean } | null;
+  }>('detect_mesh_project', { meshPath });
+
 // Session Discovery
 export interface DiscoveredSession {
   session_id: string;

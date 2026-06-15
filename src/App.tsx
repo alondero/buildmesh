@@ -6,11 +6,9 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { SessionView } from './components/SessionView/SessionView';
 import { ProbePanel } from './components/Probe/ProbePanel';
-import { MeshPropertiesPanel } from './components/MeshPropertiesPanel/MeshPropertiesPanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
-import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import {
@@ -34,7 +32,6 @@ function App() {
 
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
   const [isReady, setIsReady] = useState(false);
-  const propertiesPanelMeshId = useUIStore((s) => s.propertiesPanelMeshId);
 
   // Track window focus state for conditional shortcut handling
   const isFocusedRef = useRef(false);
@@ -295,7 +292,13 @@ function App() {
       <SessionView />
       <ProbePanel />
 
-      {propertiesPanelMeshId != null && <MeshPropertiesPanel />}
+      {/* Mesh Properties is now the Probe Panel's ⚙️ tab (issue #375).
+          The legacy right-rail drawer is preserved on disk for the
+          transition period — its `DEFAULT_WORKTREE_MODE` constant is still
+          pinned by `tests/unit/mesh-properties-worktree-mode-default.test.ts`
+          — but no longer mounted here. The store action
+          `openPropertiesPanel` is kept for the same reason and can be
+          removed in a follow-up once the file is deleted. */}
       <WorktreeCloseDialog />
 
       {/* Toast notifications */}

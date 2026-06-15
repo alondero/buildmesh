@@ -51,6 +51,7 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onSelectProvider: vi.fn(),
     onOpenProperties: vi.fn(),
     onOpenFilesProbe: vi.fn(),
+    onOpenPropertiesProbe: vi.fn(),
     meshNodes: [],
     activeNodeId: null,
     setActiveNode: vi.fn(),
@@ -132,6 +133,38 @@ describe('MeshItem', () => {
     fireEvent.contextMenu(screen.getByText('my-mesh'));
     await userEvent.click(screen.getByText('File Explorer'));
     expect(props.onOpenFilesProbe).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes the right-click "Properties" entry to the Probe Panel (issue #375)', async () => {
+    // The legacy right-rail drawer is no longer triggered from the
+    // sidebar — the click now opens the Probe Panel on the ⚙️ tab.
+    const { props } = renderMeshItem();
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('Properties'));
+    expect(props.onOpenPropertiesProbe).toHaveBeenCalledWith(3);
+  });
+
+  it('routes the drift `!` badge to the Probe Panel (issue #375)', async () => {
+    // Force the drift health snapshot so the badge renders, then click
+    // it and assert the new probe-routing handler fires.
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'get_mesh_health'
+        ? Promise.resolve({
+            is_dirty: false,
+            is_drifted: true,
+            unpushed_ahead: 0,
+            base_branch_holder: null,
+            local_base_branch: 'main',
+            current_branch: 'feature/x',
+            current_short_sha: 'abc1234',
+            authenticated: false,
+          })
+        : Promise.resolve({}),
+    );
+    const { props } = renderMeshItem();
+    const badge = await screen.findByLabelText('Mesh health issue');
+    await userEvent.click(badge);
+    expect(props.onOpenPropertiesProbe).toHaveBeenCalledWith(3);
   });
 
   it('renders a sync button in the header to the left of the Add Node form', async () => {

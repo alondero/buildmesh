@@ -90,13 +90,6 @@ export const useUIStore = create<UIState>((set, get) => ({
     }));
   },
 
-  openProbeTab: (tab: ProbeTab) => {
-    // One-call "make this tab visible" helper. Does NOT collapse the panel
-    // when called on the active tab — closing stays a separate concern
-    // (the activity-bar's click handler does that).
-    set({ probeTab: tab, probeOpen: true });
-  },
-
   openDiff: (file: string) => {
     // Open the diff for `file`: also flip the probe to the review tab and
     // make sure the panel is visible, so a file picked from the file tree
@@ -106,6 +99,19 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   closeDiff: () => {
     set({ activeDiffFile: null });
+  },
+
+  // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
+  // probeOpen = true`. Call sites stay one-liners; the activity-bar owns
+  // the "click active tab to collapse" UX. The next 5 probe tabs (#376,
+  // #377, #378, #379) all open via this action.
+  //
+  // Routes through `setProbeTab` so the activeDiffFile cleanup (clear
+  // when leaving `review`) is inherited — a stale diff from Review
+  // would otherwise linger behind a freshly-opened Properties tab.
+  openProbeTab: (tab) => {
+    get().setProbeTab(tab);
+    set({ probeOpen: true });
   },
 
   toggleChangedFiles: (nodeId: number) => {

@@ -40,7 +40,6 @@ export function Sidebar() {
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const createAgentNode = useAgentNodeStore(state => state.createAgentNode);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
-  const openPropertiesPanel = useUIStore(s => s.openPropertiesPanel);
   // Issue #376: open the unified Probe Panel on the 📁 (Project Files) tab.
   // The Probe is the migration target for the legacy FileExplorerPanel; the
   // `openProbeTab` helper atomically sets the tab and opens the panel.
@@ -66,6 +65,16 @@ export function Sidebar() {
 
   const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
   const handleToggleDropdown = (mesh: Mesh) => setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
+
+  // Issue #375 — the right-click "Properties" entry and the drift `!` badge
+  // both open the Probe Panel on the ⚙️ Mesh Properties tab. We select the
+  // mesh first so `useProbeContext` resolves to the right row, then flip the
+  // probe open. The legacy `openPropertiesPanel` (right-rail drawer) is
+  // preserved in the store but is no longer wired to either entry point.
+  const handleOpenPropertiesProbe = (meshId: number) => {
+    selectMesh(meshId);
+    openProbeTab('properties');
+  };
 
   const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
     setOpenDropdownFor(null);
@@ -165,8 +174,8 @@ export function Sidebar() {
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleToggleDropdown}
                       onSelectProvider={handleSelectProvider}
-                      onOpenProperties={openPropertiesPanel}
                       onOpenFilesProbe={() => openProbeTab('files')}
+                      onOpenPropertiesProbe={handleOpenPropertiesProbe}
                       meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id)}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}
