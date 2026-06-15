@@ -8,26 +8,23 @@
 
 const TOKEN_STORAGE_KEY = "buildmesh_token";
 
-// Mesh, AgentNode and the SessionStatus union are generated from the Rust
-// structs (issue #359) — the same structs the desktop Tauri path serialises.
-// The mobile SPA reads only a subset of their fields, but the type now states
-// the full wire shape, so a missing or renamed field becomes a compile error
-// instead of a blank page (#360). NodeStatus is kept as an alias of the
-// generated SessionStatus so existing mobile call sites keep working.
+// Mesh, AgentNode, ProviderInfo and the SessionStatus union are generated from
+// the Rust structs (issue #359, issue #406) — the same structs the desktop
+// Tauri path serialises. The mobile SPA reads only a subset of their fields,
+// but the type now states the full wire shape, so a missing or renamed field
+// becomes a compile error instead of a blank page (#360). NodeStatus is kept
+// as an alias of the generated SessionStatus so existing mobile call sites
+// keep working. `Provider` is kept as an alias of the generated `ProviderInfo`
+// (issue #406) so `listProviders(): Promise<Provider[]>` and
+// `import { Provider } from "../api"` call sites keep compiling — distinct
+// from the generated `Provider` string union scoped inside `AgentNode.ts`
+// (the provider-id enum, e.g. "anthropic"/"minimax").
 import type { Mesh } from "../types/generated/Mesh";
 import type { AgentNode } from "../types/generated/AgentNode";
+import type { ProviderInfo as Provider } from "../types/generated/ProviderInfo";
 import type { SessionStatus } from "../types/generated/SessionStatus";
-export type { Mesh, AgentNode };
+export type { Mesh, AgentNode, Provider };
 export type NodeStatus = SessionStatus;
-
-/** UI metadata for a provider chip — distinct from the generated `Provider`
- *  string union; this is fetched from the providers list endpoint. */
-export interface Provider {
-  id: string;
-  label: string;
-  color: string;
-  icon: string;
-}
 
 export interface CreateNodeRequest {
   mesh_id: number;
