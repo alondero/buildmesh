@@ -1,38 +1,10 @@
 import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import * as api from '../../lib/tauri';
+import type { ProviderInfo, ProviderUsage, UsageWindow } from '../../lib/tauri';
 
 interface AppSettingsModalProps {
   onClose: () => void;
-}
-
-interface AppPreferences {
-  default_provider: string | null;
-  minimax_api_key: string | null;
-}
-
-interface ProviderInfo {
-  id: string;
-  label: string;
-}
-
-interface UsageWindow {
-  label: string;
-  usedPercent: number | null;
-  resetsAt: string | null;
-}
-
-interface ProviderUsage {
-  provider: string;
-  loggedIn: boolean;
-  windows: UsageWindow[];
-  detail: string | null;
-  error: string | null;
-}
-
-interface CoordinatorStatus {
-  enabled: boolean;
-  has_token: boolean;
 }
 
 const NO_OVERRIDE = '__no_override__';
@@ -79,9 +51,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     const init = async () => {
       try {
         const [prefs, providerList, coord] = await Promise.all([
-          invoke<AppPreferences>('get_app_preferences'),
-          invoke<ProviderInfo[]>('list_providers'),
-          invoke<CoordinatorStatus>('get_coordinator_status'),
+          api.getAppPreferences(),
+          api.listProviders(),
+          api.getCoordinatorStatus(),
         ]);
         setProviders(providerList);
         const stored = prefs.default_provider;
@@ -102,7 +74,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const fetchUsage = async (force = false) => {
     setUsageLoading(true);
     try {
-      const data = await invoke<ProviderUsage[]>('get_all_provider_usage', { forceRefresh: force });
+      const data = await api.getAllProviderUsage(force);
       setUsageData(data);
     } catch (e) {
       console.error('Failed to fetch usage:', e);
@@ -120,7 +92,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       const providerArg = newValue === NO_OVERRIDE ? null : newValue;
-      await invoke('set_app_default_provider', { provider: providerArg });
+      await api.setAppDefaultProvider(providerArg);
     } catch (e) {
       setSelected(previous);
       setError(String(e));
@@ -133,7 +105,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setMinimaxKeySaving(true);
     try {
       const key = minimaxKey.trim() || null;
-      await invoke('set_minimax_api_key', { key });
+      await api.setMinimaxApiKey(key);
       fetchUsage(true);
     } catch (e) {
       console.error('Failed to save MiniMax key:', e);
@@ -150,7 +122,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setCoordBusy(true);
     setError(null);
     try {
-      await invoke('set_coordinator_api_enabled', { enabled });
+      await api.setCoordinatorApiEnabled(enabled);
     } catch (e) {
       setCoordEnabled(previous);
       setError(String(e));
@@ -166,7 +138,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setCoordCopied(false);
     setError(null);
     try {
-      const token = await invoke<string>('generate_coordinator_read_token');
+      const token = await api.generateCoordinatorReadToken();
       setCoordToken(token);
       setCoordHasToken(true);
     } catch (e) {

@@ -7,29 +7,24 @@ import { join, relative, sep } from 'node:path';
  * wrapper in `src/lib/tauri.ts`, so a renamed `#[command]` breaks in one place
  * instead of silently across N components (the project's #1 runtime-failure
  * mode). This is the enforcement the repo uses in place of an ESLint rule (it
- * has no ESLint setup): a drift test with a shrinking allowlist.
+ * has no ESLint setup): a drift test with a (now-steady-state) allowlist.
  *
- * The allowlist is the set of files NOT YET migrated onto the wrapper — it IS
- * the remaining to-do list. As each file is migrated (raw `invoke` →
- * `import * as api from '../lib/tauri'`), delete it from the list here. A NEW
- * file importing raw `invoke` fails this test immediately. When the list is
- * empty, the seam is fully enforced: nothing outside `tauri.ts` may import
- * `invoke` from `@tauri-apps/api/core`.
- *
- * Stores were migrated first (tracer bullet); the rest follow.
+ * The allowlist started as the migration to-do list (#385) and shrank as the
+ * sweep proceeded; it has reached steady state with a single legitimate
+ * exception (see `EXEMPT_LEGITIMATE` below). Any new file importing raw
+ * `invoke` fails this test immediately. Nothing outside `tauri.ts` and the
+ * exempt list may import `invoke` from `@tauri-apps/api/core`.
  */
 
-// Files still importing raw `invoke`, relative to repo root, forward-slashed.
-// Shrink this as the component sweep proceeds; do not add to it.
-const ALLOWLIST = new Set<string>([
-  'src/App.tsx',
-  'src/components/AppSettings/AppSettingsModal.tsx',
-  'src/components/RemoteAccess/RemoteAccessModal.tsx',
-  'src/components/Terminal/BuildRunTerminal.tsx',
-  'src/components/Terminal/Terminal.tsx',
-  'src/components/Terminal/TerminalRegistry.ts',
-  'src/components/Terminal/handoverProviderCache.ts',
-  'src/lib/fileDropPaste.ts',
+/**
+ * The one legitimate, deliberate exception. `frontendLog.ts` is a peer of the
+ * wrapper, not a consumer: it forwards console errors to the backend, and the
+ * wrapper itself may eventually call *it* for central IPC error logging (per
+ * ADR-0010's "deliberate follow-up"). Routing `frontendLog.ts` through the
+ * wrapper would risk a logging cycle, so it stays a raw `invoke` site and
+ * keeps its own re-entrancy guard. Documented at the file head too.
+ */
+const EXEMPT_LEGITIMATE = new Set<string>([
   'src/lib/frontendLog.ts',
 ]);
 
@@ -59,31 +54,32 @@ function rel(full: string): string {
 }
 
 describe('Tauri IPC seam (ADR-0010)', () => {
-  it('only allowlisted files (plus the wrapper) import raw invoke', () => {
+  it('only the wrapper and the documented exemption import raw invoke', () => {
     const importers = tsFiles(SRC_DIR)
       .filter((f) => IMPORTS_INVOKE.test(readFileSync(f, 'utf8')))
       .map(rel)
       .filter((f) => f !== WRAPPER);
 
-    const unexpected = importers.filter((f) => !ALLOWLIST.has(f));
+    const unexpected = importers.filter((f) => !EXEMPT_LEGITIMATE.has(f));
     expect(
       unexpected,
-      `These files import raw invoke but are not allowlisted. Route them through ` +
-        `src/lib/tauri.ts (import * as api from '../lib/tauri'). See ADR-0010.`,
+      `These files import raw invoke. Route them through ` +
+        `src/lib/tauri.ts (import * as api from '../lib/tauri'). See ADR-0010. ` +
+        `The exemption list is closed — adding to it requires an ADR update.`,
     ).toEqual([]);
   });
 
-  it('the allowlist has no stale entries (migrated files removed)', () => {
+  it('every exempt entry still imports raw invoke (no stale exemptions)', () => {
     const importers = new Set(
       tsFiles(SRC_DIR)
         .filter((f) => IMPORTS_INVOKE.test(readFileSync(f, 'utf8')))
         .map(rel),
     );
-    const stale = [...ALLOWLIST].filter((f) => !importers.has(f));
+    const stale = [...EXEMPT_LEGITIMATE].filter((f) => !importers.has(f));
     expect(
       stale,
-      'These allowlist entries no longer import raw invoke — delete them from ' +
-        'ALLOWLIST so the ratchet keeps tightening.',
+      'These exempt entries no longer import raw invoke — delete them so the ' +
+        'exemption list stays a true map of legitimate exceptions.',
     ).toEqual([]);
   });
 });

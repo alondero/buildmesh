@@ -1,12 +1,13 @@
-import { invoke } from '@tauri-apps/api/core';
+import * as api from '../../lib/tauri';
+import type { ProviderInfo } from '../../lib/tauri';
 
 /**
  * Memoised lookups for the "Handover to new Node [<provider>]" context-menu
  * label.
  *
  * The label is two pieces of data: the mesh's default provider id
- * (`get_default_provider`, mesh-scoped) and the static provider list
- * (`list_providers`, process-global). Every `AgentTerminal` used to fetch both
+ * (`getDefaultProvider`, mesh-scoped) and the static provider list
+ * (`listProviders`, process-global). Every `AgentTerminal` used to fetch both
  * on mount, so switching to a mesh with N open nodes fired 2×N identical IPC
  * calls just to label one hidden menu item — a burst that competed with the
  * navigation it accompanied.
@@ -17,17 +18,12 @@ import { invoke } from '@tauri-apps/api/core';
  * than inheriting a permanently-failed promise.
  */
 
-interface ProviderEntry {
-  id: string;
-  label: string;
-}
-
-let providerListPromise: Promise<ProviderEntry[]> | null = null;
+let providerListPromise: Promise<ProviderInfo[]> | null = null;
 const defaultProviderByMesh = new Map<number, Promise<string>>();
 
-function fetchProviderList(): Promise<ProviderEntry[]> {
+function fetchProviderList(): Promise<ProviderInfo[]> {
   if (!providerListPromise) {
-    providerListPromise = invoke<ProviderEntry[]>('list_providers');
+    providerListPromise = api.listProviders();
     providerListPromise.catch(() => { providerListPromise = null; });
   }
   return providerListPromise;
@@ -36,7 +32,7 @@ function fetchProviderList(): Promise<ProviderEntry[]> {
 function fetchDefaultProvider(meshId: number): Promise<string> {
   let p = defaultProviderByMesh.get(meshId);
   if (!p) {
-    p = invoke<string>('get_default_provider', { meshId });
+    p = api.getDefaultProvider(meshId);
     p.catch(() => defaultProviderByMesh.delete(meshId));
     defaultProviderByMesh.set(meshId, p);
   }

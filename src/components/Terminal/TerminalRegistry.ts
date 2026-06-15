@@ -4,8 +4,8 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import * as api from '../../lib/tauri';
 import { createTerminalOptions } from './terminalConfig';
 import { resolveKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
@@ -204,7 +204,7 @@ export class TerminalRegistry {
     if (!inst || !inst.attachedContainer) return;
     measureAndFit(inst);
     const { cols, rows } = inst.term;
-    invoke('resize_agent', { sessionId: nodeId, rows, cols }).catch((err) => {
+    api.resizeAgent(nodeId, rows, cols).catch((err) => {
       if (err !== 'Agent not running') {
         console.error(`[TerminalRegistry] PTY size sync failed for node ${nodeId}:`, err);
       }
@@ -284,15 +284,12 @@ export class TerminalRegistry {
       const unlistenSerialize = await listen<{ node_id: number; request_id: string }>('serialize-terminal-request', (event) => {
         if (event.payload.node_id === nodeId) {
           const snapshot = instance.serializeAddon.serialize({ scrollback: 200 });
-          invoke('submit_terminal_snapshot', {
-            requestId: event.payload.request_id,
-            data: snapshot,
-          }).catch(console.error);
+          api.submitTerminalSnapshot(event.payload.request_id, snapshot).catch(console.error);
         }
       });
 
       term.onData((data) => {
-        invoke('write_to_agent', { sessionId: nodeId, data }).catch(console.error);
+        api.writeToAgent(nodeId, data).catch(console.error);
       });
 
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
@@ -315,7 +312,7 @@ export class TerminalRegistry {
             return false;
           case 'paste':
             ev.preventDefault();
-            invoke<string>('read_clipboard').then(text => {
+            api.readClipboard().then(text => {
               if (text) term.paste(text);
             }).catch(() => {
               navigator.clipboard.readText().then(text => {
@@ -340,7 +337,7 @@ export class TerminalRegistry {
       });
 
       term.onResize(({ cols, rows }) => {
-        invoke('resize_agent', { sessionId: nodeId, rows, cols }).catch(err => {
+        api.resizeAgent(nodeId, rows, cols).catch(err => {
           if (err !== 'Agent not running') {
             console.error(`[TerminalRegistry] Resize failed for node ${nodeId}:`, err);
           }

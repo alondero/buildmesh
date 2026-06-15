@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback, type WheelEvent as ReactWheelEvent } from 'react';
 import '@xterm/xterm/css/xterm.css';
-import { invoke } from '@tauri-apps/api/core';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
+import * as api from '../../lib/tauri';
 import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
@@ -74,10 +74,10 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   const handlePaste = () => {
     const inst = terminalManager.getInstance(sessionId);
     if (inst) {
-      // invoke('read_clipboard') uses pbpaste on macOS to bypass the WKWebView
+      // readClipboard uses pbpaste on macOS to bypass the WKWebView
       // clipboard-permission popup (macOS 14+). On other platforms it errors and
       // we fall back to the web clipboard API.
-      invoke<string>('read_clipboard').then(text => {
+      api.readClipboard().then(text => {
         if (text) inst.term.paste(text);
       }).catch(() => {
         navigator.clipboard.readText().then(text => {

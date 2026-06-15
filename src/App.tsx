@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
@@ -11,6 +10,7 @@ import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
+import * as api from './lib/tauri';
 import {
   applyToastCap,
   dedupToasts,
@@ -201,7 +201,7 @@ function App() {
         // terminals and event listeners are mounted
         setTimeout(async () => {
           try {
-            const resumed = await invoke<number[]>('auto_resume_sessions');
+            const resumed = await api.autoResumeSessions();
             if (resumed.length > 0) {
               console.log(`[App] Auto-resumed ${resumed.length} sessions`);
               await fetchAgentNodes();

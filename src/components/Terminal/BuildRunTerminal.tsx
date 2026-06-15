@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
+import * as api from '../../lib/tauri';
 import { TERMINAL_OPTIONS } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { TerminalWriter } from './TerminalWriter';
@@ -64,7 +64,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
     // Mirrors the agent terminal's pattern in TerminalRegistry.ts:228-282.
     if (mode === 'terminal') {
       term.onData((data) => {
-        invoke('write_to_build_run', { nodeId: sessionId, data }).catch((err) => {
+        api.writeToBuildRun(sessionId, data).catch((err) => {
           // The PTY may have exited (e.g. user typed `exit`) — swallow the
           // "not running" error since it's expected. Other errors are real.
           if (err !== 'Build run not running') {
@@ -73,7 +73,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
         });
       });
       term.onResize(({ cols, rows }) => {
-        invoke('resize_build_run', { nodeId: sessionId, rows, cols }).catch(() => {});
+        api.resizeBuildRun(sessionId, rows, cols).catch(() => {});
       });
     }
 
@@ -111,7 +111,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
       const bannerPrefix = modeBanner(mode);
       const worktreeSuffix = useWorktree ? ' in worktree' : '';
       term.write(`${bannerPrefix}${worktreeSuffix}...\r\n`);
-      invoke('build_run', { nodeId: sessionId, mode }).catch(err => {
+      api.buildRun(sessionId, mode).catch(err => {
         term.write(`\r\nError: ${String(err)}\r\n`);
       });
     });
@@ -122,7 +122,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
       unlistenRef.current?.();
       writer.unregister(sessionId);
       term.dispose(); // allow-dispose — BuildRunTerminal is a one-shot panel, not the agent-terminal singleton
-      invoke('close_build_run', { nodeId: sessionId }).catch(() => {});
+      api.closeBuildRun(sessionId).catch(() => {});
     };
   }, [sessionId, mode, useWorktree]);
 

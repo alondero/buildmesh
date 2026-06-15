@@ -1,18 +1,9 @@
 import { useState, useEffect } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import QRCode from 'qrcode';
+import * as api from '../../lib/tauri';
 
 interface RemoteAccessModalProps {
   onClose: () => void;
-}
-
-async function getLocalIp(): Promise<string> {
-  try {
-    const ip = await invoke<string>('get_local_ip');
-    return ip;
-  } catch {
-    return '192.168.1.x';
-  }
 }
 
 export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
@@ -26,8 +17,11 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   useEffect(() => {
     const init = async () => {
       try {
-        const rootToken = await invoke<string>('get_root_token');
-        const localIp = await getLocalIp();
+        const rootToken = await api.getRootToken();
+        // The fallback string is a UX placeholder, not a typed contract — a
+        // failure here leaves the QR pointing at a bogus IP, which is fine
+        // because the outer catch surfaces the real error to the user.
+        const localIp = await api.getLocalIp().catch(() => '192.168.1.x');
         setIp(localIp);
 
         const url = `http://${localIp}:${PORT}/?token=${rootToken}`;

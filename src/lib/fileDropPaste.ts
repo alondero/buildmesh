@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import * as api from './tauri';
 
 /**
  * Pasting an OS file drop into an agent terminal.
@@ -28,9 +28,7 @@ export function quotePathIfNeeded(path: string): string {
  * WSL/Git-Bash styles; quoting protects paths with spaces.
  */
 export async function resolveDropText(rawPaths: string[]): Promise<string> {
-  const hostPaths = await Promise.all(
-    rawPaths.map((p) => invoke<string>('to_host_path', { path: p })),
-  );
+  const hostPaths = await Promise.all(rawPaths.map((p) => api.toHostPath(p)));
   return hostPaths.filter(Boolean).map(quotePathIfNeeded).join(' ');
 }
 
