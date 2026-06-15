@@ -374,7 +374,12 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       await api.spawnAgent(nodeId, provider, node?.cli_session_id, rows, cols);
       await get().fetchAgentNodes();
     } catch (e) {
-      console.error('[agentNodeStore] spawnAgent failed:', e);
+      // The central IPC wrapper (src/lib/tauri.ts → _invoke) already logs
+      // every rejection to buildmesh.log as `[IPC:spawn_agent] args=… — <err>`,
+      // so the prior `console.error` here produced a duplicate entry. The
+      // store-side catch keeps doing two things the wrapper does not: it
+      // surfaces the error on `state.error` for the UI to render, and it
+      // re-throws so the caller's catch can react.
       set({ error: String(e) });
       throw e;
     }
