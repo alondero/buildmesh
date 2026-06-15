@@ -39,9 +39,7 @@ export function Sidebar() {
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   // Issue #376 / #378: open the unified Probe Panel on a specific tab.
-  // The Probe is the migration target for the legacy FileExplorerPanel,
-  // MeshPropertiesPanel, GitHubIssuesModal, and SessionBrowserModal. The
-  // `openProbeTab` helper atomically sets the tab and opens the panel.
+  // The `openProbeTab` helper atomically sets the tab and opens the panel.
   // The action reference is stable across renders (zustand), so we bind
   // the tab at the prop site without an extra closure layer.
   const openProbeTab = useUIStore(s => s.openProbeTab);
@@ -66,8 +64,7 @@ export function Sidebar() {
   // Issue #375 — the right-click "Properties" entry and the drift `!` badge
   // both open the Probe Panel on the ⚙️ Mesh Properties tab. We select the
   // mesh first so `useProbeContext` resolves to the right row, then flip the
-  // probe open. The legacy `openPropertiesPanel` (right-rail drawer) is
-  // preserved in the store but is no longer wired to either entry point.
+  // probe open.
   const handleOpenPropertiesProbe = (meshId: number) => {
     selectMesh(meshId);
     openProbeTab('properties');
@@ -77,10 +74,6 @@ export function Sidebar() {
   // entries open the Probe Panel on the 🐙 / 🕒 tabs respectively. The
   // mesh is selected first (same dance as the Properties entry point) so
   // `useProbeContext` resolves to the right row before the tab mounts.
-  // Replaces the legacy `GitHubIssuesModal` / `SessionBrowserModal` call
-  // sites; the modal components themselves stay on disk per the
-  // acceptance criteria (they may be reactivated for a transition period
-  // if a follow-up consumer needs them).
   const handleOpenIssuesProbe = (meshId: number) => {
     selectMesh(meshId);
     openProbeTab('issues');

@@ -16,9 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
-/// Default `worktree_mode` when the mesh config leaves it unset. The UI
-/// default in `MeshPropertiesPanel.tsx` and the Rust constant below must
-/// agree (paired-constants pattern — see [[feedback_cross-language-default-coupling]]).
+/// Default `worktree_mode` when the mesh config leaves it unset. Pinned
+/// on the TS side by `src/lib/worktreeMode.ts` + its unit test
+/// (paired-constants pattern — see [[feedback_cross-language-default-coupling]]).
 /// See `docs/knowledge-primer.md` (Worktree Support) for the branched-vs-detached rationale.
 pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 
@@ -869,7 +869,7 @@ mod tests {
     use tempfile::TempDir;
 
     /// Pin the spawn-time fallback. Mirrors the TS constant
-    /// `DEFAULT_WORKTREE_MODE` exported from `MeshPropertiesPanel.tsx`; the
+    /// `DEFAULT_WORKTREE_MODE` exported from `src/lib/worktreeMode.ts`; the
     /// two are coupled by convention, not by code.
     #[test]
     fn default_worktree_mode_is_branched() {

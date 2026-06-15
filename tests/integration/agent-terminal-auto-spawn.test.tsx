@@ -201,7 +201,7 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     vi.clearAllMocks();
     useAgentNodeStore.setState({ agentNodes: [IDLE_NODE], activeNodeId: IDLE_NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ dragTargetNodeId: null, fileExplorerContext: null });
+    useUIStore.setState({ dragTargetNodeId: null });
     terminalManager.dispose(IDLE_NODE.id);
   });
 

@@ -297,13 +297,6 @@ function App() {
       <SessionView />
       <ProbePanel />
 
-      {/* Mesh Properties is now the Probe Panel's ⚙️ tab (issue #375).
-          The legacy right-rail drawer is preserved on disk for the
-          transition period — its `DEFAULT_WORKTREE_MODE` constant is still
-          pinned by `tests/unit/mesh-properties-worktree-mode-default.test.ts`
-          — but no longer mounted here. The store action
-          `openPropertiesPanel` is kept for the same reason and can be
-          removed in a follow-up once the file is deleted. */}
       <WorktreeCloseDialog />
 
       {/* Toast notifications */}

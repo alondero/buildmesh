@@ -9,7 +9,7 @@ import type { DetectedProject, ProjectPreset } from '../lib/projectPresets';
 export type { MeshConfig } from '../lib/tauri';
 import type { MeshConfig } from '../lib/tauri';
 
-/// The set of fields the MeshPropertiesPanel can auto-save. The union is the
+/// The set of fields the MeshPropertiesTab can auto-save. The union is the
 /// store's switch table — adding a field means one new entry below + one new
 /// case in `save()`, not a new closure in the render component (issue #283).
 ///
@@ -19,7 +19,6 @@ export type MeshConfigField =
   | 'model'
   | 'effort'
   | 'defaultProvider'
-  | 'worktreeMode'
   | 'buildCommand'
   | 'runCommand'
   | 'useWorktree'
@@ -109,9 +108,6 @@ export const useMeshPropertiesStore = create<MeshPropertiesState>((set, get) => 
           break;
         case 'defaultProvider':
           await api.updateMeshField(meshId, 'agent', 'default_provider', String(value));
-          break;
-        case 'worktreeMode':
-          await api.updateMeshField(meshId, 'agent', 'worktree_mode', String(value));
           break;
         case 'buildCommand':
           await api.updateMeshField(meshId, 'build', 'command', String(value));

@@ -3,8 +3,9 @@ import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
 
 // Module-level shared client, keyed by repo path. `MeshItem` (mesh root) and
-// `FileExplorerPanel` (node path) both read through this hook, so two views of
-// the same path dedupe onto one fetch + one GIT_CHANGED subscription.
+// the 🌳 Worktree Manager tab (node path) both read through this hook, so
+// two views of the same path dedupe onto one fetch + one GIT_CHANGED
+// subscription.
 const branchStatusClient = createPathInvalidatedCache<string, GitBranchStatus>({
   fetcher: getGitBranchStatus,
   name: 'gitBranchStatus',

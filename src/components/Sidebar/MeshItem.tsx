@@ -45,7 +45,7 @@ interface MeshItemProps {
   onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
   // Issue #376: opens the unified Probe Panel on the 📁 (Project Files) tab
   // for this mesh. Replaces the legacy `onToggleFileExplorer` prop, which
-  // toggled the now-deprecated SessionView left-pane `FileExplorerPanel`.
+  // toggled the deleted SessionView left-pane `FileExplorerPanel`.
   onOpenFilesProbe: () => void;
   meshNodes: AgentNode[];
   activeNodeId: number | null;
@@ -54,21 +54,18 @@ interface MeshItemProps {
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
   // Issue #378: opens the Probe Panel on the 🐙 Git Issues tab for this
   // mesh. Replaces the legacy `onOpenGitHubIssues` prop, which mounted
-  // the now-deprecated `GitHubIssuesModal`. The modal component file
-  // stays on disk per the acceptance criteria; only the call sites
-  // are removed.
+  // the deleted `GitHubIssuesModal`.
   onOpenIssuesProbe: (meshId: number) => void;
   // Issue #378: opens the Probe Panel on the 🕒 Session History tab.
   // Replaces the legacy `onOpenSessionBrowser` prop, which mounted the
-  // `SessionBrowserModal`. The modal component file stays on disk.
+  // deleted `SessionBrowserModal`.
   onOpenSessionHistoryProbe: (meshId: number) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
   /**
    * Issue #375 — the right-click "Properties" item and the drift `!` badge
-   * both jump straight to the Probe Panel on the ⚙️ Mesh Properties tab
-   * instead of the legacy right-rail drawer. The handler is responsible
-   * for selecting the mesh (so `useProbeContext` resolves to the right
-   * row) before flipping the probe open.
+   * both jump straight to the Probe Panel on the ⚙️ Mesh Properties tab.
+   * The handler is responsible for selecting the mesh (so `useProbeContext`
+   * resolves to the right row) before flipping the probe open.
    */
   onOpenPropertiesProbe: (meshId: number) => void;
 }
