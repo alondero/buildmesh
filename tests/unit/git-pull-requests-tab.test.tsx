@@ -322,4 +322,61 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     expect(() => render(<GitPullRequestsTab />)).not.toThrow();
   });
+
+  // ----- "View changes" button (issue #421) ------------------------------
+  // Each row now exposes a read-only button that opens the PR's diff in the
+  // Center Workspace Diff Overlay. Unlike the merge control it's available
+  // for both open AND closed PRs, and regardless of mergeability — the diff
+  // is useful in every state (reviewing a merged change, looking at why a
+  // PR was closed, etc.).
+
+  it('renders a "View changes" button on every PR row', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // One per open PR. Counts are stable regardless of mergeability / draft
+    // state — only the merge control depends on those.
+    const buttons = await screen.findAllByRole('button', { name: /view changes in pr #/i });
+    expect(buttons).toHaveLength(OPEN_PRS.length);
+  });
+
+  it('opens the center diff overlay with a PR-source context when View changes is clicked', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // Wait for the list to render, then click the View changes button on
+    // PR 201 ("Add widget"). We identify it by its PR-number-specific
+    // accessible name.
+    await screen.findByText('Add widget');
+    await userEvent.click(
+      screen.getByRole('button', { name: 'View changes in PR #201' }),
+    );
+
+    // The overlay's DiffContext should pin this PR via source: 'pr' and
+    // `filePath: ''` (list mode — click a file in the overlay to drill in).
+    // `nodeId: null` because the PR's source branch may not exist locally.
+    expect(useUIStore.getState().activeDiffFile).toEqual({
+      filePath: '',
+      rootPath: MESH.path,
+      nodeId: null,
+      meshId: MESH.id,
+      source: 'pr',
+      prNumber: 201,
+    });
+  });
+
+  it('shows the View changes button for closed PRs too', async () => {
+    // Same affordance on the Closed tab — reading a merged PR's diff is a
+    // common postmortem / review flow, and we want the panel to feel
+    // symmetric across the two filters.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    await screen.findByText('Add widget');
+    await userEvent.click(screen.getByRole('button', { name: 'closed' }));
+
+    expect(
+      await screen.findByRole('button', { name: 'View changes in PR #150' }),
+    ).toBeTruthy();
+  });
 });

@@ -68,6 +68,35 @@ pub struct PrMergeability {
     pub mergeable_state: String,
 }
 
+/// One file in a pull request — wire shape of `get_pr_files` (issue #421).
+/// Mirrors `services::github::PrFile`; the panel's Center Diff Overlay
+/// (`source: 'pr'`) renders the `patch` text line-by-line rather than
+/// reconstructing our own hunk structure (GitHub's patches are non-standard —
+/// missing context lines, inline `rename from`/`rename to` — so a structural
+/// round-trip would be brittle). The frontend imports the generated type
+/// from `src/types/generated/PrFileEntry.ts`; never hand-mirror (issue #359).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PrFileEntry.ts")]
+pub struct PrFileEntry {
+    /// Number of lines added (per GitHub). `#[ts(as = "i32")]` because
+    /// serde_json emits `i64` as a JS number, not the `bigint` ts-rs defaults
+    /// to (matches the convention in `GitHubPullRequest` and friends).
+    #[ts(as = "i32")]
+    pub additions: i64,
+    #[ts(as = "i32")]
+    pub deletions: i64,
+    /// Path of the file at the head of the PR.
+    pub filename: String,
+    /// Unified diff text from GitHub. Empty for binary files (GitHub omits
+    /// `patch` for them).
+    pub patch: String,
+    /// Old path for renames; null for everything else.
+    pub previous_filename: Option<String>,
+    /// `"added" | "modified" | "deleted" | "renamed" | …` — GitHub's
+    /// vocabulary, used by the overlay to colour the file card badge.
+    pub status: String,
+}
+
 /// Check whether the user has a valid GitHub token (env var or gh config).
 ///
 /// Every command in this module talks to the GitHub REST API (blocking HTTP);
@@ -160,6 +189,33 @@ pub fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeabilit
         .map_err(|e| e.to_string())?;
 
     Ok(PrMergeability { mergeable, mergeable_state })
+}
+
+/// Get the files changed in a single pull request, for the "View changes"
+/// button on the PR tab (issue #421). One call returns the full file list
+/// (≤ 100 — GitHub's default per_page) with each file's unified-diff
+/// `patch`. The Center Diff Overlay parses the patch line-by-line to
+/// colour +/−/context rows in place. Mirrors the other PR commands:
+/// resolves owner/repo via the mesh's `origin` remote, hits the GitHub
+/// REST API, and forwards the HTTP error verbatim.
+#[command(async)]
+pub fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = resolve_github_owner_repo(&mesh)?;
+
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    let files = client
+        .list_pr_files(&owner, &repo, pr_number)
+        .map_err(|e| e.to_string())?;
+
+    Ok(files.into_iter().map(|f| PrFileEntry {
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+        patch: f.patch,
+        previous_filename: f.previous_filename,
+    }).collect())
 }
 
 /// Create a PR for the node

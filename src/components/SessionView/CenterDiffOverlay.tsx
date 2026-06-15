@@ -17,7 +17,14 @@
  * focused node and selected mesh captured in `diff.nodeId` / `diff.meshId` at
  * open time. If the user focuses a *different* background node card, or selects
  * a *different* project in the sidebar, the diff no longer matches what they're
- * looking at, so we close it rather than show a mismatched diff.
+ * looking at, so we close it rather than show a mismatched diff. The shared
+ * `DiffOverlayShell` owns the toolbar + Esc + auto-close; this file owns the
+ * per-source body (head/base local-git fetch vs `source: 'pr'` GitHub fetch).
+ *
+ * Source dispatch: `source: 'head' | 'base'` fetches from the local git
+ * commands the existing review surface uses; `source: 'pr'` (issue #421)
+ * routes to `PrDiffView`, which talks to GitHub's `/pulls/{n}/files` and
+ * doesn't need a local checkout of the PR's head branch.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -32,6 +39,8 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
 import { Diff } from '../Diff/Diff';
+import { PrDiffView } from './PrDiffView';
+import { DiffOverlayShell } from './DiffOverlayShell';
 
 interface CenterDiffOverlayProps {
   /** The file + lens to render. The parent only mounts us when this is
@@ -41,18 +50,67 @@ interface CenterDiffOverlayProps {
 
 export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
   const closeDiff = useUIStore((s) => s.closeDiff);
-  const activeNodeId = useAgentNodeStore((s) => s.activeNodeId);
-  const selectedMeshId = useMeshStore((s) => s.selectedMeshId);
 
   // Toolbar label — the file's "parent". Prefer the owning agent node's name;
   // a mesh-scoped diff (Project Files with no node focused) falls back to the
   // mesh name. Looked up live (not stored in the context) so a rename shows
-  // through immediately.
+  // through immediately. Used by both head/base and PR breadcrumb paths.
   const node = useAgentNodeStore((s) =>
     diff.nodeId === null ? null : s.agentNodes.find((n) => n.id === diff.nodeId) ?? null,
   );
   const meshName = useMeshStore((s) => s.meshesById.get(diff.meshId)?.name ?? null);
   const parentLabel = node?.name ?? meshName ?? 'Workspace';
+
+  // PR diffs (`source: 'pr'`) don't use the local-git fetch path at all —
+  // PrDiffView handles its own state. Bail out of the head/base branch and
+  // delegate, so the existing fetch effect doesn't run with no work to do.
+  // The shell is the same; only the breadcrumb + mode label + body differ.
+  if (diff.source === 'pr') {
+    const prLabel = diff.prNumber !== undefined ? `PR #${diff.prNumber}` : 'PR';
+    return (
+      <DiffOverlayShell
+        diff={diff}
+        onClose={closeDiff}
+        modeLabel={{
+          text: diff.filePath === '' ? 'PR list' : 'PR file',
+          title:
+            diff.filePath === ''
+              ? 'Files changed in this pull request'
+              : 'Diff for one file in this pull request',
+        }}
+        breadcrumb={
+          <>
+            {diff.filePath !== '' && (
+              <>
+                <span
+                  className="font-mono text-xs text-text-primary truncate"
+                  title={diff.filePath}
+                >
+                  {diff.filePath}
+                </span>
+                <span className="text-text-muted text-[11px] shrink-0">in</span>
+              </>
+            )}
+            <span
+              className="text-accent-cyan text-xs font-mono font-medium shrink-0"
+              title={prLabel}
+            >
+              {prLabel}
+            </span>
+            <span className="text-text-muted text-[11px] shrink-0">in</span>
+            <span
+              className="text-text-secondary text-xs font-medium truncate"
+              title={parentLabel}
+            >
+              {parentLabel}
+            </span>
+          </>
+        }
+      >
+        <PrDiffView diff={diff} />
+      </DiffOverlayShell>
+    );
+  }
 
   const [files, setFiles] = useState<FileDiff[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -91,87 +149,46 @@ export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
   // when the watcher reports a change in this worktree. Mirrors AgentReviewPanel.
   useGitPathInvalidation(diff.rootPath, () => fetchDiff({ background: true }));
 
-  // Esc returns to the terminal grid. Bound only while the overlay is mounted,
-  // so it never swallows Escape during normal grid use (where agent CLIs read
-  // it). The grid is fully covered, so intercepting Escape here is safe.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') closeDiff();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [closeDiff]);
-
-  // Auto-close when the lens diverges from the one the diff was opened under:
-  // a different node focused, or a different project selected. Selecting the
-  // diff's own mesh (narrowing the sidebar to its project) is not a divergence,
-  // hence the `!== null && !== meshId` guard.
-  useEffect(() => {
-    const lensChanged =
-      activeNodeId !== diff.nodeId ||
-      (selectedMeshId !== null && selectedMeshId !== diff.meshId);
-    if (lensChanged) closeDiff();
-  }, [activeNodeId, selectedMeshId, diff.nodeId, diff.meshId, closeDiff]);
-
   return (
-    <div className="absolute inset-0 z-30 flex flex-col bg-bg-base">
-      {/* Toolbar — file metadata + the prominent return button. */}
-      <div className="flex items-center gap-3 px-3 py-2 border-b border-border-subtle bg-bg-surface shrink-0">
-        <button
-          type="button"
-          onClick={closeDiff}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-accent-cyan/10 text-accent-cyan font-medium text-xs hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20 shrink-0"
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
+    <DiffOverlayShell
+      diff={diff}
+      onClose={closeDiff}
+      modeLabel={{
+        text: diff.source === 'base' ? 'vs base' : 'vs HEAD',
+        title:
+          diff.source === 'base'
+            ? 'Changes since this agent branched from its base'
+            : 'Uncommitted changes vs HEAD',
+      }}
+      breadcrumb={
+        <>
+          <span
+            className="font-mono text-xs text-text-primary truncate"
+            title={diff.filePath}
           >
-            <path d="M19 12H5M12 19l-7-7 7-7" />
-          </svg>
-          Back to Terminals
-        </button>
-        <div className="flex items-baseline gap-2 min-w-0">
-          <span className="font-mono text-xs text-text-primary truncate" title={diff.filePath}>
             {diff.filePath}
           </span>
           <span className="text-text-muted text-[11px] shrink-0">in</span>
-          <span className="text-text-secondary text-xs font-medium truncate" title={parentLabel}>
+          <span
+            className="text-text-secondary text-xs font-medium truncate"
+            title={parentLabel}
+          >
             {parentLabel}
           </span>
+        </>
+      }
+    >
+      {error ? (
+        <div className="h-full flex items-center justify-center text-accent-red text-xs px-3 text-center">
+          {error}
         </div>
-        <span
-          className="ml-auto text-text-muted text-[11px] shrink-0"
-          title={
-            diff.source === 'base'
-              ? 'Changes since this agent branched from its base'
-              : 'Uncommitted changes vs HEAD'
-          }
-        >
-          {diff.source === 'base' ? 'vs base' : 'vs HEAD'}
-        </span>
-      </div>
-
-      {/* Body — the spacious single-file diff. */}
-      <div className="flex-1 min-h-0 overflow-auto">
-        {error ? (
-          <div className="h-full flex items-center justify-center text-accent-red text-xs px-3 text-center">
-            {error}
-          </div>
-        ) : files === null ? (
-          <div className="h-full flex items-center justify-center text-text-muted text-xs">
-            Loading diff…
-          </div>
-        ) : (
-          <Diff files={files} />
-        )}
-      </div>
-    </div>
+      ) : files === null ? (
+        <div className="h-full flex items-center justify-center text-text-muted text-xs">
+          Loading diff…
+        </div>
+      ) : (
+        <Diff files={files} />
+      )}
+    </DiffOverlayShell>
   );
 }

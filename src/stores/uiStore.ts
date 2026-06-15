@@ -10,27 +10,41 @@ export type ProbeTab = 'files' | 'review' | 'properties' | 'issues' | 'pulls' | 
 //            `diff_file_against_head`).
 //   'base' — every change since the agent branched, vs the merge-base
 //            (Agent Changes tab, ADR 0005, `diff_node_file_against_base`).
-export type DiffSource = 'head' | 'base';
+//   'pr'   — a file in a GitHub pull request, fetched from the GitHub
+//            `/pulls/{n}/files` API (issue #421). `prNumber` must be set;
+//            `filePath === ''` switches the overlay to a list view of all
+//            changed files in the PR (click a file to drill in).
+export type DiffSource = 'head' | 'base' | 'pr';
 
 // Everything the Center Workspace Diff Overlay (issue #379) needs to fetch,
 // label, and auto-close a single-file diff. Captured when the user clicks a
 // changed file in the Probe; consumed by `CenterDiffOverlay`.
 export interface DiffContext {
-  /** Path of the file being diffed, relative to `rootPath`. */
+  /** Path of the file being diffed, relative to `rootPath`. Empty string
+   *  means "list view" — currently only meaningful for `source: 'pr'`,
+   *  where it switches the overlay between the PR's file list and a
+   *  single-file diff. */
   filePath: string;
   /** Repo/worktree root the diff resolves against — also the path watched for
-   *  live refresh while the overlay is open. */
+   *  live refresh while the overlay is open. For PR diffs, the mesh root
+   *  is good enough: there's no live file-watcher hook for a remote PR. */
   rootPath: string;
   /** Owning agent node — also the focused-lens node captured at open time. Used
    *  for the toolbar's "parent node" label and the auto-close comparison
    *  (criterion: close when the user focuses a different node). Null for a
-   *  mesh-scoped diff opened from Project Files with no node focused. */
+   *  mesh-scoped diff opened from Project Files with no node focused, and
+   *  always null for a PR diff (the PR's source branch may not even exist
+   *  locally — the auto-close is mesh-scoped only). */
   nodeId: number | null;
   /** Mesh the diff belongs to (the lens mesh captured at open time). Drives the
    *  auto-close when the user selects a different project in the sidebar. */
   meshId: number;
   /** Baseline to diff against — see `DiffSource`. */
   source: DiffSource;
+  /** PR number when `source === 'pr'`. The overlay reads the file list /
+   *  patch from `GET /repos/{owner}/{repo}/pulls/{n}/files` keyed off this.
+   *  Undefined for `'head'` / `'base'` sources. */
+  prNumber?: number;
 }
 
 interface UIState {

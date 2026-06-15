@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { DiffHunk, DiffLine, FileDiff, FileDiffStatus } from '../../lib/tauri';
+import { splitPath } from './diffFormat';
 
 /**
  * Shared diff renderer: a GitHub-style stacked, unified, syntax-highlighted
@@ -31,13 +32,6 @@ const STATUS_META: Record<FileDiffStatus, StatusMeta> = {
 
 export function statusMeta(status: string): StatusMeta {
   return STATUS_META[status as FileDiffStatus] ?? STATUS_META.modified;
-}
-
-/** Split a path into its (dimmed) directory and (emphasised) filename. */
-function splitPath(path: string): { dir: string; name: string } {
-  const idx = path.lastIndexOf('/');
-  if (idx === -1) return { dir: '', name: path };
-  return { dir: path.slice(0, idx + 1), name: path.slice(idx + 1) };
 }
 
 /** A stable DOM id so a file-list can scroll a card into view. */

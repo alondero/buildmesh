@@ -21,6 +21,13 @@
  * Merge is squash + delete branch (the existing `merge_pr`), gated behind an
  * inline confirm because it's an irreversible outward action. On success the
  * list refetches so the merged PR drops out of the open view.
+ *
+ * Read-oriented companion (issue #421): each row has a "View changes" button
+ * that opens the PR's diff in the Center Workspace Diff Overlay
+ * (`openDiff({ source: 'pr', prNumber, filePath: '', … })`). The overlay
+ * fetches via `getPrFiles` (GitHub's `/pulls/{n}/files`) and renders a
+ * generous file list → click a file to see its patch. This complements the
+ * merge action without overlapping it: merge writes, view reads.
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -32,6 +39,7 @@ import {
   type PrMergeability,
 } from '../../lib/tauri';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useUIStore } from '../../stores/uiStore';
 
 type StateFilter = 'open' | 'closed';
 
@@ -67,6 +75,7 @@ function deriveMergeStatus(
 
 export function GitPullRequestsTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
+  const openDiff = useUIStore((s) => s.openDiff);
 
   const [prs, setPrs] = useState<GitHubPullRequest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -203,6 +212,24 @@ export function GitPullRequestsTab() {
     }
   };
 
+  // Read-only "View changes" (issue #421). Always available — the diff is
+  // useful regardless of merge state, so we don't gate on `status.kind`.
+  // `filePath: ''` opens the overlay in list mode (every file in the PR);
+  // clicking a file there drills into a single-file patch view. `nodeId`
+  // stays null because the PR's source branch may not exist locally; the
+  // overlay's auto-close is mesh-scoped only.
+  const handleViewChanges = (pr: GitHubPullRequest) => {
+    if (activeMeshId === null) return;
+    openDiff({
+      filePath: '',
+      rootPath: activeMeshPath ?? '',
+      nodeId: null,
+      meshId: activeMeshId,
+      source: 'pr',
+      prNumber: pr.number,
+    });
+  };
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-3 py-1.5 border-b border-border-subtle flex items-center justify-between gap-2">
@@ -318,6 +345,24 @@ export function GitPullRequestsTab() {
                       )}
                     </div>
                   )}
+
+                  {/* Read-only "View changes" (issue #421). Always available
+                      for any state filter — the diff is useful on closed PRs
+                      too (review a merged change, compare with a rebase).
+                      `onMouseDown` stopPropagation mirrors the merge control
+                      so a future click-outside picker (issue #373's dock
+                      pattern) doesn't swallow the click. */}
+                  <div className="shrink-0 flex items-center" onMouseDown={(e) => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      onClick={() => handleViewChanges(pr)}
+                      aria-label={`View changes in PR #${pr.number}`}
+                      title="Open the PR's diff in the center overlay"
+                      className="px-2.5 py-1 text-xs font-medium rounded text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
+                    >
+                      View changes
+                    </button>
+                  </div>
                 </div>
               );
             })}
