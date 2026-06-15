@@ -24,8 +24,6 @@ import { join, relative, sep } from 'node:path';
 const ALLOWLIST = new Set<string>([
   'src/App.tsx',
   'src/components/AppSettings/AppSettingsModal.tsx',
-  'src/components/MeshPropertiesPanel/BranchesWorktreesSection.tsx',
-  'src/components/MeshPropertiesPanel/MeshPropertiesPanel.tsx',
   'src/components/RemoteAccess/RemoteAccessModal.tsx',
   'src/components/Terminal/BuildRunTerminal.tsx',
   'src/components/Terminal/Terminal.tsx',

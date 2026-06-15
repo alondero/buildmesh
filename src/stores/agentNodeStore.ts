@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { disposeTerminal } from '../components/Terminal/Terminal';
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
 import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
+import { useMeshStore } from './meshStore';
 
 // `AgentNode` is generated from the Rust `models::AgentNode` struct (issue
 // #359), along with the `EnvType`/`Provider`/`SessionStatus` unions it
@@ -70,6 +71,12 @@ interface AgentNodeState {
 
   fetchAgentNodes: () => Promise<void>;
   createAgentNode: (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) => Promise<AgentNode>;
+  /// Sidebar "click + or pick provider" entrypoint — creates a node on the
+  /// mesh, sets it active, and selects the mesh. The three steps live behind
+  /// one action (issue #283) so the invariant — "only switch active mesh/node
+  /// if creation succeeded" — is enforced in one place, not re-derivable per
+  /// click handler. On `createAgentNode` rejection the active mesh stays put.
+  selectProviderForMesh: (meshId: number, meshName: string, meshPath: string, providerId: string, useWorktree?: boolean) => Promise<AgentNode>;
   deleteAgentNode: (id: number) => Promise<void>;
   renameAgentNode: (id: number, name: string) => Promise<void>;
   reorderAgentNode: (nodeId: number, insertIndex: number) => Promise<void>;
@@ -199,6 +206,19 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       set({ error: String(e) });
       throw e;
     }
+  },
+
+  selectProviderForMesh: async (meshId, meshName, meshPath, providerId, useWorktree?: boolean): Promise<AgentNode> => {
+    // Create FIRST — only switch active mesh/node if creation succeeded.
+    // The order is the invariant: pre-refactor this lived in three sequential
+    // store calls in Sidebar.handleSelectProvider (#283), where a future hand
+    // could re-arrange them and re-introduce the half-applied
+    // "mesh selected but no node" state. Holding the order here makes the
+    // invariant unit-testable and impossible to violate from a click handler.
+    const node = await get().createAgentNode(meshId, meshName, meshPath, 'main', providerId, useWorktree);
+    get().setActiveNode(node.id);
+    useMeshStore.getState().selectMesh(meshId);
+    return node;
   },
 
   deleteAgentNode: async (id) => {
