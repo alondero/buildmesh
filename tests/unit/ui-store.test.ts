@@ -4,57 +4,9 @@ import { useUIStore } from '../../src/stores/uiStore';
 describe('useUIStore', () => {
   beforeEach(() => {
     useUIStore.setState({
-      changedFilesOpen: false,
-      changedFilesNodeId: null,
       probeOpen: false,
       probeTab: 'files',
       activeDiffFile: null,
-    });
-  });
-
-  describe('toggleChangedFiles', () => {
-    it('opens panel for a node', () => {
-      useUIStore.getState().toggleChangedFiles(1);
-      expect(useUIStore.getState().changedFilesOpen).toBe(true);
-      expect(useUIStore.getState().changedFilesNodeId).toBe(1);
-    });
-
-    it('closes panel when toggling same node', () => {
-      useUIStore.getState().toggleChangedFiles(1);
-      useUIStore.getState().toggleChangedFiles(1);
-      expect(useUIStore.getState().changedFilesOpen).toBe(false);
-      expect(useUIStore.getState().changedFilesNodeId).toBe(null);
-    });
-
-    it('switches to new node when different node clicked', () => {
-      useUIStore.getState().toggleChangedFiles(1);
-      useUIStore.getState().toggleChangedFiles(2);
-      expect(useUIStore.getState().changedFilesOpen).toBe(true);
-      expect(useUIStore.getState().changedFilesNodeId).toBe(2);
-    });
-  });
-
-  describe('closeChangedFiles', () => {
-    it('resets both state fields', () => {
-      useUIStore.getState().toggleChangedFiles(5);
-      useUIStore.getState().closeChangedFiles();
-      expect(useUIStore.getState().changedFilesOpen).toBe(false);
-      expect(useUIStore.getState().changedFilesNodeId).toBe(null);
-    });
-  });
-
-  describe('setChangedFilesNodeId', () => {
-    it('updates node when panel is open', () => {
-      useUIStore.getState().toggleChangedFiles(1);
-      useUIStore.getState().setChangedFilesNodeId(3);
-      expect(useUIStore.getState().changedFilesNodeId).toBe(3);
-      expect(useUIStore.getState().changedFilesOpen).toBe(true);
-    });
-
-    it('does nothing when panel is closed', () => {
-      useUIStore.getState().setChangedFilesNodeId(3);
-      expect(useUIStore.getState().changedFilesNodeId).toBe(null);
-      expect(useUIStore.getState().changedFilesOpen).toBe(false);
     });
   });
 
@@ -185,10 +137,9 @@ describe('useUIStore', () => {
       });
 
       it('is idempotent on the active tab (no toggle-off)', () => {
-        // The legacy `toggleFileExplorer` semantics closed the panel on a
-        // second click. `openProbeTab` is "make this tab visible" — closing
-        // stays a separate concern (the activity-bar's click handler does
-        // that), so the second call must not collapse the panel.
+        // `openProbeTab` is "make this tab visible" — closing stays a
+        // separate concern (the activity-bar's click handler does that),
+        // so the second call must not collapse the panel.
         useUIStore.setState({ probeOpen: true, probeTab: 'review' });
         useUIStore.getState().openProbeTab('review');
         expect(useUIStore.getState().probeOpen).toBe(true);

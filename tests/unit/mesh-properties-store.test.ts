@@ -188,16 +188,6 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       });
     });
 
-    it('routes worktreeMode through update_mesh_field with snake_case key', async () => {
-      mockInvoke.mockResolvedValueOnce(undefined);
-
-      await useMeshPropertiesStore.getState().save('worktreeMode', 'detached');
-
-      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_field', {
-        meshId: 11, section: 'agent', key: 'worktree_mode', value: 'detached',
-      });
-    });
-
     it('routes defaultProvider through update_mesh_field with snake_case key', async () => {
       mockInvoke.mockResolvedValueOnce(undefined);
 

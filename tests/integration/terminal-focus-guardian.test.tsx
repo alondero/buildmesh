@@ -176,7 +176,7 @@ describe('AgentTerminal focus guardian', () => {
     vi.clearAllMocks();
     useAgentNodeStore.setState({ agentNodes: [RUNNING_NODE], activeNodeId: RUNNING_NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ dragTargetNodeId: null, fileExplorerContext: null });
+    useUIStore.setState({ dragTargetNodeId: null });
     terminalManager.dispose(RUNNING_NODE.id);
     // jsdom's hasFocus() can be unreliable across versions; pin it true so the
     // guardian's "window still focused" guard doesn't gate the test.

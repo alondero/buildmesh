@@ -24,7 +24,8 @@ interface GridNodeHeaderProps {
 export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
   // Issue #376: the chip now opens the unified Probe Panel on the 🔍
   // (Agent Changes) tab for this node, rather than toggling the legacy
-  // FileExplorerPanel in the SessionView left pane.
+  // FileExplorerPanel in the SessionView left pane (deleted in #380; the
+  // `AgentChangesTab` review surface is the only one now).
   const openProbeTab = useUIStore(state => state.openProbeTab);
   const probeOpen = useUIStore(state => state.probeOpen);
   const probeTab = useUIStore(state => state.probeTab);
@@ -38,9 +39,9 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   // `AgentChangesTab` reads `useProbeContext().activeNodeId` to pick
   // which node's review to render, so without this the user could land
   // on a different terminal's review if a different node was already
-  // focused. (The legacy `toggleFileExplorer` was per-node by passing
-  // an explicit nodeId; the new probe context derivation makes focus
-  // the natural way to express "review THIS node".)
+  // focused. (The pre-#376 left-pane `FileExplorerPanel` accepted an
+  // explicit `nodeId` per click; the new probe context derivation
+  // makes "focus" the natural way to express "review THIS node".)
   const setActiveNode = useAgentNodeStore((state) => state.setActiveNode);
   // The cyan chip highlight (post-#376) signals "the probe is showing
   // this node's review right now". `AgentChangesTab` reads `activeNodeId`

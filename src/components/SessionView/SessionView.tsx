@@ -7,7 +7,6 @@ import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
-import { FileExplorerPanel } from '../FileTree/FileExplorerPanel';
 import { watchSession, unwatchSession } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
 import { NodeCard, type BuildRunState } from './NodeCard';
@@ -130,7 +129,6 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
 
 export function SessionView() {
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
-  const meshesById = useMeshStore(state => state.meshesById);
   // Granular selectors: subscribing to the whole store (useAgentNodeStore())
   // re-rendered SessionView on every unrelated change — including each
   // attention status flip — even though only agentNodes/activeNodeId affect
@@ -146,12 +144,9 @@ export function SessionView() {
     [agentNodes, activeNodeId],
   );
 
-  const fileExplorerContext = useUIStore(state => state.fileExplorerContext);
-  const closeFileExplorer = useUIStore(state => state.closeFileExplorer);
   const maximizedNodeId = useUIStore(state => state.maximizedNodeId);
   const clearMaximizedNode = useUIStore(state => state.clearMaximizedNode);
   const probeOpen = useUIStore(state => state.probeOpen);
-  const [fileExplorerWidth, setFileExplorerWidth] = useState(360);
   const [openBuildRun, setOpenBuildRun] = useState<BuildRunState>(null);
 
   const filteredNodes = useMemo(() => {
@@ -170,18 +165,6 @@ export function SessionView() {
     [maximizedNodeId, filteredNodes],
   );
 
-  // Get node for file explorer context
-  const fileExplorerNode = useMemo(() => {
-    if (!fileExplorerContext || fileExplorerContext.type !== 'agent') return null;
-    return agentNodes.find(n => n.id === fileExplorerContext.nodeId) ?? null;
-  }, [fileExplorerContext, agentNodes]);
-
-  // Get mesh name for file explorer mesh context
-  const fileExplorerMeshName = useMemo(() => {
-    if (!fileExplorerContext || fileExplorerContext.type !== 'mesh') return null;
-    return meshesById.get(fileExplorerContext.meshId)?.name ?? null;
-  }, [fileExplorerContext, meshesById]);
-
   useEffect(() => {
     if (!activeNode) return;
     watchSession(activeNode.id).catch(console.error);
@@ -190,20 +173,6 @@ export function SessionView() {
     };
   // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree
   }, [activeNode?.id, activeNode?.cli_session_id]);
-
-  // React only to mesh switches, not to context changes. Reading the context
-  // via getState() (rather than the subscribed value) keeps it out of the deps:
-  // otherwise opening an agent's file explorer mutates fileExplorerContext, re-runs
-  // this effect, and closes the panel the instant it's opened (#changes-header).
-  useEffect(() => {
-    if (selectedMeshId === null) return;
-    const ctx = useUIStore.getState().fileExplorerContext;
-    const shouldClose = ctx && (
-      (ctx.type === 'mesh' && ctx.meshId !== selectedMeshId) ||
-      ctx.type === 'agent'
-    );
-    if (shouldClose) closeFileExplorer();
-  }, [selectedMeshId, closeFileExplorer]);
 
   // Auto-select first node when switching to a mesh that doesn't include the active node
   useEffect(() => {
@@ -331,17 +300,6 @@ export function SessionView() {
   return (
     <div className="flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
       <div className="flex-1 flex overflow-hidden">
-        {fileExplorerContext && (
-          <FileExplorerPanel
-            context={fileExplorerContext}
-            width={fileExplorerWidth}
-            onWidthChange={setFileExplorerWidth}
-            onClose={closeFileExplorer}
-            nodeName={fileExplorerNode?.name}
-            meshName={fileExplorerMeshName ?? undefined}
-          />
-        )}
-
         <DndContext
           sensors={sensors}
           collisionDetection={pointerWithin}

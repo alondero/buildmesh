@@ -3,13 +3,8 @@ import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
 
 // Module-level shared client (keyed by meshId). The sidebar `!` badge and
-// the 🌳 Worktree Manager tab's `WorktreeManagerTab` HealthBlock both read
-// from this hook; they share one cache + one GIT_CHANGED subscription
-// through the primitive. (#377 deleted the legacy `BranchesWorktreesSection`
-// that used to live inside `MeshPropertiesPanel.tsx`; the unmounted parent
-// panel is kept on disk for the `DEFAULT_WORKTREE_MODE` constant pinned by
-// `tests/unit/mesh-properties-worktree-mode-default.test.ts` and the
-// `AiContextSection` still consumed by `MeshPropertiesTab`.)
+// the 🌳 Worktree Manager tab's HealthBlock both read from this hook; they
+// share one cache + one GIT_CHANGED subscription through the primitive.
 const healthClient = createPathInvalidatedCache<number, MeshHealth>({
   fetcher: getMeshHealth,
   name: 'useMeshHealth',

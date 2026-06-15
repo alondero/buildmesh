@@ -7,8 +7,9 @@
  * — that lives behind the dedicated 🌳 Worktree Manager tab, and the
  * uncommitted-changes / PR surface belongs to the 🔍 Agent Changes tab.
  *
- * Fields ported from the legacy `MeshPropertiesPanel.tsx` (preserved
- * untouched for the transition period):
+ * Fields ported from the legacy `MeshPropertiesPanel.tsx` (the panel
+ * itself was deleted in #380; only the `AiContextSection` helper in that
+ * directory is still imported here):
  *   • Display name (auto-save on blur, syncs the meshStore)
  *   • Directory (read-only — derived from the mesh row)
  *   • AI context portability (delegated to `<AiContextSection>`)

@@ -70,7 +70,6 @@ describe('GridNodeHeader git-summary chip', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ fileExplorerContext: null });
     summaryMock.mockReset();
     prMock.mockReset();
     openUrlMock.mockClear();
@@ -96,16 +95,13 @@ describe('GridNodeHeader git-summary chip', () => {
 
   it('overrides per-status colour with cyan when the probe is showing this node\'s review (#376)', () => {
     // Issue #376 — the cyan "this is the node being reviewed" highlight
-    // now follows the Probe Panel state (probeOpen + probeTab === 'review'
-    // + activeNodeId === node.id), not the legacy `fileExplorerContext`
-    // (which is being phased out as the FileExplorerPanel consumers
-    // migrate to the probe).
+    // follows the Probe Panel state (probeOpen + probeTab === 'review'
+    // + activeNodeId === node.id).
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
     useUIStore.setState({
       probeOpen: true,
       probeTab: 'review',
-      fileExplorerContext: null,
     });
     useAgentNodeStore.setState({ activeNodeId: NODE.id });
     const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
@@ -123,7 +119,6 @@ describe('GridNodeHeader git-summary chip', () => {
     useUIStore.setState({
       probeOpen: true,
       probeTab: 'review',
-      fileExplorerContext: null,
     });
     useAgentNodeStore.setState({ activeNodeId: 999 /* not this node */ });
     const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
@@ -138,7 +133,6 @@ describe('GridNodeHeader worktree/root pill', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ fileExplorerContext: null });
     summaryMock.mockReset();
   });
 
@@ -176,7 +170,7 @@ describe('GridNodeHeader maximize (#65)', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ fileExplorerContext: null, maximizedNodeId: null });
+    useUIStore.setState({ maximizedNodeId: null });
     summaryMock.mockReturnValue(null);
     prMock.mockReturnValue(null);
   });
@@ -209,7 +203,6 @@ describe('GridNodeHeader PR chip', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
-    useUIStore.setState({ fileExplorerContext: null });
     summaryMock.mockReset();
     prMock.mockReset();
     openUrlMock.mockClear();
@@ -252,17 +245,14 @@ describe('GridNodeHeader PR chip', () => {
   });
 
   it('opens the probe panel on the review tab when the git-summary chip is clicked (#376)', () => {
-    // Issue #376 — clicking the +/~/- chip used to call the legacy
-    // `toggleFileExplorer` (which opened the FileExplorerPanel in the
-    // SessionView left pane). After the port it opens the unified Probe
-    // Panel on the 🔍 tab so the user lands on the active agent's
+    // Issue #376 — clicking the +/~/- chip opens the unified Probe Panel
+    // on the 🔍 tab so the user lands on the active agent's
     // AgentReviewPanel.
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
     useUIStore.setState({
       probeOpen: false,
       probeTab: 'files',
-      fileExplorerContext: null,
     });
     const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
 
@@ -271,23 +261,18 @@ describe('GridNodeHeader PR chip', () => {
     const state = useUIStore.getState();
     expect(state.probeOpen).toBe(true);
     expect(state.probeTab).toBe('review');
-    // The legacy `fileExplorerContext` must NOT be touched any more — it's
-    // reserved for the in-flight migration of FileExplorerPanel consumers.
-    expect(state.fileExplorerContext).toBeNull();
   });
 
   it('focuses this node when the chip is clicked, so the review tab shows THIS node\'s diff', () => {
-    // Regression guard: the legacy `toggleFileExplorer` was per-node
-    // (passed an explicit nodeId). The new flow routes through
-    // `AgentChangesTab` which reads `useProbeContext().activeNodeId`, so
-    // if the chip click doesn't also focus this node, the user lands on
-    // whichever node was last focused — a different terminal's review.
+    // Regression guard: the new flow routes through `AgentChangesTab`
+    // which reads `useProbeContext().activeNodeId`. If the chip click
+    // doesn't also focus this node, the user lands on whichever node
+    // was last focused — a different terminal's review.
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     prMock.mockReturnValue(null);
     useUIStore.setState({
       probeOpen: false,
       probeTab: 'files',
-      fileExplorerContext: null,
     });
     // Pre-focus a DIFFERENT node (not NODE) — if the chip click doesn't
     // also set activeNodeId, the probe would render that other node's
