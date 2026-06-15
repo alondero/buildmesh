@@ -5,7 +5,6 @@ import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { UncommittedChangesSection } from './UncommittedChangesSection';
 import { AiContextSection } from './AiContextSection';
-import { BranchesWorktreesSection } from './BranchesWorktreesSection';
 import { useMeshGitStatus } from '../../hooks/useMeshGitStatus';
 import { listProviders, ProviderInfo } from '../../lib/tauri';
 import {
@@ -424,8 +423,7 @@ export function MeshPropertiesPanel() {
                 />
               </div>
 
-              {/* Branches & Worktrees */}
-              <BranchesWorktreesSection meshId={propertiesPanelMeshId} meshPath={mesh.path} />
+              {/* Branches & Worktrees — extracted to 🌳 Worktree Manager tab (issue #377). */}
             </>
           )}
         </div>
