@@ -261,26 +261,22 @@ describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', (
     expect(useUIStore.getState().probeTab).toBe('issues');
   });
 
-  it('clears activeDiffFile when leaving the review tab', () => {
-    // Regression for a bug introduced when the new probe-tab entry
-    // point was added: opening a diff on Review, then right-clicking
-    // Properties, used to leave the diff file lingering in the store.
-    // `setProbeTab` already cleared it; `openProbeTab` routes through
-    // `setProbeTab` so the invariant is inherited.
-    useUIStore.setState({ probeTab: 'review', activeDiffFile: 'src/foo.ts' });
+  it('does not touch activeDiffFile when switching tabs (#379)', () => {
+    // The Center Workspace Diff Overlay floats over the terminal grid and is
+    // independent of the active tab, so opening a probe tab (even right-
+    // clicking Properties) leaves the open diff alone — it closes only via
+    // Esc / "Back to Terminals" or the overlay's own auto-close.
+    const ctx = {
+      filePath: 'src/foo.ts',
+      rootPath: '/repo',
+      nodeId: 7,
+      meshId: 1,
+      source: 'base' as const,
+    };
+    useUIStore.setState({ probeTab: 'review', activeDiffFile: ctx });
     useUIStore.getState().openProbeTab('properties');
     expect(useUIStore.getState().probeTab).toBe('properties');
     expect(useUIStore.getState().probeOpen).toBe(true);
-    expect(useUIStore.getState().activeDiffFile).toBeNull();
-  });
-
-  it('preserves activeDiffFile when switching back to review', () => {
-    // The opposite direction: if a diff is set and we re-open review
-    // via `openProbeTab('review')`, the file must stay so the user
-    // doesn't lose the file they were just inspecting.
-    useUIStore.setState({ probeTab: 'files', activeDiffFile: 'src/foo.ts' });
-    useUIStore.getState().openProbeTab('review');
-    expect(useUIStore.getState().probeTab).toBe('review');
-    expect(useUIStore.getState().activeDiffFile).toBe('src/foo.ts');
+    expect(useUIStore.getState().activeDiffFile).toEqual(ctx);
   });
 });

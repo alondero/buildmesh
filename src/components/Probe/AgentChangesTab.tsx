@@ -11,20 +11,41 @@
  * The review surface itself is unchanged from PR #170 — every file the
  * agent changed since branching, sticky summary bar, jump-to-file index
  * built from the per-file sticky headers, and a collapsible FileTree for
- * opening any (even unchanged) file in the editor. The only thing this
- * component adds is the binding to the Probe context.
+ * opening any (even unchanged) file in the editor. This component adds the
+ * binding to the Probe context, plus (issue #379) the per-file handoff to
+ * the Center Workspace Diff Overlay.
+ *
+ * The overlay's diff baseline is `'base'` here — Agent Changes reviews
+ * everything the node changed since branching (merge-base, ADR 0005), so the
+ * overlay shows the same "vs base" view via `diff_node_file_against_base`.
  */
 
 import { AgentReviewPanel } from '../FileTree/AgentReviewPanel';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useUIStore } from '../../stores/uiStore';
 
 export function AgentChangesTab() {
-  const { activeNodeId, activePath } = useProbeContext();
+  const { activeNodeId, activePath, activeMeshId } = useProbeContext();
+  const openDiff = useUIStore((s) => s.openDiff);
 
-  // ProbeTabBody gates on `activeNodeId !== null` before mounting this
-  // component, so the assertion is a type-narrowing convenience rather
-  // than a runtime guard.
-  if (activeNodeId === null || activePath === null) return null;
+  // ProbeTabBody gates on `activeNodeId !== null` (and a selected mesh) before
+  // mounting this component, so the guard is a type-narrowing convenience
+  // rather than a runtime guard.
+  if (activeNodeId === null || activePath === null || activeMeshId === null) return null;
 
-  return <AgentReviewPanel nodeId={activeNodeId} rootPath={activePath} />;
+  // Clicking a file's "open in center" button pops it into the spacious
+  // overlay. We capture the focused node/mesh as the lens so the overlay
+  // auto-closes if the user later focuses a different node or project.
+  const handleOpenFile = (filePath: string) =>
+    openDiff({
+      filePath,
+      rootPath: activePath,
+      nodeId: activeNodeId,
+      meshId: activeMeshId,
+      source: 'base',
+    });
+
+  return (
+    <AgentReviewPanel nodeId={activeNodeId} rootPath={activePath} onOpenFile={handleOpenFile} />
+  );
 }

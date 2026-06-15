@@ -106,9 +106,14 @@ function HunkBlock({ hunk, last }: { hunk: DiffHunk; last: boolean }) {
 export function FileDiffCard({
   file,
   defaultOpen = true,
+  onOpenFile,
 }: {
   file: FileDiff;
   defaultOpen?: boolean;
+  /** When set, the header shows an "open in the center overlay" button that
+   *  calls this with the file's path (issue #379). Omit it where there's no
+   *  spacious surface to open into (e.g. the overlay renders its own diff). */
+  onOpenFile?: (path: string) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const meta = statusMeta(file.status);
@@ -150,6 +155,43 @@ export function FileDiffCard({
         {file.deletions > 0 && (
           <span className="text-accent-red flex-shrink-0 font-mono text-[11px]">
             -{file.deletions}
+          </span>
+        )}
+        {onOpenFile && (
+          // Rendered as a sibling — nesting a <button> inside the header
+          // button is invalid HTML and breaks click handling. `stopPropagation`
+          // keeps the expand from also toggling the card's collapse.
+          <span
+            role="button"
+            tabIndex={0}
+            aria-label={`Open ${file.path} in the center diff overlay`}
+            title="Open in center workspace"
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenFile(file.path);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                onOpenFile(file.path);
+              }
+            }}
+            className="flex-shrink-0 text-text-muted hover:text-accent-cyan transition-colors cursor-pointer"
+          >
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M15 3h6v6M14 10l7-7M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+            </svg>
           </span>
         )}
       </button>
@@ -195,7 +237,14 @@ export function diffTotals(files: FileDiff[]): DiffTotals {
 }
 
 /** Stacked review surface: every changed file's diff in one scroll column. */
-export function Diff({ files }: { files: FileDiff[] }) {
+export function Diff({
+  files,
+  onOpenFile,
+}: {
+  files: FileDiff[];
+  /** Threaded to each card's "open in center overlay" affordance (#379). */
+  onOpenFile?: (path: string) => void;
+}) {
   if (files.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-text-muted text-xs">
@@ -206,7 +255,7 @@ export function Diff({ files }: { files: FileDiff[] }) {
   return (
     <div>
       {files.map((file) => (
-        <FileDiffCard key={file.path} file={file} />
+        <FileDiffCard key={file.path} file={file} onOpenFile={onOpenFile} />
       ))}
     </div>
   );
