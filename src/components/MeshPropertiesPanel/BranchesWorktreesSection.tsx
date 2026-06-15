@@ -1,38 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
+import { useMeshRecovery } from '../../hooks/useMeshRecovery';
 import {
-  restoreMeshToBase,
-  freeBaseBranch,
-  type MeshHealth,
+  deleteBranches,
+  deleteWorktrees,
+  getGitPruneInfo,
+  pruneRemoteTracking,
+  type BranchInfo,
+  type GitRepoPruneInfo,
   type HoldingWorktree,
+  type MeshHealth,
+  type WorktreeInfo,
 } from '../../lib/tauri';
-
-interface BranchInfo {
-  name: string;
-  is_head: boolean;
-  is_merged_into_main: boolean | null;
-  is_orphan: boolean;
-  has_uncommitted: boolean;
-  last_commit_date: string | null;
-  ahead: number;
-  behind: number;
-}
-
-interface WorktreeInfo {
-  path: string;
-  branch: string | null;
-  is_active: boolean;
-  is_stale: boolean;
-}
-
-interface GitRepoPruneInfo {
-  path: string;
-  local_branches: BranchInfo[];
-  worktrees: WorktreeInfo[];
-  remote_tracking_branches: string[];
-}
 
 interface Props {
   meshId: number;
@@ -81,11 +61,6 @@ export function BranchesWorktreesSection({ meshId, meshPath }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  // Health recovery: track in-flight actions and the last result so the
-  // UI can disable buttons during the call and show a one-line status.
-  const [restoreInFlight, setRestoreInFlight] = useState(false);
-  const [freeInFlight, setFreeInFlight] = useState(false);
-  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
   // The hook is keyed on `meshId`; meshPath lets the GIT_CHANGED listener
   // fire on background `git checkout` events from outside the app, so the
   // health block stays in sync with the root's actual HEAD without a
@@ -95,7 +70,10 @@ export function BranchesWorktreesSection({ meshId, meshPath }: Props) {
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
-    invoke<GitRepoPruneInfo[]>('get_git_prune_info', { meshId })
+    // Return the promise so callers can sequence work AFTER load() has
+    // finished clearing its own error state (handleDelete needs this so
+    // its partial-failure error message isn't wiped by load's setError(null)).
+    return getGitPruneInfo(meshId)
       .then((data) => {
         setRepos(data);
         setSelected(new Set());
@@ -111,35 +89,16 @@ export function BranchesWorktreesSection({ meshId, meshPath }: Props) {
     }
   }, [collapsed, repos.length, loading, error, load]);
 
-  const handleRestore = async () => {
-    setRestoreInFlight(true);
-    setRecoveryMessage(null);
-    try {
-      const result = await restoreMeshToBase(meshId);
-      setRecoveryMessage(result.message);
-      refreshHealth();
-      load();
-    } catch (e) {
-      setRecoveryMessage(`Restore error: ${e}`);
-    } finally {
-      setRestoreInFlight(false);
-    }
-  };
-
-  const handleFree = async (holder: HoldingWorktree) => {
-    setFreeInFlight(true);
-    setRecoveryMessage(null);
-    try {
-      const result = await freeBaseBranch(meshId, holder.path);
-      setRecoveryMessage(`Freed base branch at ${result.detached_at_sha}`);
-      refreshHealth();
-      load();
-    } catch (e) {
-      setRecoveryMessage(`Free error: ${e}`);
-    } finally {
-      setFreeInFlight(false);
-    }
-  };
+  // Recovery actions (restore root to base / free a hostage branch) live in
+  // `useMeshRecovery` (issue #283). The hook owns the in-flight flag + the
+  // one-line status message + the "always invalidate both caches on success"
+  // rule, so the section can focus on the prune UI.
+  const refreshAfterRecovery = useCallback(() => {
+    refreshHealth();
+    load();
+  }, [refreshHealth, load]);
+  const { restore, free, inFlight: recoveryInFlight, message: recoveryMessage } =
+    useMeshRecovery(meshId, refreshAfterRecovery);
 
   // Has this mesh got any health signal to surface?
   const hasHealthSignal =
@@ -204,22 +163,26 @@ export function BranchesWorktreesSection({ meshId, meshPath }: Props) {
     try {
       for (const [repoPath, names] of branchesByRepo) {
         try {
-          await invoke('delete_branches', { worktreePath: repoPath, branchNames: names });
+          await deleteBranches(repoPath, names);
         } catch (e) {
           errors.push(String(e));
         }
       }
       if (worktreePaths.length > 0) {
         try {
-          await invoke('delete_worktrees', { worktreePaths });
+          await deleteWorktrees(worktreePaths);
         } catch (e) {
           errors.push(String(e));
         }
       }
     } finally {
       setDeleting(false);
+      // Refresh FIRST so load()'s own setError(null) runs, then restore
+      // the partial-failure message on top. Pre-fix the message was wiped
+      // because load() was fire-and-forget and its synchronous setError(null)
+      // immediately clobbered the error we'd just set.
+      await load();
       if (errors.length > 0) setError(errors.join('; '));
-      load();
     }
   };
 
@@ -272,9 +235,9 @@ export function BranchesWorktreesSection({ meshId, meshPath }: Props) {
           {hasHealthSignal && health && (
             <HealthBlock
               health={health}
-              inFlight={restoreInFlight || freeInFlight}
-              onRestore={handleRestore}
-              onFree={handleFree}
+              inFlight={recoveryInFlight}
+              onRestore={restore}
+              onFree={free}
               message={recoveryMessage}
             />
           )}
@@ -429,7 +392,7 @@ export function BranchesWorktreesSection({ meshId, meshPath }: Props) {
                       </p>
                       <button
                         onClick={() =>
-                          invoke('prune_remote_tracking', { worktreePath: repo.path })
+                          pruneRemoteTracking(repo.path)
                             .then(load)
                             .catch((e) => setError(String(e)))
                         }

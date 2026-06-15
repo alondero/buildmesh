@@ -38,7 +38,7 @@ export function Sidebar() {
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
-  const createAgentNode = useAgentNodeStore(state => state.createAgentNode);
+  const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
   // Issue #376: open the unified Probe Panel on the 📁 (Project Files) tab.
   // The Probe is the migration target for the legacy FileExplorerPanel; the
@@ -78,10 +78,10 @@ export function Sidebar() {
 
   const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
     setOpenDropdownFor(null);
+    // The create→activate→select-mesh dance + its rollback contract live in
+    // selectProviderForMesh (issue #283); this handler stays a thin UI shim.
     try {
-      const node = await createAgentNode(mesh.id, mesh.name, mesh.path, 'main', providerId, useWorktree);
-      await setActiveNode(node.id);
-      selectMesh(mesh.id);
+      await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree);
     } catch (e) {
       console.error('Failed to create node:', e);
     }

@@ -102,6 +102,47 @@ export const updateMeshName = (meshId: number, name: string) =>
 export const getDefaultProvider = (meshId: number) =>
   invoke<string>('get_default_provider', { meshId });
 
+// Mesh properties / configuration (issue #283)
+//
+// `MeshConfig` is the wire shape of `commands::mesh_config::get_mesh_properties`.
+// The Rust struct (`src-tauri/src/models/mod.rs`) only derives `serde::Serialize`,
+// not `TS`, so no generated type exists — keep the hand-written interface in
+// sync if the Rust struct changes (follow-up: derive `TS` once #359's
+// hand-kept-types backlog is being worked).
+export interface MeshConfig {
+  name: string | null;
+  build_command: string | null;
+  run_command: string | null;
+  model: string | null;
+  effort: string | null;
+  base_ref: string | null;
+  use_worktree: boolean;
+  worktree_mode?: string | null;
+  default_provider: string | null;
+}
+
+export const getMeshProperties = (meshId: number) =>
+  invoke<MeshConfig>('get_mesh_properties', { meshId });
+
+/** Generic mesh.toml field write: routes `(section, key, value)` to the
+ *  backend's `update_mesh_field`. Use it for fields with no DB-side
+ *  side-effects (model, effort, worktree_mode, default_provider, build /
+ *  run command). Fields with side-effects have dedicated commands —
+ *  `updateMeshUseWorktree` and `updateWorktreeBaseRef` below. */
+export const updateMeshField = (meshId: number, section: string, key: string, value: string) =>
+  invoke<void>('update_mesh_field', { meshId, section, key, value });
+
+export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
+  invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
+
+export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
+  invoke<void>('update_worktree_base_ref', { meshId, baseRef });
+
+import type { DetectedProject } from './projectPresets';
+
+export const detectMeshProject = (meshPath: string) =>
+  invoke<DetectedProject>('detect_mesh_project', { meshPath });
+
 // Agent
 export const spawnAgent = (
   sessionId: number,
@@ -269,6 +310,50 @@ export interface FreeResult {
 
 export const freeBaseBranch = (meshId: number, worktreePath: string) =>
   invoke<FreeResult>('free_base_branch', { meshId, worktreePath });
+
+// ── Git prune (branches & worktrees) ────────────────────────────────────────
+//
+// Mirrors the Rust structs in `src-tauri/src/models/mod.rs`. None of the
+// prune types derive `TS` (yet), so the wire shapes are hand-written here —
+// keep in sync if a Rust field is added/renamed.
+
+export interface BranchInfo {
+  name: string;
+  is_head: boolean;
+  /** null when the repo has no main/master branch to compare against. */
+  is_merged_into_main: boolean | null;
+  is_orphan: boolean;
+  has_uncommitted: boolean;
+  last_commit_date: string | null;
+  ahead: number;
+  behind: number;
+}
+
+export interface WorktreeInfo {
+  path: string;
+  branch: string | null;
+  is_active: boolean;
+  is_stale: boolean;
+}
+
+export interface GitRepoPruneInfo {
+  path: string;
+  local_branches: BranchInfo[];
+  worktrees: WorktreeInfo[];
+  remote_tracking_branches: string[];
+}
+
+export const getGitPruneInfo = (meshId: number) =>
+  invoke<GitRepoPruneInfo[]>('get_git_prune_info', { meshId });
+
+export const deleteBranches = (worktreePath: string, branchNames: string[]) =>
+  invoke<void>('delete_branches', { worktreePath, branchNames });
+
+export const deleteWorktrees = (worktreePaths: string[]) =>
+  invoke<void>('delete_worktrees', { worktreePaths });
+
+export const pruneRemoteTracking = (worktreePath: string) =>
+  invoke<void>('prune_remote_tracking', { worktreePath });
 
 // Attention
 export const registerAttentionSession = (sessionId: number) =>

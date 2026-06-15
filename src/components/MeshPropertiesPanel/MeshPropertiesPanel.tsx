@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useMeshStore } from '../../stores/meshStore';
+import { useMeshPropertiesStore } from '../../stores/meshPropertiesStore';
 import { useUIStore } from '../../stores/uiStore';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { UncommittedChangesSection } from './UncommittedChangesSection';
@@ -11,21 +11,8 @@ import { listProviders, ProviderInfo } from '../../lib/tauri';
 import {
   PROJECT_PRESETS,
   resolvePreset,
-  type DetectedProject,
   type ProjectPreset,
 } from '../../lib/projectPresets';
-
-interface MeshConfig {
-  name: string | null;
-  build_command: string | null;
-  run_command: string | null;
-  model: string | null;
-  effort: string | null;
-  base_ref: string | null;
-  use_worktree: boolean;
-  worktree_mode?: string | null;
-  default_provider: string | null;
-}
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Not set' },
@@ -60,7 +47,20 @@ export function MeshPropertiesPanel() {
   const deleteMesh = useMeshStore((s) => s.deleteMesh);
   const selectMesh = useMeshStore((s) => s.selectMesh);
 
-  const [, setInitialConfig] = useState<MeshConfig | null>(null);
+  // The headless intake (issue #283): one store owns load / save(field, value)
+  // / applyPreset for every panel auto-save. The component holds only the
+  // form's editing buffer (cursor positions, mid-typing values) and binds
+  // its blur/change handlers to `save`. Component pattern: `await save(...)`
+  // then optionally `git?.refresh()` — the git side-effect stays here, not
+  // in the store, because it's a render concern of the panel layout.
+  const config = useMeshPropertiesStore((s) => s.config);
+  const detected = useMeshPropertiesStore((s) => s.detected);
+  const loading = useMeshPropertiesStore((s) => s.loading);
+  const loadProperties = useMeshPropertiesStore((s) => s.load);
+  const saveProperty = useMeshPropertiesStore((s) => s.save);
+  const applyPresetStore = useMeshPropertiesStore((s) => s.applyPreset);
+  const resetProperties = useMeshPropertiesStore((s) => s.reset);
+
   const [form, setForm] = useState({
     name: '',
     model: '',
@@ -73,14 +73,11 @@ export function MeshPropertiesPanel() {
     defaultProvider: '',
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
-  const [detected, setDetected] = useState<DetectedProject | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
 
   const git = useMeshGitStatus(mesh?.path ?? null);
 
-  // Load config on mount
   useEffect(() => {
     mountedRef.current = true;
     return () => { mountedRef.current = false; };
@@ -90,141 +87,51 @@ export function MeshPropertiesPanel() {
     listProviders().then(setProviders).catch(() => {});
   }, []);
 
+  // Drive the store's load when the panel opens for a (new) mesh; reset
+  // when it closes so a re-open starts from `loading=true` rather than
+  // flashing the previous mesh's values.
   useEffect(() => {
-    if (propertiesPanelMeshId == null || !mesh?.path) return;
-    setDetected(null);
-    invoke<DetectedProject>('detect_mesh_project', { meshPath: mesh.path })
-      .then((d) => {
-        if (mountedRef.current) setDetected(d);
-      })
-      .catch(() => {
-        if (mountedRef.current) setDetected(null);
-      });
-  }, [propertiesPanelMeshId, mesh?.path]);
+    if (propertiesPanelMeshId == null || !mesh?.path) {
+      resetProperties();
+      return;
+    }
+    loadProperties(propertiesPanelMeshId, mesh.path);
+  }, [propertiesPanelMeshId, mesh?.path, loadProperties, resetProperties]);
 
+  // Mirror the loaded config into the form's editing buffer once it arrives.
+  // The form is a controlled-input mirror, not the source of truth — the
+  // store is authoritative.
   useEffect(() => {
-    if (propertiesPanelMeshId == null) return;
-    setLoading(true);
-    invoke<MeshConfig>('get_mesh_properties', { meshId: propertiesPanelMeshId })
-      .then((config) => {
-        setInitialConfig(config);
-        const folderName = mesh?.path.split(/[/\\]/).pop() ?? '';
-        const resolvedName = config.name || mesh?.name || folderName;
-        setForm({
-          name: resolvedName,
-          model: config.model ?? '',
-          effort: config.effort ?? '',
-          useWorktree: config.use_worktree,
-          baseRef: config.base_ref === 'HEAD' ? 'head' : 'fresh',
-          worktreeMode: config.worktree_mode ?? DEFAULT_WORKTREE_MODE,
-          buildCommand: config.build_command ?? '',
-          runCommand: config.run_command ?? '',
-          defaultProvider: config.default_provider ?? '',
-        });
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [propertiesPanelMeshId, mesh?.name, mesh?.path]);
+    if (!config) return;
+    const folderName = mesh?.path.split(/[/\\]/).pop() ?? '';
+    const resolvedName = config.name || mesh?.name || folderName;
+    setForm({
+      name: resolvedName,
+      model: config.model ?? '',
+      effort: config.effort ?? '',
+      useWorktree: config.use_worktree,
+      baseRef: config.base_ref === 'HEAD' ? 'head' : 'fresh',
+      worktreeMode: config.worktree_mode ?? DEFAULT_WORKTREE_MODE,
+      buildCommand: config.build_command ?? '',
+      runCommand: config.run_command ?? '',
+      defaultProvider: config.default_provider ?? '',
+    });
+  }, [config, mesh?.name, mesh?.path]);
 
-  // Auto-save helpers — each returns a promise so callers can await then refetch
+  // The name auto-save still routes through `useMeshStore.updateMeshName`
+  // because the sidebar reads `mesh.name` from there and would otherwise
+  // miss the optimistic update.
   const saveName = async (name: string) => {
     if (name !== mesh?.name) {
       await updateMeshName(propertiesPanelMeshId!, name);
     }
   };
 
-  const saveModel = async (value: string) => {
-    await invoke('update_mesh_field', {
-      meshId: propertiesPanelMeshId,
-      section: 'agent',
-      key: 'model',
-      value: value || '',
-    });
-  };
-
-  const saveEffort = async (value: string) => {
-    if (value) {
-      await invoke('update_mesh_field', {
-        meshId: propertiesPanelMeshId,
-        section: 'agent',
-        key: 'effort',
-        value,
-      });
-    }
-  };
-
-  const saveUseWorktree = async (value: boolean) => {
-    await invoke('update_mesh_use_worktree', {
-      meshId: propertiesPanelMeshId,
-      useWorktree: value,
-    });
-  };
-
-  const saveBaseRef = async (value: string) => {
-    await invoke('update_worktree_base_ref', {
-      meshId: propertiesPanelMeshId,
-      baseRef: value,
-    });
-  };
-
-  const saveWorktreeMode = async (value: string) => {
-    await invoke('update_mesh_field', {
-      meshId: propertiesPanelMeshId,
-      section: 'agent',
-      key: 'worktree_mode',
-      value,
-    });
-  };
-
-  const saveBuildCommand = async (value: string) => {
-    await invoke('update_mesh_field', {
-      meshId: propertiesPanelMeshId,
-      section: 'build',
-      key: 'command',
-      value,
-    });
-  };
-
-  const saveRunCommand = async (value: string) => {
-    await invoke('update_mesh_field', {
-      meshId: propertiesPanelMeshId,
-      section: 'run',
-      key: 'command',
-      value,
-    });
-  };
-
-  const saveDefaultProvider = async (value: string) => {
-    await invoke('update_mesh_field', {
-      meshId: propertiesPanelMeshId,
-      section: 'agent',
-      key: 'default_provider',
-      value,
-    });
-  };
-
-  const applyPreset = async (preset: ProjectPreset) => {
-    setForm((p) => ({ ...p, buildCommand: preset.build, runCommand: preset.run }));
-    await Promise.all([
-      invoke('update_mesh_field', {
-        meshId: propertiesPanelMeshId,
-        section: 'build',
-        key: 'command',
-        value: preset.build,
-      }),
-      invoke('update_mesh_field', {
-        meshId: propertiesPanelMeshId,
-        section: 'run',
-        key: 'command',
-        value: preset.run,
-      }),
-    ]);
-  };
-
   const applyPresetById = async (id: string) => {
-    const preset = resolvePreset(id, detected?.node_scripts);
+    const preset: ProjectPreset | undefined = resolvePreset(id, detected?.node_scripts);
     if (!preset) return;
-    await applyPreset(preset);
+    setForm((p) => ({ ...p, buildCommand: preset.build, runCommand: preset.run }));
+    await applyPresetStore(preset);
     git?.refresh();
   };
 
@@ -335,7 +242,7 @@ export function MeshPropertiesPanel() {
                   onChange={(e) => setForm((p) => ({ ...p, model: e.target.value }))}
                   onBlur={async (e) => {
                     if (!mountedRef.current) return;
-                    await saveModel(e.target.value);
+                    await saveProperty('model', e.target.value);
                     git?.refresh();
                   }}
                   placeholder="e.g., opus-4, sonnet-4"
@@ -352,7 +259,7 @@ export function MeshPropertiesPanel() {
                   value={form.effort}
                   onChange={async (e) => {
                     setForm((p) => ({ ...p, effort: e.target.value }));
-                    await saveEffort(e.target.value);
+                    await saveProperty('effort', e.target.value);
                     git?.refresh();
                   }}
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
@@ -370,7 +277,7 @@ export function MeshPropertiesPanel() {
                   value={form.defaultProvider}
                   onChange={async (e) => {
                     setForm((p) => ({ ...p, defaultProvider: e.target.value }));
-                    await saveDefaultProvider(e.target.value);
+                    await saveProperty('defaultProvider', e.target.value);
                   }}
                   className="w-full bg-[#1a1a2e] border border-[#2a2a2a] rounded px-2 py-1.5 text-sm text-[#e0e0e0] focus:outline-none focus:border-[#00d4ff]"
                 >
@@ -424,7 +331,7 @@ export function MeshPropertiesPanel() {
                     checked={form.useWorktree}
                     onChange={async (e) => {
                       setForm((p) => ({ ...p, useWorktree: e.target.checked }));
-                      await saveUseWorktree(e.target.checked);
+                      await saveProperty('useWorktree', e.target.checked);
                       git?.refresh();
                     }}
                     className="accent-[#00d4ff]"
@@ -446,7 +353,7 @@ export function MeshPropertiesPanel() {
                               checked={form.baseRef === o.value}
                               onChange={async (e) => {
                                 setForm((p) => ({ ...p, baseRef: e.target.value }));
-                                await saveBaseRef(e.target.value);
+                                await saveProperty('baseRef', e.target.value);
                                 git?.refresh();
                               }}
                               className="mt-0.5 accent-[#00d4ff]"
@@ -469,7 +376,7 @@ export function MeshPropertiesPanel() {
                               checked={form.worktreeMode === o.value}
                               onChange={async (e) => {
                                 setForm((p) => ({ ...p, worktreeMode: e.target.value }));
-                                await saveWorktreeMode(e.target.value);
+                                await saveProperty('worktreeMode', e.target.value);
                                 git?.refresh();
                               }}
                               className="mt-0.5 accent-[#00d4ff]"
@@ -492,7 +399,7 @@ export function MeshPropertiesPanel() {
                   onChange={(e) => setForm((p) => ({ ...p, buildCommand: e.target.value }))}
                   onBlur={async (e) => {
                     if (!mountedRef.current) return;
-                    await saveBuildCommand(e.target.value);
+                    await saveProperty('buildCommand', e.target.value);
                     git?.refresh();
                   }}
                   placeholder="npm run build"
@@ -509,7 +416,7 @@ export function MeshPropertiesPanel() {
                   onChange={(e) => setForm((p) => ({ ...p, runCommand: e.target.value }))}
                   onBlur={async (e) => {
                     if (!mountedRef.current) return;
-                    await saveRunCommand(e.target.value);
+                    await saveProperty('runCommand', e.target.value);
                     git?.refresh();
                   }}
                   placeholder="npm run dev"

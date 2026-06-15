@@ -6,6 +6,7 @@ import {
   useAgentNodeStore,
   type AgentNode,
 } from '../../src/stores/agentNodeStore';
+import { useMeshStore } from '../../src/stores/meshStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
@@ -48,6 +49,15 @@ describe('useAgentNodeStore', () => {
     });
     vi.clearAllMocks();
     setWorktreeCloseActionResolverForTests();
+    // selectProviderForMesh reaches into useMeshStore — keep it clean too so
+    // a leftover selectedMeshId from a sibling test can't mask a rollback bug.
+    useMeshStore.setState({
+      meshes: [],
+      meshesById: new Map(),
+      selectedMeshId: null,
+      loading: false,
+      error: null,
+    });
   });
 
   describe('fetchAgentNodes', () => {
@@ -145,6 +155,69 @@ describe('useAgentNodeStore', () => {
       ).rejects.toThrow('Duplicate path');
 
       expect(useAgentNodeStore.getState().error).toContain('Duplicate path');
+    });
+  });
+
+  describe('selectProviderForMesh', () => {
+    // The whole point of pulling this orchestration out of Sidebar.handleSelectProvider
+    // (issue #283): the create-then-activate-then-select-mesh sequence enforces ONE
+    // invariant — "only switch active mesh/node if creation succeeded" — and the
+    // invariant lives next to the orchestration, not in each click handler.
+
+    it('creates the node, then sets it active, then selects the mesh', async () => {
+      const newNode = {
+        id: 42, mesh_id: 7, name: 'mesh-7', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: true, position: 0,
+      };
+      mockInvoke.mockResolvedValueOnce(newNode); // create_session
+
+      const result = await useAgentNodeStore.getState().selectProviderForMesh(
+        7, 'mesh-7', '/p', 'anthropic', undefined,
+      );
+
+      expect(result.id).toBe(42);
+      expect(mockInvoke).toHaveBeenCalledWith('create_session', {
+        meshId: 7, name: 'mesh-7', path: '/p', branch: 'main',
+        provider: 'anthropic', useWorktree: undefined,
+      });
+      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(1);
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
+      expect(useMeshStore.getState().selectedMeshId).toBe(7);
+    });
+
+    it('passes useWorktree=false through to create_session (mesh-root spawn)', async () => {
+      // Alt-click on + spawns in the mesh root: that signal must reach the
+      // backend, otherwise the new node gets a worktree it shouldn't have.
+      const newNode = {
+        id: 43, mesh_id: 7, name: 'm', path: '/p', branch: 'main',
+        env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
+        use_worktree: false, position: 0,
+      };
+      mockInvoke.mockResolvedValueOnce(newNode);
+
+      await useAgentNodeStore.getState().selectProviderForMesh(7, 'm', '/p', 'anthropic', false);
+
+      expect(mockInvoke).toHaveBeenCalledWith('create_session', expect.objectContaining({
+        useWorktree: false,
+      }));
+    });
+
+    it('does NOT switch the active mesh when node creation fails (the bug fix)', async () => {
+      // Pre-seed: a different mesh is selected. If creation fails the
+      // active-mesh selection must NOT move to the new mesh — that was the
+      // "mesh selected but no node exists" half-applied state called out by
+      // the issue.
+      useMeshStore.setState({ selectedMeshId: 99 });
+      mockInvoke.mockRejectedValueOnce(new Error('create_session failed'));
+
+      await expect(
+        useAgentNodeStore.getState().selectProviderForMesh(7, 'm', '/p', 'anthropic', undefined)
+      ).rejects.toThrow('create_session failed');
+
+      expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
+      expect(useMeshStore.getState().selectedMeshId).toBe(99); // unchanged
+      expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
     });
   });
 

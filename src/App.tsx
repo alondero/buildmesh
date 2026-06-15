@@ -150,11 +150,16 @@ function App() {
           const mesh = useMeshStore.getState().meshesById.get(meshId);
           if (!mesh) return;
           const provider = activeNode?.provider ?? 'anthropic';
-          const branch = activeNode?.branch ?? 'main';
-          const path = activeNode?.path ?? mesh.path;
-          const node = await useAgentNodeStore.getState().createAgentNode(mesh.id, mesh.name, path, branch, provider);
-          useAgentNodeStore.getState().setActiveNode(node.id);
-          useMeshStore.getState().selectMesh(mesh.id);
+          // Route through the same store action the sidebar uses (issue #283)
+          // so the create→activate→select-mesh invariant ("no half-applied
+          // mesh-selected-but-no-node state") lives in exactly one place.
+          // The action uses branch='main'; the keyboard shortcut previously
+          // copied activeNode?.branch — branch wasn't actually wired through
+          // create_session here, since the sidebar's spawn path already
+          // passes 'main' too.
+          await useAgentNodeStore
+            .getState()
+            .selectProviderForMesh(mesh.id, mesh.name, mesh.path, provider, undefined);
         });
       } else if (action.startsWith('switch-')) {
         const index = parseInt(action.replace('switch-', '')) - 1;
