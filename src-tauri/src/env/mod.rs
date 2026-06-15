@@ -241,6 +241,17 @@ pub struct ResolvedPath {
     pub host_path: String,
     /// Path to use as CWD when spawning agent/shell processes.
     pub spawn_path: String,
+    /// The input `base_path`, optionally with a `/`-separated
+    /// `.claude/worktrees/{trimmed_name}` appended for a Worktree Node. The
+    /// "raw" form is input-pass-through — `node.path` is whatever was stored
+    /// in the DB (POSIX `/home/...`, Windows native `C:\...`, or WSL UNC
+    /// `\\wsl$\...`), and the worktree subdir is appended with `/` regardless
+    /// of host. This is the input to `to_host_path` / `to_spawn_path` and
+    /// the form the frontend's `getNodeGitPath` (in `src/lib/paths.ts`)
+    /// mirrors for the GIT_CHANGED subscription. Exposed so callers like
+    /// `file_watcher` can stop re-spelling the worktree rule and consume
+    /// the single canonical authority (issue #409).
+    pub raw_path: String,
     /// The detected environment type for this path.
     pub env_type: EnvType,
 }
@@ -255,7 +266,7 @@ pub struct ResolvedPath {
 /// Returns a `ResolvedPath` with host, spawn, and env fields populated.
 pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> ResolvedPath {
     // Compute the effective path (with worktree if applicable)
-    let effective_path = match worktree_name {
+    let raw_path = match worktree_name {
         Some(wt_name) if !wt_name.is_empty() => {
             format!("{}/.claude/worktrees/{}", base_path, wt_name)
         }
@@ -263,16 +274,16 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
     };
 
     // Detect environment from the effective path
-    let path_buf = PathBuf::from(&effective_path);
+    let path_buf = PathBuf::from(&raw_path);
     let env_internal = env_for_path(&path_buf);
     let env_type = EnvType::from(env_internal);
 
     // On macOS, paths are always native — no WSL conversion needed.
     // On Windows, convert based on detected environment.
     let (host_path, spawn_path) = if cfg!(target_os = "macos") {
-        (effective_path.clone(), effective_path)
+        (raw_path.clone(), raw_path.clone())
     } else {
-        let host = to_host_path(&effective_path);
+        let host = to_host_path(&raw_path);
         let spawn = to_spawn_path(&path_buf).to_string_lossy().to_string();
         (host, spawn)
     };
@@ -280,6 +291,7 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
     ResolvedPath {
         host_path,
         spawn_path,
+        raw_path,
         env_type,
     }
 }
@@ -302,8 +314,11 @@ fn worktree_segment(node: &AgentNode) -> Option<&str> {
 /// `use_worktree` + (trimmed, non-empty) `worktree_name` rule; diff, PR,
 /// close-safety, removal, and the coordinator transcript reader all resolve
 /// through here so every layer agrees on a node's directory. Callers pick the
-/// `host_path` (Windows git2 / file ops) or the `spawn_path` (the path as the
-/// agent saw it — the form Claude Code encodes for its on-disk transcript dir).
+/// `host_path` (Windows git2 / file ops), the `spawn_path` (the path as the
+/// agent saw it — the form Claude Code encodes for its on-disk transcript
+/// dir), or the `raw_path` (the POSIX-style effective path; the string the
+/// GIT_CHANGED payload carries to the frontend's `getNodeGitPath()` for
+/// subscription matching, issue #409).
 ///
 /// Mirrors the frontend's `getNodeGitPath` in `src/lib/paths.ts` — keep the two
 /// in sync if the worktree layout ever changes (paired cross-language defaults,
@@ -601,5 +616,81 @@ mod tests {
             node_worktree_path(&n).map(|r| r.host_path),
             Some(node_working_path(&n).host_path)
         );
+    }
+
+    // ----- raw_path contract (issue #409) -----
+    //
+    // `raw_path` is the POSIX-style effective path (input to `to_host_path` /
+    // `to_spawn_path`) and the string the GIT_CHANGED payload carries to the
+    // frontend for `getNodeGitPath()` to subscribe on. These assertions pin
+    // that `env::node_working_path` is now the SOLE Rust definition of the
+    // worktree rule — `file_watcher::node_internal_path` was deleted and
+    // consumes `raw_path` instead. If any case here drifts, the GIT_CHANGED
+    // match contract breaks and changed-files go stale (issue #387).
+
+    /// Worktree Node: raw_path is `<base>/.claude/worktrees/<trimmed_name>`.
+    #[test]
+    fn raw_path_for_worktree_node_is_worktree_subdir() {
+        assert_eq!(
+            node_working_path(&node(true, Some("gentle-fox"))).raw_path,
+            "/home/user/my-repo/.claude/worktrees/gentle-fox"
+        );
+    }
+
+    /// Root Node: raw_path is the Mesh root regardless of a stale
+    /// `worktree_name`. Regression: without the `use_worktree` gate, a Root
+    /// Node with a stale `worktree_name` emitted a worktree subdir the
+    /// frontend never subscribed to (issue #383).
+    #[test]
+    fn raw_path_for_root_node_ignores_stale_worktree_name() {
+        assert_eq!(
+            node_working_path(&node(false, Some("gentle-fox"))).raw_path,
+            "/home/user/my-repo"
+        );
+    }
+
+    /// No worktree name → Mesh root.
+    #[test]
+    fn raw_path_without_worktree_name_is_mesh_root() {
+        assert_eq!(
+            node_working_path(&node(true, None)).raw_path,
+            "/home/user/my-repo"
+        );
+    }
+
+    /// Padded `worktree_name` is trimmed (parity with the frontend's
+    /// `getNodeGitPath()` in `src/lib/paths.ts`, issue #387).
+    #[test]
+    fn raw_path_for_padded_worktree_name_is_trimmed() {
+        assert_eq!(
+            node_working_path(&node(true, Some("  gentle-fox  "))).raw_path,
+            "/home/user/my-repo/.claude/worktrees/gentle-fox"
+        );
+    }
+
+    /// Whitespace-only worktree name trims to empty → Mesh root.
+    #[test]
+    fn raw_path_for_whitespace_only_worktree_name_is_mesh_root() {
+        assert_eq!(
+            node_working_path(&node(true, Some("   "))).raw_path,
+            "/home/user/my-repo"
+        );
+    }
+
+    /// `raw_path` is the input to `to_host_path` / `to_spawn_path` — the
+    /// "pre-transform" form. The raw/host/spawn triple is internally
+    /// consistent in that `raw_path` does NOT go through `to_host_path`; a
+    /// regression that routed `raw_path` through that conversion would
+    /// produce a UNC-shaped string on Windows and break the GIT_CHANGED
+    /// match contract (which depends on `raw_path` matching
+    /// `getNodeGitPath()` in the TS layer). This single value assertion
+    /// pins that contract for the standard Worktree Node fixture: if
+    /// `raw_path` ever diverges from `{base}/.claude/worktrees/{trimmed}`,
+    /// the regression is caught here.
+    #[test]
+    fn raw_path_is_effective_path_not_host_or_spawn_form() {
+        let n = node(true, Some("gentle-fox"));
+        let resolved = node_working_path(&n);
+        assert_eq!(resolved.raw_path, "/home/user/my-repo/.claude/worktrees/gentle-fox");
     }
 }

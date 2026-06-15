@@ -34,3 +34,38 @@ Buildmesh takes ownership of worktree creation:
 - **Regression — `base_ref` was orphaned.** `base_ref` (default `origin/main`) was introduced (`431e858`, 2026-05-08) as a value written to `{mesh}/.claude/settings.json` **for the CLI to consume**. When PR #51 removed the CLI's worktree logic, that consumer disappeared, but `base_ref` is still persisted and editable in the UI. `add_worktree_impl` never reads it — it bases every worktree off the Mesh root's live `repo.head()`. The only link to the remote is ADR 0001's best-effort fast-forward, which is silently skipped when the parent is dirty (now allowed, ADR 0002) or offline. Net effect: worktrees can be cut from a stale local HEAD with the configured base ref ignored. Tracked for repair in [#230](https://github.com/alondero/buildmesh/issues/230).
 - **`.worktreeinclude` directory copying is unimplemented** (`env/mod.rs`) — only individual files are copied; directory entries are logged and skipped.
 - **Doc debt:** `docs/knowledge-primer.md` (the "Worktree Support (`-w`)" section and the resume-fix note) still describes the delegated `-w` model as current and must be updated to reflect this decision.
+
+## Follow-up (issue #409): `raw_path` collapses the worktree-rule copy in `file_watcher`
+
+When PR #383 added the `use_worktree` gate and PR #387 added the trim to
+`file_watcher::node_internal_path`, the worktree rule (`use_worktree` +
+trimmed + non-empty `worktree_name` → `base_path` or
+`base_path/.claude/worktrees/<name>`) was spelled in three places, kept in
+lockstep by paired tests:
+
+1. `env::worktree_segment` + `env::node_working_path` — canonical Rust
+   authority (`src-tauri/src/env/mod.rs`).
+2. `file_watcher::node_internal_path` — paired Rust copy
+   (`src-tauri/src/commands/file_watcher.rs`).
+3. `getNodeGitPath` in `src/lib/paths.ts` — paired TS copy.
+
+#1↔#3 must stay paired (Tauri IPC async + React sync initial render rule, see
+`feedback_cross-language-default-coupling.md`). The two **Rust** copies were
+the architectural smell: the rule for "does this node have a worktree, and
+what's its dir?" lived in `env`, but `file_watcher` re-spelled it. The
+historical reason was that `ResolvedPath` only exposed `host_path` (Windows
+UNC) and `spawn_path` (the agent's CWD form), not the **raw** effective path
+the `file_watcher` GIT_CHANGED payload needed for the byte-identical-to-frontend
+contract.
+
+`env::node_working_path(...).raw_path` closes that gap: it's the POSIX-style
+effective path (the input to `to_host_path` / `to_spawn_path`), and it's
+exactly what the GIT_CHANGED `internal_path` field has always carried. The
+local `file_watcher::node_internal_path` was deleted and its call site now
+reads `resolved.raw_path`; the existing paired-test suite was re-pointed at
+`env::node_working_path(node).raw_path` to keep the contract pinned.
+
+Net effect: the rule is now defined once in Rust (`env::worktree_segment`).
+Any future change to GIT_CHANGED matching (case-folding at emission, WSL↔Windows
+canonicalisation) has exactly one place to change on the Rust side, and the
+TS paired copy remains the only cross-language coupling.
