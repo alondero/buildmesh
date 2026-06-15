@@ -62,7 +62,12 @@ pub struct UiMeta {
 
 /// Frontend-facing provider listing. Composed by `commands::agent::available_providers`
 /// from each adapter's `id()` + `ui()`.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// Generated to src/types/generated/ProviderInfo.ts (issue #404). `Deserialize`
+/// is added so the type participates in the ts-rs `export` derive (the project
+/// pattern is `Serialize + Deserialize + TS` for every generated wire type).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "ProviderInfo.ts")]
 pub struct ProviderInfo {
     pub id: String,
     pub label: String,

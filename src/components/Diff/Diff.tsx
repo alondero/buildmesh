@@ -16,7 +16,11 @@ interface StatusMeta {
   color: string;
 }
 
-// Mirrors the status vocabulary shared with `GitStatus.status`.
+// Mirrors the status vocabulary shared with `GitStatus.status`. The function
+// accepts any `string` (the generated `FileDiff.status` is `string`, not the
+// narrower hand-written `FileDiffStatus | ''` it replaced — see ADR-0009
+// "wider unions lose narrowing"); the table-lookup + `?? modified` fallback
+// handles anything the vocabulary doesn't cover.
 const STATUS_META: Record<FileDiffStatus, StatusMeta> = {
   added: { letter: 'A', label: 'Added', color: 'text-accent-green' },
   modified: { letter: 'M', label: 'Modified', color: 'text-accent-amber' },
@@ -25,7 +29,7 @@ const STATUS_META: Record<FileDiffStatus, StatusMeta> = {
   untracked: { letter: '?', label: 'Untracked', color: 'text-text-muted' },
 };
 
-export function statusMeta(status: FileDiffStatus | ''): StatusMeta {
+export function statusMeta(status: string): StatusMeta {
   return STATUS_META[status as FileDiffStatus] ?? STATUS_META.modified;
 }
 

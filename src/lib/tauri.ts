@@ -3,9 +3,34 @@ import { logFrontend } from './frontendLog';
 import { shapeArgs } from './ipcShape';
 import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
+import type { AiContextStatus } from '../types/generated/AiContextStatus';
+import type { AppPreferences } from '../types/generated/AppPreferences';
+import type { BranchInfo } from '../types/generated/BranchInfo';
+import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
+import type { DiffHunk } from '../types/generated/DiffHunk';
+import type { DiffLine } from '../types/generated/DiffLine';
+import type { DiffResult } from '../types/generated/DiffResult';
+import type { DiscoveredSession } from '../types/generated/DiscoveredSession';
+import type { FileDiff } from '../types/generated/FileDiff';
+import type { FileNode } from '../types/generated/FileNode';
+import type { FreeResult } from '../types/generated/FreeResult';
+import type { GitBranchStatus } from '../types/generated/GitBranchStatus';
 import type { GitHubIssue } from '../types/generated/GitHubIssue';
 import type { GitHubPullRequest } from '../types/generated/GitHubPullRequest';
+import type { GitRepoPruneInfo } from '../types/generated/GitRepoPruneInfo';
+import type { GitSummary } from '../types/generated/GitSummary';
+import type { GitSyncResult } from '../types/generated/GitSyncResult';
+import type { HoldingWorktree } from '../types/generated/HoldingWorktree';
+import type { IssueNodeDraft } from '../types/generated/IssueNodeDraft';
+import type { MeshConfig } from '../types/generated/MeshConfig';
+import type { MeshHealth } from '../types/generated/MeshHealth';
+import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
+import type { ProviderInfo } from '../types/generated/ProviderInfo';
+import type { ProviderUsage } from '../types/generated/ProviderUsage';
+import type { RestoreResult } from '../types/generated/RestoreResult';
+import type { UsageWindow } from '../types/generated/UsageWindow';
+import type { WorktreeInfo } from '../types/generated/WorktreeInfo';
 import type { WorktreeCloseSafety } from './worktreeClose';
 
 /**
@@ -49,49 +74,21 @@ async function _invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<
 
 export type DiffLineType = 'context' | 'add' | 'remove';
 
-export interface DiffLine {
-  line_type: DiffLineType;
-  content: string;
-  old_num: number | null;
-  new_num: number | null;
-}
+// Diff types — generated from the Rust structs in `src-tauri/src/models/mod.rs`
+// (issue #404). The Rust `status` / `line_type` fields are plain `String`, so
+// the generated types emit `string` (a wider union than the hand-written
+// versions used to carry); consumers that switch on them still compare fine.
+export type { DiffLine, DiffHunk, FileDiff, DiffResult };
 
-export interface DiffHunk {
-  old_start: number;
-  old_lines: number;
-  new_start: number;
-  new_lines: number;
-  old_highlighted: string;
-  new_highlighted: string;
-  lines: DiffLine[];
-  /** Per-line highlighted inline HTML, aligned 1:1 with `lines`. May be absent
-   *  for producers that only feed the side-by-side view. */
-  lines_highlighted?: string[];
-}
-
-/** Change kind, shared with `GitStatus.status`. */
+/** Change kind vocabulary, shared with `GitStatus.status`. Subset of the
+ *  `FileDiff.status` string union the generated type uses. Kept as a hand-typed
+ *  alias because it documents the closed set consumers can rely on. */
 export type FileDiffStatus =
   | 'added'
   | 'modified'
   | 'deleted'
   | 'renamed'
   | 'untracked';
-
-export interface FileDiff {
-  path: string;
-  hunks: DiffHunk[];
-  /** Empty string from older diff producers that don't set a status. */
-  status: FileDiffStatus | '';
-  /** Source path for renames; null otherwise. */
-  old_path: string | null;
-  additions: number;
-  deletions: number;
-  binary: boolean;
-}
-
-export interface DiffResult {
-  files: FileDiff[];
-}
 
 // Agent Node
 export const createSession = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) =>
@@ -165,21 +162,8 @@ export const getDefaultProvider = (meshId: number): Promise<string> => {
 // Mesh properties / configuration (issue #283)
 //
 // `MeshConfig` is the wire shape of `commands::mesh_config::get_mesh_properties`.
-// The Rust struct (`src-tauri/src/models/mod.rs`) only derives `serde::Serialize`,
-// not `TS`, so no generated type exists — keep the hand-written interface in
-// sync if the Rust struct changes (follow-up: derive `TS` once #359's
-// hand-kept-types backlog is being worked).
-export interface MeshConfig {
-  name: string | null;
-  build_command: string | null;
-  run_command: string | null;
-  model: string | null;
-  effort: string | null;
-  base_ref: string | null;
-  use_worktree: boolean;
-  worktree_mode?: string | null;
-  default_provider: string | null;
-}
+// Generated from `src-tauri/src/models/mod.rs` (issue #404).
+export type { MeshConfig };
 
 export const getMeshProperties = (meshId: number) =>
   _invoke<MeshConfig>('get_mesh_properties', { meshId });
@@ -252,12 +236,7 @@ export const unwatchSession = (sessionId: number) =>
   _invoke('unwatch_session', { sessionId });
 
 // File tree
-export interface FileNode {
-  name: string;
-  path: string;
-  is_dir: boolean;
-  children: FileNode[];
-}
+export type { FileNode };
 
 export const listDirectory = (path: string, maxDepth?: number) =>
   _invoke<FileNode>('list_directory', { path, maxDepth });
@@ -281,28 +260,12 @@ export type { GitStatus };
 export const getGitStatus = (path: string) =>
   _invoke<GitStatus[]>('get_git_status', { path });
 
-export interface GitBranchStatus {
-  name: string;
-  ahead: number;
-  behind: number;
-  /**
-   * Abbreviated HEAD OID (7 chars by default — matches `git rev-parse --short HEAD`).
-   * Empty string when HEAD is unborn. Lets the UI render a stable identifier on
-   * detached-HEAD worktrees (e.g. after `free_base_branch` recovery detaches
-   * a branched worktree) where `name === 'HEAD'` would otherwise be uninformative.
-   */
-  short_sha: string;
-}
+export type { GitBranchStatus };
 
 export const getGitBranchStatus = (path: string) =>
   _invoke<GitBranchStatus | null>('get_git_branch_status', { path });
 
-export interface GitSummary {
-  total: number;
-  added: number;
-  modified: number;
-  deleted: number;
-}
+export type { GitSummary };
 
 export const getGitSummary = (path: string) =>
   _invoke<GitSummary>('get_git_summary', { path });
@@ -313,99 +276,35 @@ export const checkIsGitRepo = (path: string) =>
 export const getDefaultBranch = (path: string) =>
   _invoke<string>('get_default_branch', { path });
 
-export interface GitSyncResult {
-  fetched: boolean;
-  pulled: boolean;
-  new_commits: number;
-  message: string;
-}
+export type { GitSyncResult };
 
 export const gitSync = (path: string) =>
   _invoke<GitSyncResult>('git_sync', { path });
 
 // ── Mesh health & recovery (issue #231) ─────────────────────────────────────
 
-/**
- * A worktree that currently has the Base Ref's branch checked out,
- * blocking `git checkout <base>` from the Mesh root. The `name` is
- * the worktree's basename for display. `is_active` is true when a
- * non-archived agent node currently points at `path`.
- */
-export interface HoldingWorktree {
-  path: string;
-  name: string;
-  is_active: boolean;
-}
-
-/**
- * Single-snapshot read of a Mesh's Git health. `local_base_branch` is
- * derived from `base_ref` (e.g. `origin/main` → `main`). `is_drifted`
- * is true when the current branch differs from the base (or HEAD is
- * detached on a non-base OID). `unpushed_ahead` counts local commits
- * that would be stranded by a restore-to-base.
- */
-export interface MeshHealth {
-  base_ref: string;
-  local_base_branch: string | null;
-  current_branch: string | null;
-  current_short_sha: string;
-  is_detached: boolean;
-  is_dirty: boolean;
-  unpushed_ahead: number;
-  has_upstream: boolean;
-  is_drifted: boolean;
-  base_branch_holder: HoldingWorktree | null;
-}
+// Generated from the Rust structs in `src-tauri/src/models/mod.rs` (issue #404).
+// Doc-comments from the hand-written interfaces now live on the Rust side and
+// are picked up by the generated `.ts` files.
+export type { HoldingWorktree, MeshHealth };
 
 export const getMeshHealth = (meshId: number) =>
   _invoke<MeshHealth>('get_mesh_health', { meshId });
 
-export interface RestoreResult {
-  restored: boolean;
-  message: string;
-}
+export type { RestoreResult };
 
 export const restoreMeshToBase = (meshId: number) =>
   _invoke<RestoreResult>('restore_mesh_to_base', { meshId });
 
-export interface FreeResult {
-  detached_at_sha: string;
-}
+export type { FreeResult };
 
 export const freeBaseBranch = (meshId: number, worktreePath: string) =>
   _invoke<FreeResult>('free_base_branch', { meshId, worktreePath });
 
 // ── Git prune (branches & worktrees) ────────────────────────────────────────
 //
-// Mirrors the Rust structs in `src-tauri/src/models/mod.rs`. None of the
-// prune types derive `TS` (yet), so the wire shapes are hand-written here —
-// keep in sync if a Rust field is added/renamed.
-
-export interface BranchInfo {
-  name: string;
-  is_head: boolean;
-  /** null when the repo has no main/master branch to compare against. */
-  is_merged_into_main: boolean | null;
-  is_orphan: boolean;
-  has_uncommitted: boolean;
-  last_commit_date: string | null;
-  ahead: number;
-  behind: number;
-}
-
-export interface WorktreeInfo {
-  path: string;
-  branch: string | null;
-  is_active: boolean;
-  is_stale: boolean;
-}
-
-export interface GitRepoPruneInfo {
-  path: string;
-  local_branches: BranchInfo[];
-  worktrees: WorktreeInfo[];
-  remote_tracking_branches: string[];
-}
+// Generated from the Rust structs in `src-tauri/src/models/mod.rs` (issue #404).
+export type { BranchInfo, WorktreeInfo, GitRepoPruneInfo };
 
 export const getGitPruneInfo = (meshId: number) =>
   _invoke<GitRepoPruneInfo[]>('get_git_prune_info', { meshId });
@@ -442,13 +341,9 @@ export const getCurrentBranch = (sessionId: number) =>
 export const checkGhAuth = () =>
   _invoke<boolean>('check_gh_auth');
 
-/** Open PR summary for an agent node — surfaces as the "PR #N" chip. */
-export interface OpenPr {
-  number: number;
-  url: string;
-  title: string;
-  draft: boolean;
-}
+/** Open PR summary for an agent node — surfaces as the "PR #N" chip.
+ *  Generated from the Rust struct in `src-tauri/src/commands/pr.rs` (issue #404). */
+export type { OpenPr };
 
 export const getOpenPrForNode = (nodeId: number) =>
   _invoke<OpenPr | null>('get_open_pr_for_node', { nodeId });
@@ -491,9 +386,13 @@ export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle:
 /// so the modal can close and the new node can appear almost
 /// immediately. The original `spawnIssueAgent` is kept for the mobile
 /// HTTP route, which has no interactive UI to keep responsive.
-export interface IssueNodeDraft extends AgentNode {
-  prefill: string;
-}
+///
+/// `IssueNodeDraft` is generated from the Rust struct in
+/// `src-tauri/src/commands/agent.rs` (issue #404). The Rust struct uses
+/// `#[serde(flatten)]` so the wire form is the flat merge of `AgentNode`
+/// + `prefill`, matching the `extends AgentNode` shape the hand-written
+/// TS used to carry.
+export type { IssueNodeDraft };
 
 export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
   _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider });
@@ -516,13 +415,7 @@ export const createPrForMesh = (meshPath: string, title: string, body: string, b
   _invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 
 // AI context portability
-export interface AiContextStatus {
-  claude_md_exists: boolean;
-  agents_md_exists: boolean;
-  skills_dir_exists: boolean;
-  skill_count: number;
-  agents_skills_exists: boolean;
-}
+export type { AiContextStatus };
 
 export const detectAiContext = (meshPath: string) =>
   _invoke<AiContextStatus>('detect_ai_context', { meshPath });
@@ -538,22 +431,13 @@ export const listProviders = (): Promise<ProviderInfo[]> => {
   return providerListPromise;
 };
 
-export interface ProviderInfo {
-  id: string;
-  label: string;
-  color: string;
-  icon: string;
-}
+/** Provider UI metadata for the agent picker — generated from the Rust struct
+ *  in `src-tauri/src/agent/provider/mod.rs` (issue #404). */
+export type { ProviderInfo };
 
-// Session Discovery
-export interface DiscoveredSession {
-  session_id: string;
-  first_message: string;
-  branch: string | null;
-  cwd: string | null;
-  timestamp: string | null;
-  worktree_name: string | null;
-}
+// Session Discovery — generated from the Rust struct (issue #359, re-exported
+// here per #404 so call sites that import from `../lib/tauri` keep working).
+export type { DiscoveredSession };
 
 export const discoverSessions = (meshId: number, meshPath: string) =>
   _invoke<DiscoveredSession[]>('discover_sessions', { meshId, meshPath });
@@ -627,15 +511,10 @@ export const resizeBuildRun = (nodeId: number, rows: number, cols: number) =>
 
 // ── App-wide preferences (`preferences.json`) ──────────────────────────────
 //
-// Hand-mirrored shape of `crate::preferences::AppPreferences` —
-// `google_cloud_project` is included to match the Rust struct in full even
-// though the current settings UI only reads two fields. Not generated; bump
-// this if the Rust struct grows. (Follow-up: derive `TS` per #359.)
-export interface AppPreferences {
-  default_provider: string | null;
-  minimax_api_key: string | null;
-  google_cloud_project?: string | null;
-}
+// Generated from `crate::preferences::AppPreferences` (issue #404). The
+// `google_cloud_project` field is included to match the Rust struct in full
+// even though the current settings UI only reads two fields.
+export type { AppPreferences };
 
 export const getAppPreferences = () =>
   _invoke<AppPreferences>('get_app_preferences');
@@ -650,35 +529,22 @@ export const setMinimaxApiKey = (key: string | null) =>
 
 // ── Provider usage (Accounts & Usage panel) ────────────────────────────────
 //
-// Mirrors `crate::services::usage::{ProviderUsage, UsageWindow}`. Rust uses
-// `#[serde(rename = "...")]` on some fields, so the camelCase / snake_case
-// mix is exact — `usedPercent`/`resetsAt`/`loggedIn` are camelCase on the
-// wire, the rest are snake_case. Keep matching the Rust shape if it grows.
-export interface UsageWindow {
-  label: string;
-  usedPercent: number | null;
-  resetsAt: string | null;
-}
-
-export interface ProviderUsage {
-  provider: string;
-  loggedIn: boolean;
-  windows: UsageWindow[];
-  detail: string | null;
-  error: string | null;
-}
+// Generated from `crate::services::usage::{ProviderUsage, UsageWindow}`
+// (issue #404). Rust uses `#[serde(rename = "...")]` + matching
+// `#[ts(rename = "...")]` on some fields, so the camelCase / snake_case
+// mix is exact — `usedPercent` / `resetsAt` / `loggedIn` are camelCase on
+// the wire, the rest are snake_case.
+export type { UsageWindow, ProviderUsage };
 
 export const getAllProviderUsage = (forceRefresh: boolean) =>
   _invoke<ProviderUsage[]>('get_all_provider_usage', { forceRefresh });
 
 // ── Coordinator read API control (ADR-0008) ────────────────────────────────
 //
+// Generated from `commands::coordinator::CoordinatorStatus` (issue #404).
 // `has_token` reports presence without ever leaking the token value — the
 // token is only ever surfaced once, by `generateCoordinatorReadToken`.
-export interface CoordinatorStatus {
-  enabled: boolean;
-  has_token: boolean;
-}
+export type { CoordinatorStatus };
 
 export const getCoordinatorStatus = () =>
   _invoke<CoordinatorStatus>('get_coordinator_status');

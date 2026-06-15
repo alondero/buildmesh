@@ -10,9 +10,13 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{OnceLock, Mutex};
+use ts_rs::TS;
 
 /// User-editable, persisted preferences applied across all meshes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Generated to src/types/generated/AppPreferences.ts (issue #404).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "AppPreferences.ts")]
 pub struct AppPreferences {
     /// Buildmesh-wide default provider id (e.g. "anthropic", "minimax").
     /// `None` means "no app-wide override — use the hardcoded fallback".

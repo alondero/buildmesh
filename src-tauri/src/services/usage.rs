@@ -12,19 +12,29 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "UsageWindow.ts")]
+/// Generated to src/types/generated/UsageWindow.ts (issue #404). The wire
+/// field names (`usedPercent` / `resetsAt`) are camelCase per
+/// `#[serde(rename = "...")]` + matching `#[ts(rename = "...")]`.
 pub struct UsageWindow {
     pub label: String,
     #[serde(rename = "usedPercent")]
+    #[ts(rename = "usedPercent")]
     pub used_percent: Option<f64>,
     #[serde(rename = "resetsAt")]
+    #[ts(rename = "resetsAt")]
     pub resets_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "ProviderUsage.ts")]
+/// Generated to src/types/generated/ProviderUsage.ts (issue #404). `loggedIn`
+/// is camelCase on the wire per `#[ts(rename = "loggedIn")]`.
 pub struct ProviderUsage {
     pub provider: String,
     #[serde(rename = "loggedIn")]
+    #[ts(rename = "loggedIn")]
     pub logged_in: bool,
     pub windows: Vec<UsageWindow>,
     pub detail: Option<String>,

@@ -23,11 +23,15 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::command;
+use ts_rs::TS;
 
 /// What AI-context files a project currently has, and what mirrors already exist.
 /// Drives the Mesh Properties panel: enables the button only when there is
 /// something to port that isn't already present.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/AiContextStatus.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "AiContextStatus.ts")]
 pub struct AiContextStatus {
     /// `CLAUDE.md` exists at the repo root.
     pub claude_md_exists: bool,
@@ -36,6 +40,7 @@ pub struct AiContextStatus {
     /// `.claude/skills/` exists and is a directory.
     pub skills_dir_exists: bool,
     /// Number of skill directories inside `.claude/skills/`.
+    #[ts(as = "i32")]
     pub skill_count: usize,
     /// `.agents/skills` already exists.
     pub agents_skills_exists: bool,

@@ -14,11 +14,18 @@ use crate::git::{health, primitives};
 use crate::models::MeshHealth;
 use crate::process_util::command_no_window;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitSummary.ts")]
+/// Generated to src/types/generated/GitSummary.ts (issue #404). `usize`
+/// counters carry `#[ts(as = "i32")]` so they emit `number`.
 pub struct GitSummary {
+    #[ts(as = "i32")]
     pub total: usize,
+    #[ts(as = "i32")]
     pub added: usize,
+    #[ts(as = "i32")]
     pub modified: usize,
+    #[ts(as = "i32")]
     pub deleted: usize,
 }
 
@@ -84,10 +91,15 @@ fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
     stats
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitBranchStatus.ts")]
+/// Generated to src/types/generated/GitBranchStatus.ts (issue #404). `u32`
+/// counters carry `#[ts(as = "i32")]` so they emit `number`.
 pub struct GitBranchStatus {
     pub name: String,
+    #[ts(as = "i32")]
     pub ahead: u32,
+    #[ts(as = "i32")]
     pub behind: u32,
     /// Abbreviated HEAD OID (7 chars by default, matches `git rev-parse --short HEAD`).
     /// Empty string when HEAD is unborn. Useful for showing a stable identifier on
@@ -275,10 +287,14 @@ pub fn get_default_branch(path: String) -> String {
     "main".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitSyncResult.ts")]
+/// Generated to src/types/generated/GitSyncResult.ts (issue #404). `u32`
+/// counter carries `#[ts(as = "i32")]` so it emits `number`.
 pub struct GitSyncResult {
     pub fetched: bool,
     pub pulled: bool,
+    #[ts(as = "i32")]
     pub new_commits: u32,
     pub message: String,
 }
@@ -369,7 +385,10 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
 /// `true` only when HEAD actually moved; an already-on-base call returns
 /// `restored = false` with a "no-op" message so the UI can distinguish
 /// the two outcomes for telemetry / toast wording.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/RestoreResult.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "RestoreResult.ts")]
 pub struct RestoreResult {
     pub restored: bool,
     pub message: String,
@@ -378,7 +397,10 @@ pub struct RestoreResult {
 /// Result of a successful `free_base_branch` invocation. `detached_at_sha`
 /// is the 7-char short OID the worktree was detached at, useful for the
 /// "freed at a064f55" toast.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/FreeResult.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "FreeResult.ts")]
 pub struct FreeResult {
     pub detached_at_sha: String,
 }
