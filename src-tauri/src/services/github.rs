@@ -106,6 +106,35 @@ pub struct PullRequest {
     pub state: String,
 }
 
+/// A single file changed in a pull request — the wire shape of
+/// `GET /repos/{o}/{r}/pulls/{n}/files`. The `patch` field is the unified
+/// diff text GitHub renders; the frontend parses it line-by-line to colour
+/// +/−/context rows (rather than trying to reconstruct our own `DiffHunk`
+/// structure, which would be brittle given GitHub's non-standard hunks —
+/// missing context lines, inline `rename from`/`rename to`, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrFile {
+    /// Path of the file at the head of the PR (after any rename).
+    pub filename: String,
+    /// `"added" | "modified" | "deleted" | "renamed" | "copied" | "changed" | "unchanged"`.
+    /// Mirrors the `FileDiffStatus` vocabulary; "renamed" is the only rename
+    /// state we care about, "copied" / "changed" / "unchanged" surface as
+    /// "modified" on the frontend (the panel isn't a GitHub API mirror).
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub additions: i64,
+    #[serde(default)]
+    pub deletions: i64,
+    /// Unified diff text — empty for binary files (which omit `patch`).
+    #[serde(default)]
+    pub patch: String,
+    /// For renames, the path the file had on the base branch. `None` for
+    /// everything else.
+    #[serde(default)]
+    pub previous_filename: Option<String>,
+}
+
 /// A lightweight GitHub API client.
 pub struct GitHubClient {
     client: Client,
@@ -311,6 +340,39 @@ impl GitHubClient {
 
         let detail: Detail = resp.json()?;
         Ok((detail.mergeable, detail.mergeable_state))
+    }
+
+    /// List the files changed in a single pull request.
+    /// (`GET /repos/{o}/{r}/pulls/{n}/files`.) Backed by the per-PR files
+    /// endpoint rather than `/compare/{base}...{head}` so we don't have to
+    /// know the head ref or fall back to a `git fetch` if the branch isn't
+    /// local — the PR number is the only key the panel needs.
+    pub fn list_pr_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> Result<Vec<PrFile>, GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}/files?per_page=100",
+            owner, repo, pr_number
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        // The endpoint returns a bare array, NOT a `{files: [...]}` wrapper.
+        let files: Vec<PrFile> = resp.json()?;
+        Ok(files)
     }
 
     /// Merge a pull request via squash and delete the branch.
@@ -795,5 +857,104 @@ mod tests {
         let absent: Detail = serde_json::from_str(r#"{}"#).unwrap();
         assert_eq!(absent.mergeable, None);
         assert_eq!(absent.mergeable_state, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // PR files deserialisation — issue #421, the wire shape of
+    // `GET /repos/{o}/{r}/pulls/{n}/files`. The endpoint returns a bare
+    // array; each item carries `filename`, `status`, `additions`,
+    // `deletions`, and a unified `patch`. The frontend renders the patch
+    // line-by-line, so we don't need to reconstruct hunk structure here.
+    // `previous_filename` is only set for renames (the corresponding entry
+    // in GitHub's response has it; everything else omits it).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pr_file_deserialises_full_shape_with_patch() {
+        // Realistic `/pulls/{n}/files` item — a modified file with a patch.
+        // The patch text spans lines and includes hunk markers; we don't try
+        // to parse it (the frontend does that), just confirm it round-trips.
+        let json = r#"{
+            "filename": "src/app.ts",
+            "status": "modified",
+            "additions": 3,
+            "deletions": 1,
+            "changes": 4,
+            "blob_url": "https://github.com/alondero/buildmesh/blob/.../src/app.ts",
+            "raw_url": "https://raw.githubusercontent.com/.../src/app.ts",
+            "contents_url": "https://api.github.com/repos/.../contents/src/app.ts",
+            "sha": "abc123",
+            "patch": "@@ -1,5 +1,7 @@\n line1\n-line2\n+line2-tweaked\n+line2b\n line3\n"
+        }"#;
+        let file: PrFile = serde_json::from_str(json).expect("full PR file shape must parse");
+        assert_eq!(file.filename, "src/app.ts");
+        assert_eq!(file.status, "modified");
+        assert_eq!(file.additions, 3);
+        assert_eq!(file.deletions, 1);
+        assert!(file.patch.starts_with("@@"), "patch should round-trip verbatim");
+        assert!(file.previous_filename.is_none(), "no rename → no previous_filename");
+    }
+
+    #[test]
+    fn pr_file_deserialises_rename_with_previous_filename() {
+        // A renamed file: status = "renamed", previous_filename = the old path.
+        let json = r#"{
+            "filename": "src/new-name.ts",
+            "previous_filename": "src/old-name.ts",
+            "status": "renamed",
+            "additions": 0,
+            "deletions": 0,
+            "patch": ""
+        }"#;
+        let file: PrFile = serde_json::from_str(json).expect("rename shape must parse");
+        assert_eq!(file.filename, "src/new-name.ts");
+        assert_eq!(file.previous_filename.as_deref(), Some("src/old-name.ts"));
+        assert_eq!(file.status, "renamed");
+    }
+
+    #[test]
+    fn pr_file_deserialises_binary_file_with_empty_patch() {
+        // GitHub omits `patch` for binary files; our `#[serde(default)]` makes
+        // it parse to "" rather than fail. Status is typically "modified" for
+        // binary blobs.
+        let json = r#"{
+            "filename": "assets/logo.png",
+            "status": "modified",
+            "additions": 0,
+            "deletions": 0
+        }"#;
+        let file: PrFile = serde_json::from_str(json).expect("binary file shape must parse");
+        assert_eq!(file.filename, "assets/logo.png");
+        assert_eq!(file.patch, "", "missing patch defaults to empty string");
+        assert!(file.previous_filename.is_none());
+    }
+
+    #[test]
+    fn pr_file_list_deserialises_as_bare_array() {
+        // The `/pulls/{n}/files` endpoint returns a bare array, just like
+        // `/pulls`. Pin that so a future refactor doesn't accidentally wrap
+        // it in an object.
+        let json = r#"[
+            {
+                "filename": "a.txt",
+                "status": "added",
+                "additions": 1,
+                "deletions": 0,
+                "patch": "@@ -0,0 +1 @@\n+new line\n"
+            },
+            {
+                "filename": "b.txt",
+                "status": "deleted",
+                "additions": 0,
+                "deletions": 1,
+                "patch": "@@ -1 +0,0 @@\n-gone\n"
+            }
+        ]"#;
+        let files: Vec<PrFile> = serde_json::from_str(json).expect("PR file list must parse");
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].filename, "a.txt");
+        assert_eq!(files[0].status, "added");
+        assert_eq!(files[1].filename, "b.txt");
+        assert_eq!(files[1].status, "deleted");
     }
 }

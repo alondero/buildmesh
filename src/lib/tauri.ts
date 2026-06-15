@@ -27,6 +27,7 @@ import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
+import type { PrFileEntry } from '../types/generated/PrFileEntry';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RestoreResult } from '../types/generated/RestoreResult';
@@ -367,7 +368,7 @@ export const getRepoIssues = (meshId: number) =>
 // src/types/generated/; see top import. Re-exported here so the PR probe tab
 // can `import { GitHubPullRequest } from '../lib/tauri'` alongside the issue
 // types. Issue #359.
-export type { GitHubPullRequest, PrMergeability };
+export type { GitHubPullRequest, PrMergeability, PrFileEntry };
 
 /** List PRs for a mesh's repo, filtered by `state` (`'open'` or `'closed'`). */
 export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
@@ -378,6 +379,15 @@ export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
 /// still computing the merge.
 export const getPrMergeability = (meshId: number, prNumber: number) =>
   _invoke<PrMergeability>('get_pr_mergeability', { meshId, prNumber });
+
+/// List the files changed in a single PR (issue #421). Backed by GitHub's
+/// `/pulls/{n}/files` endpoint; one call returns the whole PR with each
+/// file's unified-diff `patch`. The Center Diff Overlay parses the patch
+/// line-by-line to render +/−/context rows. Distinct from `getRepoPulls` /
+/// `getPrMergeability` because the panel needs the diff payload, not just
+/// the metadata.
+export const getPrFiles = (meshId: number, prNumber: number) =>
+  _invoke<PrFileEntry[]>('get_pr_files', { meshId, prNumber });
 
 export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
   _invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });
