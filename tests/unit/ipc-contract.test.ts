@@ -61,7 +61,10 @@ interface InvokeCall {
 
 function extractInvokeCalls(files: string[]): InvokeCall[] {
   // Matches: invoke('name'), invoke("name"), invoke<Type>('name'), invoke<T[]>("name")
-  const re = /\binvoke(?:<[^>]+>)?\(\s*['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]/g;
+  // and the wrapper's `_invoke<T>(...)` form (issue #386). The optional
+  // leading underscore catches both — `_rawInvoke` is a low-level call
+  // that also goes through the registered handler, so we want to lint it.
+  const re = /\b_?invoke(?:<[^>]+>)?\(\s*['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]/g;
   const calls: InvokeCall[] = [];
 
   for (const file of files) {

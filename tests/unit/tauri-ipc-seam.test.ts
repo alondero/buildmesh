@@ -14,6 +14,13 @@ import { join, relative, sep } from 'node:path';
  * exception (see `EXEMPT_LEGITIMATE` below). Any new file importing raw
  * `invoke` fails this test immediately. Nothing outside `tauri.ts` and the
  * exempt list may import `invoke` from `@tauri-apps/api/core`.
+ *
+ * The wrapper itself is also the central IPC error-logging chokepoint
+ * (issue #386) — see `_invoke` in `src/lib/tauri.ts` and the shape serializer
+ * in `src/lib/ipcShape.ts`. That follow-up is the reason `frontendLog.ts` is
+ * pinned as a peer-of-wrapper exemption below: the wrapper calls
+ * `frontendLog` on every rejection, so routing `frontendLog.ts` through the
+ * wrapper would risk a logging cycle.
  */
 
 /**

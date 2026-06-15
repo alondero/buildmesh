@@ -1,8 +1,49 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke as _rawInvoke } from '@tauri-apps/api/core';
+import { logFrontend } from './frontendLog';
+import { shapeArgs } from './ipcShape';
 import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { GitHubIssue } from '../types/generated/GitHubIssue';
 import type { WorktreeCloseSafety } from './worktreeClose';
+
+/**
+ * Central IPC chokepoint (issue #386). Every wrapper below calls through
+ * `_invoke`, which delegates to Tauri's `invoke` and — on rejection —
+ * forwards a single `frontendLog` entry (command name + sanitized arg
+ * shape) and re-throws the original error. The re-throw preserves every
+ * existing call-site behaviour (stores set error state, components show
+ * toasts, the bridge still sees the original `Error` for `window.error` /
+ * `unhandledrejection` plumbing). The arg shape is the sanitized form
+ * produced by `ipcShape.shapeArgs` so PII (API keys) and unbounded
+ * payloads (terminal scrollback) are never written to `buildmesh.log`.
+ *
+ * Tests stub `_rawInvoke` (the aliased Tauri binding) via
+ * `vi.mock('@tauri-apps/api/core', …)` and mock `frontendLog.logFrontend`
+ * to assert on the formatted shape — see `tests/unit/ipc-error-logging.test.ts`.
+ */
+// Function declaration (not const) so it hoists — the wrappers below
+// reference `_invoke` and the function name is referenced before its
+// declaration in source order.
+const ERROR_TEXT_CAP = 200;
+
+async function _invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    // Only pass `args` when defined so the call shape matches the
+    // pre-wrapper `invoke('cmd')` form (some tests assert on
+    // argument count, e.g. `toHaveBeenCalledWith('list_projects')`).
+    return args === undefined
+      ? await _rawInvoke<T>(cmd)
+      : await _rawInvoke<T>(cmd, args);
+  } catch (err) {
+    const shape = JSON.stringify(shapeArgs(args));
+    const raw = String(err);
+    const truncated = raw.length > ERROR_TEXT_CAP
+      ? raw.slice(0, ERROR_TEXT_CAP) + '…'
+      : raw;
+    logFrontend('error', `[IPC:${cmd}] args=${shape} — ${truncated}`);
+    throw err;
+  }
+}
 
 export type DiffLineType = 'context' | 'add' | 'remove';
 
@@ -52,55 +93,55 @@ export interface DiffResult {
 
 // Agent Node
 export const createSession = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) =>
-  invoke<AgentNode>('create_session', { meshId, name, path, branch, provider, useWorktree });
+  _invoke<AgentNode>('create_session', { meshId, name, path, branch, provider, useWorktree });
 
 export const listSessions = () =>
-  invoke<AgentNode[]>('list_sessions');
+  _invoke<AgentNode[]>('list_sessions');
 
 export const getSession = (sessionId: number) =>
-  invoke<AgentNode>('get_session', { sessionId });
+  _invoke<AgentNode>('get_session', { sessionId });
 
 export const getWorktreeCloseSafety = (sessionId: number) =>
-  invoke<WorktreeCloseSafety>('get_worktree_close_safety', { sessionId });
+  _invoke<WorktreeCloseSafety>('get_worktree_close_safety', { sessionId });
 
 export const deleteSession = (sessionId: number, removeWorktree = false) =>
-  invoke('delete_session', { sessionId, removeWorktree });
+  _invoke('delete_session', { sessionId, removeWorktree });
 
 export const renameSession = (sessionId: number, name: string) =>
-  invoke('rename_session', { sessionId, name });
+  _invoke('rename_session', { sessionId, name });
 
 /** Persist new grid positions for a set of nodes: `[nodeId, position]` pairs. */
 export const updateSessionPositions = (updates: [number, number][]) =>
-  invoke('update_session_positions', { updates });
+  _invoke('update_session_positions', { updates });
 
 // Mesh
 export const addProject = () =>
-  invoke<Mesh>('add_project');
+  _invoke<Mesh>('add_project');
 
 export const createProject = (name: string, path: string) =>
-  invoke<Mesh>('create_project', { name, path });
+  _invoke<Mesh>('create_project', { name, path });
 
 export const createTestProject = (name: string) =>
-  invoke<Mesh>('create_test_project', { name });
+  _invoke<Mesh>('create_test_project', { name });
 
 export const listProjects = () =>
-  invoke<Mesh[]>('list_projects');
+  _invoke<Mesh[]>('list_projects');
 
 export const deleteProject = (projectId: number) =>
-  invoke('delete_project', { projectId });
+  _invoke('delete_project', { projectId });
 
 export const updateProjectLayout = (projectId: number, layout: 'grid' | 'single') =>
-  invoke('update_project_layout', { projectId, layout });
+  _invoke('update_project_layout', { projectId, layout });
 
 /** Persist new sidebar positions for a set of meshes: `[meshId, position]` pairs. */
 export const updateProjectPositions = (updates: [number, number][]) =>
-  invoke('update_project_positions', { updates });
+  _invoke('update_project_positions', { updates });
 
 export const updateMeshName = (meshId: number, name: string) =>
-  invoke('update_mesh_name', { meshId, name });
+  _invoke('update_mesh_name', { meshId, name });
 
 export const getDefaultProvider = (meshId: number) =>
-  invoke<string>('get_default_provider', { meshId });
+  _invoke<string>('get_default_provider', { meshId });
 
 // Mesh properties / configuration (issue #283)
 //
@@ -122,7 +163,7 @@ export interface MeshConfig {
 }
 
 export const getMeshProperties = (meshId: number) =>
-  invoke<MeshConfig>('get_mesh_properties', { meshId });
+  _invoke<MeshConfig>('get_mesh_properties', { meshId });
 
 /** Generic mesh.toml field write: routes `(section, key, value)` to the
  *  backend's `update_mesh_field`. Use it for fields with no DB-side
@@ -134,18 +175,18 @@ export const updateMeshField = (
   section: 'agent' | 'build' | 'run',
   key: string,
   value: string,
-) => invoke<void>('update_mesh_field', { meshId, section, key, value });
+) => _invoke<void>('update_mesh_field', { meshId, section, key, value });
 
 export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
-  invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
+  _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
 
 export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
-  invoke<void>('update_worktree_base_ref', { meshId, baseRef });
+  _invoke<void>('update_worktree_base_ref', { meshId, baseRef });
 
 import type { DetectedProject } from './projectPresets';
 
 export const detectMeshProject = (meshPath: string) =>
-  invoke<DetectedProject>('detect_mesh_project', { meshPath });
+  _invoke<DetectedProject>('detect_mesh_project', { meshPath });
 
 // Agent
 export const spawnAgent = (
@@ -154,42 +195,42 @@ export const spawnAgent = (
   resume?: string | null,
   rows?: number,
   cols?: number,
-) => invoke('spawn_agent', { sessionId, provider, resume, rows, cols });
+) => _invoke('spawn_agent', { sessionId, provider, resume, rows, cols });
 
 export const killAgent = (sessionId: number) =>
-  invoke('kill_agent', { sessionId });
+  _invoke('kill_agent', { sessionId });
 
 export const isAgentRunning = (sessionId: number) =>
-  invoke<boolean>('is_agent_running', { sessionId });
+  _invoke<boolean>('is_agent_running', { sessionId });
 
 export const sendToAgent = (sessionId: number, input: string) =>
-  invoke('send_to_agent', { sessionId, input });
+  _invoke('send_to_agent', { sessionId, input });
 
 /** Raw write to the agent's PTY (no submit/newline handling — cf. `sendToAgent`). */
 export const writeToAgent = (sessionId: number, data: string) =>
-  invoke('write_to_agent', { sessionId, data });
+  _invoke('write_to_agent', { sessionId, data });
 
 // Diff
 export const diffFiles = (oldPath: string, newPath: string) =>
-  invoke<DiffResult>('diff_files', { oldPath, newPath });
+  _invoke<DiffResult>('diff_files', { oldPath, newPath });
 
 export const diffFileAgainstHead = (sessionPath: string, filePath: string) =>
-  invoke<DiffResult>('diff_file_against_head', { sessionPath, filePath });
+  _invoke<DiffResult>('diff_file_against_head', { sessionPath, filePath });
 
 // Every file an agent changed since branching (merge-base with mesh base_ref;
 // see ADR 0005). One call returns the whole change set for the review panel.
 export const diffNodeAgainstBase = (nodeId: number) =>
-  invoke<DiffResult>('diff_node_against_base', { nodeId });
+  _invoke<DiffResult>('diff_node_against_base', { nodeId });
 
 export const diffNodeFileAgainstBase = (nodeId: number, filePath: string) =>
-  invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
+  _invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
 
 // File watcher
 export const watchSession = (sessionId: number) =>
-  invoke('watch_session', { sessionId });
+  _invoke('watch_session', { sessionId });
 
 export const unwatchSession = (sessionId: number) =>
-  invoke('unwatch_session', { sessionId });
+  _invoke('unwatch_session', { sessionId });
 
 // File tree
 export interface FileNode {
@@ -200,16 +241,16 @@ export interface FileNode {
 }
 
 export const listDirectory = (path: string, maxDepth?: number) =>
-  invoke<FileNode>('list_directory', { path, maxDepth });
+  _invoke<FileNode>('list_directory', { path, maxDepth });
 
 export const openInEditor = (path: string) =>
-  invoke('open_in_editor', { path });
+  _invoke('open_in_editor', { path });
 
 export const openInFileManager = (path: string) =>
-  invoke('open_in_file_manager', { path });
+  _invoke('open_in_file_manager', { path });
 
 export const getUserConfigDir = () =>
-  invoke<string>('get_user_config_dir');
+  _invoke<string>('get_user_config_dir');
 
 // Git — `GitStatus` is generated from the Rust struct (issue #359).
 // The Rust `status` field is a plain `String`, so the generated type widens
@@ -219,7 +260,7 @@ import type { GitStatus } from '../types/generated/GitStatus';
 export type { GitStatus };
 
 export const getGitStatus = (path: string) =>
-  invoke<GitStatus[]>('get_git_status', { path });
+  _invoke<GitStatus[]>('get_git_status', { path });
 
 export interface GitBranchStatus {
   name: string;
@@ -235,7 +276,7 @@ export interface GitBranchStatus {
 }
 
 export const getGitBranchStatus = (path: string) =>
-  invoke<GitBranchStatus | null>('get_git_branch_status', { path });
+  _invoke<GitBranchStatus | null>('get_git_branch_status', { path });
 
 export interface GitSummary {
   total: number;
@@ -245,13 +286,13 @@ export interface GitSummary {
 }
 
 export const getGitSummary = (path: string) =>
-  invoke<GitSummary>('get_git_summary', { path });
+  _invoke<GitSummary>('get_git_summary', { path });
 
 export const checkIsGitRepo = (path: string) =>
-  invoke<boolean>('check_is_git_repo', { path });
+  _invoke<boolean>('check_is_git_repo', { path });
 
 export const getDefaultBranch = (path: string) =>
-  invoke<string>('get_default_branch', { path });
+  _invoke<string>('get_default_branch', { path });
 
 export interface GitSyncResult {
   fetched: boolean;
@@ -261,7 +302,7 @@ export interface GitSyncResult {
 }
 
 export const gitSync = (path: string) =>
-  invoke<GitSyncResult>('git_sync', { path });
+  _invoke<GitSyncResult>('git_sync', { path });
 
 // ── Mesh health & recovery (issue #231) ─────────────────────────────────────
 
@@ -298,7 +339,7 @@ export interface MeshHealth {
 }
 
 export const getMeshHealth = (meshId: number) =>
-  invoke<MeshHealth>('get_mesh_health', { meshId });
+  _invoke<MeshHealth>('get_mesh_health', { meshId });
 
 export interface RestoreResult {
   restored: boolean;
@@ -306,14 +347,14 @@ export interface RestoreResult {
 }
 
 export const restoreMeshToBase = (meshId: number) =>
-  invoke<RestoreResult>('restore_mesh_to_base', { meshId });
+  _invoke<RestoreResult>('restore_mesh_to_base', { meshId });
 
 export interface FreeResult {
   detached_at_sha: string;
 }
 
 export const freeBaseBranch = (meshId: number, worktreePath: string) =>
-  invoke<FreeResult>('free_base_branch', { meshId, worktreePath });
+  _invoke<FreeResult>('free_base_branch', { meshId, worktreePath });
 
 // ── Git prune (branches & worktrees) ────────────────────────────────────────
 //
@@ -348,39 +389,39 @@ export interface GitRepoPruneInfo {
 }
 
 export const getGitPruneInfo = (meshId: number) =>
-  invoke<GitRepoPruneInfo[]>('get_git_prune_info', { meshId });
+  _invoke<GitRepoPruneInfo[]>('get_git_prune_info', { meshId });
 
 export const deleteBranches = (worktreePath: string, branchNames: string[]) =>
-  invoke<void>('delete_branches', { worktreePath, branchNames });
+  _invoke<void>('delete_branches', { worktreePath, branchNames });
 
 export const deleteWorktrees = (worktreePaths: string[]) =>
-  invoke<void>('delete_worktrees', { worktreePaths });
+  _invoke<void>('delete_worktrees', { worktreePaths });
 
 export const pruneRemoteTracking = (worktreePath: string) =>
-  invoke<void>('prune_remote_tracking', { worktreePath });
+  _invoke<void>('prune_remote_tracking', { worktreePath });
 
 // Attention
 export const registerAttentionSession = (sessionId: number) =>
-  invoke('register_attention_session', { sessionId });
+  _invoke('register_attention_session', { sessionId });
 
 export const clearAttentionSession = (sessionId: number) =>
-  invoke('clear_attention_session', { sessionId });
+  _invoke('clear_attention_session', { sessionId });
 
 export const isAttentionPending = (sessionId: number) =>
-  invoke<boolean>('is_attention_pending', { sessionId });
+  _invoke<boolean>('is_attention_pending', { sessionId });
 
 // PR
 export const createPr = (sessionId: number, title: string, body: string) =>
-  invoke<string>('create_pr', { sessionId, title, body });
+  _invoke<string>('create_pr', { sessionId, title, body });
 
 export const mergePr = (prUrl: string) =>
-  invoke<string>('merge_pr', { prUrl });
+  _invoke<string>('merge_pr', { prUrl });
 
 export const getCurrentBranch = (sessionId: number) =>
-  invoke<string>('get_current_branch', { sessionId });
+  _invoke<string>('get_current_branch', { sessionId });
 
 export const checkGhAuth = () =>
-  invoke<boolean>('check_gh_auth');
+  _invoke<boolean>('check_gh_auth');
 
 /** Open PR summary for an agent node — surfaces as the "PR #N" chip. */
 export interface OpenPr {
@@ -391,7 +432,7 @@ export interface OpenPr {
 }
 
 export const getOpenPrForNode = (nodeId: number) =>
-  invoke<OpenPr | null>('get_open_pr_for_node', { nodeId });
+  _invoke<OpenPr | null>('get_open_pr_for_node', { nodeId });
 
 // GitHub Issues — `GitHubIssue` is generated from the Rust struct
 // (src-tauri/src/commands/pr.rs) into src/types/generated/; see top import.
@@ -400,10 +441,10 @@ export const getOpenPrForNode = (nodeId: number) =>
 export type { GitHubIssue };
 
 export const getRepoIssues = (meshId: number) =>
-  invoke<GitHubIssue[]>('get_repo_issues', { meshId });
+  _invoke<GitHubIssue[]>('get_repo_issues', { meshId });
 
 export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
-  invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });
+  _invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });
 
 /// Two-stage spawn (issue flow) — stage 1 of 2.
 ///
@@ -419,7 +460,7 @@ export interface IssueNodeDraft extends AgentNode {
 }
 
 export const createIssueNode = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
-  invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider });
+  _invoke<IssueNodeDraft>('create_issue_node', { meshId, issueNumber, issueTitle, provider });
 
 /// Two-stage spawn (issue flow) — stage 2 of 2.
 ///
@@ -430,13 +471,13 @@ export const createIssueNode = (meshId: number, issueNumber: number, issueTitle:
 /// `node-spawn-failed` (with the node's status already flipped to
 /// `error` in the DB).
 export const startNodeBackground = (nodeId: number, prefill?: string) =>
-  invoke<void>('start_node_background', { nodeId, prefill });
+  _invoke<void>('start_node_background', { nodeId, prefill });
 
 export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: string) =>
-  invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
+  _invoke<AgentNode>('spawn_handover_agent', { meshId, prefill, provider });
 
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
-  invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
+  _invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 
 // AI context portability
 export interface AiContextStatus {
@@ -448,13 +489,13 @@ export interface AiContextStatus {
 }
 
 export const detectAiContext = (meshPath: string) =>
-  invoke<AiContextStatus>('detect_ai_context', { meshPath });
+  _invoke<AiContextStatus>('detect_ai_context', { meshPath });
 
 export const createAiContextPortabilityPr = (meshId: number) =>
-  invoke<string>('create_ai_context_portability_pr', { meshId });
+  _invoke<string>('create_ai_context_portability_pr', { meshId });
 
 export const listProviders = () =>
-  invoke<ProviderInfo[]>('list_providers');
+  _invoke<ProviderInfo[]>('list_providers');
 
 export interface ProviderInfo {
   id: string;
@@ -474,7 +515,7 @@ export interface DiscoveredSession {
 }
 
 export const discoverSessions = (meshId: number, meshPath: string) =>
-  invoke<DiscoveredSession[]>('discover_sessions', { meshId, meshPath });
+  _invoke<DiscoveredSession[]>('discover_sessions', { meshId, meshPath });
 
 export const importDiscoveredSession = (
   meshId: number,
@@ -484,7 +525,7 @@ export const importDiscoveredSession = (
   worktreeName: string | null,
   provider?: string,
 ) =>
-  invoke<AgentNode>('import_discovered_session', {
+  _invoke<AgentNode>('import_discovered_session', {
     meshId, meshPath, cliSessionId, branch, worktreeName, provider
   });
 
@@ -494,20 +535,20 @@ export const importDiscoveredSession = (
 // interrupted (status === 'suspended'). Returns the ids of the nodes that
 // were actually resumed.
 export const autoResumeSessions = () =>
-  invoke<number[]>('auto_resume_sessions');
+  _invoke<number[]>('auto_resume_sessions');
 
 // ── Paths & clipboard ──────────────────────────────────────────────────────
 //
 // `to_host_path` is a no-op for native paths and normalises WSL/Git-Bash
 // variants — used by the OS file-drop paste path.
 export const toHostPath = (path: string) =>
-  invoke<string>('to_host_path', { path });
+  _invoke<string>('to_host_path', { path });
 
 /** Native clipboard read. On macOS this bypasses the WKWebView
  *  clipboard-permission popup by shelling to `pbpaste`; on other platforms it
  *  may reject, and callers fall back to `navigator.clipboard.readText()`. */
 export const readClipboard = () =>
-  invoke<string>('read_clipboard');
+  _invoke<string>('read_clipboard');
 
 // ── Agent PTY transport ────────────────────────────────────────────────────
 //
@@ -517,13 +558,13 @@ export const readClipboard = () =>
 // match on that exact value to ignore the expected race (see
 // `TerminalRegistry.syncPtySize`).
 export const resizeAgent = (sessionId: number, rows: number, cols: number) =>
-  invoke('resize_agent', { sessionId, rows, cols });
+  _invoke('resize_agent', { sessionId, rows, cols });
 
 /** Reply to a remote-pane snapshot request from the HTTP server. The pair
  *  (`request_id`, `data`) is matched against an in-flight promise on the
  *  backend; the call returns immediately and has no result. */
 export const submitTerminalSnapshot = (requestId: string, data: string) =>
-  invoke<void>('submit_terminal_snapshot', { requestId, data });
+  _invoke<void>('submit_terminal_snapshot', { requestId, data });
 
 // ── Build/Run side-panel PTY ───────────────────────────────────────────────
 //
@@ -532,16 +573,16 @@ export const submitTerminalSnapshot = (requestId: string, data: string) =>
 // returns once the child has been spawned; output flows via the
 // `build-run-output-<nodeId>` event.
 export const buildRun = (nodeId: number, mode: 'build' | 'run' | 'terminal') =>
-  invoke('build_run', { nodeId, mode });
+  _invoke('build_run', { nodeId, mode });
 
 export const closeBuildRun = (nodeId: number) =>
-  invoke('close_build_run', { nodeId });
+  _invoke('close_build_run', { nodeId });
 
 export const writeToBuildRun = (nodeId: number, data: string) =>
-  invoke('write_to_build_run', { nodeId, data });
+  _invoke('write_to_build_run', { nodeId, data });
 
 export const resizeBuildRun = (nodeId: number, rows: number, cols: number) =>
-  invoke('resize_build_run', { nodeId, rows, cols });
+  _invoke('resize_build_run', { nodeId, rows, cols });
 
 // ── App-wide preferences (`preferences.json`) ──────────────────────────────
 //
@@ -556,15 +597,15 @@ export interface AppPreferences {
 }
 
 export const getAppPreferences = () =>
-  invoke<AppPreferences>('get_app_preferences');
+  _invoke<AppPreferences>('get_app_preferences');
 
 /** Pass `null` (or an empty string, which the backend filters out) to clear
  *  the override and fall back to the hardcoded `anthropic` default. */
 export const setAppDefaultProvider = (provider: string | null) =>
-  invoke('set_app_default_provider', { provider });
+  _invoke('set_app_default_provider', { provider });
 
 export const setMinimaxApiKey = (key: string | null) =>
-  invoke('set_minimax_api_key', { key });
+  _invoke('set_minimax_api_key', { key });
 
 // ── Provider usage (Accounts & Usage panel) ────────────────────────────────
 //
@@ -587,7 +628,7 @@ export interface ProviderUsage {
 }
 
 export const getAllProviderUsage = (forceRefresh: boolean) =>
-  invoke<ProviderUsage[]>('get_all_provider_usage', { forceRefresh });
+  _invoke<ProviderUsage[]>('get_all_provider_usage', { forceRefresh });
 
 // ── Coordinator read API control (ADR-0008) ────────────────────────────────
 //
@@ -599,19 +640,19 @@ export interface CoordinatorStatus {
 }
 
 export const getCoordinatorStatus = () =>
-  invoke<CoordinatorStatus>('get_coordinator_status');
+  _invoke<CoordinatorStatus>('get_coordinator_status');
 
 export const setCoordinatorApiEnabled = (enabled: boolean) =>
-  invoke('set_coordinator_api_enabled', { enabled });
+  _invoke('set_coordinator_api_enabled', { enabled });
 
 /** Mint (or replace) the read-scoped token and return it for the user to copy.
  *  Replacing invalidates the previously issued token; the value is shown once. */
 export const generateCoordinatorReadToken = () =>
-  invoke<string>('generate_coordinator_read_token');
+  _invoke<string>('generate_coordinator_read_token');
 
 // ── Remote access (mobile QR) ──────────────────────────────────────────────
 export const getLocalIp = () =>
-  invoke<string>('get_local_ip');
+  _invoke<string>('get_local_ip');
 
 export const getRootToken = () =>
-  invoke<string>('get_root_token');
+  _invoke<string>('get_root_token');

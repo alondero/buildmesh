@@ -31,7 +31,7 @@ Adopt the hand-written wrapper everywhere and enforce it:
 
 - A command rename now changes one wrapper function; TypeScript flags every caller. The command-name string has a single home.
 - Adoption ratchets: the allowlist only shrinks, and CI fails if a new file reaches for raw `invoke`.
-- The wrapper stays a **pure typing seam** for now — it adds the typed command name and nothing else. Central IPC error logging (via the existing `frontendLog` bridge) is a deliberate follow-up the single chokepoint now makes possible; it is intentionally not bundled with this migration.
+- The wrapper stays a **pure typing seam** for now — it adds the typed command name and nothing else. Central IPC error logging (via the existing `frontendLog` bridge) is a deliberate follow-up the single chokepoint now makes possible; it is intentionally not bundled with this migration. *Update (issue #386):* the follow-up has landed — `_invoke` in `src/lib/tauri.ts` now catches every `invoke` rejection, calls `frontendLog` once with the command name + sanitized arg shape (produced by `src/lib/ipcShape.ts`), and re-throws the original error so existing call-site catches keep working. Hot-path commands (`write_to_agent`, `resize_agent`, `*_build_run`) are logged on failure too — a `write_to_agent` rejection is exactly the agent-died case we want visibility on.
 - Adding a `#[command]` still means hand-adding a wrapper function. The drift test makes the omission visible the moment a consumer tries to call it raw, but it does not generate the function — that is the residual cost of choosing hand-written over codegen, accepted above.
 
 ## Status: complete (issue #385)
