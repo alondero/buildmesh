@@ -13,15 +13,22 @@
  *
  * Resolution rules
  * ----------------
- *   activeMeshId  =  selectedMeshId ?? (activeNode?.mesh_id ?? null)
- *   activeNodeId  =  activeNodeId from agentNodeStore (the focused card,
- *                    independent of which mesh the sidebar is on)
- *   activePath    =  when a node is focused, the node's working directory
- *                    (`node.path`, which the backend already resolves to
- *                    the worktree dir for a Worktree Node or the mesh root
- *                    for a Root Node — see `env::node_working_path`).
- *                    When no node is focused but a mesh is, the mesh root.
- *                    Otherwise null.
+ *   activeMeshId    =  selectedMeshId ?? (activeNode?.mesh_id ?? null)
+ *   activeNodeId    =  activeNodeId from agentNodeStore (the focused card,
+ *                      independent of which mesh the sidebar is on)
+ *   activePath      =  when a node is focused, the node's working
+ *                      directory (`node.path`, which the backend already
+ *                      resolves to the worktree dir for a Worktree Node
+ *                      or the mesh root for a Root Node — see
+ *                      `env::node_working_path`). When no node is
+ *                      focused but a mesh is, the mesh root. Otherwise null.
+ *   activeMeshPath  =  the mesh row's own path (NOT the focused node's
+ *                      worktree). Mesh-scoped tabs (issues, sessions,
+ *                      future worktree manager) need the *mesh root* to
+ *                      walk the repo (e.g. `discover_sessions` reads
+ *                      `.claude/projects/...` from the mesh root, not
+ *                      from a worktree subdir). Use this instead of
+ *                      reaching into the mesh store directly.
  *
  * The "global view" case (sidebar shows all meshes, no mesh selected, but
  * the user just clicked an agent card) is the one the explicit fallback
@@ -40,12 +47,18 @@ export interface ProbeContext {
   /** Working directory the probe should treat as its root — node path if a
    *  node is focused, else the mesh root, else null. */
   activePath: string | null;
+  /** The mesh row's own path (independent of any focused worktree). Mesh-
+   *  scoped tabs that walk the repo (GitHub Issues, Session Discovery,
+   *  etc.) should prefer this over `activePath`. Null when no mesh is
+   *  resolvable. */
+  activeMeshPath: string | null;
 }
 
 const EMPTY_CONTEXT: ProbeContext = {
   activeMeshId: null,
   activeNodeId: null,
   activePath: null,
+  activeMeshPath: null,
 };
 
 export function useProbeContext(): ProbeContext {
@@ -79,6 +92,12 @@ export function useProbeContext(): ProbeContext {
       ? activeNode.path
       : mesh?.path ?? null;
 
-    return { activeMeshId, activeNodeId, activePath };
+    // The mesh's own path is independent of any focused worktree. The
+    // "global view" fallback (`selectedMeshId === null`, mesh derived
+    // from the focused node) keeps `activeMeshPath` populated so the
+    // mesh-scoped tabs still have a repo root to walk.
+    const activeMeshPath = mesh?.path ?? null;
+
+    return { activeMeshId, activeNodeId, activePath, activeMeshPath };
   }, [selectedMeshId, meshesById, activeNodeId, agentNodes]);
 }

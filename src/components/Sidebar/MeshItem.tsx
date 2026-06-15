@@ -52,8 +52,16 @@ interface MeshItemProps {
   setActiveNode: (id: number) => void;
   selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
-  onOpenGitHubIssues: (meshId: number) => void;
-  onOpenSessionBrowser: (meshId: number) => void;
+  // Issue #378: opens the Probe Panel on the 🐙 Git Issues tab for this
+  // mesh. Replaces the legacy `onOpenGitHubIssues` prop, which mounted
+  // the now-deprecated `GitHubIssuesModal`. The modal component file
+  // stays on disk per the acceptance criteria; only the call sites
+  // are removed.
+  onOpenIssuesProbe: (meshId: number) => void;
+  // Issue #378: opens the Probe Panel on the 🕒 Session History tab.
+  // Replaces the legacy `onOpenSessionBrowser` prop, which mounted the
+  // `SessionBrowserModal`. The modal component file stays on disk.
+  onOpenSessionHistoryProbe: (meshId: number) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
   /**
    * Issue #375 — the right-click "Properties" item and the drift `!` badge
@@ -79,8 +87,8 @@ export function MeshItem({
   setActiveNode,
   selectMesh,
   onDeleteNode,
-  onOpenGitHubIssues,
-  onOpenSessionBrowser,
+  onOpenIssuesProbe,
+  onOpenSessionHistoryProbe,
   getDefaultProvider,
   onOpenPropertiesProbe,
 }: MeshItemProps) {
@@ -273,7 +281,7 @@ export function MeshItem({
             {syncing ? 'Syncing...' : 'Sync Latest'}
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenSessionBrowser(mesh.id); }}
+            onClick={() => { setContextMenu(null); onOpenSessionHistoryProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -283,7 +291,7 @@ export function MeshItem({
             Previous Sessions
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenGitHubIssues(mesh.id); }}
+            onClick={() => { setContextMenu(null); onOpenIssuesProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
