@@ -12,8 +12,11 @@
  * single-PR detail endpoint does, and even there it's `null` while GitHub
  * computes the merge asynchronously. So the list loads fast, then each open,
  * non-draft PR is enriched in parallel via `getPrMergeability`. Until that
- * resolves (or while GitHub returns `null`) the row shows "Checking…"; a
- * draft PR is flagged without any detail call.
+ * resolves the row shows "Checking…"; a draft PR is flagged without any
+ * detail call. If GitHub returns `null` (still computing) the enrichment
+ * effect schedules a bounded retry so the row doesn't get stuck on
+ * "Checking…" forever — see issue #419 and the inline note above the
+ * enrichment useEffect.
  *
  * Merge is squash + delete branch (the existing `merge_pr`), gated behind an
  * inline confirm because it's an irreversible outward action. On success the
@@ -114,25 +117,66 @@ export function GitPullRequestsTab() {
   // load — depending on the map would let the first probe's setState cancel the
   // siblings' in-flight callbacks and force needless refetches. `load` already
   // clears the map, so there's nothing stale to guard against here.
+  //
+  // Re-poll on `mergeable: null` (issue #419)
+  // ----------------------------------------
+  // GitHub computes the merge asynchronously, so the detail endpoint can return
+  // `mergeable: null` for a few seconds. We schedule a bounded retry — first
+  // retry after 1.5s, then 3s, 4.5s — and give up after `MAX_MERGEABILITY_ATTEMPTS`
+  // total (1 initial + 3 retries, ~9s). Past that, "Checking…" is the best we
+  // can do without spamming GitHub; the next list reload retries from scratch.
+  // Cleanup clears every pending retry timer so a filter toggle / mesh change /
+  // unmount tears down the whole chain at once.
   useEffect(() => {
     if (activeMeshId === null || stateFilter !== 'open') return;
     let cancelled = false;
+    // Per-PR retry timers + attempt counts. Maps are owned by this effect
+    // instance; cleanup discards them and clears the timers.
+    const retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+    const attempts = new Map<number, number>();
+    const MAX_MERGEABILITY_ATTEMPTS = 4;
+    const BASE_RETRY_DELAY_MS = 1500;
+
+    const probe = (pr: GitHubPullRequest) => {
+      getPrMergeability(activeMeshId, pr.number)
+        .then((info) => {
+          if (cancelled) return;
+          setMergeability((prev) => ({ ...prev, [pr.number]: info }));
+          // Still computing — schedule a bounded retry.
+          if (info.mergeable === null) {
+            const attempt = (attempts.get(pr.number) ?? 0) + 1;
+            if (attempt < MAX_MERGEABILITY_ATTEMPTS) {
+              attempts.set(pr.number, attempt);
+              const delay = BASE_RETRY_DELAY_MS * attempt;
+              const timer = setTimeout(() => {
+                retryTimers.delete(pr.number);
+                if (cancelled) return;
+                probe(pr);
+              }, delay);
+              retryTimers.set(pr.number, timer);
+            }
+            // else: exhausted retries; row stays in "Checking…" (matches
+            // pre-fix behaviour and avoids spamming GitHub).
+          }
+        })
+        .catch((e) => {
+          // A failed mergeability probe leaves the row in "Checking…" rather
+          // than falsely claiming conflicts; the next list reload retries.
+          console.error(`mergeability probe failed for PR #${pr.number}:`, e);
+        });
+    };
+
     prs
       .filter((pr) => !pr.draft)
       .forEach((pr) => {
-        getPrMergeability(activeMeshId, pr.number)
-          .then((info) => {
-            if (cancelled) return;
-            setMergeability((prev) => ({ ...prev, [pr.number]: info }));
-          })
-          .catch((e) => {
-            // A failed mergeability probe leaves the row in "Checking…" rather
-            // than falsely claiming conflicts; the next list reload retries.
-            console.error(`mergeability probe failed for PR #${pr.number}:`, e);
-          });
+        attempts.set(pr.number, 0);
+        probe(pr);
       });
+
     return () => {
       cancelled = true;
+      for (const timer of retryTimers.values()) clearTimeout(timer);
+      retryTimers.clear();
     };
   }, [prs, stateFilter, activeMeshId]);
 
