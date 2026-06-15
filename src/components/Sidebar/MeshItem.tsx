@@ -3,7 +3,6 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
-import type { FileExplorerContext } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
 import type { MeshHealth } from '../../lib/tauri';
@@ -45,7 +44,10 @@ interface MeshItemProps {
   onNewNode: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
   onOpenProperties: (meshId: number) => void;
-  onToggleFileExplorer: (context: FileExplorerContext) => void;
+  // Issue #376: opens the unified Probe Panel on the 📁 (Project Files) tab
+  // for this mesh. Replaces the legacy `onToggleFileExplorer` prop, which
+  // toggled the now-deprecated SessionView left-pane `FileExplorerPanel`.
+  onOpenFilesProbe: () => void;
   meshNodes: AgentNode[];
   activeNodeId: number | null;
   setActiveNode: (id: number) => void;
@@ -65,7 +67,7 @@ export function MeshItem({
   onNewNode,
   onSelectProvider,
   onOpenProperties,
-  onToggleFileExplorer,
+  onOpenFilesProbe,
   meshNodes,
   activeNodeId,
   setActiveNode,
@@ -242,7 +244,7 @@ export function MeshItem({
             Properties
           </button>
           <button
-            onClick={() => { setContextMenu(null); onToggleFileExplorer({ type: 'mesh', meshId: mesh.id, path: mesh.path }); }}
+            onClick={() => { setContextMenu(null); onOpenFilesProbe(); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

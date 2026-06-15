@@ -50,7 +50,7 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onNewNode: vi.fn(),
     onSelectProvider: vi.fn(),
     onOpenProperties: vi.fn(),
-    onToggleFileExplorer: vi.fn(),
+    onOpenFilesProbe: vi.fn(),
     meshNodes: [],
     activeNodeId: null,
     setActiveNode: vi.fn(),
@@ -121,6 +121,17 @@ describe('MeshItem', () => {
     fireEvent.contextMenu(screen.getByText('my-mesh'));
     await userEvent.click(screen.getByText('GitHub Issues'));
     expect(props.onOpenGitHubIssues).toHaveBeenCalledWith(3);
+  });
+
+  it('opens the probe panel on the files tab when "File Explorer" is chosen (#376)', async () => {
+    // Issue #376 — the "File Explorer" right-click item used to call the
+    // legacy `onToggleFileExplorer` (which opened FileExplorerPanel in the
+    // SessionView left pane). After the port it calls `onOpenFilesProbe`,
+    // which Sidebar wires to `openProbeTab('files')`.
+    const { props } = renderMeshItem();
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('File Explorer'));
+    expect(props.onOpenFilesProbe).toHaveBeenCalledTimes(1);
   });
 
   it('renders a sync button in the header to the left of the Add Node form', async () => {

@@ -8,8 +8,10 @@
  * behaviour). Because the bar stays visible while collapsed, the panel can
  * always be reopened after the header's close button hides the body.
  *
- * Scope of #374 is the shell only — the six tabs' real content
- * (ProjectFilesTab, AgentChangesTab, …) lands in follow-up issues under #372.
+ * Tab bodies land incrementally as follow-up issues under #372 complete:
+ *   - #376: `ProjectFilesTab` (📁) and `AgentChangesTab` (🔍)
+ *   - remaining tabs (`properties`, `worktrees`, `issues`, `sessions`)
+ *     still render the placeholder pending their own issues.
  * Until then each tab renders a scaffold placeholder, and the friendly
  * empty states for "no project / no agent node" are wired here so the dock is
  * useful from day one.
@@ -17,6 +19,8 @@
 
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { ProjectFilesTab } from './ProjectFilesTab';
+import { AgentChangesTab } from './AgentChangesTab';
 
 interface ProbeTabDef {
   tab: ProbeTab;
@@ -171,6 +175,11 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
       />
     );
   }
+
+  // The two tabs that already have real content (#376) — the rest of the
+  // dock still shows the scaffold placeholder pending their own issues.
+  if (tab === 'files') return <ProjectFilesTab />;
+  if (tab === 'review') return <AgentChangesTab />;
 
   return <ProbeTabPlaceholder tab={tab} />;
 }

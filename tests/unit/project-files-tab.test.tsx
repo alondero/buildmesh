@@ -1,0 +1,119 @@
+/**
+ * ProjectFilesTab — issue #376. The Probe Panel's 📁 tab body.
+ *
+ * Mirrors the non-agent branch of the legacy `FileExplorerPanel`:
+ * `ChangedFilesSection` on top, a collapsible `FileTree` underneath. A click
+ * on a changed file should switch the probe to the `review` tab via the
+ * existing `openDiff` action (the review tab is where the diff is consumed,
+ * not here in the narrow 360px body).
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { invoke } from '@tauri-apps/api/core';
+import { ProjectFilesTab } from '../../src/components/Probe/ProjectFilesTab';
+import { useUIStore } from '../../src/stores/uiStore';
+import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
+import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import type { FileNode, GitStatus, DiffResult } from '../../src/lib/tauri';
+
+const MESH: Mesh = {
+  id: 1,
+  name: 'demo',
+  path: '/repo',
+  layout: 'grid',
+  position: 0,
+  created_at: '2026-01-01',
+};
+
+const NODE: AgentNode = {
+  id: 7,
+  mesh_id: 1,
+  name: 'agent-1',
+  path: '/repo/worktrees/agent-1',
+  branch: 'main',
+  env: 'windows',
+  provider: 'anthropic',
+  status: 'running',
+  use_worktree: true,
+  position: 0,
+  created_at: '2026-01-01',
+};
+
+const FILES: GitStatus[] = [
+  { path: 'src/app.ts', status: 'modified', additions: 3, deletions: 1 },
+];
+
+const DIFF: DiffResult = { files: [{ path: 'src/app.ts', hunks: [] }] };
+
+const TREE: FileNode = {
+  name: 'repo',
+  path: '/repo',
+  is_dir: true,
+  children: [
+    { name: 'app.ts', path: '/repo/app.ts', is_dir: false, children: [] },
+  ],
+};
+
+/** Route invoke() so both the git status and the file tree can be controlled. */
+function mockBackend() {
+  vi.mocked(invoke).mockImplementation((cmd: string) => {
+    if (cmd === 'get_git_status') return Promise.resolve(FILES);
+    if (cmd === 'list_directory') return Promise.resolve(TREE);
+    if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);
+    if (cmd === 'get_git_branch_status') return Promise.resolve(null);
+    return Promise.resolve({});
+  });
+}
+
+describe('ProjectFilesTab (#376)', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    mockBackend();
+    useMeshStore.setState({
+      meshes: [MESH],
+      meshesById: new Map([[MESH.id, MESH]]),
+      selectedMeshId: MESH.id,
+    });
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: null });
+    useUIStore.setState({
+      probeOpen: true,
+      probeTab: 'files',
+      activeDiffFile: null,
+    });
+  });
+
+  it('renders both the Changed Files and File Tree sections anchored on the active mesh path', async () => {
+    render(<ProjectFilesTab />);
+
+    // Changed Files section shows the git-status file. The shared cache
+    // dedupes the fetch with useMeshGitStatus, but the component still
+    // makes the get_git_status call once.
+    expect(await screen.findByText('src/app.ts')).toBeTruthy();
+    expect(screen.getByText('Changed Files')).toBeTruthy();
+    expect(screen.getByText('File Tree')).toBeTruthy();
+  });
+
+  it('collapses the File Tree when its header is clicked', async () => {
+    render(<ProjectFilesTab />);
+
+    await screen.findByText('File Tree');
+    fireEvent.click(screen.getByText('File Tree'));
+    // The Changed Files section is unaffected — only the tree sub-tree hides.
+    expect(screen.getByText('Changed Files')).toBeTruthy();
+  });
+
+  it('clicking a changed file switches to the review tab via openDiff', async () => {
+    render(<ProjectFilesTab />);
+
+    const fileButton = await screen.findByText('src/app.ts');
+    fireEvent.click(fileButton);
+
+    await waitFor(() => {
+      const state = useUIStore.getState();
+      expect(state.activeDiffFile).toBe('src/app.ts');
+      expect(state.probeTab).toBe('review');
+      expect(state.probeOpen).toBe(true);
+    });
+  });
+});

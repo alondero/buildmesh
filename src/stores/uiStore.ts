@@ -33,6 +33,12 @@ interface UIState {
   activeDiffFile: string | null;
   toggleProbe: () => void;
   setProbeTab: (tab: ProbeTab) => void;
+  // Open the probe on a specific tab, opening the panel if it's collapsed.
+  // Used by issue #376's call sites (sidebar "File Explorer" menu, agent
+  // node git-summary chip) to land the user on the right tab in one call.
+  // The "click active tab to collapse" UX is left to ProbePanel's own
+  // click handler — this is a pure "make the tab visible" action.
+  openProbeTab: (tab: ProbeTab) => void;
   openDiff: (file: string) => void;
   closeDiff: () => void;
 
@@ -82,6 +88,13 @@ export const useUIStore = create<UIState>((set, get) => ({
       probeTab: tab,
       activeDiffFile: tab === 'review' ? state.activeDiffFile : null,
     }));
+  },
+
+  openProbeTab: (tab: ProbeTab) => {
+    // One-call "make this tab visible" helper. Does NOT collapse the panel
+    // when called on the active tab — closing stays a separate concern
+    // (the activity-bar's click handler does that).
+    set({ probeTab: tab, probeOpen: true });
   },
 
   openDiff: (file: string) => {
