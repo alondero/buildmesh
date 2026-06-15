@@ -79,15 +79,18 @@ pub fn watch_session(
 /// the host form — it must match what the frontend's `getNodeGitPath()` computes
 /// (`src/lib/paths.ts`), because that's the string components subscribe with.
 ///
-/// Like `getNodeGitPath`, it gates on `use_worktree` and does NOT trim the name.
-/// The `use_worktree` gate is the bug this fixes: without it, a Root Node
-/// (`use_worktree = false`) carrying a stale `worktree_name` emitted a worktree
-/// subdir the frontend never subscribes to, so its GIT_CHANGED never matched and
-/// the node's changed-files went stale until remount. (Trimming is a separate
-/// paired cross-language change — `getNodeGitPath` doesn't trim either, so the
-/// two must stay byte-identical and change together.)
+/// The rule (gated on `use_worktree`, trimmed, non-empty) is the same one
+/// `env::worktree_segment` uses; both this helper and `getNodeGitPath()` are
+/// paired copies of that rule, kept in lockstep via tests on each side (issue
+/// #387). Without the `use_worktree` gate, a Root Node (`use_worktree = false`)
+/// carrying a stale `worktree_name` emitted a worktree subdir the frontend
+/// never subscribes to, so its GIT_CHANGED never matched and the node's
+/// changed-files went stale until remount. Without the trim, a padded
+/// `worktree_name` produced an `internal_path` that the frontend (now also
+/// trimming) wouldn't subscribe to — same staleness, narrower trigger.
 fn node_internal_path(node: &AgentNode) -> String {
-    match node.worktree_name.as_deref() {
+    let trimmed = node.worktree_name.as_deref().map(str::trim);
+    match trimmed {
         Some(wt) if node.use_worktree && !wt.is_empty() => {
             format!("{}/.claude/worktrees/{}", node.path, wt)
         }
@@ -172,5 +175,29 @@ mod tests {
     #[test]
     fn internal_path_without_worktree_name_is_mesh_root() {
         assert_eq!(node_internal_path(&node(true, None)), "/home/user/my-repo");
+    }
+
+    /// A padded `worktree_name` is trimmed to match the canonical
+    /// `env::worktree_segment` rule (and the frontend `getNodeGitPath()` in
+    /// `src/lib/paths.ts`). The GIT_CHANGED `internal_path` is the string the
+    /// frontend subscribes with — if it diverges from `getNodeGitPath()` by
+    /// even whitespace, the event never matches and changed-files go stale.
+    /// See issue #387. Paired-constant pattern, not a single source of truth.
+    #[test]
+    fn internal_path_for_padded_worktree_name_is_trimmed() {
+        assert_eq!(
+            node_internal_path(&node(true, Some("  gentle-fox  "))),
+            "/home/user/my-repo/.claude/worktrees/gentle-fox"
+        );
+    }
+
+    /// A whitespace-only worktree name trims to empty → Mesh root (parity with
+    /// the canonical `env::worktree_segment` rule).
+    #[test]
+    fn internal_path_for_whitespace_only_worktree_name_is_mesh_root() {
+        assert_eq!(
+            node_internal_path(&node(true, Some("   "))),
+            "/home/user/my-repo"
+        );
     }
 }

@@ -3,9 +3,20 @@ import { isWindows } from './platform';
 // `worktree_name` is `string | null` (the generated `AgentNode` shape — ts-rs
 // emits Rust `Option<String>` as `string | null`, issue #359); `null` is falsy
 // so the guard below handles it the same as the old `undefined`.
+//
+// The trim mirrors the canonical `env::worktree_segment` rule in
+// `src-tauri/src/env/mod.rs`, and is paired with `node_internal_path` in
+// `src-tauri/src/commands/file_watcher.rs`. The GIT_CHANGED `internal_path`
+// Rust emits and the path this helper returns must be byte-identical — a
+// divergence (even just whitespace) means the event never matches the
+// subscription and the node's changed-files goes stale. Paired-constant
+// pattern, not a single source of truth (issue #387, ADR-0010).
 export function getNodeGitPath(node: { path: string; worktree_name?: string | null; use_worktree?: boolean }): string {
   if (node.use_worktree !== false && node.worktree_name) {
-    return `${node.path}/.claude/worktrees/${node.worktree_name}`;
+    const trimmed = node.worktree_name.trim();
+    if (trimmed) {
+      return `${node.path}/.claude/worktrees/${trimmed}`;
+    }
   }
   return node.path;
 }
