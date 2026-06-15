@@ -212,6 +212,41 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     }
   }, [activeNodeId, sessionId]);
 
+  // Focus guardian. In a multi-pane grid, background DOM churn — a re-render
+  // that momentarily re-parents xterm's imperatively-appended `.xterm` element,
+  // an overlay mounting/unmounting next to it, or a WebView2 focus hiccup — can
+  // blur the terminal's hidden helper-textarea and drop keyboard focus to
+  // <body> mid-keystroke, with no user action, so the next characters go
+  // nowhere. When *this* node is the active one and the app window still holds
+  // OS focus, reclaim it. We act ONLY when focus has fallen to nothing
+  // (<body>/null): a click that moves focus to a real control (the search box, a
+  // rename input, a header button, another pane) lands on that element, so the
+  // guard skips and never fights a legitimate move. activeNodeId is read via
+  // getState() so the listener doesn't need re-binding on every switch.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onFocusOut = () => {
+      // Defer a microtask so document.activeElement reflects where focus
+      // actually landed before we judge whether it fell out entirely.
+      queueMicrotask(() => {
+        if (sessionId !== useAgentNodeStore.getState().activeNodeId) return;
+        if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
+        const active = document.activeElement;
+        if (active && active !== document.body) return; // moved to a real control — leave it
+        // Read the live instance from the registry (not instRef): a node closed
+        // mid-flight is removed from the registry, so this skips it rather than
+        // focusing a disposed xterm (dispose() doesn't null attachedContainer).
+        const inst = terminalManager.getInstance(sessionId);
+        if (!inst || !inst.attachedContainer) return;
+        console.warn(`[AgentTerminal] keyboard focus fell to <body> while node ${sessionId} was active — restoring terminal focus`);
+        inst.term.focus();
+      });
+    };
+    container.addEventListener('focusout', onFocusOut);
+    return () => container.removeEventListener('focusout', onFocusOut);
+  }, [sessionId]);
+
   // Attach/detach the xterm element. Keyed on sessionId ONLY. It used to also
   // depend on node.status, which meant every attention flip (running ↔
   // awaiting_input, many per minute while an agent works) tore the terminal
