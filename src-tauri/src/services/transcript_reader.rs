@@ -16,6 +16,7 @@
 //! than someone else's lossy summary. Truncation only bounds payload size.
 //!
 //! [`Unavailable`]: UnavailableReason
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,12 @@ use crate::env;
 /// Per-turn text cap. Generous (this is the deep drill-in, not the scan) but
 /// bounded so a single huge assistant message can't dominate the payload.
 const MAX_TURN_TEXT: usize = 4000;
+/// Per-turn tool-call cap. Within one `message.id` the count is naturally small
+/// (parallel calls usually span separate message ids → separate turns), so this
+/// is defensive only — but it honours the same "no single turn dominates the
+/// payload" intent as [`MAX_TURN_TEXT`] (issue #335). Generous so a real turn is
+/// never clipped; a turn that hits it was already pathological.
+const MAX_TURN_TOOL_CALLS: usize = 50;
 /// Cap applied to every string leaf inside a tool call's raw `input`, so a
 /// `Write` carrying a whole file body doesn't blow up the response while the
 /// input's *structure* is still delivered raw.
@@ -65,6 +72,25 @@ pub(crate) fn concat_text_blocks(content: Option<&serde_json::Value>) -> String 
             .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
             .collect::<Vec<_>>()
             .join("\n"),
+        _ => String::new(),
+    }
+}
+/// Pull the text of only the **first** `text` block out of a message `content`
+/// field (or the whole string for a bare-string content). Unlike
+/// [`concat_text_blocks`] this never joins multiple blocks: `session_discovery`
+/// wants a single-line session *title* from the opening prompt, and joining all
+/// blocks with `\n` (which its `strip_tags` doesn't collapse) would corrupt the
+/// title for a multi-text-block user message (issue #335). For the common
+/// single-block message the two functions are identical.
+pub(crate) fn first_text_block(content: Option<&serde_json::Value>) -> String {
+    match content {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .find_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .unwrap_or("")
+            .to_string(),
         _ => String::new(),
     }
 }
@@ -124,11 +150,6 @@ pub struct Turn {
     /// Tool calls made in this turn (assistant turns only).
     pub tool_calls: Vec<ToolCall>,
 }
-impl Turn {
-    fn is_assistant(&self) -> bool {
-        self.role == "assistant"
-    }
-}
 /// Why a transcript could not be read. Typed so the Coordinator can tell a
 /// genuinely-quiet node from a degraded rich layer (ADR-0008 Â§3) "— never a
 /// panic, never a silent empty result.
@@ -149,9 +170,20 @@ pub enum UnavailableReason {
     NoTranscript,
     /// The transcript file exists but could not be opened or read (I/O error).
     Unreadable,
-    /// The file was read but no recognizable turns could be parsed "— the Claude
-    /// Code JSONL shape has changed (renamed/missing fields). A busy node must
-    /// never look quiet, so this degrades loudly rather than returning `[]`.
+    /// The file was read and its lines were *structurally well-formed*, but it
+    /// carried no recognizable turns yet — a genuinely quiet/new session whose
+    /// only lines are deliberately-skipped ones (synthetic `local-command-caveat`
+    /// injections, tool-result echoes, thinking-only assistant lines) plus
+    /// non-message lines (`mode`/`system`/summary). Distinct from `ShapeChanged`
+    /// so a Coordinator can tell "nothing has happened yet" from "the rich layer
+    /// is broken, page me" (issue #335). Low-probability in practice (a spawned
+    /// node's first user prompt is itself a turn) but the two are now distinct.
+    Empty,
+    /// The file was read but a structurally-malformed `user`/`assistant` line was
+    /// seen (renamed/missing `message`/`role`/`content`) and no recognizable
+    /// turns could be parsed "— the Claude Code JSONL shape has changed. A busy
+    /// node must never look quiet, so this degrades loudly rather than returning
+    /// `[]` or the quieter `Empty`.
     ShapeChanged,
 }
 /// The reader's result: either an available tail, or a typed unavailable
@@ -210,7 +242,11 @@ pub fn read_tail_from_file(path: &Path, tail: usize) -> TranscriptTail {
     };
     let reader = BufReader::new(file);
     let lines = reader.lines().map_while(Result::ok);
-    tail_from_turns(parse_turns(lines), tail)
+    // Stream the whole file but retain only the last N turns (issue #335): the
+    // on-demand drill-in still scans every line, yet holds O(tail) turns in
+    // memory instead of the whole transcript, so a busy long-running node can't
+    // make the endpoint allocate a Vec of every turn it ever produced.
+    build_tail(parse_turns(lines, effective_tail(tail)))
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
 /// from a Claude Code transcript, bounded to a tail byte window so a single
@@ -245,43 +281,27 @@ pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
     // few minutes. Bounded so a 30s Coordinator poll over N cwrap nodes
     // doesn't parse the entire transcript for each one (issue #341).
     const TAIL_BYTES: u64 = 256 * 1024;
-    let turns = if size > TAIL_BYTES {
-        let mut file = match fs::File::open(path) {
-            Ok(f) => f,
-            Err(_) => return TranscriptTail::unavailable(UnavailableReason::Unreadable),
+    // The digest only needs the last assistant message, so keep just one turn
+    // (enough for a split assistant message to coalesce its text) — the rolling
+    // buffer never grows with transcript length.
+    let parsed = if size > TAIL_BYTES {
+        let Some(window) = parse_byte_window(path, TAIL_BYTES) else {
+            return TranscriptTail::unavailable(UnavailableReason::Unreadable);
         };
-        if file.seek(SeekFrom::End(-(TAIL_BYTES as i64))).is_err() {
-            return TranscriptTail::unavailable(UnavailableReason::Unreadable);
-        }
-        let mut buf = Vec::with_capacity(TAIL_BYTES as usize);
-        if file.read_to_end(&mut buf).is_err() {
-            return TranscriptTail::unavailable(UnavailableReason::Unreadable);
-        }
-        let mut buf_reader = BufReader::new(buf.as_slice());
-        // The seek landed mid-line; drop everything up to and including the
-        // first newline so the parser only sees complete JSONL lines.
-        let mut discard = Vec::new();
-        let _ = buf_reader.read_until(b'\n', &mut discard);
-        let lines = buf_reader.lines().map_while(Result::ok);
-        let parsed = parse_turns(lines);
-        // Defensive fallback: if the bounded window yielded no assistant
-        // *text* — the common case is a long window of tool calls — re-parse
-        // the whole file so we still surface the actual last assistant
-        // message. (Per the contract in `last_assistant_message_is_from_full_transcript_not_window`,
-        // a `tail=1` request must not report the blocking question as
-        // absent just because the requested window missed it.)
-        let have_assistant_text = parsed
-            .iter()
-            .any(|t| t.is_assistant() && !t.text.is_empty());
-        if !have_assistant_text {
+        // Defensive fallback: if the bounded window carried no assistant *text*
+        // — the common case is a long window of tool calls — re-parse the whole
+        // file so we still surface the actual last assistant message. (Per the
+        // contract in `last_assistant_message_is_from_full_transcript_not_window`,
+        // a `tail=1` request must not report the blocking question as absent
+        // just because the requested window missed it.)
+        if window.last_assistant_message.is_none() {
             let Ok(file) = fs::File::open(path) else {
                 return TranscriptTail::unavailable(UnavailableReason::Unreadable);
             };
             let reader = BufReader::new(file);
-            let lines = reader.lines().map_while(Result::ok);
-            parse_turns(lines)
+            parse_turns(reader.lines().map_while(Result::ok), 1)
         } else {
-            parsed
+            window
         }
     } else {
         // Small file "— parse the whole thing, no point in seeking.
@@ -289,21 +309,31 @@ pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
             return TranscriptTail::unavailable(UnavailableReason::Unreadable);
         };
         let reader = BufReader::new(file);
-        let lines = reader.lines().map_while(Result::ok);
-        parse_turns(lines)
+        parse_turns(reader.lines().map_while(Result::ok), 1)
     };
-    if turns.is_empty() {
-        return TranscriptTail::unavailable(UnavailableReason::ShapeChanged);
+    if parsed.turns.is_empty() {
+        return TranscriptTail::unavailable(empty_or_shape_changed(parsed.saw_malformed));
     }
-    let last_assistant_message = turns
-        .iter()
-        .rev()
-        .find(|t| t.is_assistant() && !t.text.is_empty())
-        .map(|t| t.text.clone());
     TranscriptTail::Available {
         turns: Vec::new(),
-        last_assistant_message,
+        last_assistant_message: parsed.last_assistant_message,
     }
+}
+/// Read and parse only the last `tail_bytes` of a transcript (keeping one turn,
+/// for the cheap digest reader). Seeks to the byte window, drops the partial
+/// first line the seek landed mid-way through, and parses the remainder. Returns
+/// `None` on any I/O failure so the caller can degrade to `Unreadable`.
+fn parse_byte_window(path: &Path, tail_bytes: u64) -> Option<Parsed> {
+    let mut file = fs::File::open(path).ok()?;
+    file.seek(SeekFrom::End(-(tail_bytes as i64))).ok()?;
+    let mut buf = Vec::with_capacity(tail_bytes as usize);
+    file.read_to_end(&mut buf).ok()?;
+    let mut buf_reader = BufReader::new(buf.as_slice());
+    // The seek landed mid-line; drop everything up to and including the first
+    // newline so the parser only sees complete JSONL lines.
+    let mut discard = Vec::new();
+    let _ = buf_reader.read_until(b'\n', &mut discard);
+    Some(parse_turns(buf_reader.lines().map_while(Result::ok), 1))
 }
 /// Effective tail length: `0` …"™ default, otherwise clamp to the ceiling.
 fn effective_tail(tail: usize) -> usize {
@@ -313,40 +343,54 @@ fn effective_tail(tail: usize) -> usize {
         tail.min(MAX_TAIL)
     }
 }
-/// Turn a parsed turn list into the wire result: keep the last N, derive the
-/// last assistant message, or flag `ShapeChanged` if a non-empty file yielded
-/// no turns at all.
-fn tail_from_turns(turns: Vec<Turn>, tail: usize) -> TranscriptTail {
-    if turns.is_empty() {
-        // The caller only reaches here for a file that opened; zero turns from
-        // it means the recognizable shape is gone (or, rarely, a brand-new
-        // empty session). Degrade loudly so a busy node never reads as quiet.
-        return TranscriptTail::unavailable(UnavailableReason::ShapeChanged);
+/// The outcome of parsing JSONL lines into turns. Carries the *bounded* tail of
+/// turns (the last `keep`, so memory is O(keep) even for a many-MB transcript —
+/// issue #335), the last assistant message text seen across the **whole** stream
+/// (not just the retained window, so a small tail still surfaces the blocking
+/// question), and whether any structurally-malformed `user`/`assistant` line was
+/// seen (issue #335: lets [`empty_or_shape_changed`] tell a broken Claude Code
+/// shape from a genuinely-quiet session that simply has no turns yet).
+struct Parsed {
+    turns: Vec<Turn>,
+    last_assistant_message: Option<String>,
+    saw_malformed: bool,
+}
+/// Build the wire result from a [`Parsed`]: an `Available` tail, or — for a file
+/// that yielded no turns — the typed empty-vs-shape-changed degrade.
+fn build_tail(parsed: Parsed) -> TranscriptTail {
+    if parsed.turns.is_empty() {
+        return TranscriptTail::unavailable(empty_or_shape_changed(parsed.saw_malformed));
     }
-    // Derive the last assistant message from the WHOLE transcript, not just the
-    // returned window: it is "the last assistant message" (the blocking question
-    // when awaiting input) regardless of how small a `tail` the caller asked
-    // for, so a `tail=2` request must not report it as absent.
-    let last_assistant_message = turns
-        .iter()
-        .rev()
-        .find(|t| t.is_assistant() && !t.text.is_empty())
-        .map(|t| t.text.clone());
-    let n = effective_tail(tail);
-    let start = turns.len().saturating_sub(n);
-    let tail_turns = turns[start..].to_vec();
     TranscriptTail::Available {
-        turns: tail_turns,
-        last_assistant_message,
+        turns: parsed.turns,
+        last_assistant_message: parsed.last_assistant_message,
     }
 }
-/// Parse JSONL lines into logical turns. Skips every non-message line type
-/// (`mode`, `queue-operation`, `file-history-snapshot`, `system`, summaries,
-/// …), synthetic injections, and pure tool-result echoes. Consecutive assistant
-/// lines sharing a `message.id` are coalesced into one turn (Claude Code splits
-/// one assistant message "— thinking / text / tool_use "— across several lines).
-fn parse_turns(lines: impl Iterator<Item = String>) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = Vec::new();
+/// The degrade reason for a file that opened but yielded no turns: `ShapeChanged`
+/// (loud) when a malformed message line proves the recognizable shape is gone,
+/// else `Empty` (quiet) for a genuinely-new/quiet session (issue #335).
+fn empty_or_shape_changed(saw_malformed: bool) -> UnavailableReason {
+    if saw_malformed {
+        UnavailableReason::ShapeChanged
+    } else {
+        UnavailableReason::Empty
+    }
+}
+/// Parse JSONL lines into logical turns, retaining only the last `keep` of them
+/// in a rolling buffer (issue #335: bounds held memory regardless of transcript
+/// size). Skips every non-message line type (`mode`, `queue-operation`,
+/// `file-history-snapshot`, `system`, summaries, …), synthetic injections, and
+/// pure tool-result echoes. Consecutive assistant lines sharing a `message.id`
+/// are coalesced into one turn (Claude Code splits one assistant message "—
+/// thinking / text / tool_use "— across several lines).
+fn parse_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    // Always retain at least the open turn so a split assistant message can
+    // still coalesce its continuation lines (the open turn is never evicted —
+    // eviction only drops the front).
+    let keep = keep.max(1);
+    let mut turns: VecDeque<Turn> = VecDeque::new();
+    let mut last_assistant_message: Option<String> = None;
+    let mut saw_malformed = false;
     // Tracks the message.id of the in-progress assistant turn so the next line
     // of the same message merges instead of starting a new turn.
     let mut open_assistant_id: Option<String> = None;
@@ -361,19 +405,31 @@ fn parse_turns(lines: impl Iterator<Item = String>) -> Vec<Turn> {
         if entry_type != Some("user") && entry_type != Some("assistant") {
             continue;
         }
+        // From here the line claims to be a user/assistant message. A missing or
+        // renamed `message`/`role`/`content` is a structural break in the Claude
+        // Code shape (issue #335) — flag it so an all-broken file degrades loudly
+        // as `ShapeChanged`, while a file whose only non-turn lines were
+        // *deliberately* skipped (synthetic/echo/thinking) degrades as `Empty`.
         let Some(message) = val.get("message") else {
+            saw_malformed = true;
             continue;
         };
         let role = message.get("role").and_then(|r| r.as_str());
         if role != Some("user") && role != Some("assistant") {
+            saw_malformed = true;
             continue;
         }
         let role = role.unwrap();
-        let content = message.get("content");
+        let Some(content) = message.get("content") else {
+            saw_malformed = true;
+            continue;
+        };
+        let content = Some(content);
         let text = concat_text_blocks(content);
-        let tool_calls = extract_tool_calls(content);
+        let mut tool_calls = extract_tool_calls(content);
         // Skip synthetic user injections (local-command-caveat) and pure
-        // tool-result echoes (a user line carrying only tool output).
+        // tool-result echoes (a user line carrying only tool output). These are
+        // well-formed lines we choose not to surface — never `ShapeChanged`.
         if role == "user" {
             if is_synthetic_message(&text) {
                 open_assistant_id = None;
@@ -399,31 +455,64 @@ fn parse_turns(lines: impl Iterator<Item = String>) -> Vec<Turn> {
             // non-empty; otherwise this starts a fresh turn.
             if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
                 if id == open {
-                    if let Some(last) = turns.last_mut() {
+                    if let Some(last) = turns.back_mut() {
                         merge_into(last, &text, tool_calls);
+                        if !last.text.is_empty() {
+                            last_assistant_message = Some(last.text.clone());
+                        }
                         continue;
                     }
                 }
             }
             open_assistant_id = id;
-            turns.push(Turn {
+            cap_tool_calls(&mut tool_calls);
+            let turn = Turn {
                 role: "assistant".to_string(),
                 text: truncate(&text, MAX_TURN_TEXT),
                 tool_calls,
-            });
+            };
+            if !turn.text.is_empty() {
+                last_assistant_message = Some(turn.text.clone());
+            }
+            push_bounded(&mut turns, turn, keep);
         } else {
             open_assistant_id = None;
-            turns.push(Turn {
-                role: "user".to_string(),
-                text: truncate(&text, MAX_TURN_TEXT),
-                tool_calls: Vec::new(),
-            });
+            push_bounded(
+                &mut turns,
+                Turn {
+                    role: "user".to_string(),
+                    text: truncate(&text, MAX_TURN_TEXT),
+                    tool_calls: Vec::new(),
+                },
+                keep,
+            );
         }
     }
-    turns
+    Parsed {
+        turns: turns.into(),
+        last_assistant_message,
+        saw_malformed,
+    }
+}
+/// Push a turn into the rolling buffer, evicting the oldest if it now exceeds
+/// `keep`. Only the front is dropped, so the most-recent (open) turn always
+/// survives for a continuation line to coalesce into.
+fn push_bounded(turns: &mut VecDeque<Turn>, turn: Turn, keep: usize) {
+    turns.push_back(turn);
+    while turns.len() > keep {
+        turns.pop_front();
+    }
+}
+/// Bound a turn's tool-call count to [`MAX_TURN_TOOL_CALLS`] (issue #335), so no
+/// single turn dominates the payload even if a message carries a pathological
+/// number of parallel tool calls.
+fn cap_tool_calls(tool_calls: &mut Vec<ToolCall>) {
+    tool_calls.truncate(MAX_TURN_TOOL_CALLS);
 }
 /// Merge a continuation line of the same assistant message into the open turn:
-/// append any text (re-truncating the combined result) and add its tool calls.
+/// append any text (re-truncating the combined result) and add its tool calls
+/// (re-capping the combined list so a turn split across many lines still honours
+/// [`MAX_TURN_TOOL_CALLS`]).
 fn merge_into(turn: &mut Turn, more_text: &str, mut more_tools: Vec<ToolCall>) {
     if !more_text.trim().is_empty() {
         let combined = if turn.text.is_empty() {
@@ -434,6 +523,7 @@ fn merge_into(turn: &mut Turn, more_text: &str, mut more_tools: Vec<ToolCall>) {
         turn.text = truncate(&combined, MAX_TURN_TEXT);
     }
     turn.tool_calls.append(&mut more_tools);
+    cap_tool_calls(&mut turn.tool_calls);
 }
 /// Pull `tool_use` blocks out of a message `content` array into [`ToolCall`]s,
 /// truncating string leaves in each raw `input`.
@@ -662,22 +752,46 @@ mod tests {
     #[test]
     fn last_assistant_message_is_from_full_transcript_not_window() {
         // The blocking question is "the last assistant message" regardless of
-        // how small a tail the caller asks for: a window that ends on a user
-        // turn must still surface it.
-        let turns = vec![
-            Turn { role: "assistant".to_string(), text: "Shall I apply the fix?".to_string(), tool_calls: vec![] },
-            Turn { role: "user".to_string(), text: "wait, first explain".to_string(), tool_calls: vec![] },
+        // how small a tail the caller asks for: a rolling buffer that retains
+        // only the trailing user turn must still surface it (issue #335 — the
+        // last-message tracking is independent of the bounded turn window).
+        let lines = vec![
+            r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Shall I apply the fix?"}]}}"#.to_string(),
+            r#"{"type":"user","message":{"role":"user","content":"wait, first explain"}}"#.to_string(),
         ];
-        let TranscriptTail::Available { turns: window, last_assistant_message } =
-            tail_from_turns(turns, 1)
-        else {
-            panic!("expected available");
-        };
-        // Window is just the trailing user turn …
-        assert_eq!(window.len(), 1);
-        assert_eq!(window[0].role, "user");
-        // … but the last assistant message is still recovered from the full list.
-        assert_eq!(last_assistant_message.as_deref(), Some("Shall I apply the fix?"));
+        let parsed = parse_turns(lines.into_iter(), 1);
+        // The retained window (keep=1) is just the trailing user turn …
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].role, "user");
+        // … but the last assistant message is still recovered from the full stream.
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Shall I apply the fix?"));
+    }
+
+    #[test]
+    fn rolling_buffer_retains_only_the_last_keep_turns() {
+        // Stream more turns than `keep`; the buffer holds the last `keep`, in
+        // order, while still tracking the last assistant message (issue #335).
+        let mut lines = Vec::new();
+        for i in 0..50 {
+            lines.push(format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"prompt {i}"}}}}"#
+            ));
+            lines.push(format!(
+                r#"{{"type":"assistant","message":{{"id":"m{i}","role":"assistant","content":[{{"type":"text","text":"reply {i}"}}]}}}}"#
+            ));
+        }
+        let parsed = parse_turns(lines.into_iter(), 3);
+        assert_eq!(parsed.turns.len(), 3, "buffer never exceeds keep");
+        // The last three of [… user 49, assistant 49] are user49, asst49 — wait,
+        // order is user,assistant per round, so the tail is asst48? Build it out:
+        let roles: Vec<&str> = parsed.turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(roles, vec!["assistant", "user", "assistant"]);
+        assert_eq!(parsed.turns[2].text, "reply 49");
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("reply 49"),
+            "last assistant message survives eviction of its turn from the window"
+        );
     }
     // --- Brittleness defence: renamed/missing fields …"™ Unavailable, no panic ---
     #[test]
@@ -688,6 +802,108 @@ mod tests {
             TranscriptTail::unavailable(UnavailableReason::ShapeChanged),
             "a renamed/missing-field transcript must degrade loudly, never panic"
         );
+    }
+
+    // --- Item 1: empty/quiet session is Empty, not ShapeChanged (issue #335) ---
+    #[test]
+    fn empty_session_degrades_to_empty_not_shape_changed() {
+        // A file whose only lines are deliberately-skipped ones (caveat, a
+        // tool-result echo, a thinking-only assistant) plus non-message lines
+        // (summary/mode/system) is a genuinely-quiet session — `Empty`, the
+        // quiet degrade, not the loud `ShapeChanged`.
+        let tail = read_tail_from_file(&fixture("claude_code_transcript_empty.jsonl"), 10);
+        assert_eq!(
+            tail,
+            TranscriptTail::unavailable(UnavailableReason::Empty),
+            "a structurally well-formed but turn-less session is Empty, not ShapeChanged"
+        );
+    }
+
+    #[test]
+    fn empty_session_is_empty_through_the_digest_reader_too() {
+        // The cheap digest path must make the same empty-vs-shape distinction.
+        let tail =
+            read_last_assistant_message_from_file(&fixture("claude_code_transcript_empty.jsonl"));
+        assert_eq!(tail, TranscriptTail::unavailable(UnavailableReason::Empty));
+    }
+
+    #[test]
+    fn one_malformed_line_tips_an_otherwise_empty_file_to_shape_changed() {
+        // The discriminator is "did we see a malformed user/assistant line",
+        // not "is the file empty": a single renamed-field line among skipped
+        // ones still means the shape broke.
+        let lines = vec![
+            r#"{"type":"user","message":{"role":"user","content":"<local-command-caveat>noise</local-command-caveat>"}}"#.to_string(),
+            r#"{"type":"assistant","message":{"id":"m1","author":"assistant","blocks":[{"type":"text","text":"renamed role+content"}]}}"#.to_string(),
+        ];
+        let parsed = parse_turns(lines.into_iter(), 10);
+        assert!(parsed.turns.is_empty());
+        assert!(parsed.saw_malformed, "a renamed role/content line is malformed");
+        assert_eq!(
+            empty_or_shape_changed(parsed.saw_malformed),
+            UnavailableReason::ShapeChanged
+        );
+    }
+
+    // --- Item 3: per-turn tool-call cap (issue #335) ---
+    #[test]
+    fn tool_calls_per_turn_are_capped() {
+        let mut calls = String::new();
+        for i in 0..(MAX_TURN_TOOL_CALLS + 10) {
+            if i > 0 {
+                calls.push(',');
+            }
+            calls.push_str(&format!(
+                r#"{{"type":"tool_use","id":"t{i}","name":"Read","input":{{"file_path":"/a/{i}"}}}}"#
+            ));
+        }
+        let line =
+            format!(r#"{{"type":"assistant","message":{{"id":"m1","role":"assistant","content":[{calls}]}}}}"#);
+        let parsed = parse_turns(std::iter::once(line), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(
+            parsed.turns[0].tool_calls.len(),
+            MAX_TURN_TOOL_CALLS,
+            "a single turn's tool calls are bounded so no turn dominates the payload"
+        );
+    }
+
+    #[test]
+    fn coalesced_turn_tool_calls_are_capped_across_lines() {
+        // Two lines of the same message.id, each already at the cap, must still
+        // coalesce to a single capped turn — the merge re-caps, not just appends.
+        let mk = |start: usize| {
+            let mut calls = String::new();
+            for i in 0..MAX_TURN_TOOL_CALLS {
+                if i > 0 {
+                    calls.push(',');
+                }
+                calls.push_str(&format!(
+                    r#"{{"type":"tool_use","id":"t{}","name":"Read","input":{{}}}}"#,
+                    start + i
+                ));
+            }
+            format!(r#"{{"type":"assistant","message":{{"id":"m1","role":"assistant","content":[{calls}]}}}}"#)
+        };
+        let parsed = parse_turns(vec![mk(0), mk(1000)].into_iter(), 10);
+        assert_eq!(parsed.turns.len(), 1, "same message.id coalesces to one turn");
+        assert_eq!(parsed.turns[0].tool_calls.len(), MAX_TURN_TOOL_CALLS);
+    }
+
+    // --- Item 4: first_text_block is first-block, not join-all (issue #335) ---
+    #[test]
+    fn first_text_block_takes_only_the_first_block() {
+        assert_eq!(first_text_block(Some(&serde_json::json!("hello"))), "hello");
+        let arr = serde_json::json!([
+            {"type": "thinking", "thinking": "ignored"},
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ]);
+        // concat_text_blocks would join to "first\nsecond"; first_text_block
+        // returns just "first" with no interior newline.
+        assert_eq!(first_text_block(Some(&arr)), "first");
+        assert_eq!(concat_text_blocks(Some(&arr)), "first\nsecond");
+        assert_eq!(first_text_block(None), "");
     }
     // --- Serialization shape (the wire contract a later MCP wrap depends on) ---
     #[test]

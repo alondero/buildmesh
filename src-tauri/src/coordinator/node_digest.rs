@@ -90,7 +90,12 @@ pub enum EnrichmentUnavailable {
     NoTranscript,
     /// The transcript file exists but could not be opened or read.
     Unreadable,
-    /// The file was read but no recognizable turns parsed — the Claude Code
+    /// The file was read and well-formed but carried no recognizable turns yet —
+    /// a genuinely quiet/new session. Distinct from `ShapeChanged` so a busy
+    /// node's broken rich layer ("page me") never reads the same as "nothing has
+    /// happened yet" (issue #335).
+    Empty,
+    /// The file was read but a malformed message line proved the Claude Code
     /// JSONL shape has changed. Degrades loudly so a busy node never looks quiet.
     ShapeChanged,
 }
@@ -102,6 +107,7 @@ impl From<UnavailableReason> for EnrichmentUnavailable {
             UnavailableReason::NoSession => EnrichmentUnavailable::NoSession,
             UnavailableReason::NoTranscript => EnrichmentUnavailable::NoTranscript,
             UnavailableReason::Unreadable => EnrichmentUnavailable::Unreadable,
+            UnavailableReason::Empty => EnrichmentUnavailable::Empty,
             UnavailableReason::ShapeChanged => EnrichmentUnavailable::ShapeChanged,
         }
     }
@@ -352,6 +358,7 @@ mod tests {
             (UnavailableReason::NoSession, E::NoSession),
             (UnavailableReason::NoTranscript, E::NoTranscript),
             (UnavailableReason::Unreadable, E::Unreadable),
+            (UnavailableReason::Empty, E::Empty),
             (UnavailableReason::ShapeChanged, E::ShapeChanged),
         ];
         for (reader, expected) in cases {
