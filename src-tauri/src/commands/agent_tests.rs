@@ -29,6 +29,7 @@ mod tests {
         ResolvedPath {
             host_path: SPAWN_PATH.to_string(),
             spawn_path: SPAWN_PATH.to_string(),
+            raw_path: SPAWN_PATH.to_string(),
             env_type: EnvType::Wsl,
         }
     }
@@ -40,6 +41,7 @@ mod tests {
         ResolvedPath {
             host_path: SPAWN_PATH.to_string(),
             spawn_path: SPAWN_PATH.to_string(),
+            raw_path: SPAWN_PATH.to_string(),
             env_type: EnvType::Windows,
         }
     }
