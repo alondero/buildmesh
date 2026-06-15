@@ -4,10 +4,14 @@ use std::fs;
 use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tauri::command;
+use ts_rs::TS;
 use crate::env;
 use crate::process_util::command_no_window;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "FileNode.ts")]
+/// Generated to src/types/generated/FileNode.ts (issue #404). The recursive
+/// `children: Vec<FileNode>` is handled by ts-rs.
 pub struct FileNode {
     pub name: String,
     pub path: String,

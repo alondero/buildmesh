@@ -6,11 +6,15 @@
 
 use crate::db;
 use tauri::command;
+use ts_rs::TS;
 
 /// Snapshot of the coordinator API's control state for a settings/status view.
 /// `has_token` reports whether a read token has been minted without ever
 /// leaking the token value.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// Generated to src/types/generated/CoordinatorStatus.ts (issue #404).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export, export_to = "CoordinatorStatus.ts")]
 pub struct CoordinatorStatus {
     pub enabled: bool,
     pub has_token: bool,
