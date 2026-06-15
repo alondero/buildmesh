@@ -28,6 +28,24 @@ describe('getNodeGitPath', () => {
     const node = { path: '/Users/adam/myproject', worktree_name: '' };
     expect(getNodeGitPath(node)).toBe('/Users/adam/myproject');
   });
+
+  it('returns node.path when worktree_name is whitespace-only', () => {
+    // Paired with env::worktree_segment in src-tauri/src/env/mod.rs — a
+    // whitespace-only name trims to empty, which collapses to the no-worktree
+    // branch (Node Working Directory = Mesh root). See issue #387.
+    const node = { path: '/Users/adam/myproject', worktree_name: '   ' };
+    expect(getNodeGitPath(node)).toBe('/Users/adam/myproject');
+  });
+
+  it('trims a padded worktree_name to match the canonical env::worktree_segment rule', () => {
+    // The GIT_CHANGED `internal_path` Rust emits (file_watcher::node_internal_path)
+    // and the path this helper returns must be byte-identical — a divergent
+    // `internal_path` never matches the frontend subscription, so the node's
+    // changed-files goes stale. The canonical rule (env::worktree_segment) trims;
+    // this helper must agree. See issue #387.
+    const node = { path: '/Users/adam/myproject', worktree_name: '  gentle-fox  ' };
+    expect(getNodeGitPath(node)).toBe('/Users/adam/myproject/.claude/worktrees/gentle-fox');
+  });
 });
 
 // Regression coverage for issue #304: every GIT_CHANGED consumer used to do
