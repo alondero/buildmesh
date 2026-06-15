@@ -582,6 +582,56 @@ mod tests {
         assert_eq!(status.short_sha.len(), 7);
     }
 
+    // ─── get_mesh_git_static gh-auth cache (issue #432) ─────────────────────
+
+    /// Five back-to-back `get_mesh_git_static` calls within the TTL window
+    /// must result in a single underlying `check_gh_auth` round-trip, not
+    /// five. This is the acceptance criterion for the #432 cache: a user
+    /// iterating through N meshes in the sidebar pays 1 gh round-trip (the
+    /// first mesh) + 1 per TTL expiry, instead of 1 per mesh.
+    ///
+    /// The cache must live in `get_mesh_git_static`, NOT in
+    /// `commands::pr::check_gh_auth` itself: that command is also called by
+    /// the mobile `/git/auth` HTTP route (`http/routes/git.rs:112`) and by
+    /// `MeshPropertiesTab.tsx` when the user clicks "re-check", and both
+    /// want a fresh value.
+    #[test]
+    fn get_mesh_git_static_caches_gh_auth_across_calls() {
+        // Force a known starting state: miss counter = 0, cache backdated
+        // so the next read is a miss.
+        crate::commands::git::__reset_gh_auth_cache_for_tests();
+
+        // Non-existent paths are fine — we just want to exercise the cache
+        // path. `is_git_repo` will be `false` for all of them, but the
+        // gh-auth branch runs unconditionally (a non-git dir can still have
+        // `gh` configured), which is exactly the path we're caching.
+        let r1 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-1".to_string())
+            .expect("first call should succeed");
+        let r2 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-2".to_string())
+            .expect("second call should succeed");
+        let r3 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-3".to_string())
+            .expect("third call should succeed");
+        let r4 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-4".to_string())
+            .expect("fourth call should succeed");
+        let r5 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-5".to_string())
+            .expect("fifth call should succeed");
+
+        // All 5 must agree on the process-wide gh-auth state. The value
+        // itself depends on the env (GITHUB_TOKEN / GH_TOKEN / `gh auth
+        // status`); we don't assert what it is, only that it's stable.
+        assert_eq!(r1.is_gh_authenticated, r2.is_gh_authenticated);
+        assert_eq!(r2.is_gh_authenticated, r3.is_gh_authenticated);
+        assert_eq!(r3.is_gh_authenticated, r4.is_gh_authenticated);
+        assert_eq!(r4.is_gh_authenticated, r5.is_gh_authenticated);
+
+        // The headline assertion: 5 snapshot calls = 1 gh round-trip.
+        assert_eq!(
+            crate::commands::git::__gh_auth_cache_misses(),
+            1,
+            "5 get_mesh_git_static calls within the TTL window should result in exactly 1 gh round-trip"
+        );
+    }
+
     #[test]
     fn test_count_status_main_repo_vs_worktree() {
         let _repo = TempGitRepo::new();
