@@ -9,7 +9,7 @@
 use super::*;
 // `remove_one_worktree` moved to the git module (ADR 0007); these removal
 // regression tests exercise it from here, alongside the worktree enumeration.
-use crate::git::worktree::remove_one_worktree;
+use crate::git::worktree::{remove_one_worktree, remove_one_worktree_and_branch};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -143,6 +143,63 @@ fn unmerged_branch_detected() {
 
     let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
     assert_eq!(find_branch(&info, "feature-a").is_merged_into_main, Some(false));
+}
+
+#[test]
+fn squash_merged_branch_detected() {
+    // A squash merge rewrites the whole branch into a single new commit on main
+    // with no ancestry link back — so `graph_descendant_of` (the old check)
+    // reports it unmerged and it never gets recommended for pruning. The
+    // branch's cumulative diff against the merge base equals that squash
+    // commit's patch, so patch-id matching must catch it.
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+
+    branch_from_head(&repo, "feature");
+    repo.set_head("refs/heads/feature").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    commit_file(&repo, "feature.txt", "feature work");
+
+    // Back on main, land the *same change* as one fresh commit — exactly what a
+    // squash merge produces. main lacks feature's commit but holds its net diff.
+    repo.set_head("refs/heads/main").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    commit_file(&repo, "feature.txt", "feature work");
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert_eq!(
+        find_branch(&info, "feature").is_merged_into_main,
+        Some(true),
+        "squash-merged branch (same net diff already on main) must read as merged"
+    );
+}
+
+#[test]
+fn genuinely_unmerged_branch_not_falsely_merged() {
+    // Guard against patch-id over-recommending: a branch whose work is absent
+    // from main in any form must still read as unmerged.
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+
+    branch_from_head(&repo, "feature");
+    repo.set_head("refs/heads/feature").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    commit_file(&repo, "feature.txt", "feature work");
+
+    repo.set_head("refs/heads/main").unwrap();
+    repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+        .unwrap();
+    commit_file(&repo, "unrelated.txt", "different work");
+
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert_eq!(
+        find_branch(&info, "feature").is_merged_into_main,
+        Some(false),
+        "a branch whose diff is absent from main must not be flagged merged"
+    );
 }
 
 #[test]
@@ -411,6 +468,65 @@ fn remove_worktrees_cannot_remove_main() {
         err
     );
     assert!(dir.path().exists(), "main worktree must survive");
+}
+
+/// Closing a node removes the worktree *and* its branch — the leftover branches
+/// were the thing piling up. `remove_one_worktree_and_branch` is what the close
+/// drain calls.
+#[test]
+fn close_removes_worktree_and_its_branch() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+    assert!(wt_dir.path().exists());
+
+    remove_one_worktree_and_branch(&wt_dir.path_str()).unwrap();
+
+    assert!(!wt_dir.path().exists(), "working directory should be gone");
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert!(
+        !info.local_branches.iter().any(|b| b.name == "wt-branch"),
+        "the worktree's branch must be deleted on close, not left orphaned"
+    );
+}
+
+/// The Worktree Manager's manual worktree delete stays worktree-only — branches
+/// are a separate, independently-selectable list there, so removing a worktree
+/// must NOT silently take its branch with it.
+#[test]
+fn manual_worktree_removal_keeps_branch() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+
+    remove_one_worktree(&wt_dir.path_str()).unwrap();
+
+    assert!(!wt_dir.path().exists());
+    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    assert!(
+        info.local_branches.iter().any(|b| b.name == "wt-branch"),
+        "manual worktree removal must leave the branch for separate selection"
+    );
 }
 
 /// Build a repo with one linked worktree, then pin that worktree the way a live

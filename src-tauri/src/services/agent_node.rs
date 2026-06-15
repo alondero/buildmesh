@@ -178,7 +178,7 @@ pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
 
     process_removals(
         pending,
-        crate::git::worktree::remove_one_worktree,
+        crate::git::worktree::remove_one_worktree_and_branch,
         db::delete_pending_worktree_removal,
     )
 }
