@@ -230,6 +230,8 @@ pub fn run() {
             commands::pr::create_pr_for_mesh,
             commands::pr::get_repo_issues,
             commands::pr::get_open_pr_for_node,
+            commands::pr::get_repo_pulls,
+            commands::pr::get_pr_mergeability,
             // AI context portability
             commands::ai_context::detect_ai_context,
             commands::ai_context::create_ai_context_portability_pr,

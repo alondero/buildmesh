@@ -95,6 +95,15 @@ pub struct PullRequest {
     /// `true` for draft PRs. GitHub always returns this field on `/pulls` responses.
     #[serde(default)]
     pub draft: bool,
+    /// PR description body. `#[serde(default)]` so a partial response (or a PR
+    /// opened with no body) parses to `""` rather than failing.
+    #[serde(default)]
+    pub body: String,
+    /// `"open"` or `"closed"`. The list endpoint echoes the `state` filter, but
+    /// we keep the field so the PR panel can render a closed chip without a
+    /// second lookup. `#[serde(default)]` covers partial responses.
+    #[serde(default)]
+    pub state: String,
 }
 
 /// A lightweight GitHub API client.
@@ -230,6 +239,78 @@ impl GitHubClient {
 
         let prs: Vec<PullRequest> = resp.json()?;
         Ok(prs.into_iter().next())
+    }
+
+    /// List pull requests for a repository, filtered by `state`
+    /// (`"open"`, `"closed"`, or `"all"`). Unlike `list_issues_only` (which
+    /// uses the search API and wraps results in `items`), the `/pulls`
+    /// endpoint returns the array directly.
+    pub fn list_pull_requests(
+        &self,
+        owner: &str,
+        repo: &str,
+        state: &str,
+    ) -> Result<Vec<PullRequest>, GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls?state={}&per_page=100",
+            owner, repo, state
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        let prs: Vec<PullRequest> = resp.json()?;
+        Ok(prs)
+    }
+
+    /// Fetch a single PR's mergeability via the detail endpoint. The list
+    /// endpoint omits `mergeable`/`mergeable_state`; only `GET /pulls/{n}`
+    /// carries them. `mergeable` is `null` while GitHub is still computing
+    /// the merge — we surface that as `None` rather than coercing to `false`,
+    /// so the UI can show a "checking" state and the user isn't told a
+    /// freshly-opened PR has conflicts when it doesn't.
+    pub fn pull_request_mergeability(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> Result<(Option<bool>, String), GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}",
+            owner, repo, pr_number
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        #[derive(Deserialize)]
+        struct Detail {
+            #[serde(default)]
+            mergeable: Option<bool>,
+            #[serde(default)]
+            mergeable_state: String,
+        }
+
+        let detail: Detail = resp.json()?;
+        Ok((detail.mergeable, detail.mergeable_state))
     }
 
     /// Merge a pull request via squash and delete the branch.
@@ -619,5 +700,100 @@ mod tests {
         assert_eq!(result.items.len(), 2);
         assert_eq!(result.items[0].labels, vec!["bug".to_string()]);
         assert!(result.items[1].labels.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Pull request deserialisation — the `/pulls` list shape (number, title,
+    // body, draft, state) and the `/pulls/{n}` detail shape (mergeable,
+    // mergeable_state). The list endpoint omits mergeability; the detail
+    // endpoint can return `mergeable: null` while GitHub computes the merge.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pull_request_deserialises_full_list_shape() {
+        // Realistic `GET /repos/{o}/{r}/pulls` item — the keys the panel reads.
+        let json = r#"{
+            "number": 412,
+            "html_url": "https://github.com/alondero/buildmesh/pull/412",
+            "title": "Add PR probe panel",
+            "body": "Lists open/closed PRs and merges mergeable ones",
+            "draft": false,
+            "state": "open"
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).expect("full PR shape must parse");
+        assert_eq!(pr.number, 412);
+        assert_eq!(pr.html_url, "https://github.com/alondero/buildmesh/pull/412");
+        assert_eq!(pr.title, "Add PR probe panel");
+        assert_eq!(pr.body, "Lists open/closed PRs and merges mergeable ones");
+        assert!(!pr.draft);
+        assert_eq!(pr.state, "open");
+    }
+
+    #[test]
+    fn pull_request_deserialises_with_missing_body_state_and_draft() {
+        // Partial response: body/state/draft default rather than failing.
+        let json = r#"{
+            "number": 7,
+            "html_url": "https://github.com/x/y/pull/7",
+            "title": "Legacy PR"
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).expect("partial PR shape must parse");
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.body, "", "missing body defaults to empty");
+        assert_eq!(pr.state, "", "missing state defaults to empty");
+        assert!(!pr.draft, "missing draft defaults to false");
+    }
+
+    #[test]
+    fn pull_request_list_deserialises_as_bare_array() {
+        // The `/pulls` endpoint returns a bare array, NOT a `{items: [...]}`
+        // wrapper like the search API — pin that so a future refactor doesn't
+        // accidentally reuse the SearchResult wrapper here.
+        let json = r#"[
+            {"number": 1, "html_url": "https://github.com/x/y/pull/1", "title": "First", "state": "open", "draft": false},
+            {"number": 2, "html_url": "https://github.com/x/y/pull/2", "title": "Second", "state": "open", "draft": true}
+        ]"#;
+        let prs: Vec<PullRequest> = serde_json::from_str(json).expect("PR list must parse");
+        assert_eq!(prs.len(), 2);
+        assert_eq!(prs[0].number, 1);
+        assert!(prs[1].draft);
+    }
+
+    #[test]
+    fn pr_detail_mergeability_parses_true_false_and_null() {
+        // The detail endpoint carries `mergeable` (bool | null) and
+        // `mergeable_state`. We deserialise the same private `Detail` shape
+        // `pull_request_mergeability` uses.
+        #[derive(Deserialize)]
+        struct Detail {
+            #[serde(default)]
+            mergeable: Option<bool>,
+            #[serde(default)]
+            mergeable_state: String,
+        }
+
+        let clean: Detail = serde_json::from_str(
+            r#"{"mergeable": true, "mergeable_state": "clean"}"#,
+        ).unwrap();
+        assert_eq!(clean.mergeable, Some(true));
+        assert_eq!(clean.mergeable_state, "clean");
+
+        let dirty: Detail = serde_json::from_str(
+            r#"{"mergeable": false, "mergeable_state": "dirty"}"#,
+        ).unwrap();
+        assert_eq!(dirty.mergeable, Some(false));
+        assert_eq!(dirty.mergeable_state, "dirty");
+
+        // `null` (still computing) must stay `None`, not become `false`.
+        let computing: Detail = serde_json::from_str(
+            r#"{"mergeable": null, "mergeable_state": "unknown"}"#,
+        ).unwrap();
+        assert_eq!(computing.mergeable, None);
+        assert_eq!(computing.mergeable_state, "unknown");
+
+        // Keys absent entirely (defensive) — both fall to their defaults.
+        let absent: Detail = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(absent.mergeable, None);
+        assert_eq!(absent.mergeable_state, "");
     }
 }

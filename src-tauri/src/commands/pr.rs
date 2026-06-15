@@ -34,6 +34,40 @@ pub struct GitHubIssue {
     pub labels: Vec<String>,
 }
 
+/// Wire shape of `get_repo_pulls` (desktop Tauri) — one entry per pull request.
+/// Generated to TS via ts-rs (issue #359); `i64` carries `#[ts(as = "i32")]`
+/// because serde_json emits it as a JS number, not the `bigint` ts-rs defaults
+/// to. Mergeability is intentionally NOT on this struct: the `/pulls` list
+/// endpoint omits it, so the panel enriches each PR via `get_pr_mergeability`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitHubPullRequest.ts")]
+pub struct GitHubPullRequest {
+    #[ts(as = "i32")]
+    pub number: i64,
+    pub title: String,
+    pub body: String,
+    /// Absolute GitHub URL for the PR — also the argument `merge_pr` parses.
+    pub url: String,
+    /// `"open"` or `"closed"` — echoes the requested `state` filter.
+    pub state: String,
+    /// `true` for draft PRs. Drafts can't be merged, so the panel flags them
+    /// without needing a per-PR mergeability call.
+    pub draft: bool,
+}
+
+/// Wire shape of `get_pr_mergeability` — the per-PR enrichment the panel
+/// requests after the list loads. `mergeable` is `null`/`None` while GitHub is
+/// still computing the merge; the panel renders a "checking" state for that.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PrMergeability.ts")]
+pub struct PrMergeability {
+    /// `Some(true)` mergeable, `Some(false)` conflicts, `None` still computing.
+    pub mergeable: Option<bool>,
+    /// GitHub's `mergeable_state` (`clean`, `dirty`, `blocked`, `behind`,
+    /// `unstable`, `unknown`, …) — used for the flag wording.
+    pub mergeable_state: String,
+}
+
 /// Check whether the user has a valid GitHub token (env var or gh config).
 ///
 /// Every command in this module talks to the GitHub REST API (blocking HTTP);
@@ -76,6 +110,56 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
         state: issue.state,
         labels: issue.labels,
     }).collect())
+}
+
+/// Get pull requests for a mesh, filtered by `state` (`"open"` or `"closed"`).
+/// Mirrors [`get_repo_issues`]: degrades to an empty list (with a `warn!`) when
+/// the mesh has no GitHub origin, so the panel renders an empty state rather
+/// than an error. Mergeability is fetched separately per PR — see
+/// [`get_pr_mergeability`] — because the list endpoint omits it.
+#[command(async)]
+pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+    // Only ever forward a known filter to GitHub; anything unexpected falls
+    // back to "open" rather than letting an arbitrary string reach the API.
+    let state = if state == "closed" { "closed" } else { "open" };
+
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+
+    let (owner, repo) = match resolve_github_owner_repo(&mesh) {
+        Ok(pair) => pair,
+        Err(reason) => {
+            tracing::warn!("get_repo_pulls: {} — returning empty PR list", reason);
+            return Ok(Vec::new());
+        }
+    };
+
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    let prs = client.list_pull_requests(&owner, &repo, state).map_err(|e| e.to_string())?;
+
+    Ok(prs.into_iter().map(|pr| GitHubPullRequest {
+        number: pr.number,
+        title: pr.title,
+        body: pr.body,
+        url: pr.html_url,
+        state: pr.state,
+        draft: pr.draft,
+    }).collect())
+}
+
+/// Get a single PR's mergeability for a mesh's repo. The panel calls this once
+/// per open PR after the list loads. `mergeable` is `null`/`None` while GitHub
+/// computes the merge — surfaced as-is so the UI can show a "checking" state.
+#[command(async)]
+pub fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = resolve_github_owner_repo(&mesh)?;
+
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    let (mergeable, mergeable_state) = client
+        .pull_request_mergeability(&owner, &repo, pr_number)
+        .map_err(|e| e.to_string())?;
+
+    Ok(PrMergeability { mergeable, mergeable_state })
 }
 
 /// Create a PR for the node
