@@ -199,8 +199,29 @@ pub fn on_spawn() -> String {
 ///   in that case we fall back to a plain random name so the caller always
 ///   gets a valid slug (an empty string would break worktree creation).
 pub fn issue_node_name(issue_number: i64, title: &str) -> String {
+    prefixed_node_name("gh", issue_number, title)
+}
+
+/// Build the initial node name for a node spawned from a GitHub pull request
+/// (issue #420). `pr{N}-` prefix distinguishes PR-spawned nodes from
+/// issue-spawned `gh{N}-` ones in the sidebar.
+pub fn pr_node_name(pr_number: i64, title: &str) -> String {
+    prefixed_node_name("pr", pr_number, title)
+}
+
+/// Shared core for `issue_node_name` / `pr_node_name` — both flows just
+/// pick a prefix and the rules below apply uniformly. Centralising the
+/// 50-char cap, trailing-hyphen re-trim, and `SLUG_REGEX` / `on_spawn()`
+/// fallback in one place means a future tweak (e.g. bumping the cap) lands
+/// for every spawn source at once.
+///
+/// Wire format: `{prefix}{number}-{slug}` (no dash between prefix and
+/// number — `gh123-fix-this-feature`, not `gh-123-fix-this-feature`).
+/// This matches what existing users have on disk from previous builds
+/// and what the existing issue-spawn tests pin.
+fn prefixed_node_name(prefix: &str, number: i64, title: &str) -> String {
     let slug = slugify_issue_title(title);
-    let mut full = format!("gh{}-{}", issue_number, slug);
+    let mut full = format!("{}{}-{}", prefix, number, slug);
 
     if full.len() > 50 {
         full.truncate(50);
@@ -980,6 +1001,49 @@ mod tests {
         );
     }
 
+    // --- pr_node_name (issue #420, pr{N}- prefix) ---
+
+    /// PR-spawned nodes use the `pr{N}-` prefix (vs the issue-spawn
+    /// `gh{N}-` prefix) so the user can distinguish the two spawn sources
+    /// at a glance in the sidebar. Otherwise the slugification rules are
+    /// identical to `issue_node_name`'s.
+    #[test]
+    fn pr_node_name_prefixes_with_pr_number() {
+        assert_eq!(pr_node_name(420, "spawn on PR"), "pr420-spawn-on-pr");
+    }
+
+    /// Empty title still produces a valid slug, keeping the `pr` prefix
+    /// (matches the issue-spawn behaviour for "keep the prefix" — the
+    /// user can always tell which PR the node came from).
+    #[test]
+    fn pr_node_name_keeps_prefix_when_title_is_empty() {
+        let result = pr_node_name(5, "");
+        assert!(
+            result.starts_with("pr5-") || result.starts_with("pr5"),
+            "empty title must keep the pr prefix: {:?}",
+            result
+        );
+        assert!(
+            SLUG_REGEX.is_match(&result) || result == on_spawn(),
+            "must match SLUG_REGEX or fall back to a random default: {:?}",
+            result
+        );
+    }
+
+    /// Symmetry with `issue_node_name` — for the same input the PR variant
+    /// only differs in the prefix (`pr` vs `gh`). Pin so a future refactor
+    /// that drifts one without the other surfaces as a test failure.
+    #[test]
+    fn pr_node_name_differs_from_issue_name_only_by_prefix() {
+        let title = "Add dark mode to settings";
+        let issue = issue_node_name(42, title);
+        let pr = pr_node_name(42, title);
+        // Strip the prefix from each and the slug must match.
+        let issue_slug = issue.strip_prefix("gh42-").unwrap();
+        let pr_slug = pr.strip_prefix("pr42-").unwrap();
+        assert_eq!(issue_slug, pr_slug, "pr and issue slugs must match for the same title");
+    }
+
     #[test]
     fn is_default_name_negative() {
         assert!(!is_default_name("fix-auth-token-refresh"));
@@ -1228,6 +1292,7 @@ mod tests {
                 worktree_name: None,
                 use_worktree: false,
                 source_issue: None,
+                source_pr: None,
                 position: 0,
                 created_at: chrono::Utc::now(),
             })

@@ -36,6 +36,38 @@ pub fn create(
     use_worktree_override: Option<bool>,
     name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
+    // Hand off to the explicit-source version with `source_pr = None` so the
+    // single create() call site for issue-spawn / handover / generic paths
+    // stays binary-compatible. The PR-spawn flow uses `create_with_source_pr`
+    // (or `create_pending_with_source_pr` for the two-stage variant) to
+    // record the originating PR number — see issue #420.
+    create_with_source_pr(
+        mesh_id,
+        path,
+        branch,
+        provider,
+        source_issue,
+        None,
+        use_worktree_override,
+        name_override,
+    )
+}
+
+/// Like [`create`], but accepts a `source_pr` so PR-spawned nodes (#420) can
+/// record the originating PR number. Used by `commands::pr::create_pr_node`
+/// and (transitively) by the stage-1 split of the PR-spawn flow. For all
+/// other spawn paths the `create` wrapper passes `None` here.
+#[allow(clippy::too_many_arguments)]
+pub fn create_with_source_pr(
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    use_worktree_override: Option<bool>,
+    name_override: Option<&str>,
+) -> Result<AgentNode, AgentNodeError> {
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let use_worktree = use_worktree_override.unwrap_or(mesh.use_worktree);
 
@@ -48,8 +80,8 @@ pub fn create(
         _ => crate::session_naming::on_spawn(),
     };
     tracing::debug!(
-        "agent_node::create: mesh_id={}, name={}, path={}, branch={}, provider={:?}, use_worktree={}",
-        mesh_id, session_name, path, branch, provider, use_worktree
+        "agent_node::create: mesh_id={}, name={}, path={}, branch={}, provider={:?}, use_worktree={}, source_pr={:?}",
+        mesh_id, session_name, path, branch, provider, use_worktree, source_pr
     );
 
     let worktree_db_name = if use_worktree {
@@ -73,6 +105,7 @@ pub fn create(
         provider_enum,
         worktree_db_name,
         source_issue,
+        source_pr,
         use_worktree,
     )?;
 
@@ -96,7 +129,40 @@ pub fn create_pending(
     source_issue: Option<i64>,
     name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
-    let mut node = create(mesh_id, path, branch, provider, source_issue, None, name_override)?;
+    // Hand off to the explicit-source variant with `source_pr = None` so the
+    // existing issue-spawn call sites stay binary-compatible.
+    create_pending_with_source_pr(
+        mesh_id,
+        path,
+        branch,
+        provider,
+        source_issue,
+        None,
+        name_override,
+    )
+}
+
+/// Like [`create_pending`], but accepts a `source_pr` for the PR-spawn flow.
+/// See `create_with_source_pr` for the underlying mechanics.
+pub fn create_pending_with_source_pr(
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+    source_pr: Option<i64>,
+    name_override: Option<&str>,
+) -> Result<AgentNode, AgentNodeError> {
+    let mut node = create_with_source_pr(
+        mesh_id,
+        path,
+        branch,
+        provider,
+        source_issue,
+        source_pr,
+        None,
+        name_override,
+    )?;
     // Two writes (insert + status update) is one extra ~1ms SQLite round
     // trip. Acceptable: this function is on the fast path, and the second
     // write is the whole point — without it the new node would look

@@ -199,6 +199,7 @@ mod tests {
             worktree_name: None,
             use_worktree: true,
             source_issue: None,
+            source_pr: None,
             position: 0,
             created_at: Utc::now(),
         }

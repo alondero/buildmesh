@@ -40,6 +40,7 @@ pub async fn import_discovered_session(
         provider_enum,
         worktree_name.as_deref(),
         None,
+        None,
         use_worktree,
     ).map_err(|e| e.to_string())?;
 

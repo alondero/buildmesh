@@ -14,4 +14,13 @@ import type { SessionStatus } from "./SessionStatus";
  * flat merge of `AgentNode` + `prefill`, matching the hand-typed
  * `interface IssueNodeDraft extends AgentNode` the wrapper used to carry.
  */
-export type IssueNodeDraft = { prefill: string, id: number, mesh_id: number, name: string, path: string, branch: string, env: EnvType, provider: Provider, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, source_issue: number | null, position: number, created_at: string, };
+export type IssueNodeDraft = { prefill: string, id: number, mesh_id: number, name: string, path: string, branch: string, env: EnvType, provider: Provider, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, source_issue: number | null, 
+/**
+ * GitHub PR number that triggered this node (issue #420). `None` for
+ * issue-spawned and hand-spawned nodes. When set, `spawn_agent_inner`
+ * fetches `origin/<head_ref>` and uses it as the worktree's `base_ref`
+ * instead of the mesh's `base_ref` (relates to #36 worktree adoption).
+ * Mirrors the `source_issue` field so the same resume-by-URL plumbing
+ * (issue #37) can target both spawn sources.
+ */
+source_pr: number | null, position: number, created_at: string, };

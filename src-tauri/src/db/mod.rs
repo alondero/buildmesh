@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 14;
+const SCHEMA_VERSION: i32 = 15;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -87,6 +87,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_use_worktree(&conn)?;
     ensure_agent_node_position(&conn)?;
     ensure_agent_node_status_changed_at(&conn)?;
+    ensure_agent_node_source_pr(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
@@ -320,6 +321,39 @@ pub(crate) fn ensure_agent_node_status_changed_at(conn: &Connection) -> SqlResul
             [],
         )?;
         tracing::warn!("ensure_agent_node_status_changed_at: added column and backfilled from created_at");
+    }
+    Ok(())
+}
+
+/// Safety net (v15): ensure the `source_pr` column exists on agent_nodes.
+/// Added for issue #420 — PR-spawned nodes record the originating PR number
+/// so the spawn path can fetch the head ref and use it as the worktree's
+/// `base_ref` (worktree adoption, #36). `None` for every existing row, so no
+/// backfill is needed — `#[serde(default)]` on the Rust struct (and the
+/// generated TS shape) makes the absence explicit and the spawn path
+/// branches on it.
+pub(crate) fn ensure_agent_node_source_pr(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !has_col {
+        conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_pr INTEGER", [])?;
+        tracing::warn!("ensure_agent_node_source_pr: added missing source_pr column");
     }
     Ok(())
 }
@@ -794,7 +828,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position, source_pr";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -811,6 +845,10 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         use_worktree: row.get::<_, i32>(12)? != 0,
         source_issue: row.get(11)?,
         position: row.get(13)?,
+        // source_pr is the last column (index 14). Read as Option: the safety
+        // net adds the column nullable for pre-v15 DBs, and rusqlite's typed
+        // read errors the row on NULL otherwise.
+        source_pr: row.get(14)?,
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -862,17 +900,18 @@ pub fn list_coordinator_node_rows_inner(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..13, which match the
+        // map_agent_node_row reads positional indices 0..14, which match the
         // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 14 and 15.
+        // status_changed_at follow at 15 and 16 (source_pr is the 15th column
+        // after #420 added it).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(14)?;
+        let mesh_name: String = row.get(15)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(15)?;
+        let status_changed_at: Option<String> = row.get(16)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -983,6 +1022,7 @@ pub fn create_agent_node(
     provider: Provider,
     worktree_name: Option<&str>,
     source_issue: Option<i64>,
+    source_pr: Option<i64>,
     use_worktree: bool,
 ) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
@@ -998,8 +1038,8 @@ pub fn create_agent_node(
     // default (SQLite can't ALTER-add a non-constant default), so an INSERT that
     // omitted it would store NULL and break the coordinator digest query.
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, use_worktree, position, status_changed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, use_worktree, position, status_changed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             mesh_id,
             name,
@@ -1009,6 +1049,7 @@ pub fn create_agent_node(
             provider.to_string(),
             worktree_name,
             source_issue,
+            source_pr,
             if use_worktree { 1 } else { 0 },
             next_position,
             chrono::Utc::now().to_rfc3339()

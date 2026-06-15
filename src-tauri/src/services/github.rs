@@ -85,7 +85,7 @@ where
     Vec::<RawLabel>::deserialize(deserializer).map(|v| v.into_iter().map(|l| l.name).collect())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PullRequest {
     pub number: i64,
     pub html_url: String,
@@ -104,6 +104,65 @@ pub struct PullRequest {
     /// second lookup. `#[serde(default)]` covers partial responses.
     #[serde(default)]
     pub state: String,
+    /// PR's source-branch ref name (e.g. `"feature/some-thing"`). Captured from
+    /// the GitHub API's `head.ref` field on both the list and detail endpoints
+    /// via the custom `Deserialize` impl below. Empty when the PR is from a
+    /// fork (the head lives on the fork's remote, not `origin`) — the spawn
+    /// path refuses fork PRs for now (issue #36 follow-up).
+    #[serde(default)]
+    pub head_ref: String,
+}
+
+// ---------------------------------------------------------------------------
+// Custom `Deserialize` for `PullRequest`.
+//
+// GitHub's `/pulls` response nests the head commit under a `head` object:
+//   { "head": { "ref": "feat/420-pr-spawn", ... } }
+//
+// The struct above exposes the `ref` field as flat top-level `head_ref` (so
+// call sites stay branch-free and the Tauri-side wire shape stays flat). The
+// derive macro can't do that flattening in one pass because `ref` is a Rust
+// keyword and we want `head.ref` → `head_ref`, not nested under a `head` key.
+// The custom impl below reads `head` once and projects `head.ref` onto
+// `head_ref`, leaving the rest of the struct's `#[serde(default)]` rules in
+// place.
+// ---------------------------------------------------------------------------
+impl<'de> serde::Deserialize<'de> for PullRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct HeadHelper {
+            #[serde(default, rename = "ref")]
+            ref_: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Raw {
+            pub number: i64,
+            pub html_url: String,
+            #[serde(default)]
+            pub title: String,
+            #[serde(default)]
+            pub draft: bool,
+            #[serde(default)]
+            pub body: String,
+            #[serde(default)]
+            pub state: String,
+            #[serde(default)]
+            pub head: Option<HeadHelper>,
+        }
+        let raw = Raw::deserialize(deserializer)?;
+        Ok(PullRequest {
+            number: raw.number,
+            html_url: raw.html_url,
+            title: raw.title,
+            draft: raw.draft,
+            body: raw.body,
+            state: raw.state,
+            head_ref: raw.head.map(|h| h.ref_).unwrap_or_default(),
+        })
+    }
 }
 
 /// A single file changed in a pull request — the wire shape of
@@ -774,13 +833,20 @@ mod tests {
     #[test]
     fn pull_request_deserialises_full_list_shape() {
         // Realistic `GET /repos/{o}/{r}/pulls` item — the keys the panel reads.
+        // The `head` block is what the spawn path consumes to fetch the head ref
+        // (issue #420); pin the parsing so a GitHub API change surfaces as a
+        // test failure rather than a silent empty ref at runtime.
         let json = r#"{
             "number": 412,
             "html_url": "https://github.com/alondero/buildmesh/pull/412",
             "title": "Add PR probe panel",
             "body": "Lists open/closed PRs and merges mergeable ones",
             "draft": false,
-            "state": "open"
+            "state": "open",
+            "head": {
+                "ref": "feat/420-pr-spawn",
+                "sha": "0123456789abcdef0123456789abcdef01234567"
+            }
         }"#;
         let pr: PullRequest = serde_json::from_str(json).expect("full PR shape must parse");
         assert_eq!(pr.number, 412);
@@ -789,6 +855,7 @@ mod tests {
         assert_eq!(pr.body, "Lists open/closed PRs and merges mergeable ones");
         assert!(!pr.draft);
         assert_eq!(pr.state, "open");
+        assert_eq!(pr.head_ref, "feat/420-pr-spawn");
     }
 
     #[test]
@@ -804,6 +871,7 @@ mod tests {
         assert_eq!(pr.body, "", "missing body defaults to empty");
         assert_eq!(pr.state, "", "missing state defaults to empty");
         assert!(!pr.draft, "missing draft defaults to false");
+        assert_eq!(pr.head_ref, "", "missing head.ref defaults to empty");
     }
 
     #[test]
@@ -812,8 +880,8 @@ mod tests {
         // wrapper like the search API — pin that so a future refactor doesn't
         // accidentally reuse the SearchResult wrapper here.
         let json = r#"[
-            {"number": 1, "html_url": "https://github.com/x/y/pull/1", "title": "First", "state": "open", "draft": false},
-            {"number": 2, "html_url": "https://github.com/x/y/pull/2", "title": "Second", "state": "open", "draft": true}
+            {"number": 1, "html_url": "https://github.com/x/y/pull/1", "title": "First", "state": "open", "draft": false, "head": {"ref": "f1", "sha": "aaa"}},
+            {"number": 2, "html_url": "https://github.com/x/y/pull/2", "title": "Second", "state": "open", "draft": true, "head": {"ref": "f2", "sha": "bbb"}}
         ]"#;
         let prs: Vec<PullRequest> = serde_json::from_str(json).expect("PR list must parse");
         assert_eq!(prs.len(), 2);

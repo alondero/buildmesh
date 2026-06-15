@@ -81,6 +81,7 @@ mod tests {
             worktree_name: Some("gentle-fox".to_string()),
             use_worktree,
             source_issue: None,
+            source_pr: None,
             position: 0,
             created_at: Utc::now(),
         }

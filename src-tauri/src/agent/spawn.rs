@@ -586,6 +586,83 @@ pub async fn spawn_agent_inner(
             timer.checkpoint("after_fetch_origin");
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
+            // Worktree adoption for PR-spawned nodes (issue #420). When the
+            // node carries a `source_pr`, the head ref stored in `node.branch`
+            // is the PR's actual source branch (e.g. `feat/420-pr-spawn`),
+            // and the worktree needs to be cut from `origin/<head_ref>` so
+            // the agent lands on the same commits the PR is built from.
+            // `create_pr_node` already refuses fork PRs (`head_ref` empty),
+            // so this branch is unreachable for those — fork-remote support
+            // is a #36 follow-up.
+            //
+            // The fetch is best-effort: a network failure or stale local ref
+            // falls back to the mesh's `base_ref` (the ADR 0001 offline
+            // pattern), and the user sees the agent spawn on the wrong
+            // commits rather than a hard error — strictly worse than a clean
+            // spawn on the right commits, but a strict-error spawn is
+            // brittle to the very first offline session.
+            //
+            // Even so, the fallback MUST surface to the user: the spawn
+            // otherwise reports success, the dock closes, and the agent
+            // silently lands on the wrong commits. We piggy-back on the
+            // existing `mesh-sync-warning` event (the same non-fatal channel
+            // the auto-sync path uses) with a `pr_head_unfetchable` outcome
+            // — the App.tsx listener already renders a toast for that
+            // event, so no frontend change is required.
+            let worktree_base_ref = if node.source_pr.is_some() {
+                let head_ref_owned = node.branch.clone();
+                let root = node.path.clone();
+                timer.checkpoint("before_fetch_pr_head");
+                let fetch_ok = tokio::task::spawn_blocking(move || {
+                    fetch_single_ref(&root, &head_ref_owned)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "spawn_agent_inner: fetch_single_ref task panicked: {}",
+                        e
+                    );
+                    false
+                });
+                timer.checkpoint("after_fetch_pr_head");
+                if fetch_ok {
+                    // `origin/<head_ref>` — same remote convention as the
+                    // mesh's default `base_ref`, so a future head-branch
+                    // push is picked up by the next fetch the same way.
+                    format!("origin/{}", node.branch)
+                } else {
+                    let pr_number = node.source_pr.unwrap_or(-1);
+                    let head_ref = node.branch.clone();
+                    let message = format!(
+                        "Could not fetch PR #{} head ref '{}' from origin; \
+                         spawning from the mesh's base ref '{}' instead. \
+                         The agent may land on stale commits — re-spawn \
+                         when the network is back to retry.",
+                        pr_number, head_ref, base_ref,
+                    );
+                    tracing::warn!(
+                        "spawn_agent_inner: {} (node {})",
+                        message,
+                        session_id,
+                    );
+                    let _ = app.emit(
+                        "mesh-sync-warning",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "mesh_path": node.path,
+                            "outcome": "pr_head_unfetchable",
+                            "pr_number": pr_number,
+                            "head_ref": head_ref,
+                            "fallback_base_ref": base_ref,
+                            "message": message,
+                        }),
+                    );
+                    base_ref.to_string()
+                }
+            } else {
+                base_ref.to_string()
+            };
+
             tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
             // The checkout can take seconds on a large repo; spawn_blocking keeps
             // it off the async runtime's worker threads (same as fetch_origin above).
@@ -594,7 +671,7 @@ pub async fn spawn_agent_inner(
                 resolved.host_path.clone(),
                 wt_name.to_string(),
                 worktree_mode.to_string(),
-                base_ref.to_string(),
+                worktree_base_ref,
             );
             timer.checkpoint("before_worktree_create");
             let created = tokio::task::spawn_blocking(move || {
@@ -867,6 +944,54 @@ fn emit_sync_outcome_event(
         }
     };
     let _ = app.emit(event_name, payload);
+}
+
+/// Fetch a single ref from `origin` into the local repo. Used by the PR-spawn
+/// path (#420) to materialise `origin/<head_ref>` so the worktree can be cut
+/// from it. `head_ref` is the PR's source branch (e.g. `feat/420-pr-spawn`);
+/// the function runs `git fetch origin <head_ref>` and returns `true` on a
+/// clean exit, `false` on any failure.
+///
+/// Best-effort by design: the caller falls back to the mesh's `base_ref` on
+/// `false` rather than failing the spawn (ADR 0001 offline pattern). The user
+/// sees the agent spawn on the wrong commits in the rare offline / stale-ref
+/// case, instead of a hard error every time the network blips. The
+/// alternative (strict-error spawn) is brittle to the very first offline
+/// session after a fresh install.
+///
+/// `--` separator before `head_ref` defends against an adversarial / malformed
+/// ref starting with `-` (e.g. `--upload-pack=…`); `git fetch` would otherwise
+/// treat it as a flag. GitHub's branch-name validation blocks this in
+/// practice, but the cost of the separator is zero and the upside is hardening
+/// against a future refactor that lets a hand-entered or imported ref flow
+/// through.
+fn fetch_single_ref(project_root: &str, head_ref: &str) -> bool {
+    use crate::process_util::command_no_window;
+    let host_root = crate::env::to_host_path(project_root);
+    tracing::info!(
+        "fetch_single_ref: running git fetch origin -- {} in {}",
+        head_ref,
+        host_root
+    );
+    let mut cmd = command_no_window("git");
+    cmd.arg("fetch").arg("origin").arg("--").arg(head_ref);
+    let output = match cmd.current_dir(&host_root).output() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("fetch_single_ref: failed to spawn git fetch: {}", e);
+            return false;
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "fetch_single_ref: git fetch origin -- {} failed: {}",
+            head_ref,
+            stderr.trim()
+        );
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
