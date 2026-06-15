@@ -23,13 +23,21 @@ function callsTo(cmd: string): number {
   return mockInvoke.mock.calls.filter(c => c[0] === cmd).length;
 }
 
+// Default snapshot returned by `get_mesh_git_static` (issue #348):
+// repo=true, auth=true, default_branch='main'. Mirrors the previous
+// trio's defaults so existing tests' "happy path" assertions still pass
+// without re-wiring every case.
+const DEFAULT_SNAPSHOT = {
+  is_git_repo: true,
+  is_gh_authenticated: true,
+  default_branch: 'main',
+};
+
 beforeEach(() => {
   mockInvoke.mockReset();
   mockInvoke.mockImplementation((cmd: string) => {
     switch (cmd) {
-      case 'check_is_git_repo': return Promise.resolve(true);
-      case 'check_gh_auth': return Promise.resolve(true);
-      case 'get_default_branch': return Promise.resolve('main');
+      case 'get_mesh_git_static': return Promise.resolve(DEFAULT_SNAPSHOT);
       case 'get_git_status': return Promise.resolve([]);
       default: return Promise.resolve(undefined);
     }
@@ -48,9 +56,11 @@ describe('useMeshGitStatus', () => {
     expect(result.current?.isAuthenticated).toBe(true);
     expect(result.current?.defaultBranch).toBe('main');
     expect(callsTo('get_git_status')).toBe(1);
+    // Issue #348: the static trio is one IPC, not three.
+    expect(callsTo('get_mesh_git_static')).toBe(1);
   });
 
-  it('refetches only the file list on GIT_CHANGED — not gh auth or default branch', async () => {
+  it('refetches only the file list on GIT_CHANGED — not the static snapshot', async () => {
     const { result } = renderHook(() => useMeshGitStatus(MESH_PATH));
     await waitFor(() => expect(result.current?.isGitRepo).toBe(true));
     await waitFor(() => expect(callsTo('get_git_status')).toBe(1));
@@ -60,9 +70,9 @@ describe('useMeshGitStatus', () => {
     });
 
     await waitFor(() => expect(callsTo('get_git_status')).toBe(2));
-    // checkGhAuth is a GitHub network round-trip; it must not re-run per file change.
-    expect(callsTo('check_gh_auth')).toBe(1);
-    expect(callsTo('get_default_branch')).toBe(1);
+    // The snapshot bundles the gh-auth network round-trip; it must not
+    // re-run per file change.
+    expect(callsTo('get_mesh_git_static')).toBe(1);
   });
 
   // Regression for issue #304: the file_watcher emits the worktree subdir
@@ -94,7 +104,7 @@ describe('useMeshGitStatus', () => {
   // caller that re-reads during the transition sees the defaults rather
   // than the previous mesh's snapshot.
   it('resets static state (isGitRepo/isAuthenticated/defaultBranch) when meshPath changes', async () => {
-    // Start with the default mock: repo=true, auth=true, branch='main'.
+    // Start with the default mock: snapshot → repo=true, auth=true, branch='main'.
     // Let the first render settle so the hook is "primed" with PATH_A's
     // values.
     const OTHER_MESH = 'X:\\other-repo';
@@ -106,21 +116,17 @@ describe('useMeshGitStatus', () => {
     expect(result.current?.isAuthenticated).toBe(true);
     expect(result.current?.defaultBranch).toBe('main');
 
-    // Now wire the THREE static-fetch commands to three independent
-    // deferred promises so we can control each separately and observe
-    // the in-between state. Use a `Map` so we can resolve them by command.
-    const deferreds = new Map<string, { resolve: (v: unknown) => void }>();
-    function deferFor(cmd: string): Promise<unknown> {
-      return new Promise<unknown>((resolve) => {
-        deferreds.set(cmd, { resolve });
-      });
-    }
+    // Now wire the single snapshot IPC to a deferred promise so we can
+    // observe the in-between state. With the trio there were three
+    // independent deferreds; with the snapshot there's one.
+    let resolveSnapshot: (v: unknown) => void = () => {};
+    const snapshotPromise = new Promise<unknown>((resolve) => {
+      resolveSnapshot = resolve;
+    });
     mockInvoke.mockImplementation((cmd: string) => {
-      if (cmd === 'check_is_git_repo'
-          || cmd === 'check_gh_auth'
-          || cmd === 'get_default_branch') return deferFor(cmd);
+      if (cmd === 'get_mesh_git_static') return snapshotPromise;
       // get_git_status: shouldn't be called during this test (static
-      // effect only calls `refresh()` after repo check resolves), but
+      // effect only calls `refresh()` after the snapshot resolves), but
       // return [] defensively in case a stale call slips through.
       if (cmd === 'get_git_status') return Promise.resolve([]);
       return Promise.resolve(undefined);
@@ -134,8 +140,8 @@ describe('useMeshGitStatus', () => {
     rerender({ path: OTHER_MESH });
 
     // Flush the synchronous portion of the new effect (the setState calls
-    // + the re-render they trigger) without awaiting any of the deferred
-    // promises. `act` flushes microtasks once; the deferreds are still
+    // + the re-render they trigger) without awaiting the deferred
+    // promise. `act` flushes microtasks once; the deferred is still
     // pending so the async IIFE inside the effect can't have completed.
     await act(async () => {
       await Promise.resolve();
@@ -143,13 +149,40 @@ describe('useMeshGitStatus', () => {
 
     expect(result.current).toBeNull();
 
-    // Let the new fetch resolve with DIFFERENT values from PATH_A and
+    // Let the new snapshot resolve with DIFFERENT values from PATH_A and
     // verify the new values land (and the panel re-appears).
-    deferreds.get('check_is_git_repo')!.resolve(true);
-    deferreds.get('check_gh_auth')!.resolve(false);
-    deferreds.get('get_default_branch')!.resolve('develop');
+    resolveSnapshot({
+      is_git_repo: true,
+      is_gh_authenticated: false,
+      default_branch: 'develop',
+    });
     await waitFor(() => expect(result.current?.isAuthenticated).toBe(false));
     expect(result.current?.defaultBranch).toBe('develop');
     expect(result.current?.isGitRepo).toBe(true);
+  });
+
+  // New behaviour guard for issue #348: a non-repo path must take the
+  // same "panel returns null" short-circuit the trio used to. The
+  // snapshot returns `is_git_repo: false` for a non-repo path (other
+  // fields are still populated, but the hook ignores them).
+  it('returns null and skips the file-list fetch when the snapshot says non-repo', async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_git_static') {
+        return Promise.resolve({
+          is_git_repo: false,
+          is_gh_authenticated: false,
+          default_branch: 'main',
+        });
+      }
+      if (cmd === 'get_git_status') return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useMeshGitStatus(MESH_PATH));
+    await waitFor(() => expect(callsTo('get_mesh_git_static')).toBe(1));
+    // The static check resolved to non-repo: the hook must NOT call
+    // `refresh()` and `get_git_status` should never fire.
+    expect(callsTo('get_git_status')).toBe(0);
+    expect(result.current).toBeNull();
   });
 });

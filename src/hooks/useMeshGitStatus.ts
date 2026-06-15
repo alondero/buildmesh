@@ -1,8 +1,6 @@
 import { useState } from 'react';
 import {
-  checkIsGitRepo,
-  checkGhAuth,
-  getDefaultBranch,
+  getMeshGitStatic,
   type GitStatus,
 } from '../lib/tauri';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
@@ -41,9 +39,13 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
     { enabled: false },
   );
 
-  // Repo-ness, GitHub auth, and the default branch are stable per panel
-  // session — fetch once per path. Re-running checkGhAuth (a GitHub
-  // network round-trip) on every file save was pure waste.
+  // Static snapshot (issue #348): one IPC replaces the three-way
+  // `Promise.all` of `check_is_git_repo` + `check_gh_auth` +
+  // `get_default_branch`. The backend's `get_mesh_git_static` composes
+  // the trio atomically — partial state (e.g. `is_gh_authenticated`
+  // updated but the path is not a repo) is no longer observable in the
+  // UI. The GitHub network round-trip still only fires once per mesh
+  // switch: the effect is keyed on `meshPath`, not on file-change events.
   useAsyncEffect((signal) => {
     if (!meshPath) return;
     // Issue #343: when `meshPath` changes within the same mount (e.g. user
@@ -60,19 +62,15 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
     setDefaultBranch('main');
     (async () => {
       try {
-        const [repoOk, ghOk, branchResult] = await Promise.all([
-          checkIsGitRepo(meshPath),
-          checkGhAuth(),
-          getDefaultBranch(meshPath),
-        ]);
+        const snap = await getMeshGitStatic(meshPath);
         if (signal.aborted) return;
-        if (!repoOk) {
+        if (!snap.is_git_repo) {
           setIsGitRepo(false);
           return;
         }
         setIsGitRepo(true);
-        setIsAuthenticated(ghOk);
-        setDefaultBranch(branchResult);
+        setIsAuthenticated(snap.is_gh_authenticated);
+        setDefaultBranch(snap.default_branch);
         // Static check passed — kick off the file-list fetch. The
         // primitive's subscribe effect is already wired, so any
         // GIT_CHANGED after this point will refetch via the bus.

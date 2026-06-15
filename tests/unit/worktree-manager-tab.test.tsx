@@ -159,7 +159,6 @@ function mockBackend(overrides: { health?: unknown; prune?: unknown } = {}) {
         });
       case 'update_mesh_field':
         return Promise.resolve();
-      case 'check_is_git_repo':
       case 'check_gh_auth':
       case 'get_default_branch':
       case 'get_git_status':
