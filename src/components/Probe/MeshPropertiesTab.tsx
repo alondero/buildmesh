@@ -7,9 +7,8 @@
  * — that lives behind the dedicated 🌳 Worktree Manager tab, and the
  * uncommitted-changes / PR surface belongs to the 🔍 Agent Changes tab.
  *
- * Fields ported from the legacy `MeshPropertiesPanel.tsx` (the panel
- * itself was deleted in #380; only the `AiContextSection` helper in that
- * directory is still imported here):
+ * Fields ported from the legacy `MeshPropertiesPanel.tsx` (deleted in #380;
+ * the `AiContextSection` helper moved into this directory in #410):
  *   • Display name (auto-save on blur, syncs the meshStore)
  *   • Directory (read-only — derived from the mesh row)
  *   • AI context portability (delegated to `<AiContextSection>`)
@@ -29,7 +28,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
-import { AiContextSection } from '../MeshPropertiesPanel/AiContextSection';
+import { AiContextSection } from './AiContextSection';
 import {
   checkGhAuth,
   detectMeshProject,

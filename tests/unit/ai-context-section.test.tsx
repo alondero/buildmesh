@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
-import { AiContextSection } from '../../src/components/MeshPropertiesPanel/AiContextSection';
+import { AiContextSection } from '../../src/components/Probe/AiContextSection';
 import type { AiContextStatus } from '../../src/lib/tauri';
 
 /** Route invoke() calls by command name so each test controls the backend response. */
