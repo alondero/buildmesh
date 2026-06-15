@@ -10,11 +10,13 @@
  *
  * Tab bodies land incrementally as follow-up issues under #372 complete:
  *   - #376: `ProjectFilesTab` (📁) and `AgentChangesTab` (🔍)
- *   - remaining tabs (`properties`, `worktrees`, `issues`, `sessions`)
- *     still render the placeholder pending their own issues.
- * Until then each tab renders a scaffold placeholder, and the friendly
- * empty states for "no project / no agent node" are wired here so the dock is
- * useful from day one.
+ *   - #377: `WorktreeManagerTab` (🌳) — health recovery + branch / worktree
+ *     prune + remote-tracking prune
+ *   - remaining tabs (`issues`, `sessions`) still render the placeholder
+ *     pending their own issues.
+ * Until those land each unbuilt tab renders a scaffold placeholder, and the
+ * friendly empty states for "no project / no agent node" are wired here so
+ * the dock is useful from day one.
  */
 
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
@@ -22,6 +24,7 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { ProjectFilesTab } from './ProjectFilesTab';
 import { AgentChangesTab } from './AgentChangesTab';
 import { MeshPropertiesTab } from './MeshPropertiesTab';
+import { WorktreeManagerTab } from './WorktreeManagerTab';
 import { GitIssuesTab } from './GitIssuesTab';
 import { SessionHistoryTab } from './SessionHistoryTab';
 
@@ -187,6 +190,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <MeshPropertiesTab />;
+  if (tab === 'worktrees') return <WorktreeManagerTab />;
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'sessions') return <SessionHistoryTab />;
 
