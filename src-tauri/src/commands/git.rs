@@ -247,12 +247,6 @@ pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
     })
 }
 
-/// Check whether a path is a valid git repository
-#[command(async)]
-pub fn check_is_git_repo(path: String) -> bool {
-    git2::Repository::open(&path).is_ok()
-}
-
 /// Get the default branch name for the remote named "origin".
 /// Reads the local symbolic ref (populated by clone/fetch) to avoid a network round-trip.
 /// Falls back to "main" if no remote is configured or HEAD ref is missing.
@@ -486,3 +480,62 @@ pub async fn free_base_branch(
     Ok(FreeResult { detached_at_sha })
 }
 
+// ── Static mesh-snapshot for the git-status panel (issue #348) ──────────────
+
+/// Static "is this mesh a git repo + is the user GitHub-authenticated + what
+/// is the default branch" snapshot for `useMeshGitStatus`. The trio was
+/// previously three independent Tauri commands fetched in parallel from the
+/// hook; folding them into one IPC cuts the round-trip count, removes the
+/// possibility of partial-state races in the UI, and makes future static
+/// fields (e.g. `git_user_email` for blame rendering) a one-line struct
+/// change instead of a new IPC.
+///
+/// `default_branch` is the repo's local symbolic ref fallback
+/// (`refs/remotes/origin/HEAD` → "main") — same logic as
+/// [`get_default_branch`]. The trio is composed inline so the snapshot
+/// never crosses the IPC boundary partially.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "MeshGitStatic.ts")]
+pub struct MeshGitStatic {
+    pub is_git_repo: bool,
+    pub is_gh_authenticated: bool,
+    pub default_branch: String,
+}
+
+/// Compute the static trio in one IPC. `check_gh_auth` is composed
+/// (delegated to the existing `commands::pr::check_gh_auth`) so the
+/// mobile `/git/auth` HTTP route and `MeshPropertiesTab.tsx` keep using
+/// the same source of truth — the snapshot just bundles it with the
+/// repo-only fields the panel needs.
+///
+/// `#[command(async)]` (not bare `#[command]`) dispatches the whole
+/// call to a worker thread: the `check_gh_auth` delegation spawns
+/// `gh auth status` as a child process (~100–500 ms), and we don't want
+/// that round-trip blocking the main thread (which would freeze the UI
+/// and stall every other IPC — see the trio's doc-comment at
+/// `check_gh_auth` for the same rationale).
+///
+/// Never returns an error: a non-repo path yields `is_git_repo = false`
+/// with the auth check still attempted (a non-git directory can still
+/// have `gh` configured) and `default_branch = "main"`. That matches
+/// the hook's prior short-circuit (`if (!repoOk) return;`) and keeps the
+/// UI contract identical.
+#[command(async)]
+pub fn get_mesh_git_static(mesh_path: String) -> Result<MeshGitStatic, String> {
+    let is_git_repo = git2::Repository::open(&mesh_path).is_ok();
+    let is_gh_authenticated = crate::commands::pr::check_gh_auth();
+    let default_branch = if is_git_repo {
+        get_default_branch(mesh_path)
+    } else {
+        // Mirror `get_default_branch`'s "open failed" fallback so a
+        // non-repo path never produces a "checking repo…" hang waiting
+        // for a ref that won't exist.
+        "main".to_string()
+    };
+
+    Ok(MeshGitStatic {
+        is_git_repo,
+        is_gh_authenticated,
+        default_branch,
+    })
+}

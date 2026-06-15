@@ -6,6 +6,7 @@ import type { Mesh } from '../stores/meshStore';
 import type { GitHubIssue } from '../types/generated/GitHubIssue';
 import type { GitHubPullRequest } from '../types/generated/GitHubPullRequest';
 import type { PrMergeability } from '../types/generated/PrMergeability';
+import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { WorktreeCloseSafety } from './worktreeClose';
 
 /**
@@ -290,11 +291,15 @@ export interface GitSummary {
 export const getGitSummary = (path: string) =>
   _invoke<GitSummary>('get_git_summary', { path });
 
-export const checkIsGitRepo = (path: string) =>
-  _invoke<boolean>('check_is_git_repo', { path });
-
 export const getDefaultBranch = (path: string) =>
   _invoke<string>('get_default_branch', { path });
+
+/** One-shot static snapshot for the git-status panel: repo-ness, GitHub
+ *  auth, and the default branch. Replaces the three parallel IPCs
+ *  (`check_is_git_repo` + `check_gh_auth` + `get_default_branch`) that
+ *  `useMeshGitStatus` used to fan out (issue #348). */
+export const getMeshGitStatic = (path: string) =>
+  _invoke<MeshGitStatic>('get_mesh_git_static', { path });
 
 export interface GitSyncResult {
   fetched: boolean;

@@ -200,10 +200,10 @@ pub fn run() {
             commands::git::get_git_status,
             commands::git::get_git_branch_status,
             commands::git::get_git_summary,
-            commands::git::check_is_git_repo,
             commands::git::get_default_branch,
             commands::git::git_sync,
             commands::git::get_mesh_health,
+            commands::git::get_mesh_git_static,
             commands::git::restore_mesh_to_base,
             commands::git::free_base_branch,
             // Prune (branches & worktrees)
