@@ -16,10 +16,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
-/// Default `worktree_mode` when the mesh config leaves it unset. Pinned
-/// on the TS side by `src/lib/worktreeMode.ts` + its unit test
-/// (paired-constants pattern — see [[feedback_cross-language-default-coupling]]).
-/// See `docs/knowledge-primer.md` (Worktree Support) for the branched-vs-detached rationale.
+/// Default `worktree_mode` when the mesh config leaves it unset. Pinned by
+/// the unit test in this module (`default_worktree_mode_is_branched`).
+///
+/// This was previously paired with a TS sentinel at `src/lib/worktreeMode.ts`,
+/// deleted in #411 once the TS side lost its only consumer (a self-referential
+/// test). If a future UI re-exposes a worktree-mode selector, re-introduce
+/// the TS constant alongside it and re-couple by doc comment + paired test
+/// (see [[feedback_cross-language-default-coupling]]). See
+/// `docs/knowledge-primer.md` (Worktree Support) for the branched-vs-detached
+/// rationale.
 pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 
 /// Binary name the cwrap provider launcher resolves to (Anthropic/Minimax/Kimi).
@@ -868,9 +874,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Pin the spawn-time fallback. Mirrors the TS constant
-    /// `DEFAULT_WORKTREE_MODE` exported from `src/lib/worktreeMode.ts`; the
-    /// two are coupled by convention, not by code.
+    /// Pin the spawn-time fallback. Sole pin of `DEFAULT_WORKTREE_MODE`
+    /// after #411 deleted the TS-side sentinel (it had no real consumer).
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
