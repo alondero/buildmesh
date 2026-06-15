@@ -276,14 +276,22 @@ pub struct FileChange {
     pub kind: String, // "created" | "modified" | "deleted"
 }
 
-/// Diff result — a set of per-file diffs
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Diff result — a set of per-file diffs.
+///
+/// Generated to src/types/generated/DiffResult.ts (issue #404). `usize`
+/// counters carry `#[ts(as = "i32")]` so they emit `number`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "DiffResult.ts")]
 pub struct DiffResult {
     pub files: Vec<FileDiff>,
 }
 
-/// A single file diff
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// A single file diff.
+///
+/// Generated to src/types/generated/FileDiff.ts (issue #404). `usize`
+/// counters carry `#[ts(as = "i32")]` so they emit `number`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, TS)]
+#[ts(export, export_to = "FileDiff.ts")]
 pub struct FileDiff {
     pub path: String,
     pub hunks: Vec<DiffHunk>,
@@ -297,8 +305,10 @@ pub struct FileDiff {
     /// Added / removed line counts across the whole file (not just the
     /// context-bounded hunks), so summaries match `git diff --stat`.
     #[serde(default)]
+    #[ts(as = "i32")]
     pub additions: usize,
     #[serde(default)]
+    #[ts(as = "i32")]
     pub deletions: usize,
     /// True for binary files — `hunks` is empty and the UI shows a placeholder
     /// instead of dumping bytes.
@@ -306,12 +316,20 @@ pub struct FileDiff {
     pub binary: bool,
 }
 
-/// A hunk within a diff
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// A hunk within a diff.
+///
+/// Generated to src/types/generated/DiffHunk.ts (issue #404). `usize` hunk
+/// line counters carry `#[ts(as = "i32")]` so they emit `number`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, TS)]
+#[ts(export, export_to = "DiffHunk.ts")]
 pub struct DiffHunk {
+    #[ts(as = "i32")]
     pub old_start: usize,
+    #[ts(as = "i32")]
     pub old_lines: usize,
+    #[ts(as = "i32")]
     pub new_start: usize,
+    #[ts(as = "i32")]
     pub new_lines: usize,
     /// Full highlighted HTML for the old version of this hunk (side-by-side view)
     pub old_highlighted: String,
@@ -326,17 +344,26 @@ pub struct DiffHunk {
     pub lines_highlighted: Vec<String>,
 }
 
-/// A single line in a diff
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A single line in a diff.
+///
+/// Generated to src/types/generated/DiffLine.ts (issue #404). `Option<usize>`
+/// line numbers carry `#[ts(as = "Option<i32>")]` so they emit `number | null`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "DiffLine.ts")]
 pub struct DiffLine {
     pub line_type: String,   // "context" | "add" | "remove"
     pub content: String,
+    #[ts(as = "Option<i32>")]
     pub old_num: Option<usize>,
+    #[ts(as = "Option<i32>")]
     pub new_num: Option<usize>,
 }
 
-/// Per-repo git prune info — branches, worktrees, and remote-tracking refs
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Per-repo git prune info — branches, worktrees, and remote-tracking refs.
+///
+/// Generated to src/types/generated/GitRepoPruneInfo.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitRepoPruneInfo.ts")]
 pub struct GitRepoPruneInfo {
     pub path: String,
     pub local_branches: Vec<BranchInfo>,
@@ -344,8 +371,12 @@ pub struct GitRepoPruneInfo {
     pub remote_tracking_branches: Vec<String>,
 }
 
-/// A local branch and its prune-relevant metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A local branch and its prune-relevant metadata.
+///
+/// Generated to src/types/generated/BranchInfo.ts (issue #404). `u64` counters
+/// carry `#[ts(as = "i32")]` so they emit `number`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "BranchInfo.ts")]
 pub struct BranchInfo {
     pub name: String,
     pub is_head: bool,
@@ -354,12 +385,17 @@ pub struct BranchInfo {
     pub is_orphan: bool,
     pub has_uncommitted: bool,
     pub last_commit_date: Option<String>,
+    #[ts(as = "i32")]
     pub ahead: u64,
+    #[ts(as = "i32")]
     pub behind: u64,
 }
 
-/// A worktree (main or linked) and its prune-relevant metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A worktree (main or linked) and its prune-relevant metadata.
+///
+/// Generated to src/types/generated/WorktreeInfo.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "WorktreeInfo.ts")]
 pub struct WorktreeInfo {
     pub path: String,
     pub branch: Option<String>,
@@ -380,7 +416,10 @@ pub struct AppSettings {
 /// This is the single typed view of mesh config used by every consumer
 /// (frontend properties, agent spawning, build/run). Construct it via
 /// `MeshConfig::from(&mesh)` — never hand-copy `Mesh` fields elsewhere.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// Generated to src/types/generated/MeshConfig.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "MeshConfig.ts")]
 pub struct MeshConfig {
     pub name: Option<String>,
     pub build_command: Option<String>,
@@ -417,7 +456,10 @@ impl From<&Mesh> for MeshConfig {
 /// basename for display. `is_active` reflects whether a non-archived
 /// agent node currently points at the path (active worktrees can't be
 /// freely deleted but can be safely detached via `free_base_branch`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/HoldingWorktree.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "HoldingWorktree.ts")]
 pub struct HoldingWorktree {
     pub path: String,
     pub name: String,
@@ -440,7 +482,11 @@ pub struct HoldingWorktree {
 ///   branch ref is the only handle to those commits.
 /// - `base_branch_holder` is `Some` when the Base Ref's branch is checked
 ///   out in any of the Mesh's worktrees (main or linked).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/MeshHealth.ts (issue #404). `u32`
+/// counter carries `#[ts(as = "i32")]` so it emits `number`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "MeshHealth.ts")]
 pub struct MeshHealth {
     pub base_ref: String,
     pub local_base_branch: Option<String>,
@@ -448,6 +494,7 @@ pub struct MeshHealth {
     pub current_short_sha: String,
     pub is_detached: bool,
     pub is_dirty: bool,
+    #[ts(as = "i32")]
     pub unpushed_ahead: u32,
     pub has_upstream: bool,
     pub is_drifted: bool,

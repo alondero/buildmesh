@@ -60,8 +60,15 @@ vi.mock('@tauri-apps/api/core', () => ({
   // store's agentNodes in sync post-spawn. If we return a non-array (the
   // default `{}` from `mockResolvedValue({})`) the store writes that to
   // state.agentNodes and the next render explodes on `find()`. Return [].
+  // `list_providers` / `get_default_provider` are the new wrapper-memoised
+  // lookups (issue #405); Terminal.tsx's handover-label effect reads them
+  // on every node mount, so the mock must satisfy it with deterministic data.
   invoke: vi.fn().mockImplementation((cmd: string) => {
     if (cmd === 'list_sessions') return Promise.resolve([]);
+    if (cmd === 'list_providers') return Promise.resolve([
+      { id: 'anthropic', label: 'Claude' },
+    ]);
+    if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
     return Promise.resolve({});
   }),
 }));
@@ -155,12 +162,10 @@ vi.mock('@xterm/addon-unicode11', () => ({
   Unicode11Addon: class { dispose = vi.fn(); },
 }));
 
-// HandoverProviderCache hits an IPC for the default provider label; stub it
-// to a deterministic string so the effect that fetches it doesn't noise up
-// the test logs.
-vi.mock('../../src/components/Terminal/handoverProviderCache', () => ({
-  getHandoverProviderLabel: vi.fn().mockResolvedValue('Anthropic'),
-}));
+// The handover label effect in AgentTerminal hits `api.getDefaultProvider`
+// + `api.listProviders` (issue #405) — both are now stubbed at the IPC
+// level in the `vi.mock('@tauri-apps/api/core', …)` block above, so no
+// separate cache mock is needed.
 
 import { AgentTerminal, terminalManager } from '../../src/components/Terminal/Terminal';
 

@@ -12,13 +12,19 @@ use crate::db;
 use crate::env::to_host_path;
 use crate::git::{health, primitives};
 use crate::models::MeshHealth;
-use crate::process_util::command_no_window;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitSummary.ts")]
+/// Generated to src/types/generated/GitSummary.ts (issue #404). `usize`
+/// counters carry `#[ts(as = "i32")]` so they emit `number`.
 pub struct GitSummary {
+    #[ts(as = "i32")]
     pub total: usize,
+    #[ts(as = "i32")]
     pub added: usize,
+    #[ts(as = "i32")]
     pub modified: usize,
+    #[ts(as = "i32")]
     pub deleted: usize,
 }
 
@@ -84,10 +90,15 @@ fn line_stats_by_path(repo: &Repository) -> HashMap<String, (usize, usize)> {
     stats
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitBranchStatus.ts")]
+/// Generated to src/types/generated/GitBranchStatus.ts (issue #404). `u32`
+/// counters carry `#[ts(as = "i32")]` so they emit `number`.
 pub struct GitBranchStatus {
     pub name: String,
+    #[ts(as = "i32")]
     pub ahead: u32,
+    #[ts(as = "i32")]
     pub behind: u32,
     /// Abbreviated HEAD OID (7 chars by default, matches `git rev-parse --short HEAD`).
     /// Empty string when HEAD is unborn. Useful for showing a stable identifier on
@@ -269,92 +280,138 @@ pub fn get_default_branch(path: String) -> String {
     "main".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitSyncResult.ts")]
+/// Generated to src/types/generated/GitSyncResult.ts (issue #404). `u32`
+/// counter carries `#[ts(as = "i32")]` so it emits `number`.
 pub struct GitSyncResult {
     pub fetched: bool,
     pub pulled: bool,
+    #[ts(as = "i32")]
     pub new_commits: u32,
     pub message: String,
 }
 
-/// Fetch from the current branch's default remote and attempt a fast-forward pull.
-/// Returns a structured result with feedback about what happened.
+/// Fetch from the current branch's configured upstream remote and
+/// attempt a fast-forward pull. Returns a structured result with
+/// feedback about what happened.
+///
+/// This is now a thin wrapper over the shared `do_sync` helper
+/// (issue #274). The wrapper's job is purely the `git_sync`-specific
+/// bookkeeping: resolve the remote from the current branch's
+/// upstream (so the test
+/// `git_sync_fetches_current_branch_upstream_when_remote_is_not_origin`
+/// keeps passing — a repo whose upstream is named `main` rather
+/// than `origin` must still be synced against that upstream), and
+/// translate the shared `SyncOutcome` back to the `GitSyncResult`
+/// shape the frontend expects (the wire type is unchanged).
+///
+/// Note: the shared helper performs a dirty-check and skips silently
+/// (returning `SkippedDirty` → "Skipped: working tree has
+/// uncommitted changes" in the result). This is new behaviour for
+/// `git_sync`; the pre-#274 inline code would have gone ahead and
+/// tried the fetch + ff-pull anyway, then reported a ff-pull
+/// failure. The new message is more informative and avoids the
+/// unnecessary network round-trip on a dirty click.
+///
+/// **Fetch scope trade-off:** the pre-#274 inline code did
+/// `git fetch` with NO arguments, which git resolves to "fetch the
+/// current branch's tracking ref only" (~300 ms on a 250-branch
+/// remote). The new code passes `branch = None` to `do_sync`, which
+/// runs `git fetch <remote>` and negotiates **every** remote-tracking
+/// ref (7–36 s on the same repo, per the project's spawn-latency
+/// memory note). The spawn-time `fetch_origin` keeps the narrow
+/// fetch because cold-spawn latency is on the critical path; the
+/// manual `git_sync` user click accepts the slower fetch in exchange
+/// for a Sync that catches branches the user may have switched to.
+/// A future change could resolve the current branch and pass it
+/// here to recover the pre-#274 latency if user feedback warrants.
 #[command]
 pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     let host_path = to_host_path(&path);
 
-    // Step 1: git fetch
-    let fetch_output = command_no_window("git")
-        .args(["fetch"])
-        .current_dir(&host_path)
-        .output()
-        .map_err(|e| format!("Failed to run git fetch: {}", e))?;
+    // Resolve the remote the same way `git fetch` (no args) used to:
+    // the current branch's configured upstream, falling back to
+    // `origin`. We open the repo here so we can query its branch
+    // config; `do_sync` re-opens (microsecond cost) to keep its
+    // signature self-contained and the call shape uniform with
+    // `fetch_origin`.
+    let repo = Repository::open(&host_path)
+        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
+    let remote = crate::git::sync::current_branch_upstream_remote(&repo)
+        .unwrap_or_else(|| "origin".to_string());
 
-    if !fetch_output.status.success() {
-        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-        return Ok(GitSyncResult {
+    // Delegate to the shared helper. Pass `None` for the branch —
+    // `git_sync` is a manual user click, not a spawn-time path, so
+    // the all-refs fetch is fine here (and matches the behaviour of
+    // `git fetch` with no arguments that the pre-#274 code used).
+    let outcome = crate::git::sync::do_sync(&host_path, &remote, None);
+    Ok(sync_outcome_to_git_sync_result(outcome))
+}
+
+/// Map a [`crate::git::sync::SyncOutcome`] to the [`GitSyncResult`]
+/// shape the frontend expects from the `git_sync` Tauri command. The
+/// four wire fields are unchanged; the messages match the prior
+/// `format!` strings where the variant maps cleanly, and introduce a
+/// clear message for the two skip variants (`SkippedDirty`,
+/// `SkippedNoRemote`) that the pre-#274 inline code never produced.
+fn sync_outcome_to_git_sync_result(
+    outcome: crate::git::sync::SyncOutcome,
+) -> GitSyncResult {
+    use crate::git::sync::SyncOutcome;
+    match outcome {
+        SyncOutcome::SkippedDirty => GitSyncResult {
             fetched: false,
             pulled: false,
             new_commits: 0,
-            message: format!("Fetch failed: {}", stderr.trim()),
-        });
-    }
-
-    // Step 2: Count how many commits we're behind, via the shared
-    // `git::sync::commits_behind_upstream` (git2's `graph_ahead_behind`, which
-    // avoids the Windows `@{u}` brace-stripping bug).
-    let behind_count: u32 = Repository::open(&host_path)
-        .map_err(|e| e.to_string())
-        .and_then(|repo| crate::git::sync::commits_behind_upstream(&repo))
-        .unwrap_or_else(|e| {
-            tracing::warn!("git_sync: failed to count commits behind upstream: {}", e);
-            0
-        });
-
-    if behind_count == 0 {
-        return Ok(GitSyncResult {
+            message: "Skipped: working tree has uncommitted changes".to_string(),
+        },
+        SyncOutcome::SkippedNoRemote => GitSyncResult {
+            fetched: false,
+            pulled: false,
+            new_commits: 0,
+            message: "No remote configured".to_string(),
+        },
+        SyncOutcome::UpToDate => GitSyncResult {
             fetched: true,
             pulled: false,
             new_commits: 0,
             message: "Already up to date".to_string(),
-        });
-    }
-
-    // Step 3: git pull --ff-only --no-rebase. The explicit --no-rebase defeats a
-    // user's global pull.rebase=true, which would otherwise turn this into a
-    // rebase and write conflict markers on diverged history (same policy as the
-    // auto-sync fetch_origin — see [[buildmesh-pull-rebase-default]]).
-    let pull_output = command_no_window("git")
-        .args(["pull", "--ff-only", "--no-rebase"])
-        .current_dir(&host_path)
-        .output()
-        .map_err(|e| format!("Failed to run git pull: {}", e))?;
-
-    if !pull_output.status.success() {
-        let stderr = String::from_utf8_lossy(&pull_output.stderr);
-        return Ok(GitSyncResult {
+        },
+        SyncOutcome::Synced { new_commits } => GitSyncResult {
+            fetched: true,
+            pulled: true,
+            new_commits,
+            message: format!(
+                "Pulled {} new commit{}",
+                new_commits,
+                if new_commits == 1 { "" } else { "s" }
+            ),
+        },
+        SyncOutcome::FetchedButDiverged { new_commits, reason } => GitSyncResult {
             fetched: true,
             pulled: false,
-            new_commits: behind_count,
+            new_commits,
             message: format!(
                 "Fetched {} new commit{} but fast-forward failed: {}",
-                behind_count,
-                if behind_count == 1 { "" } else { "s" },
-                stderr.trim()
+                new_commits,
+                if new_commits == 1 { "" } else { "s" },
+                reason
             ),
-        });
+        },
+        SyncOutcome::FetchFailed { reason } => GitSyncResult {
+            fetched: false,
+            pulled: false,
+            new_commits: 0,
+            message: format!("Fetch failed: {}", reason),
+        },
+        SyncOutcome::RepoUnusable { reason } => GitSyncResult {
+            fetched: false,
+            pulled: false,
+            new_commits: 0,
+            message: format!("Repository unusable: {}", reason),
+        },
     }
-
-    Ok(GitSyncResult {
-        fetched: true,
-        pulled: true,
-        new_commits: behind_count,
-        message: format!(
-            "Pulled {} new commit{}",
-            behind_count,
-            if behind_count == 1 { "" } else { "s" }
-        ),
-    })
 }
 
 // ── Mesh health detection (issue #231) ──────────────────────────────────────
@@ -363,7 +420,10 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
 /// `true` only when HEAD actually moved; an already-on-base call returns
 /// `restored = false` with a "no-op" message so the UI can distinguish
 /// the two outcomes for telemetry / toast wording.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/RestoreResult.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "RestoreResult.ts")]
 pub struct RestoreResult {
     pub restored: bool,
     pub message: String,
@@ -372,7 +432,10 @@ pub struct RestoreResult {
 /// Result of a successful `free_base_branch` invocation. `detached_at_sha`
 /// is the 7-char short OID the worktree was detached at, useful for the
 /// "freed at a064f55" toast.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/FreeResult.ts (issue #404).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "FreeResult.ts")]
 pub struct FreeResult {
     pub detached_at_sha: String,
 }

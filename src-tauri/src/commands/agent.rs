@@ -10,7 +10,9 @@ use crate::agent::provider::{Platform, ProviderInfo};
 use crate::agent::spawn::SpawnOptions;
 use crate::db;
 use crate::models::{Provider, SessionStatus};
+use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Emitter};
+use ts_rs::TS;
 
 // ---------------------------------------------------------------------------
 // Provider listing
@@ -225,9 +227,16 @@ pub(crate) fn format_issue_prefill(
 /// The frontend holds onto `prefill` and passes it back to
 /// `start_node_background` (no DB round-trip for the prefill — it's
 /// transient and <500 bytes).
-#[derive(serde::Serialize)]
+///
+/// Generated to src/types/generated/IssueNodeDraft.ts (issue #404). The
+/// `#[serde(flatten)]` + `#[ts(flatten)]` pair makes the wire shape the
+/// flat merge of `AgentNode` + `prefill`, matching the hand-typed
+/// `interface IssueNodeDraft extends AgentNode` the wrapper used to carry.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "IssueNodeDraft.ts")]
 pub struct IssueNodeDraft {
     #[serde(flatten)]
+    #[ts(flatten)]
     pub node: crate::models::AgentNode,
     pub prefill: String,
 }

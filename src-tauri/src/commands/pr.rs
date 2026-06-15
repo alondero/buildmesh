@@ -234,8 +234,13 @@ pub fn get_current_branch(session_id: i64) -> Result<String, String> {
 }
 
 /// Open PR summary for an agent node — shape matches the TS `OpenPr` type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Generated to src/types/generated/OpenPr.ts (issue #404). `i64` carries
+/// `#[ts(as = "i32")]` so it emits `number` (matches `GitHubIssue.number`).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "OpenPr.ts")]
 pub struct OpenPr {
+    #[ts(as = "i32")]
     pub number: i64,
     pub url: String,
     pub title: String,

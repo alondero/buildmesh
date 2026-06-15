@@ -6,7 +6,6 @@ import * as api from '../../lib/tauri';
 import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
-import { getHandoverProviderLabel } from './handoverProviderCache';
 
 export { type TerminalInstance } from './TerminalRegistry';
 export const terminalManager = new TerminalRegistry();
@@ -318,16 +317,28 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     return () => { cancelled = true; };
   }, [sessionId, node?.provider, node?.status, spawnAgent]);
 
-  // Resolve the default provider label for the handover menu item. The lookups
-  // are memoised per process / per mesh (see handoverProviderCache), so the N
-  // panes of a mesh share one get_default_provider + one list_providers call
-  // instead of firing 2×N IPC calls on every mesh switch.
+  // Resolve the default provider label for the handover menu item. The
+  // `api.getDefaultProvider` and `api.listProviders` wrappers are memoised
+  // in `src/lib/tauri.ts` (issue #405) — per mesh / per process, with
+  // rejection-evict — so the N panes of a mesh share one
+  // `get_default_provider` + one `list_providers` call instead of firing
+  // 2×N IPC calls on every mesh switch.
   useEffect(() => {
     if (!node) return;
     let cancelled = false;
-    getHandoverProviderLabel(node.mesh_id).then(label => {
-      if (!cancelled) setHandoverProviderLabel(label);
-    });
+    (async () => {
+      try {
+        const [defProvider, providers] = await Promise.all([
+          api.getDefaultProvider(node.mesh_id),
+          api.listProviders(),
+        ]);
+        if (cancelled) return;
+        const match = providers.find(p => p.id === defProvider);
+        setHandoverProviderLabel(match?.label ?? defProvider);
+      } catch {
+        if (!cancelled) setHandoverProviderLabel('Default');
+      }
+    })();
     return () => { cancelled = true; };
   }, [node?.mesh_id]);
 
