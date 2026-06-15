@@ -43,7 +43,6 @@ interface MeshItemProps {
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
-  onOpenProperties: (meshId: number) => void;
   // Issue #376: opens the unified Probe Panel on the 📁 (Project Files) tab
   // for this mesh. Replaces the legacy `onToggleFileExplorer` prop, which
   // toggled the now-deprecated SessionView left-pane `FileExplorerPanel`.
@@ -74,7 +73,6 @@ export function MeshItem({
   onSelectMesh,
   onNewNode,
   onSelectProvider,
-  onOpenProperties,
   onOpenFilesProbe,
   meshNodes,
   activeNodeId,

@@ -27,6 +27,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { AiContextSection } from '../MeshPropertiesPanel/AiContextSection';
 import {
   checkGhAuth,
@@ -97,22 +98,18 @@ export function MeshPropertiesTab() {
   // Lightweight `gh auth status` probe per active mesh. The result is
   // local to the section that needs it, so we don't need to share it via
   // a store or a global cache.
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (activeMeshId === null) {
       setIsGhAuthenticated(false);
       return;
     }
-    let cancelled = false;
     checkGhAuth()
       .then((ok) => {
-        if (!cancelled) setIsGhAuthenticated(ok);
+        if (!signal.aborted) setIsGhAuthenticated(ok);
       })
       .catch(() => {
-        if (!cancelled) setIsGhAuthenticated(false);
+        if (!signal.aborted) setIsGhAuthenticated(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [activeMeshId]);
 
   // Project-type detection: drives the "Looks like an X project" hint and
@@ -123,15 +120,15 @@ export function MeshPropertiesTab() {
   // running detection against `activePath` would silently miss the
   // mesh's actual project type whenever a node is focused.
   const meshRoot = mesh?.path ?? null;
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (activeMeshId === null || !meshRoot) return;
     setDetected(null);
     detectMeshProject(meshRoot)
       .then((d) => {
-        if (mountedRef.current) setDetected(d);
+        if (!signal.aborted) setDetected(d);
       })
       .catch(() => {
-        if (mountedRef.current) setDetected(null);
+        if (!signal.aborted) setDetected(null);
       });
   }, [activeMeshId, meshRoot]);
 
@@ -143,12 +140,12 @@ export function MeshPropertiesTab() {
   // effect on every name save). The "config.name → mesh.name → folder
   // name" fallback chain runs at mount only; the user can still rename
   // later via the Name field.
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (activeMeshId === null || !activePath) return;
     setLoading(true);
     getMeshProperties(activeMeshId)
       .then((config) => {
-        if (!mountedRef.current) return;
+        if (signal.aborted) return;
         const folderName = activePath.split(/[/\\]/).pop() ?? '';
         const resolvedName = config.name || mesh?.name || folderName;
         setForm({
@@ -162,12 +159,17 @@ export function MeshPropertiesTab() {
         setLoading(false);
       })
       .catch(() => {
-        if (mountedRef.current) setLoading(false);
+        if (!signal.aborted) setLoading(false);
       });
     // Dep array intentionally excludes `mesh?.name` (see comment above).
     // `mesh` is captured at effect-run time, which is fine for the
     // fallback chain — the user can rename later via the form itself.
   }, [activeMeshId, activePath]);
+
+  // Keep `mountedRef` ONLY for the blur handlers' "save-after-unmount"
+  // guard. The 3 IPC effects above use `useAsyncEffect`'s AbortSignal
+  // (PR #390, issue #349) — see the hook for the rationale.
+  // (No further effects below this line use mountedRef.)
 
   // Auto-save helpers — each returns a promise so callers can await then
   // refetch. The legacy panel reused `git.refresh()` after every save to

@@ -90,13 +90,6 @@ export const useUIStore = create<UIState>((set, get) => ({
     }));
   },
 
-  openProbeTab: (tab: ProbeTab) => {
-    // One-call "make this tab visible" helper. Does NOT collapse the panel
-    // when called on the active tab — closing stays a separate concern
-    // (the activity-bar's click handler does that).
-    set({ probeTab: tab, probeOpen: true });
-  },
-
   openDiff: (file: string) => {
     // Open the diff for `file`: also flip the probe to the review tab and
     // make sure the panel is visible, so a file picked from the file tree

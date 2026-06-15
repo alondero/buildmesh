@@ -40,7 +40,6 @@ export function Sidebar() {
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const createAgentNode = useAgentNodeStore(state => state.createAgentNode);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
-  const openPropertiesPanel = useUIStore(s => s.openPropertiesPanel);
   // Issue #376: open the unified Probe Panel on the 📁 (Project Files) tab.
   // The Probe is the migration target for the legacy FileExplorerPanel; the
   // `openProbeTab` helper atomically sets the tab and opens the panel.
@@ -175,7 +174,6 @@ export function Sidebar() {
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleToggleDropdown}
                       onSelectProvider={handleSelectProvider}
-                      onOpenProperties={openPropertiesPanel}
                       onOpenFilesProbe={() => openProbeTab('files')}
                       onOpenPropertiesProbe={handleOpenPropertiesProbe}
                       meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id)}
