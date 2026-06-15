@@ -380,9 +380,24 @@ const WORKTREE_REMOVE_ATTEMPTS: u32 = 5;
 const WORKTREE_REMOVE_BACKOFF_MS: u64 = 100;
 
 /// Remove a single worktree: delete its working directory (with retry) then
-/// prune its git admin entry. Idempotent — a missing directory counts as
-/// already removed.
+/// prune its git admin entry, leaving the branch it checked out alone. Used by
+/// the Worktree Manager, where branches are a separate, independently-selectable
+/// list. Idempotent — a missing directory counts as already removed.
 pub fn remove_one_worktree(path: &str) -> Result<(), String> {
+    remove_worktree_inner(path, false)
+}
+
+/// Like [`remove_one_worktree`], but also deletes the local branch the worktree
+/// had checked out. This is the *node close* path: a branched worktree's branch
+/// exists only to back that node, so leaving it behind on close is what lets
+/// dead branches pile up and slow git operations. The work-at-risk decision is
+/// made upstream (the close-safety prompt) — by the time a removal is queued the
+/// branch is meant to go, so the deletion is unconditional but best-effort.
+pub fn remove_one_worktree_and_branch(path: &str) -> Result<(), String> {
+    remove_worktree_inner(path, true)
+}
+
+fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> {
     let host_path = to_host_path(path);
 
     // An already-gone working directory is nothing to remove. The node may have
@@ -396,6 +411,17 @@ pub fn remove_one_worktree(path: &str) -> Result<(), String> {
     let worktree = git2::Worktree::open_from_repository(&repo)
         .map_err(|e| format!("not a removable worktree: {}", e))?;
 
+    // Capture what we need to tidy the branch *before* the worktree is gone: a
+    // branch checked out in a live worktree can't be deleted, so the delete must
+    // wait until after the prune — by which point this handle's working
+    // directory (and its per-worktree gitdir) no longer exist, so we reopen via
+    // the shared common dir, where the branch ref actually lives.
+    let branch_to_delete = if delete_branch {
+        primitives::head_branch_name(&repo).map(|b| (b, repo.commondir().to_path_buf()))
+    } else {
+        None
+    };
+
     // Delete the working directory ourselves first. git2's prune removes the
     // admin gitdir before the working tree, so if its rmdir loses the race with
     // a just-killed agent's handle release it leaves a dangling, un-prunable
@@ -405,7 +431,34 @@ pub fn remove_one_worktree(path: &str) -> Result<(), String> {
 
     let mut opts = git2::WorktreePruneOptions::new();
     opts.valid(true).locked(true);
-    worktree.prune(Some(&mut opts)).map_err(|e| e.to_string())
+    worktree.prune(Some(&mut opts)).map_err(|e| e.to_string())?;
+
+    // Best-effort: the worktree (and its work) is already gone, so a branch
+    // delete that fails — e.g. the branch was reused by another worktree — must
+    // not fail the close.
+    if let Some((branch, commondir)) = branch_to_delete {
+        delete_local_branch_best_effort(&commondir, &branch);
+    }
+
+    Ok(())
+}
+
+/// Delete a local branch from the repository whose git dir is `commondir`,
+/// logging rather than propagating any failure. The branch ref lives in the
+/// shared common dir, not the (now-removed) per-worktree gitdir, so we open
+/// there.
+fn delete_local_branch_best_effort(commondir: &std::path::Path, branch: &str) {
+    let Ok(repo) = Repository::open(commondir) else {
+        tracing::warn!("could not reopen repo at {:?} to delete branch {}", commondir, branch);
+        return;
+    };
+    // No such branch (detached, or already gone) — nothing to tidy.
+    let Ok(mut branch_ref) = repo.find_branch(branch, git2::BranchType::Local) else {
+        return;
+    };
+    if let Err(e) = branch_ref.delete() {
+        tracing::warn!("could not delete branch {} after closing its worktree: {}", branch, e);
+    }
 }
 
 /// Remove a worktree's working directory *all-or-nothing*, retrying with backoff

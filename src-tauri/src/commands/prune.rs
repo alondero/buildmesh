@@ -5,7 +5,7 @@
 //! one piece that crosses into application state: a worktree is "active" when
 //! a non-archived agent node points at its path.
 
-use git2::{BranchType, Repository};
+use git2::{BranchType, Oid, Repository};
 
 use crate::db;
 use crate::env::to_host_path;
@@ -118,6 +118,92 @@ fn main_branch_oid(repo: &Repository) -> Option<git2::Oid> {
     None
 }
 
+/// Cap on how many commits to scan back from `main` when hunting for the squash
+/// commit that integrated a branch. A real integration sits within a handful of
+/// commits of the tip; the cap stops a pathological history from making the
+/// prune scan crawl.
+const SQUASH_SCAN_CAP: usize = 2000;
+
+/// Whether `branch_oid`'s work is already present in `main_oid`.
+///
+/// Ancestry (`graph_descendant_of`) catches fast-forward and merge-commit
+/// integration. But GitHub's default *squash and merge* rewrites the whole
+/// branch into a single new commit on main with no ancestry link back — so an
+/// ancestry-only check reports squash-merged branches as unmerged, and they
+/// pile up locally forever. A squash commit's patch is, by construction, the
+/// branch's *cumulative* diff against the merge base, so we compute that one
+/// patch-id and look for a commit on main (since the merge base) whose own
+/// patch matches. Rebase-and-merge that collapses to an equal patch is caught
+/// the same way. False negatives are safe (the branch just isn't recommended);
+/// a patch-id match is strong evidence the identical change is already on main.
+fn branch_is_merged_into_main(repo: &Repository, main_oid: Oid, branch_oid: Oid) -> bool {
+    if main_oid == branch_oid || repo.graph_descendant_of(main_oid, branch_oid).unwrap_or(false) {
+        return true;
+    }
+
+    let Ok(base) = repo.merge_base(main_oid, branch_oid) else {
+        return false;
+    };
+
+    let cumulative = match cumulative_patch_id(repo, base, branch_oid) {
+        // Identical trees → the branch adds nothing main lacks → nothing to
+        // lose, so treat it as merged.
+        Ok(None) => return true,
+        Ok(Some(pid)) => pid,
+        Err(()) => return false,
+    };
+
+    main_contains_patch(repo, main_oid, base, cumulative)
+}
+
+/// Patch-id of the cumulative diff from `from` to `to`. `Ok(None)` = the trees
+/// are identical (empty diff); `Err(())` = it could not be computed.
+fn cumulative_patch_id(repo: &Repository, from: Oid, to: Oid) -> Result<Option<Oid>, ()> {
+    let from_tree = repo.find_commit(from).and_then(|c| c.tree()).map_err(|_| ())?;
+    let to_tree = repo.find_commit(to).and_then(|c| c.tree()).map_err(|_| ())?;
+    let diff = repo
+        .diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None)
+        .map_err(|_| ())?;
+    if diff.deltas().len() == 0 {
+        return Ok(None);
+    }
+    diff.patchid(None).map(Some).map_err(|_| ())
+}
+
+/// Scan commits added to `main` since `base` for one whose own patch equals
+/// `target` — the fingerprint a squash merge of the branch leaves behind.
+fn main_contains_patch(repo: &Repository, main_oid: Oid, base: Oid, target: Oid) -> bool {
+    let Ok(mut walk) = repo.revwalk() else {
+        return false;
+    };
+    if walk.push(main_oid).is_err() {
+        return false;
+    }
+    let _ = walk.hide(base);
+
+    for oid in walk.flatten().take(SQUASH_SCAN_CAP) {
+        let Ok(commit) = repo.find_commit(oid) else {
+            continue;
+        };
+        // A squash lands as a single-parent commit; skip merge commits, whose
+        // patch-id isn't comparable to a linear branch diff.
+        if commit.parent_count() != 1 {
+            continue;
+        }
+        let (Ok(tree), Ok(parent_tree)) = (commit.tree(), commit.parent(0).and_then(|p| p.tree()))
+        else {
+            continue;
+        };
+        let Ok(diff) = repo.diff_tree_to_tree(Some(&parent_tree), Some(&tree), None) else {
+            continue;
+        };
+        if diff.patchid(None).map(|pid| pid == target).unwrap_or(false) {
+            return true;
+        }
+    }
+    false
+}
+
 fn format_commit_time(time: git2::Time) -> Option<String> {
     chrono::DateTime::from_timestamp(time.seconds(), 0).map(|dt| dt.to_rfc3339())
 }
@@ -182,9 +268,7 @@ fn collect_prune_info(
         }
 
         let is_merged_into_main = match (main_oid, branch_oid) {
-            (Some(main), Some(b)) => Some(
-                main == b || repo.graph_descendant_of(main, b).unwrap_or(false),
-            ),
+            (Some(main), Some(b)) => Some(branch_is_merged_into_main(&repo, main, b)),
             _ => None,
         };
 

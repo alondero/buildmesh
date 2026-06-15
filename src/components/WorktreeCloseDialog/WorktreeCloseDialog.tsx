@@ -20,9 +20,9 @@ export function WorktreeCloseDialog() {
         className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-6 max-w-md w-full"
         onClick={e => e.stopPropagation()}
       >
-        <h2 className="text-sm font-semibold text-text-primary mb-2">Remove agent worktree?</h2>
+        <h2 className="text-sm font-semibold text-text-primary mb-2">Remove agent worktree &amp; branch?</h2>
         <p className="text-xs text-text-muted mb-2">
-          {pending.nodeName} has {riskText}.
+          {pending.nodeName} has {riskText}. Removing also deletes its local branch.
         </p>
         {pending.safety.worktree_path && (
           <p className="text-[11px] font-mono text-text-muted bg-bg-card border border-border-subtle rounded px-2 py-1 mb-5 break-all">
@@ -40,7 +40,7 @@ export function WorktreeCloseDialog() {
             onClick={() => choose('keep')}
             className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary border border-border-subtle rounded transition-colors"
           >
-            Keep worktree on disk
+            Keep worktree &amp; branch
           </button>
           <button
             onClick={() => choose('remove')}
