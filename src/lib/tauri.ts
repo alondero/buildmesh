@@ -4,6 +4,8 @@ import { shapeArgs } from './ipcShape';
 import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { GitHubIssue } from '../types/generated/GitHubIssue';
+import type { GitHubPullRequest } from '../types/generated/GitHubPullRequest';
+import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { WorktreeCloseSafety } from './worktreeClose';
 
 /**
@@ -442,6 +444,23 @@ export type { GitHubIssue };
 
 export const getRepoIssues = (meshId: number) =>
   _invoke<GitHubIssue[]>('get_repo_issues', { meshId });
+
+// GitHub Pull Requests — `GitHubPullRequest` / `PrMergeability` are generated
+// from the Rust structs (src-tauri/src/commands/pr.rs) into
+// src/types/generated/; see top import. Re-exported here so the PR probe tab
+// can `import { GitHubPullRequest } from '../lib/tauri'` alongside the issue
+// types. Issue #359.
+export type { GitHubPullRequest, PrMergeability };
+
+/** List PRs for a mesh's repo, filtered by `state` (`'open'` or `'closed'`). */
+export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
+  _invoke<GitHubPullRequest[]>('get_repo_pulls', { meshId, state });
+
+/// Per-PR mergeability enrichment — the `/pulls` list endpoint omits it, so the
+/// panel fetches this once per open PR. `mergeable` is `null` while GitHub is
+/// still computing the merge.
+export const getPrMergeability = (meshId: number, prNumber: number) =>
+  _invoke<PrMergeability>('get_pr_mergeability', { meshId, prNumber });
 
 export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
   _invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });
