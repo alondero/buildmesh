@@ -5,6 +5,34 @@ import { create } from 'zustand';
 // it.
 export type ProbeTab = 'files' | 'review' | 'properties' | 'issues' | 'sessions' | 'worktrees';
 
+// Which baseline a single-file diff is taken against:
+//   'head' — uncommitted working-tree changes vs HEAD (Project Files tab,
+//            `diff_file_against_head`).
+//   'base' — every change since the agent branched, vs the merge-base
+//            (Agent Changes tab, ADR 0005, `diff_node_file_against_base`).
+export type DiffSource = 'head' | 'base';
+
+// Everything the Center Workspace Diff Overlay (issue #379) needs to fetch,
+// label, and auto-close a single-file diff. Captured when the user clicks a
+// changed file in the Probe; consumed by `CenterDiffOverlay`.
+export interface DiffContext {
+  /** Path of the file being diffed, relative to `rootPath`. */
+  filePath: string;
+  /** Repo/worktree root the diff resolves against — also the path watched for
+   *  live refresh while the overlay is open. */
+  rootPath: string;
+  /** Owning agent node — also the focused-lens node captured at open time. Used
+   *  for the toolbar's "parent node" label and the auto-close comparison
+   *  (criterion: close when the user focuses a different node). Null for a
+   *  mesh-scoped diff opened from Project Files with no node focused. */
+  nodeId: number | null;
+  /** Mesh the diff belongs to (the lens mesh captured at open time). Drives the
+   *  auto-close when the user selects a different project in the sidebar. */
+  meshId: number;
+  /** Baseline to diff against — see `DiffSource`. */
+  source: DiffSource;
+}
+
 interface UIState {
   // ---- Probe Panel (issue #373) ----
   // The Probe Panel is a unified right-hand surface for a focused context
@@ -14,17 +42,20 @@ interface UIState {
   // card, keyboard shortcut) reads/writes the same source of truth.
   probeOpen: boolean;
   probeTab: ProbeTab;
-  // Path of the file currently being diffed in the probe's Review tab, or
-  // null when no file is open. Cleared by `closeDiff` and on tab change away
-  // from `review`.
-  activeDiffFile: string | null;
+  // The single file currently shown in the Center Workspace Diff Overlay
+  // (issue #379), or null when the overlay is closed. Independent of
+  // `probeTab` — the overlay floats over the terminal grid and survives Probe
+  // tab switches, so the user can keep the Probe open on any tab while
+  // reviewing. Cleared by `closeDiff`, by Esc / "Back to Terminals", and by
+  // the overlay's auto-close when the focused node or selected mesh changes.
+  activeDiffFile: DiffContext | null;
   toggleProbe: () => void;
   setProbeTab: (tab: ProbeTab) => void;
   // Open the probe on a specific tab, opening the panel if it's collapsed.
   // The "click active tab to collapse" UX is left to ProbePanel's own
   // click handler — this is a pure "make the tab visible" action.
   openProbeTab: (tab: ProbeTab) => void;
-  openDiff: (file: string) => void;
+  openDiff: (ctx: DiffContext) => void;
   closeDiff: () => void;
 
   // Agent node currently under an OS file-drag, or null. Drives the terminal
@@ -49,20 +80,21 @@ export const useUIStore = create<UIState>((set, get) => ({
   },
 
   setProbeTab: (tab: ProbeTab) => {
-    // Switching away from `review` implicitly closes any open diff so the
-    // next visit to the tab starts blank — the previous file's diff would
-    // otherwise linger as stale state behind a non-review tab.
-    set((state) => ({
-      probeTab: tab,
-      activeDiffFile: tab === 'review' ? state.activeDiffFile : null,
-    }));
+    // Pure tab switch. The Center Workspace Diff Overlay (issue #379) is
+    // independent of the active tab — it floats over the terminal grid — so
+    // switching tabs no longer clears `activeDiffFile`. The overlay closes
+    // only via `closeDiff` (Esc / "Back to Terminals") or its own auto-close
+    // when the focused node / selected mesh changes.
+    set({ probeTab: tab });
   },
 
-  openDiff: (file: string) => {
-    // Open the diff for `file`: also flip the probe to the review tab and
-    // make sure the panel is visible, so a file picked from the file tree
-    // surfaces its diff without the user hunting for the tab.
-    set({ activeDiffFile: file, probeTab: 'review', probeOpen: true });
+  openDiff: (ctx: DiffContext) => {
+    // Open the Center Workspace Diff Overlay on `ctx.filePath`. The Probe
+    // stays on whatever tab it was on (so the user can keep clicking files in
+    // Project Files / Agent Changes to switch the diff), but we make sure the
+    // panel is visible — the overlay and the interactive file list are meant
+    // to be used together (issue #379).
+    set({ activeDiffFile: ctx, probeOpen: true });
   },
 
   closeDiff: () => {
@@ -71,12 +103,9 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   // Idempotent "make this tab visible" — atomic `setProbeTab(tab) +
   // probeOpen = true`. Call sites stay one-liners; the activity-bar owns
-  // the "click active tab to collapse" UX. All 6 probe tabs open via this
-  // action.
-  //
-  // Routes through `setProbeTab` so the activeDiffFile cleanup (clear
-  // when leaving `review`) is inherited — a stale diff from Review
-  // would otherwise linger behind a freshly-opened Properties tab.
+  // the "click active tab to collapse" UX. The probe tabs (#376, #377,
+  // #378) all open via this action. Does not touch `activeDiffFile`: the
+  // diff overlay (#379) is independent of the active tab.
   openProbeTab: (tab) => {
     get().setProbeTab(tab);
     set({ probeOpen: true });

@@ -13,6 +13,9 @@ interface AgentReviewPanelProps {
   nodeId: number;
   /** Worktree root, for the browse-the-tree-and-open-in-editor affordance. */
   rootPath: string;
+  /** When set, each stacked file card gets an "open in the center overlay"
+   *  button that calls this with the file's path (issue #379). */
+  onOpenFile?: (path: string) => void;
 }
 
 /**
@@ -20,7 +23,7 @@ interface AgentReviewPanelProps {
  * branched, stacked in one scroll column with a sticky summary bar and a
  * jump-to-file index. Replaces the old click-one-file-at-a-time flow.
  */
-export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
+export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPanelProps) {
   const [diff, setDiff] = useState<DiffResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -119,7 +122,9 @@ export function AgentReviewPanel({ nodeId, rootPath }: AgentReviewPanelProps) {
         // The stacked, highlighted diffs. Each file card has its own sticky
         // header (status letter, path, +/-), so it doubles as the scannable
         // file list — no separate jump index needed in this narrow panel.
-        <Diff files={files} />
+        // `onOpenFile` adds the per-card "open in the spacious center overlay"
+        // button (#379).
+        <Diff files={files} onOpenFile={onOpenFile} />
       )}
 
       {/* Browse the full tree to open any (even unchanged) file in the editor. */}

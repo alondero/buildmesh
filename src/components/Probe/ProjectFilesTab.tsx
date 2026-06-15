@@ -9,11 +9,16 @@
  *
  * Click semantics
  * ---------------
- * A click on a changed file switches the probe to the `review` tab via
- * `openDiff(file)` — the review tab is where the diff is consumed, not
- * inside the narrow 360px body of the files tab. A click on an unchanged
- * file opens it in the OS editor (the same default the legacy
- * `FileExplorerPanel` used).
+ * A click on a changed file opens its diff in the Center Workspace Diff
+ * Overlay (issue #379) via `openDiff(ctx)` — the spacious center surface is
+ * where the diff is consumed, not inside the narrow 360px body of the files
+ * tab. The Probe stays on this tab so the list keeps responding to clicks. A
+ * click on an unchanged file opens it in the OS editor (the same default the
+ * legacy `FileExplorerPanel` used).
+ *
+ * The overlay's diff baseline is `'head'` here — Project Files lists
+ * uncommitted working-tree changes (`get_git_status` / `diff_file_against_head`),
+ * so the overlay shows the same "vs HEAD" view the user clicked.
  *
  * Why a separate component (not just importing `FileExplorerPanel`)
  * ---------------------------------------------------------------
@@ -34,26 +39,34 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 
 export function ProjectFilesTab() {
-  const { activePath } = useProbeContext();
+  const { activePath, activeMeshId, activeNodeId } = useProbeContext();
   const openDiff = useUIStore((s) => s.openDiff);
 
   const [fileTreeExpanded, setFileTreeExpanded] = useState(true);
 
-  // ProbeTabBody guarantees `activePath` is non-null by the time this
-  // component renders (it shows the "no project selected" empty state
-  // otherwise). The non-null assertion keeps the child components' types
-  // narrow without a runtime check that would never fire.
-  if (!activePath) return null;
+  // ProbeTabBody guarantees `activePath` and `activeMeshId` are non-null by the
+  // time this component renders (it shows the "no project selected" empty state
+  // otherwise). The guard keeps the context's types narrow without a runtime
+  // check that would never fire.
+  if (!activePath || activeMeshId === null) return null;
 
-  // Wire both the changed-files list and the file-tree's changed-file
-  // rows through `openDiff` so the user lands on the review tab — the
-  // probe's 360px body can't host an inline diff, so this is the natural
-  // handoff. The `DiffResult` argument is ignored: `openDiff` only needs
-  // the file path to populate the review tab's `activeDiffFile`. The
-  // `string | null` signature is dictated by `FileTree.onFileSelect`'s
-  // "clear the selection" hook — we treat null as a no-op.
+  // A changed-file click opens the Center Workspace Diff Overlay (#379). The
+  // diff is `'head'`-source (uncommitted vs HEAD) because that's what the
+  // Changed Files list shows; `rootPath` is the probe's active path (the
+  // focused node's worktree, or the mesh root with no node focused), so the
+  // path joins correctly for `diff_file_against_head`. We capture the focused
+  // node/mesh as the lens so the overlay auto-closes if it later changes. The
+  // `string | null` signature is dictated by `FileTree.onFileSelect`'s "clear
+  // the selection" hook — we treat null as a no-op.
   const handleChangedFileSelect = (path: string | null) => {
-    if (path) openDiff(path);
+    if (!path) return;
+    openDiff({
+      filePath: path,
+      rootPath: activePath,
+      nodeId: activeNodeId,
+      meshId: activeMeshId,
+      source: 'head',
+    });
   };
   const handleUnchangedFileSelect = async (path: string) => {
     try {

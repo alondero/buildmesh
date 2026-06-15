@@ -9,6 +9,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { watchSession, unwatchSession } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
+import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { NodeCard, type BuildRunState } from './NodeCard';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
@@ -147,6 +148,7 @@ export function SessionView() {
   const maximizedNodeId = useUIStore(state => state.maximizedNodeId);
   const clearMaximizedNode = useUIStore(state => state.clearMaximizedNode);
   const probeOpen = useUIStore(state => state.probeOpen);
+  const activeDiffFile = useUIStore(state => state.activeDiffFile);
   const [openBuildRun, setOpenBuildRun] = useState<BuildRunState>(null);
 
   const filteredNodes = useMemo(() => {
@@ -190,15 +192,19 @@ export function SessionView() {
   }, [activeNode?.id]);
 
   // Escape exits maximize. Only bound while something is maximized so we don't
-  // intercept Escape (e.g. agent CLIs read it) during normal grid use.
+  // intercept Escape (e.g. agent CLIs read it) during normal grid use. While
+  // the Center Diff Overlay (#379) is open it sits on top of the maximized
+  // terminal and owns Escape — without this guard, Escape would close the
+  // overlay AND un-maximize in one press. When the overlay closes, this effect
+  // re-runs (activeDiffFile dep) and re-binds the maximize handler.
   useEffect(() => {
-    if (maximizedNode == null) return;
+    if (maximizedNode == null || activeDiffFile != null) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') clearMaximizedNode();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [maximizedNode, clearMaximizedNode]);
+  }, [maximizedNode, activeDiffFile, clearMaximizedNode]);
 
   // If the maximized node disappears (closed, or filtered out by a mesh
   // switch), drop the stale id so it doesn't suppress the grid on return.
@@ -298,7 +304,13 @@ export function SessionView() {
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
+    <div className="relative flex-1 flex flex-col h-full bg-bg-base overflow-hidden">
+      {/* Center Workspace Diff Overlay (#379) — covers the terminal grid with a
+          spacious single-file diff when a changed file is clicked in the Probe.
+          Absolutely positioned over this view only, so the right-hand Probe
+          (a sibling in App's flex row) stays open and interactive. The
+          terminals behind it keep running; "Back to Terminals" just hides it. */}
+      {activeDiffFile && <CenterDiffOverlay diff={activeDiffFile} />}
       <div className="flex-1 flex overflow-hidden">
         <DndContext
           sensors={sensors}

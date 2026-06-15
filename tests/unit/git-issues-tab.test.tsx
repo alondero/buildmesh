@@ -196,13 +196,14 @@ describe('GitIssuesTab (#378)', () => {
     });
   });
 
-  it('hides the dock after a successful spawn (parity with legacy modal onClose)', async () => {
-    // Issue #378 follow-up — the legacy `GitHubIssuesModal` called
-    // `onClose()` after stage 1 of the two-stage spawn resolved so the
-    // user sees the modal vanish and the new node appear. The probe tab
-    // must do the same: hide the dock (`toggleProbe()`) once
-    // `create_issue_node` returns, so the user lands on the terminal
-    // ready to interact with the new node.
+  it('keeps the dock open after a successful spawn so the user can spawn more', async () => {
+    // Regression: the legacy `GitHubIssuesModal` called `onClose()` after
+    // stage 1 of the two-stage spawn resolved so the user saw the modal
+    // vanish and the new node appear. The probe tab is a persistent
+    // dock, not a one-shot dialog — closing it after every spawn forces
+    // the user to re-open it (sidebar context menu → "Open Issues") for
+    // the next issue. The dock stays open; the user dismisses it with
+    // the activity-bar toggle when they're done.
     mockBackend();
     useUIStore.setState({ probeOpen: true, probeTab: 'issues' });
     render(<GitIssuesTab />);
@@ -211,13 +212,13 @@ describe('GitIssuesTab (#378)', () => {
     const spawns = await screen.findAllByText('Spawn');
     await userEvent.click(spawns[0]);
 
+    // Stage 2 fires; the dock must NOT have closed.
     await waitFor(() => {
-      expect(useUIStore.getState().probeOpen).toBe(false);
+      expect(invoke).toHaveBeenCalledWith('start_node_background', expect.objectContaining({
+        nodeId: 7,
+      }));
     });
-    // Sanity: the stage-2 fire-and-forget IPC is also on the wire.
-    expect(invoke).toHaveBeenCalledWith('start_node_background', expect.objectContaining({
-      nodeId: 7,
-    }));
+    expect(useUIStore.getState().probeOpen).toBe(true);
   });
 
   it('keeps the dock open when create_issue_node rejects (lets the user retry)', async () => {

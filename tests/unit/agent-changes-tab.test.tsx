@@ -9,11 +9,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AgentChangesTab } from '../../src/components/Probe/AgentChangesTab';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
+import { useUIStore } from '../../src/stores/uiStore';
 import type { DiffResult } from '../../src/lib/tauri';
 
 const MESH: Mesh = {
@@ -69,6 +70,7 @@ describe('AgentChangesTab (#376)', () => {
       selectedMeshId: MESH.id,
     });
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useUIStore.setState({ probeOpen: true, probeTab: 'review', activeDiffFile: null });
   });
 
   it('renders the AgentReviewPanel summary for the focused node', async () => {
@@ -90,6 +92,25 @@ describe('AgentChangesTab (#376)', () => {
     // The collapsible "File Tree" button is part of AgentReviewPanel.
     await waitFor(() => {
       expect(screen.getByText('File Tree')).toBeTruthy();
+    });
+  });
+
+  it('opens the center diff overlay with a base-source context when a file is expanded (#379)', async () => {
+    render(<AgentChangesTab />);
+
+    const openBtn = await screen.findByRole('button', {
+      name: /open src\/app\.ts in the center diff overlay/i,
+    });
+    fireEvent.click(openBtn);
+
+    // The focused node + mesh are captured as the lens; source is 'base'
+    // (since-branching) to match the Agent Changes view.
+    expect(useUIStore.getState().activeDiffFile).toEqual({
+      filePath: 'src/app.ts',
+      rootPath: NODE.path,
+      nodeId: NODE.id,
+      meshId: MESH.id,
+      source: 'base',
     });
   });
 });
