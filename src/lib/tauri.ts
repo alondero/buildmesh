@@ -142,8 +142,25 @@ export const updateProjectPositions = (updates: [number, number][]) =>
 export const updateMeshName = (meshId: number, name: string) =>
   _invoke('update_mesh_name', { meshId, name });
 
-export const getDefaultProvider = (meshId: number) =>
-  _invoke<string>('get_default_provider', { meshId });
+// Module-level memoisation for stable, scope-bounded reads (issue #405).
+// `listProviders` is cached for the process lifetime; `getDefaultProvider`
+// is cached per mesh. A rejected promise is evicted so the next caller
+// retries rather than inheriting a permanently-failed read. See
+// `tests/unit/tauri-provider-cache.test.ts` for the contract — concurrent
+// callers de-dupe onto the in-flight promise, and a rejection evicts the
+// slot for that mesh / for the global list.
+let providerListPromise: Promise<ProviderInfo[]> | null = null;
+const defaultProviderByMesh = new Map<number, Promise<string>>();
+
+export const getDefaultProvider = (meshId: number): Promise<string> => {
+  let p = defaultProviderByMesh.get(meshId);
+  if (!p) {
+    p = _invoke<string>('get_default_provider', { meshId });
+    p.catch(() => { defaultProviderByMesh.delete(meshId); });
+    defaultProviderByMesh.set(meshId, p);
+  }
+  return p;
+};
 
 // Mesh properties / configuration (issue #283)
 //
@@ -513,8 +530,13 @@ export const detectAiContext = (meshPath: string) =>
 export const createAiContextPortabilityPr = (meshId: number) =>
   _invoke<string>('create_ai_context_portability_pr', { meshId });
 
-export const listProviders = () =>
-  _invoke<ProviderInfo[]>('list_providers');
+export const listProviders = (): Promise<ProviderInfo[]> => {
+  if (!providerListPromise) {
+    providerListPromise = _invoke<ProviderInfo[]>('list_providers');
+    providerListPromise.catch(() => { providerListPromise = null; });
+  }
+  return providerListPromise;
+};
 
 export interface ProviderInfo {
   id: string;
@@ -675,3 +697,10 @@ export const getLocalIp = () =>
 
 export const getRootToken = () =>
   _invoke<string>('get_root_token');
+
+/** Test-only: clear the module-level provider caches between cases. Exported
+ *  with a leading-underscore name so accidental production use is loud. */
+export function __resetProviderCachesForTests(): void {
+  providerListPromise = null;
+  defaultProviderByMesh.clear();
+}
