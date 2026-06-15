@@ -430,6 +430,26 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
             routes::pr::create(&mut lines, mesh_id, content_length).await;
             return;
         }
+        // POST /api/meshes/{id}/pulls/{n}/merge — merge a PR (issue #422).
+        // Pairs with the GET `/pulls/{n}/mergeability` route; the GET
+        // branch (which checks the longer suffix first) handles the auth
+        // gate for the read path, and this branch owns the write path.
+        if let Some((mesh_id, pr_number)) = path_two_segment_ids(
+            &path_without_query,
+            "/api/meshes/",
+            "/pulls/",
+            "/merge",
+        ) {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            routes::pr::merge(&mut lines, mesh_id, pr_number, content_length).await;
+            return;
+        }
         // POST /api/meshes/{id}/sessions/import-and-resume
         if let Some(mesh_id) = path_segment_id(
             &path_without_query,
@@ -531,6 +551,38 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
                 return;
             }
             routes::issues::list(&mut lines, mesh_id).await;
+            return;
+        }
+        // GET /api/meshes/{id}/pulls?state=open|closed — list PRs (issue #422).
+        // Mirrors the issues route above; the `state` query param defaults
+        // to "open" inside the handler.
+        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pulls") {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let state = query_param(&path_with_query, "state").unwrap_or_default();
+            routes::pr::list_pulls(&mut lines, mesh_id, &state).await;
+            return;
+        }
+        // GET /api/meshes/{id}/pulls/{n}/mergeability — per-PR enrichment
+        // (issue #422). The POST `/merge` route lives in its own `method
+        // == "POST"` branch below, so a GET to this URL can never
+        // collide with it; the two-segment helper also rejects the
+        // cross-suffix case (`/merge` with `/mergeability` suffix) via
+        // its numeric-only parse, so dispatch is safe regardless of the
+        // order the two GET-side PR routes are listed in.
+        if let Some((mesh_id, pr_number)) = path_two_segment_ids(
+            &path_without_query,
+            "/api/meshes/",
+            "/pulls/",
+            "/mergeability",
+        ) {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::pr::get_mergeability(&mut lines, mesh_id, pr_number).await;
             return;
         }
     }
@@ -887,6 +939,98 @@ mod tests {
     #[tokio::test]
     async fn meshes_issues_requires_token() {
         assert_eq!(get_request("/api/meshes/1/issues").await, 401);
+    }
+
+    #[tokio::test]
+    async fn meshes_pulls_requires_token() {
+        // GET /api/meshes/{id}/pulls — list PRs for a mesh (issue #422).
+        // Without a valid token the dispatcher must short-circuit to 401
+        // before reaching `commands::pr::get_repo_pulls`.
+        assert_eq!(get_request("/api/meshes/1/pulls").await, 401);
+        // The `?state=closed` variant is the same code path; the token
+        // gate is checked first so a query string never reaches GitHub.
+        assert_eq!(get_request("/api/meshes/1/pulls?state=closed").await, 401);
+    }
+
+    #[tokio::test]
+    async fn meshes_pulls_mergeability_requires_token() {
+        // GET /api/meshes/{id}/pulls/{n}/mergeability — per-PR enrichment.
+        // Must reject with 401 before any GitHub call.
+        assert_eq!(
+            get_request("/api/meshes/1/pulls/42/mergeability").await,
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn meshes_pulls_merge_requires_token() {
+        // POST /api/meshes/{id}/pulls/{n}/merge — write action. The auth
+        // gate runs before body parsing, so 401 is returned even for a
+        // malformed body. We use a GET helper which still parses status
+        // codes from the response line (the server returns 401 regardless
+        // of method on an unauthenticated request).
+        assert_eq!(
+            get_request("/api/meshes/1/pulls/42/merge").await,
+            401
+        );
+    }
+
+    #[test]
+    fn path_two_segment_ids_parses_pulls_routes() {
+        // The PR routes use the same `path_two_segment_ids` helper as the
+        // issues/spawn route, with a different middle/suffix. Lock the
+        // shape so a future refactor of the helper can't silently
+        // misroute `/api/meshes/7/pulls/42/mergeability`.
+        assert_eq!(
+            path_two_segment_ids(
+                "/api/meshes/7/pulls/42/mergeability",
+                "/api/meshes/",
+                "/pulls/",
+                "/mergeability",
+            ),
+            Some((7, 42)),
+        );
+        assert_eq!(
+            path_two_segment_ids(
+                "/api/meshes/7/pulls/42/merge",
+                "/api/meshes/",
+                "/pulls/",
+                "/merge",
+            ),
+            Some((7, 42)),
+        );
+    }
+
+    #[test]
+    fn path_two_segment_ids_rejects_non_numeric_pulls_segments() {
+        // Either segment being non-numeric must yield None — otherwise
+        // the dispatcher would forward `mesh_id="foo"` to
+        // `get_repo_pulls`, which would hit the DB and return an error
+        // instead of a clean 404.
+        assert!(path_two_segment_ids(
+            "/api/meshes/foo/pulls/42/mergeability",
+            "/api/meshes/",
+            "/pulls/",
+            "/mergeability",
+        )
+        .is_none());
+        assert!(path_two_segment_ids(
+            "/api/meshes/7/pulls/bar/mergeability",
+            "/api/meshes/",
+            "/pulls/",
+            "/mergeability",
+        )
+        .is_none());
+        // The `mergeability` suffix must NOT match `merge` requests (and
+        // vice versa) — order-independence: the dispatcher checks both,
+        // so each must parse correctly with its OWN suffix.
+        assert!(path_two_segment_ids(
+            "/api/meshes/7/pulls/42/merge",
+            "/api/meshes/",
+            "/pulls/",
+            "/mergeability",
+        )
+        .is_none());
     }
 
     #[tokio::test]

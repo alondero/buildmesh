@@ -289,6 +289,17 @@ mod tests {
     /// NOT engage for WSL spawns.
     #[test]
     fn prefill_stays_argv_for_wsl() {
+        // portable_pty::CommandBuilder inherits the parent process env, so
+        // a BUILDMESH_PREFILL leaked into the test runner's shell — e.g. by
+        // a Claude Code attention-hook spawn (which is how the orchestrating
+        // agent sets *its* prefill) — would make `get_env` return Some(...)
+        // and fail the "must not set" assertion below. Clear it so the test
+        // is hermetic regardless of the runner's env. Safe to scope: no
+        // other test in this module reads BUILDMESH_PREFILL, and the
+        // sibling Windows test always sets the value via `cmd.env()`, so a
+        // clear here doesn't change its observed outcome.
+        unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
+
         let cmd = build_spawn_command(
             &wsl_resolved(),
             Provider::Minimax,
