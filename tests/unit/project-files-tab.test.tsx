@@ -103,7 +103,7 @@ describe('ProjectFilesTab (#376)', () => {
     expect(screen.getByText('Changed Files')).toBeTruthy();
   });
 
-  it('clicking a changed file switches to the review tab via openDiff', async () => {
+  it('clicking a changed file opens the center diff overlay via openDiff (#379)', async () => {
     render(<ProjectFilesTab />);
 
     const fileButton = await screen.findByText('src/app.ts');
@@ -111,8 +111,18 @@ describe('ProjectFilesTab (#376)', () => {
 
     await waitFor(() => {
       const state = useUIStore.getState();
-      expect(state.activeDiffFile).toBe('src/app.ts');
-      expect(state.probeTab).toBe('review');
+      // The overlay context is a 'head'-source diff anchored on the active
+      // mesh path (no node focused in this fixture → nodeId null).
+      expect(state.activeDiffFile).toEqual({
+        filePath: 'src/app.ts',
+        rootPath: '/repo',
+        nodeId: null,
+        meshId: 1,
+        source: 'head',
+      });
+      // The Probe stays on the files tab so the list keeps responding to
+      // clicks — the diff is consumed in the center, not the review tab.
+      expect(state.probeTab).toBe('files');
       expect(state.probeOpen).toBe(true);
     });
   });

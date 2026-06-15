@@ -1,5 +1,16 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useUIStore } from '../../src/stores/uiStore';
+import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
+
+// A representative single-file diff context (issue #379). The overlay needs
+// the path + root to fetch, the node/mesh to label and auto-close, and the
+// source to pick the diff baseline.
+const DIFF_CTX: DiffContext = {
+  filePath: 'src/foo.ts',
+  rootPath: '/repo/worktrees/agent-1',
+  nodeId: 7,
+  meshId: 1,
+  source: 'base',
+};
 
 describe('useUIStore', () => {
   beforeEach(() => {
@@ -115,44 +126,40 @@ describe('useUIStore', () => {
         expect(useUIStore.getState().probeTab).toBe('review');
       });
 
-      it('does NOT round-trip activeDiffFile: switching to review → files → review leaves it cleared', () => {
-        // Switching away from review is a one-way clear, even if the user
-        // comes back to review later. The test name matches the
-        // implementation: a switch-then-switch-back is NOT a round-trip —
-        // the user is expected to re-pick a file from the tree.
-        useUIStore.getState().openDiff('src/foo.ts');
-        useUIStore.getState().setProbeTab('files');
-        useUIStore.getState().setProbeTab('review');
-        expect(useUIStore.getState().activeDiffFile).toBeNull();
-      });
-
-      it('clears activeDiffFile when switching away from review', () => {
-        useUIStore.getState().openDiff('src/foo.ts');
-        expect(useUIStore.getState().activeDiffFile).toBe('src/foo.ts');
+      it('leaves activeDiffFile untouched when switching tabs (#379)', () => {
+        // The Center Workspace Diff Overlay floats over the terminal grid and
+        // is independent of the active tab, so switching tabs must NOT close
+        // it — the user keeps the Probe on any tab while reviewing.
+        useUIStore.getState().openDiff(DIFF_CTX);
         useUIStore.getState().setProbeTab('worktrees');
-        expect(useUIStore.getState().activeDiffFile).toBeNull();
+        expect(useUIStore.getState().activeDiffFile).toEqual(DIFF_CTX);
+        useUIStore.getState().setProbeTab('properties');
+        expect(useUIStore.getState().activeDiffFile).toEqual(DIFF_CTX);
       });
     });
 
-    describe('openDiff', () => {
-      it('sets the file, jumps to the review tab, and opens the panel', () => {
+    describe('openDiff (#379)', () => {
+      it('sets the context and opens the panel without changing the tab', () => {
         useUIStore.setState({ probeOpen: false, probeTab: 'files' });
-        useUIStore.getState().openDiff('src/baz.ts');
-        expect(useUIStore.getState().activeDiffFile).toBe('src/baz.ts');
-        expect(useUIStore.getState().probeTab).toBe('review');
+        useUIStore.getState().openDiff(DIFF_CTX);
+        expect(useUIStore.getState().activeDiffFile).toEqual(DIFF_CTX);
+        // The overlay is consumed in the center, so the Probe stays where it
+        // was — the user can keep clicking files in the same tab.
+        expect(useUIStore.getState().probeTab).toBe('files');
         expect(useUIStore.getState().probeOpen).toBe(true);
       });
 
       it('overwrites a previously-open diff', () => {
-        useUIStore.getState().openDiff('src/old.ts');
-        useUIStore.getState().openDiff('src/new.ts');
-        expect(useUIStore.getState().activeDiffFile).toBe('src/new.ts');
+        useUIStore.getState().openDiff(DIFF_CTX);
+        const next: DiffContext = { ...DIFF_CTX, filePath: 'src/new.ts' };
+        useUIStore.getState().openDiff(next);
+        expect(useUIStore.getState().activeDiffFile).toEqual(next);
       });
     });
 
     describe('closeDiff', () => {
-      it('clears the active diff file', () => {
-        useUIStore.getState().openDiff('src/foo.ts');
+      it('clears the active diff context', () => {
+        useUIStore.getState().openDiff(DIFF_CTX);
         useUIStore.getState().closeDiff();
         expect(useUIStore.getState().activeDiffFile).toBeNull();
       });
