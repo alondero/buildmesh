@@ -106,7 +106,7 @@ cargo test               # Rust unit tests (run inside src-tauri/)
 ```
 buildmesh/
 ├── src/                       # React frontend
-│   ├── components/            # Terminal, Sidebar, FileTree, MeshPropertiesPanel, …
+│   ├── components/            # Terminal, Sidebar, FileTree, Probe, …
 │   ├── stores/                # Zustand stores
 │   └── lib/                   # shared utilities
 ├── src-tauri/
