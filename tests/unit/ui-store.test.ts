@@ -201,6 +201,24 @@ describe('useUIStore', () => {
         expect(useUIStore.getState().probeOpen).toBe(true);
         expect(useUIStore.getState().probeTab).toBe('files');
       });
+
+      // Issue #378 — the GitHub Issues and Session History probe tabs share
+      // the same openProbeTab action as the rest. Pin both values here so a
+      // future union-narrowing refactor can't silently drop the GitHub
+      // Issues / Session History entry points.
+      it('opens the 🐙 Git Issues tab (#378)', () => {
+        useUIStore.setState({ probeOpen: false, probeTab: 'files' });
+        useUIStore.getState().openProbeTab('issues');
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('issues');
+      });
+
+      it('opens the 🕒 Session History tab (#378)', () => {
+        useUIStore.setState({ probeOpen: false, probeTab: 'files' });
+        useUIStore.getState().openProbeTab('sessions');
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('sessions');
+      });
     });
   });
 });

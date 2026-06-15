@@ -6,8 +6,6 @@ import type { Mesh } from '../../stores/meshStore';
 import { listProviders } from '../../lib/tauri';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
-import { GitHubIssuesModal } from '../GitHubIssues/GitHubIssuesModal';
-import { SessionBrowserModal } from '../SessionBrowser/SessionBrowserModal';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
@@ -40,8 +38,9 @@ export function Sidebar() {
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
   const selectProviderForMesh = useAgentNodeStore(state => state.selectProviderForMesh);
   const deleteAgentNode = useAgentNodeStore(state => state.deleteAgentNode);
-  // Issue #376: open the unified Probe Panel on the 📁 (Project Files) tab.
-  // The Probe is the migration target for the legacy FileExplorerPanel; the
+  // Issue #376 / #378: open the unified Probe Panel on a specific tab.
+  // The Probe is the migration target for the legacy FileExplorerPanel,
+  // MeshPropertiesPanel, GitHubIssuesModal, and SessionBrowserModal. The
   // `openProbeTab` helper atomically sets the tab and opens the panel.
   // The action reference is stable across renders (zustand), so we bind
   // the tab at the prop site without an extra closure layer.
@@ -50,8 +49,6 @@ export function Sidebar() {
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
-  const [githubIssuesModal, setGithubIssuesModal] = useState<{ meshId: number; meshPath: string } | null>(null);
-  const [sessionBrowserModal, setSessionBrowserModal] = useState<{ meshId: number; meshPath: string } | null>(null);
 
   // Close the provider dropdown when clicking outside of it.
   useEffect(() => {
@@ -76,6 +73,23 @@ export function Sidebar() {
     openProbeTab('properties');
   };
 
+  // Issue #378 — the right-click "GitHub Issues" and "Previous Sessions"
+  // entries open the Probe Panel on the 🐙 / 🕒 tabs respectively. The
+  // mesh is selected first (same dance as the Properties entry point) so
+  // `useProbeContext` resolves to the right row before the tab mounts.
+  // Replaces the legacy `GitHubIssuesModal` / `SessionBrowserModal` call
+  // sites; the modal components themselves stay on disk per the
+  // acceptance criteria (they may be reactivated for a transition period
+  // if a follow-up consumer needs them).
+  const handleOpenIssuesProbe = (meshId: number) => {
+    selectMesh(meshId);
+    openProbeTab('issues');
+  };
+  const handleOpenSessionHistoryProbe = (meshId: number) => {
+    selectMesh(meshId);
+    openProbeTab('sessions');
+  };
+
   const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
     setOpenDropdownFor(null);
     // The create→activate→select-mesh dance + its rollback contract live in
@@ -85,11 +99,6 @@ export function Sidebar() {
     } catch (e) {
       console.error('Failed to create node:', e);
     }
-  };
-
-  const openModalForMesh = (meshId: number, set: (v: { meshId: number; meshPath: string }) => void) => {
-    const mesh = meshes.find(m => m.id === meshId);
-    if (mesh) set({ meshId, meshPath: mesh.path });
   };
 
   const handleDeleteNode = async (e: React.MouseEvent, nodeId: number) => {
@@ -141,18 +150,6 @@ export function Sidebar() {
 
         {appSettingsOpen && <AppSettingsModal onClose={() => setAppSettingsOpen(false)} />}
         {remoteAccessOpen && <RemoteAccessModal onClose={() => setRemoteAccessOpen(false)} />}
-        {githubIssuesModal && (
-          <GitHubIssuesModal
-            meshId={githubIssuesModal.meshId}
-            meshPath={githubIssuesModal.meshPath}
-            providerList={providerData}
-            getDefaultProvider={getDefaultProvider}
-            onClose={() => setGithubIssuesModal(null)}
-          />
-        )}
-        {sessionBrowserModal && (
-          <SessionBrowserModal meshId={sessionBrowserModal.meshId} meshPath={sessionBrowserModal.meshPath} providerList={providerData} onClose={() => setSessionBrowserModal(null)} />
-        )}
 
         {/* Meshes list */}
         <div className="flex-1 overflow-y-auto">
@@ -176,13 +173,13 @@ export function Sidebar() {
                       onSelectProvider={handleSelectProvider}
                       onOpenFilesProbe={() => openProbeTab('files')}
                       onOpenPropertiesProbe={handleOpenPropertiesProbe}
+                      onOpenIssuesProbe={handleOpenIssuesProbe}
+                      onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
                       meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id)}
                       activeNodeId={activeNodeId}
                       setActiveNode={setActiveNode}
                       selectMesh={selectMesh}
                       onDeleteNode={handleDeleteNode}
-                      onOpenGitHubIssues={id => openModalForMesh(id, setGithubIssuesModal)}
-                      onOpenSessionBrowser={id => openModalForMesh(id, setSessionBrowserModal)}
                       getDefaultProvider={getDefaultProvider}
                     />
                   ))}

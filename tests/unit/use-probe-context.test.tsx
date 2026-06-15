@@ -64,6 +64,7 @@ describe('useProbeContext (issue #373)', () => {
       activeMeshId: null,
       activeNodeId: null,
       activePath: null,
+      activeMeshPath: null,
     });
   });
 
@@ -78,6 +79,7 @@ describe('useProbeContext (issue #373)', () => {
       activeMeshId: 1,
       activeNodeId: null,
       activePath: '/a',
+      activeMeshPath: '/a',
     });
   });
 
@@ -95,7 +97,11 @@ describe('useProbeContext (issue #373)', () => {
     expect(result.current).toEqual({
       activeMeshId: 1,
       activeNodeId: 7,
+      // activePath follows the focused node (worktree subdir), but
+      // activeMeshPath stays anchored on the mesh root so the new
+      // mesh-scoped tabs (issues, sessions) can walk the repo.
       activePath: '/a/.claude/worktrees/bold-keen-brook',
+      activeMeshPath: '/a',
     });
   });
 
@@ -123,6 +129,7 @@ describe('useProbeContext (issue #373)', () => {
       activeMeshId: 2,
       activeNodeId: 22,
       activePath: '/b/.claude/worktrees/y',
+      activeMeshPath: '/b',
     });
   });
 
@@ -148,11 +155,13 @@ describe('useProbeContext (issue #373)', () => {
     const { result } = renderHook(() => useProbeContext());
     // The selected mesh (1) wins, but the focused node (22) is still
     // surfaced as activeNodeId; activePath follows the focused node
-    // (the user is looking at that card, not at the mesh).
+    // (the user is looking at that card, not at the mesh), and
+    // activeMeshPath follows the selected mesh.
     expect(result.current).toEqual({
       activeMeshId: 1,
       activeNodeId: 22,
       activePath: '/b/.claude/worktrees/y',
+      activeMeshPath: '/a',
     });
   });
 
@@ -163,6 +172,7 @@ describe('useProbeContext (issue #373)', () => {
     const { result } = renderHook(() => useProbeContext());
     expect(result.current.activeMeshId).toBe(99);
     expect(result.current.activePath).toBeNull();
+    expect(result.current.activeMeshPath).toBeNull();
   });
 
   it('falls back to mesh root for activePath when the focused node is missing from the list', () => {

@@ -195,6 +195,40 @@ describe('ProbePanel', () => {
     expect(screen.queryByText('Loading…')).toBeTruthy();
     expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
   });
+
+  it('renders the Git Issues tab body (issue #378) when the 🐙 tab is open', async () => {
+    // Issue #378 — the 🐙 tab hosts the new `<GitIssuesTab>` (ported
+    // from `GitHubIssuesModal`), not the legacy placeholder. The
+    // "Loading issues..." canary is enough to prove the tab mounted
+    // before the mocked `get_repo_issues` resolves.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return Promise.resolve([]);
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    useUIStore.setState({ probeOpen: true, probeTab: 'issues' });
+    render(<ProbePanel />);
+
+    expect(await screen.findByText('Loading issues...')).toBeTruthy();
+    expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
+  });
+
+  it('renders the Session History tab body (issue #378) when the 🕒 tab is open', async () => {
+    // Issue #378 — the 🕒 tab hosts the new `<SessionHistoryTab>`
+    // (ported from `SessionBrowserModal`). The "Scanning sessions…"
+    // canary is enough to prove the tab mounted before the mocked
+    // `discover_sessions` resolves.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'discover_sessions') return Promise.resolve([]);
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    useUIStore.setState({ probeOpen: true, probeTab: 'sessions' });
+    render(<ProbePanel />);
+
+    expect(await screen.findByText('Scanning sessions…')).toBeTruthy();
+    expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
+  });
 });
 
 describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', () => {

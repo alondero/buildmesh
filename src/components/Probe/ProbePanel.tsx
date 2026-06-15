@@ -25,6 +25,8 @@ import { ProjectFilesTab } from './ProjectFilesTab';
 import { AgentChangesTab } from './AgentChangesTab';
 import { MeshPropertiesTab } from './MeshPropertiesTab';
 import { WorktreeManagerTab } from './WorktreeManagerTab';
+import { GitIssuesTab } from './GitIssuesTab';
+import { SessionHistoryTab } from './SessionHistoryTab';
 
 interface ProbeTabDef {
   tab: ProbeTab;
@@ -180,13 +182,17 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
     );
   }
 
-  // Real content for the tabs whose issues have landed. Routed before the
-  // placeholder so the empty-state guards above (no mesh selected, no node
-  // focused) still apply uniformly.
+  // Real content for the tabs whose issues have landed. Routed before
+  // the placeholder so the empty-state guards above (no mesh selected,
+  // no node focused) still apply uniformly. The 🐙 and 🕒 tabs are
+  // mesh-scoped but don't require an active node, so they fall through
+  // to the "no project selected" guard only.
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <MeshPropertiesTab />;
   if (tab === 'worktrees') return <WorktreeManagerTab />;
+  if (tab === 'issues') return <GitIssuesTab />;
+  if (tab === 'sessions') return <SessionHistoryTab />;
 
   return <ProbeTabPlaceholder tab={tab} />;
 }

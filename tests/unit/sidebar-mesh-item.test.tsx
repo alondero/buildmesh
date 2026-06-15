@@ -49,16 +49,20 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onSelectMesh: vi.fn(),
     onNewNode: vi.fn(),
     onSelectProvider: vi.fn(),
-    onOpenProperties: vi.fn(),
     onOpenFilesProbe: vi.fn(),
     onOpenPropertiesProbe: vi.fn(),
+    // Issue #378 — the right-click "GitHub Issues" / "Previous Sessions"
+    // entries route through the Probe Panel via the new probe-tab
+    // handlers. The legacy `onOpenGitHubIssues` / `onOpenSessionBrowser`
+    // props are gone; the modal components stay on disk but no
+    // consumer wires them up.
+    onOpenIssuesProbe: vi.fn(),
+    onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
     activeNodeId: null,
     setActiveNode: vi.fn(),
     selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
-    onOpenGitHubIssues: vi.fn(),
-    onOpenSessionBrowser: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
     ...overrides,
   };
@@ -121,7 +125,31 @@ describe('MeshItem', () => {
     const { props } = renderMeshItem();
     fireEvent.contextMenu(screen.getByText('my-mesh'));
     await userEvent.click(screen.getByText('GitHub Issues'));
-    expect(props.onOpenGitHubIssues).toHaveBeenCalledWith(3);
+    expect(props.onOpenIssuesProbe).toHaveBeenCalledWith(3);
+  });
+
+  it('routes the right-click "GitHub Issues" entry to the Probe Panel (issue #378)', async () => {
+    // Issue #378 — the "GitHub Issues" right-click item used to mount
+    // the legacy `GitHubIssuesModal` via `onOpenGitHubIssues`. After the
+    // port it calls `onOpenIssuesProbe`, which Sidebar wires to
+    // `openProbeTab('issues')`.
+    const { props } = renderMeshItem();
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('GitHub Issues'));
+    expect(props.onOpenIssuesProbe).toHaveBeenCalledTimes(1);
+    expect(props.onOpenIssuesProbe).toHaveBeenCalledWith(3);
+  });
+
+  it('routes the right-click "Previous Sessions" entry to the Probe Panel (issue #378)', async () => {
+    // Issue #378 — the "Previous Sessions" right-click item used to
+    // mount the legacy `SessionBrowserModal` via `onOpenSessionBrowser`.
+    // After the port it calls `onOpenSessionHistoryProbe`, which
+    // Sidebar wires to `openProbeTab('sessions')`.
+    const { props } = renderMeshItem();
+    fireEvent.contextMenu(screen.getByText('my-mesh'));
+    await userEvent.click(screen.getByText('Previous Sessions'));
+    expect(props.onOpenSessionHistoryProbe).toHaveBeenCalledTimes(1);
+    expect(props.onOpenSessionHistoryProbe).toHaveBeenCalledWith(3);
   });
 
   it('opens the probe panel on the files tab when "File Explorer" is chosen (#376)', async () => {
