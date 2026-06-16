@@ -224,6 +224,7 @@ fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
         Provider::Anthropic,
         Some(name),
         None,
+        None,
         true,
     ) {
         Ok(node) => {

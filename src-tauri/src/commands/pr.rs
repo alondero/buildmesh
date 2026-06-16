@@ -6,7 +6,7 @@ use crate::models::SessionStatus;
 use crate::services::github::{self, GitHubClient, PullRequest};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
-use tauri::command;
+use tauri::{command, Emitter};
 use ts_rs::TS;
 
 /// Wire shape of `get_repo_issues` (desktop Tauri) and `GET /api/meshes/{id}/issues`
@@ -53,6 +53,13 @@ pub struct GitHubPullRequest {
     /// `true` for draft PRs. Drafts can't be merged, so the panel flags them
     /// without needing a per-PR mergeability call.
     pub draft: bool,
+    /// PR's source-branch ref name (e.g. `"feature/some-thing"`). Captured from
+    /// GitHub's `head.ref` so the spawn button (#420) can pass it to the
+    /// backend, which fetches it and uses it as the worktree's `base_ref`.
+    /// Empty when the PR is from a fork (the head lives on the fork's remote,
+    /// not `origin`) — the spawn path refuses those for now (issue #36).
+    #[serde(default)]
+    pub head_ref: String,
 }
 
 /// Wire shape of `get_pr_mergeability` — the per-PR enrichment the panel
@@ -172,6 +179,7 @@ pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullReque
         url: pr.html_url,
         state: pr.state,
         draft: pr.draft,
+        head_ref: pr.head_ref,
     }).collect())
 }
 
@@ -276,6 +284,135 @@ pub fn merge_pr(pr_url: String) -> Result<String, String> {
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
     client.merge_pull_request(&owner, &repo, pr_number)
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// PR-spawn flow (issue #420) — mirror of the issue-spawn two-stage flow.
+//
+// Spawns an agent that checks out the PR's head branch and starts reviewing
+// or iterating on it. The worktree is created off `origin/<head_ref>` rather
+// than the mesh's `base_ref`, so the agent lands on the same commits the PR
+// is built from. Reuses `IssueNodeDraft` for the return type (the wire shape
+// is the same: flattened `AgentNode` + `prefill`); the PR-spawn flow only
+// diverges in the *row* (`source_pr` is set, `branch` is the head ref) and
+// in stage-2's `git fetch origin <head_ref>` worktree adoption.
+// ---------------------------------------------------------------------------
+
+/// Compose the prefill string handed to the agent on PR spawn.
+///
+/// Shape: `Please review pull request #N — Title\n<html_url>` — mirrors
+/// `format_issue_prefill` (issue flow) so the agent gets the same kind of
+/// one-line imperative + URL hand-off. The title is passed verbatim (the
+/// consumer is an LLM, not a parser); the PR's body is intentionally NOT
+/// included (same rationale as the issue flow — multi-KB markdown is the
+/// worst case for the PowerShell `-EncodedCommand` argv path).
+///
+/// Pure function — exposed `pub(crate)` so unit tests can pin the wording.
+pub(crate) fn format_pr_prefill(
+    owner: &str,
+    repo: &str,
+    pr_number: i64,
+    pr_title: &str,
+) -> String {
+    let url = format!("https://github.com/{}/{}/pull/{}", owner, repo, pr_number);
+    let trimmed = pr_title.trim();
+    if trimmed.is_empty() {
+        format!("Please review pull request #{}\n{}", pr_number, url)
+    } else {
+        format!(
+            "Please review pull request #{} — {}\n{}",
+            pr_number, trimmed, url
+        )
+    }
+}
+
+/// Fast stage-1 of the PR-spawn flow. Creates a `Pending` agent node row
+/// with the originating PR number stamped on `source_pr` and the PR's head
+/// ref stored in `branch`. The caller is expected to invoke
+/// `start_node_background` to do the slow work (git fetch the head ref +
+/// worktree create + PTY spawn), which in turn uses `source_pr` to override
+/// the worktree's `base_ref` so the agent lands on the PR's actual commits
+/// instead of the mesh's base ref.
+///
+/// Refuses fork PRs (`head_ref` empty) — the head ref is on the fork's
+/// remote, not `origin`, and adding a fork remote is a follow-up to #36
+/// (worktree adoption). The user gets a clear error rather than a
+/// silently-empty worktree.
+///
+/// Returns the same `IssueNodeDraft` wire shape as `create_issue_node`; the
+/// frontend reuses the generated `IssueNodeDraft.ts` import (the structure
+/// is identical: flattened `AgentNode` + `prefill`).
+#[command]
+pub fn create_pr_node(
+    app: tauri::AppHandle,
+    mesh_id: i64,
+    pr_number: i64,
+    pr_title: String,
+    head_ref: String,
+    provider: Option<String>,
+) -> Result<crate::commands::agent::IssueNodeDraft, String> {
+    // Refuse fork PRs up front: head_ref is the only handle to the head
+    // branch, and for fork PRs it lives on the fork's remote, not `origin`.
+    // The whole worktree-adoption path (git fetch origin <head_ref> +
+    // create_worktree off origin/<head_ref>) assumes the same-repo case.
+    // Once #36 lands fork-remote support, this guard goes away and
+    // `spawn_agent_inner` learns to add the fork as a remote first.
+    if head_ref.trim().is_empty() {
+        return Err(
+            "This PR's head branch is on a fork — worktree adoption for fork PRs \
+             isn't supported yet (issue #36). Add the fork as a remote and spawn \
+             via handover, or wait for the worktree-adoption follow-up."
+                .to_string(),
+        );
+    }
+
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = resolve_github_owner_repo(&mesh)
+        .map_err(|e| format!("{} — cannot derive PR URL", e))?;
+
+    let prefill = format_pr_prefill(&owner, &repo, pr_number, &pr_title);
+
+    // Seed the node with a `pr{N}-{slug}` name (mirrors `issue_node_name`) so
+    // the user can identify it in the mesh list from the moment the row
+    // appears. Falls back to a random default if the title doesn't yield a
+    // valid slug; the `pr` prefix is still applied so the user can spot the
+    // originating PR at a glance.
+    let initial_name = crate::session_naming::pr_node_name(pr_number, &pr_title);
+
+    let effective_provider = crate::preferences::resolve_default_provider(
+        provider,
+        mesh.default_provider.clone(),
+        crate::preferences::default_provider(),
+    );
+
+    let node = crate::services::agent_node::create_pending_with_source_pr(
+        mesh.id,
+        &mesh.path,
+        &head_ref,
+        Some(&effective_provider),
+        None,                 // source_issue
+        Some(pr_number),      // source_pr — the key field for stage-2 worktree adoption
+        Some(&initial_name),
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Reuse the existing `session-created` event so the frontend's listener
+    // (which already triggers `fetchAgentNodes`) picks up the new node
+    // without a new event-name coupling. Mirrors `create_issue_node`.
+    let _ = app.emit(
+        "session-created",
+        serde_json::json!({ "id": node.id }),
+    );
+
+    tracing::info!(
+        "create_pr_node: created pending node {} for PR #{} (head_ref={}) on mesh {}",
+        node.id,
+        pr_number,
+        head_ref,
+        mesh_id
+    );
+
+    Ok(crate::commands::agent::IssueNodeDraft { node, prefill })
 }
 
 /// Get the current branch for a node
@@ -497,6 +634,73 @@ mod tests {
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+    // ----- format_pr_prefill (issue #420) ---------------------------------
+
+    /// `format_pr_prefill` mirrors `format_issue_prefill` (the issue-spawn
+    /// flow): one-line imperative + the canonical URL. The body is
+    /// intentionally NOT included — multi-KB markdown is the worst case for
+    /// the PowerShell `-EncodedCommand` argv path.
+    #[test]
+    fn format_pr_prefill_includes_number_title_and_url() {
+        let prefill = format_pr_prefill("alondero", "buildmesh", 420, "spawn on PR");
+        assert_eq!(
+            prefill,
+            "Please review pull request #420 — spawn on PR\nhttps://github.com/alondero/buildmesh/pull/420"
+        );
+    }
+
+    /// Empty / whitespace-only title degrades to the bare `#N\n<url>` form
+    /// so the prefill never carries a dangling em-dash artifact. Mirrors
+    /// the issue-spawn behaviour so both spawn paths produce uniform output.
+    #[test]
+    fn format_pr_prefill_handles_empty_title() {
+        let prefill = format_pr_prefill("alondero", "buildmesh", 420, "");
+        assert_eq!(
+            prefill,
+            "Please review pull request #420\nhttps://github.com/alondero/buildmesh/pull/420"
+        );
+        let prefill_ws = format_pr_prefill("alondero", "buildmesh", 420, "   \t  ");
+        assert_eq!(prefill_ws, prefill, "whitespace title trims like empty");
+    }
+
+    // ----- GitHubPullRequest wire shape (issue #420) ---------------------
+
+    /// `head_ref` is optional with `#[serde(default)]` so a partial response
+    /// (older / cached) still parses — the spawn path surfaces "missing head
+    /// ref" as a user-facing error. Pin the wire shape so a future refactor
+    /// that flips it to required surfaces as a test failure rather than a
+    /// runtime panic. The Tauri-side wire struct uses the field name `url`
+    /// (mapped from GitHub's `html_url` by the command-side mapper), not
+    /// `html_url`.
+    #[test]
+    fn github_pull_request_wire_shape_with_head_ref() {
+        let json = r#"{
+            "number": 420,
+            "url": "https://github.com/alondero/buildmesh/pull/420",
+            "title": "spawn on PR",
+            "body": "spawn an agent on a PR",
+            "state": "open",
+            "draft": false,
+            "head_ref": "feat/420-pr-spawn"
+        }"#;
+        let pr: GitHubPullRequest = serde_json::from_str(json).expect("full wire shape parses");
+        assert_eq!(pr.head_ref, "feat/420-pr-spawn");
+    }
+
+    #[test]
+    fn github_pull_request_wire_shape_with_missing_head_ref_defaults() {
+        let json = r#"{
+            "number": 7,
+            "url": "https://github.com/x/y/pull/7",
+            "title": "legacy",
+            "body": "",
+            "state": "open",
+            "draft": false
+        }"#;
+        let pr: GitHubPullRequest = serde_json::from_str(json).expect("partial wire shape parses");
+        assert_eq!(pr.head_ref, "", "missing head_ref defaults to empty");
+    }
+
     /// Build a `TempGitRepo` and an `AgentNode` that uses a branched worktree
     /// under `<root>/.claude/worktrees/<name>`. The mesh root stays on
     /// `main`; the worktree is on `<name>` (matching the production
@@ -533,6 +737,7 @@ mod tests {
             worktree_name: Some("agent-1".into()),
             use_worktree: true,
             source_issue: None,
+            source_pr: None,
             position: 0,
             created_at: Utc::now(),
         };
@@ -559,6 +764,7 @@ mod tests {
             worktree_name: None,
             use_worktree: false,
             source_issue: None,
+            source_pr: None,
             position: 0,
             created_at: Utc::now(),
         };

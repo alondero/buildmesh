@@ -234,6 +234,14 @@ pub struct AgentNode {
     pub use_worktree: bool,  // true = commands run in worktree, false = repo root
     #[ts(as = "Option<i32>")]
     pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
+    /// GitHub PR number that triggered this node (issue #420). `None` for
+    /// issue-spawned and hand-spawned nodes. When set, `spawn_agent_inner`
+    /// fetches `origin/<head_ref>` and uses it as the worktree's `base_ref`
+    /// instead of the mesh's `base_ref` (relates to #36 worktree adoption).
+    /// Mirrors the `source_issue` field so the same resume-by-URL plumbing
+    /// (issue #37) can target both spawn sources.
+    #[ts(as = "Option<i32>")]
+    pub source_pr: Option<i64>,
     #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,

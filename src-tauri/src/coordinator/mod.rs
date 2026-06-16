@@ -97,6 +97,7 @@ mod tests {
                 worktree_name TEXT,
                 use_worktree INTEGER NOT NULL DEFAULT 1,
                 source_issue INTEGER,
+                source_pr INTEGER,
                 position INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -198,6 +199,7 @@ mod tests {
                 cli_session_id TEXT, worktree_name TEXT,
                 use_worktree INTEGER NOT NULL DEFAULT 1,
                 source_issue INTEGER,
+                source_pr INTEGER,
                 position INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );

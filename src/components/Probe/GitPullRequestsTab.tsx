@@ -28,6 +28,15 @@
  * fetches via `getPrFiles` (GitHub's `/pulls/{n}/files`) and renders a
  * generous file list → click a file to see its patch. This complements the
  * merge action without overlapping it: merge writes, view reads.
+ *
+ * Spawn companion (issue #420): open PRs get a split spawn button (default
+ * provider + ▾ picker) that mirrors `GitIssuesTab`'s issue-spawn flow. The
+ * backend `create_pr_node` creates a `pending` node with the PR's head ref
+ * stored in `branch` (and `source_pr` set), then stage-2 fetches
+ * `origin/<head_ref>` and cuts the worktree from it — so the agent lands on
+ * the same commits the PR is built from (worktree adoption, #36 follow-up).
+ * The dock stays open after a successful spawn (matches the issue-tab
+ * behaviour, see memory buildmesh-spawn-from-probe-keeps-dock-open).
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -35,11 +44,16 @@ import {
   getRepoPulls,
   getPrMergeability,
   mergePr,
+  createPrNode,
+  startNodeBackground,
+  listProviders,
   type GitHubPullRequest,
   type PrMergeability,
 } from '../../lib/tauri';
+import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
+import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
 type StateFilter = 'open' | 'closed';
 
@@ -76,6 +90,8 @@ function deriveMergeStatus(
 export function GitPullRequestsTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   const openDiff = useUIStore((s) => s.openDiff);
+  // `getDefaultProvider` is mesh-scoped — same pattern as `GitIssuesTab`.
+  const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
 
   const [prs, setPrs] = useState<GitHubPullRequest[]>([]);
   const [loading, setLoading] = useState(true);
@@ -89,6 +105,14 @@ export function GitPullRequestsTab() {
   const [merging, setMerging] = useState<number | null>(null);
   // Per-row merge failure message (transient `gh`/network hiccup, etc.).
   const [mergeError, setMergeError] = useState<Record<number, string>>({});
+  // Spawn state (issue #420) — mirrors the issue-tab pattern: a per-PR
+  // "spawning" flag for the button, an "open dropdown" for the ▾ picker, and
+  // a per-PR spawn error so a rejected `create_pr_node` surfaces inline
+  // rather than vanishing into the console.
+  const [spawning, setSpawning] = useState<number | null>(null);
+  const [openDropdown, setOpenDropdown] = useState<number | null>(null);
+  const [spawnError, setSpawnError] = useState<Record<number, string>>({});
+  const [providerList, setProviderList] = useState<ProviderEntry[]>([]);
 
   const load = useCallback(async (signal: { cancelled: boolean }) => {
     if (activeMeshId === null) return;
@@ -188,6 +212,123 @@ export function GitPullRequestsTab() {
       retryTimers.clear();
     };
   }, [prs, stateFilter, activeMeshId]);
+
+  // Fetch the provider list once at mount (issue #420, mirrors
+  // `GitIssuesTab`). Platform filtering is enforced server-side via
+  // `AgentProvider::available_on()`. Re-fetching on every render would be
+  // wasteful, and the list is stable for the lifetime of a session.
+  useEffect(() => {
+    let cancelled = false;
+    listProviders()
+      .then((backendProviders) => {
+        if (cancelled) return;
+        setProviderList(
+          backendProviders.map((p) => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
+        );
+      })
+      .catch((err) => console.error('listProviders failed:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Close the provider dropdown when clicking outside it. The dropdown
+  // container carries a `data-dropdown-for` attribute set to the PR number,
+  // matching the issue-tab pattern (memory:
+  // feedback-probe-tab-test-and-jsdoc-gotchas — mousedown vs click race).
+  useEffect(() => {
+    if (openDropdown === null) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(`[data-dropdown-for="${openDropdown}"]`)) {
+        setOpenDropdown(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [openDropdown]);
+
+  // Two-stage PR spawn (issue #420) — mirrors the issue-spawn flow in
+  // `GitIssuesTab`. Stage-1 (`createPrNode`) is the fast DB-only IPC
+  // (~20ms) that returns a `pending` node + the prefill; stage-2
+  // (`startNodeBackground`) does the slow work (git fetch origin
+  // <head_ref>, worktree create off the head ref, PTY spawn) in the
+  // background and the store flips the node to `running` / `error` via
+  // `node-spawn-completed` / `node-spawn-failed` events. We deliberately do
+  // NOT toggle the probe — the dock stays open so the user can fire off
+  // another PR without re-opening the context menu (matches the issue-tab
+  // contract; see memory buildmesh-spawn-from-probe-keeps-dock-open).
+  const handleSpawn = async (pr: GitHubPullRequest, providerId: string) => {
+    if (activeMeshId === null) return;
+    setSpawning(pr.number);
+    setSpawnError((prev) => {
+      const next = { ...prev };
+      delete next[pr.number];
+      return next;
+    });
+    try {
+      const draft = await createPrNode(
+        activeMeshId,
+        pr.number,
+        pr.title,
+        pr.head_ref,
+        providerId,
+      );
+      setOpenDropdown(null);
+      // Dispatch stage-2 BEFORE clearing the busy state so the
+      // fire-and-forget IPC is on the wire before the same-row button
+      // re-enables for another click.
+      startNodeBackground(draft.id, draft.prefill);
+      setSpawning(null);
+    } catch (e) {
+      console.error('Failed to spawn PR agent:', e);
+      setSpawnError((prev) => ({
+        ...prev,
+        [pr.number]: e instanceof Error ? e.message : String(e),
+      }));
+      setSpawning(null);
+    }
+  };
+
+  // Primary "Spawn" button uses the mesh's resolved default provider —
+  // explicit > per-mesh > app-wide > "anthropic" fallback is enforced
+  // server-side by `resolve_default_provider`. We mark `spawning` BEFORE
+  // awaiting `getDefaultProvider` so the split button's `disabled`
+  // immediately blocks a second click on the same PR (e.g. picking a
+  // different provider in the still-open dropdown) from racing with the
+  // in-flight default-resolution IPC. If `getDefaultProvider` rejects, the
+  // catch clears `spawning` so the user can retry.
+  const handleDefaultSpawn = async (pr: GitHubPullRequest) => {
+    if (activeMeshId === null) return;
+    setSpawning(pr.number);
+    setSpawnError((prev) => {
+      const next = { ...prev };
+      delete next[pr.number];
+      return next;
+    });
+    try {
+      const defaultProvider = await getDefaultProvider(activeMeshId);
+      const draft = await createPrNode(
+        activeMeshId,
+        pr.number,
+        pr.title,
+        pr.head_ref,
+        defaultProvider,
+      );
+      setOpenDropdown(null);
+      // Same ordering as `handleSpawn`: stage-2 IPC first, then clear the
+      // busy state. Dock stays open (see handleSpawn).
+      startNodeBackground(draft.id, draft.prefill);
+      setSpawning(null);
+    } catch (e) {
+      console.error('Failed to spawn PR agent:', e);
+      setSpawnError((prev) => ({
+        ...prev,
+        [pr.number]: e instanceof Error ? e.message : String(e),
+      }));
+      setSpawning(null);
+    }
+  };
 
   const handleMerge = async (pr: GitHubPullRequest) => {
     setMerging(pr.number);
@@ -290,23 +431,30 @@ export function GitPullRequestsTab() {
               const isMerging = merging === pr.number;
               const isConfirming = confirming === pr.number;
               const rowError = mergeError[pr.number];
+              const isSpawning = spawning === pr.number;
+              const isDropdownOpen = openDropdown === pr.number;
+              const rowSpawnError = spawnError[pr.number];
               return (
                 <div
                   key={pr.number}
-                  className="flex items-start gap-2 px-2 py-2 rounded hover:bg-bg-card transition-colors"
+                  className="flex flex-col gap-1 px-2 py-2 rounded hover:bg-bg-card transition-colors"
                 >
-                  <div className="flex-1 min-w-0">
-                    <div>
-                      <span className="text-xs text-accent-cyan font-mono">#{pr.number}</span>
-                      <span className="text-sm text-text-primary ml-2">{pr.title}</span>
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <div>
+                        <span className="text-xs text-accent-cyan font-mono">#{pr.number}</span>
+                        <span className="text-sm text-text-primary ml-2">{pr.title}</span>
+                      </div>
+                      {pr.body && (
+                        <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{pr.body}</p>
+                      )}
+                      {rowError && (
+                        <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowError}</p>
+                      )}
+                      {rowSpawnError && (
+                        <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowSpawnError}</p>
+                      )}
                     </div>
-                    {pr.body && (
-                      <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{pr.body}</p>
-                    )}
-                    {rowError && (
-                      <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowError}</p>
-                    )}
-                  </div>
 
                   {/* Merge control — open PRs only; closed PRs are read-only. */}
                   {stateFilter === 'open' && (
@@ -346,6 +494,56 @@ export function GitPullRequestsTab() {
                     </div>
                   )}
 
+                  {/* Split spawn button (issue #420) — open PRs only;
+                      closed PRs are read-only. Mirrors the issue-tab
+                      pattern: primary "Spawn" uses the mesh's default
+                      provider, the `▾` half opens a picker that bypasses
+                      the default. The row is disabled while any spawn
+                      is in flight (busy state shared across rows). The
+                      `data-dropdown-for` attribute feeds the click-outside
+                      handler in the spawn-effects block above. */}
+                  {stateFilter === 'open' && (
+                    <div
+                      className="relative flex shrink-0"
+                      data-dropdown-for={pr.number}
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      {isSpawning ? (
+                        <button
+                          disabled
+                          className="px-2.5 py-1 text-xs font-medium rounded bg-accent-cyan/10 text-text-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        >
+                          Spawning...
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            onClick={() => handleDefaultSpawn(pr)}
+                            disabled={spawning !== null}
+                            className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          >
+                            Spawn
+                          </button>
+                          <button
+                            onClick={() => setOpenDropdown(isDropdownOpen ? null : pr.number)}
+                            disabled={spawning !== null}
+                            className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            title="Choose provider"
+                          >
+                            ▾
+                          </button>
+                          {isDropdownOpen && (
+                            <ProviderDropdown
+                              meshId={pr.number}
+                              providers={providerList}
+                              onSelect={(providerId) => handleSpawn(pr, providerId)}
+                            />
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {/* Read-only "View changes" (issue #421). Always available
                       for any state filter — the diff is useful on closed PRs
                       too (review a merged change, compare with a rebase).
@@ -362,6 +560,7 @@ export function GitPullRequestsTab() {
                     >
                       View changes
                     </button>
+                  </div>
                   </div>
                 </div>
               );

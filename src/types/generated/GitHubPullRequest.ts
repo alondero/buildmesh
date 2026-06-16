@@ -20,4 +20,12 @@ state: string,
  * `true` for draft PRs. Drafts can't be merged, so the panel flags them
  * without needing a per-PR mergeability call.
  */
-draft: boolean, };
+draft: boolean, 
+/**
+ * PR's source-branch ref name (e.g. `"feature/some-thing"`). Captured from
+ * GitHub's `head.ref` so the spawn button (#420) can pass it to the
+ * backend, which fetches it and uses it as the worktree's `base_ref`.
+ * Empty when the PR is from a fork (the head lives on the fork's remote,
+ * not `origin`) — the spawn path refuses those for now (issue #36).
+ */
+head_ref: string, };

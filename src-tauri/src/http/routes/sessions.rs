@@ -105,6 +105,7 @@ pub async fn import_and_resume(
         provider_enum,
         req.worktree_name.as_deref(),
         None,
+        None,
         use_worktree,
     ) {
         Ok(n) => n,

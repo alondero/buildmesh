@@ -13,6 +13,10 @@
  *   - backend errors surface the raw message
  *   - removing the mesh after mount doesn't crash (ProbeTabBody owns the
  *     "no project selected" empty state, like GitIssuesTab)
+ *   - open PRs expose a split Spawn button (issue #420) that calls
+ *     `create_pr_node` → `start_node_background` mirroring the issue-spawn
+ *     flow; dock stays open across the spawn; rejected spawns surface
+ *     inline and leave the dock open for retry
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -35,21 +39,55 @@ const MESH: Mesh = {
 };
 
 // PR 201: clean/mergeable. PR 202: conflicts. PR 203: draft. PR 204: computing.
+// `head_ref` populated on every fixture PR — the spawn flow (issue #420)
+// requires it: it's the ref `create_pr_node` stores on the new node's
+// `branch` column, and stage-2 fetches `origin/<head_ref>` to cut the
+// worktree from it. PRs without a head ref are fork PRs and the spawn flow
+// refuses them.
 const OPEN_PRS: GitHubPullRequest[] = [
-  { number: 201, title: 'Add widget', body: 'Adds the widget', url: 'https://github.com/acme/demo/pull/201', state: 'open', draft: false },
-  { number: 202, title: 'Refactor core', body: 'Big refactor', url: 'https://github.com/acme/demo/pull/202', state: 'open', draft: false },
-  { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true },
-  { number: 204, title: 'Fresh PR', body: '', url: 'https://github.com/acme/demo/pull/204', state: 'open', draft: false },
+  { number: 201, title: 'Add widget', body: 'Adds the widget', url: 'https://github.com/acme/demo/pull/201', state: 'open', draft: false, head_ref: 'feat/201-add-widget' },
+  { number: 202, title: 'Refactor core', body: 'Big refactor', url: 'https://github.com/acme/demo/pull/202', state: 'open', draft: false, head_ref: 'refactor/202-core' },
+  { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true, head_ref: 'wip/203-spike' },
+  { number: 204, title: 'Fresh PR', body: '', url: 'https://github.com/acme/demo/pull/204', state: 'open', draft: false, head_ref: 'fresh/204-pr' },
 ];
 
 const CLOSED_PRS: GitHubPullRequest[] = [
-  { number: 150, title: 'Old change', body: 'merged ages ago', url: 'https://github.com/acme/demo/pull/150', state: 'closed', draft: false },
+  { number: 150, title: 'Old change', body: 'merged ages ago', url: 'https://github.com/acme/demo/pull/150', state: 'closed', draft: false, head_ref: 'old/150-change' },
 ];
 
 const MERGEABILITY: Record<number, PrMergeability> = {
   201: { mergeable: true, mergeable_state: 'clean' },
   202: { mergeable: false, mergeable_state: 'dirty' },
   204: { mergeable: null, mergeable_state: 'unknown' },
+};
+
+const PROVIDERS = [
+  { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '' },
+  { id: 'minimax', label: 'Minimax', color: '#000', icon: '' },
+  { id: 'opencode', label: 'OpenCode', color: '#000', icon: '' },
+];
+
+// Stage-1 return value — the same shape `create_issue_node` returns, so
+// `create_pr_node` reuses the generated `IssueNodeDraft` TS type. The
+// `branch` field carries the PR's head ref (set server-side from the
+// `head_ref` arg) and `source_pr` records the originating PR number
+// (issue #420) so stage-2's `spawn_agent_inner` can override the
+// worktree's `base_ref` to `origin/<head_ref>`.
+const PR_DRAFT = {
+  id: 17,
+  mesh_id: 42,
+  name: 'pr201-add-widget',
+  path: '/repos/demo',
+  branch: 'feat/201-add-widget',
+  env: 'wsl',
+  provider: 'anthropic',
+  status: 'pending',
+  use_worktree: true,
+  source_issue: null,
+  source_pr: 201,
+  position: 0,
+  created_at: '2026-01-01',
+  prefill: 'Please review pull request #201 — Add widget\nhttps://github.com/acme/demo/pull/201',
 };
 
 /**
@@ -67,8 +105,16 @@ function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequ
         const n = (args as { prNumber?: number })?.prNumber ?? -1;
         return Promise.resolve(MERGEABILITY[n] ?? { mergeable: null, mergeable_state: 'unknown' });
       }
+      case 'list_providers':
+        return Promise.resolve(PROVIDERS);
+      case 'get_default_provider':
+        return Promise.resolve('anthropic');
+      case 'create_pr_node':
+        return Promise.resolve(PR_DRAFT);
       case 'merge_pr':
         return Promise.resolve('Merged (squash) via abc123 — done');
+      case 'start_node_background':
+        return Promise.resolve(undefined);
       default:
         return Promise.resolve({});
     }
@@ -378,5 +424,122 @@ describe('GitPullRequestsTab', () => {
     expect(
       await screen.findByRole('button', { name: 'View changes in PR #150' }),
     ).toBeTruthy();
+  });
+
+  // ----- Spawn button (issue #420) ---------------------------------------
+  // Open PRs expose a split spawn button (default provider + ▾ picker) that
+  // mirrors `GitIssuesTab`'s two-stage issue-spawn flow:
+  //   1. `create_pr_node` — fast DB-only IPC (~20ms) returns a `pending`
+  //      node with `branch = head_ref` and `source_pr = Some(n)`, plus the
+  //      prefill string the caller must hand to stage-2.
+  //   2. `start_node_background` — fire-and-forget; `spawn_agent_inner`
+  //      does the slow work (git fetch origin <head_ref>, worktree create
+  //      off the head ref, PTY spawn).
+  // The dock stays open after a successful spawn so the user can fire off
+  // another PR without re-opening the context menu — same UX contract as
+  // the issue tab (memory buildmesh-spawn-from-probe-keeps-dock-open).
+
+  it('does the two-stage spawn on the primary Spawn button (issue #420)', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // findAllByText because every open PR row renders its own "Spawn"
+    // button — the first row (PR 201) is what the test exercises.
+    const spawns = await screen.findAllByText('Spawn');
+    await userEvent.click(spawns[0]);
+
+    // Stage 1 — `create_pr_node` carries the head ref from the fixture,
+    // plus the resolved default provider from `get_default_provider`.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('create_pr_node', {
+        meshId: 42,
+        prNumber: 201,
+        prTitle: 'Add widget',
+        headRef: 'feat/201-add-widget',
+        provider: 'anthropic',
+      });
+    });
+    // Stage 2 — fire-and-forget IPC with the draft id + prefill from stage 1.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('start_node_background', {
+        nodeId: 17,
+        prefill: 'Please review pull request #201 — Add widget\nhttps://github.com/acme/demo/pull/201',
+      });
+    });
+  });
+
+  it('keeps the dock open after a successful spawn (mirrors issue-tab contract)', async () => {
+    // The PR tab is a persistent dock like the issue tab. Closing on every
+    // spawn would force the user to re-open the dock for the next PR.
+    mockBackend();
+    useUIStore.setState({ probeOpen: true, probeTab: 'pulls' });
+    render(<GitPullRequestsTab />);
+
+    const spawns = await screen.findAllByText('Spawn');
+    await userEvent.click(spawns[0]);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('start_node_background', expect.objectContaining({ nodeId: 17 }));
+    });
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it('keeps the dock open when create_pr_node rejects (lets the user retry)', async () => {
+    // Symmetric to the issue tab — a failed spawn should NOT close the
+    // dock, the user needs to be able to retry (e.g. transient `gh` hiccup,
+    // a fork PR that the backend refuses, etc.). The error surfaces inline
+    // on the row, the spawning label clears.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'create_pr_node') return Promise.reject(new Error("This PR's head branch is on a fork — worktree adoption for fork PRs isn't supported yet"));
+      return Promise.resolve({});
+    });
+    useUIStore.setState({ probeOpen: true, probeTab: 'pulls' });
+    render(<GitPullRequestsTab />);
+
+    const spawns = await screen.findAllByText('Spawn');
+    await userEvent.click(spawns[0]);
+
+    // The spawning label clears once the rejected promise resolves.
+    await waitFor(() => {
+      expect(screen.queryByText('Spawning...')).toBeNull();
+    });
+    // The error message surfaces inline on the row.
+    expect(
+      await screen.findByText(/This PR's head branch is on a fork/),
+    ).toBeTruthy();
+    // The dock stays open so the user can try a different PR.
+    expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  it('disables the split button while a spawn is in flight to block double-clicks', async () => {
+    let resolveCreate!: (v: typeof PR_DRAFT) => void;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'create_pr_node') return new Promise((res) => { resolveCreate = res; });
+      return Promise.resolve({});
+    });
+    render(<GitPullRequestsTab />);
+
+    const spawns = await screen.findAllByText('Spawn');
+    await userEvent.click(spawns[0]);
+
+    // The in-flight `create_pr_node` leaves the spawning flag set, so both
+    // halves of every split button disable. A second click would be a
+    // no-op even if it landed — assert the guard rather than the backend
+    // idempotency.
+    const allSpawning = await screen.findAllByText('Spawning...');
+    expect(allSpawning.length).toBeGreaterThan(0);
+    expect((allSpawning[0] as HTMLButtonElement).disabled).toBe(true);
+
+    // Resolve the in-flight IPC and confirm the label flips back.
+    resolveCreate(PR_DRAFT);
+    await waitFor(() => {
+      expect(screen.queryByText('Spawning...')).toBeNull();
+    });
   });
 });
