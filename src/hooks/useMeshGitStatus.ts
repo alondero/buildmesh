@@ -32,7 +32,12 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
   // only useful once we know the path is a git repo. The `enabled: false`
   // option skips the mount-refetch so the static effect is the single
   // caller of the initial `refresh()`.
-  const { data: files, loading, refresh } = usePathInvalidatedQuery(
+  //
+  // The `error` field is consumed at the bottom of this hook: a non-null
+  // `error` means the file-list fetch (initial OR a GIT_CHANGED-driven
+  // refetch) threw, which collapses the panel — mirrors the pre-#282
+  // behavior where the panel hid on a `getGitStatus` rejection. Issue #342.
+  const { data: files, loading, error, refresh } = usePathInvalidatedQuery(
     gitStatusClient,
     meshPath,
     { enabled: false },
@@ -80,8 +85,20 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
     })();
   }, [meshPath, refresh]);
 
+  // The file-list fetch is gated by the static check above — it only
+  // runs after `isGitRepo === true` lands. So by the time we reach this
+  // point, `isGitRepo` is either `null` (loading), `false` (non-repo OR
+  // static check threw), or `true` (we tried to fetch the file list).
+  //
+  // When the file-list fetch itself fails (`error !== null`), the path
+  // IS a git repo (per the static check) but the listing just failed —
+  // we can't render anything trustworthy, so collapse the panel. This
+  // mirrors the pre-#282 behavior that issue #282 inadvertently changed.
+  // A legitimate `null`/`[]` from the fetcher is a SUCCESS, not an
+  // error, and leaves the panel open. Issue #342.
   if (isGitRepo === null) return null;
   if (isGitRepo === false) return null;
+  if (error !== null) return null;
 
   return {
     files: files ?? [],

@@ -10,10 +10,8 @@ import { getGitStatus, type GitStatus } from '../lib/tauri';
  * through the primitive. Two panels rendering the same Mesh no longer hit
  * `get_git_status` twice.
  *
- * `createPathKeyedCache` is the right factory here: the IPC is
- * `getGitStatus(path: string)`, so the key IS the path — there's no entity
- * id separate from the subscription path. Issue #347 split this single-key
- * shape out from the old single `createPathInvalidatedCache` factory.
+ * Uses `createPathKeyedCache` (issue #347's split) — the key IS the path
+ * the bus matches, so the single-key factory is the right fit.
  */
 export const gitStatusClient = createPathKeyedCache<GitStatus[]>({
   fetcher: getGitStatus,

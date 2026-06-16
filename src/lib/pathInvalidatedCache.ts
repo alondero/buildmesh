@@ -95,8 +95,17 @@ export interface PathKeyedClient<V> {
   /** Fetches the value for `key`, deduping with any concurrent caller. On
    * rejection, the cache is left untouched and the in-flight is cleared; the
    * returned promise resolves to `null` so callers can `await` without
-   * try/catch but should still treat `null` from `refresh` as "no data". */
+   * try/catch but should still treat `null` from `refresh` as "no data".
+   *
+   * The thrown error is recorded per key — see `lastError(key)` — so callers
+   * that need to disambiguate "fetch failed" from "fetcher returned null"
+   * can read it after the promise resolves. Issue #342. */
   refresh(key: string): Promise<V | null>;
+  /** Returns the most recent error caught by `refresh(key)`, or `null` if
+   * the last refresh succeeded (or no refresh has run yet). The slot is
+   * per-key: a failure for `keyA` does not leak to `keyB`, and a
+   * subsequent successful refresh of `keyA` clears it. Issue #342. */
+  lastError(key: string): Error | null;
   /** Erases the cached value AND any in-flight fetch for `key`. */
   invalidate(key: string): void;
   /** Registers a callback to be invoked when a `GIT_CHANGED` event matches
@@ -113,8 +122,13 @@ export interface DualKeyClient<K, V> {
    * A cached `null` is returned as `null` (not `undefined`). */
   read(key: K): V | null | undefined;
   /** Fetches the value for `key`, deduping with any concurrent caller. On
-   * rejection, the cache is left untouched and the in-flight is cleared. */
+   * rejection, the cache is left untouched and the in-flight is cleared.
+   * The thrown error is recorded per key — see `lastError(key)`. Issue #342. */
   refresh(key: K): Promise<V | null>;
+  /** Returns the most recent error caught by `refresh(key)`, or `null` if
+   * the last refresh succeeded. Per-key; a subsequent successful refresh
+   * of the same key clears it. Issue #342. */
+  lastError(key: K): Error | null;
   /** Erases the cached value AND any in-flight fetch for `key`. */
   invalidate(key: K): void;
   /** Registers a callback to be invoked when a `GIT_CHANGED` event matches
@@ -286,6 +300,9 @@ interface InternalClient<K, V> {
   /** Fetches the value for `key`, deduping with any concurrent caller. On
    * rejection, the cache is left untouched and the in-flight is cleared. */
   refresh(key: K): Promise<V | null>;
+  /** Returns the most recent error for `key`, or `null` if the last refresh
+   * succeeded (or no refresh has run yet). Issue #342. */
+  lastError(key: K): Error | null;
   /** Erases the cached value AND any in-flight fetch for `key`. */
   invalidate(key: K): void;
   /** Wires the bus handler + listener and registers a keyed subscriber
@@ -302,10 +319,16 @@ function createInternalClient<K, V>(
   const clientId = Symbol('pathInvalidatedCache');
   const cache = new Map<K, V | typeof HAS_NULL>();
   const pending = new Map<K, Promise<V | null>>();
+  // Per-key most-recent error, populated by `refresh`'s catch and cleared
+  // on the next successful refresh for the same key. Exposed via
+  // `lastError(key)` so callers can disambiguate "fetch failed" from
+  // "fetcher returned null" — issue #342.
+  const errors = new Map<K, Error>();
   // Let `resetPathInvalidatedCacheForTests` wipe this client's state too.
   clientCacheResets.add(() => {
     cache.clear();
     pending.clear();
+    errors.clear();
   });
 
   // The bus calls this for every matched KEYED subscriber of THIS client. It
@@ -335,16 +358,31 @@ function createInternalClient<K, V>(
         .then((result) => {
           cache.set(key, result === null ? HAS_NULL : result);
           pending.delete(key);
+          // A success erases the previous failure for this key — the hook
+          // layer's `error` field will read `null` on the next state read.
+          errors.delete(key);
           return result;
         })
         .catch((err) => {
           pending.delete(key);
+          // Record the error for `lastError(key)`. The cache itself is
+          // left untouched (the success branch owns writes), so a
+          // successful refresh is the only path that populates the cache.
+          // Wrap non-Error throws so the contract is always `Error`.
+          errors.set(
+            key,
+            err instanceof Error ? err : new Error(String(err)),
+          );
           // eslint-disable-next-line no-console
           console.warn(`${name}: fetch failed for key`, key, err);
           return null;
         });
       pending.set(key, p);
       return p;
+    },
+
+    lastError(key) {
+      return errors.get(key) ?? null;
     },
 
     invalidate(key) {
@@ -420,12 +458,13 @@ export function createDualKeyCache<K, V>(
 
   // The `subscribe` and `subscribeOn` members are intentionally NOT
   // exposed on the dual-key public type — `subscribeByPath` is the only
-  // public subscription method. `read`/`refresh`/`invalidate` come
-  // straight from the internal client.
-  const { read, refresh, invalidate, subscribeOn } = internal;
+  // public subscription method. `read`/`refresh`/`lastError`/`invalidate`
+  // come straight from the internal client. Issue #342 adds `lastError`.
+  const { read, refresh, lastError, invalidate, subscribeOn } = internal;
   return {
     read,
     refresh,
+    lastError,
     invalidate,
     subscribeByPath: subscribeOn,
   };

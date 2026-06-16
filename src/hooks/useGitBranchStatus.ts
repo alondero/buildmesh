@@ -6,11 +6,6 @@ import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
 // the 🌳 Worktree Manager tab (node path) both read through this hook, so
 // two views of the same path dedupe onto one fetch + one GIT_CHANGED
 // subscription.
-//
-// `createPathKeyedCache` is the right factory here: the IPC is
-// `getGitBranchStatus(path: string)`, so the key IS the path. Issue #347
-// split this single-key shape out from the old single
-// `createPathInvalidatedCache` factory.
 const branchStatusClient = createPathKeyedCache<GitBranchStatus>({
   fetcher: getGitBranchStatus,
   name: 'gitBranchStatus',

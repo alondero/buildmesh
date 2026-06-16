@@ -185,4 +185,88 @@ describe('useMeshGitStatus', () => {
     expect(callsTo('get_git_status')).toBe(0);
     expect(result.current).toBeNull();
   });
+
+  // Issue #342: the primitive (post-#282) collapses a `get_git_status`
+  // rejection to `data: null` without surfacing the error, so the panel
+  // would render "0 files" — same as a legitimate empty repo. The fix
+  // mirrors the pre-#282 behavior: a file-list error collapses the panel
+  // (returns null), since the path is supposedly a repo per the static
+  // check but the listing just failed, so we can't render anything
+  // trustworthy.
+  it('returns null (collapses the panel) when the file-list fetch rejects on initial mount', async () => {
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_git_static') {
+        return Promise.resolve(DEFAULT_SNAPSHOT);
+      }
+      if (cmd === 'get_git_status') return Promise.reject(new Error('status-fail'));
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useMeshGitStatus(MESH_PATH));
+    await waitFor(() => expect(callsTo('get_git_status')).toBe(1));
+    // The static check passed (repo=true) but the file-list fetch
+    // failed. The hook must collapse to null — NOT render an empty
+    // file list as if the repo had no changes.
+    expect(result.current).toBeNull();
+  });
+
+  it('returns null when the file-list fetch rejects after a GIT_CHANGED refetch', async () => {
+    // First fetch succeeds, second fetch (driven by GIT_CHANGED) fails.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_git_static') {
+        return Promise.resolve(DEFAULT_SNAPSHOT);
+      }
+      if (cmd === 'get_git_status') {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useMeshGitStatus(MESH_PATH));
+    await waitFor(() => expect(result.current?.isGitRepo).toBe(true));
+    expect(callsTo('get_git_status')).toBe(1);
+
+    // Now make the next get_git_status call reject.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_git_static') return Promise.resolve(DEFAULT_SNAPSHOT);
+      if (cmd === 'get_git_status') return Promise.reject(new Error('event-fail'));
+      return Promise.resolve(undefined);
+    });
+
+    await act(async () => {
+      await emit('git-changed', { path: MESH_PATH });
+    });
+    await waitFor(() => expect(callsTo('get_git_status')).toBe(2));
+    expect(result.current).toBeNull();
+  });
+
+  it('keeps the panel open when get_git_status returns an empty array (NOT an error)', async () => {
+    // The whole point of the error field: a legitimate empty list is
+    // a SUCCESS — the repo IS a git repo, it just has no uncommitted
+    // changes. The panel must render with `files: []`, not collapse.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_git_static') return Promise.resolve(DEFAULT_SNAPSHOT);
+      if (cmd === 'get_git_status') return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useMeshGitStatus(MESH_PATH));
+    await waitFor(() => expect(result.current?.isGitRepo).toBe(true));
+    expect(result.current?.files).toEqual([]);
+  });
+
+  it('keeps the panel open when get_git_status returns null (a real "no data" state)', async () => {
+    // `get_git_status` resolves to `null` (not an error) when the
+    // upstream legitimately has no data to report. The panel must
+    // stay open with empty files — not collapse.
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_git_static') return Promise.resolve(DEFAULT_SNAPSHOT);
+      if (cmd === 'get_git_status') return Promise.resolve(null);
+      return Promise.resolve(undefined);
+    });
+
+    const { result } = renderHook(() => useMeshGitStatus(MESH_PATH));
+    await waitFor(() => expect(result.current?.isGitRepo).toBe(true));
+    expect(result.current?.files).toEqual([]);
+  });
 });
