@@ -698,6 +698,36 @@ describe('GitPullRequestsTab', () => {
     expect(row.querySelector('[data-pr-body-expanded], div.max-h-48')).toBeNull();
   });
 
+  /// Regression: the PR tab has three action groups (Merge, split Spawn,
+  /// View changes) where the Issues tab only has one. Long PR titles
+  /// were wrapping to multiple lines and visually colliding with the
+  /// action buttons to the right. Root cause was a flexbox `truncate`
+  /// trap: the nested flex (caret / # / title / ↗) had no `min-w-0`, so
+  /// the title's `truncate` class could not shrink it below its
+  /// intrinsic content width and the text wrapped instead. Pin the
+  /// classes on the title element + its flex parent so a future
+  /// refactor can't silently drop the fix.
+  it('truncates a long PR title so it does not wrap into the action buttons', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const titleLink = (await screen.findByText('Add widget')).closest('a')!;
+    expect(titleLink).toBeTruthy();
+    // Title <a> needs all three: `truncate` (white-space:nowrap +
+    // overflow:hidden + ellipsis), `min-w-0` (allow shrinking below
+    // content width inside a flex parent), and `flex-1` (grow to fill
+    // remaining space so the action buttons sit clearly to the right).
+    expect(titleLink.className).toContain('truncate');
+    expect(titleLink.className).toContain('min-w-0');
+    expect(titleLink.className).toContain('flex-1');
+    // The parent flex (caret / # / title / ↗) also needs `min-w-0` —
+    // its children's `min-w-0` won't help if the flex container itself
+    // can't shrink below the sum of its children's intrinsic widths.
+    const parentFlex = titleLink.parentElement!;
+    expect(parentFlex.className).toContain('flex');
+    expect(parentFlex.className).toContain('min-w-0');
+  });
+
   it('clears expanded state when the open/closed filter changes', async () => {
     // PR numbers don't carry across the open/closed filter (PR 201 vs
     // PR 150), so the prior Set would either no-op or re-open a

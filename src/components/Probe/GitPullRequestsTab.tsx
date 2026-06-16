@@ -487,7 +487,18 @@ export function GitPullRequestsTab() {
                       className="flex-1 min-w-0 cursor-pointer"
                       onClick={() => toggleExpanded(pr.number)}
                     >
-                      <div className="flex items-center gap-1">
+                      {/* `min-w-0` on this nested flex + `min-w-0 flex-1`
+                          on the title <a>/<span> is required for the
+                          `truncate` class to actually take effect. Without
+                          it, a long PR title (PRs often have multi-clause
+                          titles) overflows the flex parent and wraps to
+                          multiple lines, visually colliding with the
+                          Merge/Spawn/View-changes buttons to the right.
+                          The outer wrapper already has `flex-1 min-w-0` so
+                          the title area is bounded; the inner flex must
+                          also be `min-w-0` for its children to shrink
+                          below their intrinsic content width. */}
+                      <div className="flex items-center gap-1 min-w-0">
                         <span
                           aria-hidden
                           className={
@@ -504,7 +515,7 @@ export function GitPullRequestsTab() {
                             target="_blank"
                             rel="noopener noreferrer"
                             onClick={(e) => e.stopPropagation()}
-                            className="text-sm text-text-primary hover:underline ml-1 truncate"
+                            className="text-sm text-text-primary hover:underline ml-1 truncate min-w-0 flex-1"
                             title="Open on GitHub"
                           >
                             {pr.title}
@@ -513,7 +524,7 @@ export function GitPullRequestsTab() {
                           // Defensive guard: see memory
                           // buildmesh-empty-url-frontend-guard. A bare
                           // <a href=""> would self-navigate the WebView.
-                          <span className="text-sm text-text-primary ml-1 truncate">
+                          <span className="text-sm text-text-primary ml-1 truncate min-w-0 flex-1">
                             {pr.title}
                           </span>
                         )}
