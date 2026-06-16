@@ -660,7 +660,68 @@ pub async fn spawn_agent_inner(
                         Some(owner) => fork_remote_alias(owner),
                         None => "origin".to_string(),
                     };
-                    format!("{}/{}", remote_name, node.branch)
+                    let remote_ref = format!("{}/{}", remote_name, node.branch);
+
+                    // Issue #444 — exact-pinning: after a successful fetch,
+                    // compare the local SHA at the remote ref we just
+                    // populated to the `source_pr_pinned_sha` we stored at
+                    // spawn time. On mismatch (PR was force-pushed / rebased
+                    // between click-time and spawn-time) emit a non-fatal
+                    // `pr_sha_drift` warning via the same `mesh-sync-warning`
+                    // channel the offline-fallback path uses. The worktree
+                    // proceeds on the new tip — strict-fail would block
+                    // legitimate rebase-and-merge workflows for one stale
+                    // click. The drift check is a no-op for v15-and-earlier
+                    // PR-spawned rows where `source_pr_pinned_sha` is None
+                    // (the column was added in v16) and for any empty
+                    // GitHub response: read_origin_ref_sha returns None
+                    // for a missing ref, and a None expected/actual pair
+                    // is treated as "no SHA to compare" and skipped.
+                    let root_for_sha = node.path.clone();
+                    let head_ref_for_sha = remote_ref.clone();
+                    let expected_sha = node.source_pr_pinned_sha.clone();
+                    let actual_sha = tokio::task::spawn_blocking(move || {
+                        read_origin_ref_sha(&root_for_sha, &head_ref_for_sha)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "spawn_agent_inner: read_origin_ref_sha task panicked: {}",
+                            e
+                        );
+                        None
+                    });
+                    if let (Some(expected), Some(actual)) = (expected_sha.as_deref(), actual_sha.as_deref()) {
+                        if expected != actual {
+                            let pr_number = node.source_pr.unwrap_or(-1);
+                            let head_ref = node.branch.clone();
+                            let message = format!(
+                                "PR #{} was force-pushed or rebased after you clicked Spawn \
+                                 (expected {}, now {} on {}). Spawning on the new tip — \
+                                 re-spawn to pin to a fresh SHA.",
+                                pr_number, expected, actual, remote_ref,
+                            );
+                            tracing::warn!(
+                                "spawn_agent_inner: {} (node {})",
+                                message,
+                                session_id,
+                            );
+                            let _ = app.emit(
+                                "mesh-sync-warning",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "mesh_path": node.path,
+                                    "outcome": "pr_sha_drift",
+                                    "pr_number": pr_number,
+                                    "head_ref": head_ref,
+                                    "expected_sha": expected,
+                                    "actual_sha": actual,
+                                    "message": message,
+                                }),
+                            );
+                        }
+                    }
+                    remote_ref
                 } else {
                     let pr_number = node.source_pr.unwrap_or(-1);
                     let head_ref = node.branch.clone();
@@ -1168,6 +1229,43 @@ fn fetch_fork_head(
     true
 }
 
+/// Read the local SHA at `refs/remotes/origin/<head_ref>` — the ref
+/// `fetch_single_ref` populates via `git fetch origin -- <head_ref>`.
+/// Returns `None` when the ref doesn't exist (a stale local cache, a
+/// first-time fetch, or a non-git directory) so the spawn path can treat
+/// the absence as "skip the drift check" rather than a hard error.
+///
+/// Issue #444 — exact-pinning: the spawn path compares this to the
+/// `source_pr_pinned_sha` we stored at `create_pr_node` time and emits a
+/// `pr_sha_drift` `mesh-sync-warning` if they differ. SHA comparison is
+/// direct string equality: both `git rev-parse` and GitHub's API return
+/// 40-char lowercase hex, so a `String::ne` check is sufficient (no need
+/// to lowercase or trim).
+///
+/// `remote_ref` is the full remote-tracking ref (e.g. `origin/feat-x` for
+/// same-repo PRs from #420, or `fork-alice/feat-x` for fork PRs from #443).
+/// `git rev-parse` accepts both the short and the fully-qualified
+/// `refs/remotes/origin/...` form.
+fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Option<String> {
+    use crate::process_util::command_no_window;
+    let host_root = crate::env::to_host_path(project_root);
+    // Read the symbolic SHA in one shot — `git rev-parse` exits non-zero
+    // (and produces no stdout) when the ref doesn't exist, so we don't
+    // need a separate "is this a ref?" probe first.
+    let mut cmd = command_no_window("git");
+    cmd.arg("rev-parse").arg(remote_ref);
+    let output = cmd.current_dir(&host_root).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1178,6 +1276,64 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    // -----------------------------------------------------------------------
+    // SHA-drift detection (issue #444)
+    //
+    // `read_origin_ref_sha` returns the local SHA at `origin/<head_ref>` so
+    // the spawn path can compare it to the user-pinned `source_pr_pinned_sha`
+    // and emit a `pr_sha_drift` warning on mismatch. The unit test creates
+    // the local ref directly via git2 (no real remote / fetch roundtrip) so
+    // the test is hermetic and fast.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_origin_ref_sha_returns_local_sha_when_ref_exists() {
+        let tmp = TempDir::new().unwrap();
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        // Create a real commit on a known branch — we need a tree OID the
+        // commit can point at. `Repository::init` leaves the index empty
+        // but write_tree() on an empty index still produces a valid tree.
+        let tree_oid = repo.index().unwrap().write_tree().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        let commit_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+
+        // Manually create the remote-tracking ref the function reads. In
+        // production this is what `git fetch origin -- <head_ref>` writes;
+        // here we shortcut the network roundtrip to keep the test hermetic.
+        let ref_name = "refs/remotes/origin/feat-x";
+        repo.reference(ref_name, commit_oid, true, "test").unwrap();
+
+        let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/feat-x");
+        assert_eq!(
+            sha.as_deref(),
+            Some(commit_oid.to_string().as_str()),
+            "read_origin_ref_sha must return the full 40-char SHA the ref points to"
+        );
+    }
+
+    #[test]
+    fn read_origin_ref_sha_returns_none_for_missing_ref() {
+        let tmp = TempDir::new().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        // No refs/remotes/origin/* exists; the function must return None
+        // (the spawn path treats this as "skip drift check" rather than
+        // failing — same fail-open semantics as `pr_head_unfetchable`).
+        let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/nope");
+        assert!(sha.is_none(), "missing ref must return None, not error");
+    }
+
+    #[test]
+    fn read_origin_ref_sha_returns_none_for_non_git_directory() {
+        // A path that isn't a git repo at all — `git rev-parse` exits non-zero,
+        // the helper must swallow that and return None rather than panicking.
+        let tmp = TempDir::new().unwrap();
+        let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/main");
+        assert!(sha.is_none(), "non-repo path must return None, not error");
     }
 
     fn read_injected_settings(project: &std::path::Path) -> serde_json::Value {

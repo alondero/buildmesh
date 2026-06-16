@@ -106,6 +106,7 @@ pub async fn import_and_resume(
         req.worktree_name.as_deref(),
         None,
         None,
+        None, // source_pr_pinned_sha — HTTP route doesn't accept a pinned SHA
         use_worktree,
         None,
         None,

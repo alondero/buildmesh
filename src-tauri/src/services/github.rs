@@ -127,6 +127,14 @@ pub struct PullRequest {
     /// Empty when the field is missing.
     #[serde(default)]
     pub head_repo_clone_url: String,
+    /// PR's head commit SHA (e.g. `"0123456789abcdef..."`). Captured from
+    /// the GitHub API's `head.sha` field via the custom `Deserialize` impl
+    /// below. Used by issue #444's exact-pinning: the spawn path stores this
+    /// on the new agent node and verifies the local `origin/<head_ref>` SHA
+    /// matches it after `git fetch`. Empty on partial responses and some
+    /// fork-PR payloads — same `#[serde(default)]` rationale as `head_ref`.
+    #[serde(default)]
+    pub head_sha: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +174,13 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             ref_: String,
             #[serde(default)]
             repo: Option<RepoHelper>,
+            // The SHA lives next to `ref` on the same `head` object; we lift
+            // it to a top-level `head_sha` for the same reason as `head_ref` —
+            // so the spawn path doesn't have to walk a nested struct just to
+            // read a string. `#[serde(default)]` keeps partial responses
+            // (some fork payloads, older list endpoints) parseable.
+            #[serde(default)]
+            sha: String,
         }
         #[derive(serde::Deserialize)]
         struct Raw {
@@ -210,6 +225,7 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             head_ref,
             head_repo_owner,
             head_repo_clone_url,
+            head_sha: raw.head.map(|h| h.sha).unwrap_or_default(),
         })
     }
 }
@@ -905,6 +921,30 @@ mod tests {
         assert!(!pr.draft);
         assert_eq!(pr.state, "open");
         assert_eq!(pr.head_ref, "feat/420-pr-spawn");
+        // Issue #444 — `head_sha` is the exact-pinning handle used by the
+        // PR-spawn drift check. It MUST survive the projection through the
+        // custom Deserialize so `create_pr_node` can persist it for stage-2.
+        assert_eq!(
+            pr.head_sha, "0123456789abcdef0123456789abcdef01234567",
+            "head_sha must be projected from head.sha so the spawn path can pin the worktree"
+        );
+    }
+
+    /// When GitHub omits `head.sha` (some fork responses, stale list
+    /// endpoints), the deserialiser must default `head_sha` to "" rather
+    /// than failing the whole list. Matches the existing default-on-missing
+    /// rule for `head_ref`.
+    #[test]
+    fn pull_request_deserialises_with_missing_head_sha() {
+        let json = r#"{
+            "number": 8,
+            "html_url": "https://github.com/x/y/pull/8",
+            "title": "PR with no head sha",
+            "head": { "ref": "f8" }
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).expect("head without sha must parse");
+        assert_eq!(pr.head_ref, "f8");
+        assert_eq!(pr.head_sha, "", "missing head.sha must default to empty");
     }
 
     #[test]
@@ -929,6 +969,7 @@ mod tests {
             pr.head_repo_clone_url, "",
             "missing head.repo.clone_url defaults to empty"
         );
+        assert_eq!(pr.head_sha, "", "missing head.sha defaults to empty");
     }
 
     /// Issue #443: a fork PR (head's `repo.owner.login` differs from the

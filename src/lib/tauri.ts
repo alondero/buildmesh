@@ -444,6 +444,14 @@ export const createPrForMesh = (meshPath: string, title: string, body: string, b
 /// head ref from there; the `headRepoOwner` + `headRepoCloneUrl` arguments
 /// carry that info from the GitHub list response to the node row.
 ///
+/// `headSha` (issue #444) is the PR's head commit SHA at click time, also
+/// exposed on `GitHubPullRequest` via `head_sha`. The backend persists it
+/// as `source_pr_pinned_sha` on the new node and verifies the local
+/// `origin/<head_ref>` SHA matches it after `git fetch`, emitting a
+/// non-fatal `pr_sha_drift` `mesh-sync-warning` if not (force-push /
+/// rebase between click-time and spawn-time). An empty `headSha` skips
+/// the drift check (same fail-open semantics as `pr_head_unfetchable`).
+///
 /// Reuses the generated `IssueNodeDraft` type for the return value: the wire
 /// shape is identical (flattened `AgentNode` + `prefill`), so no new TS
 /// type is generated.
@@ -452,6 +460,7 @@ export const createPrNode = (
   prNumber: number,
   prTitle: string,
   headRef: string,
+  headSha: string,
   provider?: string,
   headRepoOwner?: string,
   headRepoCloneUrl?: string,
@@ -461,6 +470,7 @@ export const createPrNode = (
     prNumber,
     prTitle,
     headRef,
+    headSha,
     provider,
     headRepoOwner,
     headRepoCloneUrl,

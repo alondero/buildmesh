@@ -252,7 +252,7 @@ function App() {
     const unlisten = listen<{
       session_id: number;
       mesh_path: string;
-      outcome: 'diverged' | 'fetch_failed' | 'repo_unusable';
+      outcome: 'diverged' | 'fetch_failed' | 'repo_unusable' | 'pr_head_unfetchable' | 'pr_sha_drift';
       new_commits?: number;
       message: string;
     }>('mesh-sync-warning', (event) => {

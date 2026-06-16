@@ -25,6 +25,7 @@ export type IssueNodeDraft = { prefill: string, id: number, mesh_id: number, nam
  */
 source_pr: number | null, 
 /**
+<<<<<<< HEAD
  * GitHub owner login of the PR's head repo (issue #443). Only set for
  * PR-spawned nodes where the head lives on a fork — when `Some`,
  * `spawn_agent_inner` runs `git remote add fork-<owner> <clone_url>` and
@@ -42,3 +43,16 @@ head_repo_owner: string | null,
  * same-repo PRs and for issue-spawned / hand-spawned nodes.
  */
 head_repo_clone_url: string | null, position: number, created_at: string, };
+=======
+ * PR's head commit SHA at spawn time (issue #444). Exact-pinning handle:
+ * `spawn_agent_inner` reads the local `origin/<head_ref>` SHA after
+ * `git fetch` and emits a `pr_sha_drift` warning via `mesh-sync-warning`
+ * if it no longer matches (force-push / rebase). `None` for v15 and
+ * earlier PR-spawned rows (the SHA wasn't known at insert time), and
+ * `None` for issue-spawned / hand-spawned nodes. The drift-check path
+ * branches on `Some(_)` so `None` skips the comparison rather than
+ * failing — same fail-open semantics as the `pr_head_unfetchable`
+ * fallback introduced in #420.
+ */
+source_pr_pinned_sha: string | null, position: number, created_at: string, };
+>>>>>>> f7aa529 (feat(pr-spawn): exact-pinning — reintroduce head_sha on the wire (#444))

@@ -31,6 +31,7 @@ draft: boolean,
  */
 head_ref: string, 
 /**
+<<<<<<< HEAD
  * Owner login of the PR's head repo (e.g. `"alice"` for a fork PR opened
  * from `alice/buildmesh`). Captured from `head.repo.owner.login`. For
  * same-repo PRs the head's repo IS the destination repo, so the value
@@ -47,3 +48,15 @@ head_repo_owner: string,
  * the head ref from it. Empty when the field is missing.
  */
 head_repo_clone_url: string, };
+=======
+ * PR's head commit SHA (e.g. `"0123456789abcdef..."`). Mirrors
+ * `services::github::PullRequest::head_sha` and is the exact-pinning
+ * handle introduced in issue #444: the spawn path persists it on the
+ * new agent node and verifies the local `origin/<head_ref>` SHA matches
+ * it after `git fetch`. Empty on partial responses and some fork-PR
+ * payloads — the spawn path treats empty as "skip drift check" rather
+ * than failing, matching the existing `pr_head_unfetchable` fallback
+ * semantics.
+ */
+head_sha: string, };
+>>>>>>> f7aa529 (feat(pr-spawn): exact-pinning — reintroduce head_sha on the wire (#444))

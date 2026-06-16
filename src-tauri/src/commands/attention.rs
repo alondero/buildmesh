@@ -144,7 +144,8 @@ mod tests {
                 position INTEGER NOT NULL DEFAULT 0,
                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
                 head_repo_owner TEXT,
-                head_repo_clone_url TEXT
+                head_repo_clone_url TEXT,
+                source_pr_pinned_sha TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)
