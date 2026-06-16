@@ -25,7 +25,25 @@ draft: boolean,
  * PR's source-branch ref name (e.g. `"feature/some-thing"`). Captured from
  * GitHub's `head.ref` so the spawn button (#420) can pass it to the
  * backend, which fetches it and uses it as the worktree's `base_ref`.
- * Empty when the PR is from a fork (the head lives on the fork's remote,
- * not `origin`) — the spawn path refuses those for now (issue #36).
+ * Empty when the API response is a partial shape or the head ref is
+ * unknown — the spawn path treats empty as a non-forkable case and the
+ * panel surfaces a clear error.
  */
-head_ref: string, };
+head_ref: string, 
+/**
+ * Owner login of the PR's head repo (e.g. `"alice"` for a fork PR opened
+ * from `alice/buildmesh`). Captured from `head.repo.owner.login`. For
+ * same-repo PRs the head's repo IS the destination repo, so the value
+ * matches the destination owner — `create_pr_node` compares it against
+ * the mesh's destination owner to decide whether to take the fork-spawn
+ * path (issue #443). Empty when the field is missing.
+ */
+head_repo_owner: string, 
+/**
+ * HTTPS clone URL of the PR's head repo (e.g.
+ * `"https://github.com/alice/buildmesh.git"`). Captured from
+ * `head.repo.clone_url`. Paired with [`head_repo_owner`](Self::head_repo_owner)
+ * — the spawn path uses both to register the fork as a remote and fetch
+ * the head ref from it. Empty when the field is missing.
+ */
+head_repo_clone_url: string, };

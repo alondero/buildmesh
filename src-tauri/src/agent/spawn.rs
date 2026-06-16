@@ -586,14 +586,21 @@ pub async fn spawn_agent_inner(
             timer.checkpoint("after_fetch_origin");
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
-            // Worktree adoption for PR-spawned nodes (issue #420). When the
-            // node carries a `source_pr`, the head ref stored in `node.branch`
-            // is the PR's actual source branch (e.g. `feat/420-pr-spawn`),
-            // and the worktree needs to be cut from `origin/<head_ref>` so
-            // the agent lands on the same commits the PR is built from.
-            // `create_pr_node` already refuses fork PRs (`head_ref` empty),
-            // so this branch is unreachable for those — fork-remote support
-            // is a #36 follow-up.
+            // Worktree adoption for PR-spawned nodes (issue #420, extended
+            // by #443 for fork PRs). When the node carries a `source_pr`,
+            // the head ref stored in `node.branch` is the PR's actual source
+            // branch (e.g. `feat/420-pr-spawn`), and the worktree needs to
+            // be cut from `<remote>/<head_ref>` so the agent lands on the
+            // same commits the PR is built from. Two cases:
+            //
+            //  - Same-repo PRs (`head_repo_owner` is `None`): the head
+            //    lives on `origin` — we call `fetch_single_ref` and use
+            //    `origin/<head_ref>` (the #420 path).
+            //  - Fork PRs (`head_repo_owner` is `Some`): the head lives on
+            //    the fork's clone URL — we call `fetch_fork_head`, which
+            //    registers the fork as a remote (`fork-<login>`) and fetches
+            //    from there (issue #443, follow-up to #36). The worktree
+            //    base_ref becomes `fork-<login>/<head_ref>`.
             //
             // The fetch is best-effort: a network failure or stale local ref
             // falls back to the mesh's `base_ref` (the ADR 0001 offline
@@ -606,57 +613,106 @@ pub async fn spawn_agent_inner(
             // otherwise reports success, the dock closes, and the agent
             // silently lands on the wrong commits. We piggy-back on the
             // existing `mesh-sync-warning` event (the same non-fatal channel
-            // the auto-sync path uses) with a `pr_head_unfetchable` outcome
-            // — the App.tsx listener already renders a toast for that
-            // event, so no frontend change is required.
+            // the auto-sync path uses) with a `pr_head_unfetchable` or
+            // `pr_fork_unfetchable` outcome — the App.tsx listener already
+            // renders a toast for that event, so no frontend change is
+            // required.
             let worktree_base_ref = if node.source_pr.is_some() {
                 let head_ref_owned = node.branch.clone();
                 let root = node.path.clone();
+                let fork_owner_owned = node.head_repo_owner.clone();
+                let fork_url_owned = node.head_repo_clone_url.clone();
                 timer.checkpoint("before_fetch_pr_head");
                 let fetch_ok = tokio::task::spawn_blocking(move || {
-                    fetch_single_ref(&root, &head_ref_owned)
+                    // Fork path (#443): when the head repo's owner is
+                    // recorded, the head lives on the fork's clone URL, not
+                    // on `origin`. The clone URL is part of the row (set by
+                    // `create_pr_node` from `head_repo_clone_url`), so the
+                    // stage-2 spawn has everything it needs without a
+                    // second GitHub lookup. The same-repo path (#420)
+                    // passes `None` for both fork fields and takes the
+                    // `git fetch origin` branch via `fetch_single_ref`.
+                    match (fork_owner_owned.as_deref(), fork_url_owned.as_deref()) {
+                        (Some(owner), Some(clone_url)) => {
+                            fetch_fork_head(&root, owner, clone_url, &head_ref_owned)
+                        }
+                        _ => fetch_single_ref(&root, &head_ref_owned),
+                    }
                 })
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(
-                        "spawn_agent_inner: fetch_single_ref task panicked: {}",
+                        "spawn_agent_inner: fetch task panicked: {}",
                         e
                     );
                     false
                 });
                 timer.checkpoint("after_fetch_pr_head");
                 if fetch_ok {
-                    // `origin/<head_ref>` — same remote convention as the
-                    // mesh's default `base_ref`, so a future head-branch
-                    // push is picked up by the next fetch the same way.
-                    format!("origin/{}", node.branch)
+                    // Pick the right remote-name prefix for the base_ref
+                    // string the worktree will be cut from. Same-repo PRs
+                    // use `origin/<head_ref>` (matches the mesh's default
+                    // `base_ref`); fork PRs use `fork-<login>/<head_ref>`.
+                    // The mesh's `base_ref` is overwritten to use the fork
+                    // remote so a future head-branch push is picked up by
+                    // the same fetch the auto-sync path runs.
+                    let remote_name = match node.head_repo_owner.as_deref() {
+                        Some(owner) => fork_remote_alias(owner),
+                        None => "origin".to_string(),
+                    };
+                    format!("{}/{}", remote_name, node.branch)
                 } else {
                     let pr_number = node.source_pr.unwrap_or(-1);
                     let head_ref = node.branch.clone();
+                    // Distinguish the two failure modes in the toast: a
+                    // fork fetch failure is more likely to be permanent
+                    // (the user renamed or deleted the fork) than a same-
+                    // repo failure (usually transient network).
+                    let is_fork = node.head_repo_owner.is_some();
+                    let outcome = if is_fork {
+                        "pr_fork_unfetchable"
+                    } else {
+                        "pr_head_unfetchable"
+                    };
+                    let source_label = if is_fork {
+                        let alias = node
+                            .head_repo_owner
+                            .as_deref()
+                            .map(fork_remote_alias)
+                            .unwrap_or_else(|| "fork".to_string());
+                        format!("the fork remote '{}'", alias)
+                    } else {
+                        "origin".to_string()
+                    };
                     let message = format!(
-                        "Could not fetch PR #{} head ref '{}' from origin; \
+                        "Could not fetch PR #{} head ref '{}' from {}; \
                          spawning from the mesh's base ref '{}' instead. \
                          The agent may land on stale commits — re-spawn \
                          when the network is back to retry.",
-                        pr_number, head_ref, base_ref,
+                        pr_number, head_ref, source_label, base_ref,
                     );
                     tracing::warn!(
                         "spawn_agent_inner: {} (node {})",
                         message,
                         session_id,
                     );
-                    let _ = app.emit(
-                        "mesh-sync-warning",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "mesh_path": node.path,
-                            "outcome": "pr_head_unfetchable",
-                            "pr_number": pr_number,
-                            "head_ref": head_ref,
-                            "fallback_base_ref": base_ref,
-                            "message": message,
-                        }),
-                    );
+                    let mut payload = serde_json::json!({
+                        "session_id": session_id,
+                        "mesh_path": node.path,
+                        "outcome": outcome,
+                        "pr_number": pr_number,
+                        "head_ref": head_ref,
+                        "fallback_base_ref": base_ref,
+                        "message": message,
+                    });
+                    if let (Some(owner), Some(url)) = (
+                        node.head_repo_owner.as_deref(),
+                        node.head_repo_clone_url.as_deref(),
+                    ) {
+                        payload["head_repo_owner"] = serde_json::Value::String(owner.to_string());
+                        payload["head_repo_clone_url"] = serde_json::Value::String(url.to_string());
+                    }
+                    let _ = app.emit("mesh-sync-warning", payload);
                     base_ref.to_string()
                 }
             } else {
@@ -994,6 +1050,124 @@ fn fetch_single_ref(project_root: &str, head_ref: &str) -> bool {
     true
 }
 
+/// The alias used for a fork remote (issue #443). `fork-<login>` is
+/// human-readable in `git remote -v` and stays distinct from any user-defined
+/// remote name (a regular remote can't start with `fork-` because GitHub
+/// logins are alphanumeric + `-` with no leading `-`, but a user could
+/// still define one; the `fork-` prefix keeps our entries easy to spot in
+/// the output and trivial to clean up if we ever need to).
+fn fork_remote_alias(head_repo_owner: &str) -> String {
+    format!("fork-{}", head_repo_owner)
+}
+
+/// Fetch a single ref from a fork's clone URL into the local repo. Used by
+/// the PR-spawn path (issue #443, follow-up to #36 worktree adoption) when
+/// the PR's head branch lives on a fork — `fetch_single_ref` only fetches
+/// from `origin`, which the fork's head ref isn't on.
+///
+/// The function:
+///   1. Registers the fork as a remote named `fork-<login>` (idempotent —
+///      ignores the "remote already exists" error from `git remote add` and
+///      updates the URL via `git remote set-url` if the existing URL drifted,
+///      e.g. the user re-pointed the fork's origin on GitHub).
+///   2. Runs `git fetch <alias> <head_ref>` to materialise the ref locally.
+///   3. Returns `true` only when both steps succeed.
+///
+/// Best-effort by design (same contract as `fetch_single_ref`): the caller
+/// falls back to the mesh's `base_ref` on `false` rather than failing the
+/// spawn. The user sees the agent spawn on the wrong commits in the rare
+/// offline / stale-ref / removed-fork case, instead of a hard error every
+/// time the network blips.
+fn fetch_fork_head(
+    project_root: &str,
+    head_repo_owner: &str,
+    head_repo_clone_url: &str,
+    head_ref: &str,
+) -> bool {
+    use crate::process_util::command_no_window;
+    let host_root = crate::env::to_host_path(project_root);
+    let alias = fork_remote_alias(head_repo_owner);
+    tracing::info!(
+        "fetch_fork_head: ensuring remote {} -> {} in {}",
+        alias,
+        head_repo_clone_url,
+        host_root
+    );
+
+    // Step 1: `git remote add` is idempotent via the explicit existence check.
+    // We use `git remote get-url` (read-only) to see if the remote already
+    // exists; if it does, `set-url` keeps it in sync with the fork's current
+    // clone URL. If it doesn't, `remote add` registers it. This avoids
+    // parsing `git remote add`'s non-zero stderr for the "already exists"
+    // signal — easier to read, and works on every git version.
+    let mut get_url = command_no_window("git");
+    get_url.arg("remote").arg("get-url").arg(&alias);
+    let existing = get_url
+        .current_dir(&host_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+    let url_matches = existing.as_deref() == Some(head_repo_clone_url);
+    if !url_matches {
+        let mut cmd = command_no_window("git");
+        if existing.is_some() {
+            cmd.arg("remote").arg("set-url").arg(&alias).arg(head_repo_clone_url);
+            tracing::info!("fetch_fork_head: updating remote {} URL", alias);
+        } else {
+            cmd.arg("remote").arg("add").arg(&alias).arg(head_repo_clone_url);
+            tracing::info!("fetch_fork_head: adding remote {}", alias);
+        }
+        let output = match cmd.current_dir(&host_root).output() {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("fetch_fork_head: failed to spawn git remote: {}", e);
+                return false;
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                "fetch_fork_head: git remote config for {} failed: {}",
+                alias,
+                stderr.trim()
+            );
+            return false;
+        }
+    }
+
+    // Step 2: fetch the head ref. `--` before `head_ref` defends against an
+    // adversarial / malformed ref starting with `-` (same hardening as
+    // `fetch_single_ref`).
+    tracing::info!(
+        "fetch_fork_head: running git fetch {} -- {} in {}",
+        alias,
+        head_ref,
+        host_root
+    );
+    let mut cmd = command_no_window("git");
+    cmd.arg("fetch").arg(&alias).arg("--").arg(head_ref);
+    let output = match cmd.current_dir(&host_root).output() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("fetch_fork_head: failed to spawn git fetch: {}", e);
+            return false;
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "fetch_fork_head: git fetch {} -- {} failed: {}",
+            alias,
+            head_ref,
+            stderr.trim()
+        );
+        return false;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1089,5 +1263,224 @@ mod tests {
             "pre-existing permissions must survive hook injection"
         );
         assert_eq!(settings["hooks"]["Notification"][0]["matcher"], "");
+    }
+
+    // ----- fork alias + fetch_fork_head (issue #443) ---------------------
+
+    /// `fork-<login>` is the human-readable alias used in `git remote -v` and
+    /// the worktree `base_ref` string. The `fork-` prefix keeps our entries
+    /// easy to spot in the remote list and trivial to clean up if we ever
+    /// need to. Pin the format so a future refactor that swaps the prefix
+    /// surfaces as a test failure rather than a silent rename in user
+    /// worktrees.
+    #[test]
+    fn fork_remote_alias_uses_fork_prefix() {
+        assert_eq!(fork_remote_alias("alice"), "fork-alice");
+        assert_eq!(fork_remote_alias("alondero"), "fork-alondero");
+    }
+
+    /// Build a bare "fork" repo (a real local clone target so the test
+    /// doesn't need a network round-trip) and a regular repo that will
+    /// register the fork as a remote. The fork has a single commit on
+    /// `main` plus a `feat/443-fork` branch so the fetch can target a
+    /// non-default ref. Returns `(local, fork_bare_dir, fork_path)` —
+    /// the caller holds the dirs for the duration of the test.
+    fn init_fork_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        // Source: a regular repo with a feature branch we can fetch.
+        let src = TempDir::new().unwrap();
+        let src_path = src.path().to_path_buf();
+        let src_repo = git2::Repository::init(&src_path).unwrap();
+        let sig = git2::Signature::now("test", "test@example.com").unwrap();
+        std::fs::write(src_path.join("README.md"), "fork-source\n").unwrap();
+        let mut index = src_repo.index().unwrap();
+        index.add_path(std::path::Path::new("README.md")).unwrap();
+        index.write().unwrap();
+        let tree_oid = index.write_tree().unwrap();
+        let tree = src_repo.find_tree(tree_oid).unwrap();
+        let main_commit = src_repo
+            .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+            .unwrap();
+        // Branch off a feature branch.
+        let feat_commit = src_repo.commit(
+            Some("HEAD"),
+            &sig,
+            &sig,
+            "feat: fork-only commit",
+            &tree,
+            &[&src_repo.find_commit(main_commit).unwrap()],
+        )
+        .unwrap();
+        let _ = tree;
+        // `main_commit` is a `git2::Oid` (Copy) — no need to `drop` it; the
+        // explicit `drop()` was a no-op flagged by clippy.
+        let feat_commit = src_repo.find_commit(feat_commit).unwrap();
+        src_repo
+            .branch("feat/443-fork", &feat_commit, true)
+            .unwrap();
+        // Bare clone target (so the fork has no working tree, like a real
+        // remote on GitHub — `git fetch` reads its objects directly).
+        // Use a unique, path-safe name — avoid `{:?}` on the source path
+        // (it produces `C:\...` with backslashes and quotes that don't
+        // round-trip as a directory name on Windows).
+        let bare_dir = std::env::temp_dir().join(format!(
+            "buildmesh_fork_bare_{}_{}",
+            std::process::id(),
+            NEXT_FORK_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ));
+        let _ = std::fs::remove_dir_all(&bare_dir);
+        let clone = git2::Repository::init_bare(&bare_dir).unwrap();
+        let mut remote = clone.remote("origin", src_path.to_str().unwrap()).unwrap();
+        remote
+            .fetch(&["refs/heads/*:refs/heads/*"], None, None)
+            .unwrap();
+        // Local: a fresh repo with no remotes — this is what
+        // `fetch_fork_head` will register the fork on.
+        let local = TempDir::new().unwrap();
+        git2::Repository::init(local.path()).unwrap();
+        (local, bare_dir, src_path)
+    }
+
+    /// Atomic counter for unique bare-repo paths (one per test run).
+    static NEXT_FORK_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// First-time registration: the fork is added as `fork-alice` and the
+    /// head ref is materialised. `fetch_fork_head` returns `true` and
+    /// the resulting `git ls-remote` shows the ref under the alias.
+    /// This is the end-to-end "fork spawn" path that issue #443 opens up.
+    #[test]
+    fn fetch_fork_head_registers_remote_and_fetches_ref() {
+        let (local, bare_dir, _src) = init_fork_fixture();
+        let bare_dir_str = bare_dir.to_str().unwrap().to_string();
+
+        let ok = fetch_fork_head(
+            local.path().to_str().unwrap(),
+            "alice",
+            &bare_dir_str,
+            "feat/443-fork",
+        );
+        assert!(ok, "fetch_fork_head must succeed on a real bare repo");
+
+        // Verify the alias + URL are registered.
+        let local_repo = git2::Repository::open(local.path()).unwrap();
+        let remote = local_repo
+            .find_remote("fork-alice")
+            .expect("fork-alice remote must be registered");
+        let url = remote.url().expect("remote URL must be set");
+        assert_eq!(url, bare_dir_str, "remote URL must match the fork's clone URL");
+
+        // Verify the ref was fetched — it should be visible as
+        // `fork-alice/feat/443-fork`.
+        let reference = local_repo
+            .find_reference("refs/remotes/fork-alice/feat/443-fork")
+            .expect("fetched ref must be present under fork-alice/");
+        assert!(reference.target().is_some(), "ref target must be a real OID");
+    }
+
+    /// Idempotent: a second call on a repo that already has the remote
+    /// registered AND the right URL is a no-op. The user can spawn a
+    /// second agent on the same fork PR (e.g. after closing the first)
+    /// without `git remote add` failing. The function still returns
+    /// `true` because the fetch succeeds.
+    #[test]
+    fn fetch_fork_head_is_idempotent_on_repeat_call() {
+        let (local, bare_dir, _src) = init_fork_fixture();
+        let bare_dir_str = bare_dir.to_str().unwrap().to_string();
+
+        let first = fetch_fork_head(
+            local.path().to_str().unwrap(),
+            "alice",
+            &bare_dir_str,
+            "feat/443-fork",
+        );
+        assert!(first, "first call must succeed");
+
+        // Second call with the SAME URL — must not error (the `remote add`
+        // path is the failure-prone one without the existence check; the
+        // `get-url` probe should return the right URL and skip the add).
+        let second = fetch_fork_head(
+            local.path().to_str().unwrap(),
+            "alice",
+            &bare_dir_str,
+            "feat/443-fork",
+        );
+        assert!(second, "second call must still succeed (idempotent)");
+
+        // Remote is still there, single entry.
+        let local_repo = git2::Repository::open(local.path()).unwrap();
+        let remote = local_repo
+            .find_remote("fork-alice")
+            .expect("fork-alice remote must still be registered after repeat call");
+        assert_eq!(remote.url().unwrap(), bare_dir_str);
+    }
+
+    /// URL drift: if the fork's clone URL changes between spawns (the
+    /// user renamed the repo, or — more likely — the first call stored a
+    /// stale URL), the second call should update the existing remote's
+    /// URL via `git remote set-url` rather than fail or keep the stale
+    /// URL. Pin this so a future refactor that skips the set-url branch
+    /// surfaces as a test failure (the second call would silently fetch
+    /// the wrong ref).
+    #[test]
+    fn fetch_fork_head_updates_url_on_drift() {
+        let (local, bare_dir, _src) = init_fork_fixture();
+        let stale_url = bare_dir.to_str().unwrap().to_string();
+        // Reuse the SAME bare dir (so the second call still finds a real
+        // repo) but pretend the URL "drifted" by passing a different
+        // string that ALSO resolves to the same on-disk repo. We achieve
+        // that with a file:// URL on Windows (path with backslashes
+        // round-trip cleanly through git remote add).
+        let drifted_url = format!("file://{}", stale_url.replace('\\', "/"));
+
+        // First call: register the stale URL.
+        let first = fetch_fork_head(
+            local.path().to_str().unwrap(),
+            "alice",
+            &stale_url,
+            "feat/443-fork",
+        );
+        assert!(first, "first call must succeed");
+
+        // Second call: same alias, drifted URL — the function should run
+        // `git remote set-url` and re-fetch.
+        let second = fetch_fork_head(
+            local.path().to_str().unwrap(),
+            "alice",
+            &drifted_url,
+            "feat/443-fork",
+        );
+        assert!(second, "second call must still succeed after URL drift");
+
+        // The stored URL must be the drifted one, not the original.
+        let local_repo = git2::Repository::open(local.path()).unwrap();
+        let remote = local_repo
+            .find_remote("fork-alice")
+            .expect("remote must still be registered");
+        let stored = remote.url().unwrap();
+        // git normalises file:// URLs slightly on Windows — assert it's
+        // the drifted one rather than the original.
+        assert_ne!(
+            stored, stale_url,
+            "URL must have been updated, not left at the stale value"
+        );
+    }
+
+    /// Failure path: a non-existent clone URL must return `false` rather
+    /// than panic. The caller (`spawn_agent_inner`) falls back to the
+    /// mesh's `base_ref` and emits a `mesh-sync-warning` toast with
+    /// `outcome: "pr_fork_unfetchable"`. Without the failure-as-false
+    /// contract, a typo'd clone URL would either spawn on the wrong
+    /// commits silently or surface as a hard error every offline session.
+    #[test]
+    fn fetch_fork_head_returns_false_on_bad_clone_url() {
+        let (local, _bare_dir, _src) = init_fork_fixture();
+        let bad_url = "/nonexistent/path/to/fork/that/does/not/exist".to_string();
+
+        let ok = fetch_fork_head(
+            local.path().to_str().unwrap(),
+            "alice",
+            &bad_url,
+            "feat/443-fork",
+        );
+        assert!(!ok, "fetch_fork_head must return false on a bad clone URL");
     }
 }

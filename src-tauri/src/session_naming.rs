@@ -1293,6 +1293,8 @@ mod tests {
                 use_worktree: false,
                 source_issue: None,
                 source_pr: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
                 position: 0,
                 created_at: chrono::Utc::now(),
             })

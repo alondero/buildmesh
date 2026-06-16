@@ -248,16 +248,23 @@ export function GitPullRequestsTab() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [openDropdown]);
 
-  // Two-stage PR spawn (issue #420) — mirrors the issue-spawn flow in
-  // `GitIssuesTab`. Stage-1 (`createPrNode`) is the fast DB-only IPC
-  // (~20ms) that returns a `pending` node + the prefill; stage-2
-  // (`startNodeBackground`) does the slow work (git fetch origin
-  // <head_ref>, worktree create off the head ref, PTY spawn) in the
-  // background and the store flips the node to `running` / `error` via
-  // `node-spawn-completed` / `node-spawn-failed` events. We deliberately do
-  // NOT toggle the probe — the dock stays open so the user can fire off
-  // another PR without re-opening the context menu (matches the issue-tab
-  // contract; see memory buildmesh-spawn-from-probe-keeps-dock-open).
+  // Two-stage PR spawn (issue #420, extended by #443 for fork PRs) —
+  // mirrors the issue-spawn flow in `GitIssuesTab`. Stage-1
+  // (`createPrNode`) is the fast DB-only IPC (~20ms) that returns a
+  // `pending` node + the prefill; stage-2 (`startNodeBackground`) does the
+  // slow work (git fetch <remote> <head_ref>, worktree create off the
+  // head ref, PTY spawn) in the background and the store flips the node
+  // to `running` / `error` via `node-spawn-completed` /
+  // `node-spawn-failed` events. We deliberately do NOT toggle the probe —
+  // the dock stays open so the user can fire off another PR without
+  // re-opening the context menu (matches the issue-tab contract; see
+  // memory buildmesh-spawn-from-probe-keeps-dock-open).
+  //
+  // For fork PRs (#443) the stage-2 path adds the fork as a remote and
+  // fetches the head ref from there instead of from `origin`. The fork
+  // fields come from the GitHub list response (`head_repo_owner` +
+  // `head_repo_clone_url` on `GitHubPullRequest`); for same-repo PRs both
+  // are empty strings and the backend takes the #420 origin-fetch path.
   const handleSpawn = async (pr: GitHubPullRequest, providerId: string) => {
     if (activeMeshId === null) return;
     setSpawning(pr.number);
@@ -273,6 +280,8 @@ export function GitPullRequestsTab() {
         pr.title,
         pr.head_ref,
         providerId,
+        pr.head_repo_owner,
+        pr.head_repo_clone_url,
       );
       setOpenDropdown(null);
       // Dispatch stage-2 BEFORE clearing the busy state so the
@@ -314,6 +323,8 @@ export function GitPullRequestsTab() {
         pr.title,
         pr.head_ref,
         defaultProvider,
+        pr.head_repo_owner,
+        pr.head_repo_clone_url,
       );
       setOpenDropdown(null);
       // Same ordering as `handleSpawn`: stage-2 IPC first, then clear the

@@ -107,10 +107,26 @@ pub struct PullRequest {
     /// PR's source-branch ref name (e.g. `"feature/some-thing"`). Captured from
     /// the GitHub API's `head.ref` field on both the list and detail endpoints
     /// via the custom `Deserialize` impl below. Empty when the PR is from a
-    /// fork (the head lives on the fork's remote, not `origin`) — the spawn
-    /// path refuses fork PRs for now (issue #36 follow-up).
+    /// fork and the detail endpoint was the only source of truth — the
+    /// fork-spawn path (issue #443) reads `head_repo_owner` + `head_repo_clone_url`
+    /// to register the fork as a remote and fetch the head ref from there.
     #[serde(default)]
     pub head_ref: String,
+    /// Owner login of the PR's head repo (e.g. `"alice"` for a fork PR opened
+    /// from `alice/buildmesh`). Captured from `head.repo.owner.login`. For
+    /// same-repo PRs the head's repo is the destination repo, so the value
+    /// matches the destination owner. Empty when the field is missing from the
+    /// API response. Issue #443 uses this to derive the `fork-<login>` remote
+    /// alias when the head repo's owner differs from the destination.
+    #[serde(default)]
+    pub head_repo_owner: String,
+    /// HTTPS clone URL of the PR's head repo (e.g.
+    /// `"https://github.com/alice/buildmesh.git"`). Captured from
+    /// `head.repo.clone_url`. Issue #443 uses this to register the fork as a
+    /// remote when spawning an agent on a fork PR (worktree adoption, #36).
+    /// Empty when the field is missing.
+    #[serde(default)]
+    pub head_repo_clone_url: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,9 +149,23 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
         D: serde::Deserializer<'de>,
     {
         #[derive(serde::Deserialize)]
+        struct RepoHelper {
+            #[serde(default, rename = "clone_url")]
+            clone_url: String,
+            #[serde(default)]
+            owner: Option<OwnerHelper>,
+        }
+        #[derive(serde::Deserialize)]
+        struct OwnerHelper {
+            #[serde(default, rename = "login")]
+            login: String,
+        }
+        #[derive(serde::Deserialize)]
         struct HeadHelper {
             #[serde(default, rename = "ref")]
             ref_: String,
+            #[serde(default)]
+            repo: Option<RepoHelper>,
         }
         #[derive(serde::Deserialize)]
         struct Raw {
@@ -153,6 +183,23 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             pub head: Option<HeadHelper>,
         }
         let raw = Raw::deserialize(deserializer)?;
+        // Project `head.repo.owner.login` → `head_repo_owner` and
+        // `head.repo.clone_url` → `head_repo_clone_url` at deserialise time so
+        // the public struct stays flat (the same reason the `head.ref` →
+        // `head_ref` projection exists at the top of this file). Issue #443
+        // reads both fields on fork PRs to register `fork-<owner>` as a
+        // remote and fetch the head ref from there. Both default to "" when
+        // the API omits the nested object — the call site treats "" as
+        // "same-repo PR" (the #420 origin/<head_ref> branch).
+        let head = raw.head;
+        let head_ref = head.as_ref().map(|h| h.ref_.clone()).unwrap_or_default();
+        let (head_repo_owner, head_repo_clone_url) = match head.and_then(|h| h.repo) {
+            Some(repo) => (
+                repo.owner.map(|o| o.login).unwrap_or_default(),
+                repo.clone_url,
+            ),
+            None => (String::new(), String::new()),
+        };
         Ok(PullRequest {
             number: raw.number,
             html_url: raw.html_url,
@@ -160,7 +207,9 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             draft: raw.draft,
             body: raw.body,
             state: raw.state,
-            head_ref: raw.head.map(|h| h.ref_).unwrap_or_default(),
+            head_ref,
+            head_repo_owner,
+            head_repo_clone_url,
         })
     }
 }
@@ -872,6 +921,84 @@ mod tests {
         assert_eq!(pr.state, "", "missing state defaults to empty");
         assert!(!pr.draft, "missing draft defaults to false");
         assert_eq!(pr.head_ref, "", "missing head.ref defaults to empty");
+        assert_eq!(
+            pr.head_repo_owner, "",
+            "missing head.repo.owner.login defaults to empty"
+        );
+        assert_eq!(
+            pr.head_repo_clone_url, "",
+            "missing head.repo.clone_url defaults to empty"
+        );
+    }
+
+    /// Issue #443: a fork PR (head's `repo.owner.login` differs from the
+    /// destination) carries the fork's owner login + clone URL on
+    /// `head_repo_owner` + `head_repo_clone_url`. The list endpoint
+    /// includes the head's full `head.repo` object, so a single call
+    /// surfaces everything the spawn path needs to register the fork as a
+    /// remote and fetch the head ref. Pin the fork shape so a future
+    /// refactor that drops `head.repo` from the projection surfaces as a
+    /// test failure rather than a silent spawn on the wrong commits.
+    #[test]
+    fn pull_request_deserialises_fork_pr_with_head_repo_metadata() {
+        let json = r#"{
+            "number": 443,
+            "html_url": "https://github.com/alondero/buildmesh/pull/443",
+            "title": "fork PR worktree adoption",
+            "body": "spawn on a fork's head ref",
+            "draft": false,
+            "state": "open",
+            "head": {
+                "ref": "feat/443-fork",
+                "sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                "repo": {
+                    "clone_url": "https://github.com/alice/buildmesh.git",
+                    "owner": {"login": "alice"}
+                }
+            }
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).expect("fork PR shape must parse");
+        assert_eq!(pr.head_ref, "feat/443-fork");
+        assert_eq!(
+            pr.head_repo_owner, "alice",
+            "head.repo.owner.login is the fork's owner"
+        );
+        assert_eq!(
+            pr.head_repo_clone_url, "https://github.com/alice/buildmesh.git",
+            "head.repo.clone_url is the fork's clone URL"
+        );
+    }
+
+    /// A same-repo PR's `head.repo` IS the destination repo — the values
+    /// are still populated (and equal the destination owner / URL), but
+    /// `commands::pr::create_pr_node` compares `head_repo_owner` against
+    /// the mesh's owner and treats a match as "same-repo, take the #420
+    /// origin-fetch path". Pin the populated values so a future refactor
+    /// that special-cases the same-repo case to drop the projection is
+    /// caught (we still want the fields populated for the comparison).
+    #[test]
+    fn pull_request_deserialises_same_repo_pr_with_destination_repo_metadata() {
+        let json = r#"{
+            "number": 439,
+            "html_url": "https://github.com/alondero/buildmesh/pull/439",
+            "title": "same-repo PR",
+            "draft": false,
+            "state": "open",
+            "head": {
+                "ref": "feat/420-pr-spawn",
+                "sha": "abc123abc123abc123abc123abc123abc123abcd",
+                "repo": {
+                    "clone_url": "https://github.com/alondero/buildmesh.git",
+                    "owner": {"login": "alondero"}
+                }
+            }
+        }"#;
+        let pr: PullRequest = serde_json::from_str(json).expect("same-repo PR shape must parse");
+        assert_eq!(pr.head_repo_owner, "alondero");
+        assert_eq!(
+            pr.head_repo_clone_url,
+            "https://github.com/alondero/buildmesh.git"
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 15;
+const SCHEMA_VERSION: i32 = 16;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -66,7 +66,10 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             use_worktree INTEGER NOT NULL DEFAULT 1,
             position INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
+            status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            source_pr INTEGER,
+            head_repo_owner TEXT,
+            head_repo_clone_url TEXT
         );
 
         CREATE TABLE IF NOT EXISTS pending_worktree_removals (
@@ -88,6 +91,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_position(&conn)?;
     ensure_agent_node_status_changed_at(&conn)?;
     ensure_agent_node_source_pr(&conn)?;
+    ensure_agent_node_source_pr_fork_meta(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
@@ -354,6 +358,44 @@ pub(crate) fn ensure_agent_node_source_pr(conn: &Connection) -> SqlResult<()> {
     if !has_col {
         conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_pr INTEGER", [])?;
         tracing::warn!("ensure_agent_node_source_pr: added missing source_pr column");
+    }
+    Ok(())
+}
+
+/// Safety net (v16): ensure the `head_repo_owner` + `head_repo_clone_url`
+/// columns exist on `agent_nodes`. Added for issue #443 — PR-spawned nodes
+/// spawned from a fork PR record the fork's owner login and clone URL so
+/// `spawn_agent_inner` can add the fork as a remote and fetch the head ref
+/// (worktree adoption for fork PRs, #36). Both columns are nullable; only
+/// rows spawned from a fork PR set them. Pre-v16 rows stay `NULL` and the
+/// spawn path treats that as "same-repo PR" (the #420 path).
+pub(crate) fn ensure_agent_node_source_pr_fork_meta(conn: &Connection) -> SqlResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+
+    for (name, ty) in [("head_repo_owner", "TEXT"), ("head_repo_clone_url", "TEXT")] {
+        let has_col: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_col {
+            conn.execute(&format!("ALTER TABLE agent_nodes ADD COLUMN {} {}", name, ty), [])?;
+            tracing::warn!(
+                "ensure_agent_node_source_pr_fork_meta: added missing {} column",
+                name
+            );
+        }
     }
     Ok(())
 }
@@ -920,7 +962,7 @@ fn parse_str(s: String) -> Option<String> {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position, source_pr";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, position, source_pr, head_repo_owner, head_repo_clone_url";
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -937,10 +979,13 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         use_worktree: row.get::<_, i32>(12)? != 0,
         source_issue: row.get(11)?,
         position: row.get(13)?,
-        // source_pr is the last column (index 14). Read as Option: the safety
-        // net adds the column nullable for pre-v15 DBs, and rusqlite's typed
-        // read errors the row on NULL otherwise.
+        // source_pr is column 14. Read as Option: the safety net adds the
+        // column nullable for pre-v15 DBs, and rusqlite's typed read errors
+        // the row on NULL otherwise. (v16 added head_repo_owner + clone_url at
+        // 15/16 — see AGENT_NODE_COLUMNS.)
         source_pr: row.get(14)?,
+        head_repo_owner: row.get(15)?,
+        head_repo_clone_url: row.get(16)?,
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -992,18 +1037,18 @@ pub fn list_coordinator_node_rows_inner(
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..14, which match the
+        // map_agent_node_row reads positional indices 0..16, which match the
         // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 15 and 16 (source_pr is the 15th column
-        // after #420 added it).
+        // status_changed_at follow at 17 and 18 (v16 added head_repo_owner +
+        // head_repo_clone_url at 15/16 — see AGENT_NODE_COLUMNS).
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(15)?;
+        let mesh_name: String = row.get(17)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(16)?;
+        let status_changed_at: Option<String> = row.get(18)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -1116,6 +1161,8 @@ pub fn create_agent_node(
     source_issue: Option<i64>,
     source_pr: Option<i64>,
     use_worktree: bool,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
 ) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
     // Append at the end of this mesh's grid order. New nodes land last so an
@@ -1130,8 +1177,8 @@ pub fn create_agent_node(
     // default (SQLite can't ALTER-add a non-constant default), so an INSERT that
     // omitted it would store NULL and break the coordinator digest query.
     db.execute(
-        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, use_worktree, position, status_changed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             mesh_id,
             name,
@@ -1144,7 +1191,9 @@ pub fn create_agent_node(
             source_pr,
             if use_worktree { 1 } else { 0 },
             next_position,
-            chrono::Utc::now().to_rfc3339()
+            chrono::Utc::now().to_rfc3339(),
+            head_repo_owner,
+            head_repo_clone_url,
         ],
     )?;
     let id = db.last_insert_rowid();

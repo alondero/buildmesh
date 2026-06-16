@@ -142,7 +142,9 @@ mod tests {
                 source_pr INTEGER,
                 use_worktree INTEGER NOT NULL DEFAULT 1,
                 position INTEGER NOT NULL DEFAULT 0,
-                status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
+                status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)

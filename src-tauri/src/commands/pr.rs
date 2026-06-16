@@ -56,10 +56,26 @@ pub struct GitHubPullRequest {
     /// PR's source-branch ref name (e.g. `"feature/some-thing"`). Captured from
     /// GitHub's `head.ref` so the spawn button (#420) can pass it to the
     /// backend, which fetches it and uses it as the worktree's `base_ref`.
-    /// Empty when the PR is from a fork (the head lives on the fork's remote,
-    /// not `origin`) — the spawn path refuses those for now (issue #36).
+    /// Empty when the API response is a partial shape or the head ref is
+    /// unknown — the spawn path treats empty as a non-forkable case and the
+    /// panel surfaces a clear error.
     #[serde(default)]
     pub head_ref: String,
+    /// Owner login of the PR's head repo (e.g. `"alice"` for a fork PR opened
+    /// from `alice/buildmesh`). Captured from `head.repo.owner.login`. For
+    /// same-repo PRs the head's repo IS the destination repo, so the value
+    /// matches the destination owner — `create_pr_node` compares it against
+    /// the mesh's destination owner to decide whether to take the fork-spawn
+    /// path (issue #443). Empty when the field is missing.
+    #[serde(default)]
+    pub head_repo_owner: String,
+    /// HTTPS clone URL of the PR's head repo (e.g.
+    /// `"https://github.com/alice/buildmesh.git"`). Captured from
+    /// `head.repo.clone_url`. Paired with [`head_repo_owner`](Self::head_repo_owner)
+    /// — the spawn path uses both to register the fork as a remote and fetch
+    /// the head ref from it. Empty when the field is missing.
+    #[serde(default)]
+    pub head_repo_clone_url: String,
 }
 
 /// Wire shape of `get_pr_mergeability` — the per-PR enrichment the panel
@@ -180,6 +196,8 @@ pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullReque
         state: pr.state,
         draft: pr.draft,
         head_ref: pr.head_ref,
+        head_repo_owner: pr.head_repo_owner,
+        head_repo_clone_url: pr.head_repo_clone_url,
     }).collect())
 }
 
@@ -334,15 +352,22 @@ pub(crate) fn format_pr_prefill(
 /// the worktree's `base_ref` so the agent lands on the PR's actual commits
 /// instead of the mesh's base ref.
 ///
-/// Refuses fork PRs (`head_ref` empty) — the head ref is on the fork's
-/// remote, not `origin`, and adding a fork remote is a follow-up to #36
-/// (worktree adoption). The user gets a clear error rather than a
-/// silently-empty worktree.
+/// Fork PRs are supported (issue #443, follow-up to #36). When the PR's
+/// `head_repo_owner` differs from the mesh's destination owner, the spawn
+/// path adds the fork as a remote (`fork-<login>`) and fetches the head
+/// ref from it instead of `origin`. The owner / clone URL are recorded on
+/// the node row so the stage-2 work has them without an extra round-trip.
+///
+/// Still refuses a fork PR whose fork info is missing (an old frontend or a
+/// partial API response) — without the clone URL we can't register the
+/// remote, and silently spawning on the mesh's `base_ref` would land the
+/// agent on the wrong commits.
 ///
 /// Returns the same `IssueNodeDraft` wire shape as `create_issue_node`; the
 /// frontend reuses the generated `IssueNodeDraft.ts` import (the structure
 /// is identical: flattened `AgentNode` + `prefill`).
 #[command]
+#[allow(clippy::too_many_arguments)]
 pub fn create_pr_node(
     app: tauri::AppHandle,
     mesh_id: i64,
@@ -350,18 +375,36 @@ pub fn create_pr_node(
     pr_title: String,
     head_ref: String,
     provider: Option<String>,
+    head_repo_owner: Option<String>,
+    head_repo_clone_url: Option<String>,
 ) -> Result<crate::commands::agent::IssueNodeDraft, String> {
-    // Refuse fork PRs up front: head_ref is the only handle to the head
-    // branch, and for fork PRs it lives on the fork's remote, not `origin`.
-    // The whole worktree-adoption path (git fetch origin <head_ref> +
-    // create_worktree off origin/<head_ref>) assumes the same-repo case.
-    // Once #36 lands fork-remote support, this guard goes away and
-    // `spawn_agent_inner` learns to add the fork as a remote first.
-    if head_ref.trim().is_empty() {
+    // Two inputs gate the fork path. Both must be present for the spawn to
+    // proceed with a fork PR — the spawn-time `git remote add` needs the
+    // clone URL, and the alias `fork-<login>` needs the owner login. If the
+    // frontend passes a fork PR with only `head_ref` (an old client or a
+    // partial API response), surface that as a clear error rather than
+    // silently spawning on the mesh's base ref. (The previous #420 guard
+    // rejected ALL fork PRs by checking `head_ref.is_empty()`; that was
+    // correct at the time because the wire shape didn't carry fork info.
+    // Now that it does, the gate is "fork info present" rather than
+    // "same-repo".)
+    let head_repo_owner = head_repo_owner.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let head_repo_clone_url = head_repo_clone_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if (head_repo_owner.is_some()) ^ (head_repo_clone_url.is_some()) {
         return Err(
-            "This PR's head branch is on a fork — worktree adoption for fork PRs \
-             isn't supported yet (issue #36). Add the fork as a remote and spawn \
-             via handover, or wait for the worktree-adoption follow-up."
+            "PR's fork info is incomplete (head_repo_owner and head_repo_clone_url \
+             must both be present, or both absent). Reload the PR list and retry."
+                .to_string(),
+        );
+    }
+    if head_ref.trim().is_empty() && head_repo_owner.is_none() {
+        return Err(
+            "This PR's head branch is on a fork, but no clone URL was provided. \
+             Reload the PR list so the panel can pull the fork's clone URL, \
+             then retry the spawn."
                 .to_string(),
         );
     }
@@ -385,7 +428,7 @@ pub fn create_pr_node(
         crate::preferences::default_provider(),
     );
 
-    let node = crate::services::agent_node::create_pending_with_source_pr(
+    let node = crate::services::agent_node::create_pending_with_source_pr_fork(
         mesh.id,
         &mesh.path,
         &head_ref,
@@ -393,6 +436,8 @@ pub fn create_pr_node(
         None,                 // source_issue
         Some(pr_number),      // source_pr — the key field for stage-2 worktree adoption
         Some(&initial_name),
+        head_repo_owner,      // fork meta (issue #443) — None for same-repo PRs
+        head_repo_clone_url,
     )
     .map_err(|e| e.to_string())?;
 
@@ -405,10 +450,11 @@ pub fn create_pr_node(
     );
 
     tracing::info!(
-        "create_pr_node: created pending node {} for PR #{} (head_ref={}) on mesh {}",
+        "create_pr_node: created pending node {} for PR #{} (head_ref={}, head_repo_owner={:?}) on mesh {}",
         node.id,
         pr_number,
         head_ref,
+        head_repo_owner,
         mesh_id
     );
 
@@ -701,6 +747,58 @@ mod tests {
         assert_eq!(pr.head_ref, "", "missing head_ref defaults to empty");
     }
 
+    /// Issue #443: a fork PR carries `head_repo_owner` (the fork's owner
+    /// login) + `head_repo_clone_url` (the fork's clone URL) on the wire
+    /// so the spawn path can register the fork as a remote. Both fields
+    /// are `#[serde(default)]` so a partial response (older frontend, or
+    /// an API hiccup that drops `head.repo`) still parses — the spawn
+    /// path then treats empty values as "no fork info, use the #420
+    /// same-repo path" and a head_ref-empty head as the refusal case.
+    #[test]
+    fn github_pull_request_wire_shape_with_fork_metadata() {
+        let json = r#"{
+            "number": 443,
+            "url": "https://github.com/alondero/buildmesh/pull/443",
+            "title": "fork PR",
+            "body": "spawn on a fork",
+            "state": "open",
+            "draft": false,
+            "head_ref": "feat/443-fork",
+            "head_repo_owner": "alice",
+            "head_repo_clone_url": "https://github.com/alice/buildmesh.git"
+        }"#;
+        let pr: GitHubPullRequest = serde_json::from_str(json).expect("fork wire shape parses");
+        assert_eq!(pr.head_ref, "feat/443-fork");
+        assert_eq!(pr.head_repo_owner, "alice");
+        assert_eq!(
+            pr.head_repo_clone_url,
+            "https://github.com/alice/buildmesh.git"
+        );
+    }
+
+    /// Partial response with no fork metadata: both fields default to "".
+    /// This is the #420 same-repo case — the spawn path takes the
+    /// `git fetch origin <head_ref>` branch.
+    #[test]
+    fn github_pull_request_wire_shape_with_missing_fork_metadata_defaults() {
+        let json = r#"{
+            "number": 8,
+            "url": "https://github.com/x/y/pull/8",
+            "title": "legacy",
+            "body": "",
+            "state": "open",
+            "draft": false,
+            "head_ref": "feat/legacy"
+        }"#;
+        let pr: GitHubPullRequest =serde_json::from_str(json).expect("partial wire shape parses");
+        assert_eq!(pr.head_ref, "feat/legacy");
+        assert_eq!(pr.head_repo_owner, "", "missing head_repo_owner defaults to empty");
+        assert_eq!(
+            pr.head_repo_clone_url, "",
+            "missing head_repo_clone_url defaults to empty"
+        );
+    }
+
     /// Build a `TempGitRepo` and an `AgentNode` that uses a branched worktree
     /// under `<root>/.claude/worktrees/<name>`. The mesh root stays on
     /// `main`; the worktree is on `<name>` (matching the production
@@ -738,6 +836,8 @@ mod tests {
             use_worktree: true,
             source_issue: None,
             source_pr: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
             position: 0,
             created_at: Utc::now(),
         };
@@ -765,6 +865,8 @@ mod tests {
             use_worktree: false,
             source_issue: None,
             source_pr: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
             position: 0,
             created_at: Utc::now(),
         };

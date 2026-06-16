@@ -226,6 +226,8 @@ fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
         None,
         None,
         true,
+        None,
+        None,
     ) {
         Ok(node) => {
             // Emit event so frontend session store can refetch via invoke()
