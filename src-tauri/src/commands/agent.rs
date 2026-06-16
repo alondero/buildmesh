@@ -299,6 +299,174 @@ pub fn create_issue_node(
     Ok(IssueNodeDraft { node, prefill })
 }
 
+// ---------------------------------------------------------------------------
+// Two-stage PR spawn (fast stage-1 + background stage-2) — issue #420
+//
+// Mirror of the issue-spawn two-stage flow above. Spawns an agent that
+// checks out the PR's head branch and starts reviewing or iterating on it.
+// The worktree is created off `origin/<head_ref>` rather than the mesh's
+// `base_ref`, so the agent lands on the same commits the PR is built from.
+// Reuses `IssueNodeDraft` for the return type (the wire shape is the same:
+// flattened `AgentNode` + `prefill`); the PR-spawn flow only diverges in
+// the *row* (`source_pr` is set, `branch` is the head ref) and in stage-2's
+// `git fetch origin <head_ref>` worktree adoption.
+// ---------------------------------------------------------------------------
+
+/// Compose the prefill string handed to the agent on PR spawn.
+///
+/// Shape: `Please review pull request #N — Title\n<html_url>` — mirrors
+/// `format_issue_prefill` (issue flow) so the agent gets the same kind of
+/// one-line imperative + URL hand-off. The title is passed verbatim (the
+/// consumer is an LLM, not a parser); the PR's body is intentionally NOT
+/// included (same rationale as the issue flow — multi-KB markdown is the
+/// worst case for the PowerShell `-EncodedCommand` argv path).
+///
+/// Pure function — exposed `pub(crate)` so unit tests can pin the wording.
+pub(crate) fn format_pr_prefill(
+    owner: &str,
+    repo: &str,
+    pr_number: i64,
+    pr_title: &str,
+) -> String {
+    let url = format!("https://github.com/{}/{}/pull/{}", owner, repo, pr_number);
+    let trimmed = pr_title.trim();
+    if trimmed.is_empty() {
+        format!("Please review pull request #{}\n{}", pr_number, url)
+    } else {
+        format!(
+            "Please review pull request #{} — {}\n{}",
+            pr_number, trimmed, url
+        )
+    }
+}
+
+/// Fast stage-1 of the PR-spawn flow. Creates a `Pending` agent node row
+/// with the originating PR number stamped on `source_pr` and the PR's head
+/// ref stored in `branch`. The caller is expected to invoke
+/// `start_node_background` to do the slow work (git fetch the head ref +
+/// worktree create + PTY spawn), which in turn uses `source_pr` to override
+/// the worktree's `base_ref` so the agent lands on the PR's actual commits
+/// instead of the mesh's base ref.
+///
+/// Fork PRs are supported (issue #443, follow-up to #36). When the PR's
+/// `head_repo_owner` differs from the mesh's destination owner, the spawn
+/// path adds the fork as a remote (`fork-<login>`) and fetches the head
+/// ref from it instead of `origin`. The owner / clone URL are recorded on
+/// the node row so the stage-2 work has them without an extra round-trip.
+///
+/// Still refuses a fork PR whose fork info is missing (an old frontend or a
+/// partial API response) — without the clone URL we can't register the
+/// remote, and silently spawning on the mesh's `base_ref` would land the
+/// agent on the wrong commits.
+///
+/// Returns the same `IssueNodeDraft` wire shape as `create_issue_node`; the
+/// frontend reuses the generated `IssueNodeDraft.ts` import (the structure
+/// is identical: flattened `AgentNode` + `prefill`).
+#[command]
+#[allow(clippy::too_many_arguments)]
+pub fn create_pr_node(
+    app: tauri::AppHandle,
+    mesh_id: i64,
+    pr_number: i64,
+    pr_title: String,
+    head_ref: String,
+    head_sha: String,
+    provider: Option<String>,
+    head_repo_owner: Option<String>,
+    head_repo_clone_url: Option<String>,
+) -> Result<IssueNodeDraft, String> {
+    // Two inputs gate the fork path. Both must be present for the spawn to
+    // proceed with a fork PR — the spawn-time `git remote add` needs the
+    // clone URL, and the alias `fork-<login>` needs the owner login. If the
+    // frontend passes a fork PR with only `head_ref` (an old client or a
+    // partial API response), surface that as a clear error rather than
+    // silently spawning on the mesh's base ref. (The previous #420 guard
+    // rejected ALL fork PRs by checking `head_ref.is_empty()`; that was
+    // correct at the time because the wire shape didn't carry fork info.
+    // Now that it does, the gate is "fork info present" rather than
+    // "same-repo".)
+    let head_repo_owner = head_repo_owner.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let head_repo_clone_url = head_repo_clone_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if (head_repo_owner.is_some()) ^ (head_repo_clone_url.is_some()) {
+        return Err(
+            "PR's fork info is incomplete (head_repo_owner and head_repo_clone_url \
+             must both be present, or both absent). Reload the PR list and retry."
+                .to_string(),
+        );
+    }
+    if head_ref.trim().is_empty() && head_repo_owner.is_none() {
+        return Err(
+            "This PR's head branch is on a fork, but no clone URL was provided. \
+             Reload the PR list so the panel can pull the fork's clone URL, \
+             then retry the spawn."
+                .to_string(),
+        );
+    }
+
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
+        .map_err(|e| format!("{} — cannot derive PR URL", e))?;
+
+    let prefill = format_pr_prefill(&owner, &repo, pr_number, &pr_title);
+
+    // Seed the node with a `pr{N}-{slug}` name (mirrors `issue_node_name`) so
+    // the user can identify it in the mesh list from the moment the row
+    // appears. Falls back to a random default if the title doesn't yield a
+    // valid slug; the `pr` prefix is still applied so the user can spot the
+    // originating PR at a glance.
+    let initial_name = crate::session_naming::pr_node_name(pr_number, &pr_title);
+
+    let effective_provider = crate::preferences::resolve_default_provider(
+        provider,
+        mesh.default_provider.clone(),
+        crate::preferences::default_provider(),
+    );
+
+    // Issue #444 — `head_sha` is the exact-pinning handle. We persist it as
+    // `source_pr_pinned_sha` so `spawn_agent_inner` can verify the local
+    // `origin/<head_ref>` SHA matches after `git fetch` and emit a
+    // `pr_sha_drift` warning via `mesh-sync-warning` if the PR was
+    // force-pushed / rebased between click-time and spawn-time. An empty
+    // `head_sha` (partial GitHub response, fork payload) skips the drift
+    // check — same fail-open semantics as `pr_head_unfetchable`.
+    let pinned_sha_opt: Option<&str> = if head_sha.is_empty() { None } else { Some(&head_sha) };
+
+    let node = crate::services::agent_node::create_pending_with_source_pr_fork(
+        mesh.id,
+        &mesh.path,
+        &head_ref,
+        Some(&effective_provider),
+        None,                 // source_issue
+        Some(pr_number),      // source_pr — the key field for stage-2 worktree adoption
+        pinned_sha_opt,       // source_pr_pinned_sha — exact-pinning handle (issue #444)
+        Some(&initial_name),
+        head_repo_owner,      // fork meta (issue #443) — None for same-repo PRs
+        head_repo_clone_url,
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Mirrors `create_issue_node` — see that block for the rationale.
+    let _ = app.emit(
+        "session-created",
+        serde_json::json!({ "id": node.id }),
+    );
+
+    tracing::info!(
+        "create_pr_node: created pending node {} for PR #{} (head_ref={}, head_sha={}, head_repo_owner={:?}) on mesh {}",
+        node.id,
+        pr_number,
+        head_ref,
+        head_sha,
+        head_repo_owner,
+        mesh_id
+    );
+
+    Ok(IssueNodeDraft { node, prefill })
+}
+
 /// Slow stage-2 of the two-stage spawn flow. Runs the existing
 /// `spawn_agent_inner` pipeline (git fetch, worktree create, PTY spawn,
 /// workspace-trust + attention-hook write, reader thread) for a node

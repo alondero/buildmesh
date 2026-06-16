@@ -1015,12 +1015,13 @@ mod tests {
     }
 
     /// A same-repo PR's `head.repo` IS the destination repo — the values
-    /// are still populated (and equal the destination owner / URL), but
-    /// `commands::pr::create_pr_node` compares `head_repo_owner` against
-    /// the mesh's owner and treats a match as "same-repo, take the #420
-    /// origin-fetch path". Pin the populated values so a future refactor
-    /// that special-cases the same-repo case to drop the projection is
-    /// caught (we still want the fields populated for the comparison).
+    /// are still populated (and equal the destination owner / URL). Stage-2
+    /// spawn (`spawn_agent_inner`, issue #443) keys the fork-vs-same-repo
+    /// decision on whether these fields are `Some` (fork → register a
+    /// `fork-<login>` remote) or empty (same-repo → `git fetch origin
+    /// <head_ref>`). Pin the populated values so a future refactor that
+    /// special-cases the same-repo case to drop the projection is caught
+    /// (we still want the fields populated so the comparison has inputs).
     #[test]
     fn pull_request_deserialises_same_repo_pr_with_destination_repo_metadata() {
         let json = r#"{

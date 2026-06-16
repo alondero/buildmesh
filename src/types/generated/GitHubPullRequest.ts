@@ -34,9 +34,10 @@ head_ref: string,
  * Owner login of the PR's head repo (e.g. `"alice"` for a fork PR opened
  * from `alice/buildmesh`). Captured from `head.repo.owner.login`. For
  * same-repo PRs the head's repo IS the destination repo, so the value
- * matches the destination owner — `create_pr_node` compares it against
- * the mesh's destination owner to decide whether to take the fork-spawn
- * path (issue #443). Empty when the field is missing.
+ * matches the destination owner. Stage-2 spawn (`spawn_agent_inner`,
+ * issue #443) keys the fork-spawn decision on whether this field is
+ * `Some` — populated means the PR is from a fork and gets a `fork-<login>`
+ * remote; empty means the same-repo path. Empty when the field is missing.
  */
 head_repo_owner: string, 
 /**

@@ -519,6 +519,47 @@ mod tests {
         );
     }
 
+    // ----- format_pr_prefill (issue #420) ---------------------------------
+
+    /// `format_pr_prefill` mirrors `format_issue_prefill` (the issue-spawn
+    /// flow): one-line imperative + the canonical URL. The body is
+    /// intentionally NOT included — multi-KB markdown is the worst case for
+    /// the PowerShell `-EncodedCommand` argv path.
+    #[test]
+    fn format_pr_prefill_includes_number_title_and_url() {
+        let prefill = crate::commands::agent::format_pr_prefill(
+            "alondero",
+            "buildmesh",
+            420,
+            "spawn on PR",
+        );
+        assert_eq!(
+            prefill,
+            "Please review pull request #420 — spawn on PR\n\
+             https://github.com/alondero/buildmesh/pull/420"
+        );
+    }
+
+    /// Empty / whitespace-only title degrades to the bare `#N\n<url>` form
+    /// so the prefill never carries a dangling em-dash artifact. Mirrors
+    /// the issue-spawn behaviour so both spawn paths produce uniform output.
+    #[test]
+    fn format_pr_prefill_handles_empty_title() {
+        let prefill = crate::commands::agent::format_pr_prefill("alondero", "buildmesh", 420, "");
+        assert_eq!(
+            prefill,
+            "Please review pull request #420\n\
+             https://github.com/alondero/buildmesh/pull/420"
+        );
+        let prefill_ws = crate::commands::agent::format_pr_prefill(
+            "alondero",
+            "buildmesh",
+            420,
+            "   \t  ",
+        );
+        assert_eq!(prefill_ws, prefill, "whitespace title trims like empty");
+    }
+
     /// On a Windows-native host a cwrap provider is launched through
     /// `powershell.exe -NoLogo -NoProfile -EncodedCommand <base64>`. The
     /// `-NoProfile` flag is load-bearing for spawn latency: without it every

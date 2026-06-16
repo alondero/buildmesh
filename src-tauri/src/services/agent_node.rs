@@ -55,7 +55,7 @@ pub fn create(
 }
 
 /// Like [`create`], but accepts a `source_pr` so PR-spawned nodes (#420) can
-/// record the originating PR number. Used by `commands::pr::create_pr_node`
+/// record the originating PR number. Used by `commands::agent::create_pr_node`
 /// and (transitively) by the stage-1 split of the PR-spawn flow. For all
 /// other spawn paths the `create` wrapper passes `None` here.
 ///
@@ -238,7 +238,7 @@ pub fn create_pending_with_source_pr(
 /// Like [`create_pending_with_source_pr`], but also records the fork's
 /// owner login + clone URL when the PR is from a fork (issue #443) and
 /// the PR's head commit SHA for exact-pinning (issue #444). The PR-spawn
-/// flow (`commands::pr::create_pr_node`) calls this with the two fork
+/// flow (`commands::agent::create_pr_node`) calls this with the two fork
 /// fields populated for fork PRs and `None, None` for same-repo PRs.
 #[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork(
