@@ -37,6 +37,17 @@
  * the same commits the PR is built from (worktree adoption, #36 follow-up).
  * The dock stays open after a successful spawn (matches the issue-tab
  * behaviour, see memory buildmesh-spawn-from-probe-keeps-dock-open).
+ *
+ * Read-the-body companion (issue #461): mirror of PR #459's
+ * `GitIssuesTab` pattern. Body is clamped to 2 lines; clicking it flips
+ * to a scrollable container (`max-h-48`, `whitespace-pre-wrap`,
+ * `break-words`). Title is an `<a target="_blank" rel="noopener
+ * noreferrer">` to `pr.url` with a `↗` discoverability hint, and the
+ * empty-URL guard (defensive — `PullRequest.html_url` has no
+ * `#[serde(default)]`, unlike the issue struct) renders the title as
+ * a `<span>` and omits the icon. The expanded Set resets on every
+ * load (mesh OR open/closed filter — PR numbers are not stable across
+ * either boundary).
  */
 
 import { useState, useEffect, useCallback } from 'react';
@@ -113,6 +124,19 @@ export function GitPullRequestsTab() {
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   const [spawnError, setSpawnError] = useState<Record<number, string>>({});
   const [providerList, setProviderList] = useState<ProviderEntry[]>([]);
+  // Per-row expand state (issue #461) — Set keyed by PR number so two
+  // long PRs can stay expanded side-by-side. Reset on every load
+  // below (mesh + open/closed filter both change the visible set of
+  // PR numbers, so the prior Set would either no-op or re-open a
+  // different row).
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const toggleExpanded = (n: number) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(n)) next.delete(n);
+      else next.add(n);
+      return next;
+    });
 
   const load = useCallback(async (signal: { cancelled: boolean }) => {
     if (activeMeshId === null) return;
@@ -121,6 +145,8 @@ export function GitPullRequestsTab() {
     setMergeability({});
     setConfirming(null);
     setMergeError({});
+    // PR numbers don't carry across mesh/filter changes (issue #461).
+    setExpanded(new Set());
     try {
       const result = await getRepoPulls(activeMeshId, stateFilter);
       // The mesh / filter could have changed mid-flight — drop a stale result.
@@ -449,19 +475,78 @@ export function GitPullRequestsTab() {
               const isSpawning = spawning === pr.number;
               const isDropdownOpen = openDropdown === pr.number;
               const rowSpawnError = spawnError[pr.number];
+              const isExpanded = expanded.has(pr.number);
+              // Local alias so the two anchor gates below stay in sync
+              // (issue #461 empty-URL guard, see memory).
+              const url = pr.url;
               return (
                 <div
                   key={pr.number}
+                  data-pr-row={pr.number}
                   className="flex flex-col gap-1 px-2 py-2 rounded hover:bg-bg-card transition-colors"
                 >
                   <div className="flex items-start gap-2">
-                    <div className="flex-1 min-w-0">
-                      <div>
+                    {/* Title <a> uses onClick stopPropagation so navigating
+                        to GitHub doesn't also toggle expand (issue #461). */}
+                    <div
+                      className="flex-1 min-w-0 cursor-pointer"
+                      onClick={() => toggleExpanded(pr.number)}
+                    >
+                      <div className="flex items-center gap-1">
+                        <span
+                          aria-hidden
+                          className={
+                            'text-text-muted text-[10px] w-3 text-center shrink-0 transition-transform ' +
+                            (isExpanded ? 'rotate-90' : '')
+                          }
+                        >
+                          ▸
+                        </span>
                         <span className="text-xs text-accent-cyan font-mono">#{pr.number}</span>
-                        <span className="text-sm text-text-primary ml-2">{pr.title}</span>
+                        {url ? (
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-sm text-text-primary hover:underline ml-1 truncate"
+                            title="Open on GitHub"
+                          >
+                            {pr.title}
+                          </a>
+                        ) : (
+                          // Defensive guard: see memory
+                          // buildmesh-empty-url-frontend-guard. A bare
+                          // <a href=""> would self-navigate the WebView.
+                          <span className="text-sm text-text-primary ml-1 truncate">
+                            {pr.title}
+                          </span>
+                        )}
+                        {url && (
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            aria-label="Open pull request on GitHub"
+                            className="text-text-muted hover:text-accent-cyan transition-colors text-[11px] shrink-0"
+                            title="Open on GitHub"
+                          >
+                            ↗
+                          </a>
+                        )}
                       </div>
                       {pr.body && (
-                        <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{pr.body}</p>
+                        isExpanded ? (
+                          <div
+                            data-pr-body-expanded
+                            className="mt-1 max-h-48 overflow-y-auto text-[10px] text-text-muted whitespace-pre-wrap break-words"
+                          >
+                            {pr.body}
+                          </div>
+                        ) : (
+                          <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{pr.body}</p>
+                        )
                       )}
                       {rowError && (
                         <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowError}</p>
