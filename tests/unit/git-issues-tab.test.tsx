@@ -118,13 +118,6 @@ describe('GitIssuesTab (#378)', () => {
     expect(screen.getByText('#102')).toBeTruthy();
   });
 
-  it('renders the mesh path subtitle', async () => {
-    mockBackend();
-    render(<GitIssuesTab />);
-
-    expect(await screen.findByText('/repos/demo')).toBeTruthy();
-  });
-
   it('shows a friendly empty state when there are no open issues', async () => {
     mockBackend({ issues: [] });
     render(<GitIssuesTab />);

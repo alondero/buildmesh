@@ -65,6 +65,7 @@ describe('useProbeContext (issue #373)', () => {
       activeNodeId: null,
       activePath: null,
       activeMeshPath: null,
+      activeMeshName: null,
     });
   });
 
@@ -80,6 +81,7 @@ describe('useProbeContext (issue #373)', () => {
       activeNodeId: null,
       activePath: '/a',
       activeMeshPath: '/a',
+      activeMeshName: 'mesh-1',
     });
   });
 
@@ -100,8 +102,12 @@ describe('useProbeContext (issue #373)', () => {
       // activePath follows the focused node (worktree subdir), but
       // activeMeshPath stays anchored on the mesh root so the new
       // mesh-scoped tabs (issues, sessions) can walk the repo.
+      // activeMeshName follows the selected mesh, independent of the
+      // focused worktree (the dock header uses it to label the active
+      // context).
       activePath: '/a/.claude/worktrees/bold-keen-brook',
       activeMeshPath: '/a',
+      activeMeshName: 'mesh-1',
     });
   });
 
@@ -130,6 +136,7 @@ describe('useProbeContext (issue #373)', () => {
       activeNodeId: 22,
       activePath: '/b/.claude/worktrees/y',
       activeMeshPath: '/b',
+      activeMeshName: 'mesh-2',
     });
   });
 
@@ -162,6 +169,7 @@ describe('useProbeContext (issue #373)', () => {
       activeNodeId: 22,
       activePath: '/b/.claude/worktrees/y',
       activeMeshPath: '/a',
+      activeMeshName: 'mesh-1',
     });
   });
 
@@ -173,6 +181,9 @@ describe('useProbeContext (issue #373)', () => {
     expect(result.current.activeMeshId).toBe(99);
     expect(result.current.activePath).toBeNull();
     expect(result.current.activeMeshPath).toBeNull();
+    // activeMeshName also degrades to null — without a mesh row there's
+    // no name to surface in the dock header.
+    expect(result.current.activeMeshName).toBeNull();
   });
 
   it('falls back to mesh root for activePath when the focused node is missing from the list', () => {
@@ -191,5 +202,8 @@ describe('useProbeContext (issue #373)', () => {
     expect(result.current.activeMeshId).toBe(1);
     expect(result.current.activeNodeId).toBe(999);
     expect(result.current.activePath).toBe('/a');
+    // The mesh is known, so the name is too — the dock header still has
+    // a subheading to render even with a dangling activeNodeId.
+    expect(result.current.activeMeshName).toBe('mesh-1');
   });
 });

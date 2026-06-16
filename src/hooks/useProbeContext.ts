@@ -52,6 +52,12 @@ export interface ProbeContext {
    *  etc.) should prefer this over `activePath`. Null when no mesh is
    *  resolvable. */
   activeMeshPath: string | null;
+  /** The mesh's display name. Surfaced in the shared dock header as a
+   *  subheading so the user always knows which project the dock is
+   *  anchored to, without needing the directory path strip that the
+   *  Issues / PRs tabs used to render. Follows the same resolution rule
+   *  as `activeMeshPath` (independent of any focused worktree). */
+  activeMeshName: string | null;
 }
 
 const EMPTY_CONTEXT: ProbeContext = {
@@ -59,6 +65,7 @@ const EMPTY_CONTEXT: ProbeContext = {
   activeNodeId: null,
   activePath: null,
   activeMeshPath: null,
+  activeMeshName: null,
 };
 
 export function useProbeContext(): ProbeContext {
@@ -98,6 +105,11 @@ export function useProbeContext(): ProbeContext {
     // mesh-scoped tabs still have a repo root to walk.
     const activeMeshPath = mesh?.path ?? null;
 
-    return { activeMeshId, activeNodeId, activePath, activeMeshPath };
+    // Display name follows the same resolution as the path — sourced
+    // from the mesh row, independent of any focused worktree. Null when
+    // no mesh is resolvable so the dock header can omit the subheading.
+    const activeMeshName = mesh?.name ?? null;
+
+    return { activeMeshId, activeNodeId, activePath, activeMeshPath, activeMeshName };
   }, [selectedMeshId, meshesById, activeNodeId, agentNodes]);
 }

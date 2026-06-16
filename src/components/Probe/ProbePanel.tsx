@@ -59,6 +59,11 @@ export function ProbePanel() {
   const probeTab = useUIStore((s) => s.probeTab);
   const setProbeTab = useUIStore((s) => s.setProbeTab);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
+  // The dock header surfaces the active mesh name as a subheading on every
+  // tab, so each tab body stays free of redundant path/name chrome. The
+  // hook degrades to `null` in the empty state; we render nothing in that
+  // branch rather than blank-pad the row.
+  const { activeMeshName } = useProbeContext();
 
   // The "click active tab to collapse, click any tab to open" rule composes the
   // store's two orthogonal primitives. Kept in the component so the store stays
@@ -84,15 +89,29 @@ export function ProbePanel() {
           className="flex flex-col h-full overflow-hidden border-l border-border-subtle"
           style={{ width: PROBE_BODY_WIDTH }}
         >
-          {/* Header — active tab label + collapse button */}
+          {/* Header — active tab label (title) + active mesh name
+              (subheading) + collapse button. The subheading replaces the
+              directory-path strip the Issues / PRs tabs used to render
+              individually, so the same context appears uniformly across
+              all 7 probe tabs. Bumped from 40px → 56px to fit the second
+              line comfortably. */}
           <div
-            className="flex items-center justify-between px-3 py-2 border-b border-border-subtle"
-            style={{ minHeight: 40 }}
+            className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border-subtle min-h-[56px]"
           >
-            <span className="text-xs text-text-secondary font-medium truncate flex items-center gap-1.5 min-w-0">
-              <span aria-hidden="true">{activeDef.icon}</span>
-              <span className="truncate">{activeDef.label}</span>
-            </span>
+            <div className="flex flex-col min-w-0 flex-1">
+              <span className="text-sm text-text-primary font-medium truncate flex items-center gap-1.5 min-w-0">
+                <span aria-hidden="true">{activeDef.icon}</span>
+                <span className="truncate">{activeDef.label}</span>
+              </span>
+              {activeMeshName && (
+                <span
+                  className="text-[11px] text-text-muted truncate min-w-0"
+                  title={activeMeshName}
+                >
+                  {activeMeshName}
+                </span>
+              )}
+            </div>
             <button
               type="button"
               onClick={toggleProbe}
