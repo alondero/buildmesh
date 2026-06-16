@@ -230,7 +230,7 @@ pub fn run() {
             commands::pr::get_current_branch,
             commands::pr::check_gh_auth,
             commands::pr::create_pr_for_mesh,
-            commands::pr::create_pr_node,
+            commands::agent::create_pr_node,
             commands::pr::get_repo_issues,
             commands::pr::get_open_pr_for_node,
             commands::pr::get_repo_pulls,

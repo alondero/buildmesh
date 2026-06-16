@@ -163,8 +163,10 @@ pub fn create_pending(
 }
 
 /// Like [`create_pending`], but also records the fork's owner login and
-/// clone URL when the PR is from a fork (issue #443). `commands::pr::create_pr_node`
-/// calls this directly with the fork fields populated for fork PRs.
+/// clone URL when the PR is from a fork (issue #443) and the PR's head
+/// commit SHA for exact-pinning (issue #444). `commands::agent::create_pr_node`
+/// calls this directly with the fork fields populated for fork PRs and
+/// `None, None` for same-repo PRs.
 #[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork(
     mesh_id: i64,
