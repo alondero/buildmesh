@@ -68,6 +68,16 @@ export function GitIssuesTab() {
   // stable for the duration of a session (adding a new provider requires
   // an app restart).
   const [providerList, setProviderList] = useState<ProviderEntry[]>([]);
+  // Per-row expand state for the issue body. Set keyed by issue number
+  // (not a single boolean) so cross-referencing two long issues stays
+  // possible — the dock is 360px wide, but a user can scroll it freely.
+  // Cleared on mesh change in the load effect below.
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const toggleExpanded = (n: number) => setExpanded(prev => {
+    const next = new Set(prev);
+    if (next.has(n)) next.delete(n); else next.add(n);
+    return next;
+  });
 
   useEffect(() => {
     if (activeMeshId === null) return;
@@ -80,6 +90,10 @@ export function GitIssuesTab() {
         // showing issues for a mesh the user no longer has focused.
         if (cancelled) return;
         setIssues(result);
+        // Issue numbers are mesh-scoped — a row expanded in the prior
+        // mesh would either be a no-op or accidentally open an
+        // unrelated row in the new mesh. Clear on every mesh change.
+        setExpanded(new Set());
       } catch (e) {
         if (cancelled) return;
         console.error('Failed to load issues:', e);
@@ -220,48 +234,110 @@ export function GitIssuesTab() {
           </div>
         ) : (
           <div className="space-y-1">
-            {issues.map(issue => (
-              <div
-                key={issue.number}
-                className="flex items-center gap-2 px-2 py-2 rounded hover:bg-bg-card transition-colors"
-              >
-                <div className="flex-1 min-w-0">
-                  <div>
-                    <span className="text-xs text-accent-cyan font-mono">#{issue.number}</span>
-                    <span className="text-sm text-text-primary ml-2">{issue.title}</span>
+            {issues.map(issue => {
+              const isExpanded = expanded.has(issue.number);
+              return (
+                <div
+                  key={issue.number}
+                  data-issue-row={issue.number}
+                  className="flex items-start gap-2 px-2 py-2 rounded hover:bg-bg-card transition-colors"
+                >
+                  {/* Left content area — clickable to expand/collapse the
+                      body. Title is wrapped in an <a> with stopPropagation
+                      so a title click navigates to GitHub without flipping
+                      expand. The Spawn button area below is its own
+                      stopPropagation island and never bubbles here. */}
+                  <div
+                    className="flex-1 min-w-0 cursor-pointer"
+                    onClick={() => toggleExpanded(issue.number)}
+                  >
+                    <div className="flex items-center gap-1">
+                      <span
+                        aria-hidden
+                        className={
+                          'text-text-muted text-[10px] w-3 text-center shrink-0 transition-transform ' +
+                          (isExpanded ? 'rotate-90' : '')
+                        }
+                      >
+                        ▸
+                      </span>
+                      <span className="text-xs text-accent-cyan font-mono">#{issue.number}</span>
+                      {issue.url ? (
+                        <a
+                          href={issue.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-sm text-text-primary hover:underline ml-1 truncate"
+                          title="Open on GitHub"
+                        >
+                          {issue.title}
+                        </a>
+                      ) : (
+                        // Upstream html_url is #[serde(default)] on the
+                        // Rust side, so a partial GitHub response yields
+                        // an empty url — render the title as plain text
+                        // to avoid a self-navigating <a href="">.
+                        <span className="text-sm text-text-primary ml-1 truncate">
+                          {issue.title}
+                        </span>
+                      )}
+                      {issue.url && (
+                        <a
+                          href={issue.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label="Open issue on GitHub"
+                          className="text-text-muted hover:text-accent-cyan transition-colors text-[11px] shrink-0"
+                          title="Open on GitHub"
+                        >
+                          ↗
+                        </a>
+                      )}
+                    </div>
+                    {issue.body && (
+                      isExpanded ? (
+                        <div
+                          data-issue-body-expanded
+                          className="mt-1 max-h-48 overflow-y-auto text-[10px] text-text-muted whitespace-pre-wrap break-words"
+                        >
+                          {issue.body}
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{issue.body}</p>
+                      )
+                    )}
                   </div>
-                  {issue.body && (
-                    <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{issue.body}</p>
-                  )}
-                </div>
 
-                {/* Split spawn button — primary uses default provider, ▾ opens picker */}
-                <div className="relative flex shrink-0" onMouseDown={e => e.stopPropagation()}>
-                  <button
-                    onClick={() => handleDefaultSpawn(issue)}
-                    disabled={spawning !== null}
-                    className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {spawning === issue.number ? 'Spawning...' : 'Spawn'}
-                  </button>
-                  <button
-                    onClick={() => setOpenDropdown(openDropdown === issue.number ? null : issue.number)}
-                    disabled={spawning !== null}
-                    className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    title="Choose provider"
-                  >
-                    ▾
-                  </button>
-                  {openDropdown === issue.number && (
-                    <ProviderDropdown
-                      meshId={issue.number}
-                      providers={providerList}
-                      onSelect={(providerId) => handleSpawn(issue, providerId)}
-                    />
-                  )}
+                  {/* Split spawn button — primary uses default provider, ▾ opens picker */}
+                  <div className="relative flex shrink-0" onMouseDown={e => e.stopPropagation()}>
+                    <button
+                      onClick={() => handleDefaultSpawn(issue)}
+                      disabled={spawning !== null}
+                      className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {spawning === issue.number ? 'Spawning...' : 'Spawn'}
+                    </button>
+                    <button
+                      onClick={() => setOpenDropdown(openDropdown === issue.number ? null : issue.number)}
+                      disabled={spawning !== null}
+                      className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="Choose provider"
+                    >
+                      ▾
+                    </button>
+                    {openDropdown === issue.number && (
+                      <ProviderDropdown
+                        meshId={issue.number}
+                        providers={providerList}
+                        onSelect={(providerId) => handleSpawn(issue, providerId)}
+                      />
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
