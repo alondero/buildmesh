@@ -31,7 +31,6 @@ draft: boolean,
  */
 head_ref: string, 
 /**
-<<<<<<< HEAD
  * Owner login of the PR's head repo (e.g. `"alice"` for a fork PR opened
  * from `alice/buildmesh`). Captured from `head.repo.owner.login`. For
  * same-repo PRs the head's repo IS the destination repo, so the value
@@ -47,8 +46,8 @@ head_repo_owner: string,
  * — the spawn path uses both to register the fork as a remote and fetch
  * the head ref from it. Empty when the field is missing.
  */
-head_repo_clone_url: string, };
-=======
+head_repo_clone_url: string, 
+/**
  * PR's head commit SHA (e.g. `"0123456789abcdef..."`). Mirrors
  * `services::github::PullRequest::head_sha` and is the exact-pinning
  * handle introduced in issue #444: the spawn path persists it on the
@@ -59,4 +58,3 @@ head_repo_clone_url: string, };
  * semantics.
  */
 head_sha: string, };
->>>>>>> f7aa529 (feat(pr-spawn): exact-pinning — reintroduce head_sha on the wire (#444))

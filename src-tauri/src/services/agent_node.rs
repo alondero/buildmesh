@@ -261,7 +261,7 @@ pub fn create_pending_with_source_pr_fork(
         source_issue,
         source_pr,
         source_pr_pinned_sha,
-        use_worktree_override: None,
+        None,
         name_override,
         head_repo_owner,
         head_repo_clone_url,
