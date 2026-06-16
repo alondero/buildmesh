@@ -393,12 +393,7 @@ export function GitPullRequestsTab() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-3 py-1.5 border-b border-border-subtle flex items-center justify-between gap-2">
-        {activeMeshPath ? (
-          <p className="text-[10px] text-text-muted truncate flex-1" title={activeMeshPath}>{activeMeshPath}</p>
-        ) : (
-          <span className="flex-1" />
-        )}
+      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-end gap-2">
         {/* Open / Closed segmented toggle */}
         <div className="flex shrink-0 rounded overflow-hidden border border-border-subtle">
           {(['open', 'closed'] as const).map((s) => (

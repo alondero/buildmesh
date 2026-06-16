@@ -2,9 +2,10 @@
  * GitIssuesTab — the Probe Panel's 🐙 tab body (issue #378).
  *
  * Thin wrapper port of the legacy `GitHubIssuesModal` (issue #113). The
- * dock supplies the header and close button, so this component drops the
- * modal's backdrop / header / Escape handler and renders the same list
- * + split-spawn button in the probe's 360px body.
+ * dock supplies the header, mesh-name subheading, and close button, so
+ * this component drops the modal's backdrop / header / Escape handler
+ * and renders the same list + split-spawn button in the probe's 360px
+ * body.
  *
  * Two-stage spawn (issue #302)
  * ----------------------------
@@ -24,14 +25,6 @@
  * The user sees the dock-close → node-appear transition in well under
  * 500ms instead of the 5-10s they used to wait for the old synchronous
  * `spawn_issue_agent`.
- *
- * Why `activeMeshPath` from the probe context (not `activePath`)
- * ---------------------------------------------------------------
- * `activePath` resolves to the focused node's working directory (a
- * worktree subdir) when a node is active, which is wrong for the mesh
- * subtitle — the path is the *mesh root*, not the worktree. The probe
- * context hook exposes `activeMeshPath` for exactly this case; we
- * don't reach into `meshesById` directly.
  */
 
 import { useState, useEffect } from 'react';
@@ -47,13 +40,10 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
 export function GitIssuesTab() {
-  const { activeMeshId, activeMeshPath } = useProbeContext();
+  const { activeMeshId } = useProbeContext();
   // `getDefaultProvider` is mesh-scoped — the only call that needs the
   // meshId directly, since it resolves the per-mesh > app-wide > default
-  // precedence chain server-side. The mesh path comes from the probe
-  // context (not the store directly) so the global-view fallback
-  // (`selectedMeshId === null`, mesh derived from the focused node)
-  // still has a path to render the subtitle.
+  // precedence chain server-side.
   const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
 
   const [issues, setIssues] = useState<GitHubIssue[]>([]);
@@ -188,11 +178,6 @@ export function GitIssuesTab() {
 
   return (
     <div className="flex flex-col h-full">
-      {activeMeshPath && (
-        <div className="px-3 py-1.5 border-b border-border-subtle">
-          <p className="text-[10px] text-text-muted truncate" title={activeMeshPath}>{activeMeshPath}</p>
-        </div>
-      )}
       <div className="flex-1 overflow-y-auto p-2">
         {loading ? (
           <div className="flex flex-col items-center justify-center py-8 gap-3">

@@ -157,12 +157,6 @@ describe('GitPullRequestsTab', () => {
     });
   });
 
-  it('renders the mesh path subtitle', async () => {
-    mockBackend();
-    render(<GitPullRequestsTab />);
-    expect(await screen.findByText('/repos/demo')).toBeTruthy();
-  });
-
   it('toggling to Closed refetches with state: "closed"', async () => {
     mockBackend();
     render(<GitPullRequestsTab />);

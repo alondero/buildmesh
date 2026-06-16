@@ -136,6 +136,32 @@ describe('ProbePanel', () => {
     expect(header.textContent).toContain('Session History');
   });
 
+  it('shows the active mesh name as a subheading in the header', () => {
+    // The shared dock header carries both the active tab label (title)
+    // and the active mesh name (subheading) so the user always knows
+    // which project the dock is anchored to without needing the
+    // directory path strip that the Issues / PRs tabs used to render.
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    const header = screen.getByRole('region', { name: 'Probe panel' });
+    // MESH.name is 'demo' (see fixture at the top of the file).
+    expect(header.textContent).toContain('demo');
+  });
+
+  it('omits the mesh-name subheading when no project is active', () => {
+    // Empty-state header: the title is still there, but with no mesh
+    // there is no name to render so the subheading line is omitted
+    // (not blank-padded) — keeps the no-project empty state tidy.
+    useMeshStore.setState({ meshesById: new Map(), selectedMeshId: null });
+    useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    const header = screen.getByRole('region', { name: 'Probe panel' });
+    expect(header.textContent).not.toContain('demo');
+  });
+
   it('renders a friendly empty state when no project is active', () => {
     useMeshStore.setState({ meshesById: new Map(), selectedMeshId: null });
     useAgentNodeStore.setState({ agentNodes: [], activeNodeId: null });
