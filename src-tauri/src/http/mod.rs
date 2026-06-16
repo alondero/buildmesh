@@ -397,6 +397,25 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         }
     }
 
+    // Coordinator drive API (ADR-0008 §5, issue #319): POST /nodes/{id}/prompt —
+    // write a prompt into a live node's PTY and return an honest verdict.
+    // Authenticated with the DRIVE-scoped token (a read-only token is rejected
+    // here) behind the drive kill-switch; both sit under the coordinator master
+    // switch, so disabling the surface disables drive too.
+    if method == "POST" {
+        if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/prompt") {
+            if !crate::coordinator::authenticate_drive(&headers, token.clone()) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            routes::coordinator::prompt(&mut lines, node_id, content_length).await;
+            return;
+        }
+    }
+
     // Attention webhook: POST /api/attention/{session_id}
     // Called by Claude Code's Stop hook — no token required (localhost-only).
     if method == "POST" && path_without_query.starts_with("/api/attention/") {

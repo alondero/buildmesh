@@ -2,14 +2,20 @@
 //! `coordinator::node_digest` module — all the read-model logic lives there so
 //! these handlers stay a transport adapter.
 //!
-//! This slice exposes `GET /nodes` (layered digests: spine + transcript
-//! enrichment) and `GET /nodes/{id}/log?tail=N` (raw recent transcript turns).
-//! Auth (the off-by-default master switch + read token) is enforced by the
-//! dispatcher in `http::mod` via `coordinator::authenticate_read` before either
-//! is reached.
+//! This module exposes the read routes — `GET /nodes` (layered digests: spine +
+//! transcript enrichment) and `GET /nodes/{id}/log?tail=N` (raw recent
+//! transcript turns) — plus the drive route `POST /nodes/{id}/prompt` (issue
+//! #319), which writes a prompt to a live node's PTY and returns an honest
+//! verdict. Auth (the off-by-default master switch + the read- or drive-scoped
+//! token) is enforced by the dispatcher in `http::mod` via
+//! `coordinator::authenticate_read` / `authenticate_drive` before any handler is
+//! reached.
 
-use crate::coordinator::{enrichment, node_digest};
+use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
+use crate::http::request;
+use tokio::io::{AsyncReadExt, BufStream};
+use tokio::net::TcpStream;
 
 /// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each
 /// digest is the always-available spine plus a transcript-derived rich layer;
@@ -46,5 +52,77 @@ pub fn log_json(node_id: i64, tail: usize) -> Option<String> {
         // A serialization failure still answers structurally rather than 500ing.
         "{\"status\":\"unavailable\",\"reason\":\"unreadable\"}".to_string()
     }))
+}
+
+/// The drive request body: `{"prompt": "..."}`. Strict (no serde default) so a
+/// malformed body is a 400, not a silent no-op — see the serde-default-fragility
+/// lesson the read side follows.
+#[derive(serde::Deserialize)]
+struct PromptRequest {
+    prompt: String,
+}
+
+/// `POST /nodes/{id}/prompt` — drive a live node by writing `prompt` to its PTY
+/// (ADR-0008 §5, issue #319). Auth (the drive-scoped token + drive kill-switch)
+/// is enforced by the dispatcher via `coordinator::authenticate_drive` before
+/// this is reached.
+///
+/// Outcomes:
+/// - unknown node id → `404`
+/// - empty prompt or malformed body → `400`
+/// - node not live (no agent process to write to) → `409` with a clear error
+/// - written → `200 {"verdict":"delivered"|"unverified"}` (honest verdict)
+pub async fn prompt(
+    lines: &mut BufStream<TcpStream>,
+    node_id: i64,
+    content_length: usize,
+) {
+    if content_length > 256 * 1024 {
+        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
+        return;
+    }
+    let mut body_bytes = vec![0u8; content_length];
+    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
+        let _ = request::write_status_only(lines, "400 Bad Request").await;
+        return;
+    }
+
+    let req: PromptRequest = match serde_json::from_slice(&body_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
+                .await;
+            return;
+        }
+    };
+    if req.prompt.trim().is_empty() {
+        request::send_json_error(lines, "400 Bad Request", "Prompt must not be empty").await;
+        return;
+    }
+
+    // Distinguish "no such node" (404) from "node exists but isn't drivable"
+    // (409) — the latter comes back from the driver as `NotLive`.
+    if db::get_agent_node_by_id(node_id).is_err() {
+        request::send_json_error(lines, "404 Not Found", "Unknown node").await;
+        return;
+    }
+
+    match drive::drive_node(node_id, &req.prompt) {
+        Ok(verdict) => {
+            let body = serde_json::json!({ "verdict": verdict }).to_string();
+            let _ = request::write_json(lines, "200 OK", &body).await;
+        }
+        Err(drive::DriveError::NotLive) => {
+            request::send_json_error(
+                lines,
+                "409 Conflict",
+                "Node is not live — only a node with a running agent can be driven",
+            )
+            .await;
+        }
+        Err(drive::DriveError::WriteFailed(e)) => {
+            request::send_json_error(lines, "500 Internal Server Error", &e).await;
+        }
+    }
 }
 

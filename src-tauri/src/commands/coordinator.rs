@@ -43,3 +43,23 @@ pub async fn set_coordinator_api_enabled(enabled: bool) -> Result<(), String> {
 pub async fn generate_coordinator_read_token() -> Result<String, String> {
     db::generate_coordinator_read_token().map_err(|e| e.to_string())
 }
+
+// --- Drive (write) side (issue #319) ---
+//
+// Like the read slice (#315), drive ships backend-first with no UI yet — these
+// commands are the kill-switch and token mint a later Settings surface drives.
+
+/// Flip the drive kill-switch (ADR-0008 §5). Defaults off and is independent of
+/// the read side, so read-only coordination can be granted without ever exposing
+/// the ability to write to a node's PTY.
+#[command]
+pub async fn set_coordinator_drive_enabled(enabled: bool) -> Result<(), String> {
+    db::set_coordinator_drive_enabled(enabled).map_err(|e| e.to_string())
+}
+
+/// Mint (or replace) the drive-scoped coordinator token and return it for the
+/// user to copy. Distinct from the read token: a read token can never drive.
+#[command]
+pub async fn generate_coordinator_drive_token() -> Result<String, String> {
+    db::generate_coordinator_drive_token().map_err(|e| e.to_string())
+}
