@@ -115,7 +115,7 @@ describe('useGitPathInvalidation (issue #357)', () => {
     // Code-review finding: the hook previously listed `cb` in the deps
     // array, which tore down and rebuilt the bus subscription on every
     // render of consumers that pass inline arrows (`AgentReviewPanel`,
-    // `ChangedFilesPanel`). The fix wraps `cb` in a ref and depends on
+    // `CenterDiffOverlay`). The fix wraps `cb` in a ref and depends on
     // `[path]` only. Pin: changing the `cb` ref alone must NOT trigger
     // a re-subscribe — the subscription count is the observable signal.
     //

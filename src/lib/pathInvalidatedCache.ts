@@ -9,7 +9,7 @@
  * issue #345) so React components that only need the invalidation callback
  * (no key, no cache) can share the same bus + `pathMatchesGitEvent` plumbing
  * without hand-rolling their own `listen(GIT_CHANGED, ...)` + cleanup pair.
- * Used by `AgentReviewPanel` and `ChangedFilesPanel`.
+ * Used by `AgentReviewPanel` and `CenterDiffOverlay`.
  *
  * Architecture
  * ------------
@@ -318,7 +318,7 @@ export function createPathInvalidatedCache<K, V>(
  * Use this from components that need the invalidation callback but don't
  * have a key+cache to manage — i.e. consumers for whom
  * `createPathInvalidatedCache` is overkill. Used directly by
- * `AgentReviewPanel` and `ChangedFilesPanel`; intentionally NOT used by
+ * `AgentReviewPanel` and `CenterDiffOverlay`; intentionally NOT used by
  * the `usePathInvalidatedQuery` hook (which subscribes via the
  * cache-bearing `client.subscribe(key, path, cb)` on its own client).
  * Issue #345.
