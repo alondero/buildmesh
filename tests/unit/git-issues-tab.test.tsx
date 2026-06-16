@@ -248,4 +248,144 @@ describe('GitIssuesTab (#378)', () => {
     mockBackend();
     expect(() => render(<GitIssuesTab />)).not.toThrow();
   });
+
+  it('expands the body to the full text when the body is clicked', async () => {
+    // The body is clamped to 2 lines by default; clicking the body
+    // reveals a scrollable, full-text container and drops the clamp.
+    // Re-clicking the body re-applies the clamp. We click the body
+    // element directly rather than the row's bounding box, because
+    // the title <a> inside the row has stopPropagation and would
+    // otherwise swallow a center-of-row click.
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Fix the wobble');
+    const row = title.closest('[data-issue-row]')!;
+    expect(row).toBeTruthy();
+
+    // Collapsed: the clamped <p> with line-clamp-2 is present.
+    const clampedBody = row.querySelector('p.line-clamp-2') as HTMLElement;
+    expect(clampedBody).toBeTruthy();
+    expect(clampedBody.textContent).toContain('wobbles under load');
+
+    // Expand — click the body (the user's actual click target).
+    await userEvent.click(clampedBody);
+    const expandedBody = row.querySelector('div.max-h-48, [data-issue-body-expanded]');
+    expect(expandedBody).toBeTruthy();
+    expect(expandedBody!.textContent).toBe('The foobar widget wobbles under load.');
+    // The clamp is gone — no line-clamp-2 element on the body now.
+    expect(row.querySelector('p.line-clamp-2')).toBeNull();
+
+    // Collapse — click the expanded body (the same region, now showing
+    // the full text) to re-apply the clamp.
+    const expandedBodyEl = row.querySelector(
+      'div.max-h-48, [data-issue-body-expanded]',
+    ) as HTMLElement;
+    await userEvent.click(expandedBodyEl);
+    expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
+    expect(row.querySelector('[data-issue-body-expanded], div.max-h-48')).toBeNull();
+  });
+
+  it('renders the title as an anchor pointing at the issue URL', async () => {
+    // The dock has no other route to GitHub — the title IS the link.
+    // It must open in a new tab (target=_blank) with the standard
+    // noopener/noreferrer rel pair (mirrors AiContextSection.tsx:64-68).
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const titleLink = (await screen.findByText('Fix the wobble')).closest('a')!;
+    expect(titleLink).toBeTruthy();
+    expect(titleLink.getAttribute('href')).toBe('https://github.com/acme/demo/issues/101');
+    expect(titleLink.getAttribute('target')).toBe('_blank');
+    expect(titleLink.getAttribute('rel') ?? '').toContain('noopener');
+    expect(titleLink.getAttribute('rel') ?? '').toContain('noreferrer');
+  });
+
+  it('renders the title as plain text (no link) when issue.url is empty', async () => {
+    // The Rust GitHubIssue struct has #[serde(default)] on the upstream
+    // html_url, so a partial GitHub response can reach the frontend as
+    // an empty string. A bare <a href=""> would self-navigate the
+    // WebView; the component should fall back to a plain <span> for
+    // the title and skip the ↗ icon entirely.
+    mockBackend({
+      issues: [
+        {
+          number: 200,
+          title: 'Mystery issue',
+          body: 'No html_url from upstream.',
+          url: '',
+          state: 'open',
+          labels: [],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Mystery issue');
+    // The title must NOT be wrapped in an <a>.
+    expect(title.closest('a')).toBeNull();
+    // The ↗ icon is gone too (both anchors are gated on issue.url).
+    expect(screen.queryByLabelText('Open issue on GitHub')).toBeNull();
+  });
+
+  it('does not toggle expand when the title link is clicked', async () => {
+    // The link has its own click target — clicking the link navigates
+    // to GitHub and must NOT also flip the row's expanded state. The
+    // onClick on the <a> calls stopPropagation to keep the row handler
+    // out of the way.
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const titleLink = (await screen.findByText('Fix the wobble')).closest('a')!;
+    await userEvent.click(titleLink);
+
+    const row = titleLink.closest('[data-issue-row]')!;
+    // Still collapsed — clamp still present, no scrollable container.
+    expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
+    expect(row.querySelector('[data-issue-body-expanded], div.max-h-48')).toBeNull();
+  });
+
+  it('clears expanded state when the active mesh changes', async () => {
+    // Switching meshes mid-session should reset the per-row expanded
+    // set — the issue numbers are not stable across meshes, so the
+    // previous expand set would either be a no-op or accidentally
+    // re-open an unrelated row in the new mesh. We mock the IPC to
+    // return different issue lists per meshId so the empty-state
+    // assertion in the middle of the test is meaningful.
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'get_repo_issues') {
+        const meshId = (args as { meshId: number } | undefined)?.meshId;
+        return Promise.resolve(meshId === MESH.id ? ISSUES : []);
+      }
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
+      if (cmd === 'start_node_background') return Promise.resolve(undefined);
+      return Promise.resolve({});
+    });
+    const { rerender } = render(<GitIssuesTab />);
+
+    const firstTitle = await screen.findByText('Fix the wobble');
+    const firstRow = firstTitle.closest('[data-issue-row]')!;
+    // Click the body (the user's click target) — the row's bounding
+    // box center is on the title <a> which has stopPropagation.
+    const firstBody = firstRow.querySelector('p.line-clamp-2') as HTMLElement;
+    await userEvent.click(firstBody);
+    expect(firstRow.querySelector('p.line-clamp-2')).toBeNull();
+
+    // Swap to a different mesh in the store. The load effect re-runs;
+    // expanded set is reset to a new empty Set. The new mesh has no
+    // issues, so the empty state appears.
+    useMeshStore.setState({ selectedMeshId: 99 });
+    rerender(<GitIssuesTab />);
+
+    expect(await screen.findByText('No open issues')).toBeTruthy();
+
+    // Switch back to mesh 42. Issue list reappears, all rows collapsed.
+    useMeshStore.setState({ selectedMeshId: MESH.id });
+    rerender(<GitIssuesTab />);
+    const resetTitle = await screen.findByText('Fix the wobble');
+    const resetRow = resetTitle.closest('[data-issue-row]')!;
+    expect(resetRow.querySelector('p.line-clamp-2')).toBeTruthy();
+  });
 });
