@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import {
   AgentNode,
   GitStatusEntry,
@@ -9,6 +9,7 @@ import {
   gitSummary,
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
+import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 
 type Props = {
   node: AgentNode;
@@ -28,9 +29,12 @@ export default function ChangesScreen({
   const [branch, setBranch] = useState<string | null>(null);
   const [ghOk, setGhOk] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Bump to force the load effect to re-run. The previous run's signal
+  // is aborted by useAsyncEffect's cleanup, so any in-flight Promise
+  // drops its setState instead of clobbering the new run's result.
+  const [reloadKey, setReloadKey] = useState(0);
 
-  const load = useCallback(() => {
-    let cancelled = false;
+  useAsyncEffect((signal) => {
     setError(null);
     Promise.all([
       gitStatus(node.id),
@@ -39,21 +43,17 @@ export default function ChangesScreen({
       ghAuthOk().catch(() => false),
     ])
       .then(([s, sum, br, gh]) => {
-        if (cancelled) return;
+        if (signal.aborted) return;
         setStatus(s);
         setSummary(sum);
         setBranch(br);
         setGhOk(gh);
       })
       .catch((e) => {
-        if (!cancelled) setError((e as Error).message);
+        if (signal.aborted) return;
+        setError((e as Error).message);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [node.id]);
-
-  useEffect(() => load(), [load]);
+  }, [node.id, reloadKey]);
 
   return (
     <div data-testid="changes-screen" className="screen">
@@ -78,7 +78,7 @@ export default function ChangesScreen({
         }
       >
         <button
-          onClick={load}
+          onClick={() => setReloadKey((k) => k + 1)}
           aria-label="Refresh changes"
           data-testid="changes-refresh"
           className="chip-btn"

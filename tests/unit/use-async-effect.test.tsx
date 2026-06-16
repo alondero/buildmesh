@@ -140,4 +140,52 @@ describe('useAsyncEffect (issue #349)', () => {
     rerender();
     expect(effect).toHaveBeenCalledTimes(1); // no re-run with stable []
   });
+
+  it('runs the returned cleanup on unmount, after aborting the signal', () => {
+    // Mirrors the WS + retry-timer sites: the effect owns a long-lived
+    // resource (timer, websocket) and must release it on cleanup. The
+    // helper must (a) call the user's cleanup and (b) abort the signal
+    // BEFORE the cleanup runs — otherwise a cleanup that re-checks
+    // `signal.aborted` would race the helper's own abort.
+    let signalAtCleanupTime: boolean | null = null;
+    const cleanup = vi.fn(() => {
+      signalAtCleanupTime = capturedSignal?.aborted ?? null;
+    });
+    let capturedSignal: AbortSignal | null = null;
+    const { unmount } = renderHook(() =>
+      useAsyncEffect((signal) => {
+        capturedSignal = signal;
+        return cleanup;
+      }),
+    );
+    expect(cleanup).not.toHaveBeenCalled();
+    unmount();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    // Signal must already be aborted when the user cleanup runs, so a
+    // user cleanup that consults the signal sees the truth.
+    expect(signalAtCleanupTime).toBe(true);
+  });
+
+  it('runs the returned cleanup on dep change for the PREVIOUS run only', () => {
+    // The contract: a dep change re-runs the effect, but the previous
+    // run's cleanup is invoked first. This is the same contract as
+    // useEffect — the helper just runs `controller.abort()` first.
+    const cleanups: string[] = [];
+    const { rerender, unmount } = renderHook(
+      ({ dep }: { dep: number }) =>
+        useAsyncEffect(
+          (_signal) => {
+            return () => cleanups.push(`cleanup-for-${dep}`);
+          },
+          [dep],
+        ),
+      { initialProps: { dep: 1 } },
+    );
+    rerender({ dep: 2 });
+    expect(cleanups).toEqual(['cleanup-for-1']);
+    rerender({ dep: 3 });
+    expect(cleanups).toEqual(['cleanup-for-1', 'cleanup-for-2']);
+    unmount();
+    expect(cleanups).toEqual(['cleanup-for-1', 'cleanup-for-2', 'cleanup-for-3']);
+  });
 });

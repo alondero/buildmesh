@@ -14,6 +14,7 @@ import {
 } from "../api";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { ProviderIcon } from "../../components/Providers/ProviderIcon";
+import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
@@ -522,14 +523,13 @@ function useWsEvents(onEvent: () => void) {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
 
-  useEffect(() => {
-    let cancelled = false;
+  useAsyncEffect((signal) => {
     let ws: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let attempt = 0;
 
     const connect = () => {
-      if (cancelled) return;
+      if (signal.aborted) return;
       try {
         ws = new WebSocket(eventsWsUrl());
       } catch {
@@ -550,10 +550,10 @@ function useWsEvents(onEvent: () => void) {
         }
       };
       ws.onclose = () => {
-        if (!cancelled) scheduleReconnect();
+        if (!signal.aborted) scheduleReconnect();
       };
       ws.onerror = () => {
-        if (!cancelled) scheduleReconnect();
+        if (!signal.aborted) scheduleReconnect();
       };
     };
 
@@ -566,7 +566,6 @@ function useWsEvents(onEvent: () => void) {
 
     connect();
     return () => {
-      cancelled = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       if (ws) {
         ws.onclose = null;

@@ -50,7 +50,7 @@
  * either boundary).
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import {
   getRepoPulls,
   getPrMergeability,
@@ -63,6 +63,7 @@ import {
 } from '../../lib/tauri';
 import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useUIStore } from '../../stores/uiStore';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
@@ -137,8 +138,13 @@ export function GitPullRequestsTab() {
       else next.add(n);
       return next;
     });
+  // Bump to force the load effect to re-run — the previous run's signal
+  // is aborted by useAsyncEffect's cleanup, so any in-flight getRepoPulls
+  // drops its setState instead of clobbering the new run's result. Used
+  // by `handleMerge` to refetch after a successful squash-merge (issue #349).
+  const [reloadKey, setReloadKey] = useState(0);
 
-  const load = useCallback(async (signal: { cancelled: boolean }) => {
+  useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
     setLoading(true);
     setError(null);
@@ -147,28 +153,21 @@ export function GitPullRequestsTab() {
     setMergeError({});
     // PR numbers don't carry across mesh/filter changes (issue #461).
     setExpanded(new Set());
-    try {
-      const result = await getRepoPulls(activeMeshId, stateFilter);
-      // The mesh / filter could have changed mid-flight — drop a stale result.
-      if (signal.cancelled) return;
-      setPrs(result);
-    } catch (e) {
-      if (signal.cancelled) return;
-      console.error('Failed to load pull requests:', e);
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (!signal.cancelled) setLoading(false);
-    }
-  }, [activeMeshId, stateFilter]);
-
-  useEffect(() => {
-    if (activeMeshId === null) return;
-    const signal = { cancelled: false };
-    load(signal);
-    return () => {
-      signal.cancelled = true;
-    };
-  }, [activeMeshId, stateFilter, load]);
+    (async () => {
+      try {
+        const result = await getRepoPulls(activeMeshId, stateFilter);
+        // The mesh / filter could have changed mid-flight — drop a stale result.
+        if (signal.aborted) return;
+        setPrs(result);
+      } catch (e) {
+        if (signal.aborted) return;
+        console.error('Failed to load pull requests:', e);
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!signal.aborted) setLoading(false);
+      }
+    })();
+  }, [activeMeshId, stateFilter, reloadKey]);
 
   // Enrich each open, non-draft PR with its mergeability in parallel. Closed
   // PRs can't be merged, and drafts are flagged without a call, so both skip.
@@ -186,9 +185,8 @@ export function GitPullRequestsTab() {
   // can do without spamming GitHub; the next list reload retries from scratch.
   // Cleanup clears every pending retry timer so a filter toggle / mesh change /
   // unmount tears down the whole chain at once.
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (activeMeshId === null || stateFilter !== 'open') return;
-    let cancelled = false;
     // Per-PR retry timers + attempt counts. Maps are owned by this effect
     // instance; cleanup discards them and clears the timers.
     const retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -199,7 +197,7 @@ export function GitPullRequestsTab() {
     const probe = (pr: GitHubPullRequest) => {
       getPrMergeability(activeMeshId, pr.number)
         .then((info) => {
-          if (cancelled) return;
+          if (signal.aborted) return;
           setMergeability((prev) => ({ ...prev, [pr.number]: info }));
           // Still computing — schedule a bounded retry.
           if (info.mergeable === null) {
@@ -209,7 +207,7 @@ export function GitPullRequestsTab() {
               const delay = BASE_RETRY_DELAY_MS * attempt;
               const timer = setTimeout(() => {
                 retryTimers.delete(pr.number);
-                if (cancelled) return;
+                if (signal.aborted) return;
                 probe(pr);
               }, delay);
               retryTimers.set(pr.number, timer);
@@ -233,7 +231,6 @@ export function GitPullRequestsTab() {
       });
 
     return () => {
-      cancelled = true;
       for (const timer of retryTimers.values()) clearTimeout(timer);
       retryTimers.clear();
     };
@@ -243,19 +240,15 @@ export function GitPullRequestsTab() {
   // `GitIssuesTab`). Platform filtering is enforced server-side via
   // `AgentProvider::available_on()`. Re-fetching on every render would be
   // wasteful, and the list is stable for the lifetime of a session.
-  useEffect(() => {
-    let cancelled = false;
+  useAsyncEffect((signal) => {
     listProviders()
       .then((backendProviders) => {
-        if (cancelled) return;
+        if (signal.aborted) return;
         setProviderList(
           backendProviders.map((p) => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
         );
       })
       .catch((err) => console.error('listProviders failed:', err));
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   // Close the provider dropdown when clicking outside it. The dropdown
@@ -386,8 +379,10 @@ export function GitPullRequestsTab() {
     });
     try {
       await mergePr(pr.url);
-      // Refetch so the merged PR drops out of the open list.
-      load({ cancelled: false });
+      // Refetch so the merged PR drops out of the open list. Bumping
+      // reloadKey aborts the in-flight effect (if any) and re-runs it
+      // — see the useAsyncEffect deps at the top of this component.
+      setReloadKey((k) => k + 1);
     } catch (e) {
       console.error('Failed to merge PR:', e);
       setMergeError((prev) => ({

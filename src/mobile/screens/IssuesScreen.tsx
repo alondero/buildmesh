@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   AgentNode,
   GitHubIssue,
@@ -7,6 +7,7 @@ import {
   spawnFromIssue,
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
+import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 
 type Props = {
   mesh: Mesh;
@@ -25,18 +26,16 @@ export default function IssuesScreen({ mesh, onBack, onSpawned }: Props) {
   // the issue (body preview, GitHub link), the explicit button commits.
   const [selectedIssue, setSelectedIssue] = useState<number | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  useAsyncEffect((signal) => {
     listIssues(mesh.id)
       .then((i) => {
-        if (!cancelled) setIssues(i);
+        if (signal.aborted) return;
+        setIssues(i);
       })
       .catch((e) => {
-        if (!cancelled) setError((e as Error).message);
+        if (signal.aborted) return;
+        setError((e as Error).message);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [mesh.id]);
 
   const spawn = async (issue: GitHubIssue) => {

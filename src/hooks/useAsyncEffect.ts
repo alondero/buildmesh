@@ -5,21 +5,24 @@
  * callback an `AbortSignal`. The signal is `aborted` on cleanup (unmount
  * or dep change). Async work inside `fn` can gate setState on
  * `signal.aborted` to drop stale resolutions, replacing the hand-rolled
- * `let cancelled = false` pattern from the path-invalidated cache hooks.
+ * `let cancelled = false` pattern.
  *
- * The hook can also `signal.addEventListener('abort', ...)` — used by
- * the subscribe-effect pattern in `usePathInvalidatedQuery`, where the
- * bus callback's body short-circuits if the effect has been cleaned up.
+ * The callback may return a cleanup function (typed as `() => void`) for
+ * symmetric teardown pairs — the helper aborts the signal first, then
+ * runs the returned cleanup. The signal is also `EventTarget`-shaped, so
+ * `signal.addEventListener('abort', cb)` works for the subscribe-effect
+ * pattern in `usePathInvalidatedQuery`, where the bus callback's body
+ * short-circuits if the effect has been cleaned up.
  *
- * Why a helper rather than `useEffect` + AbortController inline
- * ------------------------------------------------------------
- * - The cleanup contract is documented once, here.
- * - The five hooks that use the pattern (`usePathInvalidatedQuery`,
- *   `useMeshGitStatus`, `useGitPathInvalidation`, `useFileDropToTerminal`,
- *   and the focus effect in `usePathInvalidatedQuery`) drop the
- *   `let cancelled = false; ... return () => { cancelled = true; };`
- *   boilerplate.
- * - Future async work in new hooks follows the same pattern by default.
+ * If you're adding a new useEffect that awaits a fetch/IPC and
+ * setStates the result, prefer this helper. If your effect owns a
+ * long-lived non-React resource (websocket, xterm, RAF loop,
+ * ResizeObserver) the cleanup must release, return a cleanup function
+ * from the effect — the helper runs it after aborting the signal. The
+ * `cancelled` flag belongs to the helper in that case.
+ *
+ * For the full migration list (per-file), see `git log --oneline --grep
+ * '#349'` or the PR that closed the issue.
  */
 
 import { DependencyList, useEffect } from 'react';
