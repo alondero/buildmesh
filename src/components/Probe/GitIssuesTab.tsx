@@ -37,6 +37,7 @@ import {
 } from '../../lib/tauri';
 import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
 export function GitIssuesTab() {
@@ -69,54 +70,46 @@ export function GitIssuesTab() {
     return next;
   });
 
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
-    let cancelled = false;
     const load = async () => {
       try {
         const result = await getRepoIssues(activeMeshId);
         // The mesh could have changed between opening the modal and the
         // IPC returning — drop the result in that case rather than
         // showing issues for a mesh the user no longer has focused.
-        if (cancelled) return;
+        if (signal.aborted) return;
         setIssues(result);
         // Issue numbers are mesh-scoped — a row expanded in the prior
         // mesh would either be a no-op or accidentally open an
         // unrelated row in the new mesh. Clear on every mesh change.
         setExpanded(new Set());
       } catch (e) {
-        if (cancelled) return;
+        if (signal.aborted) return;
         console.error('Failed to load issues:', e);
         setError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!signal.aborted) setLoading(false);
       }
     };
     setLoading(true);
     setError(null);
     load();
-    return () => {
-      cancelled = true;
-    };
   }, [activeMeshId]);
 
   // Fetch the provider list once at mount. Platform filtering (e.g.
   // macOS-only Anthropic) is enforced server-side via
   // AgentProvider::available_on(). Re-fetching on every render would
   // be wasteful, and the list is stable for the lifetime of a session.
-  useEffect(() => {
-    let cancelled = false;
+  useAsyncEffect((signal) => {
     listProviders()
       .then(backendProviders => {
-        if (cancelled) return;
+        if (signal.aborted) return;
         setProviderList(
           backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
         );
       })
       .catch(err => console.error('listProviders failed:', err));
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   // Close the provider dropdown when clicking outside of it. The dropdown

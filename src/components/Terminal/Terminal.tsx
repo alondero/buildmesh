@@ -6,6 +6,7 @@ import * as api from '../../lib/tauri';
 import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 
 export { type TerminalInstance } from './TerminalRegistry';
 export const terminalManager = new TerminalRegistry();
@@ -252,14 +253,20 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   // element out of the DOM and re-appended it — a visible reflow and a
   // micro-hang. The status-driven auto-spawn lives in its own effect below so
   // it no longer drags the DOM lifecycle with it.
-  useEffect(() => {
+  //
+  // The xterm itself is owned by `TerminalRegistry` — `attach`/`detach`
+  // reference-count it. The cleanup here releases the things this effect
+  // *adds on top of* the registry's term: the scroll listener, the
+  // `onFindRequest` callback, and the registry ref. The helper's returned
+  // cleanup runs after the signal abort, so any pending `.then` callback
+  // for `attach` short-circuits on `signal.aborted` first.
+  useAsyncEffect((signal) => {
     if (!containerRef.current) return;
-    const cancelled = { current: false };
     const container = containerRef.current;
     setAtBottom(true);
 
     terminalManager.attach(sessionId, container).then((inst) => {
-      if (cancelled.current || !inst) return;
+      if (signal.aborted || !inst) return;
       instRef.current = inst;
       inst.onFindRequest = () => setSearchOpen(true);
 
@@ -277,7 +284,6 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     });
 
     return () => {
-      cancelled.current = true;
       const inst = terminalManager.getInstance(sessionId);
       if (inst) inst.onFindRequest = null;
       scrollDisposableRef.current?.dispose(); // allow-dispose — scroll listener, not the xterm terminal
@@ -299,14 +305,17 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   // first lines of output inside a wider pane (#302). `attach` is idempotent
   // with the sibling effect's call: when both fire on first mount, the
   // second one is a no-op (`attachToDOM` short-circuits on `inst.opened`).
-  useEffect(() => {
+  //
+  // The xterm itself is owned by `TerminalRegistry`; this effect only
+  // needs to drop its setState on cleanup (no resource teardown). The
+  // helper's signal-abort covers it.
+  useAsyncEffect((signal) => {
     if (!node || !node.provider || node.status !== 'idle') return;
     if (!containerRef.current) return;
     const container = containerRef.current;
-    let cancelled = false;
     (async () => {
       const inst = await terminalManager.attach(sessionId, container);
-      if (cancelled || !inst) return;
+      if (signal.aborted || !inst) return;
       const dims = inst.fitAddon.proposeDimensions();
       try {
         await spawnAgent(sessionId, node.provider, dims?.rows, dims?.cols);
@@ -314,7 +323,6 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
         console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
       }
     })();
-    return () => { cancelled = true; };
   }, [sessionId, node?.provider, node?.status, spawnAgent]);
 
   // Resolve the default provider label for the handover menu item. The
@@ -323,23 +331,22 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   // rejection-evict — so the N panes of a mesh share one
   // `get_default_provider` + one `list_providers` call instead of firing
   // 2×N IPC calls on every mesh switch.
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (!node) return;
-    let cancelled = false;
     (async () => {
       try {
         const [defProvider, providers] = await Promise.all([
           api.getDefaultProvider(node.mesh_id),
           api.listProviders(),
         ]);
-        if (cancelled) return;
+        if (signal.aborted) return;
         const match = providers.find(p => p.id === defProvider);
         setHandoverProviderLabel(match?.label ?? defProvider);
       } catch {
-        if (!cancelled) setHandoverProviderLabel('Default');
+        if (signal.aborted) return;
+        setHandoverProviderLabel('Default');
       }
     })();
-    return () => { cancelled = true; };
   }, [node?.mesh_id]);
 
   return (

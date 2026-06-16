@@ -47,6 +47,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
@@ -96,43 +97,35 @@ export function SessionHistoryTab() {
 
   // Fetch providers once at mount. Platform filtering is enforced
   // server-side; the list is stable for the lifetime of a session.
-  useEffect(() => {
-    let cancelled = false;
+  useAsyncEffect((signal) => {
     listProviders()
       .then(backendProviders => {
-        if (cancelled) return;
+        if (signal.aborted) return;
         setProviderList(
           backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
         );
       })
       .catch(err => console.error('listProviders failed:', err));
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (activeMeshId === null || activeMeshPath === null) return;
-    let cancelled = false;
     const load = async () => {
       try {
         const result = await discoverSessions(activeMeshId, activeMeshPath);
-        if (cancelled) return;
+        if (signal.aborted) return;
         setSessions(result);
       } catch (e) {
-        if (cancelled) return;
+        if (signal.aborted) return;
         console.error('Failed to discover sessions:', e);
         setError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!signal.aborted) setLoading(false);
       }
     };
     setLoading(true);
     setError(null);
     load();
-    return () => {
-      cancelled = true;
-    };
   }, [activeMeshId, activeMeshPath]);
 
   const filtered = useMemo(() => {

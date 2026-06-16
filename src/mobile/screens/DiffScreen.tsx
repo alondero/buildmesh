@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { AgentNode, DiffHunk, DiffResult, diffFile } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
+import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 
 type Props = {
   node: AgentNode;
@@ -15,18 +16,16 @@ export default function DiffScreen({ node, filePath, onBack }: Props) {
   const [diff, setDiff] = useState<DiffResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
+  useAsyncEffect((signal) => {
     diffFile(node.id, filePath)
       .then((d) => {
-        if (!cancelled) setDiff(d);
+        if (signal.aborted) return;
+        setDiff(d);
       })
       .catch((e) => {
-        if (!cancelled) setError((e as Error).message);
+        if (signal.aborted) return;
+        setError((e as Error).message);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [node.id, filePath]);
 
   return (
