@@ -1,4 +1,4 @@
-import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
+import { createPathKeyedCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getGitSummary, type GitSummary } from '../lib/tauri';
 
@@ -6,7 +6,12 @@ import { getGitSummary, type GitSummary } from '../lib/tauri';
 // per hook family. The `useGitSummary` consumer is a single component, but
 // multiple instances of it (one per mesh/node) share this client and dedup
 // their fetches via the primitive's pending map.
-const summaryClient = createPathInvalidatedCache<string, GitSummary>({
+//
+// `createPathKeyedCache` is the right factory here: the key IS the git path
+// (the IPC is `getGitSummary(path: string)`), so the key doubles as the
+// GIT_CHANGED subscription path. Issue #347 split this shape out from the
+// old single `createPathInvalidatedCache` factory.
+const summaryClient = createPathKeyedCache<GitSummary>({
   fetcher: getGitSummary,
   name: 'useGitSummary',
 });
@@ -28,7 +33,6 @@ export function useGitSummary(gitPath: string | null): {
 } {
   const { data, loading, refresh } = usePathInvalidatedQuery(
     summaryClient,
-    gitPath,
     gitPath,
   );
   // Match the original hook's public shape: hide zero-total summaries as

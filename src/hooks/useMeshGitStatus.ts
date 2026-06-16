@@ -35,7 +35,6 @@ export function useMeshGitStatus(meshPath: string | null): MeshGitStatus | null 
   const { data: files, loading, refresh } = usePathInvalidatedQuery(
     gitStatusClient,
     meshPath,
-    meshPath,
     { enabled: false },
   );
 

@@ -1,4 +1,4 @@
-import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
+import { createPathKeyedCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
 
@@ -6,7 +6,12 @@ import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
 // the 🌳 Worktree Manager tab (node path) both read through this hook, so
 // two views of the same path dedupe onto one fetch + one GIT_CHANGED
 // subscription.
-const branchStatusClient = createPathInvalidatedCache<string, GitBranchStatus>({
+//
+// `createPathKeyedCache` is the right factory here: the IPC is
+// `getGitBranchStatus(path: string)`, so the key IS the path. Issue #347
+// split this single-key shape out from the old single
+// `createPathInvalidatedCache` factory.
+const branchStatusClient = createPathKeyedCache<GitBranchStatus>({
   fetcher: getGitBranchStatus,
   name: 'gitBranchStatus',
 });
@@ -27,7 +32,6 @@ export function useGitBranchStatus(gitPath: string | null): {
 } {
   const { data, refresh } = usePathInvalidatedQuery(
     branchStatusClient,
-    gitPath,
     gitPath,
     { refetchOnFocus: true },
   );

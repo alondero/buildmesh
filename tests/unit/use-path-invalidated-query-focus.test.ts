@@ -16,7 +16,7 @@ vi.mock('@tauri-apps/api/window', () => ({
   }),
 }));
 
-import { createPathInvalidatedCache } from '../../src/lib/pathInvalidatedCache';
+import { createPathKeyedCache } from '../../src/lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from '../../src/hooks/usePathInvalidatedQuery';
 
 beforeEach(() => {
@@ -26,12 +26,15 @@ beforeEach(() => {
 describe('usePathInvalidatedQuery refetchOnFocus', () => {
   it('refetches when the window regains focus (opt-in)', async () => {
     let calls = 0;
-    const client = createPathInvalidatedCache<string, number>({
+    const client = createPathKeyedCache<number>({
       fetcher: async () => ++calls,
     });
 
+    // Single-key call site: 'k' doubles as the GIT_CHANGED subscription
+    // path. Issue #347 split the path-keyed shape out of the old
+    // `createPathInvalidatedCache` factory.
     const { result } = renderHook(() =>
-      usePathInvalidatedQuery(client, 'k', 'k', { refetchOnFocus: true }),
+      usePathInvalidatedQuery(client, 'k', { refetchOnFocus: true }),
     );
     await waitFor(() => expect(result.current.data).toBe(1));
 
@@ -52,12 +55,12 @@ describe('usePathInvalidatedQuery refetchOnFocus', () => {
 
   it('does not subscribe to focus when the option is off (default)', async () => {
     let calls = 0;
-    const client = createPathInvalidatedCache<string, number>({
+    const client = createPathKeyedCache<number>({
       fetcher: async () => ++calls,
     });
 
     const { result } = renderHook(() =>
-      usePathInvalidatedQuery(client, 'k', 'k'),
+      usePathInvalidatedQuery(client, 'k'),
     );
     await waitFor(() => expect(result.current.data).toBe(1));
 

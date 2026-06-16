@@ -1,4 +1,4 @@
-import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
+import { createPathKeyedCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getGitStatus, type GitStatus } from '../lib/tauri';
 
@@ -9,8 +9,13 @@ import { getGitStatus, type GitStatus } from '../lib/tauri';
  * (the badges) — dedupes the fetch and shares one GIT_CHANGED subscription
  * through the primitive. Two panels rendering the same Mesh no longer hit
  * `get_git_status` twice.
+ *
+ * `createPathKeyedCache` is the right factory here: the IPC is
+ * `getGitStatus(path: string)`, so the key IS the path — there's no entity
+ * id separate from the subscription path. Issue #347 split this single-key
+ * shape out from the old single `createPathInvalidatedCache` factory.
  */
-export const gitStatusClient = createPathInvalidatedCache<string, GitStatus[]>({
+export const gitStatusClient = createPathKeyedCache<GitStatus[]>({
   fetcher: getGitStatus,
   name: 'gitStatus',
 });
@@ -28,7 +33,6 @@ export function useChangedFiles(rootPath: string | null): {
 } {
   const { data, loading } = usePathInvalidatedQuery(
     gitStatusClient,
-    rootPath,
     rootPath,
   );
   return { files: data ?? [], loading };
