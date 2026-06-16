@@ -26,6 +26,14 @@ interface ResizablePanesProps {
 
 function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: ResizablePanesProps) {
   const [widths, setWidths] = useState(() => equalSizes(nodes.length));
+  // Issue #301: keep a ref of the latest `widths` updated synchronously per
+  // render. The drag-state machine below snapshots from this ref in
+  // mousedown, NOT from the closed-over `widths` state — without the ref,
+  // a fast second drag would snapshot the pre-first-drag widths and the
+  // pane divider would visibly jump. The same pattern lives in
+  // GridSplitter (lines 41–46 there) and `src/hooks/useResizable.ts`.
+  const widthsRef = useRef(widths);
+  widthsRef.current = widths;
   const resizingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthsRef = useRef<number[]>([]);
@@ -41,7 +49,9 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
     resizingRef.current = true;
     dragIndexRef.current = index;
     startXRef.current = e.clientX;
-    startWidthsRef.current = [...widths];
+    // BUG FIX (#301): snapshot from widthsRef (kept in sync per render),
+    // NOT from the closed-over `widths` state. See file-level comment.
+    startWidthsRef.current = [...widthsRef.current];
     containerRef.current = document.getElementById('grid-panes-container');
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';

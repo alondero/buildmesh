@@ -1,6 +1,7 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { getGitStatus, diffFileAgainstHead, type GitStatus, type DiffResult } from '../../lib/tauri';
 import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
+import { useResizable } from '../../hooks/useResizable';
 
 interface ChangedFilesPanelProps {
   projectPath: string;
@@ -16,41 +17,20 @@ export function ChangedFilesPanel({ projectPath, isOpen, width, onWidthChange, o
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [diffLoading, setDiffLoading] = useState<string | null>(null);
-  const [isResizing, setIsResizing] = useState(false);
-  const resizingRef = useRef(false);
-  const startXRef = useRef(0);
-  const startWidthRef = useRef(0);
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    resizingRef.current = true;
-    startXRef.current = e.clientX;
-    startWidthRef.current = width;
-    setIsResizing(true);
-  };
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!resizingRef.current) return;
-      const delta = e.clientX - startXRef.current;
-      const newWidth = Math.max(200, Math.min(480, startWidthRef.current - delta));
-      onWidthChange(newWidth);
-    };
-
-    const handleMouseUp = () => {
-      if (resizingRef.current) {
-        resizingRef.current = false;
-        setIsResizing(false);
-      }
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, []);
+  // Issue #301: useResizable keeps a `valueRef` updated synchronously per
+  // render and snapshots from that ref in mousedown — the previous
+  // implementation snapshotted `startWidthRef.current = width` from
+  // closed-over state, which gave a stale baseline on the second drag of a
+  // fast double-drag and made the handle visibly jump.
+  // `side: 'left'` mirrors the original (this panel's resize handle is on
+  // its left edge, so dragging right shrinks the panel).
+  const { isResizing, handleMouseDown } = useResizable({
+    value: width,
+    min: 200,
+    max: 480,
+    side: 'left',
+    onChange: onWidthChange,
+  });
 
   const fetchStatus = () => {
     if (!isOpen || !projectPath) return;

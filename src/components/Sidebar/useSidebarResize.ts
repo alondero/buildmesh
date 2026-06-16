@@ -1,45 +1,35 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState } from 'react';
+import { useResizable } from '../../hooks/useResizable';
 
 const MIN_WIDTH = 192;
 const MAX_WIDTH = 480;
 const DEFAULT_WIDTH = 256;
 
+/**
+ * Sidebar's width-tracker. Thin wrapper around the shared `useResizable`
+ * hook (issue #301) — owns `width` as local state and exposes
+ * `{ width, isResizing, handleMouseDown }` for the resize handle in
+ * `Sidebar.tsx`.
+ *
+ * Previously this hook re-implemented the drag-state machine inline
+ * (`isResizing` state, `resizingRef`/`startXRef`/`startWidthRef` refs, plus
+ * a `useEffect` installing document mousemove/mouseup listeners). That
+ * implementation had a stale-closure bug: the mousedown handler snapshotted
+ * `startWidthRef.current = width` from closed-over state, and on the second
+ * drag of a fast double-drag React had not yet flushed the first drag's
+ * `setWidth(...)` — so the second drag started from a stale baseline and
+ * the handle visibly jumped by 10–30px. The shared hook keeps a
+ * `valueRef` updated synchronously in the render body and snapshots from
+ * that ref. See `src/hooks/useResizable.ts` for the full analysis.
+ */
 export function useSidebarResize(initialWidth = DEFAULT_WIDTH) {
   const [width, setWidth] = useState(initialWidth);
-  const [isResizing, setIsResizing] = useState(false);
-  const resizingRef = useRef(false);
-  const startXRef = useRef(0);
-  const startWidthRef = useRef(initialWidth);
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    resizingRef.current = true;
-    startXRef.current = e.clientX;
-    startWidthRef.current = width;
-    setIsResizing(true);
-  };
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!resizingRef.current) return;
-      const delta = e.clientX - startXRef.current;
-      setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startWidthRef.current + delta)));
-    };
-
-    const handleMouseUp = () => {
-      if (resizingRef.current) {
-        resizingRef.current = false;
-        setIsResizing(false);
-      }
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, []);
-
+  const { isResizing, handleMouseDown } = useResizable({
+    value: width,
+    min: MIN_WIDTH,
+    max: MAX_WIDTH,
+    side: 'right', // Sidebar sits on the left; dragging the right edge right grows it.
+    onChange: setWidth,
+  });
   return { width, isResizing, handleMouseDown };
 }
