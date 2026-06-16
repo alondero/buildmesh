@@ -22,7 +22,6 @@ export type AgentNode = { id: number, mesh_id: number, name: string, path: strin
  */
 source_pr: number | null, 
 /**
-<<<<<<< HEAD
  * GitHub owner login of the PR's head repo (issue #443). Only set for
  * PR-spawned nodes where the head lives on a fork — when `Some`,
  * `spawn_agent_inner` runs `git remote add fork-<owner> <clone_url>` and
@@ -39,8 +38,8 @@ head_repo_owner: string | null,
  * can be fetched without the user pre-configuring it. `None` for
  * same-repo PRs and for issue-spawned / hand-spawned nodes.
  */
-head_repo_clone_url: string | null, position: number, created_at: string, };
-=======
+head_repo_clone_url: string | null, 
+/**
  * PR's head commit SHA at spawn time (issue #444). Exact-pinning handle:
  * `spawn_agent_inner` reads the local `origin/<head_ref>` SHA after
  * `git fetch` and emits a `pr_sha_drift` warning via `mesh-sync-warning`
@@ -52,4 +51,3 @@ head_repo_clone_url: string | null, position: number, created_at: string, };
  * fallback introduced in #420.
  */
 source_pr_pinned_sha: string | null, position: number, created_at: string, };
->>>>>>> f7aa529 (feat(pr-spawn): exact-pinning — reintroduce head_sha on the wire (#444))

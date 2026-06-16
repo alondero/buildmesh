@@ -208,6 +208,10 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
         // "same-repo PR" (the #420 origin/<head_ref> branch).
         let head = raw.head;
         let head_ref = head.as_ref().map(|h| h.ref_.clone()).unwrap_or_default();
+        // Read `head_sha` from `head.as_ref()` before `head` is moved into the
+        // `and_then` below. The struct-init shorthand at the bottom just hands
+        // the value through unchanged.
+        let head_sha = head.as_ref().map(|h| h.sha.clone()).unwrap_or_default();
         let (head_repo_owner, head_repo_clone_url) = match head.and_then(|h| h.repo) {
             Some(repo) => (
                 repo.owner.map(|o| o.login).unwrap_or_default(),
@@ -225,7 +229,7 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             head_ref,
             head_repo_owner,
             head_repo_clone_url,
-            head_sha: raw.head.map(|h| h.sha).unwrap_or_default(),
+            head_sha,
         })
     }
 }
