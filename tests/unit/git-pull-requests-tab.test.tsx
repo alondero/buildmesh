@@ -617,4 +617,107 @@ describe('GitPullRequestsTab', () => {
       expect(screen.queryByText('Spawning...')).toBeNull();
     });
   });
+
+  // ----- Expand body + title link (issue #461) --------------------------
+
+  // Per memory feedback-probe-tab-test-and-jsdoc-gotchas §4: row's
+  // bounding-box center is on the title <a> (stopPropagation), so
+  // click the body / link directly, not the row.
+  it('expands the body to the full text when the body is clicked', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Add widget');
+    const row = title.closest('[data-pr-row]')!;
+    expect(row).toBeTruthy();
+
+    const clampedBody = row.querySelector('p.line-clamp-2') as HTMLElement;
+    expect(clampedBody).toBeTruthy();
+    expect(clampedBody.textContent).toContain('Adds the widget');
+
+    await userEvent.click(clampedBody);
+    const expandedBody = row.querySelector('div.max-h-48, [data-pr-body-expanded]');
+    expect(expandedBody).toBeTruthy();
+    expect(expandedBody!.textContent).toBe('Adds the widget');
+    expect(row.querySelector('p.line-clamp-2')).toBeNull();
+
+    const expandedBodyEl = row.querySelector(
+      'div.max-h-48, [data-pr-body-expanded]',
+    ) as HTMLElement;
+    await userEvent.click(expandedBodyEl);
+    expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
+    expect(row.querySelector('[data-pr-body-expanded], div.max-h-48')).toBeNull();
+  });
+
+  it('renders the title as an anchor pointing at the PR URL', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const titleLink = (await screen.findByText('Add widget')).closest('a')!;
+    expect(titleLink).toBeTruthy();
+    expect(titleLink.getAttribute('href')).toBe('https://github.com/acme/demo/pull/201');
+    expect(titleLink.getAttribute('target')).toBe('_blank');
+    expect(titleLink.getAttribute('rel') ?? '').toContain('noopener');
+    expect(titleLink.getAttribute('rel') ?? '').toContain('noreferrer');
+  });
+
+  it('renders the title as plain text (no link) when pr.url is empty', async () => {
+    // Defensive: PullRequest.html_url has no #[serde(default)] today,
+    // so the empty case is theoretical. The pin prevents a future
+    // widening from regressing to a bare <a href="">.
+    mockBackend({
+      open: [
+        {
+          number: 999,
+          title: 'Mystery PR',
+          body: 'No html_url from upstream.',
+          url: '',
+          state: 'open',
+          draft: false,
+          head_ref: 'mystery/999',
+          head_sha: 'f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9',
+        },
+      ],
+    });
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Mystery PR');
+    expect(title.closest('a')).toBeNull();
+    expect(screen.queryByLabelText(/open pull request on github/i)).toBeNull();
+  });
+
+  it('does not toggle expand when the title link is clicked', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const titleLink = (await screen.findByText('Add widget')).closest('a')!;
+    await userEvent.click(titleLink);
+
+    const row = titleLink.closest('[data-pr-row]')!;
+    expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
+    expect(row.querySelector('[data-pr-body-expanded], div.max-h-48')).toBeNull();
+  });
+
+  it('clears expanded state when the open/closed filter changes', async () => {
+    // PR numbers don't carry across the open/closed filter (PR 201 vs
+    // PR 150), so the prior Set would either no-op or re-open a
+    // different row. The same `load` reset covers mesh swaps (mesh
+    // change re-triggers `load` via the same effect dep list).
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const firstTitle = await screen.findByText('Add widget');
+    const firstRow = firstTitle.closest('[data-pr-row]')!;
+    const firstBody = firstRow.querySelector('p.line-clamp-2') as HTMLElement;
+    await userEvent.click(firstBody);
+    expect(firstRow.querySelector('p.line-clamp-2')).toBeNull();
+
+    await userEvent.click(screen.getByRole('button', { name: 'closed' }));
+    expect(await screen.findByText('Old change')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'open' }));
+    const resetTitle = await screen.findByText('Add widget');
+    const resetRow = resetTitle.closest('[data-pr-row]')!;
+    expect(resetRow.querySelector('p.line-clamp-2')).toBeTruthy();
+  });
 });
