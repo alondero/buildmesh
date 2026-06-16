@@ -436,11 +436,13 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     await openWorktreesTab();
 
     // Wait for the form to populate from the load effect.
-    const checkbox = await screen.findByLabelText('Use worktree');
-    expect(checkbox).toBeChecked();
+    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
     // Default base_ref is origin/main → Fresh; default mode is branched.
-    expect(await screen.findByLabelText(/Fresh — start new session/i)).toBeChecked();
-    expect(await screen.findByLabelText(/Branched/i)).toBeChecked();
+    const fresh = (await screen.findByLabelText(/Fresh — start new session/i)) as HTMLInputElement;
+    expect(fresh.checked).toBe(true);
+    const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
+    expect(branched.checked).toBe(true);
 
     // The load IPC was issued with the active mesh id.
     await waitFor(() => {
@@ -454,8 +456,8 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     await openWorktreesTab();
 
     // Wait for the form to populate.
-    const checkbox = await screen.findByLabelText('Use worktree');
-    expect(checkbox).toBeChecked();
+    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
 
     await user.click(checkbox);
 
@@ -468,7 +470,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // The radios are gated on the checkbox; collapsing it removes the
     // section from the DOM (matches the legacy panel's
     // `{form.useWorktree && <div className="pl-4 border-l …">…}` block).
-    expect(checkbox).not.toBeChecked();
+    expect(checkbox.checked).toBe(false);
     expect(screen.queryByText('Starting point')).toBeNull();
     expect(screen.queryByText('Worktree mode')).toBeNull();
   });
@@ -479,7 +481,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     await openWorktreesTab();
 
     // The default is Fresh (base_ref: origin/main). Click Head to flip.
-    const headRadio = await screen.findByLabelText(/Head — resume last session/i);
+    const headRadio = (await screen.findByLabelText(/Head — resume last session/i)) as HTMLInputElement;
     await user.click(headRadio);
 
     await waitFor(() => {
@@ -488,9 +490,10 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
         baseRef: 'HEAD',
       });
     });
-    expect(headRadio).toBeChecked();
+    expect(headRadio.checked).toBe(true);
     // The Fresh radio is no longer checked.
-    expect(screen.getByLabelText(/Fresh — start new session/i)).not.toBeChecked();
+    const fresh = screen.getByLabelText(/Fresh — start new session/i) as HTMLInputElement;
+    expect(fresh.checked).toBe(false);
   });
 
   it('selecting the Detached radio calls update_mesh_field with section=agent and key=worktree_mode', async () => {
@@ -499,7 +502,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     await openWorktreesTab();
 
     // The default is branched. Click Detached to flip.
-    const detachedRadio = await screen.findByLabelText(/Detached/i);
+    const detachedRadio = (await screen.findByLabelText(/Detached/i)) as HTMLInputElement;
     await user.click(detachedRadio);
 
     await waitFor(() => {
@@ -510,9 +513,10 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
         value: 'detached',
       });
     });
-    expect(detachedRadio).toBeChecked();
+    expect(detachedRadio.checked).toBe(true);
     // The Branched radio is no longer checked.
-    expect(screen.getByLabelText(/Branched/i)).not.toBeChecked();
+    const branched = screen.getByLabelText(/Branched/i) as HTMLInputElement;
+    expect(branched.checked).toBe(false);
   });
 
   it('collapsing use_worktree hides the two radio groups', async () => {
@@ -525,7 +529,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     expect(screen.getByText('Worktree mode')).toBeTruthy();
 
     // Toggle use_worktree off.
-    const checkbox = screen.getByLabelText('Use worktree');
+    const checkbox = screen.getByLabelText('Use worktree') as HTMLInputElement;
     await user.click(checkbox);
 
     // Both group labels are gone.
@@ -538,8 +542,8 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     mockBackend({ saveUseWorktreeFails: true });
     await openWorktreesTab();
 
-    const checkbox = await screen.findByLabelText('Use worktree');
-    expect(checkbox).toBeChecked();
+    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
 
     await user.click(checkbox);
 
@@ -553,7 +557,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // though the backend rejected the save. This matches the legacy
     // "form mirrors user intent" rule — the user retries by toggling
     // again rather than the UI silently undoing their click.
-    expect(checkbox).not.toBeChecked();
+    expect(checkbox.checked).toBe(false);
   });
 
   it('null worktree_mode defaults to branched on load', async () => {
@@ -563,7 +567,9 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     mockBackend({ meshConfig: { worktree_mode: null } });
     await openWorktreesTab();
 
-    expect(await screen.findByLabelText(/Branched/i)).toBeChecked();
-    expect(screen.getByLabelText(/Detached/i)).not.toBeChecked();
+    const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
+    expect(branched.checked).toBe(true);
+    const detached = screen.getByLabelText(/Detached/i) as HTMLInputElement;
+    expect(detached.checked).toBe(false);
   });
 });

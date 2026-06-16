@@ -42,7 +42,11 @@ import {
   deleteBranches,
   deleteWorktrees,
   getGitPruneInfo,
+  getMeshProperties,
   pruneRemoteTracking,
+  updateMeshField,
+  updateMeshUseWorktree,
+  updateWorktreeBaseRef,
   type BranchInfo,
   type GitRepoPruneInfo,
   type HoldingWorktree,
@@ -81,6 +85,55 @@ const isRecommendedBranch = (b: BranchInfo) =>
 
 const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
 
+// ── Configuration card (issue #451) ─────────────────────────────────────────
+
+/**
+ * The default worktree mode for a fresh agent node. Local pin that must
+ * agree with `DEFAULT_WORKTREE_MODE` in `src-tauri/src/agent/spawn.rs`
+ * (per the cross-language default coupling pattern — see ADR
+ * follow-up). When the worktree_mode column in `mesh.toml` is missing
+ * or `null` on the wire, this is the value the form falls back to.
+ */
+const DEFAULT_WORKTREE_MODE = 'branched';
+
+/**
+ * Wire-shape form values for the Starting point radio. The on-the-wire
+ * value (passed to `update_worktree_base_ref`) is the `wire` field —
+ * `'origin/main'` for fresh sessions, `'HEAD'` for resuming. The legacy
+ * `MeshPropertiesPanel` (deleted in #380) used the same two options.
+ */
+type BaseRefForm = 'fresh' | 'head';
+
+const BASEREF_OPTIONS: { value: BaseRefForm; label: string; wire: 'origin/main' | 'HEAD' }[] = [
+  { value: 'fresh', label: 'Fresh — start new session (origin/<default>)', wire: 'origin/main' },
+  { value: 'head', label: 'Head — resume last session (HEAD)', wire: 'HEAD' },
+];
+
+/**
+ * Wire-shape form values for the Worktree mode radio. Mirrors the
+ * legacy `MeshPropertiesPanel` options verbatim. `branched` is the
+ * default per `DEFAULT_WORKTREE_MODE` above.
+ */
+type WorktreeModeForm = 'branched' | 'detached';
+
+const WORKTREE_MODE_OPTIONS: { value: WorktreeModeForm; label: string }[] = [
+  { value: 'branched', label: 'Branched — actual git branch per worktree (default)' },
+  { value: 'detached', label: 'Detached — detached HEAD worktree' },
+];
+
+// Mappers between the form's two-option enum and the open-ended
+// string values stored in `meshes.base_ref` / `mesh.toml` worktree_mode.
+// We intentionally collapse anything other than the canonical values
+// to the form's default — matches the legacy panel's
+// `config.base_ref === 'HEAD' ? 'head' : 'fresh'` rule and the
+// `config.worktree_mode ?? DEFAULT_WORKTREE_MODE` fallback.
+const wireToFormBaseRef = (wire: string | null): BaseRefForm =>
+  wire === 'HEAD' ? 'head' : 'fresh';
+const wireToFormMode = (wire: string | null): WorktreeModeForm =>
+  wire === 'detached' ? 'detached' : DEFAULT_WORKTREE_MODE;
+const formToWireBaseRef = (form: BaseRefForm): 'origin/main' | 'HEAD' =>
+  form === 'head' ? 'HEAD' : 'origin/main';
+
 export function WorktreeManagerTab() {
   const { activeMeshId, activePath } = useProbeContext();
 
@@ -96,6 +149,21 @@ export function WorktreeManagerTab() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // Configuration card state (issue #451). The three fields are
+  // initialised to the legacy `MeshPropertiesPanel` defaults (use a
+  // worktree, start a fresh session, branched mode). The load effect
+  // below replaces them with the persisted values from the wire.
+  //
+  // `saveError` is scoped to the Configuration card only — the
+  // existing `error` channel is reserved for prune / recovery /
+  // remote-tracking failures and renders below the toolbar. Keeping
+  // the two channels separate prevents a stale prune error from
+  // getting clobbered by a config save (or vice versa).
+  const [useWorktree, setUseWorktree] = useState(true);
+  const [baseRef, setBaseRef] = useState<BaseRefForm>('fresh');
+  const [worktreeMode, setWorktreeMode] = useState<WorktreeModeForm>(DEFAULT_WORKTREE_MODE);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Single prune-fetch body. Mount, mesh-switch, manual Refresh, and
   // post-recovery all route through `load`. The function returns the
@@ -139,6 +207,82 @@ export function WorktreeManagerTab() {
         });
     },
     [activeMeshId, load],
+  );
+
+  // Configuration card load (issue #451). Mirrors the dep discipline
+  // from `MeshPropertiesTab.tsx:143-167`: the dep set is intentionally
+  // `[activeMeshId, activePath]` only — adding the form state (e.g.
+  // `useWorktree`) would re-fire on every save and clobber the user's
+  // in-flight edits to `baseRef` / `worktreeMode` with the just-saved
+  // values. On a load failure we keep the stale form state rather
+  // than showing an error — the user can still toggle the controls,
+  // and a subsequent save will retry the load path on the next
+  // mesh switch.
+  useAsyncEffect(
+    (signal) => {
+      if (activeMeshId === null) return;
+      getMeshProperties(activeMeshId)
+        .then((config) => {
+          if (signal.aborted) return;
+          setUseWorktree(config.use_worktree);
+          setBaseRef(wireToFormBaseRef(config.base_ref));
+          setWorktreeMode(wireToFormMode(config.worktree_mode));
+        })
+        .catch(() => {
+          // Swallow — keep the existing form state. Mirrors the legacy
+          // "form mirrors user intent" rule and matches the
+          // MeshPropertiesTab's load-failure behaviour.
+        });
+    },
+    [activeMeshId, activePath],
+  );
+
+  // Configuration card save handlers. Each: (1) update form state
+  // optimistically, (2) clear any prior save error, (3) call the
+  // typed wrapper, (4) on reject, surface the error inline WITHOUT
+  // reverting the form. The "do not revert" rule matches the legacy
+  // panel — for a binary control like a checkbox, reverting would
+  // silently undo the user's click and they would have no idea why.
+  const handleToggleUseWorktree = useCallback(
+    async (next: boolean) => {
+      if (activeMeshId === null) return;
+      setUseWorktree(next);
+      setSaveError(null);
+      try {
+        await updateMeshUseWorktree(activeMeshId, next);
+      } catch (e) {
+        setSaveError(`Failed to update use_worktree: ${String(e)}`);
+      }
+    },
+    [activeMeshId],
+  );
+
+  const handleChangeBaseRef = useCallback(
+    async (next: BaseRefForm) => {
+      if (activeMeshId === null) return;
+      setBaseRef(next);
+      setSaveError(null);
+      try {
+        await updateWorktreeBaseRef(activeMeshId, formToWireBaseRef(next));
+      } catch (e) {
+        setSaveError(`Failed to update base_ref: ${String(e)}`);
+      }
+    },
+    [activeMeshId],
+  );
+
+  const handleChangeWorktreeMode = useCallback(
+    async (next: WorktreeModeForm) => {
+      if (activeMeshId === null) return;
+      setWorktreeMode(next);
+      setSaveError(null);
+      try {
+        await updateMeshField(activeMeshId, 'agent', 'worktree_mode', next);
+      } catch (e) {
+        setSaveError(`Failed to update worktree_mode: ${String(e)}`);
+      }
+    },
+    [activeMeshId],
   );
 
   // Recovery actions (restore root to base / free a hostage branch) live
@@ -268,6 +412,25 @@ export function WorktreeManagerTab() {
           onFree={free}
           message={recoveryMessage}
         />
+      )}
+
+      {/* Configuration card (issue #451) — sits above the prune
+          toolbar so the user sees the "what kind of worktree does
+          this mesh use" controls before they decide what to prune.
+          The saveError slot below the card mirrors the prune-error
+          slot at the bottom of the toolbar; the two channels are
+          kept separate so a config save failure doesn't get
+          clobbered by a later prune error (or vice versa). */}
+      <ConfigurationCard
+        useWorktree={useWorktree}
+        baseRef={baseRef}
+        worktreeMode={worktreeMode}
+        onToggleUseWorktree={handleToggleUseWorktree}
+        onChangeBaseRef={handleChangeBaseRef}
+        onChangeWorktreeMode={handleChangeWorktreeMode}
+      />
+      {saveError && (
+        <p className="text-xs text-status-error break-words">{saveError}</p>
       )}
 
       <div className="flex items-center justify-between">
@@ -599,6 +762,125 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) 
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Configuration card (issue #451) ─────────────────────────────────────────
+
+interface ConfigurationCardProps {
+  useWorktree: boolean;
+  baseRef: BaseRefForm;
+  worktreeMode: WorktreeModeForm;
+  onToggleUseWorktree: (next: boolean) => void;
+  onChangeBaseRef: (next: BaseRefForm) => void;
+  onChangeWorktreeMode: (next: WorktreeModeForm) => void;
+}
+
+/**
+ * Ports the worktree-config sub-section that used to live at the top
+ * of the legacy `MeshPropertiesPanel` (deleted in #380). The card
+ * surfaces three controls:
+ *
+ *   1. **Use worktree** — checkbox. When unchecked, the two radio
+ *      groups collapse (matches the legacy panel's `{form.useWorktree
+ *      && <div className="pl-4 border-l …">…}` block).
+ *   2. **Starting point** — `<fieldset>` with two radios that map
+ *      Fresh ↔ `origin/main` and Head ↔ `HEAD` on the wire. The
+ *      fieldset/legend pairing gives the radios a real `radiogroup`
+ *      ARIA role (the test harness resolves individual radios by
+ *      their label via `getByRole('radio', { name: … })`).
+ *   3. **Worktree mode** — same pattern, branched vs detached.
+ *
+ * All saves fire on change through the parent's typed wrappers — no
+ * raw `invoke` (preserves the `tauri-ipc-seam` ratchet at
+ * `tests/unit/tauri-ipc-seam.test.ts`). The card is intentionally
+ * "dumb" — it owns no state, all the form values and the
+ * save-handler callbacks come from the parent. That keeps the
+ * "form mirrors user intent" + "do not revert on save failure"
+ * guarantees in one place.
+ *
+ * The wrapping `<label>` pattern (option label + nested input)
+ * is intentional: it makes `getByLabelText('Use worktree')` resolve
+ * the checkbox in the test harness without needing a separate
+ * `id`/`htmlFor` wire. Radio options use the same pattern so
+ * `getByRole('radio', { name: /Fresh/ })` finds them.
+ */
+function ConfigurationCard({
+  useWorktree,
+  baseRef,
+  worktreeMode,
+  onToggleUseWorktree,
+  onChangeBaseRef,
+  onChangeWorktreeMode,
+}: ConfigurationCardProps) {
+  return (
+    <div className="rounded border border-border-subtle p-3 space-y-3">
+      <p className="text-[10px] uppercase tracking-wide text-text-muted">
+        Worktree configuration
+      </p>
+
+      {/* Use worktree checkbox — the gate. When unchecked, the two
+          radio groups below collapse. */}
+      <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+        <input
+          type="checkbox"
+          checked={useWorktree}
+          onChange={(e) => onToggleUseWorktree(e.target.checked)}
+          className="accent-accent-cyan"
+        />
+        <span>Use worktree</span>
+      </label>
+
+      {useWorktree && (
+        <div className="pl-4 border-l border-border-subtle space-y-3">
+          {/* Starting point — Fresh / Head */}
+          <fieldset className="border-0 p-0 m-0 space-y-2">
+            <legend className="block text-xs text-text-muted mb-1">
+              Starting point
+            </legend>
+            {BASEREF_OPTIONS.map((o) => (
+              <label
+                key={o.value}
+                className="flex items-start gap-2 text-xs text-text-primary cursor-pointer"
+              >
+                <input
+                  type="radio"
+                  name="wt-cfg-baseref"
+                  value={o.value}
+                  checked={baseRef === o.value}
+                  onChange={() => onChangeBaseRef(o.value)}
+                  className="mt-0.5 accent-accent-cyan"
+                />
+                <span>{o.label}</span>
+              </label>
+            ))}
+          </fieldset>
+
+          {/* Worktree mode — Branched / Detached */}
+          <fieldset className="border-0 p-0 m-0 space-y-2">
+            <legend className="block text-xs text-text-muted mb-1">
+              Worktree mode
+            </legend>
+            {WORKTREE_MODE_OPTIONS.map((o) => (
+              <label
+                key={o.value}
+                className="flex items-start gap-2 text-xs text-text-primary cursor-pointer"
+              >
+                <input
+                  type="radio"
+                  name="wt-cfg-mode"
+                  value={o.value}
+                  checked={worktreeMode === o.value}
+                  onChange={() => onChangeWorktreeMode(o.value)}
+                  className="mt-0.5 accent-accent-cyan"
+                />
+                <span>{o.label}</span>
+              </label>
+            ))}
+          </fieldset>
         </div>
       )}
     </div>
