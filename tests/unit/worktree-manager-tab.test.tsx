@@ -22,6 +22,7 @@ import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import type { MeshConfig } from '../../src/types/generated/MeshConfig';
 
 const MESH: Mesh = {
   id: 42,
@@ -123,10 +124,38 @@ const DRIFTED_HEALTH: Record<string, unknown> = {
  * `get_git_prune_info` and the recovery commands. We use module-state
  * health/prune so individual tests can swap the health shape without
  * re-mocking.
+ *
+ * `meshConfig` controls the response of `get_mesh_properties` (issue
+ * #451 — the Configuration card on the 🌳 tab). The default matches
+ * the legacy `MeshPropertiesPanel` initial state so the existing
+ * health / prune / recovery tests stay deterministic. `saveUseWorktree
+ * Fails` and `saveBaseRefFails` are opt-in knobs that flip the two
+ * worktree-config save commands to rejecting handlers, used by the
+ * "save failure surfaces inline" test.
  */
-function mockBackend(overrides: { health?: unknown; prune?: unknown } = {}) {
+function mockBackend(
+  overrides: {
+    health?: unknown;
+    prune?: unknown;
+    meshConfig?: Partial<MeshConfig>;
+    saveUseWorktreeFails?: boolean;
+    saveBaseRefFails?: boolean;
+  } = {},
+) {
   const health = overrides.health ?? HEALTHY;
   const prune = overrides.prune ?? PRUNE_INFO;
+  const meshConfig: MeshConfig = {
+    name: null,
+    build_command: null,
+    run_command: null,
+    model: null,
+    effort: null,
+    base_ref: 'origin/main',
+    use_worktree: true,
+    worktree_mode: 'branched',
+    default_provider: null,
+    ...overrides.meshConfig,
+  };
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'get_mesh_health':
@@ -146,7 +175,7 @@ function mockBackend(overrides: { health?: unknown; prune?: unknown } = {}) {
       case 'list_providers':
         return Promise.resolve([]);
       case 'get_mesh_properties':
-        return Promise.resolve({});
+        return Promise.resolve(meshConfig);
       case 'detect_mesh_project':
         return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
       case 'detect_ai_context':
@@ -159,6 +188,14 @@ function mockBackend(overrides: { health?: unknown; prune?: unknown } = {}) {
         });
       case 'update_mesh_field':
         return Promise.resolve();
+      case 'update_mesh_use_worktree':
+        return overrides.saveUseWorktreeFails
+          ? Promise.reject(new Error('mock: update_mesh_use_worktree failed'))
+          : Promise.resolve();
+      case 'update_worktree_base_ref':
+        return overrides.saveBaseRefFails
+          ? Promise.reject(new Error('mock: update_worktree_base_ref failed'))
+          : Promise.resolve();
       case 'check_gh_auth':
       case 'get_default_branch':
       case 'get_git_status':
@@ -384,5 +421,155 @@ describe('ProbePanel routing for the 🌳 tab (issue #377)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Worktree Manager' }));
     expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().probeTab).toBe('worktrees');
+  });
+});
+
+describe('WorktreeManagerTab Configuration card (issue #451)', () => {
+  // The Configuration card ports the worktree-config sub-section that
+  // used to live at the top of the legacy `MeshPropertiesPanel` (deleted
+  // in #380). The card has three controls: a `use_worktree` checkbox,
+  // a "Starting point" radio (Fresh/Head ↔ origin/main/HEAD on the
+  // wire), and a "Worktree mode" radio (Branched/Detached).
+
+  it('initial load populates the form from get_mesh_properties', async () => {
+    mockBackend();
+    await openWorktreesTab();
+
+    // Wait for the form to populate from the load effect.
+    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+    // Default base_ref is origin/main → Fresh; default mode is branched.
+    const fresh = (await screen.findByLabelText(/Fresh — start new session/i)) as HTMLInputElement;
+    expect(fresh.checked).toBe(true);
+    const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
+    expect(branched.checked).toBe(true);
+
+    // The load IPC was issued with the active mesh id.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('get_mesh_properties', { meshId: 42 });
+    });
+  });
+
+  it('toggling the use_worktree checkbox calls update_mesh_use_worktree and collapses the radios', async () => {
+    const user = userEvent.setup();
+    mockBackend();
+    await openWorktreesTab();
+
+    // Wait for the form to populate.
+    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+
+    await user.click(checkbox);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_use_worktree', {
+        meshId: 42,
+        useWorktree: false,
+      });
+    });
+    // The radios are gated on the checkbox; collapsing it removes the
+    // section from the DOM (matches the legacy panel's
+    // `{form.useWorktree && <div className="pl-4 border-l …">…}` block).
+    expect(checkbox.checked).toBe(false);
+    expect(screen.queryByText('Starting point')).toBeNull();
+    expect(screen.queryByText('Worktree mode')).toBeNull();
+  });
+
+  it('selecting the Head radio calls update_worktree_base_ref with HEAD on the wire', async () => {
+    const user = userEvent.setup();
+    mockBackend();
+    await openWorktreesTab();
+
+    // The default is Fresh (base_ref: origin/main). Click Head to flip.
+    const headRadio = (await screen.findByLabelText(/Head — resume last session/i)) as HTMLInputElement;
+    await user.click(headRadio);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_worktree_base_ref', {
+        meshId: 42,
+        baseRef: 'HEAD',
+      });
+    });
+    expect(headRadio.checked).toBe(true);
+    // The Fresh radio is no longer checked.
+    const fresh = screen.getByLabelText(/Fresh — start new session/i) as HTMLInputElement;
+    expect(fresh.checked).toBe(false);
+  });
+
+  it('selecting the Detached radio calls update_mesh_field with section=agent and key=worktree_mode', async () => {
+    const user = userEvent.setup();
+    mockBackend();
+    await openWorktreesTab();
+
+    // The default is branched. Click Detached to flip.
+    const detachedRadio = (await screen.findByLabelText(/Detached/i)) as HTMLInputElement;
+    await user.click(detachedRadio);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_field', {
+        meshId: 42,
+        section: 'agent',
+        key: 'worktree_mode',
+        value: 'detached',
+      });
+    });
+    expect(detachedRadio.checked).toBe(true);
+    // The Branched radio is no longer checked.
+    const branched = screen.getByLabelText(/Branched/i) as HTMLInputElement;
+    expect(branched.checked).toBe(false);
+  });
+
+  it('collapsing use_worktree hides the two radio groups', async () => {
+    const user = userEvent.setup();
+    mockBackend();
+    await openWorktreesTab();
+
+    // Both group labels are present while use_worktree is true.
+    expect(await screen.findByText('Starting point')).toBeTruthy();
+    expect(screen.getByText('Worktree mode')).toBeTruthy();
+
+    // Toggle use_worktree off.
+    const checkbox = screen.getByLabelText('Use worktree') as HTMLInputElement;
+    await user.click(checkbox);
+
+    // Both group labels are gone.
+    expect(screen.queryByText('Starting point')).toBeNull();
+    expect(screen.queryByText('Worktree mode')).toBeNull();
+  });
+
+  it('save failure surfaces inline and does NOT revert the form state', async () => {
+    const user = userEvent.setup();
+    mockBackend({ saveUseWorktreeFails: true });
+    await openWorktreesTab();
+
+    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+
+    await user.click(checkbox);
+
+    // The save error appears below the card, in the same inline-error
+    // style as the prune error at `WorktreeManagerTab.tsx:304`.
+    const error = await screen.findByText(/Failed to update use_worktree/);
+    expect(error).toBeTruthy();
+    expect(error.className).toContain('text-status-error');
+
+    // The form was *not* reverted: the checkbox stays unchecked even
+    // though the backend rejected the save. This matches the legacy
+    // "form mirrors user intent" rule — the user retries by toggling
+    // again rather than the UI silently undoing their click.
+    expect(checkbox.checked).toBe(false);
+  });
+
+  it('null worktree_mode defaults to branched on load', async () => {
+    // A fresh mesh row returns `worktree_mode: null` from the wire.
+    // The card must fall back to the default rather than rendering
+    // an empty radio group.
+    mockBackend({ meshConfig: { worktree_mode: null } });
+    await openWorktreesTab();
+
+    const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
+    expect(branched.checked).toBe(true);
+    const detached = screen.getByLabelText(/Detached/i) as HTMLInputElement;
+    expect(detached.checked).toBe(false);
   });
 });
