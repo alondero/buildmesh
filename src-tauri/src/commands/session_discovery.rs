@@ -42,6 +42,8 @@ pub async fn import_discovered_session(
         None,
         None,
         use_worktree,
+        None,
+        None,
     ).map_err(|e| e.to_string())?;
 
     db::update_cli_session_id(node.id, &cli_session_id)

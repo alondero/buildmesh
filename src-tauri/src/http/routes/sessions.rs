@@ -107,6 +107,8 @@ pub async fn import_and_resume(
         None,
         None,
         use_worktree,
+        None,
+        None,
     ) {
         Ok(n) => n,
         Err(e) => {

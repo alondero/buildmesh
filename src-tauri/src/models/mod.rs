@@ -242,6 +242,20 @@ pub struct AgentNode {
     /// (issue #37) can target both spawn sources.
     #[ts(as = "Option<i32>")]
     pub source_pr: Option<i64>,
+    /// GitHub owner login of the PR's head repo (issue #443). Only set for
+    /// PR-spawned nodes where the head lives on a fork — when `Some`,
+    /// `spawn_agent_inner` runs `git remote add fork-<owner> <clone_url>` and
+    /// fetches `fork-<owner>/<head_ref>` instead of `origin/<head_ref>`. For
+    /// same-repo PRs the head's `repo.owner.login` is the destination owner,
+    /// and the column stays `None` so the spawn path takes the #420 branch.
+    /// `None` for issue-spawned and hand-spawned nodes.
+    pub head_repo_owner: Option<String>,
+    /// Clone URL of the PR's head repo (issue #443). Paired with
+    /// [`head_repo_owner`](Self::head_repo_owner) — only set for fork PRs, used
+    /// as the URL when registering `fork-<owner>` as a remote so the head ref
+    /// can be fetched without the user pre-configuring it. `None` for
+    /// same-repo PRs and for issue-spawned / hand-spawned nodes.
+    pub head_repo_clone_url: Option<String>,
     #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,

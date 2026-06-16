@@ -113,7 +113,9 @@ mod tests {
                 source_pr INTEGER,
                 position INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
+                status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (mesh_id, name, path, provider, status, position)
@@ -274,7 +276,9 @@ mod tests {
                 source_issue INTEGER,
                 source_pr INTEGER,
                 position INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                head_repo_owner TEXT,
+                head_repo_clone_url TEXT
             );
             ALTER TABLE agent_nodes ADD COLUMN status_changed_at TEXT;
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');

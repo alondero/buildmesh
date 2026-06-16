@@ -429,18 +429,20 @@ export const spawnHandoverAgent = (meshId: number, prefill: string, provider?: s
 export const createPrForMesh = (meshPath: string, title: string, body: string, baseBranch: string) =>
   _invoke<string>('create_pr_for_mesh', { meshPath, title, body, baseBranch });
 
-/// Two-stage spawn (PR flow) — stage 1 of 2 (issue #420).
+/// Two-stage spawn (PR flow) — stage 1 of 2 (issue #420, extended by #443
+/// for fork PRs).
 ///
 /// `create_pr_node` is the PR-flow mirror of `createIssueNode`: fast DB-only
 /// IPC that returns a `pending` agent node row + the prefill string the
 /// caller must pass to `startNodeBackground`. Returns in ~20ms; the slow
-/// work (git fetch origin <head_ref>, worktree create off the head ref, PTY
-/// spawn) runs on stage-2's background task.
+/// work (git fetch <remote> <head_ref>, worktree create off the head ref,
+/// PTY spawn) runs on stage-2's background task.
 ///
 /// The `headRef` field comes from the GitHub API's `head.ref` (now exposed
-/// on `GitHubPullRequest` for this purpose). `create_pr_node` refuses fork
-/// PRs (`headRef` empty) — fork-remote support is a follow-up to issue #36
-/// (worktree adoption).
+/// on `GitHubPullRequest` for this purpose). For fork PRs (issue #443) the
+/// stage-2 path adds the fork as a remote (`fork-<login>`) and fetches the
+/// head ref from there; the `headRepoOwner` + `headRepoCloneUrl` arguments
+/// carry that info from the GitHub list response to the node row.
 ///
 /// Reuses the generated `IssueNodeDraft` type for the return value: the wire
 /// shape is identical (flattened `AgentNode` + `prefill`), so no new TS
@@ -451,8 +453,18 @@ export const createPrNode = (
   prTitle: string,
   headRef: string,
   provider?: string,
+  headRepoOwner?: string,
+  headRepoCloneUrl?: string,
 ) =>
-  _invoke<IssueNodeDraft>('create_pr_node', { meshId, prNumber, prTitle, headRef, provider });
+  _invoke<IssueNodeDraft>('create_pr_node', {
+    meshId,
+    prNumber,
+    prTitle,
+    headRef,
+    provider,
+    headRepoOwner,
+    headRepoCloneUrl,
+  });
 
 // AI context portability
 export type { AiContextStatus };
