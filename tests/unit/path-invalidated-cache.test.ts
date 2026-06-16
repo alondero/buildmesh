@@ -129,3 +129,63 @@ describe('subscribeGitPathInvalidation — bus dispatches each subscriber via it
     expect(dualClient.read(7)).toBeUndefined();
   });
 });
+
+// Issue #342: `refresh()` collapses rejection to `null`, so consumers
+// can't tell "fetch failed" from "legitimate null". The primitive now
+// exposes the most-recent error per key via `lastError(key)` so callers
+// (e.g. usePathInvalidatedQuery) can surface it in their result type.
+// Both `createPathKeyedCache` and `createDualKeyCache` carry the new
+// `lastError` accessor (it's added in the shared `createInternalClient`).
+describe('lastError(key) — issue #342', () => {
+  it('createPathKeyedCache: exposes the most recent error via lastError(key) after a rejection', async () => {
+    const boom = new Error('boom');
+    const client = createPathKeyedCache<string>({
+      fetcher: vi.fn().mockRejectedValue(boom),
+    });
+    expect(client.lastError('k')).toBeNull();
+    await client.refresh('k');
+    expect(client.lastError('k')).toBe(boom);
+  });
+
+  it('createPathKeyedCache: clears lastError(key) on a subsequent successful refresh', async () => {
+    const fetcher = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce('ok');
+    const client = createPathKeyedCache<string>({ fetcher });
+    await client.refresh('k');
+    expect(client.lastError('k')).toBeInstanceOf(Error);
+    await client.refresh('k');
+    expect(client.lastError('k')).toBeNull();
+  });
+
+  it('createPathKeyedCache: lastError is per-key — a failure for one key does not leak to another', async () => {
+    const fetcher = vi.fn().mockImplementation((key: string) => {
+      if (key === 'a') return Promise.reject(new Error('a-fail'));
+      return Promise.resolve('b-value');
+    });
+    const client = createPathKeyedCache<string>({ fetcher });
+    await client.refresh('a');
+    await client.refresh('b');
+    expect(client.lastError('a')).toBeInstanceOf(Error);
+    expect(client.lastError('b')).toBeNull();
+  });
+
+  it('createDualKeyCache: exposes lastError(key) with the same per-key semantics', async () => {
+    // Pin the dual-key shape's `lastError` works the same way — the
+    // error slot is keyed on the entity id (the `key` arg), not on the
+    // GIT_CHANGED path. Issue #342's contract applies to BOTH factories.
+    const fetcher = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('node-7-fail'))
+      .mockResolvedValueOnce('node-8-value');
+    const client = createDualKeyCache<number, string>({ fetcher });
+    expect(client.lastError(7)).toBeNull();
+    expect(client.lastError(8)).toBeNull();
+    await client.refresh(7);
+    expect(client.lastError(7)).toBeInstanceOf(Error);
+    await client.refresh(8);
+    expect(client.lastError(7)).toBeInstanceOf(Error);  // still set for 7
+    expect(client.lastError(8)).toBeNull();
+  });
+});

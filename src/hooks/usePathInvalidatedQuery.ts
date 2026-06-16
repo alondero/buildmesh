@@ -28,6 +28,12 @@
  *    `setLoading(true)` (e.g. a fetch was in flight when the user switched
  *    nodes) carries over into the new render and renders a perpetual
  *    spinner next to the cached value.
+ * 3. **Error bleeds across keys** — every state-reset branch (key→null,
+ *    disabled, cache-hit) clears `error` along with `data`/`loading`,
+ *    and each refetch path reads `client.lastError(key)` only AFTER the
+ *    promise resolves. Without this, a failure on key A would still be
+ *    visible after the user switched to key B (or after a successful
+ *    refetch, the slot would hold A's error). Issue #342.
  */
 
 import { useCallback, useState } from 'react';
@@ -38,6 +44,14 @@ import { useAsyncEffect } from './useAsyncEffect';
 export interface UsePathInvalidatedQueryResult<V> {
   data: V | null;
   loading: boolean;
+  /**
+   * Why this exists (issue #342): a successful `refresh(key)` that
+   * resolves to `null`/`[]` is indistinguishable from a rejected fetch
+   * unless the error is surfaced separately. Consumers like
+   * `useMeshGitStatus` use this to collapse the panel on real failure
+   * while still rendering an empty repo as `files: []`.
+   */
+  error: Error | null;
   refresh: () => void;
 }
 
@@ -133,6 +147,11 @@ export function usePathInvalidatedQuery(
     if (key == null) return false;
     return client.read(key as never) === undefined;
   });
+  // Issue #342. Starts as null and tracks the most recent error for the
+  // current key; cleared on key change / cache hit / disabled branch so
+  // it never bleeds across keys. Each refetch path reads
+  // `client.lastError(key)` after the promise resolves.
+  const [error, setError] = useState<Error | null>(null);
 
   // Mount / key change: read from cache, otherwise fetch (unless the
   // caller opted out via `enabled: false`). The signal protects against
@@ -142,6 +161,7 @@ export function usePathInvalidatedQuery(
     if (key == null) {
       setData(null);
       setLoading(false);
+      setError(null);
       return;
     }
 
@@ -154,6 +174,9 @@ export function usePathInvalidatedQuery(
       if (signal.aborted) return;
       setData(cached === undefined ? null : cached);
       setLoading(false);
+      // No fetch happens here, so we also have no error for this key
+      // yet — clear any stale error from a previous key. Issue #342.
+      setError(null);
       return;
     }
 
@@ -164,14 +187,19 @@ export function usePathInvalidatedQuery(
       // spinner next to the cached value.
       setData(cached);
       setLoading(false);
+      // A cache hit means the last refresh for this key succeeded
+      // (the cache only stores successful results), so no error to show.
+      setError(null);
       return;
     }
 
     setLoading(true);
+    setError(null);
     client.refresh(key as never).then((result) => {
       if (signal.aborted) return;
       setData(result);
       setLoading(false);
+      setError(client.lastError(key as never));
     });
   }, [key, client, enabled]);
 
@@ -186,10 +214,12 @@ export function usePathInvalidatedQuery(
     const onInvalidate = () => {
       if (signal.aborted) return;
       setLoading(true);
+      setError(null);
       client.refresh(key as never).then((result) => {
         if (signal.aborted) return;
         setData(result);
         setLoading(false);
+        setError(client.lastError(key as never));
       });
     };
     const unsubscribe = isDualKey
@@ -210,10 +240,12 @@ export function usePathInvalidatedQuery(
       .onFocusChanged(({ payload: focused }) => {
         if (!focused || signal.aborted) return;
         setLoading(true);
+        setError(null);
         client.refresh(key as never).then((result) => {
           if (signal.aborted) return;
           setData(result);
           setLoading(false);
+          setError(client.lastError(key as never));
         });
       })
       .then((fn) => {
@@ -229,11 +261,13 @@ export function usePathInvalidatedQuery(
     if (key == null) return;
     client.invalidate(key as never);
     setLoading(true);
+    setError(null);
     client.refresh(key as never).then((result) => {
       setData(result);
       setLoading(false);
+      setError(client.lastError(key as never));
     });
   }, [key, client]);
 
-  return { data, loading, refresh };
+  return { data, loading, error, refresh };
 }

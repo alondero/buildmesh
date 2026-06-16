@@ -6,11 +6,6 @@ import { getGitSummary, type GitSummary } from '../lib/tauri';
 // per hook family. The `useGitSummary` consumer is a single component, but
 // multiple instances of it (one per mesh/node) share this client and dedup
 // their fetches via the primitive's pending map.
-//
-// `createPathKeyedCache` is the right factory here: the key IS the git path
-// (the IPC is `getGitSummary(path: string)`), so the key doubles as the
-// GIT_CHANGED subscription path. Issue #347 split this shape out from the
-// old single `createPathInvalidatedCache` factory.
 const summaryClient = createPathKeyedCache<GitSummary>({
   fetcher: getGitSummary,
   name: 'useGitSummary',
