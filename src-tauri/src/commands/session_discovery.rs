@@ -41,6 +41,7 @@ pub async fn import_discovered_session(
         worktree_name.as_deref(),
         None,
         None,
+        None, // source_pr_pinned_sha — session-discovery path doesn't pin a PR SHA
         use_worktree,
         None,
         None,

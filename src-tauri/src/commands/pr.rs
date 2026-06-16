@@ -76,6 +76,16 @@ pub struct GitHubPullRequest {
     /// the head ref from it. Empty when the field is missing.
     #[serde(default)]
     pub head_repo_clone_url: String,
+    /// PR's head commit SHA (e.g. `"0123456789abcdef..."`). Mirrors
+    /// `services::github::PullRequest::head_sha` and is the exact-pinning
+    /// handle introduced in issue #444: the spawn path persists it on the
+    /// new agent node and verifies the local `origin/<head_ref>` SHA matches
+    /// it after `git fetch`. Empty on partial responses and some fork-PR
+    /// payloads — the spawn path treats empty as "skip drift check" rather
+    /// than failing, matching the existing `pr_head_unfetchable` fallback
+    /// semantics.
+    #[serde(default)]
+    pub head_sha: String,
 }
 
 /// Wire shape of `get_pr_mergeability` — the per-PR enrichment the panel
@@ -198,6 +208,7 @@ pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullReque
         head_ref: pr.head_ref,
         head_repo_owner: pr.head_repo_owner,
         head_repo_clone_url: pr.head_repo_clone_url,
+        head_sha: pr.head_sha,
     }).collect())
 }
 
@@ -374,6 +385,7 @@ pub fn create_pr_node(
     pr_number: i64,
     pr_title: String,
     head_ref: String,
+    head_sha: String,
     provider: Option<String>,
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
@@ -428,6 +440,15 @@ pub fn create_pr_node(
         crate::preferences::default_provider(),
     );
 
+    // Issue #444 — `head_sha` is the exact-pinning handle. We persist it as
+    // `source_pr_pinned_sha` so `spawn_agent_inner` can verify the local
+    // `origin/<head_ref>` SHA matches after `git fetch` and emit a
+    // `pr_sha_drift` warning via `mesh-sync-warning` if the PR was
+    // force-pushed / rebased between click-time and spawn-time. An empty
+    // `head_sha` (partial GitHub response, fork payload) skips the drift
+    // check — same fail-open semantics as `pr_head_unfetchable`.
+    let pinned_sha_opt: Option<&str> = if head_sha.is_empty() { None } else { Some(&head_sha) };
+
     let node = crate::services::agent_node::create_pending_with_source_pr_fork(
         mesh.id,
         &mesh.path,
@@ -435,6 +456,7 @@ pub fn create_pr_node(
         Some(&effective_provider),
         None,                 // source_issue
         Some(pr_number),      // source_pr — the key field for stage-2 worktree adoption
+        pinned_sha_opt,       // source_pr_pinned_sha — exact-pinning handle (issue #444)
         Some(&initial_name),
         head_repo_owner,      // fork meta (issue #443) — None for same-repo PRs
         head_repo_clone_url,
@@ -450,10 +472,11 @@ pub fn create_pr_node(
     );
 
     tracing::info!(
-        "create_pr_node: created pending node {} for PR #{} (head_ref={}, head_repo_owner={:?}) on mesh {}",
+        "create_pr_node: created pending node {} for PR #{} (head_ref={}, head_sha={}, head_repo_owner={:?}) on mesh {}",
         node.id,
         pr_number,
         head_ref,
+        head_sha,
         head_repo_owner,
         mesh_id
     );
@@ -727,10 +750,14 @@ mod tests {
             "body": "spawn an agent on a PR",
             "state": "open",
             "draft": false,
-            "head_ref": "feat/420-pr-spawn"
+            "head_ref": "feat/420-pr-spawn",
+            "head_sha": "0123456789abcdef0123456789abcdef01234567"
         }"#;
         let pr: GitHubPullRequest = serde_json::from_str(json).expect("full wire shape parses");
         assert_eq!(pr.head_ref, "feat/420-pr-spawn");
+        // Issue #444 — the SHA must round-trip through the Tauri-side wire
+        // shape unchanged so the spawn path can persist it for exact-pinning.
+        assert_eq!(pr.head_sha, "0123456789abcdef0123456789abcdef01234567");
     }
 
     #[test]
@@ -745,6 +772,7 @@ mod tests {
         }"#;
         let pr: GitHubPullRequest = serde_json::from_str(json).expect("partial wire shape parses");
         assert_eq!(pr.head_ref, "", "missing head_ref defaults to empty");
+        assert_eq!(pr.head_sha, "", "missing head_sha defaults to empty");
     }
 
     /// Issue #443: a fork PR carries `head_repo_owner` (the fork's owner
@@ -838,6 +866,7 @@ mod tests {
             source_pr: None,
             head_repo_owner: None,
             head_repo_clone_url: None,
+            source_pr_pinned_sha: None,
             position: 0,
             created_at: Utc::now(),
         };
@@ -867,6 +896,7 @@ mod tests {
             source_pr: None,
             head_repo_owner: None,
             head_repo_clone_url: None,
+            source_pr_pinned_sha: None,
             position: 0,
             created_at: Utc::now(),
         };

@@ -256,6 +256,16 @@ pub struct AgentNode {
     /// can be fetched without the user pre-configuring it. `None` for
     /// same-repo PRs and for issue-spawned / hand-spawned nodes.
     pub head_repo_clone_url: Option<String>,
+    /// PR's head commit SHA at spawn time (issue #444). Exact-pinning handle:
+    /// `spawn_agent_inner` reads the local `origin/<head_ref>` SHA after
+    /// `git fetch` and emits a `pr_sha_drift` warning via `mesh-sync-warning`
+    /// if it no longer matches (force-push / rebase). `None` for v15 and
+    /// earlier PR-spawned rows (the SHA wasn't known at insert time), and
+    /// `None` for issue-spawned / hand-spawned nodes. The drift-check path
+    /// branches on `Some(_)` so `None` skips the comparison rather than
+    /// failing — same fail-open semantics as the `pr_head_unfetchable`
+    /// fallback introduced in #420.
+    pub source_pr_pinned_sha: Option<String>,
     #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,

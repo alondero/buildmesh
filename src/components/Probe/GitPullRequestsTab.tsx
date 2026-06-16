@@ -279,6 +279,14 @@ export function GitPullRequestsTab() {
         pr.number,
         pr.title,
         pr.head_ref,
+        // Issue #444 — pass the PR's head SHA so the backend can pin the
+        // worktree to that exact commit and emit a `pr_sha_drift`
+        // `mesh-sync-warning` if the PR was force-pushed / rebased
+        // between click-time and spawn-time. An empty `pr.head_sha`
+        // (partial GitHub response, fork payload) is passed through
+        // unchanged; the backend treats empty as "skip the drift check"
+        // — same fail-open semantics as `pr_head_unfetchable`.
+        pr.head_sha,
         providerId,
         pr.head_repo_owner,
         pr.head_repo_clone_url,
@@ -322,6 +330,7 @@ export function GitPullRequestsTab() {
         pr.number,
         pr.title,
         pr.head_ref,
+        pr.head_sha,
         defaultProvider,
         pr.head_repo_owner,
         pr.head_repo_clone_url,

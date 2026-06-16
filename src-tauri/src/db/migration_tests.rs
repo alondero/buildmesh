@@ -202,6 +202,100 @@ mod tests {
         assert_eq!(pos("m1-c"), 2, "second call must be a no-op");
     }
 
+    /// v15→v16: `ensure_agent_node_source_pr_pinned_sha` must add the new
+    /// `source_pr_pinned_sha` column to a v15-shape `agent_nodes` table
+    /// (one with `source_pr` but no SHA), and a second call must be a no-op
+    /// (idempotent). This is the safety-net path that fixes DBs that skipped
+    /// the version-gated migration (see `ensure_agent_node_source_issue`
+    /// for the same pattern in v9).
+    #[test]
+    fn ensure_agent_node_source_pr_pinned_sha_adds_column_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        // v15-shape agent_nodes: has `source_pr` (issue #420) but NOT
+        // `source_pr_pinned_sha` (issue #444).
+        conn.execute_batch(
+            "
+            CREATE TABLE agent_nodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mesh_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                branch TEXT NOT NULL DEFAULT 'main',
+                env TEXT NOT NULL DEFAULT 'windows',
+                provider TEXT NOT NULL DEFAULT 'anthropic',
+                status TEXT NOT NULL DEFAULT 'idle',
+                cli_session_id TEXT,
+                worktree_name TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                source_issue INTEGER,
+                source_pr INTEGER
+            );
+            -- Pre-existing v15 row that the safety net must not break.
+            -- Its `source_pr` is set; the new SHA column must default to NULL
+            -- and the row must remain queryable.
+            INSERT INTO agent_nodes (mesh_id, name, path, source_pr, created_at)
+                VALUES (1, 'preexisting', '/p', 420, '2020-01-01T00:00:00Z');
+            "
+        ).unwrap();
+
+        // Precondition: column does not exist yet.
+        let has_before: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr_pinned_sha'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(!has_before, "PRECONDITION: source_pr_pinned_sha must not exist in v15 schema");
+
+        // Act — first call adds the column.
+        crate::db::ensure_agent_node_source_pr_pinned_sha(&conn).unwrap();
+
+        // Assert: column now exists and is nullable (no NOT NULL constraint).
+        let has_after: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr_pinned_sha'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(has_after, "source_pr_pinned_sha column must exist after safety-net call");
+
+        let notnull: i64 = conn.query_row(
+            "SELECT \"notnull\" FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr_pinned_sha'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(notnull, 0, "source_pr_pinned_sha must be NULLable — backfill of pre-existing rows is impossible");
+
+        // Pre-existing v15 row survives: source_pr is intact, SHA defaults to NULL.
+        let (source_pr, source_pr_pinned_sha): (Option<i64>, Option<String>) = conn.query_row(
+            "SELECT source_pr, source_pr_pinned_sha FROM agent_nodes WHERE name = 'preexisting'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(source_pr, Some(420), "pre-existing source_pr must survive");
+        assert_eq!(source_pr_pinned_sha, None, "new column must default to NULL for v15 rows");
+
+        // A new row can store a SHA. Issue #444 — the SHA is the exact-pinning
+        // handle that the spawn path verifies against `origin/<head_ref>`.
+        conn.execute(
+            "INSERT INTO agent_nodes (mesh_id, name, path, source_pr, source_pr_pinned_sha, created_at)
+             VALUES (1, 'pinned', '/p2', 421, '0123456789abcdef0123456789abcdef01234567', '2020-01-02T00:00:00Z')",
+            [],
+        ).unwrap();
+        let sha: Option<String> = conn.query_row(
+            "SELECT source_pr_pinned_sha FROM agent_nodes WHERE name = 'pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(sha.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+
+        // Idempotent: a second call must not error (the column already exists).
+        crate::db::ensure_agent_node_source_pr_pinned_sha(&conn).unwrap();
+
+        // The pinned row is still queryable after the second call.
+        let sha_after: Option<String> = conn.query_row(
+            "SELECT source_pr_pinned_sha FROM agent_nodes WHERE name = 'pinned'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(sha_after.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"),
+            "second safety-net call must not corrupt existing data");
+    }
+
     #[test]
     fn test_migration_is_idempotent_when_column_exists() {
         let temp_dir = std::env::temp_dir();

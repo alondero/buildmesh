@@ -45,14 +45,14 @@ const MESH: Mesh = {
 // worktree from it. PRs without a head ref are fork PRs and the spawn flow
 // refuses them.
 const OPEN_PRS: GitHubPullRequest[] = [
-  { number: 201, title: 'Add widget', body: 'Adds the widget', url: 'https://github.com/acme/demo/pull/201', state: 'open', draft: false, head_ref: 'feat/201-add-widget' },
-  { number: 202, title: 'Refactor core', body: 'Big refactor', url: 'https://github.com/acme/demo/pull/202', state: 'open', draft: false, head_ref: 'refactor/202-core' },
-  { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true, head_ref: 'wip/203-spike' },
-  { number: 204, title: 'Fresh PR', body: '', url: 'https://github.com/acme/demo/pull/204', state: 'open', draft: false, head_ref: 'fresh/204-pr' },
+  { number: 201, title: 'Add widget', body: 'Adds the widget', url: 'https://github.com/acme/demo/pull/201', state: 'open', draft: false, head_ref: 'feat/201-add-widget', head_sha: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1' },
+  { number: 202, title: 'Refactor core', body: 'Big refactor', url: 'https://github.com/acme/demo/pull/202', state: 'open', draft: false, head_ref: 'refactor/202-core', head_sha: 'b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2' },
+  { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true, head_ref: 'wip/203-spike', head_sha: 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3' },
+  { number: 204, title: 'Fresh PR', body: '', url: 'https://github.com/acme/demo/pull/204', state: 'open', draft: false, head_ref: 'fresh/204-pr', head_sha: 'd4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4' },
 ];
 
 const CLOSED_PRS: GitHubPullRequest[] = [
-  { number: 150, title: 'Old change', body: 'merged ages ago', url: 'https://github.com/acme/demo/pull/150', state: 'closed', draft: false, head_ref: 'old/150-change' },
+  { number: 150, title: 'Old change', body: 'merged ages ago', url: 'https://github.com/acme/demo/pull/150', state: 'closed', draft: false, head_ref: 'old/150-change', head_sha: 'e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5' },
 ];
 
 const MERGEABILITY: Record<number, PrMergeability> = {
@@ -85,6 +85,13 @@ const PR_DRAFT = {
   use_worktree: true,
   source_issue: null,
   source_pr: 201,
+  // Mirrors the Rust `source_pr_pinned_sha` (issue #444) — the backend
+  // stores the PR's head SHA here for the exact-pinning drift check.
+  // OPEN_PRS[0] (PR 201) has head_sha 'a1a1...a1', so the persisted
+  // value is the same. Without this field, future tests reading
+  // `draft.node.source_pr_pinned_sha` would see `undefined` at runtime
+  // (the fixture is inferred, no TS type to catch the drift).
+  source_pr_pinned_sha: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1',
   position: 0,
   created_at: '2026-01-01',
   prefill: 'Please review pull request #201 — Add widget\nhttps://github.com/acme/demo/pull/201',
@@ -449,13 +456,18 @@ describe('GitPullRequestsTab', () => {
     await userEvent.click(spawns[0]);
 
     // Stage 1 — `create_pr_node` carries the head ref from the fixture,
-    // plus the resolved default provider from `get_default_provider`.
+    // plus the resolved default provider from `get_default_provider`. The
+    // `headSha` (issue #444) is the exact-pinning handle: the backend
+    // persists it as `source_pr_pinned_sha` and verifies the local
+    // `origin/<head_ref>` SHA matches it after `git fetch`, emitting a
+    // non-fatal `pr_sha_drift` `mesh-sync-warning` on mismatch.
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('create_pr_node', {
         meshId: 42,
         prNumber: 201,
         prTitle: 'Add widget',
         headRef: 'feat/201-add-widget',
+        headSha: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1',
         provider: 'anthropic',
       });
     });
@@ -482,6 +494,75 @@ describe('GitPullRequestsTab', () => {
       expect(invoke).toHaveBeenCalledWith('start_node_background', expect.objectContaining({ nodeId: 17 }));
     });
     expect(useUIStore.getState().probeOpen).toBe(true);
+  });
+
+  // Issue #444 — exact-pinning. `create_pr_node` MUST receive the PR's head
+  // commit SHA on every spawn path (primary + provider-picker) so the backend
+  // can persist it as `source_pr_pinned_sha` and verify the local
+  // `origin/<head_ref>` SHA matches after `git fetch`. An empty `head_sha`
+  // (partial GitHub response) is passed through unchanged — the backend
+  // treats it as "skip the drift check" (same fail-open semantics as the
+  // existing `pr_head_unfetchable` fallback).
+  it('plumbs head_sha through to create_pr_node (issue #444 exact-pinning)', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const spawns = await screen.findAllByText('Spawn');
+    await userEvent.click(spawns[0]);
+
+    await waitFor(() => {
+      // PR 201's fixture has head_sha 'a1a1...a1' (40 hex chars). The
+      // matching `headSha` arg MUST be present on the create_pr_node call
+      // — without it the backend can't pin the worktree to the exact commit
+      // and the drift check is skipped (silent UX regression).
+      expect(invoke).toHaveBeenCalledWith(
+        'create_pr_node',
+        expect.objectContaining({
+          prNumber: 201,
+          headRef: 'feat/201-add-widget',
+          headSha: 'a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1',
+        }),
+      );
+    });
+  });
+
+  it('passes an empty head_sha when the GitHub response omits it (fail-open)', async () => {
+    // Real-world case: the `/pulls` list endpoint occasionally returns a
+    // partial response (older caches, rate-limited retries) where `head.sha`
+    // is missing. `GitHubPullRequest.head_sha` defaults to "" via
+    // `#[serde(default)]` on the Rust struct (and the same default in the
+    // generated TS type), so the frontend passes "" through to the backend.
+    // The backend treats "" as "skip the drift check" — same fail-open
+    // semantics as `pr_head_unfetchable` — and the worktree proceeds on
+    // whatever `origin/<head_ref>` is currently at.
+    mockBackend();
+    // Override the PR list to omit head_sha for PR 201 (the first row).
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_pulls') {
+        return Promise.resolve(OPEN_PRS.map((pr) =>
+          pr.number === 201 ? { ...pr, head_sha: '' } : pr,
+        ));
+      }
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'create_pr_node') return Promise.resolve(PR_DRAFT);
+      if (cmd === 'start_node_background') return Promise.resolve(undefined);
+      return Promise.resolve({});
+    });
+    render(<GitPullRequestsTab />);
+
+    const spawns = await screen.findAllByText('Spawn');
+    await userEvent.click(spawns[0]);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'create_pr_node',
+        expect.objectContaining({
+          prNumber: 201,
+          headRef: 'feat/201-add-widget',
+          headSha: '', // empty — backend skips drift check
+        }),
+      );
+    });
   });
 
   it('keeps the dock open when create_pr_node rejects (lets the user retry)', async () => {

@@ -225,6 +225,7 @@ fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
         Some(name),
         None,
         None,
+        None, // source_pr_pinned_sha — test fixture; no PR SHA
         true,
         None,
         None,
