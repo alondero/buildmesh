@@ -1,4 +1,4 @@
-import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
+import { createDualKeyCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getOpenPrForNode, type OpenPr } from '../lib/tauri';
 
@@ -6,7 +6,13 @@ import { getOpenPrForNode, type OpenPr } from '../lib/tauri';
 // instances for the same nodeId dedup their fetches via the primitive's
 // pending map; instances for different nodeIds each have their own cache
 // entry, sharing the bus-level GIT_CHANGED subscription.
-const prClient = createPathInvalidatedCache<number, OpenPr>({
+//
+// `createDualKeyCache` is the right factory here: the IPC takes a
+// nodeId (`getOpenPrForNode(nodeId: number)`), and the GIT_CHANGED
+// subscription is on a different string (the node's git path). The
+// dual-key shape makes both arguments explicit at the type level —
+// issue #347.
+const prClient = createDualKeyCache<number, OpenPr>({
   fetcher: getOpenPrForNode,
   name: 'useOpenPr',
 });

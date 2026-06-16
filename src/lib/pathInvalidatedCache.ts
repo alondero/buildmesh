@@ -1,9 +1,25 @@
 /**
- * Path-invalidated cache primitive (issue #282).
+ * Path-invalidated cache primitive (issue #282), split into two factories
+ * (issue #347):
  *
- * Replaces the four near-identical `listen(GIT_CHANGED)` + module-level
- * cache + in-flight dedupe + path-keyed subscription patterns that lived in
- * `useGitSummary`, `useOpenPr`, `useMeshHealth`, and `useMeshGitStatus`.
+ * - `createPathKeyedCache<V>({fetcher, name})` — for hooks whose key IS the
+ *   git path: `useGitSummary`, `useMeshGitStatus`, `useGitBranchStatus`,
+ *   `useChangedFiles`. The `subscribe(key, cb)` method takes no separate
+ *   `path` arg because the key and the path are the same string.
+ *
+ * - `createDualKeyCache<K, V>({fetcher, name})` — for hooks whose key is
+ *   an entity id (nodeId, meshId) but whose GIT_CHANGED subscription path
+ *   is a different string: `useOpenPr`, `useMeshHealth`. The
+ *   `subscribeByPath(key, path, cb)` method makes the dual-key shape
+ *   explicit at the type level.
+ *
+ * The single-factory `createPathInvalidatedCache` that lived here before
+ * issue #347 forced every caller to write
+ * `usePathInvalidatedQuery(client, path, path)` — the duplicated `path`
+ * arg was a smell. The split makes the two shapes first-class; a reader
+ * of `usePathInvalidatedQuery(client, gitPath)` vs
+ * `usePathInvalidatedQuery(client, nodeId, gitPath)` sees immediately
+ * whether the hook treats its key as a path or as an id.
  *
  * Also exposes a component-level subscription API (`subscribeGitPathInvalidation`,
  * issue #345) so React components that only need the invalidation callback
@@ -15,8 +31,8 @@
  * ------------
  * - ONE module-level `GIT_CHANGED` listener is installed the first time any
  *   client subscribes.
- * - Each `createPathInvalidatedCache` call returns a `QueryClient` tagged
- *   with a unique `clientId` (Symbol). The client registers a single
+ * - Each factory call returns a `QueryClient` (one of the two flavours)
+ *   tagged with a unique `clientId` (Symbol). The client registers a single
  *   bus-handler in a global map keyed by that id.
  * - Subscriptions are stored in `pathSubscribers` keyed by the watched path.
  *   Each subscriber carries its `clientId` and the `notify` callback to
@@ -33,11 +49,11 @@
  *
  * Why the clientId-scoped dispatch matters (Footgun 1)
  * ----------------------------------------------------
- * Two clients (e.g. useOpenPr keys by nodeId, useMeshHealth keys by meshId)
- * can both have a subscriber whose key is `7`. A global sweep that wiped
- * "every cache entry where key === 7" would nuke the wrong client on every
- * event. Scoping dispatch to the owning client (via `clientId`) keeps the
- * invalidation local.
+ * Two clients (e.g. a useOpenPr client keyed by nodeId and a useMeshHealth
+ * client keyed by meshId) can both have a subscriber whose key is `7`. A
+ * global sweep that wiped "every cache entry where key === 7" would nuke
+ * the wrong client on every event. Scoping dispatch to the owning client
+ * (via `clientId`) keeps the invalidation local.
  *
  * `null` vs `undefined` cache reads
  * ---------------------------------
@@ -64,6 +80,49 @@ const NOOP_CLIENT_ID = Symbol('subscribeGitPathInvalidation');
 // (no fresh arrow allocation per component mount).
 const NOOP_HANDLER: CallbackBusHandler = (sub) => sub.notify();
 
+// ------------------------------------------------------------------
+// Public client interfaces
+// ------------------------------------------------------------------
+
+/** Single-key client: `key` is a string that doubles as the GIT_CHANGED
+ * subscription path. `subscribe(key, cb)` has no separate `path` arg. */
+export interface PathKeyedClient<V> {
+  /** Returns the cached value for `key`, or `undefined` if no entry exists.
+   * A cached `null` is returned as `null` (not `undefined`); callers that
+   * need to distinguish "uncached" from "cached null" should check the
+   * return value directly. */
+  read(key: string): V | null | undefined;
+  /** Fetches the value for `key`, deduping with any concurrent caller. On
+   * rejection, the cache is left untouched and the in-flight is cleared; the
+   * returned promise resolves to `null` so callers can `await` without
+   * try/catch but should still treat `null` from `refresh` as "no data". */
+  refresh(key: string): Promise<V | null>;
+  /** Erases the cached value AND any in-flight fetch for `key`. */
+  invalidate(key: string): void;
+  /** Registers a callback to be invoked when a `GIT_CHANGED` event matches
+   * `key` (via `pathMatchesGitEvent` — worktree-subdir + WUNC-aware). The
+   * returned function unsubscribes; call it from the hook's cleanup. */
+  subscribe(key: string, onInvalidate: () => void): () => void;
+}
+
+/** Dual-key client: `key` is an entity id; `path` is the separate git path
+ * the GIT_CHANGED subscription should match. The `subscribeByPath(key, path,
+ * cb)` method makes the dual shape explicit at the type level. */
+export interface DualKeyClient<K, V> {
+  /** Returns the cached value for `key`, or `undefined` if no entry exists.
+   * A cached `null` is returned as `null` (not `undefined`). */
+  read(key: K): V | null | undefined;
+  /** Fetches the value for `key`, deduping with any concurrent caller. On
+   * rejection, the cache is left untouched and the in-flight is cleared. */
+  refresh(key: K): Promise<V | null>;
+  /** Erases the cached value AND any in-flight fetch for `key`. */
+  invalidate(key: K): void;
+  /** Registers a callback to be invoked when a `GIT_CHANGED` event matches
+   * `path` (via `pathMatchesGitEvent`). The returned function unsubscribes. */
+  subscribeByPath(key: K, path: string, onInvalidate: () => void): () => void;
+}
+
+/** Options accepted by both factories. */
 export interface PathInvalidatedCacheOptions<K, V> {
   /** Loads the value for a given key. Resolves to `null` for "known empty". */
   fetcher: (key: K) => Promise<V | null>;
@@ -71,35 +130,9 @@ export interface PathInvalidatedCacheOptions<K, V> {
   name?: string;
 }
 
-export interface QueryClient<K, V> {
-  /**
-   * Returns the cached value for `key`, or `undefined` if no entry exists.
-   * A cached `null` is returned as `null` (not `undefined`); callers that
-   * need to distinguish "uncached" from "cached null" should check the
-   * return value directly.
-   */
-  read(key: K): V | null | undefined;
-  /**
-   * Fetches the value for `key`, deduping with any concurrent caller. On
-   * rejection, the cache is left untouched and the in-flight is cleared; the
-   * returned promise resolves to `null` so callers can `await` without
-   * try/catch but should still treat `null` from `refresh` as "no data".
-   */
-  refresh(key: K): Promise<V | null>;
-  /** Erases the cached value AND any in-flight fetch for `key`. */
-  invalidate(key: K): void;
-  /**
-   * Registers a callback to be invoked when a `GIT_CHANGED` event matches
-   * `path` (via `pathMatchesGitEvent` — worktree-subdir + WUNC-aware). The
-   * returned function unsubscribes; call it from the hook's cleanup.
-   *
-   * The callback fires AFTER the client's own cache entry for `key` has
-   * been evicted, so a subsequent `client.read(key)` returns `undefined`
-   * and a subsequent `client.refresh(key)` hits the backend (or dedups
-   * onto a sibling subscriber's in-flight fetch).
-   */
-  subscribe(key: K, path: string, onInvalidate: () => void): () => void;
-}
+// ------------------------------------------------------------------
+// Subscriber + handler types (shared by both factories)
+// ------------------------------------------------------------------
 
 interface KeyedPathSubscriber<K> {
   /** Discriminator — `'keyed'` means the subscriber carries a cache key and
@@ -134,8 +167,10 @@ function isCallbackSubscriber(sub: PathSubscriber): sub is CallbackPathSubscribe
 type KeyedBusHandler<K> = (sub: KeyedPathSubscriber<K>) => void;
 type CallbackBusHandler = (sub: CallbackPathSubscriber) => void;
 
-// Module-level globals — there is exactly one bus per process, regardless
-// of how many clients/subscribers exist.
+// ------------------------------------------------------------------
+// Module-level bus globals — shared by both factories + the
+// `subscribeGitPathInvalidation` callback-only API.
+// ------------------------------------------------------------------
 const pathSubscribers = new Map<string, Set<PathSubscriber>>();
 // `busHandlers` stores both keyed and callback handlers behind a single
 // `symbol` key. The bus dispatch calls whichever the subscriber's
@@ -186,8 +221,9 @@ function installListener(): void {
 /**
  * Test-only: clears all module-level state so each test can re-import and
  * start with a clean bus. The hook tests also use `vi.resetModules()` so
- * the freshly-imported module's `createPathInvalidatedCache` call gets a
- * fresh `busHandlers` entry on top of this cleared global state.
+ * the freshly-imported module's `createPathKeyedCache` /
+ * `createDualKeyCache` call gets a fresh `busHandlers` entry on top of this
+ * cleared global state.
  */
 export function resetPathInvalidatedCacheForTests(): void {
   pathSubscribers.clear();
@@ -198,10 +234,10 @@ export function resetPathInvalidatedCacheForTests(): void {
 
 /**
  * Idempotently registers a bus handler for `clientId`. Called on every
- * `subscribe` (and on every `createPathInvalidatedCache` factory call)
- * so the bus keeps working after `resetPathInvalidatedCacheForTests`
- * wipes `busHandlers` between tests. Issue #356: the contract used to
- * be stated in three different comments; it now lives once here.
+ * `subscribe` (and on every factory call) so the bus keeps working after
+ * `resetPathInvalidatedCacheForTests` wipes `busHandlers` between tests.
+ * Issue #356: the contract used to be stated in three different comments;
+ * it now lives once here.
  */
 function registerBusHandler(
   clientId: symbol,
@@ -216,7 +252,7 @@ function registerBusHandler(
  * from the set; if that was the last subscriber, the (now-empty) set is
  * also pruned from `pathSubscribers` so the global map doesn't accumulate
  * dead entries. Issue #356: this used to be duplicated between
- * `QueryClient.subscribe` and `subscribeGitPathInvalidation` — the prune
+ * `client.subscribe` and `subscribeGitPathInvalidation` — the prune
  * was the most likely drift point.
  */
 function addPathSubscriber(sub: PathSubscriber, path: string): () => void {
@@ -234,11 +270,33 @@ function addPathSubscriber(sub: PathSubscriber, path: string): () => void {
   };
 }
 
-export function createPathInvalidatedCache<K, V>(
-  options: PathInvalidatedCacheOptions<K, V>,
-): QueryClient<K, V> {
-  const { fetcher, name = 'pathInvalidatedCache' } = options;
+// ------------------------------------------------------------------
+// Shared client internals. Both factories construct the same
+// read/refresh/invalidate/subscribeOn methods; only the public
+// `subscribe*` shape differs. The helper is internal — never exported.
+// Issue #347 follow-up: pulled read/refresh/invalidate into the helper
+// after the refactor initially left them duplicated between the two
+// factories.
+// ------------------------------------------------------------------
 
+interface InternalClient<K, V> {
+  /** Returns the cached value for `key`, or `undefined` if no entry exists.
+   * A cached `null` is returned as `null` (not `undefined`). */
+  read(key: K): V | null | undefined;
+  /** Fetches the value for `key`, deduping with any concurrent caller. On
+   * rejection, the cache is left untouched and the in-flight is cleared. */
+  refresh(key: K): Promise<V | null>;
+  /** Erases the cached value AND any in-flight fetch for `key`. */
+  invalidate(key: K): void;
+  /** Wires the bus handler + listener and registers a keyed subscriber
+   * on `path`. Returns the idempotent unsubscribe. */
+  subscribeOn(key: K, path: string, onInvalidate: () => void): () => void;
+}
+
+function createInternalClient<K, V>(
+  fetcher: (key: K) => Promise<V | null>,
+  name: string,
+): InternalClient<K, V> {
   // Per-client state. A `Symbol` clientId is the load-bearing piece that
   // makes the cross-client dispatch scoping work — see module docstring.
   const clientId = Symbol('pathInvalidatedCache');
@@ -261,9 +319,6 @@ export function createPathInvalidatedCache<K, V>(
     pending.delete(sub.key);
     sub.notify();
   };
-  // Re-register on every `subscribe` (idempotently). The contract lives on
-  // `registerBusHandler` (issue #356).
-  registerBusHandler(clientId, handler);
 
   return {
     read(key) {
@@ -297,7 +352,7 @@ export function createPathInvalidatedCache<K, V>(
       pending.delete(key);
     },
 
-    subscribe(key, path, onInvalidate) {
+    subscribeOn(key, path, onInvalidate) {
       // Re-register the handler (idempotent — see `registerBusHandler`)
       // and install the global listener. Then add the subscriber via the
       // shared helper. Issue #356.
@@ -309,6 +364,73 @@ export function createPathInvalidatedCache<K, V>(
   };
 }
 
+// ------------------------------------------------------------------
+// The two factories
+// ------------------------------------------------------------------
+
+/**
+ * Single-key cache client. `key` is a path-shaped string that doubles as
+ * the GIT_CHANGED subscription path; the `subscribe(key, cb)` method takes
+ * no separate `path` argument.
+ *
+ * @example
+ * ```ts
+ * const summaryClient = createPathKeyedCache<GitSummary>({
+ *   fetcher: getGitSummary,
+ *   name: 'useGitSummary',
+ * });
+ * // hook usage:
+ * usePathInvalidatedQuery(summaryClient, gitPath);
+ * ```
+ */
+export function createPathKeyedCache<V>(
+  options: PathInvalidatedCacheOptions<string, V>,
+): PathKeyedClient<V> {
+  const { fetcher, name = 'pathInvalidatedCache' } = options;
+  const internal = createInternalClient<string, V>(fetcher, name);
+
+  return {
+    ...internal,
+    // For the single-key shape, the key IS the path the bus matches.
+    subscribe: (key, onInvalidate) => internal.subscribeOn(key, key, onInvalidate),
+  };
+}
+
+/**
+ * Dual-key cache client. `key` is an arbitrary id (e.g. `nodeId`, `meshId`);
+ * `path` is the separate string the GIT_CHANGED subscription should match.
+ * The `subscribeByPath(key, path, cb)` method makes the dual shape explicit
+ * at the type level — there's no longer a "key = path" idiom to read past.
+ *
+ * @example
+ * ```ts
+ * const prClient = createDualKeyCache<number, OpenPr>({
+ *   fetcher: getOpenPrForNode,
+ *   name: 'useOpenPr',
+ * });
+ * // hook usage:
+ * usePathInvalidatedQuery(prClient, nodeId, gitPath);
+ * ```
+ */
+export function createDualKeyCache<K, V>(
+  options: PathInvalidatedCacheOptions<K, V>,
+): DualKeyClient<K, V> {
+  const { fetcher, name = 'pathInvalidatedCache' } = options;
+  const internal = createInternalClient<K, V>(fetcher, name);
+
+  // The `subscribe` and `subscribeOn` members are intentionally NOT
+  // exposed on the dual-key public type — `subscribeByPath` is the only
+  // public subscription method. `read`/`refresh`/`invalidate` come
+  // straight from the internal client.
+  const { read, refresh, invalidate, subscribeOn } = internal;
+  return {
+    read,
+    refresh,
+    invalidate,
+    subscribeByPath: subscribeOn,
+  };
+}
+
 /**
  * Subscribes `cb` to `GIT_CHANGED` events that match `path` (using the
  * same `pathMatchesGitEvent` helper the hook-backed clients use, so the
@@ -317,10 +439,10 @@ export function createPathInvalidatedCache<K, V>(
  *
  * Use this from components that need the invalidation callback but don't
  * have a key+cache to manage — i.e. consumers for whom
- * `createPathInvalidatedCache` is overkill. Used directly by
- * `AgentReviewPanel` and `CenterDiffOverlay`; intentionally NOT used by
+ * `createPathKeyedCache` / `createDualKeyCache` is overkill. Used directly
+ * by `AgentReviewPanel` and `CenterDiffOverlay`; intentionally NOT used by
  * the `usePathInvalidatedQuery` hook (which subscribes via the
- * cache-bearing `client.subscribe(key, path, cb)` on its own client).
+ * cache-bearing `client.subscribe(key, cb)` on its own client).
  * Issue #345.
  *
  * Compared to the hand-rolled `listen(GIT_CHANGED, ...) + pathMatchesGitEvent`

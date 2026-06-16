@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 import {
   listDirectory,
   type FileNode,
@@ -6,6 +6,7 @@ import {
   type DiffResult,
 } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { statusMeta } from '../Diff/Diff';
 
 interface FileTreeProps {
@@ -34,25 +35,23 @@ export function FileTree({
   const [loadingState, setLoadingState] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
 
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (!rootPath) return;
     setLoadingState(true);
     setErrorState(null);
     setTreeState(null);
 
-    let cancelled = false;
     listDirectory(rootPath, 4)
       .then((treeData) => {
-        if (cancelled) return;
+        if (signal.aborted) return;
         setTreeState(treeData);
         setLoadingState(false);
       })
       .catch((e) => {
-        if (cancelled) return;
+        if (signal.aborted) return;
         setErrorState(String(e));
         setLoadingState(false);
       });
-    return () => { cancelled = true; };
   }, [rootPath]);
 
   // Git status badges come from the shared cache (dedupes with

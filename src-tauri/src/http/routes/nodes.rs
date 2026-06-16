@@ -67,9 +67,11 @@ pub async fn create(
         &mesh.path,
         "main",
         Some(req.provider.as_str()),
-        None,
-        None,
-        None,
+        None, // source_issue
+        None, // source_pr — generic mobile spawn, not PR-spawn (issue #450)
+        None, // source_pr_pinned_sha — generic mobile spawn, no pin (issue #444)
+        None, // use_worktree_override — None falls back to mesh default
+        None, // name_override — none supplied on this route
     ) {
         Ok(n) => n,
         Err(e) => {

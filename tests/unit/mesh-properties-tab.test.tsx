@@ -130,8 +130,8 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(screen.getByLabelText(/^Effort\b/)).toBeTruthy();
     expect(screen.getByLabelText('Default provider')).toBeTruthy();
     expect(screen.getByLabelText('Project preset')).toBeTruthy();
-    expect(screen.getByLabelText('Build command')).toBeTruthy();
-    expect(screen.getByLabelText('Run command')).toBeTruthy();
+    expect(screen.getByLabelText(/^Build command/)).toBeTruthy();
+    expect(screen.getByLabelText(/^Run command/)).toBeTruthy();
   });
 
   it('shows the active tab label in the probe header', async () => {
@@ -170,10 +170,10 @@ describe('MeshPropertiesTab (issue #375)', () => {
     const effort = screen.getByLabelText(/^Effort\b/) as HTMLSelectElement;
     expect(effort.value).toBe('high');
 
-    const build = screen.getByLabelText('Build command') as HTMLInputElement;
+    const build = screen.getByLabelText(/^Build command/) as HTMLInputElement;
     expect(build.value).toBe('npm run build');
 
-    const run = screen.getByLabelText('Run command') as HTMLInputElement;
+    const run = screen.getByLabelText(/^Run command/) as HTMLInputElement;
     expect(run.value).toBe('npm run dev');
 
     const provider = screen.getByLabelText('Default provider') as HTMLSelectElement;
@@ -203,7 +203,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
     const user = userEvent.setup();
     await openPropertiesTab();
 
-    const build = (await screen.findByLabelText('Build command')) as HTMLInputElement;
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
     await user.clear(build);
     await user.type(build, 'cargo build');
     fireEvent.blur(build);
@@ -216,6 +216,72 @@ describe('MeshPropertiesTab (issue #375)', () => {
         value: 'cargo build',
       });
     });
+  });
+
+  // Regression for "Build/Run only editable via preset". The user's manual
+  // typing must update the input's *displayed* value on every keystroke,
+  // and the field must be a plain editable `<input type="text">` — no
+  // `disabled`, no `readOnly`, no parent overlay swallowing keystrokes.
+  it('keeps the Build/Run inputs editable: typing updates the value without blurring', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const build = (await screen.findByLabelText(/^Build command/)) as HTMLInputElement;
+    const run = (await screen.findByLabelText(/^Run command/)) as HTMLInputElement;
+
+    // Editability contract: the inputs are plain text fields, not the
+    // "Directory" field which is intentionally read-only.
+    expect(build.disabled).toBe(false);
+    expect(build.readOnly).toBe(false);
+    expect(run.disabled).toBe(false);
+    expect(run.readOnly).toBe(false);
+
+    // The placeholder must NOT look like an actual command — that mix-up
+    // is the original "only preset works" UX bug. Empty fields carry a
+    // clear hint string (starts with "e.g.,") and the field is labelled
+    // "(custom)" so the user knows it's a freeform override, not a
+    // read-only mirror of the preset above.
+    expect(build.placeholder).toMatch(/^e\.g\.,/);
+    expect(run.placeholder).toMatch(/^e\.g\.,/);
+    // Pin the actual override copy too — `^e.g.,` would let a future
+    // rewrite that drops "type to override" still pass, which is the
+    // exact bug we're trying to prevent.
+    expect(build.placeholder).toContain('type to override');
+    expect(run.placeholder).toContain('type to override');
+    // The label's "(custom)" hint is the visible signal that this is a
+    // freeform override, not a read-only mirror of the preset above.
+    // The text is split across a text node + a nested <span>, so use a
+    // function matcher (RTL's recommended way to match across siblings)
+    // instead of an exact string.
+    expect(
+      screen.getByText(
+        (_content, element) =>
+          element?.tagName === 'LABEL' &&
+          /Build command\s*\(custom\)/i.test(element.textContent ?? '')
+      )
+    ).toBeTruthy();
+    expect(
+      screen.getByText(
+        (_content, element) =>
+          element?.tagName === 'LABEL' &&
+          /Run command\s*\(custom\)/i.test(element.textContent ?? '')
+      )
+    ).toBeTruthy();
+
+    // Type a custom Build command WITHOUT blurring. The displayed value
+    // must reflect the keystrokes — if a parent effect resets the form
+    // state, or the field is wrapped in something that prevents onChange
+    // propagation, this assertion catches it.
+    await user.click(build);
+    await user.clear(build);
+    await user.keyboard('cargo build --release');
+    expect(build.value).toBe('cargo build --release');
+
+    // Same contract for Run.
+    await user.click(run);
+    await user.clear(run);
+    await user.keyboard('./target/debug/myapp');
+    expect(run.value).toBe('./target/debug/myapp');
   });
 
   it('saves Effort on change and skips writes when cleared to ""', async () => {

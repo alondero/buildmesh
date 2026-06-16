@@ -98,7 +98,9 @@ async fn spawn_new_agent_impl(
         &branch,
         Some(&effective_provider),
         source_issue,
-        None,
+        None, // source_pr — non-PR spawn path (issue #450)
+        None, // source_pr_pinned_sha — non-PR spawn path (issue #444)
+        None, // use_worktree_override — None falls back to mesh default
         initial_name.as_deref(),
     ).map_err(|e| e.to_string())?;
 
@@ -277,6 +279,8 @@ pub fn create_issue_node(
         &branch,
         Some(&effective_provider),
         Some(issue_number),
+        None, // source_pr — issue-spawn path, not PR-spawn (issue #450)
+        None, // source_pr_pinned_sha — issue-spawn doesn't pin (issue #444)
         Some(&initial_name),
     )
     .map_err(|e| e.to_string())?;

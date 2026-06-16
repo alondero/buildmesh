@@ -366,7 +366,7 @@ export function MeshPropertiesTab() {
               )}
           </Field>
 
-          <Field label="Build command" htmlFor="mesh-prop-build">
+          <Field label="Build command" htmlFor="mesh-prop-build" hint="custom">
             <input
               id="mesh-prop-build"
               type="text"
@@ -376,12 +376,12 @@ export function MeshPropertiesTab() {
                 if (!mountedRef.current) return;
                 await saveBuildCommand(e.target.value);
               }}
-              placeholder="npm run build"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              placeholder="e.g., npm run build — type to override, or pick a preset above"
+              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
-          <Field label="Run command" htmlFor="mesh-prop-run">
+          <Field label="Run command" htmlFor="mesh-prop-run" hint="custom">
             <input
               id="mesh-prop-run"
               type="text"
@@ -391,8 +391,8 @@ export function MeshPropertiesTab() {
                 if (!mountedRef.current) return;
                 await saveRunCommand(e.target.value);
               }}
-              placeholder="npm run dev"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              placeholder="e.g., npm run dev — type to override, or pick a preset above"
+              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
         </>

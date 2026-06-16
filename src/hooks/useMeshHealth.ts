@@ -1,11 +1,16 @@
-import { createPathInvalidatedCache } from '../lib/pathInvalidatedCache';
+import { createDualKeyCache } from '../lib/pathInvalidatedCache';
 import { usePathInvalidatedQuery } from './usePathInvalidatedQuery';
 import { getMeshHealth, type MeshHealth } from '../lib/tauri';
 
 // Module-level shared client (keyed by meshId). The sidebar `!` badge and
 // the 🌳 Worktree Manager tab's HealthBlock both read from this hook; they
 // share one cache + one GIT_CHANGED subscription through the primitive.
-const healthClient = createPathInvalidatedCache<number, MeshHealth>({
+//
+// `createDualKeyCache` is the right factory here: the IPC takes a meshId
+// (`getMeshHealth(meshId: number)`), and the GIT_CHANGED subscription is
+// on a different string (the mesh's path). The dual-key shape makes both
+// arguments explicit at the type level — issue #347.
+const healthClient = createDualKeyCache<number, MeshHealth>({
   fetcher: getMeshHealth,
   name: 'useMeshHealth',
 });

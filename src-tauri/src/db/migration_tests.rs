@@ -333,4 +333,54 @@ mod tests {
         drop(conn);
         std::fs::remove_file(&db_path).ok();
     }
+
+    /// Issue #456: the shared `ensure_column` helper must (a) add a missing
+    /// column with the requested type/default, (b) be a no-op on a second
+    /// call (column already present), and (c) be a no-op when the table
+    /// itself is missing (mirrors the table-exists guard in every
+    /// `ensure_*` wrapper). Returns `Ok(true)` on add / `Ok(false)` on skip
+    /// so callers that need to do follow-up work (backfill) can branch.
+    #[test]
+    fn ensure_column_adds_idempotently_and_handles_missing_table() {
+        // --- Case 1: missing column on a present table ---
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE widgets (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
+        ).unwrap();
+
+        let added = crate::db::ensure_column(&conn, "widgets", "weight", "INTEGER NOT NULL DEFAULT 0").unwrap();
+        assert!(added, "first call must report the column as added");
+
+        let has_col: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('widgets') WHERE name = 'weight'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(has_col, "column must exist after first call");
+
+        // NOT NULL constraint must be honored when the caller passes it.
+        let notnull: i64 = conn.query_row(
+            "SELECT \"notnull\" FROM pragma_table_info('widgets') WHERE name = 'weight'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(notnull, 1, "column must be NOT NULL when caller said so");
+
+        // --- Case 2: column already present — no-op on second call ---
+        let added_again = crate::db::ensure_column(&conn, "widgets", "weight", "INTEGER NOT NULL DEFAULT 0").unwrap();
+        assert!(!added_again, "second call must report no change");
+
+        // Pre-existing semantics must be untouched by the helper.
+        conn.execute(
+            "INSERT INTO widgets (name, weight) VALUES ('alpha', 42)",
+            [],
+        ).unwrap();
+        let w: i64 = conn.query_row(
+            "SELECT weight FROM widgets WHERE name = 'alpha'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(w, 42, "existing column semantics must be untouched by the helper");
+
+        // --- Case 3: table missing — no-op, no error ---
+        let added_no_table = crate::db::ensure_column(&conn, "no_such_table", "x", "INTEGER").unwrap();
+        assert!(!added_no_table, "missing-table case must report no change");
+    }
 }

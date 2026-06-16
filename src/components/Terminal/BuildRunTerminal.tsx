@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -8,6 +8,7 @@ import { TERMINAL_OPTIONS } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { TerminalWriter } from './TerminalWriter';
 import { decodeBase64Bytes } from '../../lib/base64';
+import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 
 interface BuildRunTerminalProps {
   sessionId: number;
@@ -40,9 +41,13 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
   // terminal — see TerminalRegistry.ts). We don't track them individually
   // so the cleanup function stays free of any explicit teardown calls.
 
-  useEffect(() => {
+  useAsyncEffect((signal) => {
     if (!containerRef.current) return;
-    let cancelled = false;
+    // The helper aborts `signal` on cleanup so the late `listen().then`
+    // can short-circuit via `if (signal.aborted) unlisten(); return;`
+    // before this effect's returned cleanup disposes the resources
+    // owned by THIS effect. The xterm's parent TerminalRegistry is
+    // not involved here — the term is disposed inline below.
 
     const term = new Terminal(TERMINAL_OPTIONS);
     const fitAddon = new FitAddon();
@@ -103,7 +108,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
         writer.append(sessionId, decodeBase64Bytes(event.payload.data));
       }
     }).then(unlisten => {
-      if (cancelled) {
+      if (signal.aborted) {
         unlisten();
         return;
       }
@@ -117,7 +122,6 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
     });
 
     return () => {
-      cancelled = true;
       resizeObserver.disconnect();
       unlistenRef.current?.();
       writer.unregister(sessionId);

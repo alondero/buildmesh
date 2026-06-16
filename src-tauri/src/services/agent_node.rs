@@ -27,54 +27,14 @@ impl From<rusqlite::Error> for AgentNodeError {
 
 /// Create a new agent node with auto-generated name, environment detection,
 /// and provider resolution.
-pub fn create(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    use_worktree_override: Option<bool>,
-    name_override: Option<&str>,
-) -> Result<AgentNode, AgentNodeError> {
-    // Hand off to the explicit-source version with `source_pr = None` so the
-    // single create() call site for issue-spawn / handover / generic paths
-    // stays binary-compatible. The PR-spawn flow uses `create_with_source_pr`
-    // (or `create_pending_with_source_pr` for the two-stage variant) to
-    // record the originating PR number — see issue #420.
-    create_with_source_pr(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        None, // source_pr
-        None, // source_pr_pinned_sha — issue-spawn / generic paths don't pin
-        use_worktree_override,
-        name_override,
-    )
-}
-
-/// Like [`create`], but accepts a `source_pr` so PR-spawned nodes (#420) can
-/// record the originating PR number. Used by `commands::agent::create_pr_node`
-/// and (transitively) by the stage-1 split of the PR-spawn flow. For all
-/// other spawn paths the `create` wrapper passes `None` here.
 ///
-/// `source_pr_pinned_sha` (issue #444) is the exact-pinning handle — the PR's
-/// head commit SHA at the moment the user clicked Spawn. The spawn path
-/// verifies the local `origin/<head_ref>` SHA matches it after `git fetch`
-/// and emits a `pr_sha_drift` warning if not. `None` is fine: a row without
-/// a pinned SHA simply skips the drift check (same fail-open semantics as
-/// `pr_head_unfetchable`).
-///
-/// For fork PRs (issue #443), prefer [`create_with_source_pr_fork`] — it
-/// also records the fork's owner login + clone URL so `spawn_agent_inner`
-/// can add the fork as a remote and fetch the head ref. This entry point
-/// is the binary-compatible trampoline for every other call site
-/// (issue-spawn, handover, hand-spawn): it forwards to the fork-aware
-/// variant with `head_repo_owner = None, head_repo_clone_url = None` and
-/// `source_pr_pinned_sha` threaded through unchanged.
+/// Pass `None` for `source_pr` / `source_pr_pinned_sha` /
+/// `head_repo_owner` / `head_repo_clone_url` on non-PR spawns (issue-spawn,
+/// handover, hand-spawn). Fork PRs call [`create_with_source_pr_fork`]
+/// directly with the fork fields populated (issue #443). `source_pr_pinned_sha`
+/// (issue #444) is the exact-pinning handle — `None` skips the drift check.
 #[allow(clippy::too_many_arguments)]
-pub fn create_with_source_pr(
+pub fn create(
     mesh_id: i64,
     path: &str,
     branch: &str,
@@ -85,10 +45,7 @@ pub fn create_with_source_pr(
     use_worktree_override: Option<bool>,
     name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
-    // Hand off to the explicit-fork variant with the fork fields set to None.
-    // Every pre-#443 call site stays binary-compatible; the fork-aware
-    // variant is the single insert path that knows how to record both the
-    // PR number and (when applicable) the fork remote metadata.
+    // Single insert path; fork fields are None for the non-fork entry point.
     create_with_source_pr_fork(
         mesh_id,
         path,
@@ -104,15 +61,11 @@ pub fn create_with_source_pr(
     )
 }
 
-/// Like [`create_with_source_pr`], but also records the fork's owner login
-/// and clone URL when the PR is from a fork (issue #443, follow-up to #36
-/// worktree adoption), and the PR's head commit SHA (issue #444) for
-/// exact-pinning. `spawn_agent_inner` reads the fork fields to register
-/// `fork-<owner>` as a remote and fetch the head ref from it, and the SHA
-/// to verify the local SHA after `git fetch` (drift check). For same-repo
-/// PRs the head's `repo.owner.login` is the destination owner — the caller
-/// should still pass `None` for both fork fields (the spawn path then takes
-/// the #420 `origin/<head_ref>` branch).
+/// Like [`create`], but also records the fork's owner login and clone URL
+/// when the PR is from a fork (issue #443). `spawn_agent_inner` reads
+/// these to register `fork-<owner>` as a remote and fetch the head ref.
+/// For same-repo PRs, pass `None` for both fork fields and call [`create`]
+/// instead — the spawn path then takes the #420 `origin/<head_ref>` branch.
 #[allow(clippy::too_many_arguments)]
 pub fn create_with_source_pr_fork(
     mesh_id: i64,
@@ -179,39 +132,12 @@ pub fn create_with_source_pr_fork(
 /// started" from "node row exists, agent is idle and ready to re-spawn".
 ///
 /// This is the fast stage-1 of the two-stage issue-spawn flow. The caller
-/// is expected to invoke `start_node_background` (or a future
-/// fire-and-forget equivalent) to do the slow work — git fetch, worktree
-/// create, PTY spawn — and update the status to `Running` on success or
-/// `Error` on failure.
-pub fn create_pending(
-    mesh_id: i64,
-    path: &str,
-    branch: &str,
-    provider: Option<&str>,
-    source_issue: Option<i64>,
-    name_override: Option<&str>,
-) -> Result<AgentNode, AgentNodeError> {
-    // Hand off to the explicit-source variant with `source_pr = None` so the
-    // existing issue-spawn call sites stay binary-compatible.
-    create_pending_with_source_pr(
-        mesh_id,
-        path,
-        branch,
-        provider,
-        source_issue,
-        None, // source_pr
-        None, // source_pr_pinned_sha — issue-spawn doesn't pin
-        name_override,
-    )
-}
-
-/// Like [`create_pending`], but accepts a `source_pr` and `source_pr_pinned_sha`
-/// for the PR-spawn flow (issues #420 + #444). See `create_with_source_pr` for
-/// the underlying mechanics. This is the binary-compatible trampoline every
-/// pre-#443 caller uses — it forwards to [`create_pending_with_source_pr_fork`]
-/// with the fork fields set to `None`.
+/// is expected to invoke `start_node_background` to do the slow work
+/// (git fetch, worktree create, PTY spawn) and update the status to
+/// `Running` on success or `Error` on failure. The source-pr / fork-repo
+/// fields follow the same contract as [`create`].
 #[allow(clippy::too_many_arguments)]
-pub fn create_pending_with_source_pr(
+pub fn create_pending(
     mesh_id: i64,
     path: &str,
     branch: &str,
@@ -221,6 +147,7 @@ pub fn create_pending_with_source_pr(
     source_pr_pinned_sha: Option<&str>,
     name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
+    // Single insert path; fork fields are None for the non-fork entry point.
     create_pending_with_source_pr_fork(
         mesh_id,
         path,
@@ -235,11 +162,11 @@ pub fn create_pending_with_source_pr(
     )
 }
 
-/// Like [`create_pending_with_source_pr`], but also records the fork's
-/// owner login + clone URL when the PR is from a fork (issue #443) and
-/// the PR's head commit SHA for exact-pinning (issue #444). The PR-spawn
-/// flow (`commands::agent::create_pr_node`) calls this with the two fork
-/// fields populated for fork PRs and `None, None` for same-repo PRs.
+/// Like [`create_pending`], but also records the fork's owner login and
+/// clone URL when the PR is from a fork (issue #443) and the PR's head
+/// commit SHA for exact-pinning (issue #444). `commands::agent::create_pr_node`
+/// calls this directly with the fork fields populated for fork PRs and
+/// `None, None` for same-repo PRs.
 #[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_source_pr_fork(
     mesh_id: i64,

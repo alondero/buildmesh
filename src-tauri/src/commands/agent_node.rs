@@ -16,7 +16,20 @@ pub async fn create_session(
     provider: Option<String>,
     use_worktree: Option<bool>,
 ) -> Result<AgentNode, String> {
-    services::agent_node::create(mesh_id, &path, &branch, provider.as_deref(), None, use_worktree, None)
+    // Tauri command surface has no PR-spawn plumbing; PR flows go via
+    // `commands::pr::create_pr_node`. If we ever expose PR spawn here,
+    // this is the call site to grow.
+    services::agent_node::create(
+        mesh_id,
+        &path,
+        &branch,
+        provider.as_deref(),
+        None, // source_issue
+        None, // source_pr — non-PR spawn (issue #450)
+        None, // source_pr_pinned_sha — non-PR spawn (issue #444)
+        use_worktree,
+        None, // name_override — Tauri surface doesn't accept one
+    )
         .map_err(|e| {
             tracing::error!("create_session failed: {}", e);
             e.to_string()
