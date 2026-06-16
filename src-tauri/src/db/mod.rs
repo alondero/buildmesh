@@ -184,31 +184,64 @@ fn migrate_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+/// Shared safety-net helper (issue #456): add `column` of type
+/// `col_type_with_default` to `table` if (and only if) the table exists and
+/// the column is missing. The four-step pattern (table-exists guard,
+/// `pragma_table_info` check, `ALTER TABLE ADD COLUMN`, `tracing::warn!`) is
+/// shared by every `ensure_*` safety net — folding it into one helper means
+/// a new column costs a single line, not 25+.
+///
+/// Returns `Ok(true)` if the column was added by this call, `Ok(false)` if
+/// it was already present (or the table doesn't exist). The `bool` is
+/// load-bearing for backfill wrappers — `ensure_agent_node_position` and
+/// `ensure_agent_node_status_changed_at` only need to backfill existing
+/// rows on the *first* add, and re-running the backfill would clobber any
+/// positions a user has re-arranged via drag-to-reorder (issue #65).
+///
+/// The helper does NOT log itself — each `ensure_*` wrapper logs in its own
+/// name, so a `tracing` grep lands on the safety-net function that ran
+/// (not the generic helper).
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    col_type_with_default: &str,
+) -> SqlResult<bool> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(false);
+    }
+
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info(?1) WHERE name=?2",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if has_col {
+        return Ok(false);
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {} ADD COLUMN {} {}", table, column, col_type_with_default),
+        [],
+    )?;
+    Ok(true)
+}
+
 /// Safety net: ensure the v9 source_issue column exists on agent_nodes.
 /// Same shape as ensure_mesh_config_columns — fixes DBs whose schema_version
 /// was bumped past 9 without the column being added because the migration
 /// guard skipped them (see ensure_mesh_config_columns for the same bug class).
 pub(crate) fn ensure_agent_node_source_issue(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_issue'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_issue INTEGER", [])?;
+    if ensure_column(conn, "agent_nodes", "source_issue", "INTEGER")? {
         tracing::warn!("ensure_agent_node_source_issue: added missing source_issue column");
     }
     Ok(())
@@ -229,26 +262,7 @@ fn migrate_agent_node_use_worktree(conn: &Connection) -> SqlResult<()> {
 }
 
 pub(crate) fn ensure_agent_node_use_worktree(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'use_worktree'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1", [])?;
+    if ensure_column(conn, "agent_nodes", "use_worktree", "INTEGER NOT NULL DEFAULT 1")? {
         tracing::warn!("ensure_agent_node_use_worktree: added missing use_worktree column");
     }
     Ok(())
@@ -259,27 +273,13 @@ pub(crate) fn ensure_agent_node_use_worktree(conn: &Connection) -> SqlResult<()>
 /// node's position as its 0-based rank by `created_at` within its own mesh, so
 /// existing nodes keep the order they already render in (lists previously
 /// sorted by `created_at ASC`). Ties broken by `id` for determinism.
+///
+/// The backfill is a multi-step migration, not a one-column add, so it stays
+/// inline in this wrapper — the helper covers the table-exists + ALTER step,
+/// the `if` guards the backfill so a re-run never overwrites a position the
+/// user has re-arranged via drag-to-reorder (issue #65).
 pub(crate) fn ensure_agent_node_position(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'position'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN position INTEGER NOT NULL DEFAULT 0", [])?;
+    if ensure_column(conn, "agent_nodes", "position", "INTEGER NOT NULL DEFAULT 0")? {
         conn.execute(
             "UPDATE agent_nodes SET position = (
                  SELECT COUNT(*) FROM agent_nodes AS earlier
@@ -302,26 +302,7 @@ pub(crate) fn ensure_agent_node_position(conn: &Connection) -> SqlResult<()> {
 /// (if coarse) activity time instead of NULL. SQLite forbids a non-constant
 /// default on `ALTER TABLE ADD COLUMN`, hence the add-then-backfill two-step.
 pub(crate) fn ensure_agent_node_status_changed_at(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'status_changed_at'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN status_changed_at TEXT", [])?;
+    if ensure_column(conn, "agent_nodes", "status_changed_at", "TEXT")? {
         conn.execute(
             "UPDATE agent_nodes SET status_changed_at = created_at WHERE status_changed_at IS NULL",
             [],
@@ -339,26 +320,7 @@ pub(crate) fn ensure_agent_node_status_changed_at(conn: &Connection) -> SqlResul
 /// generated TS shape) makes the absence explicit and the spawn path
 /// branches on it.
 pub(crate) fn ensure_agent_node_source_pr(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_pr INTEGER", [])?;
+    if ensure_column(conn, "agent_nodes", "source_pr", "INTEGER")? {
         tracing::warn!("ensure_agent_node_source_pr: added missing source_pr column");
     }
     Ok(())
@@ -372,27 +334,8 @@ pub(crate) fn ensure_agent_node_source_pr(conn: &Connection) -> SqlResult<()> {
 /// rows spawned from a fork PR set them. Pre-v16 rows stay `NULL` and the
 /// spawn path treats that as "same-repo PR" (the #420 path).
 pub(crate) fn ensure_agent_node_source_pr_fork_meta(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
     for (name, ty) in [("head_repo_owner", "TEXT"), ("head_repo_clone_url", "TEXT")] {
-        let has_col: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = ?1",
-                [name],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if !has_col {
-            conn.execute(&format!("ALTER TABLE agent_nodes ADD COLUMN {} {}", name, ty), [])?;
+        if ensure_column(conn, "agent_nodes", name, ty)? {
             tracing::warn!(
                 "ensure_agent_node_source_pr_fork_meta: added missing {} column",
                 name
@@ -414,26 +357,7 @@ pub(crate) fn ensure_agent_node_source_pr_fork_meta(conn: &Connection) -> SqlRes
 /// the comparison rather than failing — same fail-open semantics as the
 /// existing `pr_head_unfetchable` fallback.
 pub(crate) fn ensure_agent_node_source_pr_pinned_sha(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
-    let has_col: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr_pinned_sha'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-    if !has_col {
-        conn.execute("ALTER TABLE agent_nodes ADD COLUMN source_pr_pinned_sha TEXT", [])?;
+    if ensure_column(conn, "agent_nodes", "source_pr_pinned_sha", "TEXT")? {
         tracing::warn!("ensure_agent_node_source_pr_pinned_sha: added missing source_pr_pinned_sha column");
     }
     Ok(())
@@ -454,17 +378,6 @@ pub(crate) fn ensure_checkpoints_dropped(conn: &Connection) -> SqlResult<()> {
 /// the projects-table guard (existing DBs that already had schema_version=8
 /// but whose meshes table lacked the config columns).
 fn ensure_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meshes'",
-            [],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-    if !table_exists {
-        return Ok(());
-    }
-
     let columns = [
         ("build_command", "TEXT"),
         ("run_command", "TEXT"),
@@ -476,15 +389,7 @@ fn ensure_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
         ("base_ref", "TEXT NOT NULL DEFAULT 'origin/main'"),
     ];
     for (name, ty) in columns {
-        let has_col: bool = conn
-            .query_row(
-                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = ?1",
-                [name],
-                |row| row.get(0),
-            )
-            .unwrap_or(false);
-        if !has_col {
-            conn.execute(&format!("ALTER TABLE meshes ADD COLUMN {} {}", name, ty), [])?;
+        if ensure_column(conn, "meshes", name, ty)? {
             tracing::warn!("ensure_mesh_config_columns: added missing column {}", name);
         }
     }
