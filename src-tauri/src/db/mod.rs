@@ -625,6 +625,13 @@ pub fn validate_root_token(token: &str) -> SqlResult<bool> {
 // slice). All three keys live in app_settings alongside `remote_access_token`.
 const COORDINATOR_ENABLED_KEY: &str = "coordinator_api_enabled";
 const COORDINATOR_READ_TOKEN_KEY: &str = "coordinator_read_token";
+// Drive (write) side (issue #319). The drive scope is a SEPARATE token from the
+// read token — a read-scoped credential can never drive a node — behind its own
+// enable switch (also defaulting OFF) so drive can be killed independently while
+// reads stay up. Both still sit under the coordinator master switch above, so
+// disabling the whole surface disables drive too.
+const COORDINATOR_DRIVE_ENABLED_KEY: &str = "coordinator_drive_enabled";
+const COORDINATOR_DRIVE_TOKEN_KEY: &str = "coordinator_drive_token";
 
 /// Is the coordinator read API enabled? Defaults to `false` (off) for a fresh
 /// install, so a naive setup is never an open endpoint.
@@ -705,6 +712,91 @@ pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> 
         return Ok(false);
     }
     match coordinator_read_token_inner(conn)? {
+        Some(stored) => Ok(stored == token),
+        None => Ok(false),
+    }
+}
+
+// --- Coordinator drive (write) auth (ADR-0008 §5, issue #319) ---
+
+/// Is the drive side enabled? Defaults to `false` (off), independent of the
+/// read side, so a deployment can offer read-only coordination without ever
+/// exposing the ability to write to a node's PTY. (No process-global wrapper
+/// yet — only `validate_coordinator_drive_token_inner` reads this; a drive
+/// Settings slice can add the public getter when it surfaces the state.)
+pub fn coordinator_drive_enabled_inner(conn: &Connection) -> SqlResult<bool> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![COORDINATOR_DRIVE_ENABLED_KEY],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(value.as_deref() == Some("1"))
+}
+
+/// Flip the drive kill-switch. Off by default; killing it stops all driving
+/// while leaving the read surface untouched.
+pub fn set_coordinator_drive_enabled(enabled: bool) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    set_coordinator_drive_enabled_inner(&db, enabled)
+}
+
+pub fn set_coordinator_drive_enabled_inner(conn: &Connection, enabled: bool) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params![COORDINATOR_DRIVE_ENABLED_KEY, if enabled { "1" } else { "0" }],
+    )?;
+    Ok(())
+}
+
+/// Mint (or replace) the drive-scoped coordinator token. Distinct from the read
+/// token, so granting drive is an explicit, separate act from granting read.
+pub fn generate_coordinator_drive_token() -> SqlResult<String> {
+    let db = get().lock().unwrap();
+    generate_coordinator_drive_token_inner(&db)
+}
+
+pub fn generate_coordinator_drive_token_inner(conn: &Connection) -> SqlResult<String> {
+    let token = generate_token();
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params![COORDINATOR_DRIVE_TOKEN_KEY, &token],
+    )?;
+    Ok(token)
+}
+
+/// The stored drive token, if one has been minted (and is non-empty). Only the
+/// validator reads it today (no process-global getter until a Settings slice
+/// reports drive state); kept `_inner` so a future caller can lock once.
+pub fn coordinator_drive_token_inner(conn: &Connection) -> SqlResult<Option<String>> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![COORDINATOR_DRIVE_TOKEN_KEY],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(value.filter(|v| !v.is_empty()))
+}
+
+/// Validate a presented token for DRIVE access. Rejects unless the coordinator
+/// master switch is on AND the drive kill-switch is on AND the token matches the
+/// minted drive token. Because the drive token is stored under its own key, a
+/// read-scoped token never validates here — drive is its own capability.
+pub fn validate_coordinator_drive_token(token: &str) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    validate_coordinator_drive_token_inner(&db, token)
+}
+
+pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
+    if token.is_empty()
+        || !coordinator_api_enabled_inner(conn)?
+        || !coordinator_drive_enabled_inner(conn)?
+    {
+        return Ok(false);
+    }
+    match coordinator_drive_token_inner(conn)? {
         Some(stored) => Ok(stored == token),
         None => Ok(false),
     }

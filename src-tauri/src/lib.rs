@@ -154,6 +154,8 @@ pub fn run() {
             commands::coordinator::get_coordinator_status,
             commands::coordinator::set_coordinator_api_enabled,
             commands::coordinator::generate_coordinator_read_token,
+            commands::coordinator::set_coordinator_drive_enabled,
+            commands::coordinator::generate_coordinator_drive_token,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

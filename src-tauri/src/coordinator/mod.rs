@@ -13,6 +13,7 @@
 //! - **Separate, capability-scoped token.** A read-scoped coordinator token,
 //!   distinct from the mobile root token, validated independently of it.
 
+pub mod drive;
 pub mod enrichment;
 pub mod node_digest;
 
@@ -38,6 +39,18 @@ pub fn authenticate_read(headers: &str, url_token: Option<String>) -> bool {
         return false;
     };
     crate::db::validate_coordinator_read_token(&token).unwrap_or(false)
+}
+
+/// Authenticate a request for DRIVE (write) access to the coordinator surface
+/// (issue #319). Same token-presentation shape as [`authenticate_read`], but
+/// validated against the *drive-scoped* token: a read-only token is rejected
+/// here, and drive must be independently enabled. No token presented → `false`
+/// without touching the DB.
+pub fn authenticate_drive(headers: &str, url_token: Option<String>) -> bool {
+    let Some(token) = bearer_token(headers).or_else(|| url_token.filter(|t| !t.is_empty())) else {
+        return false;
+    };
+    crate::db::validate_coordinator_drive_token(&token).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -134,6 +147,66 @@ mod tests {
         assert!(db::validate_coordinator_read_token_inner(&conn, &token).unwrap());
         assert!(!db::validate_coordinator_read_token_inner(&conn, "wrong").unwrap());
         assert!(!db::validate_coordinator_read_token_inner(&conn, "").unwrap());
+    }
+
+    // --- Drive scope (issue #319) ---
+
+    /// The drive scope is OFF by default: even with the master switch on, a drive
+    /// token, and a correct presentation, driving is rejected until the drive
+    /// kill-switch is explicitly flipped on.
+    #[test]
+    fn drive_is_off_by_default() {
+        let conn = seeded_db();
+        db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
+        let drive = db::generate_coordinator_drive_token_inner(&conn).unwrap();
+
+        assert!(!db::coordinator_drive_enabled_inner(&conn).unwrap());
+        assert!(!db::validate_coordinator_drive_token_inner(&conn, &drive).unwrap());
+    }
+
+    /// A read-scoped token can never drive — drive validates against its own
+    /// stored token, so the read token simply doesn't match.
+    #[test]
+    fn read_token_is_rejected_for_drive() {
+        let conn = seeded_db();
+        db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
+        db::set_coordinator_drive_enabled_inner(&conn, true).unwrap();
+        let read = db::generate_coordinator_read_token_inner(&conn).unwrap();
+        db::generate_coordinator_drive_token_inner(&conn).unwrap();
+
+        assert!(
+            !db::validate_coordinator_drive_token_inner(&conn, &read).unwrap(),
+            "a read-scoped token must not unlock drive"
+        );
+    }
+
+    /// The master kill-switch covers drive: turning the whole surface off rejects
+    /// a valid drive token even while the drive kill-switch is on.
+    #[test]
+    fn master_switch_disables_drive() {
+        let conn = seeded_db();
+        db::set_coordinator_drive_enabled_inner(&conn, true).unwrap();
+        let drive = db::generate_coordinator_drive_token_inner(&conn).unwrap();
+
+        // master off (default) → rejected
+        assert!(!db::validate_coordinator_drive_token_inner(&conn, &drive).unwrap());
+
+        db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
+        assert!(db::validate_coordinator_drive_token_inner(&conn, &drive).unwrap());
+    }
+
+    /// Fully enabled (master + drive on, token minted): only the exact minted
+    /// drive token is accepted; wrong/empty tokens are not.
+    #[test]
+    fn enabled_drive_accepts_only_the_minted_token() {
+        let conn = seeded_db();
+        db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
+        db::set_coordinator_drive_enabled_inner(&conn, true).unwrap();
+        let drive = db::generate_coordinator_drive_token_inner(&conn).unwrap();
+
+        assert!(db::validate_coordinator_drive_token_inner(&conn, &drive).unwrap());
+        assert!(!db::validate_coordinator_drive_token_inner(&conn, "wrong").unwrap());
+        assert!(!db::validate_coordinator_drive_token_inner(&conn, "").unwrap());
     }
 
     #[test]
