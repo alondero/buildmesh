@@ -51,6 +51,7 @@
  */
 
 import { useState, useEffect } from 'react';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   getRepoPulls,
   getPrMergeability,
@@ -603,11 +604,25 @@ export function GitPullRequestsTab() {
                         </span>
                         <span className="text-xs text-accent-cyan font-mono">#{pr.number}</span>
                         {url ? (
+                          // href/target/rel keep the link right-clickable,
+                          // keyboard-activatable, and AT-friendly. The onClick
+                          // routes through `openUrl` because the Tauri 2 WebView
+                          // is not a browser — `target="_blank"` is silently
+                          // dropped without `core:webview:allow-create-webview-window`
+                          // (which we don't grant). `e.preventDefault()` stops
+                          // the dead default action; `e.stopPropagation()` keeps
+                          // the row's expand-toggle out of the way. Mirrors the
+                          // PR-chip pattern in `GridNodeHeader.tsx:145` and the
+                          // web-links addon in `TerminalRegistry.ts:249`.
                           <a
                             href={url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            onClick={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              openUrl(url).catch(console.error);
+                            }}
                             className="text-sm text-text-primary hover:underline ml-1 truncate min-w-0 flex-1"
                             title="Open on GitHub"
                           >
@@ -622,11 +637,16 @@ export function GitPullRequestsTab() {
                           </span>
                         )}
                         {url && (
+                          // See title <a> above — Tauri 2 needs openUrl routing.
                           <a
                             href={url}
                             target="_blank"
                             rel="noopener noreferrer"
-                            onClick={(e) => e.stopPropagation()}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              openUrl(url).catch(console.error);
+                            }}
                             aria-label="Open pull request on GitHub"
                             className="text-text-muted hover:text-accent-cyan transition-colors text-[11px] shrink-0"
                             title="Open on GitHub"
