@@ -164,17 +164,21 @@ export const getDefaultProvider = (meshId: number): Promise<string> => {
 // Mesh properties / configuration (issue #283)
 //
 // `MeshConfig` is the wire shape of `commands::mesh_config::get_mesh_properties`.
+// It is a DTO over the `meshes` SQLite row (NOT a `mesh.toml` file — see
+// `src-tauri/src/models/mod.rs::MeshConfig` for the truth).
 // Generated from `src-tauri/src/models/mod.rs` (issue #404).
 export type { MeshConfig };
 
 export const getMeshProperties = (meshId: number) =>
   _invoke<MeshConfig>('get_mesh_properties', { meshId });
 
-/** Generic mesh.toml field write: routes `(section, key, value)` to the
- *  backend's `update_mesh_field`. Use it for fields with no DB-side
- *  side-effects (model, effort, worktree_mode, default_provider, build /
- *  run command). Fields with side-effects have dedicated commands —
- *  `updateMeshUseWorktree` and `updateWorktreeBaseRef` below. */
+/** Generic Mesh column write: routes `(section, key, value)` to the
+ *  backend's `update_mesh_field`. **There is no `mesh.toml` file** —
+ *  every field lives on the `meshes` SQLite row. Use it for fields with
+ *  no settings.json side-effects (model, effort, worktree_mode,
+ *  default_provider, build / run command). Fields with side-effects
+ *  have dedicated commands — `updateMeshUseWorktree` and
+ *  `updateWorktreeBaseRef` below. */
 export const updateMeshField = (
   meshId: number,
   section: 'agent' | 'build' | 'run',

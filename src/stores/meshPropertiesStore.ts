@@ -39,10 +39,12 @@ interface MeshPropertiesState {
   load: (meshId: number, meshPath: string) => Promise<void>;
 
   /// Persist a single panel field. The dispatch table routes to the right
-  /// backend command (`update_mesh_field` for plain `mesh.toml` writes,
+  /// backend command (`update_mesh_field` for plain `meshes` column writes,
   /// `update_mesh_use_worktree` / `update_worktree_base_ref` for fields
-  /// with DB-side / settings.json side-effects). Throws on backend error
-  /// so the caller can choose to suppress side-effects (e.g. `git.refresh()`).
+  /// with DB-side / settings.json side-effects). **There is no `mesh.toml`
+  /// file** — every field lives on the `meshes` SQLite row. Throws on
+  /// backend error so the caller can choose to suppress side-effects
+  /// (e.g. `git.refresh()`).
   save: (field: MeshConfigField, value: string | boolean) => Promise<void>;
 
   /// Apply a project preset's build/run commands in parallel — concurrently

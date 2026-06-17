@@ -449,6 +449,20 @@ pub struct AppSettings {
 /// (frontend properties, agent spawning, build/run). Construct it via
 /// `MeshConfig::from(&mesh)` — never hand-copy `Mesh` fields elsewhere.
 ///
+/// **There is no `mesh.toml` file.** This struct is a thin DTO over a
+/// `meshes` SQLite row (see `db::get_mesh_by_path`); every field on it
+/// is a column on that row. The "config" in the name is historical —
+/// before the DB columns existed, mesh settings lived in a TOML file at
+/// the mesh root; that file was deleted when the columns were added
+/// (see `docs/adr/` and `docs/specs/build-run-system.md` for the
+/// migration history). New contributors reading "MeshConfig" should
+/// read it as "the DTO that mirrors a `meshes` row" and treat the
+/// `meshes` table as the single source of truth. The `base_ref` field
+/// is *also* mirrored into `.claude/settings.json` at the mesh root
+/// (see `commands::mesh_config::update_worktree_base_ref`) for Claude
+/// Code to read; that mirror is an output, not an input to spawn-time
+/// resolution.
+///
 /// Generated to src/types/generated/MeshConfig.ts (issue #404).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "MeshConfig.ts")]

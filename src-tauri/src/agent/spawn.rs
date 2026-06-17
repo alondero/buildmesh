@@ -28,6 +28,51 @@ use tauri::Emitter;
 /// rationale.
 pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 
+/// Resolve the `base_ref` string that `git::sync::fetch_origin` will use for
+/// the spawn-time auto-sync. The chain (each tier only runs if the previous
+/// one yields nothing useful):
+///
+/// 1. The mesh's `base_ref` column from the `meshes` DB row — explicit
+///    user intent wins, even on a repo whose default branch disagrees.
+///    **The COALESCE default `'origin/main'` is treated as "no config"**:
+///    a fresh mesh whose `base_ref` column was never explicitly set reads
+///    as `'origin/main'` from the DB (see `db::MESH_COLUMNS`), and a
+///    user who never touched the field is functionally identical to a
+///    user who has no config. Detecting both via the same path is what
+///    closes the master-trunk regression. **There is no `mesh.toml`
+///    file**: the value lives on the `meshes` SQLite row (and is
+///    mirrored to `.claude/settings.json` at the mesh root for Claude
+///    Code, see `commands::mesh_config`).
+/// 2. The repo's actual default branch read from
+///    `refs/remotes/origin/HEAD` (populated by `git clone` / `git fetch`)
+///    — closes the master-trunk regression where a repo whose default
+///    branch is `master` was always fetched as `origin/main`.
+/// 3. The literal `"origin/main"` as a last resort. Used only for a
+///    non-repo / unconfigured path so the spawn path never blocks.
+///
+/// Extracted from `spawn_agent_inner` so the regression test in
+/// `mod tests` can call it directly without standing up the full async /
+/// PTY / DB machinery — the call site is a single expression.
+fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) -> String {
+    const COALESCE_DEFAULT: &str = "origin/main";
+    let user_set = config_base_ref.filter(|b| b.trim() != COALESCE_DEFAULT);
+    if let Some(b) = user_set {
+        let trimmed = b.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    // No explicit config (or the COALESCE sentinel) — read the repo's
+    // actual default branch from `refs/remotes/origin/HEAD` (populated by
+    // `git clone` / `git fetch`). `get_default_branch` falls back to
+    // "main" if the repo can't be opened or the symbolic ref is missing,
+    // so a non-repo / unconfigured mesh path still resolves to
+    // "origin/main" — preserving pre-fix behaviour and never blocking the
+    // spawn.
+    let branch = crate::commands::git::get_default_branch(mesh_path.to_string());
+    format!("origin/{}", branch)
+}
+
 /// Binary name the cwrap provider launcher resolves to (Anthropic/Minimax/Kimi).
 /// Mirrors the `binary: "cwrap"` declared in those adapters' spawn recipes; kept
 /// here as the single point the prefill-transport gate matches against.
@@ -521,10 +566,10 @@ pub async fn spawn_agent_inner(
         .as_ref()
         .and_then(|c| c.worktree_mode.as_deref())
         .unwrap_or(DEFAULT_WORKTREE_MODE);
-    let base_ref = config
-        .as_ref()
-        .and_then(|c| c.base_ref.as_deref())
-        .unwrap_or("origin/main");
+    let base_ref = resolve_base_ref_for_spawn(
+        &node.path,
+        config.as_ref().and_then(|c| c.base_ref.as_deref()),
+    );
 
     timer.checkpoint("after_mesh_config_read");
 
@@ -1276,6 +1321,269 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    // -----------------------------------------------------------------------
+    // base_ref resolution (master-trunk regression)
+    //
+    // Pre-fix, the spawn path hardcoded `"origin/main"` as the default
+    // `base_ref` when the `meshes.base_ref` DB column was `'origin/main'`
+    // (its COALESCE default) — meaning a master-trunk repo always hit
+    // `mesh-sync-warning` on every spawn (`fatal: couldn't find remote
+    // ref main`). These tests pin the resolution chain:
+    //
+    //   1. meshes.base_ref (BUT NOT the COALESCE default — that's
+    //      treated as "no config" so the detection chain runs)
+    //   2. refs/remotes/origin/HEAD read from the local repo
+    //   3. "origin/main" last resort
+    //
+    // The COALESCE-sentinel treatment is critical: the DB column is
+    // NOT NULL with default `'origin/main'`, so `Mesh.base_ref` is
+    // ALWAYS a non-empty `String` and `MeshConfig.base_ref` is ALWAYS
+    // `Some(_)` — a naive `if let Some(b) = config_base_ref { return b }`
+    // would make the detection chain dead code in production. The
+    // `resolve_base_ref_treats_coalesce_sentinel_as_unset` test pins the
+    // production call path (`Some("origin/main")`).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_base_ref_uses_config_value_when_set() {
+        // The config wins even on a non-repo / non-master path — explicit
+        // user intent overrides any auto-detection. Empty / whitespace
+        // config falls through to the detection chain (regression guard
+        // for an empty-string value slipping through the COALESCE).
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(
+            resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("origin/develop")),
+            "origin/develop"
+        );
+        // Empty / whitespace strings are treated as "no config" so the
+        // detection chain runs — mirrors the COALESCE-to-default contract
+        // in the DB layer.
+        assert_eq!(
+            resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("")),
+            "origin/main",
+            "empty config base_ref must fall through to detection, not propagate"
+        );
+        assert_eq!(
+            resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("   ")),
+            "origin/main",
+            "whitespace-only config base_ref must fall through to detection"
+        );
+    }
+
+    #[test]
+    fn resolve_base_ref_falls_back_to_origin_main_for_non_repo() {
+        // Non-repo path with no config — must not panic. Last-resort
+        // behaviour preserved: `get_default_branch` returns "main" on a
+        // failed `Repository::open`, and we prefix it with "origin/".
+        // The spawn path itself short-circuits to `RepoUnusable` so the
+        // auto-sync result is non-blocking.
+        let tmp = TempDir::new().unwrap();
+        let resolved = resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), None);
+        assert_eq!(resolved, "origin/main");
+    }
+
+    #[test]
+    fn resolve_base_ref_detects_master_via_origin_head() {
+        // Headline regression test: a master-trunk repo with no
+        // `base_ref` in mesh config must produce "origin/master", not
+        // the legacy "origin/main". Pre-fix, this always returned
+        // "origin/main" and the spawn emitted a `mesh-sync-warning` on
+        // every node.
+        use crate::env::test_helpers::TestDir;
+        use git2;
+
+        let td = TestDir::new("base_ref_master");
+        let parent = td.path();
+        // Create a working repo on whatever default branch git picks.
+        // The local branch name doesn't matter — what matters is that
+        // `refs/remotes/origin/HEAD` points at `refs/remotes/origin/master`.
+        crate::env::test_helpers::init_repo_with_commit(
+            parent,
+            &[("README.md", "v1\n")],
+        );
+
+        let repo = git2::Repository::open(parent).unwrap();
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        // Build the symbolic ref that `get_default_branch` reads.
+        repo.reference(
+            "refs/remotes/origin/master",
+            oid,
+            true,
+            "test setup",
+        )
+        .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+            true,
+            "test setup",
+        )
+        .unwrap();
+
+        // Sanity: precondition for the test to be meaningful.
+        let head_ref = repo
+            .find_reference("refs/remotes/origin/HEAD")
+            .unwrap()
+            .symbolic_target()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            head_ref, "refs/remotes/origin/master",
+            "precondition: origin/HEAD must point at refs/remotes/origin/master"
+        );
+
+        let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), None);
+        assert_eq!(
+            resolved, "origin/master",
+            "master-trunk repo with no base_ref in config must yield origin/master, \
+             not the legacy hardcoded origin/main (this is the master-trunk regression)"
+        );
+    }
+
+    #[test]
+    fn resolve_base_ref_detects_main_via_origin_head() {
+        // Sanity pin: the existing main-trunk behaviour (a repo whose
+        // origin/HEAD points at `main`) must still resolve to
+        // "origin/main" after the fix. Guards against the master fix
+        // accidentally regressing the main case.
+        use crate::env::test_helpers::TestDir;
+        use git2;
+
+        let td = TestDir::new("base_ref_main");
+        let parent = td.path();
+        crate::env::test_helpers::init_repo_with_commit(
+            parent,
+            &[("README.md", "v1\n")],
+        );
+
+        let repo = git2::Repository::open(parent).unwrap();
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference(
+            "refs/remotes/origin/main",
+            oid,
+            true,
+            "test setup",
+        )
+        .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            true,
+            "test setup",
+        )
+        .unwrap();
+
+        let resolved = resolve_base_ref_for_spawn(parent.to_str().unwrap(), None);
+        assert_eq!(
+            resolved, "origin/main",
+            "main-trunk repo must still resolve to origin/main (no regression)"
+        );
+    }
+
+    #[test]
+    fn resolve_base_ref_treats_coalesce_sentinel_as_unset() {
+        // The production call path: `meshes.base_ref` is a NOT NULL
+        // column with a COALESCE default of `'origin/main'` (see
+        // `db::MESH_COLUMNS`). A fresh mesh whose base_ref was never
+        // explicitly set reads as `Some("origin/main")` from the DB →
+        // `MeshConfig.base_ref = Some("origin/main")` →
+        // `config.as_ref().and_then(|c| c.base_ref.as_deref())` returns
+        // `Some("origin/main")`. The helper MUST treat this sentinel as
+        // "no config" and fall through to the detection chain, otherwise
+        // a master-trunk repo's spawn still hits `mesh-sync-warning`.
+        // The earlier `_detects_master_via_origin_head` test passes
+        // `None` (which never reaches production); THIS test pins the
+        // actual production contract.
+        use crate::env::test_helpers::TestDir;
+        use git2;
+
+        let td = TestDir::new("base_ref_coalesce_master");
+        let parent = td.path();
+        crate::env::test_helpers::init_repo_with_commit(
+            parent,
+            &[("README.md", "v1\n")],
+        );
+
+        let repo = git2::Repository::open(parent).unwrap();
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference(
+            "refs/remotes/origin/master",
+            oid,
+            true,
+            "test setup",
+        )
+        .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/master",
+            true,
+            "test setup",
+        )
+        .unwrap();
+
+        // Production-shaped input: COALESCE default from the DB.
+        let resolved = resolve_base_ref_for_spawn(
+            parent.to_str().unwrap(),
+            Some("origin/main"),
+        );
+        assert_eq!(
+            resolved, "origin/master",
+            "the COALESCE default 'origin/main' from a fresh mesh's DB row \
+             must be treated as 'no config' — fall through to origin/HEAD \
+             detection. A master-trunk repo with an unconfigured mesh \
+             produces origin/master, not origin/main. This is the actual \
+             production contract; the test passing None never reaches \
+             production."
+        );
+    }
+
+    #[test]
+    fn resolve_base_ref_keeps_explicit_user_value_for_main_trunk() {
+        // A user who LEGITIMATELY sets `base_ref = "origin/main"` (via
+        // the 'Fresh' UI option) on a main-trunk repo must still get
+        // "origin/main" back. The COALESCE-sentinel treatment must
+        // apply to the *fresh* / *unconfigured* case, not penalize a
+        // user who explicitly chose the same value. For a main-trunk
+        // repo the auto-detect would return the same value, so this
+        // test is mostly a documentation pin.
+        use crate::env::test_helpers::TestDir;
+        use git2;
+
+        let td = TestDir::new("base_ref_explicit_main");
+        let parent = td.path();
+        crate::env::test_helpers::init_repo_with_commit(
+            parent,
+            &[("README.md", "v1\n")],
+        );
+
+        let repo = git2::Repository::open(parent).unwrap();
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference(
+            "refs/remotes/origin/main",
+            oid,
+            true,
+            "test setup",
+        )
+        .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            true,
+            "test setup",
+        )
+        .unwrap();
+
+        let resolved = resolve_base_ref_for_spawn(
+            parent.to_str().unwrap(),
+            Some("origin/main"),
+        );
+        assert_eq!(
+            resolved, "origin/main",
+            "explicit user-set 'origin/main' on a main-trunk repo must resolve \
+             to 'origin/main' (same as auto-detect — no behaviour change)"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1,5 +1,14 @@
 //! Mesh configuration — all stored in SQLite `meshes` table.
-//! Worktree.baseRef is also written to .claude/settings.json for Claude Code.
+//!
+//! **There is no `mesh.toml` file.** The module name is historical; the
+//! "config" lives on the `meshes` SQLite row (see `db::get_mesh_by_id`),
+//! not in any file at the mesh root. The `MeshConfig` struct in
+//! `models::MeshConfig` is a thin DTO over that row.
+//!
+//! `Worktree.baseRef` is additionally written to `.claude/settings.json`
+//! at the mesh root so Claude Code can read it (see
+//! [`update_worktree_base_ref`]); that mirror is an output, not a
+//! source of truth — the DB column is the source.
 
 use crate::db;
 use crate::models::MeshConfig;
