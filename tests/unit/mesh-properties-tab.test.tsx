@@ -37,6 +37,7 @@ const MESH: Mesh = {
   worktree_mode: null,
   default_provider: null,
   base_ref: 'origin/main',
+  scratchpad: '',
 };
 
 const MESH_CONFIG = {

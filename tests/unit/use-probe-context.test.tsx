@@ -37,6 +37,7 @@ function makeMesh(id: number, path: string, overrides: Partial<{ name: string }>
     worktree_mode: null,
     default_provider: null,
     base_ref: 'origin/main',
+    scratchpad: '',
   };
 }
 

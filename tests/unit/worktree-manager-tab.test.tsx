@@ -39,6 +39,7 @@ const MESH: Mesh = {
   worktree_mode: null,
   default_provider: null,
   base_ref: 'origin/main',
+  scratchpad: '',
 };
 
 // Healthy mesh — no drift, no hostage, no dirty, no unpushed. Surfaces the

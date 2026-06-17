@@ -190,6 +190,7 @@ const MESH: Mesh = {
   layout: 'single',
   position: 0,
   created_at: new Date(0).toISOString(),
+  scratchpad: '',
 };
 
 // jsdom doesn't lay out, so we have to fabricate offsetWidth/offsetHeight.

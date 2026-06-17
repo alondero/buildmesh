@@ -188,6 +188,43 @@ export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
 export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
   _invoke<void>('update_worktree_base_ref', { meshId, baseRef });
 
+// Scratch Pad (Probe Panel "📝 Scratch Pad" tab).
+//
+// Plain-text free-form notes per mesh. The empty string is a normal
+// "no notes yet" state, not an error — `getMeshScratchpad` resolves
+// to `""` for a fresh mesh so the editor mounts blank, and `setMeshScratchpad`
+// accepts `""` as a clear-notes write. Debounced on the call site (~500ms)
+// to keep the IPC chatter bounded while the user is mid-thought.
+//
+// The per-mesh promise cache mirrors the `getDefaultProvider` pattern
+// (issue #405): concurrent callers de-dupe onto the in-flight promise,
+// a rejection evicts the slot so the next caller retries, and `set`
+// updates the cache so the editor sees its own writes without a
+// round-trip. Notes are not cross-mesh shared, so the cache key is
+// `meshId` (no need for a global slot).
+const scratchpadByMesh = new Map<number, Promise<string>>();
+
+export const getMeshScratchpad = (meshId: number): Promise<string> => {
+  let p = scratchpadByMesh.get(meshId);
+  if (!p) {
+    p = _invoke<string>('get_mesh_scratchpad', { meshId });
+    p.catch(() => { scratchpadByMesh.delete(meshId); });
+    scratchpadByMesh.set(meshId, p);
+  }
+  return p;
+};
+
+export const setMeshScratchpad = (meshId: number, content: string): Promise<void> => {
+  // Optimistic write: seed the cache with the new value so the next
+  // `get` resolves to what the editor just typed, even if the
+  // underlying IPC is in flight. The rejected-promise evicts the
+  // slot so a failed write doesn't poison future reads.
+  const p = _invoke<void>('set_mesh_scratchpad', { meshId, content }).then(() => undefined);
+  scratchpadByMesh.set(meshId, Promise.resolve(content));
+  p.catch(() => { scratchpadByMesh.delete(meshId); });
+  return p;
+};
+
 import type { DetectedProject } from './projectPresets';
 
 export const detectMeshProject = (meshPath: string) =>
