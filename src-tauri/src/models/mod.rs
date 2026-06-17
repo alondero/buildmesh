@@ -208,6 +208,12 @@ pub struct Mesh {
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
     pub base_ref: String, // default "origin/main"
+    /// Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
+    /// tab. Owned by Buildmesh only — never written to disk, never visible
+    /// to agents. Persisted as `meshes.scratchpad TEXT NOT NULL DEFAULT ''`
+    /// (schema v17) and read back as the raw `String`. Empty string is a
+    /// normal, non-error state ("no notes yet").
+    pub scratchpad: String,
 }
 
 /// An agent node — isolated agent working directory.
@@ -554,6 +560,7 @@ mod tests {
             worktree_mode: Some("branched".to_string()),
             default_provider: None,
             base_ref: "origin/main".to_string(),
+            scratchpad: String::new(),
         }
     }
 

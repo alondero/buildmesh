@@ -16,6 +16,7 @@ const MESH: Mesh = {
   layout: 'single',
   position: 0,
   created_at: '2026-01-01',
+  scratchpad: '',
 };
 
 const PROVIDERS: ProviderEntry[] = [

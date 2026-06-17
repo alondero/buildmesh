@@ -22,6 +22,7 @@ const mesh: Mesh = {
   name: "buildmesh",
   path: "/tmp/repo",
   created_at: "2026-06-11T00:00:00Z",
+  scratchpad: "",
 };
 
 function makeNode(id: number, status: NodeStatus): AgentNode {

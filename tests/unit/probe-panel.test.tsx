@@ -14,6 +14,7 @@ const MESH: Mesh = {
   layout: 'single',
   position: 0,
   created_at: new Date(0).toISOString(),
+  scratchpad: '',
 };
 
 const NODE: AgentNode = {

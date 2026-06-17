@@ -23,6 +23,7 @@ pub mod project_detect;
 pub mod prune;
 pub mod agent_node;
 pub mod remote;
+pub mod scratchpad;
 pub mod session_discovery;
 pub mod test;
 pub mod usage;

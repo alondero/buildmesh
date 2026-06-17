@@ -185,6 +185,9 @@ pub fn run() {
             commands::mesh_config::update_worktree_base_ref,
             commands::mesh_config::remove_worktree_base_ref,
             commands::mesh_config::update_mesh_use_worktree,
+            // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
+            commands::scratchpad::get_mesh_scratchpad,
+            commands::scratchpad::set_mesh_scratchpad,
             // Project detection (presets)
             commands::project_detect::detect_mesh_project,
             // Diff

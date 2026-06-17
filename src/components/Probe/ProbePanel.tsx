@@ -28,6 +28,7 @@ import { WorktreeManagerTab } from './WorktreeManagerTab';
 import { GitIssuesTab } from './GitIssuesTab';
 import { GitPullRequestsTab } from './GitPullRequestsTab';
 import { SessionHistoryTab } from './SessionHistoryTab';
+import { ScratchpadTab } from './ScratchpadTab';
 
 interface ProbeTabDef {
   tab: ProbeTab;
@@ -50,6 +51,7 @@ const PROBE_TABS: ProbeTabDef[] = [
   { tab: 'issues', icon: '🐙', label: 'Git Issues', short: 'Issues' },
   { tab: 'pulls', icon: '🔀', label: 'Pull Requests', short: 'PRs' },
   { tab: 'sessions', icon: '🕒', label: 'Session History', short: 'History' },
+  { tab: 'scratchpad', icon: '📝', label: 'Scratch Pad', short: 'Notes' },
 ];
 
 const PROBE_BODY_WIDTH = 360;
@@ -215,6 +217,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'pulls') return <GitPullRequestsTab />;
   if (tab === 'sessions') return <SessionHistoryTab />;
+  if (tab === 'scratchpad') return <ScratchpadTab />;
 
   return <ProbeTabPlaceholder tab={tab} />;
 }

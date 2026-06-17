@@ -9,6 +9,9 @@ mod tests;
 #[cfg(test)]
 mod mesh_tests;
 
+#[cfg(test)]
+mod scratchpad_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -20,7 +23,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 16;
+const SCHEMA_VERSION: i32 = 17;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -95,6 +98,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr_fork_meta(&conn)?;
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
+    ensure_mesh_scratchpad(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
     Ok(())
@@ -392,6 +396,19 @@ fn ensure_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
         if ensure_column(conn, "meshes", name, ty)? {
             tracing::warn!("ensure_mesh_config_columns: added missing column {}", name);
         }
+    }
+    Ok(())
+}
+
+/// Safety net (v17): ensure the `scratchpad` column exists on `meshes`.
+/// Added for the Scratch Pad Probe tab — a mesh-scoped free-text note field
+/// owned entirely by Buildmesh (not visible to agents, not on disk). Always
+/// non-null with a `''` default, so the no-mesh-yet case and the
+/// already-has-notes case are indistinguishable at the read boundary. No
+/// backfill needed — pre-v17 rows just get the empty string.
+pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "meshes", "scratchpad", "TEXT NOT NULL DEFAULT ''")? {
+        tracing::warn!("ensure_mesh_scratchpad: added missing scratchpad column");
     }
     Ok(())
 }
@@ -869,7 +886,8 @@ const MESH_COLUMNS: &str =
      COALESCE(build_command, ''), COALESCE(run_command, ''), \
      COALESCE(model, ''), COALESCE(effort, ''), \
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
-     COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main')";
+     COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
+     scratchpad";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -891,6 +909,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         worktree_mode: parse_str(row.get::<_, String>(11)?),
         default_provider: parse_str(row.get::<_, String>(12)?),
         base_ref: row.get::<_, String>(13)?,
+        scratchpad: row.get(14)?,
     })
 }
 
@@ -1057,6 +1076,51 @@ pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {
         "UPDATE meshes SET layout = ?1 WHERE id = ?2",
         params![layout, id],
     )?;
+    Ok(())
+}
+
+/// Read the scratch pad text for a mesh. Returns the empty string (not
+/// an error) for an unknown mesh id so the frontend can mount a blank
+/// editor without a second round-trip — Scratch Pad is a "type whatever
+/// you want" surface and the absence of notes is the common case.
+pub fn get_mesh_scratchpad(id: i64) -> SqlResult<String> {
+    let db = get().lock().unwrap();
+    get_mesh_scratchpad_inner(&db, id)
+}
+
+pub(crate) fn get_mesh_scratchpad_inner(conn: &Connection, id: i64) -> SqlResult<String> {
+    // COALESCE keeps the contract even on a pre-v17 DB whose safety net
+    // hasn't run yet (e.g. unit tests that construct the schema in
+    // memory) — empty string instead of NULL.
+    conn.query_row(
+        "SELECT COALESCE(scratchpad, '') FROM meshes WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+}
+
+/// Overwrite a mesh's scratch pad text. Empty string is a normal value
+/// (cleared notes), not a deletion. Returns an error if the mesh id
+/// doesn't exist — the call site surfaces that to the frontend so a
+/// debounced save that fires after the mesh was deleted doesn't silently
+/// report "Saved" for a write that affected zero rows.
+pub fn set_mesh_scratchpad(id: i64, content: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    set_mesh_scratchpad_inner(&db, id, content)
+}
+
+pub(crate) fn set_mesh_scratchpad_inner(
+    conn: &Connection,
+    id: i64,
+    content: &str,
+) -> SqlResult<()> {
+    let rows = conn.execute(
+        "UPDATE meshes SET scratchpad = ?1 WHERE id = ?2",
+        params![content, id],
+    )?;
+    if rows == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 

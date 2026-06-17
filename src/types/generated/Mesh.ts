@@ -7,4 +7,12 @@
  * `#[ts(as = "i32")]` so they emit `number` (serde_json sends JS numbers, not
  * the `bigint` ts-rs defaults to for 64-bit ints).
  */
-export type Mesh = { id: number, name: string, path: string, layout: string, position: number, created_at: string, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, base_ref: string, };
+export type Mesh = { id: number, name: string, path: string, layout: string, position: number, created_at: string, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, base_ref: string, 
+/**
+ * Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
+ * tab. Owned by Buildmesh only — never written to disk, never visible
+ * to agents. Persisted as `meshes.scratchpad TEXT NOT NULL DEFAULT ''`
+ * (schema v17) and read back as the raw `String`. Empty string is a
+ * normal, non-error state ("no notes yet").
+ */
+scratchpad: string, };

@@ -55,6 +55,7 @@ const NODE: AgentNode = {
   use_worktree: false,
   position: 0,
   created_at: new Date(0).toISOString(),
+  scratchpad: '',
 };
 
 const MESH: Mesh = {
