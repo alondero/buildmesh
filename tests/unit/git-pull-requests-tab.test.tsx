@@ -29,6 +29,19 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import type { GitHubPullRequest } from '../../src/types/generated/GitHubPullRequest';
 import type { PrMergeability } from '../../src/types/generated/PrMergeability';
 
+// `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
+// external URL. Tauri 2's WebView silently drops `target="_blank"` without
+// the `core:webview:allow-create-webview-window` capability (which we don't
+// grant), so the link's `onClick` must route through `openUrl` instead.
+// `vi.hoisted` so the mock factory can capture the spy ref before the
+// `vi.mock` call hoists the module replacement.
+const { openUrlMock } = vi.hoisted(() => ({
+  openUrlMock: vi.fn<[], Promise<void>>().mockResolvedValue(undefined),
+}));
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: openUrlMock,
+}));
+
 const MESH: Mesh = {
   id: 42,
   name: 'demo',
@@ -130,6 +143,13 @@ function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequ
 
 describe('GitPullRequestsTab', () => {
   beforeEach(() => {
+    // `mockReset` (not `mockClear`) wipes both call history AND any
+    // per-test `mockImplementationOnce` / `mockRejectedValueOnce`
+    // overrides — guards against a future test that adds a one-off
+    // override and accidentally leaks the override into siblings.
+    // Re-establish the default resolved value after the reset.
+    openUrlMock.mockReset();
+    openUrlMock.mockResolvedValue(undefined);
     useUIStore.setState({ probeOpen: true, probeTab: 'pulls', activeDiffFile: null });
     useMeshStore.setState({
       meshesById: new Map([[MESH.id, MESH]]),
@@ -719,6 +739,132 @@ describe('GitPullRequestsTab', () => {
     const row = titleLink.closest('[data-pr-row]')!;
     expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
     expect(row.querySelector('[data-pr-body-expanded], div.max-h-48')).toBeNull();
+  });
+
+  // ----- Tauri 2 WebView external-link routing ---------------------------
+  // Tauri 2's WebView is NOT a browser. `target="_blank"` is silently
+  // dropped without the `core:webview:allow-create-webview-window`
+  // capability (which we don't grant in `capabilities/default.json`),
+  // so the link's onClick must call `openUrl` from
+  // `@tauri-apps/plugin-opener` to delegate to the OS. These tests pin
+  // that routing — a future port that drops the handler would regress
+  // to "the URL is in the DOM but clicking does nothing".
+
+  it('opens the PR URL via openUrl when the title link is clicked', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const titleLink = (await screen.findByText('Add widget')).closest('a')!;
+    await userEvent.click(titleLink);
+
+    // `openUrl` is called once with the PR's `url` field. The PR tab
+    // has more action buttons (Merge / Spawn / View changes) than the
+    // issues tab, so it's especially easy for a future refactor to
+    // drop the link's onClick handler — this test catches that.
+    expect(openUrlMock).toHaveBeenCalledTimes(1);
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/pull/201');
+  });
+
+  it('opens the PR URL via openUrl when the ↗ icon is clicked', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // Wait for the list to render before querying the icons — the
+    // initial render is the "Loading pull requests…" spinner, so a
+    // sync getByLabelText would throw on a not-yet-mounted element.
+    // The ↗ icon is the discoverability hint — same target, same
+    // routing. aria-label distinguishes it from the issue-tab variant.
+    // The fixture has 4 open PRs, so there are 4 icon links with the
+    // same aria-label. Click the first and assert it routes to that
+    // PR's URL.
+    const iconLinks = await screen.findAllByLabelText(/open pull request on github/i);
+    expect(iconLinks.length).toBeGreaterThan(0);
+    await userEvent.click(iconLinks[0]);
+
+    expect(openUrlMock).toHaveBeenCalledTimes(1);
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/pull/201');
+  });
+
+  it('does not call openUrl when the row body is clicked', async () => {
+    // The row's expand handler fires for clicks on the body / chevron /
+    // padding — NOT for clicks on the link (those route through
+    // openUrl). Clicking the body should toggle expand and leave
+    // openUrl untouched. Guards against a future refactor that wires
+    // the row's onClick to openUrl "as a convenience" — that would
+    // fire openUrl on every expand click.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Add widget');
+    const row = title.closest('[data-pr-row]')!;
+    const clampedBody = row.querySelector('p.line-clamp-2') as HTMLElement;
+    await userEvent.click(clampedBody);
+
+    expect(openUrlMock).not.toHaveBeenCalled();
+  });
+
+  it('does not call openUrl when View changes is clicked (separate action)', async () => {
+    // View changes opens the center diff overlay (a UI action), NOT
+    // the external GitHub URL. Make sure the new link-routing didn't
+    // accidentally get wired into the View changes button — the
+    // overlay is the user-facing affordance for reading a PR's diff.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // findBy* waits for the row to mount; the View changes button is
+    // icon-only with an aria-label, identified by the PR number.
+    const viewBtn = await screen.findByRole('button', { name: 'View changes in PR #201' });
+    await userEvent.click(viewBtn);
+
+    expect(openUrlMock).not.toHaveBeenCalled();
+    // Confirm the View changes action did its real job.
+    expect(useUIStore.getState().activeDiffFile?.prNumber).toBe(201);
+  });
+
+  it('does not call openUrl when the Merge button is clicked (separate action)', async () => {
+    // Symmetric to View changes — Merge is a backend IPC (`merge_pr`),
+    // not an external navigation. Pin the routing.
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    await userEvent.click(mergeBtn);
+    // First click reveals the confirm state; second click (Confirm) fires merge_pr.
+    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
+    await userEvent.click(confirmBtn);
+
+    expect(openUrlMock).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('merge_pr', {
+        prUrl: 'https://github.com/acme/demo/pull/201',
+      });
+    });
+  });
+
+  it('does not navigate or openUrl when a link with empty url is clicked', async () => {
+    // The defensive empty-URL guard renders a <span> instead of an <a>
+    // — so clicking the title (now plain text) must not invoke openUrl.
+    // Pins against a future widening that re-introduces bare <a href="">.
+    mockBackend({
+      open: [
+        {
+          number: 999,
+          title: 'Mystery PR',
+          body: 'No html_url from upstream.',
+          url: '',
+          state: 'open',
+          draft: false,
+          head_ref: 'mystery/999',
+          head_sha: 'f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9',
+        },
+      ],
+    });
+    render(<GitPullRequestsTab />);
+
+    const title = await screen.findByText('Mystery PR');
+    await userEvent.click(title);
+
+    expect(openUrlMock).not.toHaveBeenCalled();
   });
 
   /// Regression: the PR tab has three action groups (Merge, split Spawn,

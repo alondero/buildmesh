@@ -24,6 +24,19 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import type { GitHubIssue } from '../../src/types/generated/GitHubIssue';
 
+// `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
+// external URL. Tauri 2's WebView silently drops `target="_blank"` without
+// the `core:webview:allow-create-webview-window` capability (which we don't
+// grant), so the link's `onClick` must route through `openUrl` instead.
+// `vi.hoisted` so the mock factory can capture the spy ref before the
+// `vi.mock` call hoists the module replacement.
+const { openUrlMock } = vi.hoisted(() => ({
+  openUrlMock: vi.fn<[], Promise<void>>().mockResolvedValue(undefined),
+}));
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: openUrlMock,
+}));
+
 const MESH: Mesh = {
   id: 42,
   name: 'demo',
@@ -101,6 +114,13 @@ function mockBackend(opts: { issues?: GitHubIssue[]; providers?: typeof PROVIDER
 
 describe('GitIssuesTab (#378)', () => {
   beforeEach(() => {
+    // `mockReset` (not `mockClear`) wipes both call history AND any
+    // per-test `mockImplementationOnce` / `mockRejectedValueOnce`
+    // overrides — guards against a future test that adds a one-off
+    // override and accidentally leaks the override into siblings.
+    // Re-establish the default resolved value after the reset.
+    openUrlMock.mockReset();
+    openUrlMock.mockResolvedValue(undefined);
     useUIStore.setState({ probeOpen: true, probeTab: 'issues', activeDiffFile: null });
     useMeshStore.setState({
       meshesById: new Map([[MESH.id, MESH]]),
@@ -344,6 +364,98 @@ describe('GitIssuesTab (#378)', () => {
     // Still collapsed — clamp still present, no scrollable container.
     expect(row.querySelector('p.line-clamp-2')).toBeTruthy();
     expect(row.querySelector('[data-issue-body-expanded], div.max-h-48')).toBeNull();
+  });
+
+  // ----- Tauri 2 WebView external-link routing ---------------------------
+  // Tauri 2's WebView is NOT a browser. `target="_blank"` is silently
+  // dropped without the `core:webview:allow-create-webview-window`
+  // capability (which we don't grant in `capabilities/default.json`),
+  // so the link's onClick must call `openUrl` from
+  // `@tauri-apps/plugin-opener` to delegate to the OS. These tests pin
+  // that routing — a future port that drops the handler would regress
+  // to "the URL is in the DOM but clicking does nothing".
+
+  it('opens the issue URL via openUrl when the title link is clicked', async () => {
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const titleLink = (await screen.findByText('Fix the wobble')).closest('a')!;
+    await userEvent.click(titleLink);
+
+    // `openUrl` is called once with the issue's `url` field — the same
+    // string the href carries, so right-click "open in browser" and
+    // left-click both go to the same place.
+    expect(openUrlMock).toHaveBeenCalledTimes(1);
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/issues/101');
+    // The link's onClick must preventDefault so the WebView's dead
+    // default action doesn't compete with `openUrl`. jsdom doesn't
+    // navigate, but we can assert the click was marked handled by
+    // checking the openUrl side-effect (the URL is "opened" via the
+    // plugin, not via DOM navigation).
+    expect(openUrlMock).toHaveBeenCalled();
+  });
+
+  it('opens the issue URL via openUrl when the ↗ icon is clicked', async () => {
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    // Wait for the list to render before querying the icons — the
+    // initial render is the "Loading issues…" spinner, so a sync
+    // getByLabelText would throw on a not-yet-mounted element.
+    // The ↗ icon is the discoverability hint next to the title — same
+    // target, same routing. The fixture has 2 issues, so there are
+    // 2 icon links with the same aria-label. Click the first and
+    // assert it routes to that issue's URL.
+    const iconLinks = await screen.findAllByLabelText('Open issue on GitHub');
+    expect(iconLinks.length).toBeGreaterThan(0);
+    await userEvent.click(iconLinks[0]);
+
+    expect(openUrlMock).toHaveBeenCalledTimes(1);
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/issues/101');
+  });
+
+  it('does not call openUrl when the row body is clicked', async () => {
+    // The row's expand handler fires for clicks on the body / arrow
+    // chevron / padding — NOT for clicks on the link (those route
+    // through openUrl). Clicking the body should toggle expand and
+    // leave openUrl untouched. Guards against a future refactor that
+    // wires the row's onClick to openUrl "as a convenience" — that
+    // would fire openUrl on every expand click, which is wrong.
+    mockBackend();
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Fix the wobble');
+    const row = title.closest('[data-issue-row]')!;
+    const clampedBody = row.querySelector('p.line-clamp-2') as HTMLElement;
+    await userEvent.click(clampedBody);
+
+    expect(openUrlMock).not.toHaveBeenCalled();
+  });
+
+  it('does not navigate or openUrl when a link with empty url is clicked', async () => {
+    // Symmetric to the empty-URL title-span guard. When `issue.url` is
+    // empty, no <a> is rendered at all, so there's nothing to click —
+    // but we assert `openUrl` is never called with an empty string
+    // even after a click on the (now-text) title, pinning the guard
+    // against a future regression that mounts a bare <a href="">.
+    mockBackend({
+      issues: [
+        {
+          number: 200,
+          title: 'Mystery issue',
+          body: 'No html_url from upstream.',
+          url: '',
+          state: 'open',
+          labels: [],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Mystery issue');
+    await userEvent.click(title);
+
+    expect(openUrlMock).not.toHaveBeenCalled();
   });
 
   it('clears expanded state when the active mesh changes', async () => {

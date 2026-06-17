@@ -47,6 +47,7 @@ Wire types that cross the Tauri `invoke` boundary **or** the mobile HTTP server 
 - ❌ Spawn cwrap directly without `cmd.exe /c` on Windows — ConPTY breaks
 - ❌ Lock the DB mutex in nested calls — causes deadlocks
 - ❌ Hand-declare a TS interface for a Rust wire type, or hand-edit a file in `src/types/generated/` — derive `TS` on the Rust struct and import the generated type instead (issue #359)
+- ❌ Ship `<a target="_blank">` for an external URL — Tauri 2's WebView is not a browser, the click is silently dropped without the `core:webview:allow-create-webview-window` capability (which we don't grant). Keep the `href`/`target`/`rel` and route the `onClick` through `openUrl()` from `@tauri-apps/plugin-opener` (e.g. `src/components/SessionView/GridNodeHeader.tsx:145`). The right-click "Open in browser" path still works, which makes the bug look like a click-handler issue — it isn't.
 
 ## Coordinator Read API
 
