@@ -78,9 +78,27 @@ vi.mock('@xterm/xterm', () => {
       el.className = 'xterm';
       container.appendChild(el);
       this.element = el;
+      // xterm's real `.open()` creates a hidden helper `<textarea>` that
+      // receives keyboard focus when `term.focus()` is called. The focus
+      // guardian in Terminal.tsx relies on this — focusout bubbles from
+      // the helper textarea through `.xterm` and up to the container
+      // div, so we mirror that structure here. Without a real focusable
+      // child inside the container, the tests can't reproduce a click
+      // that moves focus away from the terminal (and the guardian's
+      // "don't fight a real control" check never fires).
+      const helper = document.createElement('textarea');
+      helper.className = 'xterm-helper-textarea';
+      helper.setAttribute('aria-hidden', 'true');
+      helper.tabIndex = 0;
+      el.appendChild(helper);
+      this.helperTextarea = helper;
     }
     dispose = vi.fn();
-    focus = vi.fn();
+    // Mirror real xterm: focus the helper textarea (it owns keyboard
+    // input). When the helper is in the DOM, .focus() moves DOM focus
+    // and triggers a real focusout on whatever element previously held
+    // focus, so the focus guardian's bubbling listener fires correctly.
+    focus = vi.fn(() => { this.helperTextarea?.focus(); });
     loadAddon = vi.fn();
     attachCustomKeyEventHandler = vi.fn();
     scrollToBottom = vi.fn();
@@ -101,6 +119,7 @@ vi.mock('@xterm/xterm', () => {
     cols = 80;
     options = { fontSize: 10 };
     element: HTMLElement | null = null;
+    helperTextarea: HTMLTextAreaElement | null = null;
     constructor(_options?: unknown) {}
   }
   return { Terminal: MockTerminal };
@@ -179,6 +198,16 @@ async function dispatchFocusOut(host: HTMLElement) {
   });
 }
 
+/** Pretend focus has fallen to <body>: explicitly blur whatever the helper
+ *  textarea owns so the guardian's activeElement check sees body. Mirrors
+ *  the runtime scenario ("xterm's helper textarea blurred mid-keystroke,
+ *  no other control picked up focus"). */
+function focusFallsToBody() {
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
+}
+
 describe('AgentTerminal focus guardian', () => {
   beforeEach(() => {
     mockListeners.clear();
@@ -200,7 +229,10 @@ describe('AgentTerminal focus guardian', () => {
 
   it('restores focus to the active terminal when focus falls out to <body>', async () => {
     const { inst, host } = await mountAndSettle();
-    // Nothing is focused → document.activeElement is <body>: the bug signature.
+    // Blur the helper textarea (which the attach effect focuses) so the
+    // guardian sees activeElement === <body> when its microtask runs —
+    // the exact "focus silently dropped" signature this guard fixes.
+    focusFallsToBody();
     await dispatchFocusOut(host);
     expect(inst.term.focus).toHaveBeenCalled();
   });
@@ -228,5 +260,131 @@ describe('AgentTerminal focus guardian', () => {
     vi.mocked(document.hasFocus).mockReturnValue(false);
     await dispatchFocusOut(host);
     expect(inst.term.focus).not.toHaveBeenCalled();
+  });
+
+  // Regression for "I open the Scratch Pad and the active terminal keeps
+  // stealing focus away from the textarea". This mirrors the actual click
+  // sequence in Chromium: when the user clicks a focusable element, the
+  // browser synchronously moves focus as part of the mousedown handling,
+  // so by the time the focusout listener fires the new element is already
+  // the active element. We use the real `focus()` call (which dispatches
+  // blur/focus in JSDOM the same way Chromium dispatches them mid-click) so
+  // the microtask sees the textarea as the active element — and must
+  // therefore not reclaim.
+  it('does NOT reclaim focus when focus moves to a focusable control via real click flow', async () => {
+    const { inst } = await mountAndSettle();
+
+    const textarea = document.createElement('textarea');
+    textarea.setAttribute('aria-label', 'Scratch pad');
+    document.body.appendChild(textarea);
+
+    try {
+      // Real click flow: textarea.focus() moves focus synchronously, which
+      // blurs the terminal helper textarea (which fires focusout on the
+      // container) and focuses the textarea in the same task. By the time
+      // the queued microtask runs, activeElement IS the textarea.
+      textarea.focus();
+
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      expect(inst.term.focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(textarea);
+    } finally {
+      textarea.remove();
+    }
+  });
+
+  // Regression for the user's exact complaint: the agent terminal steals
+  // focus from text inputs elsewhere in the dock. To exercise the real
+  // "container re-renders around me" sequence (the dock panel mounting
+  // alongside the terminal), mount the terminal, focus its helper
+  // textarea (the steady-state when the user opens the dock), then
+  // focus a sibling textarea. The guardian must not steal it back.
+  it('does NOT reclaim focus from a sibling-mounted text input when probe opens', async () => {
+    // Mount the terminal first, with the helper textarea actually focused
+    // — that's the steady-state when the user is mid-typing and decides to
+    // click 📝 to open the dock.
+    const { inst } = await mountAndSettle();
+    inst.term.helperTextarea?.focus();
+    expect(document.activeElement).toBe(inst.term.helperTextarea);
+
+    // Now mount a sibling (the probe panel — simplified to just the
+    // ScratchpadTab). This mirrors the layout where the dock and the
+    // terminal live side-by-side.
+    const probe = document.createElement('textarea');
+    probe.setAttribute('aria-label', 'Scratch pad');
+    document.body.appendChild(probe);
+
+    try {
+      probe.focus();
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+
+      expect(inst.term.focus).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(probe);
+    } finally {
+      probe.remove();
+    }
+  });
+
+  // Pins the user's bug at the event-source level. The original guard
+  // only checked `document.activeElement` at microtask time, which has a
+  // window where Chromium (and WebView2) hasn't yet committed the
+  // focus event on the new control — so `activeElement` is still
+  // <body>, and the guard reclaims focus away from the user's click.
+  // The fix uses `focusout.relatedTarget` (where focus is *going*) as
+  // the primary check; this test spies on queueMicrotask to verify the
+  // relatedTarget branch short-circuits BEFORE the microtask is queued
+  // at all. With the old logic, the guard would queue a microtask on
+  // every focusout (and only the activeElement check inside would
+  // decide to skip) — the spy would record the call.
+  it('does not queue a reclaim microtask when focusout.relatedTarget is a real control', async () => {
+    const { host } = await mountAndSettle();
+    const textarea = document.createElement('textarea');
+    textarea.setAttribute('aria-label', 'Scratch pad');
+    document.body.appendChild(textarea);
+
+    const queueSpy = vi.spyOn(globalThis, 'queueMicrotask');
+    try {
+      host.dispatchEvent(new FocusEvent('focusout', {
+        bubbles: true,
+        relatedTarget: textarea,
+      }));
+
+      // The relatedTarget check must short-circuit before any microtask
+      // is queued — that's the whole point of using relatedTarget as the
+      // primary signal instead of relying on the microtask-time
+      // activeElement read.
+      expect(queueSpy).not.toHaveBeenCalled();
+    } finally {
+      textarea.remove();
+      queueSpy.mockRestore();
+    }
+  });
+
+  // relatedTarget === <body> (e.g. clicking a non-focusable area of the
+  // dock header): focus has genuinely fallen to nothing, so the guard
+  // must still reclaim. Pins the body-relatedTarget boundary so a future
+  // tweak can't accidentally start skipping the real-loss case. The
+  // `relatedTarget: null` case (programmatic focus change / focus
+  // leaving the document) hits the exact same code path — both
+  // expressions `rt && rt !== document.body` evaluate to false — so
+  // exercising one pins both.
+  it('still reclaims when focusout.relatedTarget is body (non-focusable click)', async () => {
+    const { inst, host } = await mountAndSettle();
+    focusFallsToBody();
+    host.dispatchEvent(new FocusEvent('focusout', {
+      bubbles: true,
+      relatedTarget: document.body,
+    }));
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(inst.term.focus).toHaveBeenCalled();
   });
 });

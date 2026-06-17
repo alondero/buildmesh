@@ -220,15 +220,43 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   // nowhere. When *this* node is the active one and the app window still holds
   // OS focus, reclaim it. We act ONLY when focus has fallen to nothing
   // (<body>/null): a click that moves focus to a real control (the search box, a
-  // rename input, a header button, another pane) lands on that element, so the
-  // guard skips and never fights a legitimate move. activeNodeId is read via
-  // getState() so the listener doesn't need re-binding on every switch.
+  // rename input, a header button, another pane, or — the case that motivated
+  // this comment — a textarea in the dock like the Scratch Pad or Mesh
+  // Properties tab) lands on that element, so the guard skips and never
+  // fights a legitimate move.
+  //
+  // The primary check uses `focusout.relatedTarget` (where focus is *going*),
+  // not `document.activeElement` at microtask time. The microtask check is
+  // still there as a belt-and-braces fallback for when relatedTarget is null
+  // (programmatic focus changes leave it null; focus leaving the document
+  // also yields null), but trusting relatedTarget first closes the
+  // Chromium/WebView2 race where the focus event on the new control hasn't
+  // committed to activeElement by the time the microtask runs — without
+  // the relatedTarget short-circuit, the guard would see <body> and yank
+  // focus back from the user's click. activeNodeId is read via getState()
+  // so the listener doesn't need re-binding on every switch.
+  //
+  // Note we intentionally do NOT also reclaim when activeElement is
+  // `<html>`: Tab-navigation out of the WebView can briefly surface the
+  // document root as activeElement, and reclaiming there would pull focus
+  // back from the user's deliberate Tab-out.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const onFocusOut = () => {
+    const onFocusOut = (e: FocusEvent) => {
+      // `relatedTarget` is the element receiving focus, or null when
+      // focus is leaving the document / going to body. If it's a real
+      // focusable control (input, textarea, select, button,
+      // [contenteditable], etc.) the user is moving focus there — never
+      // reclaim against that.
+      const rt = e.relatedTarget as HTMLElement | null;
+      if (rt && rt !== document.body) return;
       // Defer a microtask so document.activeElement reflects where focus
-      // actually landed before we judge whether it fell out entirely.
+      // actually landed before we judge whether it fell out entirely. The
+      // relatedTarget check above already covers the common case (click
+      // onto a focusable control); this catches the remaining <body>/null
+      // edge cases — chiefly a stray DOM reconciliation that drops focus
+      // with no element waiting to receive it.
       queueMicrotask(() => {
         if (sessionId !== useAgentNodeStore.getState().activeNodeId) return;
         if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
