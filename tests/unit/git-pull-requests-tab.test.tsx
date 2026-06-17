@@ -192,13 +192,14 @@ describe('GitPullRequestsTab', () => {
     render(<GitPullRequestsTab />);
 
     // PR 201 is clean — its row gets an enabled Merge button once the
-    // mergeability probe resolves.
-    const mergeBtn = await screen.findByRole('button', { name: 'Merge' });
+    // mergeability probe resolves. The button is now icon-only (git-merge
+    // SVG) so the accessible name comes from the aria-label.
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
     await userEvent.click(mergeBtn);
 
     // First click reveals the inline confirm — no merge IPC yet.
     expect(invoke).not.toHaveBeenCalledWith('merge_pr', expect.anything());
-    const confirmBtn = await screen.findByRole('button', { name: 'Merge?' });
+    const confirmBtn = await screen.findByRole('button', { name: /confirm squash merge/i });
     await userEvent.click(confirmBtn);
 
     await waitFor(() => {
@@ -208,6 +209,27 @@ describe('GitPullRequestsTab', () => {
     await waitFor(() => {
       expect(vi.mocked(invoke).mock.calls.filter(([c]) => c === 'get_repo_pulls').length).toBeGreaterThan(1);
     });
+  });
+
+  /// The confirm step now exposes a Cancel button (icon-only) so the user
+  /// can back out of an accidental click. It must dismiss the confirm state
+  /// without firing `merge_pr`. Pin both the label and the cancel behavior
+  /// so a future regression that hides the cancel button (or wires the
+  /// wrong handler) is caught here.
+  it('exposes a Cancel button in the confirm state that dismisses without merging', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    await userEvent.click(mergeBtn);
+
+    const cancelBtn = await screen.findByRole('button', { name: /cancel merge/i });
+    await userEvent.click(cancelBtn);
+
+    // No merge IPC after cancellation, and the original Merge button
+    // re-appears (confirm state cleared).
+    expect(invoke).not.toHaveBeenCalledWith('merge_pr', expect.anything());
+    expect(await screen.findByRole('button', { name: 'Merge pull request #201' })).toBeTruthy();
   });
 
   it('flags a conflicting PR as non-mergeable (no merge button)', async () => {
@@ -299,7 +321,8 @@ describe('GitPullRequestsTab', () => {
 
       // PR 201 (clean) and PR 204 (now mergeable on retry) both render
       // Merge buttons. Assert the row is no longer in the checking state.
-      const mergeButtons = screen.getAllByRole('button', { name: 'Merge' });
+      // The accessible name now embeds the PR number (icon-only button).
+      const mergeButtons = screen.getAllByRole('button', { name: /merge pull request #/i });
       expect(mergeButtons.length).toBeGreaterThanOrEqual(2);
       expect(screen.queryByText('Checking…')).toBeNull();
       expect(calls204.length).toBeGreaterThanOrEqual(2);
@@ -749,5 +772,39 @@ describe('GitPullRequestsTab', () => {
     const resetTitle = await screen.findByText('Add widget');
     const resetRow = resetTitle.closest('[data-pr-row]')!;
     expect(resetRow.querySelector('p.line-clamp-2')).toBeTruthy();
+  });
+
+  /// Regression: the user wanted the textual "Merge" and "View changes"
+  /// buttons replaced with intuitive icons so they take less of the 360px
+  /// dock width. Pin the icon-only contract by asserting each action
+  /// button renders exactly one inline `<svg>` and exposes the semantic
+  /// name via `aria-label`/`title` (no text children). A future refactor
+  /// that regresses to a text button would either lack the SVG (text-only)
+  /// or expose the icon's accessible name only — both fail this test.
+  it('renders the Merge and View changes buttons as icon-only with semantic labels', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // Wait for PR 201 to be both rendered AND mergeable so the Merge
+    // button exists in its initial (non-confirm) state.
+    const mergeBtn = await screen.findByRole('button', { name: 'Merge pull request #201' });
+    const viewBtn = await screen.findByRole('button', { name: 'View changes in PR #201' });
+
+    // Icon-only: no visible text. Inner text of the button is empty.
+    expect(mergeBtn.textContent?.trim() ?? '').toBe('');
+    expect(viewBtn.textContent?.trim() ?? '').toBe('');
+
+    // Each button has exactly one SVG (the icon). A regressed text
+    // button would have 0; a regressed "icon + text" hybrid would also
+    // fail the empty-textContent check above, but this one pin catches
+    // the "two icons stacked" case if a future change ever adds a badge.
+    expect(mergeBtn.querySelectorAll('svg')).toHaveLength(1);
+    expect(viewBtn.querySelectorAll('svg')).toHaveLength(1);
+
+    // `title` provides a hover tooltip — this is the discoverability
+    // mechanism that replaces the visible text. Without it the icon
+    // would be a mystery to anyone who doesn't know the convention.
+    expect(mergeBtn.getAttribute('title')).toMatch(/merge/i);
+    expect(viewBtn.getAttribute('title')).toMatch(/view changes|diff/i);
   });
 });

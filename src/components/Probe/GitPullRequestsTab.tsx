@@ -83,6 +83,99 @@ const BLOCKED_WORDING: Record<string, string> = {
   behind: 'Behind',
 };
 
+// --- Icon components ------------------------------------------------------
+// Tiny inline SVG icons used by the row's action buttons. The previous
+// text labels ("Merge", "View changes") ate ~50-80px each in the 360px
+// probe dock; icon-only buttons reclaim the space and read as clearly
+// (or more clearly) at a glance. The pattern matches the existing
+// error/empty-state SVGs in this file: 24×24 viewBox, no fill, 1.5px
+// stroke, currentColor — so the icon adopts whatever text colour the
+// button applies (cyan for merge, green for confirm, muted for cancel).
+//
+// All four take a `className` so the caller can size the icon (e.g. `w-3.5
+// h-3.5`). Width/height attributes are intentionally left at the SVG
+// defaults (24) and the visible size is controlled by the wrapper classes.
+
+function GitMergeIcon({ className }: { className?: string }) {
+  // Lucide's git-merge: two end nodes joined by a trunk + a side branch.
+  // Universally recognised as "merge branches / merge PR".
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="18" cy="18" r="3" />
+      <circle cx="6" cy="6" r="3" />
+      <path d="M6 21V9a9 9 0 0 0 9 9" />
+    </svg>
+  );
+}
+
+function FileTextIcon({ className }: { className?: string }) {
+  // Lucide's file-text: a file outline with three content lines. Reads
+  // as "view file" / "read content" — appropriate for the "open this
+  // PR's diff in the center overlay" action.
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="8" y1="13" x2="16" y2="13" />
+      <line x1="8" y1="17" x2="13" y2="17" />
+      <line x1="8" y1="9" x2="10" y2="9" />
+    </svg>
+  );
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.25"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function XIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.25"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  );
+}
+
 /**
  * Turn a PR + its (maybe-missing) mergeability into a display status.
  * `draft` short-circuits to blocked without a detail call. An absent map
@@ -562,7 +655,19 @@ export function GitPullRequestsTab() {
                       )}
                     </div>
 
-                  {/* Merge control — open PRs only; closed PRs are read-only. */}
+                  {/* Merge control — open PRs only; closed PRs are read-only.
+                      The action button is icon-only (git-merge SVG) to keep
+                      the 360px dock from being eaten by button text. The
+                      `aria-label` carries the PR number so screen readers
+                      announce "Merge pull request #201" and `title` gives
+                      mouse users a hover tooltip — the discoverability that
+                      used to come from visible text. In the confirm state
+                      we swap to a green check + muted x; the same colour
+                      semantics the text version used (green = go, muted =
+                      dismiss). The Confirm button is intentionally larger
+                      than Cancel via `px-2.5` (vs `p-1.5`) so the eye lands
+                      on the safe-looking affirmative — destructive-style
+                      confirm would invert this. */}
                   {stateFilter === 'open' && (
                     <div className="shrink-0 flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
                       {isMerging ? (
@@ -570,25 +675,35 @@ export function GitPullRequestsTab() {
                       ) : isConfirming ? (
                         <>
                           <button
+                            type="button"
                             onClick={() => handleMerge(pr)}
-                            className="px-2 py-1 text-xs font-medium rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
+                            aria-label={`Confirm squash merge of pull request #${pr.number}`}
+                            title="Confirm squash merge"
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
                           >
-                            Merge?
+                            <CheckIcon className="w-3.5 h-3.5" />
+                            <span>Confirm</span>
                           </button>
                           <button
+                            type="button"
                             onClick={() => setConfirming(null)}
-                            className="px-2 py-1 text-xs font-medium rounded text-text-muted hover:text-text-secondary transition-colors"
+                            aria-label={`Cancel merge of pull request #${pr.number}`}
+                            title="Cancel"
+                            className="p-1.5 rounded text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
                           >
-                            Cancel
+                            <XIcon className="w-3.5 h-3.5" />
                           </button>
                         </>
                       ) : status.kind === 'mergeable' ? (
                         <button
+                          type="button"
                           onClick={() => setConfirming(pr.number)}
                           disabled={merging !== null}
-                          className="px-2.5 py-1 text-xs font-medium rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                          aria-label={`Merge pull request #${pr.number}`}
+                          title="Merge pull request"
+                          className="p-1.5 rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                         >
-                          Merge
+                          <GitMergeIcon className="w-3.5 h-3.5" />
                         </button>
                       ) : status.kind === 'checking' ? (
                         <span className="px-2 py-1 text-[10px] text-text-muted">Checking…</span>
@@ -655,16 +770,19 @@ export function GitPullRequestsTab() {
                       too (review a merged change, compare with a rebase).
                       `onMouseDown` stopPropagation mirrors the merge control
                       so a future click-outside picker (issue #373's dock
-                      pattern) doesn't swallow the click. */}
+                      pattern) doesn't swallow the click. Icon-only (file-text
+                      SVG) — the visible "View changes" text ate ~80px of the
+                      360px dock. Hover tooltip + aria-label preserve the
+                      semantics for sighted and AT users. */}
                   <div className="shrink-0 flex items-center" onMouseDown={(e) => e.stopPropagation()}>
                     <button
                       type="button"
                       onClick={() => handleViewChanges(pr)}
                       aria-label={`View changes in PR #${pr.number}`}
                       title="Open the PR's diff in the center overlay"
-                      className="px-2.5 py-1 text-xs font-medium rounded text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
+                      className="p-1.5 rounded text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
                     >
-                      View changes
+                      <FileTextIcon className="w-3.5 h-3.5" />
                     </button>
                   </div>
                   </div>
