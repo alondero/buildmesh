@@ -26,8 +26,15 @@ dist-ssr
 # Local research files (not for public repo)
 user-research-grillme-*.md
 
+# Security audits, threat specs, and standards (kept local to prevent exposing vulnerabilities)
+security_audit_report.md
+docs/specs/prd-coordinator-security.md
+docs/adr/0012-coordinator-and-autopilot-security.md
+docs/development/security-standards.md
+
 # Test artifacts
 test-results/
+
 .playwright-cli/
 
 # Stray review/diff artifacts from agent sessions (e.g. `git diff > /tmp/x.patch`
