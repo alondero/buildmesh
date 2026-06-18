@@ -6,13 +6,13 @@ A Mesh's Git state can drift into a blocking condition without the user noticing
 
 ## Context
 
-The "behind upstream" `↓N` badge in `MeshItem.tsx` is computed by `get_git_branch_status` only against the **current branch's upstream**. If the root is on a feature branch with no upstream (the typical drift state), `behind = 0` and the badge is **invisible** — even though the mesh is in the most drift-y state possible. A separate "off base branch" condition needs its own surface.
+The "behind upstream" `↓N` badge in `MeshItem.tsx` is computed by `get_git_branch_status` only against the **current branch's upstream**. If the root is on a feature branch with no upstream (the typical drift state), `behind = 0` and the badge is **invisible** — even though the mesh is in the most drift-y state possible. A separate "off Base Ref" condition needs its own surface.
 
 Three failure modes are user-visible and recoverable:
 
 1. **Drifted root** — HEAD not on the Base Ref's branch (e.g. the user parked the root on `feat/x` and forgot); includes detached HEAD on a non-base commit.
 2. **Base branch hostage** — the Base Ref's branch is checked out in one of the worktrees, blocking `git checkout <base>` from the root. This is git's invariant: only one worktree may have a given branch checked out at a time.
-3. **Unpushed / unsaved work on root** — dirty working tree, ahead-of-upstream commits, or local commits on a branch with no upstream. Any "restore to base" action would strand this work, and recovery must refuse rather than silently lose it.
+3. **Unpushed / unsaved work on root** — dirty working tree, ahead-of-upstream commits, or local commits on a branch with no upstream. Any "restore to Base Ref" action would strand this work, and recovery must refuse rather than silently lose it.
 
 Sister issue #230 made `base_ref` load-bearing for new worktree creation. This ADR makes it load-bearing for **recovery** of meshes that have already drifted, and adds the UX so the user can see the problem and fix it without leaving the app.
 
@@ -20,7 +20,7 @@ Sister issue #230 made `base_ref` load-bearing for new worktree creation. This A
 
 1. **One snapshot, one source of truth.** A single `MeshHealth` struct (`base_ref`, `local_base_branch`, `current_branch`, `is_detached`, `is_dirty`, `unpushed_ahead`, `has_upstream`, `is_drifted`, `base_branch_holder`) is computed by `compute_mesh_health(&Repository, &str)` — a pure helper with no DB access, so it can be unit-tested against real temp repos. The Tauri command `get_mesh_health(mesh_id)` adds the live `active_paths` (from `db::list_agent_nodes`) to refine `base_branch_holder.is_active`. Every UI surface (sidebar badge, panel block, fix buttons) reads from the same struct so they cannot disagree.
 
-2. **Local branch derivation.** `parse_local_branch(&str) -> Option<String>` accepts `origin/main` → `main`, `main` → `main`, `refs/heads/main` → `main`, and `origin/feature/foo` → `foo`. It rejects `HEAD` and `FETCH_HEAD` so the badge and the recovery button are suppressed when no real base branch is configured. The same helper backs issue #230's `base_ref` resolution.
+2. **Local branch derivation.** `parse_local_branch(&str) -> Option<String>` accepts `origin/main` → `main`, `main` → `main`, `refs/heads/main` → `main`, and `origin/feature/foo` → `foo`. It rejects `HEAD` and `FETCH_HEAD` so the badge and the recovery button are suppressed when no real Base Ref is configured. The same helper backs issue #230's `base_ref` resolution.
 
 3. **Drift detection rules, in priority order:**
    - `local_base_branch.is_none()` → `is_drifted = false` (no base configured)
@@ -31,7 +31,7 @@ Sister issue #230 made `base_ref` load-bearing for new worktree creation. This A
 4. **`unpushed_ahead` semantic.** Counts local commits that would be stranded by `git checkout <base>`. When the branch has an upstream configured, use `graph_ahead_behind(tip, upstream)`; when no upstream, use `graph_ahead_behind(tip, local_base_tip)`. A branch with the same tip as the local base (a fresh branch with no local commits) reports `0` — it has nothing to lose.
 
 5. **Recovery commands refuse, never silently fail.** `restore_mesh_to_base` and `free_base_branch` are the **only** state mutations. Both run a guard chain that short-circuits with a user-readable `Err` on the first failure:
-   - `restore_mesh_to_base` rejects dirty roots, unpushed / no-upstream roots, already-on-base (no-op), and base-branch-hostage. The error message names the guard so the user knows which one fired. The "already on base" check must come **before** the hostage check: the root worktree itself "holds" the base branch whenever it's on it, and that's not a hostage — it's the desired state.
+   - `restore_mesh_to_base` rejects dirty roots, unpushed / no-upstream roots, already-on-base (no-op), and base-branch-hostage. The error message names the guard so the user knows which one fired. The "already on Base Ref" check must come **before** the hostage check: the root worktree itself "holds" the Base Ref whenever it's on it, and that's not a hostage — it's the desired state.
    - `free_base_branch` is idempotent (re-running on an already-detached worktree is a no-op success), non-destructive (`git checkout --detach` preserves the worktree's working tree, index, and HEAD commit), and refuses if the supplied path is not the current holder.
 
 6. **Recovery surfaces in the mesh properties panel, not as a global action.** Both buttons live in the health block at the top of `BranchesWorktreesSection`. Their disabled state mirrors the backend guard chain, and the `title` attribute quotes the exact backend error message so the user knows why a button would refuse before they click it. The sidebar badge opens the panel — the badge click does **not** trigger recovery, so a misclick can't strand work.

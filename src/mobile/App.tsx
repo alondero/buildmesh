@@ -133,7 +133,7 @@ export default function App() {
 
   const handleAuthFailed = useCallback(() => {
     clearStoredToken();
-    setAuthNotice("Session expired — scan the QR code again to reconnect.");
+    setAuthNotice("Connection expired — scan the QR code again to reconnect.");
     setScreen({ kind: "connect" });
   }, []);
 

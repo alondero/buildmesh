@@ -561,7 +561,7 @@ function HealthBlock({ health, inFlight, onRestore, onFree, message }: HealthBlo
       return `${localBase} held by ${health.base_branch_holder.name} — free it first`;
     }
     if (!health.is_drifted) {
-      return 'already on the base branch';
+      return 'already on the Base Ref';
     }
     return null;
   })();
@@ -577,7 +577,7 @@ function HealthBlock({ health, inFlight, onRestore, onFree, message }: HealthBlo
           type="button"
           onClick={onRestore}
           disabled={inFlight || restoreBlockedBy !== null}
-          title={restoreBlockedBy ?? 'Restore the mesh root to the base branch'}
+          title={restoreBlockedBy ?? 'Restore the mesh root to the Base Ref'}
           className="text-xs text-accent-cyan hover:text-accent-cyan/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Restore root to {localBase}

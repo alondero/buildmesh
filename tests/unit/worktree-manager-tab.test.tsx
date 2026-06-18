@@ -388,9 +388,9 @@ describe('WorktreeManagerTab (issue #377)', () => {
     });
   });
 
-  it('Restore is disabled (with a "free it first" tooltip) when a hostage holds the base branch', async () => {
+  it('Restore is disabled (with a "free it first" tooltip) when a hostage holds the Base Ref', async () => {
     // The legacy guard chain (issue #231) refuses Restore when a worktree
-    // holds the base branch — the user has to Free the hostage first. The
+    // holds the Base Ref — the user has to Free the hostage first. The
     // tab mirrors that guard in the UI: the button is disabled and the
     // tooltip says why.
     mockBackend({ health: DRIFTED_HEALTH });

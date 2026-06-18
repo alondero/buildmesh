@@ -291,7 +291,7 @@ fn drift_clear_when_root_on_base_branch() {
 fn drift_clear_when_detached_at_base_oid() {
     let td = TempDir::new();
     let repo = init_repo(td.path());
-    // Detach HEAD at main's tip OID (same as the base branch's tip).
+    // Detach HEAD at main's tip OID (same as the Base Ref's tip).
     let main_oid = repo
         .find_branch("main", git2::BranchType::Local)
         .unwrap()
@@ -305,7 +305,7 @@ fn drift_clear_when_detached_at_base_oid() {
     assert!(health.is_detached, "shorthand() of a detached HEAD is HEAD");
     assert!(
         !health.is_drifted,
-        "detached at the base branch's OID is not drifted (close enough)"
+        "detached at the Base Ref's OID is not drifted (close enough)"
     );
 }
 
@@ -340,13 +340,13 @@ fn drift_clear_when_base_branch_absent_from_repo() {
     assert_eq!(health.local_base_branch.as_deref(), Some("main"));
     assert!(
         !health.is_drifted,
-        "base branch `main` does not exist in this repo — cannot drift from a phantom"
+        "Base Ref `main` does not exist in this repo — cannot drift from a phantom"
     );
 }
 
 #[test]
 fn drift_still_detected_when_base_branch_present_but_off_it() {
-    // Guard against over-suppression: when the base branch DOES exist and
+    // Guard against over-suppression: when the Base Ref DOES exist and
     // the root is on a different branch, drift is still reported.
     let td = TempDir::new();
     let repo = init_repo(td.path());
@@ -453,9 +453,9 @@ fn hostage_detected_when_linked_worktree_holds_base_branch() {
 
 #[test]
 fn hostage_clear_when_root_holds_base_branch() {
-    // The repo root (main worktree) sitting on the base branch is the
+    // The repo root (main worktree) sitting on the Base Ref is the
     // HEALTHY, desired state — never a hostage. A hostage is specifically a
-    // *linked* worktree holding the base branch and blocking `git checkout`
+    // *linked* worktree holding the Base Ref and blocking `git checkout`
     // from the root; the root holding its own branch blocks nothing.
     // Regression for the false "main held by <repo>" badge (#265 follow-up).
     let td = TempDir::new();
@@ -464,7 +464,7 @@ fn hostage_clear_when_root_holds_base_branch() {
     let holder = find_base_branch_holder(&repo, "main", &[]);
     assert!(
         holder.is_none(),
-        "the root being on the base branch is not a hostage"
+        "the root being on the Base Ref is not a hostage"
     );
 }
 

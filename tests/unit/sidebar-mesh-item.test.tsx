@@ -52,8 +52,7 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onSelectProvider: vi.fn(),
     onOpenFilesProbe: vi.fn(),
     onOpenPropertiesProbe: vi.fn(),
-    // Issue #378 — the right-click "GitHub Issues" / "Previous Sessions"
-    // entries route through the Probe Panel via the new probe-tab
+    // Issue #378 — the right-click "GitHub Issues" / "Previous Agent Nodes"    // entries route through the Probe Panel via the new probe-tab
     // handlers. The legacy `onOpenGitHubIssues` / `onOpenSessionBrowser`
     // props are gone; the modal components stay on disk but no
     // consumer wires them up.
@@ -119,7 +118,7 @@ describe('MeshItem', () => {
     expect(screen.getByText('Properties')).toBeTruthy();
     expect(screen.getByText('File Explorer')).toBeTruthy();
     expect(screen.getByText('GitHub Issues')).toBeTruthy();
-    expect(screen.getByText('Previous Sessions')).toBeTruthy();
+    expect(screen.getByText('Previous Agent Nodes')).toBeTruthy();
   });
 
   it('invokes the matching handler when a context-menu action is chosen', async () => {
@@ -141,14 +140,14 @@ describe('MeshItem', () => {
     expect(props.onOpenIssuesProbe).toHaveBeenCalledWith(3);
   });
 
-  it('routes the right-click "Previous Sessions" entry to the Probe Panel (issue #378)', async () => {
-    // Issue #378 — the "Previous Sessions" right-click item used to
+  it('routes the right-click "Previous Agent Nodes" entry to the Probe Panel (issue #378)', async () => {
+    // Issue #378 — the "Previous Agent Nodes" right-click item used to
     // mount the legacy `SessionBrowserModal` via `onOpenSessionBrowser`.
     // After the port it calls `onOpenSessionHistoryProbe`, which
     // Sidebar wires to `openProbeTab('sessions')`.
     const { props } = renderMeshItem();
     fireEvent.contextMenu(screen.getByText('my-mesh'));
-    await userEvent.click(screen.getByText('Previous Sessions'));
+    await userEvent.click(screen.getByText('Previous Agent Nodes'));
     expect(props.onOpenSessionHistoryProbe).toHaveBeenCalledTimes(1);
     expect(props.onOpenSessionHistoryProbe).toHaveBeenCalledWith(3);
   });

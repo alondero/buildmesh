@@ -71,7 +71,7 @@ export default function CreatePrSheet({
         <input
           value={base}
           onChange={(e) => setBase(e.target.value)}
-          aria-label="Base branch"
+          aria-label="Base Ref"
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}

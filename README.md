@@ -2,7 +2,7 @@
 
 ![Buildmesh Wordmark](./src/assets/wordmark.png)
 
-Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Anthropic (Claude Code), Minimax, Kimi, OpenCode, Antigravity, and Codex** — across multiple repositories at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
+Buildmesh is a Tauri desktop app for orchestrating multiple AI coding agents — **Anthropic (Claude Code), Minimax, Kimi, OpenCode, Antigravity, and Codex** — across multiple meshes at the same time. It runs each agent as a durable process in a persistent xterm.js terminal, isolates work via Git worktrees, and exposes a tiled grid view so you can watch all of them at once.
 
 If you use Claude Code / Antigravity / OpenCode from your shell and find yourself `tmux`-ing, copy-pasting between tabs, or losing context when a long-running agent restarts — Buildmesh is what that should look like.
 
@@ -10,7 +10,7 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 
 ### Multi-agent orchestration
 - **Six providers, one workflow**: Anthropic (Claude Code), Minimax, Kimi, OpenCode, Antigravity, and Codex. Switch providers per agent node.
-- **Multi-mesh workspaces**: open several repositories side by side. Each mesh is its own grid of agent terminals.
+- **Multi-mesh workspaces**: open several meshes side by side. Each mesh is its own grid of agent terminals.
 - **Tiled grid view**: split each mesh into a 1–6 pane grid. Layouts are saved per mesh.
 - **Persistent terminals**: agents run as background processes. Switching meshes, panes, or even quitting the app never interrupts a running agent — `TerminalManager` is a singleton, terminals survive React remounts.
 - **Git worktree isolation**: every agent node gets its own worktree branch, so concurrent agents on the same repo never collide.

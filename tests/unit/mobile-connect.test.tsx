@@ -90,9 +90,9 @@ describe("Connect", () => {
 
   it("renders the notice explaining why the user landed here", () => {
     mockFetchStatus(200);
-    render(<Connect onConnected={vi.fn()} notice="Session expired" />);
+    render(<Connect onConnected={vi.fn()} notice="Connection expired" />);
     expect(screen.getByTestId("connect-notice").textContent).toBe(
-      "Session expired",
+      "Connection expired",
     );
   });
 });
