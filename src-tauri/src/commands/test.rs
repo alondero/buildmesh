@@ -170,7 +170,7 @@ fn process_request(request: &str, app: &AppHandle) -> String {
             "inject_test_output" => handle_inject_test_output(&rpc_req.args, app.clone()),
             "set_active_session" => handle_set_active_session(&rpc_req.args, app.clone()),
             "get_mesh_properties" => handle_get_mesh_properties(&rpc_req.args),
-            "update_mesh_field" => handle_update_mesh_field(&rpc_req.args),
+            "update_mesh_column" => handle_update_mesh_column(&rpc_req.args),
             "update_worktree_base_ref" => handle_update_worktree_base_ref(&rpc_req.args),
             "remove_worktree_base_ref" => handle_remove_worktree_base_ref(&rpc_req.args),
             "update_mesh_use_worktree" => handle_update_mesh_use_worktree(&rpc_req.args),
@@ -426,19 +426,18 @@ fn handle_set_active_session(args: &serde_json::Value, app: AppHandle) -> String
 fn handle_get_mesh_properties(args: &serde_json::Value) -> String {
     let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match tauri::async_runtime::block_on(crate::commands::mesh_config::get_mesh_properties(mesh_id)) {
+    match tauri::async_runtime::block_on(crate::commands::mesh_properties::get_mesh_properties(mesh_id)) {
         Ok(config) => JsonRpcResponse::success(&config),
         Err(e) => JsonRpcResponse::error(&e),
     }
 }
 
-fn handle_update_mesh_field(args: &serde_json::Value) -> String {
+fn handle_update_mesh_column(args: &serde_json::Value) -> String {
     let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
-    let section = args.get("section").and_then(|v| v.as_str()).unwrap_or("");
-    let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+    let column = args.get("column").and_then(|v| v.as_str()).unwrap_or("");
     let value = args.get("value").and_then(|v| v.as_str()).unwrap_or("");
 
-    match tauri::async_runtime::block_on(crate::commands::mesh_config::update_mesh_field(mesh_id, section.to_string(), key.to_string(), value.to_string())) {
+    match tauri::async_runtime::block_on(crate::commands::mesh_properties::update_mesh_column(mesh_id, column.to_string(), value.to_string())) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
         Err(e) => JsonRpcResponse::error(&e),
     }
@@ -448,7 +447,7 @@ fn handle_update_worktree_base_ref(args: &serde_json::Value) -> String {
     let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
     let base_ref = args.get("base_ref").and_then(|v| v.as_str()).unwrap_or("fresh").to_string();
 
-    match tauri::async_runtime::block_on(crate::commands::mesh_config::update_worktree_base_ref(mesh_id, base_ref)) {
+    match tauri::async_runtime::block_on(crate::commands::mesh_properties::update_worktree_base_ref(mesh_id, base_ref)) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
         Err(e) => JsonRpcResponse::error(&e),
     }
@@ -457,7 +456,7 @@ fn handle_update_worktree_base_ref(args: &serde_json::Value) -> String {
 fn handle_remove_worktree_base_ref(args: &serde_json::Value) -> String {
     let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match tauri::async_runtime::block_on(crate::commands::mesh_config::remove_worktree_base_ref(mesh_id)) {
+    match tauri::async_runtime::block_on(crate::commands::mesh_properties::remove_worktree_base_ref(mesh_id)) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
         Err(e) => JsonRpcResponse::error(&e),
     }
@@ -467,7 +466,7 @@ fn handle_update_mesh_use_worktree(args: &serde_json::Value) -> String {
     let mesh_id = args.get("mesh_id").and_then(|v| v.as_i64()).unwrap_or(0);
     let use_worktree = args.get("use_worktree").and_then(|v| v.as_bool()).unwrap_or(true);
 
-    match tauri::async_runtime::block_on(crate::commands::mesh_config::update_mesh_use_worktree(mesh_id, use_worktree)) {
+    match tauri::async_runtime::block_on(crate::commands::mesh_properties::update_mesh_use_worktree(mesh_id, use_worktree)) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id, "use_worktree": use_worktree })),
         Err(e) => JsonRpcResponse::error(&e),
     }

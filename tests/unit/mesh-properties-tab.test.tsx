@@ -88,7 +88,7 @@ function mockBackend() {
           current_short_sha: 'abc1234',
           authenticated: false,
         });
-      case 'update_mesh_field':
+      case 'update_mesh_column':
         return Promise.resolve();
       case 'git_sync':
       case 'get_git_branch_status':
@@ -181,7 +181,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(provider.value).toBe('anthropic');
   });
 
-  it('saves text fields on blur via update_mesh_field', async () => {
+  it('saves text fields on blur via update_mesh_column', async () => {
     const user = userEvent.setup();
     await openPropertiesTab();
 
@@ -191,10 +191,9 @@ describe('MeshPropertiesTab (issue #375)', () => {
     fireEvent.blur(model);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_field', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
         meshId: 42,
-        section: 'agent',
-        key: 'model',
+        column: 'model',
         value: 'sonnet-4',
       });
     });
@@ -210,10 +209,9 @@ describe('MeshPropertiesTab (issue #375)', () => {
     fireEvent.blur(build);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_field', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
         meshId: 42,
-        section: 'build',
-        key: 'command',
+        column: 'build_command',
         value: 'cargo build',
       });
     });
@@ -293,22 +291,21 @@ describe('MeshPropertiesTab (issue #375)', () => {
     await user.selectOptions(effort, 'xhigh');
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_field', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
         meshId: 42,
-        section: 'agent',
-        key: 'effort',
+        column: 'effort',
         value: 'xhigh',
       });
     });
 
     // Reset to "Not set" — the legacy panel deliberately omitted the
-    // backend write here (no way to clear a not-null config). The new
+    // backend write here (no way to clear a not-null column). The new
     // tab preserves that behaviour.
     vi.mocked(invoke).mockClear();
     await user.selectOptions(effort, '');
     await new Promise((r) => setTimeout(r, 20));
     const effortWrites = vi.mocked(invoke).mock.calls.filter(
-      ([cmd, args]) => cmd === 'update_mesh_field' && (args as { key?: string })?.key === 'effort',
+      ([cmd, args]) => cmd === 'update_mesh_column' && (args as { column?: string })?.column === 'effort',
     );
     expect(effortWrites.length).toBe(0);
   });
@@ -322,11 +319,11 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
     await waitFor(() => {
       const calls = vi.mocked(invoke).mock.calls.filter(
-        ([cmd]) => cmd === 'update_mesh_field',
+        ([cmd]) => cmd === 'update_mesh_column',
       );
-      const sections = calls.map(([, args]) => (args as { section: string }).section);
-      expect(sections).toContain('build');
-      expect(sections).toContain('run');
+      const columns = calls.map(([, args]) => (args as { column: string }).column);
+      expect(columns).toContain('build_command');
+      expect(columns).toContain('run_command');
     });
   });
 

@@ -15,7 +15,7 @@ pub mod frontend_log;
 pub mod git;
 #[cfg(test)]
 pub mod git_tests;
-pub mod mesh_config;
+pub mod mesh_properties;
 pub mod pr;
 pub mod mesh;
 pub mod preferences;

@@ -22,7 +22,7 @@ import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
-import type { MeshConfig } from '../../src/types/generated/MeshConfig';
+import type { MeshRow } from '../../src/types/generated/MeshRow';
 
 const MESH: Mesh = {
   id: 42,
@@ -126,7 +126,7 @@ const DRIFTED_HEALTH: Record<string, unknown> = {
  * health/prune so individual tests can swap the health shape without
  * re-mocking.
  *
- * `meshConfig` controls the response of `get_mesh_properties` (issue
+ * `meshRow` controls the response of `get_mesh_properties` (issue
  * #451 — the Configuration card on the 🌳 tab). The default matches
  * the legacy `MeshPropertiesPanel` initial state so the existing
  * health / prune / recovery tests stay deterministic. `saveUseWorktree
@@ -138,14 +138,14 @@ function mockBackend(
   overrides: {
     health?: unknown;
     prune?: unknown;
-    meshConfig?: Partial<MeshConfig>;
+    meshRow?: Partial<MeshRow>;
     saveUseWorktreeFails?: boolean;
     saveBaseRefFails?: boolean;
   } = {},
 ) {
   const health = overrides.health ?? HEALTHY;
   const prune = overrides.prune ?? PRUNE_INFO;
-  const meshConfig: MeshConfig = {
+  const meshRow: MeshRow = {
     name: null,
     build_command: null,
     run_command: null,
@@ -155,7 +155,7 @@ function mockBackend(
     use_worktree: true,
     worktree_mode: 'branched',
     default_provider: null,
-    ...overrides.meshConfig,
+    ...overrides.meshRow,
   };
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
@@ -187,7 +187,7 @@ function mockBackend(
           skill_count: 0,
           agents_skills_exists: false,
         });
-      case 'update_mesh_field':
+      case 'update_mesh_column':
         return Promise.resolve();
       case 'update_mesh_use_worktree':
         return overrides.saveUseWorktreeFails
@@ -497,7 +497,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     expect(fresh.checked).toBe(false);
   });
 
-  it('selecting the Detached radio calls update_mesh_field with section=agent and key=worktree_mode', async () => {
+  it('selecting the Detached radio calls update_mesh_column with column=worktree_mode', async () => {
     const user = userEvent.setup();
     mockBackend();
     await openWorktreesTab();
@@ -507,10 +507,9 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     await user.click(detachedRadio);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_field', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
         meshId: 42,
-        section: 'agent',
-        key: 'worktree_mode',
+        column: 'worktree_mode',
         value: 'detached',
       });
     });
@@ -565,7 +564,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // A fresh mesh row returns `worktree_mode: null` from the wire.
     // The card must fall back to the default rather than rendering
     // an empty radio group.
-    mockBackend({ meshConfig: { worktree_mode: null } });
+    mockBackend({ meshRow: { worktree_mode: null } });
     await openWorktreesTab();
 
     const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;

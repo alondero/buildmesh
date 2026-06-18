@@ -2,7 +2,7 @@
 
 use crate::db;
 use crate::env;
-use crate::models::MeshConfig;
+use crate::models::MeshRow;
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::collections::HashMap;
@@ -189,13 +189,13 @@ pub async fn build_run(
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;
 
-    // 2. Read canonical mesh config from DB
+    // 2. Read canonical mesh row from DB
     let mesh = db::get_mesh_by_path(&node.path)
         .map_err(|e| format!("failed to get mesh for path {}: {}", node.path, e))?;
-    let config = MeshConfig::from(&mesh);
+    let row = MeshRow::from(&mesh);
 
     // 3. If use_worktree is false, work directly in repo root
-    let use_worktree = config.use_worktree;
+    let use_worktree = row.use_worktree;
     let spawn_worktree_name = if use_worktree {
         node.worktree_name.as_deref()
     } else {
@@ -218,9 +218,9 @@ pub async fn build_run(
     // 5. Get the command to run. Terminal mode spawns an interactive shell
     //    directly, so no command string is needed.
     let command = match mode {
-        BuildRunMode::Build => config.build_command.as_deref()
+        BuildRunMode::Build => row.build_command.as_deref()
             .ok_or_else(|| "build command not configured".to_string())?,
-        BuildRunMode::Run => config.run_command.as_deref()
+        BuildRunMode::Run => row.run_command.as_deref()
             .ok_or_else(|| "run command not configured".to_string())?,
         BuildRunMode::Terminal => "",
     };
@@ -300,10 +300,10 @@ pub async fn build_run(
 }
 
 #[tauri::command]
-pub async fn get_mesh_config(mesh_id: i64) -> Result<MeshConfig, String> {
+pub async fn get_mesh_row(mesh_id: i64) -> Result<MeshRow, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("failed to get mesh {}: {}", mesh_id, e))?;
-    Ok(MeshConfig::from(&mesh))
+    Ok(MeshRow::from(&mesh))
 }
 
 /// Close a build/run terminal for a node
@@ -315,12 +315,6 @@ pub async fn close_build_run(node_id: i64) -> Result<(), String> {
         drop(master);
     }
     Ok(())
-}
-
-#[tauri::command]
-pub async fn ensure_mesh_config(_mesh_id: i64) -> Result<String, String> {
-    // Config is now in the DB from mesh creation time — nothing to create
-    Ok(String::new())
 }
 
 /// Forward user keystrokes to the live build/run PTY. Currently meaningful

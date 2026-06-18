@@ -44,7 +44,7 @@ import {
   getGitPruneInfo,
   getMeshProperties,
   pruneRemoteTracking,
-  updateMeshField,
+  updateMeshColumn,
   updateMeshUseWorktree,
   updateWorktreeBaseRef,
   type BranchInfo,
@@ -91,8 +91,8 @@ const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
  * The default worktree mode for a fresh agent node. Local pin that must
  * agree with `DEFAULT_WORKTREE_MODE` in `src-tauri/src/agent/spawn.rs`
  * (per the cross-language default coupling pattern — see ADR
- * follow-up). When the worktree_mode column in `mesh.toml` is missing
- * or `null` on the wire, this is the value the form falls back to.
+ * follow-up). When the `meshes.worktree_mode` column is missing or
+ * `null` on the wire, this is the value the form falls back to.
  */
 const DEFAULT_WORKTREE_MODE = 'branched';
 
@@ -122,7 +122,7 @@ const WORKTREE_MODE_OPTIONS: { value: WorktreeModeForm; label: string }[] = [
 ];
 
 // Mappers between the form's two-option enum and the open-ended
-// string values stored in `meshes.base_ref` / `mesh.toml` worktree_mode.
+// string values stored in `meshes.base_ref` / `meshes.worktree_mode`.
 // We intentionally collapse anything other than the canonical values
 // to the form's default — matches the legacy panel's
 // `config.base_ref === 'HEAD' ? 'head' : 'fresh'` rule and the
@@ -277,7 +277,7 @@ export function WorktreeManagerTab() {
       setWorktreeMode(next);
       setSaveError(null);
       try {
-        await updateMeshField(activeMeshId, 'agent', 'worktree_mode', next);
+        await updateMeshColumn(activeMeshId, 'worktree_mode', next);
       } catch (e) {
         setSaveError(`Failed to update worktree_mode: ${String(e)}`);
       }

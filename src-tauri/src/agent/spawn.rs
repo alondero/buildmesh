@@ -42,7 +42,7 @@ pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 ///    closes the master-trunk regression. **There is no `mesh.toml`
 ///    file**: the value lives on the `meshes` SQLite row (and is
 ///    mirrored to `.claude/settings.json` at the mesh root for Claude
-///    Code, see `commands::mesh_config`).
+///    Code, see `commands::mesh_properties`).
 /// 2. The repo's actual default branch read from
 ///    `refs/remotes/origin/HEAD` (populated by `git clone` / `git fetch`)
 ///    — closes the master-trunk regression where a repo whose default
@@ -557,21 +557,21 @@ pub async fn spawn_agent_inner(
         SessionIdMode::None
     };
 
-    // 5. Read mesh config for use_worktree / model / effort / worktree_mode
-    let config = env::read_mesh_config(&std::path::PathBuf::from(&node.path));
-    let use_worktree = config.as_ref().map(|c| c.use_worktree).unwrap_or(true);
-    let model_override = config.as_ref().and_then(|c| c.model.as_deref());
-    let effort_override = config.as_ref().and_then(|c| c.effort.as_deref());
-    let worktree_mode = config
+    // 5. Read mesh row for use_worktree / model / effort / worktree_mode
+    let row = env::mesh_row(&std::path::PathBuf::from(&node.path));
+    let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
+    let model_override = row.as_ref().and_then(|r| r.model.as_deref());
+    let effort_override = row.as_ref().and_then(|r| r.effort.as_deref());
+    let worktree_mode = row
         .as_ref()
-        .and_then(|c| c.worktree_mode.as_deref())
+        .and_then(|r| r.worktree_mode.as_deref())
         .unwrap_or(DEFAULT_WORKTREE_MODE);
     let base_ref = resolve_base_ref_for_spawn(
         &node.path,
-        config.as_ref().and_then(|c| c.base_ref.as_deref()),
+        row.as_ref().and_then(|r| r.base_ref.as_deref()),
     );
 
-    timer.checkpoint("after_mesh_config_read");
+    timer.checkpoint("after_mesh_row_read");
 
     // 6. Compute spawn path
     let spawn_worktree_name = if use_worktree {
@@ -1339,7 +1339,7 @@ mod tests {
     //
     // The COALESCE-sentinel treatment is critical: the DB column is
     // NOT NULL with default `'origin/main'`, so `Mesh.base_ref` is
-    // ALWAYS a non-empty `String` and `MeshConfig.base_ref` is ALWAYS
+    // ALWAYS a non-empty `String` and `MeshRow.base_ref` is ALWAYS
     // `Some(_)` — a naive `if let Some(b) = config_base_ref { return b }`
     // would make the detection chain dead code in production. The
     // `resolve_base_ref_treats_coalesce_sentinel_as_unset` test pins the
@@ -1488,7 +1488,7 @@ mod tests {
         // column with a COALESCE default of `'origin/main'` (see
         // `db::MESH_COLUMNS`). A fresh mesh whose base_ref was never
         // explicitly set reads as `Some("origin/main")` from the DB →
-        // `MeshConfig.base_ref = Some("origin/main")` →
+        // `MeshRow.base_ref = Some("origin/main")` →
         // `config.as_ref().and_then(|c| c.base_ref.as_deref())` returns
         // `Some("origin/main")`. The helper MUST treat this sentinel as
         // "no config" and fall through to the detection chain, otherwise
