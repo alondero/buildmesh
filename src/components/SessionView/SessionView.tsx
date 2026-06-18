@@ -348,7 +348,7 @@ export function SessionView() {
             <div className="flex-1 flex items-center justify-center text-text-muted">
               <div className="text-center max-w-sm">
                 <p className="text-xl mb-2 text-text-primary font-sans font-semibold">Buildmesh</p>
-                <p className="text-sm text-text-secondary mb-6 font-sans">Orchestrate AI agents across your projects. Add a mesh to point at a project folder, then spawn agents to work in parallel.</p>
+                <p className="text-sm text-text-secondary mb-6 font-sans">Orchestrate AI agents across your meshes. Add a mesh pointing at a Git repository, then spawn agents to work in parallel.</p>
                 <button
                   onClick={() => useMeshStore.getState().addMesh()}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"

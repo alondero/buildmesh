@@ -302,7 +302,7 @@ pub fn create_pr(
     let base_branch = &node.branch;
 
     // Read the branch from the worktree (if any) — the mesh root is on the
-    // base branch for worktree nodes, which would create a "main → main" PR.
+    // Base Ref for worktree nodes, which would create a "main → main" PR.
     let info = repo_info(&env::node_working_path(&node).host_path)?;
     if info.branch.is_empty() {
         return Err("Could not determine current branch".to_string());
@@ -326,7 +326,7 @@ pub fn create_pr_for_mesh(
     let info = repo_info(&mesh_path)?;
     if info.branch.is_empty() || info.branch == base_branch {
         return Err(format!(
-            "Current branch '{}' is the same as base branch '{}' — nothing to compare",
+            "Current branch '{}' is the same as Base Ref '{}' — nothing to compare",
             info.branch, base_branch
         ));
     }
@@ -760,7 +760,7 @@ mod tests {
             mesh_id: 1,
             name: "agent-1".into(),
             path: root.to_string_lossy().into_owned(),
-            branch: "main".into(), // The base branch (NOT the agent's branch)
+            branch: "main".into(), // The Base Ref (NOT the agent's branch)
             env: EnvType::Windows,
             provider: Provider::Anthropic,
             status: SessionStatus::Idle,
@@ -945,20 +945,20 @@ mod tests {
         let info = repo_info(&resolved).expect("worktree repo must open");
         assert_eq!(
             info.branch, "agent-1",
-            "PR chip looks up head=<branch>; the agent's working branch is the worktree name, not the mesh's base branch"
+            "PR chip looks up head=<branch>; the agent's working branch is the worktree name, not the mesh's Base Ref"
         );
         // And — for the bug regression — opening the MESH ROOT itself gives
         // `main`, not `agent-1`. This is the exact mismatch that hid the chip.
         let root_info = repo_info(&node.path).expect("mesh root must open");
         assert_eq!(
             root_info.branch, "main",
-            "sanity: mesh root is on the base branch; this is what the bug used to read"
+            "sanity: mesh root is on the Base Ref; this is what the bug used to read"
         );
     }
 
     /// `get_current_branch` is the mobile REST route's backing command; for a
     /// worktree node it must report the worktree's branch, not the mesh's
-    /// base branch. Same bug class as the PR chip.
+    /// Base Ref. Same bug class as the PR chip.
     #[test]
     fn get_current_branch_via_working_path_returns_worktree_branch() {
         let (_guard, _wt_path, node) = make_worktree_node();

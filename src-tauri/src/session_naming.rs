@@ -10,7 +10,7 @@
 //! - `buffer` — PTY output accumulator; an entry exists = the node hasn't been
 //!   renamed yet.
 //! - `buffering_ready` — the gate. PTY output is only accumulated after the
-//!   *first* idle/turn signal, which discards the chrome Claude Code prints on
+//!   *first* Node Turn, which discards the chrome Claude Code prints on
 //!   startup (the "Bypass Permissions" warning, plugin/skill listings, banner
 //!   repaints) so the renaming LLM never sees that text. Without this gate the
 //!   LLM kept producing names like `bypass-permissions-worktree`.
@@ -109,7 +109,7 @@ struct NodeNamingState {
     /// PTY output accumulated for the renamer. Only appended once the gate is
     /// open, and capped at `MAX_BUFFER_CHARS`.
     buffer: String,
-    /// The gate: PTY output is buffered only after the first turn signal, so
+    /// The gate: PTY output is buffered only after the first Node Turn, so
     /// Claude Code's startup chrome is discarded before it can reach the LLM.
     buffering_ready: bool,
     /// A rename task is in flight for this node — guards against duplicate LLM
@@ -343,7 +343,7 @@ fn should_trigger_rename(
         return None;
     }
 
-    // First idle/turn signal for this node — open the buffering gate so future
+    // First Node Turn for this node — open the buffering gate so future
     // PTY output is captured, then return without renaming. This drops all the
     // startup chrome (banner, permission warnings, plugin/skill listings).
     if !st.buffering_ready {
@@ -1189,7 +1189,7 @@ mod tests {
         let node_id = 4242;
         cleanup(node_id);
 
-        // Before any on_turn signal, all output is discarded — this is the
+        // Before any Node Turn, all output is discarded — this is the
         // bypass-permissions-warning fix: chrome printed at startup never
         // reaches the renaming buffer.
         on_output(node_id, "chrome chrome chrome");

@@ -10,7 +10,7 @@ The Changed-Files / diff views compute an Agent Node's changes against the **mer
 
 Buildmesh agents run in `git worktree`s that are usually created **detached at `base_ref`** (ADR 0003; `base_ref` defaults to `origin/main`, is stored on the `meshes` row, and is mirrored into `.claude/settings.json` `worktree.baseRef`). An agent is free to commit as it works. The moment it does, those committed files **drop out of the HEAD diff** — the cornerstone "here's what this agent changed" view silently shrinks to only the not-yet-committed tail. For a detached worktree `HEAD` *is* the agent's own latest commit, so "vs HEAD" can mean "vs my own work," which is nearly empty.
 
-The mental model users actually have — the one GitHub's "Files changed" tab serves — is **"everything this branch did relative to where it started."** That is a diff against the merge-base with the base branch, including both committed and uncommitted work.
+The mental model users actually have — the one GitHub's "Files changed" tab serves — is **"everything this branch did relative to where it started."** That is a diff against the merge-base with the Base Ref, including both committed and uncommitted work.
 
 ## Decision
 

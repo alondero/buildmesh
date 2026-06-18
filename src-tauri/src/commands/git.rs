@@ -476,9 +476,9 @@ pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
     Ok(health)
 }
 
-/// Restore the Mesh root to its base branch. Guarded by the same
+/// Restore the Mesh root to its Base Ref. Guarded by the same
 /// `restore_to_base_impl` rules: refuses if the root is dirty, has
-/// unpushed commits, or the base branch is held by a worktree.
+/// unpushed commits, or the Base Ref's branch is held by a worktree.
 ///
 /// On success, emits a `git-changed` event for the mesh path so the
 /// sidebar `!` badge clears and the file explorer refreshes.

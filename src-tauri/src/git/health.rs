@@ -32,7 +32,7 @@ use crate::process_util::command_no_window;
 /// (`origin/main`) and the common short forms (`main`, `develop`,
 /// `origin/develop`) all resolve correctly.
 ///
-/// Callers must treat `None` as "no base branch configured" — the badge
+/// Callers must treat `None` as "no Base Ref configured" — the badge
 /// and the recovery button are both suppressed in that case.
 pub(crate) fn parse_local_branch(base_ref: &str) -> Option<String> {
     let trimmed = base_ref.trim();
@@ -198,10 +198,10 @@ fn compute_unpushed(
 
 /// `is_drifted` rules, in priority order:
 /// 1. `local_base_branch.is_none()` (no base configured)       → `false`
-/// 2. base branch absent from the repo (e.g. default `origin/main`
+/// 2. Base Ref absent from the repo (e.g. default `origin/main`
 ///    against a `master`-trunk repo)                           → `false`
 /// 3. `current_branch == Some(local_base_branch)`              → `false` (on base)
-/// 4. Detached HEAD at the base branch's OID                   → `false` (close enough)
+/// 4. Detached HEAD at the Base Ref's OID                      → `false` (close enough)
 /// 5. Otherwise                                                → `true`
 ///
 /// Rule 2 is the key guard against false positives: the buildmesh DB
@@ -230,7 +230,7 @@ fn compute_is_drifted(
         return current_branch != Some(local);
     }
     // Detached: compare OIDs. A detached HEAD at the same OID as the local
-    // base branch is "close enough" — no badge.
+    // Base Ref is "close enough" — no badge.
     let base_oid = repo
         .find_branch(local, git2::BranchType::Local)
         .ok()
@@ -243,7 +243,7 @@ fn compute_is_drifted(
     }
 }
 
-/// Does the configured base branch actually exist in this repo? A Mesh
+/// Does the configured Base Ref actually exist in this repo? A Mesh
 /// carrying the default `origin/main` base_ref against a repo whose trunk
 /// is `master` has no `main` to compare against — drift detection must
 /// treat that as "no base", not "permanently drifted".
@@ -266,7 +266,7 @@ fn base_branch_present(repo: &Repository, local_base_branch: &str, base_ref: &st
 /// out, holding it hostage from the Mesh root? Returns the first match.
 ///
 /// The Mesh root (the main worktree) is deliberately NOT considered: the
-/// root sitting on the base branch is the healthy, desired state, not a
+/// root sitting on the Base Ref is the healthy, desired state, not a
 /// hostage — git only blocks a `git checkout <base>` from the root when a
 /// *different* worktree already holds that branch. Treating the root as a
 /// holder produced a false "base held by <repo>" badge for every healthy

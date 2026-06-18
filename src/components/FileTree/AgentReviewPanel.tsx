@@ -116,7 +116,7 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
 
       {files.length === 0 ? (
         <div className="flex items-center justify-center h-40 text-text-muted text-xs">
-          No changes vs base branch
+          No changes vs Base Ref
         </div>
       ) : (
         // The stacked, highlighted diffs. Each file card has its own sticky
