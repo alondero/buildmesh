@@ -67,13 +67,6 @@ pub struct Issue {
     /// defaults in the mobile screen. Empty when the issue has no labels.
     #[serde(default, deserialize_with = "deserialize_label_names")]
     pub labels: Vec<String>,
-    /// Issue numbers extracted from the body's `**Blocked by**` section.
-    /// Parsed once on fetch (see [`parse_blocked_by`]) and shipped on the
-    /// wire as the `blocked_by` field of [`crate::commands::pr::GitHubIssue`].
-    /// `#[serde(default)]` so a partial / older API response still parses —
-    /// the value falls back to `vec![]`.
-    #[serde(default)]
-    pub blocked_by: Vec<i64>,
 }
 
 /// Private GitHub wire shape for a single label entry. The public API only
@@ -158,8 +151,13 @@ pub fn parse_blocked_by(body: &str) -> Vec<i64> {
         return Vec::new();
     }
 
-    // Bound the scan. `floor_char_boundary` is stable on &str since 1.79.
-    let scan_end = body.len().min(BLOCKED_BY_BODY_CAP);
+    // Bound the scan. Real GitHub bodies can include emoji and CJK
+    // characters (each codepoint up to 4 bytes), so the raw byte cap can
+    // land mid-codepoint and `&body[..scan_end]` would panic with
+    // "byte index is not a char boundary". `floor_char_boundary` is
+    // stable on &str since 1.79 and snaps the index down to the nearest
+    // valid char boundary, matching the comment's intent.
+    let scan_end = body.floor_char_boundary(body.len().min(BLOCKED_BY_BODY_CAP));
     let scan = &body[..scan_end];
 
     let section = match BLOCKED_BY_SECTION_RE.captures(scan) {
@@ -1488,5 +1486,24 @@ This issue is related to #481 in a narrative sense.
             "{padding}\n\n**Blocked by**\n----------\n\n*   [Issue #481](https://github.com/x/y/issues/481)\n"
         );
         assert!(parse_blocked_by(&body).is_empty());
+    }
+
+    #[test]
+    fn parse_blocked_by_does_not_panic_on_multibyte_char_at_cap_boundary() {
+        // Regression: real GitHub bodies contain emoji (4-byte UTF-8) and
+        // CJK characters (3-byte). Without `floor_char_boundary`, the
+        // `&body[..scan_end]` slice would panic with
+        // "byte index N is not a char boundary" whenever a multi-byte
+        // codepoint straddled the 64 KiB cap. This test pins that the
+        // helper stays panic-free across the boundary; the assertion is
+        // intentionally loose (no specific number expected) because the
+        // important property is "doesn't panic".
+        let mut body = "x".repeat(65_534);
+        body.push('🐛'); // 4 bytes — straddles byte 65,534 / 65,535 / 65,536 / 65,537
+        body.push_str("\n**Blocked by**\n----------\n\n* [Issue #481](https://github.com/x/y/issues/481)\n");
+        // Just verify it doesn't panic. The exact return value depends on
+        // where the floor_char_boundary snaps the index, but for a body
+        // this size the Blocked-by section sits inside the floored region.
+        let _ = parse_blocked_by(&body);
     }
 }

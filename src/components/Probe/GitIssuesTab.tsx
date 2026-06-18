@@ -68,10 +68,12 @@ import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../
  * - The remaining blockers are folded into a `+ N more` suffix so the
  *   flag stays a compact 12×12 SVG regardless of dependency depth.
  *
- * Pure helper — extracted so the test file can pin the formatting
- * contract independently of the row-rendering code path.
+ * Module-local — the tooltip text is asserted through the rendered
+ * DOM (`flag.title`) in `tests/unit/git-issues-tab.test.tsx`, so an
+ * export here would broaden the component's public surface for no
+ * test value.
  */
-export function buildBlockedByTooltip(
+function buildBlockedByTooltip(
   blockers: number[],
   issuesByNumber: Map<number, GitHubIssue>,
 ): string | null {
