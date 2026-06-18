@@ -65,6 +65,10 @@ The set of configuration settings (trigger labels, concurrency limits, provider 
 A coordinator-facing read summary of a single Agent Node answering "what's going on, and does it need feedback?". Layered: an always-available spine from Buildmesh's own DB (lifecycle `status`, "needs feedback" = `awaiting_input`) enriched, for the Claude Code provider family only, with semantic content read from the agent's on-disk JSONL transcript. Non-supporting providers, or a transcript that fails to parse, degrade to the spine with the enrichment explicitly flagged unavailable (never silently omitted). The rendered terminal/TUI is deliberately **not** a digest source.
 _Avoid_: Node summary, status payload, snapshot
 
+**Blocked by**:
+The list of GitHub issue numbers an open issue declares it depends on, parsed from the issue body's `**Blocked by**` markdown section (settext or ATX heading; `None` short-circuits to an empty list; `/pull/N` references are ignored — only `/issues/N` counts). Surfaces in the Issues Probe as a flag below the Spawn button when at least one referenced blocker is still in the repo's loaded open-issues set. The flag is a warn, not a gate — the Spawn button stays enabled so a user who's intentionally unblocking something can still proceed.
+_Avoid_: depends on, dependency list, blocking issue (singular)
+
 ## Relationships
 
 - A **Mesh** can have one or more **Agent Nodes**
@@ -81,6 +85,9 @@ _Avoid_: Node summary, status payload, snapshot
 
 > **Dev:** "When the user spawns a new **Agent Node** under a **Mesh**, does it create a new Git branch?"
 > **Domain expert:** "Yes, it creates a dedicated worktree branch tracking the selected starting point of that **Mesh**."
+
+> **Dev:** "When the Issues Probe shows a red flag under an issue's Spawn button, what does that mean?"
+> **Domain expert:** "The issue's **Blocked by** list contains at least one issue that's still open in this repo — the flag is a warn, not a gate, so Spawn still works if the user is intentionally unblocking it."
 
 ## Flagged ambiguities
 
