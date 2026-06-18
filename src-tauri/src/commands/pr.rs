@@ -32,6 +32,25 @@ pub struct GitHubIssue {
     /// Label names (flattened from the GitHub API's `[{name, color, ...}]`).
     /// Empty array when the issue has no labels.
     pub labels: Vec<String>,
+    /// Issue numbers extracted from the body's `**Blocked by**` section
+    /// (issue #481 follow-up). Parsed by `services::github::parse_blocked_by`
+    /// in `get_repo_issues`'s mapper — see that fn for the parser contract.
+    ///
+    /// The Issues Probe renders a red flag below the Spawn button when at
+    /// least one of these numbers is still in the loaded open-issues list
+    /// (i.e. not yet completed). Cross-reference is frontend-side, so
+    /// blockers from a different repo or behind pagination (>100 open
+    /// issues) won't trigger the flag — a known limitation documented
+    /// in the plan.
+    ///
+    /// `Vec<i32>` on the wire (matches the existing `#[ts(as = "i32")]`
+    /// convention on `number`, `additions`, etc.). The internal
+    /// `services::github::Issue` keeps `Vec<i64>` for the GitHub API's
+    /// native integer width; the mapper downcasts via `n as i32`.
+    /// `#[serde(default)]` keeps the field additive across rolling
+    /// deploys — a missing key parses to `vec![]`.
+    #[serde(default)]
+    pub blocked_by: Vec<i32>,
 }
 
 /// Wire shape of `get_repo_pulls` (desktop Tauri) — one entry per pull request.
@@ -165,13 +184,27 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
     let issues = client.list_issues_only(&owner, &repo).map_err(|e| e.to_string())?;
 
-    Ok(issues.into_iter().map(|issue| GitHubIssue {
-        number: issue.number,
-        title: issue.title,
-        body: issue.body,
-        url: issue.html_url,
-        state: issue.state,
-        labels: issue.labels,
+    Ok(issues.into_iter().map(|issue| {
+        // Extract `blocked_by` BEFORE moving `issue.body` into the struct
+        // literal (Rust's move checker rejects the borrow-after-move).
+        // The parser is pure and bounded — see its doc comment.
+        let blocked_by: Vec<i32> = github::parse_blocked_by(&issue.body)
+            .into_iter()
+            .map(|n| n as i32)
+            .collect();
+        GitHubIssue {
+            number: issue.number,
+            title: issue.title,
+            body: issue.body,
+            url: issue.html_url,
+            state: issue.state,
+            labels: issue.labels,
+            // Downcast internal `i64` → wire `i32` (issue numbers fit
+            // comfortably in i32's ~2.1B max; matches the existing
+            // `#[ts(as = "i32")]` convention on the wire struct's other
+            // integer fields).
+            blocked_by,
+        }
     }).collect())
 }
 
@@ -536,6 +569,73 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    // ----- GitHubIssue wire shape (issue #481 follow-up: blocked_by) -----
+
+    /// Full wire shape including the `blocked_by` field. Pins the field's
+    /// JSON name and element type so the regenerated `src/types/generated/
+    /// GitHubIssue.ts` keeps `blocked_by: Array<number>` and the frontend's
+    /// strict typing continues to compile. The CI gate
+    /// `git diff --exit-code src/types/generated/` (per CLAUDE.md) catches
+    /// accidental drift here.
+    #[test]
+    fn github_issue_wire_shape_with_blocked_by() {
+        let json = r#"{
+            "number": 482,
+            "url": "https://github.com/alondero/buildmesh/issues/482",
+            "title": "Issue blocked by another",
+            "body": "see Blocked by section",
+            "state": "open",
+            "labels": [],
+            "blocked_by": [481, 999]
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json).expect("full wire shape parses");
+        assert_eq!(issue.number, 482);
+        assert_eq!(issue.blocked_by, vec![481, 999]);
+    }
+
+    /// Missing `blocked_by` key (older frontend, partial payload, or a
+    /// future test fixture that forgets it) must default to `vec![]`
+    /// rather than failing to parse. The `#[serde(default)]` on the
+    /// field is the safety net; this test pins the behaviour so a future
+    /// refactor that flips the field to required surfaces as a test
+    /// failure rather than a silent rollback.
+    #[test]
+    fn github_issue_wire_shape_with_missing_blocked_by_defaults() {
+        let json = r#"{
+            "number": 481,
+            "url": "https://github.com/alondero/buildmesh/issues/481",
+            "title": "No blockers",
+            "body": "None - can start immediately.",
+            "state": "open",
+            "labels": []
+        }"#;
+        let issue: GitHubIssue = serde_json::from_str(json).expect("partial wire shape parses");
+        assert!(issue.blocked_by.is_empty(), "missing blocked_by defaults to empty vec");
+    }
+
+    /// Round-trip: serialise a populated `blocked_by` and re-parse it
+    /// unchanged. Catches a class of bugs where serde rename / flatten
+    /// rules accidentally drop the field on serialisation (which would
+    /// only show up at the IPC seam, not at the parse-from-test-fixture
+    /// site).
+    #[test]
+    fn github_issue_wire_shape_blocked_by_round_trips() {
+        let original = GitHubIssue {
+            number: 482,
+            title: "Blocked issue".into(),
+            body: "body".into(),
+            url: "https://github.com/x/y/issues/482".into(),
+            state: "open".into(),
+            labels: vec!["bug".into()],
+            blocked_by: vec![481, 482, 483],
+        };
+        let json = serde_json::to_string(&original).expect("serialise");
+        let parsed: GitHubIssue = serde_json::from_str(&json).expect("re-parse");
+        assert_eq!(parsed.blocked_by, vec![481, 482, 483]);
+        assert_eq!(parsed.number, 482);
+        assert_eq!(parsed.labels, vec!["bug".to_string()]);
+    }
 
     // ----- GitHubPullRequest wire shape (issue #420) ---------------------
 

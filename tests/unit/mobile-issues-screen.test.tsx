@@ -39,6 +39,7 @@ const BACKEND_ISSUES: GitHubIssue[] = [
     url: "https://github.com/alondero/buildmesh/issues/101",
     state: "open",
     labels: ["enhancement", "good first issue"],
+    blocked_by: [],
   },
   {
     number: 102,
@@ -47,6 +48,7 @@ const BACKEND_ISSUES: GitHubIssue[] = [
     url: "https://github.com/alondero/buildmesh/issues/102",
     state: "open",
     labels: [],
+    blocked_by: [],
   },
   {
     number: 103,
@@ -55,6 +57,7 @@ const BACKEND_ISSUES: GitHubIssue[] = [
     url: "https://github.com/alondero/buildmesh/issues/103",
     state: "open",
     labels: ["bug"],
+    blocked_by: [],
   },
 ];
 

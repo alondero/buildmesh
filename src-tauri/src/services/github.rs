@@ -5,6 +5,9 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use once_cell::sync::Lazy;
+use regex::Regex;
+
 use crate::process_util::command_no_window;
 
 /// Error type for GitHub API operations
@@ -64,6 +67,13 @@ pub struct Issue {
     /// defaults in the mobile screen. Empty when the issue has no labels.
     #[serde(default, deserialize_with = "deserialize_label_names")]
     pub labels: Vec<String>,
+    /// Issue numbers extracted from the body's `**Blocked by**` section.
+    /// Parsed once on fetch (see [`parse_blocked_by`]) and shipped on the
+    /// wire as the `blocked_by` field of [`crate::commands::pr::GitHubIssue`].
+    /// `#[serde(default)]` so a partial / older API response still parses —
+    /// the value falls back to `vec![]`.
+    #[serde(default)]
+    pub blocked_by: Vec<i64>,
 }
 
 /// Private GitHub wire shape for a single label entry. The public API only
@@ -83,6 +93,115 @@ where
     D: serde::Deserializer<'de>,
 {
     Vec::<RawLabel>::deserialize(deserializer).map(|v| v.into_iter().map(|l| l.name).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Blocked-by body parser
+// ---------------------------------------------------------------------------
+
+/// Cap for body-length scanning. GitHub allows up to ~65 KiB per issue
+/// body, and real "Blocked by" sections sit near the top — so a 64 KiB
+/// cap is comfortably above the noise floor while bounding the regex
+/// scanner's internal buffer. Bodies beyond the cap are scanned only up
+/// to this point, so a Blocked-by section at the very end of a 65-KiB
+/// body would be missed. That's an acceptable trade-off — GitHub's UI
+/// renders the section near the top in practice, and the comment in the
+/// test module documents the assumption.
+const BLOCKED_BY_BODY_CAP: usize = 64 * 1024;
+
+/// Section header — matches either:
+///
+/// - **Setext-style:** `**Blocked by**` (asterisks optional, case-insensitive)
+///   followed by an underline of `-` or `=` characters on the next line.
+///   This is the shape GitHub's issue editor emits for `**Blocked by**`.
+/// - **ATX-style:** `# Blocked by` (1–6 `#` characters, case-insensitive)
+///   followed by one or more newlines. Less common but worth covering.
+///
+/// Both alternatives share a single lazy capture group `(.*?)` that
+/// terminates at the first blank line or end of input. The `(?mis)`
+/// flag set enables multi-line matching (`.` matches newlines),
+/// case-insensitivity, and `^`/`$` line boundaries.
+static BLOCKED_BY_SECTION_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?mis)(?:^\*{0,2}\s*Blocked\s+by\s*\*{0,2}\s*\n[-=]{2,}\s*\n|^\#{1,6}\s*Blocked\s+by[^\n]*\n+)(.*?)(?:\n\s*\n|\z)",
+    )
+    .expect("BLOCKED_BY_SECTION_RE is a static literal — must compile")
+});
+
+/// Issue URL — matches `/issues/{N}` where N is one or more digits.
+/// Pull-request URLs (`/pull/N`) are intentionally NOT matched here, so
+/// PR mentions in the section are naturally excluded.
+static ISSUE_URL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"/issues/(\d+)\b").expect("ISSUE_URL_RE is a static literal"));
+
+/// Extract the list of GitHub issue numbers referenced under the issue
+/// body's `**Blocked by**` section. Returns an empty `Vec` when:
+///
+/// - the body is empty,
+/// - the body has no `**Blocked by**` section,
+/// - the section is the literal "None" / "None - ..." (the common
+///   no-blockers idiom),
+/// - the body is larger than [`BLOCKED_BY_BODY_CAP`] bytes (the section
+///   is unreachable in that case — see the cap's doc comment).
+///
+/// Source order is preserved; duplicates are removed via `Vec::dedup`.
+/// The function is purely string-in / vec-out so it's trivially unit-testable
+/// without an Issue struct or a fixture.
+///
+/// Only `/issues/N` URLs are matched. Bare `#NNN` text references are
+/// intentionally ignored — GitHub's issue editor's "Blocked by" UI always
+/// emits `[Title #N](issues/N)` links, and matching bare `#NNN` would risk
+/// false positives when an issue narrative mentions PRs or other issues in
+/// context.
+pub fn parse_blocked_by(body: &str) -> Vec<i64> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+
+    // Bound the scan. `floor_char_boundary` is stable on &str since 1.79.
+    let scan_end = body.len().min(BLOCKED_BY_BODY_CAP);
+    let scan = &body[..scan_end];
+
+    let section = match BLOCKED_BY_SECTION_RE.captures(scan) {
+        Some(c) => match c.get(1) {
+            Some(m) => m.as_str(),
+            None => return Vec::new(),
+        },
+        None => return Vec::new(),
+    };
+
+    // Short-circuit on the "None" idiom. We strip leading bullet markers
+    // (`*`, `-`, `+`) and leading/trailing whitespace, then lower-case
+    // the result. "None.", "none", "None - can start immediately" all
+    // collapse to the same empty/blocker-free signal.
+    let cleaned: String = section
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(|l| l.trim_start_matches(['*', '-', '+']).trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if cleaned.is_empty() || cleaned.to_lowercase().starts_with("none") {
+        return Vec::new();
+    }
+
+    // Extract `/issues/N` URLs. Dedupe while preserving source order —
+    // a real "Blocked by" section can list the same issue twice (editor
+    // copy/paste), and the frontend cross-reference against the loaded
+    // open-issues set is set-based so duplicates would just be redundant.
+    let mut result: Vec<i64> = Vec::new();
+    for cap in ISSUE_URL_RE.captures_iter(section) {
+        if let Some(m) = cap.get(1) {
+            if let Ok(n) = m.as_str().parse::<i64>() {
+                if !result.contains(&n) {
+                    result.push(n);
+                }
+            }
+        }
+    }
+
+    result
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1197,5 +1316,177 @@ mod tests {
         assert_eq!(files[0].status, "added");
         assert_eq!(files[1].filename, "b.txt");
         assert_eq!(files[1].status, "deleted");
+    }
+
+    // -----------------------------------------------------------------------
+    // Blocked-by body parser — extracts the list of GitHub issue numbers
+    // referenced under a `**Blocked by**` markdown section in an issue body.
+    // The Issues Probe (issue #481) renders a red flag when an issue's
+    // blockers are still in the loaded open-issues list. The parser is
+    // intentionally URL-only (no `#NNN` text matching) because the GitHub
+    // editor's "Blocked by" UI always emits `[Title #N](issues/N)` links;
+    // matching bare `#NNN` would risk false positives when an issue
+    // mentions a PR or another issue in narrative context. Pull-request
+    // URLs (`/pull/N`) are naturally excluded because the regex only
+    // matches `/issues/N`.
+    //
+    // Bodies are assumed to be ≤64 KiB; the helper caps the scan to bound
+    // regex memory. Real issue bodies from `list_issues_only` are <16 KiB
+    // in practice (GitHub's body length cap is 65,536 chars).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_blocked_by_empty_body() {
+        assert!(parse_blocked_by("").is_empty());
+        assert!(parse_blocked_by("   \n  ").is_empty());
+    }
+
+    #[test]
+    fn parse_blocked_by_no_section() {
+        // Body has the word "blocked" but not the `**Blocked by**` header.
+        let body = "This issue was blocked by a flaky test last week.\nNo formal relationship.";
+        assert!(parse_blocked_by(body).is_empty());
+    }
+
+    #[test]
+    fn parse_blocked_by_setext_underline_single_blocker() {
+        // Real shape from issue #482 in alondero/buildmesh.
+        let body = "\
+Some intro paragraph.
+
+**Blocked by**
+----------
+
+*   [Autopilot 1: Mesh Schema & Config UI #481](https://github.com/alondero/buildmesh/issues/481)
+
+Some closing paragraph.";
+        assert_eq!(parse_blocked_by(body), vec![481]);
+    }
+
+    #[test]
+    fn parse_blocked_by_setext_underline_multiple_blockers_source_order() {
+        let body = "\
+**Blocked by**
+----------
+
+*   [Issue A #481](https://github.com/x/y/issues/481)
+*   [Issue B #482](https://github.com/x/y/issues/482)
+*   [Issue C #483](https://github.com/x/y/issues/483)
+";
+        assert_eq!(parse_blocked_by(body), vec![481, 482, 483]);
+    }
+
+    #[test]
+    fn parse_blocked_by_none_short_circuit() {
+        // Real shape from issue #481 in alondero/buildmesh — "no blockers"
+        // is the common idiom.
+        let body = "\
+**Blocked by**
+----------
+
+None - can start immediately.
+
+Some narrative below.";
+        assert!(parse_blocked_by(body).is_empty());
+    }
+
+    #[test]
+    fn parse_blocked_by_none_alone_short_circuits() {
+        let body = "**Blocked by**\n----------\n\nNone\n";
+        assert!(parse_blocked_by(body).is_empty());
+    }
+
+    #[test]
+    fn parse_blocked_by_atx_heading_variant() {
+        // Some bodies use `# Blocked by` instead of setext `---` underline.
+        let body = "\
+# Blocked by
+
+*   [Issue A #481](https://github.com/x/y/issues/481)
+";
+        assert_eq!(parse_blocked_by(body), vec![481]);
+    }
+
+    #[test]
+    fn parse_blocked_by_dedupes_repeated_link() {
+        // Same issue listed twice (editor copy/paste) → one entry.
+        let body = "\
+**Blocked by**
+----------
+
+*   [Issue A #481](https://github.com/x/y/issues/481)
+*   [Issue A again #481](https://github.com/x/y/issues/481)
+";
+        assert_eq!(parse_blocked_by(body), vec![481]);
+    }
+
+    #[test]
+    fn parse_blocked_by_excludes_pull_request_urls() {
+        // A PR mention in the section must NOT be treated as an issue
+        // blocker. Real bodies often reference context-PRs under the same
+        // header.
+        let body = "\
+**Blocked by**
+----------
+
+*   [Issue #481](https://github.com/x/y/issues/481)
+*   [Related PR #480](https://github.com/x/y/pull/480)
+";
+        assert_eq!(parse_blocked_by(body), vec![481]);
+    }
+
+    #[test]
+    fn parse_blocked_by_stray_mention_outside_section_excluded() {
+        // `#481` mentioned in narrative text outside the Blocked-by section
+        // must not be picked up — the header is the signal.
+        let body = "\
+This issue is related to #481 in a narrative sense.
+
+**Blocked by**
+----------
+
+*   [Real blocker #999](https://github.com/x/y/issues/999)
+";
+        assert_eq!(parse_blocked_by(body), vec![999]);
+    }
+
+    #[test]
+    fn parse_blocked_by_cross_repo_url_extracted() {
+        // We only need the issue number; cross-repo blockers are still
+        // listed. The frontend's `stillBlockedBy` cross-reference against
+        // the loaded open-issues set will simply not match them, which is
+        // the documented limitation in the plan.
+        let body = "\
+**Blocked by**
+----------
+
+*   [Other repo #123](https://github.com/other-org/other-repo/issues/123)
+";
+        assert_eq!(parse_blocked_by(body), vec![123]);
+    }
+
+    #[test]
+    fn parse_blocked_by_handles_64kib_capped_body() {
+        // Defensive: bodies can theoretically be up to ~65 KiB. The helper
+        // caps the scan at 64 KiB; a Blocked-by section at the very end
+        // (just inside the cap) must still be found.
+        let padding = "x".repeat(60 * 1024);
+        let body = format!(
+            "{padding}\n\n**Blocked by**\n----------\n\n*   [Issue #481](https://github.com/x/y/issues/481)\n"
+        );
+        assert_eq!(parse_blocked_by(&body), vec![481]);
+    }
+
+    #[test]
+    fn parse_blocked_by_section_past_cap_excluded_gracefully() {
+        // Blocked-by section beyond the 64 KiB cap is unreachable — the
+        // helper returns []. This documents the assumption that real
+        // blockers live within the cap (true for GitHub's 65,536 char
+        // body limit since the section sits at the top of the body).
+        let padding = "x".repeat(70 * 1024);
+        let body = format!(
+            "{padding}\n\n**Blocked by**\n----------\n\n*   [Issue #481](https://github.com/x/y/issues/481)\n"
+        );
+        assert!(parse_blocked_by(&body).is_empty());
     }
 }

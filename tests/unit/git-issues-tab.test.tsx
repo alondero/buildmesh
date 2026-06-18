@@ -55,6 +55,7 @@ const ISSUES: GitHubIssue[] = [
     url: 'https://github.com/acme/demo/issues/101',
     state: 'open',
     labels: ['bug'],
+    blocked_by: [],
   },
   {
     number: 102,
@@ -63,6 +64,7 @@ const ISSUES: GitHubIssue[] = [
     url: 'https://github.com/acme/demo/issues/102',
     state: 'open',
     labels: [],
+    blocked_by: [],
   },
 ];
 
@@ -337,6 +339,7 @@ describe('GitIssuesTab (#378)', () => {
           url: '',
           state: 'open',
           labels: [],
+          blocked_by: [],
         },
       ],
     });
@@ -447,6 +450,7 @@ describe('GitIssuesTab (#378)', () => {
           url: '',
           state: 'open',
           labels: [],
+          blocked_by: [],
         },
       ],
     });
@@ -500,5 +504,170 @@ describe('GitIssuesTab (#378)', () => {
     const resetTitle = await screen.findByText('Fix the wobble');
     const resetRow = resetTitle.closest('[data-issue-row]')!;
     expect(resetRow.querySelector('p.line-clamp-2')).toBeTruthy();
+  });
+
+  // ----- Blocked-by indicator (issue #481 follow-up) -----------------
+  // The Issues Probe renders a red flag directly below the Spawn button
+  // when an issue's `blocked_by` list contains at least one issue that's
+  // still in the loaded open-issues set. The cross-reference is
+  // frontend-side (no extra API call) so closed blockers / cross-repo
+  // blockers / paginated blockers don't trigger the flag — see the plan
+  // for the full list of limitations.
+  //
+  // Test selectors all pivot off the `[data-blocked-by]` attribute on
+  // the flag's container so we don't depend on icon library / SVG path
+  // details — keeps the test resilient to icon-style tweaks.
+  // -------------------------------------------------------------------
+
+  it('shows the blocked-by flag when a blocker is in the loaded open issues', async () => {
+    // #102 is blocked by #101, which is itself in the loaded open set.
+    // The flag must render on the #102 row with a tooltip mentioning #101.
+    mockBackend({
+      issues: [
+        {
+          number: 101,
+          title: 'Upstream blocker',
+          body: 'Body',
+          url: 'https://github.com/acme/demo/issues/101',
+          state: 'open',
+          labels: [],
+          blocked_by: [],
+        },
+        {
+          number: 102,
+          title: 'Add a /v2 endpoint',
+          body: null,
+          url: 'https://github.com/acme/demo/issues/102',
+          state: 'open',
+          labels: [],
+          blocked_by: [101],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    // The #102 row carries the flag (because #101 is in the loaded set).
+    // The #101 row does NOT (because #101 is itself unblocked).
+    const title102 = await screen.findByText('Add a /v2 endpoint');
+    const row102 = title102.closest('[data-issue-row]')!;
+    const flag102 = row102.querySelector('[data-blocked-by]') as HTMLElement;
+    expect(flag102).toBeTruthy();
+    // Tooltip must mention the blocking issue number so the user knows
+    // what to resolve first. Title resolution (the "Upstream blocker"
+    // text) is a nice-to-have; the number is the contract.
+    expect(flag102.getAttribute('title')).toContain('#101');
+    expect(flag102.getAttribute('title')).toMatch(/Blocked by/);
+
+    // #101 row has no flag.
+    const title101 = screen.getByText('Upstream blocker');
+    const row101 = title101.closest('[data-issue-row]')!;
+    expect(row101.querySelector('[data-blocked-by]')).toBeNull();
+  });
+
+  it('hides the blocked-by flag when the blocker is not in the loaded open issues', async () => {
+    // #102 lists #999 as a blocker, but #999 is not in the loaded set.
+    // That covers three cases the cross-reference collapses together:
+    //   - blocker closed
+    //   - blocker in a different repo
+    //   - blocker beyond the >100-open pagination cap
+    // In all three cases, the flag must NOT render — the user can't act
+    // on a dependency they can't see in this view.
+    mockBackend({
+      issues: [
+        {
+          number: 102,
+          title: 'Add a /v2 endpoint',
+          body: null,
+          url: 'https://github.com/acme/demo/issues/102',
+          state: 'open',
+          labels: [],
+          blocked_by: [999],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Add a /v2 endpoint');
+    const row = title.closest('[data-issue-row]')!;
+    expect(row.querySelector('[data-blocked-by]')).toBeNull();
+  });
+
+  it('shows "+N more" suffix in the flag tooltip when blocked_by has more than one entry', async () => {
+    // Three blockers, all in the loaded set. Tooltip must surface the
+    // count so the user knows there's more than one (the SVG is tiny).
+    mockBackend({
+      issues: [
+        { number: 481, title: 'A', body: '', url: 'https://github.com/acme/demo/issues/481', state: 'open', labels: [], blocked_by: [] },
+        { number: 482, title: 'B', body: '', url: 'https://github.com/acme/demo/issues/482', state: 'open', labels: [], blocked_by: [] },
+        { number: 483, title: 'C', body: '', url: 'https://github.com/acme/demo/issues/483', state: 'open', labels: [], blocked_by: [] },
+        {
+          number: 500,
+          title: 'Blocked by three',
+          body: null,
+          url: 'https://github.com/acme/demo/issues/500',
+          state: 'open',
+          labels: [],
+          blocked_by: [481, 482, 483],
+        },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const title = await screen.findByText('Blocked by three');
+    const row = title.closest('[data-issue-row]')!;
+    const flag = row.querySelector('[data-blocked-by]') as HTMLElement;
+    expect(flag).toBeTruthy();
+    // First blocker is named in full; the rest are folded into "+N more".
+    expect(flag.getAttribute('title')).toMatch(/#481/);
+    expect(flag.getAttribute('title')).toMatch(/\+ ?2 more/);
+  });
+
+  it('hides the blocked-by flag on first paint, then shows it after issues resolve', async () => {
+    // Regression guard: `loadedOpen` is built from the issues list, so
+    // before the first IPC resolves the set is empty and EVERY row
+    // would have `stillBlockedBy = []`. The cross-reference is correct
+    // here (we genuinely don't know yet), but it's worth pinning so a
+    // future "always show flag when blocked_by is non-empty" refactor
+    // surfaces as a test failure rather than a confusing first paint.
+    let resolveIssues!: (issues: GitHubIssue[]) => void;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return new Promise((res) => { resolveIssues = res as never; });
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
+      if (cmd === 'start_node_background') return Promise.resolve(undefined);
+      return Promise.resolve({});
+    });
+    render(<GitIssuesTab />);
+
+    // Loading state — no rows yet, so no flags yet (trivially).
+    expect(screen.getByText(/Loading issues/i)).toBeTruthy();
+
+    // Resolve with an issue that IS blocked by another that's also in the set.
+    resolveIssues([
+      {
+        number: 101,
+        title: 'Upstream',
+        body: null,
+        url: 'https://github.com/acme/demo/issues/101',
+        state: 'open',
+        labels: [],
+        blocked_by: [],
+      },
+      {
+        number: 102,
+        title: 'Downstream',
+        body: null,
+        url: 'https://github.com/acme/demo/issues/102',
+        state: 'open',
+        labels: [],
+        blocked_by: [101],
+      },
+    ]);
+
+    const downstreamTitle = await screen.findByText('Downstream');
+    const downstreamRow = downstreamTitle.closest('[data-issue-row]')!;
+    const flag = downstreamRow.querySelector('[data-blocked-by]');
+    expect(flag).toBeTruthy();
   });
 });
