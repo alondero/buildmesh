@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import {
   useMeshPropertiesStore,
-  type MeshConfig,
+  type MeshRow,
 } from '../../src/stores/meshPropertiesStore';
 import type { DetectedProject } from '../../src/lib/projectPresets';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 
-const SEED_CONFIG: MeshConfig = {
+const SEED_MESH: MeshRow = {
   name: 'demo',
   build_command: 'npm run build',
   run_command: 'npm run dev',
@@ -41,7 +41,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
   describe('load', () => {
     it('populates config and detected from backend', async () => {
       mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'get_mesh_properties') return Promise.resolve(SEED_CONFIG);
+        if (cmd === 'get_mesh_properties') return Promise.resolve(SEED_MESH);
         if (cmd === 'detect_mesh_project') return Promise.resolve(SEED_DETECTED);
         return Promise.resolve(undefined);
       });
@@ -50,7 +50,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
 
       const state = useMeshPropertiesStore.getState();
       expect(state.meshId).toBe(11);
-      expect(state.config).toEqual(SEED_CONFIG);
+      expect(state.config).toEqual(SEED_MESH);
       expect(state.detected).toEqual(SEED_DETECTED);
       expect(state.loading).toBe(false);
       expect(state.error).toBeNull();
@@ -65,7 +65,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       // detection alone can be hundreds of ms; doubling the open latency was
       // visible. Pin parallelism by asserting both IPCs are dispatched
       // BEFORE either resolves.
-      let resolveConfig!: (c: MeshConfig) => void;
+      let resolveConfig!: (c: MeshRow) => void;
       let resolveDetected!: (d: DetectedProject) => void;
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_mesh_properties') return new Promise((r) => { resolveConfig = r; });
@@ -83,7 +83,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       expect(calls).toContain('get_mesh_properties');
       expect(calls).toContain('detect_mesh_project');
 
-      resolveConfig(SEED_CONFIG);
+      resolveConfig(SEED_MESH);
       resolveDetected(SEED_DETECTED);
       await promise;
     });
@@ -93,8 +93,8 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       // populated while a new load was in flight, so the panel form effect
       // would mirror mesh A's values into mesh B's form — a save() then
       // wrote A's value against meshId=B.
-      useMeshPropertiesStore.setState({ meshId: 7, config: SEED_CONFIG });
-      let resolveConfig!: (c: MeshConfig) => void;
+      useMeshPropertiesStore.setState({ meshId: 7, config: SEED_MESH });
+      let resolveConfig!: (c: MeshRow) => void;
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_mesh_properties') return new Promise((r) => { resolveConfig = r; });
         return Promise.resolve(null);
@@ -105,7 +105,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       expect(useMeshPropertiesStore.getState().config).toBeNull();
       expect(useMeshPropertiesStore.getState().meshId).toBe(99);
 
-      resolveConfig({ ...SEED_CONFIG, name: 'b' });
+      resolveConfig({ ...SEED_MESH, name: 'b' });
       await promise;
     });
 
@@ -113,7 +113,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       // Pre-fix: a failed load left the previous mesh's `config` in place
       // → the form effect mirrored A's values under B's title → user edits
       // were silently written cross-mesh.
-      useMeshPropertiesStore.setState({ meshId: 7, config: SEED_CONFIG });
+      useMeshPropertiesStore.setState({ meshId: 7, config: SEED_MESH });
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_mesh_properties') return Promise.reject(new Error('mesh deleted'));
         return Promise.resolve(null);
@@ -131,7 +131,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       // The current panel quietly catches detection failures; preserve that
       // since detection is just a hint, not a load-blocking requirement.
       mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'get_mesh_properties') return Promise.resolve(SEED_CONFIG);
+        if (cmd === 'get_mesh_properties') return Promise.resolve(SEED_MESH);
         if (cmd === 'detect_mesh_project') return Promise.reject(new Error('no scripts'));
         return Promise.resolve(undefined);
       });
@@ -139,22 +139,22 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       await useMeshPropertiesStore.getState().load(11, '/m');
 
       const state = useMeshPropertiesStore.getState();
-      expect(state.config).toEqual(SEED_CONFIG);
+      expect(state.config).toEqual(SEED_MESH);
       expect(state.detected).toBeNull();
       expect(state.error).toBeNull();
     });
 
     it('flips loading true while in flight, false on completion', async () => {
-      let resolveConfig!: (c: MeshConfig) => void;
+      let resolveConfig!: (c: MeshRow) => void;
       mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'get_mesh_properties') return new Promise<MeshConfig>((r) => { resolveConfig = r; });
+        if (cmd === 'get_mesh_properties') return new Promise<MeshRow>((r) => { resolveConfig = r; });
         return Promise.resolve(null);
       });
 
       const promise = useMeshPropertiesStore.getState().load(11, '/m');
       expect(useMeshPropertiesStore.getState().loading).toBe(true);
 
-      resolveConfig(SEED_CONFIG);
+      resolveConfig(SEED_MESH);
       await promise;
       expect(useMeshPropertiesStore.getState().loading).toBe(false);
     });
@@ -175,52 +175,52 @@ describe('useMeshPropertiesStore (issue #283)', () => {
 
   describe('save', () => {
     beforeEach(() => {
-      useMeshPropertiesStore.setState({ meshId: 11, config: SEED_CONFIG });
+      useMeshPropertiesStore.setState({ meshId: 11, config: SEED_MESH });
     });
 
-    it('routes simple agent fields through update_mesh_field', async () => {
+    it('routes model through update_mesh_column', async () => {
       mockInvoke.mockResolvedValueOnce(undefined);
 
       await useMeshPropertiesStore.getState().save('model', 'sonnet-4');
 
-      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_field', {
-        meshId: 11, section: 'agent', key: 'model', value: 'sonnet-4',
+      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 11, column: 'model', value: 'sonnet-4',
       });
     });
 
-    it('routes defaultProvider through update_mesh_field with snake_case key', async () => {
+    it('routes defaultProvider through update_mesh_column with snake_case column', async () => {
       mockInvoke.mockResolvedValueOnce(undefined);
 
       await useMeshPropertiesStore.getState().save('defaultProvider', 'agy');
 
-      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_field', {
-        meshId: 11, section: 'agent', key: 'default_provider', value: 'agy',
+      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 11, column: 'default_provider', value: 'agy',
       });
     });
 
-    it('routes buildCommand to update_mesh_field with section=build, key=command', async () => {
+    it('routes buildCommand to update_mesh_column with column=build_command', async () => {
       mockInvoke.mockResolvedValueOnce(undefined);
 
       await useMeshPropertiesStore.getState().save('buildCommand', 'cargo build');
 
-      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_field', {
-        meshId: 11, section: 'build', key: 'command', value: 'cargo build',
+      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 11, column: 'build_command', value: 'cargo build',
       });
     });
 
-    it('routes runCommand to update_mesh_field with section=run, key=command', async () => {
+    it('routes runCommand to update_mesh_column with column=run_command', async () => {
       mockInvoke.mockResolvedValueOnce(undefined);
 
       await useMeshPropertiesStore.getState().save('runCommand', 'cargo run');
 
-      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_field', {
-        meshId: 11, section: 'run', key: 'command', value: 'cargo run',
+      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 11, column: 'run_command', value: 'cargo run',
       });
     });
 
-    it('routes useWorktree through update_mesh_use_worktree (NOT update_mesh_field)', async () => {
+    it('routes useWorktree through update_mesh_use_worktree (NOT update_mesh_column)', async () => {
       // Dedicated command exists because flipping use_worktree has DB-side
-      // side-effects beyond a field write — routing through update_mesh_field
+      // side-effects beyond a column write — routing through update_mesh_column
       // here would silently skip them.
       mockInvoke.mockResolvedValueOnce(undefined);
 
@@ -229,11 +229,11 @@ describe('useMeshPropertiesStore (issue #283)', () => {
       expect(mockInvoke).toHaveBeenCalledWith('update_mesh_use_worktree', {
         meshId: 11, useWorktree: false,
       });
-      const fieldCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'update_mesh_field');
+      const fieldCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'update_mesh_column');
       expect(fieldCalls).toHaveLength(0);
     });
 
-    it('routes baseRef through update_worktree_base_ref (NOT update_mesh_field)', async () => {
+    it('routes baseRef through update_worktree_base_ref (NOT update_mesh_column)', async () => {
       // Same reason as useWorktree: base ref has side-effects in settings.json.
       mockInvoke.mockResolvedValueOnce(undefined);
 
@@ -274,29 +274,29 @@ describe('useMeshPropertiesStore (issue #283)', () => {
 
   describe('applyPreset', () => {
     beforeEach(() => {
-      useMeshPropertiesStore.setState({ meshId: 11, config: SEED_CONFIG });
+      useMeshPropertiesStore.setState({ meshId: 11, config: SEED_MESH });
     });
 
-    it('fires the build + run update_mesh_field pair concurrently', async () => {
+    it('fires the build + run update_mesh_column pair concurrently', async () => {
       mockInvoke.mockResolvedValue(undefined);
 
       await useMeshPropertiesStore.getState().applyPreset({
         id: 'node', label: 'Node', build: 'npm run build', run: 'npm run dev',
       });
 
-      // Both fired, with the right sections.
+      // Both fired, with the right columns.
       const calls = mockInvoke.mock.calls;
-      expect(calls).toContainEqual(['update_mesh_field', {
-        meshId: 11, section: 'build', key: 'command', value: 'npm run build',
+      expect(calls).toContainEqual(['update_mesh_column', {
+        meshId: 11, column: 'build_command', value: 'npm run build',
       }]);
-      expect(calls).toContainEqual(['update_mesh_field', {
-        meshId: 11, section: 'run', key: 'command', value: 'npm run dev',
+      expect(calls).toContainEqual(['update_mesh_column', {
+        meshId: 11, column: 'run_command', value: 'npm run dev',
       }]);
     });
 
-    it('rejects when one of the two field writes fails', async () => {
-      mockInvoke.mockImplementation((_cmd: string, args: { section?: string }) => {
-        if (args?.section === 'run') return Promise.reject(new Error('disk full'));
+    it('rejects when one of the two column writes fails', async () => {
+      mockInvoke.mockImplementation((_cmd: string, args: { column?: string }) => {
+        if (args?.column === 'run_command') return Promise.reject(new Error('disk full'));
         return Promise.resolve(undefined);
       });
 
@@ -311,7 +311,7 @@ describe('useMeshPropertiesStore (issue #283)', () => {
   describe('reset', () => {
     it('clears every panel-scoped field', async () => {
       useMeshPropertiesStore.setState({
-        meshId: 11, config: SEED_CONFIG, detected: SEED_DETECTED,
+        meshId: 11, config: SEED_MESH, detected: SEED_DETECTED,
         loading: false, error: 'whoops',
       });
 

@@ -89,7 +89,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
 
     // Safety nets: add any columns that may be missing on old or migrated DBs.
     // These are no-ops on fresh DBs (tables just created above have the base schema).
-    ensure_mesh_config_columns(&conn)?;
+    ensure_mesh_columns(&conn)?;
     ensure_agent_node_source_issue(&conn)?;
     ensure_agent_node_use_worktree(&conn)?;
     ensure_agent_node_position(&conn)?;
@@ -140,7 +140,7 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
                 migrate_remote_access_token(conn)?;
             }
             if current_version < 8 {
-                migrate_mesh_config_columns(conn)?;
+                migrate_mesh_columns(conn)?;
             }
             if current_version < 9 {
                 migrate_agent_node_source_issue(conn)?;
@@ -161,7 +161,7 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
-fn migrate_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
+fn migrate_mesh_columns(conn: &Connection) -> SqlResult<()> {
     let columns = [
         ("build_command", "TEXT"),
         ("run_command", "TEXT"),
@@ -241,9 +241,9 @@ fn ensure_column(
 }
 
 /// Safety net: ensure the v9 source_issue column exists on agent_nodes.
-/// Same shape as ensure_mesh_config_columns — fixes DBs whose schema_version
+/// Same shape as ensure_mesh_columns — fixes DBs whose schema_version
 /// was bumped past 9 without the column being added because the migration
-/// guard skipped them (see ensure_mesh_config_columns for the same bug class).
+/// guard skipped them (see ensure_mesh_columns for the same bug class).
 pub(crate) fn ensure_agent_node_source_issue(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "agent_nodes", "source_issue", "INTEGER")? {
         tracing::warn!("ensure_agent_node_source_issue: added missing source_issue column");
@@ -377,11 +377,11 @@ pub(crate) fn ensure_checkpoints_dropped(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
-/// Safety net: ensure all v8 config columns exist on the meshes table.
+/// Safety net: ensure all v8 user-tunable columns exist on the meshes table.
 /// Called after migrate_if_needed to fix DBs that skipped migration due to
 /// the projects-table guard (existing DBs that already had schema_version=8
-/// but whose meshes table lacked the config columns).
-fn ensure_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
+/// but whose meshes table lacked those columns).
+fn ensure_mesh_columns(conn: &Connection) -> SqlResult<()> {
     let columns = [
         ("build_command", "TEXT"),
         ("run_command", "TEXT"),
@@ -394,7 +394,7 @@ fn ensure_mesh_config_columns(conn: &Connection) -> SqlResult<()> {
     ];
     for (name, ty) in columns {
         if ensure_column(conn, "meshes", name, ty)? {
-            tracing::warn!("ensure_mesh_config_columns: added missing column {}", name);
+            tracing::warn!("ensure_mesh_columns: added missing column {}", name);
         }
     }
     Ok(())
@@ -516,7 +516,7 @@ fn migrate_mesh_rename(conn: &Connection) -> SqlResult<()> {
 
     // Always rename projects→meshes; only rename sessions-related tables if they exist.
     // Without this, DBs that have `projects` but no `sessions` (v2 schema) would skip
-    // the rename and then crash in migrate_mesh_config_columns (which references `meshes`).
+    // the rename and then crash in migrate_mesh_columns (which references `meshes`).
     if !sessions_exists {
         conn.execute("ALTER TABLE projects RENAME TO meshes", [])?;
         tracing::info!("Migrated projects→meshes (no sessions table present)");
@@ -860,7 +860,7 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             migrate_remote_access_token(conn)?;
         }
         if current_version < 8 {
-            migrate_mesh_config_columns(conn)?;
+            migrate_mesh_columns(conn)?;
         }
         if current_version < 9 {
             migrate_agent_node_source_issue(conn)?;

@@ -34,7 +34,7 @@ import {
   detectMeshProject,
   getMeshProperties,
   listProviders,
-  updateMeshField,
+  updateMeshColumn,
   type ProviderInfo,
 } from '../../lib/tauri';
 import {
@@ -176,7 +176,7 @@ export function MeshPropertiesTab() {
   // keep the sidebar drift badge in sync; the new tab skips the explicit
   // refresh because the `useMeshHealth` cache the sidebar consumes is
   // already refetched by its own GIT_CHANGED / focus invalidate path
-  // (and `mesh.toml` writes don't change git health anyway).
+  // (and `meshes` column writes don't change git health anyway).
   const saveName = async (name: string) => {
     if (activeMeshId === null) return;
     if (name !== mesh?.name) {
@@ -186,35 +186,35 @@ export function MeshPropertiesTab() {
 
   const saveModel = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshField(activeMeshId, 'agent', 'model', value || '');
+    await updateMeshColumn(activeMeshId, 'model', value || '');
   };
 
   const saveEffort = async (value: string) => {
     if (activeMeshId === null || !value) return;
-    await updateMeshField(activeMeshId, 'agent', 'effort', value);
+    await updateMeshColumn(activeMeshId, 'effort', value);
   };
 
   const saveBuildCommand = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshField(activeMeshId, 'build', 'command', value);
+    await updateMeshColumn(activeMeshId, 'build_command', value);
   };
 
   const saveRunCommand = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshField(activeMeshId, 'run', 'command', value);
+    await updateMeshColumn(activeMeshId, 'run_command', value);
   };
 
   const saveDefaultProvider = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshField(activeMeshId, 'agent', 'default_provider', value);
+    await updateMeshColumn(activeMeshId, 'default_provider', value);
   };
 
   const applyPreset = async (preset: ProjectPreset) => {
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, buildCommand: preset.build, runCommand: preset.run }));
     await Promise.all([
-      updateMeshField(activeMeshId, 'build', 'command', preset.build),
-      updateMeshField(activeMeshId, 'run', 'command', preset.run),
+      updateMeshColumn(activeMeshId, 'build_command', preset.build),
+      updateMeshColumn(activeMeshId, 'run_command', preset.run),
     ]);
   };
 

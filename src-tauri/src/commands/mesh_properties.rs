@@ -1,9 +1,10 @@
-//! Mesh configuration — all stored in SQLite `meshes` table.
+//! Mesh property commands — read/write the user-tunable columns on the
+//! `meshes` SQLite row.
 //!
-//! **There is no `mesh.toml` file.** The module name is historical; the
-//! "config" lives on the `meshes` SQLite row (see `db::get_mesh_by_id`),
-//! not in any file at the mesh root. The `MeshConfig` struct in
-//! `models::MeshConfig` is a thin DTO over that row.
+//! **There is no `mesh.toml` file.** The "properties" / "config" lives on
+//! the `meshes` SQLite row (see `db::get_mesh_by_id`), not in any file at
+//! the mesh root. The `MeshRow` struct in `models::MeshRow` is a thin DTO
+//! over that row.
 //!
 //! `Worktree.baseRef` is additionally written to `.claude/settings.json`
 //! at the mesh root so Claude Code can read it (see
@@ -11,7 +12,7 @@
 //! source of truth — the DB column is the source.
 
 use crate::db;
-use crate::models::MeshConfig;
+use crate::models::MeshRow;
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
@@ -69,11 +70,11 @@ fn remove_base_ref(mesh_path: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshConfig, String> {
+pub async fn get_mesh_properties(mesh_id: i64) -> Result<MeshRow, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    Ok(MeshConfig::from(&mesh))
+    Ok(MeshRow::from(&mesh))
 }
 
 #[tauri::command]
@@ -88,28 +89,36 @@ pub async fn update_mesh_name(mesh_id: i64, name: String) -> Result<(), String> 
 }
 
 #[tauri::command]
-pub async fn update_mesh_field(
+pub async fn update_mesh_column(
     mesh_id: i64,
-    section: String,
-    key: String,
+    column: String,
     value: String,
 ) -> Result<(), String> {
-    let col_name = match (section.as_str(), key.as_str()) {
-        ("build", "command") => "build_command",
-        ("run", "command") => "run_command",
-        ("agent", "model") => "model",
-        ("agent", "effort") => "effort",
-        ("agent", "worktree_mode") => "worktree_mode",
-        ("agent", "default_provider") => "default_provider",
-        _ => return Err(format!("unknown field {}.{}", section, key)),
-    };
+    // Allowlist of user-tunable `meshes` columns this command can write. The
+    // `name` column is a dedicated command (`update_mesh_name`), and
+    // `base_ref` / `use_worktree` have settings.json or structural side-effects
+    // and route through their own commands. A direct column name is the
+    // honest wire shape now that the data lives on the `meshes` row (issue
+    // #474); the SQL below still validates against the allowlist rather than
+    // interpolating an untrusted column name from the wire.
+    const ALLOWED_COLUMNS: &[&str] = &[
+        "build_command",
+        "run_command",
+        "model",
+        "effort",
+        "worktree_mode",
+        "default_provider",
+    ];
+    if !ALLOWED_COLUMNS.contains(&column.as_str()) {
+        return Err(format!("unknown mesh column: {}", column));
+    }
 
     let db = db::get().lock().unwrap();
     db.execute(
-        &format!("UPDATE meshes SET {} = ?1 WHERE id = ?2", col_name),
+        &format!("UPDATE meshes SET {} = ?1 WHERE id = ?2", column),
         rusqlite::params![value, mesh_id],
     )
-    .map_err(|e| format!("failed to update mesh field: {}", e))?;
+    .map_err(|e| format!("failed to update mesh column: {}", e))?;
     Ok(())
 }
 

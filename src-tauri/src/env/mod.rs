@@ -1,8 +1,8 @@
 //! Environment detection and path handling for Windows + WSL hybrid setup
 
-mod mesh_config;
+mod mesh_row;
 
-pub use mesh_config::read_mesh_config;
+pub use mesh_row::mesh_row;
 
 use std::path::{Path, PathBuf};
 use once_cell::sync::Lazy;

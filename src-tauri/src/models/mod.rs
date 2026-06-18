@@ -199,7 +199,7 @@ pub struct Mesh {
     #[ts(as = "i32")]
     pub position: i64, // sort order in sidebar
     pub created_at: DateTime<Utc>,
-    // Mesh-level config (see MeshConfig for the canonical typed view)
+    // Mesh-level config (see MeshRow for the canonical typed view)
     pub build_command: Option<String>,
     pub run_command: Option<String>,
     pub model: Option<String>,
@@ -449,30 +449,31 @@ pub struct AppSettings {
     pub wsl_cli_path: String,
 }
 
-/// Canonical mesh-level configuration, derived from a `Mesh` DB row.
-///
-/// This is the single typed view of mesh config used by every consumer
-/// (frontend properties, agent spawning, build/run). Construct it via
-/// `MeshConfig::from(&mesh)` — never hand-copy `Mesh` fields elsewhere.
+/// Typed view of a `Mesh` row — a 1:1 mirror of the user-tunable columns on
+/// the `meshes` SQLite row (name, build/run commands, model, effort,
+/// base_ref, use_worktree, worktree_mode, default_provider). This is the
+/// single typed view of mesh config used by every consumer (frontend
+/// properties, agent spawning, build/run). Construct it via
+/// `MeshRow::from(&mesh)` — never hand-copy `Mesh` fields elsewhere.
 ///
 /// **There is no `mesh.toml` file.** This struct is a thin DTO over a
 /// `meshes` SQLite row (see `db::get_mesh_by_path`); every field on it
-/// is a column on that row. The "config" in the name is historical —
-/// before the DB columns existed, mesh settings lived in a TOML file at
-/// the mesh root; that file was deleted when the columns were added
-/// (see `docs/adr/` and `docs/specs/build-run-system.md` for the
-/// migration history). New contributors reading "MeshConfig" should
+/// is a column on that row. The "config" in the previous name is
+/// historical — before the DB columns existed, mesh settings lived in a
+/// TOML file at the mesh root; that file was deleted when the columns
+/// were added (see `docs/adr/` and `docs/specs/build-run-system.md` for
+/// the migration history). New contributors reading `MeshRow` should
 /// read it as "the DTO that mirrors a `meshes` row" and treat the
 /// `meshes` table as the single source of truth. The `base_ref` field
 /// is *also* mirrored into `.claude/settings.json` at the mesh root
-/// (see `commands::mesh_config::update_worktree_base_ref`) for Claude
-/// Code to read; that mirror is an output, not an input to spawn-time
-/// resolution.
+/// (see `commands::mesh_properties::update_worktree_base_ref`) for
+/// Claude Code to read; that mirror is an output, not an input to
+/// spawn-time resolution.
 ///
-/// Generated to src/types/generated/MeshConfig.ts (issue #404).
+/// Generated to src/types/generated/MeshRow.ts (issue #404 / issue #474).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "MeshConfig.ts")]
-pub struct MeshConfig {
+#[ts(export, export_to = "MeshRow.ts")]
+pub struct MeshRow {
     pub name: Option<String>,
     pub build_command: Option<String>,
     pub run_command: Option<String>,
@@ -484,7 +485,7 @@ pub struct MeshConfig {
     pub default_provider: Option<String>,
 }
 
-impl From<&Mesh> for MeshConfig {
+impl From<&Mesh> for MeshRow {
     fn from(mesh: &Mesh) -> Self {
         Self {
             name: if mesh.name.is_empty() { None } else { Some(mesh.name.clone()) },
@@ -579,8 +580,8 @@ mod tests {
     }
 
     #[test]
-    fn mesh_config_from_mesh_maps_all_fields() {
-        let cfg = MeshConfig::from(&sample_mesh());
+    fn mesh_row_from_mesh_maps_all_fields() {
+        let cfg = MeshRow::from(&sample_mesh());
         assert_eq!(cfg.name.as_deref(), Some("demo"));
         assert_eq!(cfg.build_command.as_deref(), Some("npm run build"));
         assert_eq!(cfg.run_command, None);
@@ -594,10 +595,10 @@ mod tests {
     }
 
     #[test]
-    fn mesh_config_from_mesh_blank_name_is_none() {
+    fn mesh_row_from_mesh_blank_name_is_none() {
         let mut mesh = sample_mesh();
         mesh.name = String::new();
-        assert_eq!(MeshConfig::from(&mesh).name, None);
+        assert_eq!(MeshRow::from(&mesh).name, None);
     }
 
     #[test]

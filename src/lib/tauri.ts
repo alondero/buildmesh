@@ -22,7 +22,7 @@ import type { GitSummary } from '../types/generated/GitSummary';
 import type { GitSyncResult } from '../types/generated/GitSyncResult';
 import type { HoldingWorktree } from '../types/generated/HoldingWorktree';
 import type { IssueNodeDraft } from '../types/generated/IssueNodeDraft';
-import type { MeshConfig } from '../types/generated/MeshConfig';
+import type { MeshRow } from '../types/generated/MeshRow';
 import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { OpenPr } from '../types/generated/OpenPr';
@@ -163,28 +163,28 @@ export const getDefaultProvider = (meshId: number): Promise<string> => {
 
 // Mesh properties / configuration (issue #283)
 //
-// `MeshConfig` is the wire shape of `commands::mesh_config::get_mesh_properties`.
-// It is a DTO over the `meshes` SQLite row (NOT a `mesh.toml` file — see
-// `src-tauri/src/models/mod.rs::MeshConfig` for the truth).
-// Generated from `src-tauri/src/models/mod.rs` (issue #404).
-export type { MeshConfig };
+// `MeshRow` is the wire shape of `commands::mesh_properties::get_mesh_properties`.
+// It is a 1:1 mirror of the user-tunable columns on the `meshes` SQLite row
+// (NOT a `mesh.toml` file — see `src-tauri/src/models/mod.rs::MeshRow` for the
+// truth). Generated from `src-tauri/src/models/mod.rs` (issue #404 / issue #474).
+export type { MeshRow };
 
 export const getMeshProperties = (meshId: number) =>
-  _invoke<MeshConfig>('get_mesh_properties', { meshId });
+  _invoke<MeshRow>('get_mesh_properties', { meshId });
 
-/** Generic Mesh column write: routes `(section, key, value)` to the
- *  backend's `update_mesh_field`. **There is no `mesh.toml` file** —
- *  every field lives on the `meshes` SQLite row. Use it for fields with
- *  no settings.json side-effects (model, effort, worktree_mode,
- *  default_provider, build / run command). Fields with side-effects
- *  have dedicated commands — `updateMeshUseWorktree` and
+/** Generic Mesh column write: writes `value` to the `meshes.<column>` row
+ *  for `meshId` via the backend's `update_mesh_column`. **There is no
+ *  `mesh.toml` file** — every field lives on the `meshes` SQLite row. The
+ *  column parameter is validated against an allowlist on the backend; use
+ *  it for fields with no settings.json side-effects (build_command,
+ *  run_command, model, effort, worktree_mode, default_provider). Fields
+ *  with side-effects have dedicated commands — `updateMeshUseWorktree` and
  *  `updateWorktreeBaseRef` below. */
-export const updateMeshField = (
+export const updateMeshColumn = (
   meshId: number,
-  section: 'agent' | 'build' | 'run',
-  key: string,
+  column: 'build_command' | 'run_command' | 'model' | 'effort' | 'worktree_mode' | 'default_provider',
   value: string,
-) => _invoke<void>('update_mesh_field', { meshId, section, key, value });
+) => _invoke<void>('update_mesh_column', { meshId, column, value });
 
 export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
   _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });

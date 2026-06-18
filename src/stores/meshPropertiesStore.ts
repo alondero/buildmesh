@@ -2,20 +2,19 @@ import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import type { DetectedProject, ProjectPreset } from '../lib/projectPresets';
 
-/// The wire shape of the panel's loaded config. Re-export from `tauri.ts`
-/// so consumers see one canonical `MeshConfig` (the Rust struct in
-/// `src-tauri/src/models/mod.rs` doesn't yet derive `TS` — see ADR-0009
-/// follow-up).
-export type { MeshConfig } from '../lib/tauri';
-import type { MeshConfig } from '../lib/tauri';
+/// The wire shape of the panel's loaded row. Re-export from `tauri.ts`
+/// so consumers see one canonical `MeshRow` (the Rust struct in
+/// `src-tauri/src/models/mod.rs`).
+export type { MeshRow } from '../lib/tauri';
+import type { MeshRow } from '../lib/tauri';
 
 /// The set of fields the MeshPropertiesTab can auto-save. The union is the
 /// store's switch table — adding a field means one new entry below + one new
 /// case in `save()`, not a new closure in the render component (issue #283).
 ///
 /// `useWorktree` and `baseRef` route through dedicated backend commands
-/// because they have side-effects beyond a field write (DB state, settings.json).
-export type MeshConfigField =
+/// because they have side-effects beyond a column write (DB state, settings.json).
+export type MeshColumn =
   | 'model'
   | 'effort'
   | 'defaultProvider'
@@ -26,7 +25,7 @@ export type MeshConfigField =
 
 interface MeshPropertiesState {
   meshId: number | null;
-  config: MeshConfig | null;
+  config: MeshRow | null;
   detected: DetectedProject | null;
   loading: boolean;
   error: string | null;
@@ -39,17 +38,17 @@ interface MeshPropertiesState {
   load: (meshId: number, meshPath: string) => Promise<void>;
 
   /// Persist a single panel field. The dispatch table routes to the right
-  /// backend command (`update_mesh_field` for plain `meshes` column writes,
+  /// backend command (`update_mesh_column` for plain `meshes` column writes,
   /// `update_mesh_use_worktree` / `update_worktree_base_ref` for fields
   /// with DB-side / settings.json side-effects). **There is no `mesh.toml`
   /// file** — every field lives on the `meshes` SQLite row. Throws on
   /// backend error so the caller can choose to suppress side-effects
   /// (e.g. `git.refresh()`).
-  save: (field: MeshConfigField, value: string | boolean) => Promise<void>;
+  save: (field: MeshColumn, value: string | boolean) => Promise<void>;
 
   /// Apply a project preset's build/run commands in parallel — concurrently
-  /// fires the two `update_mesh_field` writes so the panel sees one round-trip
-  /// of latency, not two.
+  /// fires the two `update_mesh_column` writes so the panel sees one
+  /// round-trip of latency, not two.
   applyPreset: (preset: ProjectPreset) => Promise<void>;
 
   /// Clear panel state on close so a re-open starts from `loading=true`
@@ -100,22 +99,22 @@ export const useMeshPropertiesStore = create<MeshPropertiesState>((set, get) => 
     try {
       switch (field) {
         case 'model':
-          await api.updateMeshField(meshId, 'agent', 'model', String(value));
+          await api.updateMeshColumn(meshId, 'model', String(value));
           break;
         case 'effort':
           // Empty effort means "Not set" — preserve the panel's existing rule
           // of never overwriting a real value with a blank by mistake.
           if (String(value) === '') return;
-          await api.updateMeshField(meshId, 'agent', 'effort', String(value));
+          await api.updateMeshColumn(meshId, 'effort', String(value));
           break;
         case 'defaultProvider':
-          await api.updateMeshField(meshId, 'agent', 'default_provider', String(value));
+          await api.updateMeshColumn(meshId, 'default_provider', String(value));
           break;
         case 'buildCommand':
-          await api.updateMeshField(meshId, 'build', 'command', String(value));
+          await api.updateMeshColumn(meshId, 'build_command', String(value));
           break;
         case 'runCommand':
-          await api.updateMeshField(meshId, 'run', 'command', String(value));
+          await api.updateMeshColumn(meshId, 'run_command', String(value));
           break;
         case 'useWorktree':
           await api.updateMeshUseWorktree(meshId, Boolean(value));
@@ -137,8 +136,8 @@ export const useMeshPropertiesStore = create<MeshPropertiesState>((set, get) => 
     // bubbles via Promise.all (consumed by the caller for git-refresh gating).
     try {
       await Promise.all([
-        api.updateMeshField(meshId, 'build', 'command', preset.build),
-        api.updateMeshField(meshId, 'run', 'command', preset.run),
+        api.updateMeshColumn(meshId, 'build_command', preset.build),
+        api.updateMeshColumn(meshId, 'run_command', preset.run),
       ]);
     } catch (e) {
       set({ error: String(e) });

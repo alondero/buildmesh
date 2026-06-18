@@ -173,18 +173,17 @@ pub fn run() {
             commands::agent::start_node_background,
             // Build/Run
             commands::build_run::build_run,
-            commands::build_run::get_mesh_config,
+            commands::build_run::get_mesh_row,
             commands::build_run::close_build_run,
-            commands::build_run::ensure_mesh_config,
             commands::build_run::write_to_build_run,
             commands::build_run::resize_build_run,
-            // Mesh config
-            commands::mesh_config::get_mesh_properties,
-            commands::mesh_config::update_mesh_name,
-            commands::mesh_config::update_mesh_field,
-            commands::mesh_config::update_worktree_base_ref,
-            commands::mesh_config::remove_worktree_base_ref,
-            commands::mesh_config::update_mesh_use_worktree,
+            // Mesh properties
+            commands::mesh_properties::get_mesh_properties,
+            commands::mesh_properties::update_mesh_name,
+            commands::mesh_properties::update_mesh_column,
+            commands::mesh_properties::update_worktree_base_ref,
+            commands::mesh_properties::remove_worktree_base_ref,
+            commands::mesh_properties::update_mesh_use_worktree,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
             commands::scratchpad::get_mesh_scratchpad,
             commands::scratchpad::set_mesh_scratchpad,
