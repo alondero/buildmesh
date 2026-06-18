@@ -24,4 +24,24 @@ state: string,
  * Label names (flattened from the GitHub API's `[{name, color, ...}]`).
  * Empty array when the issue has no labels.
  */
-labels: Array<string>, };
+labels: Array<string>, 
+/**
+ * Issue numbers extracted from the body's `**Blocked by**` section
+ * (issue #481 follow-up). Parsed by `services::github::parse_blocked_by`
+ * in `get_repo_issues`'s mapper — see that fn for the parser contract.
+ *
+ * The Issues Probe renders a red flag below the Spawn button when at
+ * least one of these numbers is still in the loaded open-issues list
+ * (i.e. not yet completed). Cross-reference is frontend-side, so
+ * blockers from a different repo or behind pagination (>100 open
+ * issues) won't trigger the flag — a known limitation documented
+ * in the plan.
+ *
+ * `Vec<i32>` on the wire (matches the existing `#[ts(as = "i32")]`
+ * convention on `number`, `additions`, etc.). The internal
+ * `services::github::Issue` keeps `Vec<i64>` for the GitHub API's
+ * native integer width; the mapper downcasts via `n as i32`.
+ * `#[serde(default)]` keeps the field additive across rolling
+ * deploys — a missing key parses to `vec![]`.
+ */
+blocked_by: Array<number>, };

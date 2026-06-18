@@ -25,9 +25,27 @@
  * The user sees the dock-close → node-appear transition in well under
  * 500ms instead of the 5-10s they used to wait for the old synchronous
  * `spawn_issue_agent`.
+ *
+ * Blocked-by indicator (issue #481 follow-up)
+ * -------------------------------------------
+ * Below each issue's split Spawn button we render a small red flag when
+ * the issue's `blocked_by` list contains at least one number that's still
+ * in the loaded open-issues set. The cross-reference is frontend-side
+ * (no extra API call) so the indicator naturally tracks GitHub state
+ * via the existing `get_repo_issues` refresh — closed blockers disappear
+ * from the flag the next time the list reloads.
+ *
+ * Known limitations (out of scope for v1, all documented in the plan):
+ *   - Cross-repo blockers aren't detected (we only cross-reference
+ *     against this repo's loaded open issues).
+ *   - Pagination: `list_issues_only` caps at 100 open issues per page,
+ *     so a blocker on page 2+ of a large repo may be missed.
+ *   - "Blocks" (reverse direction) is not surfaced — GitHub's issue
+ *     editor supports both "Blocked by" and "Blocks" sections, but v1
+ *     only handles the former.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   getRepoIssues,
@@ -40,6 +58,32 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+
+/**
+ * Build the human-readable tooltip text for the blocked-by flag.
+ *
+ * - If `blockers` is empty, return null (caller shouldn't render the flag).
+ * - The first blocker is named in full (`#N — Title` when the title can
+ *   be resolved from the loaded issues list, otherwise just `#N`).
+ * - The remaining blockers are folded into a `+ N more` suffix so the
+ *   flag stays a compact 12×12 SVG regardless of dependency depth.
+ *
+ * Module-local — the tooltip text is asserted through the rendered
+ * DOM (`flag.title`) in `tests/unit/git-issues-tab.test.tsx`, so an
+ * export here would broaden the component's public surface for no
+ * test value.
+ */
+function buildBlockedByTooltip(
+  blockers: number[],
+  issuesByNumber: Map<number, GitHubIssue>,
+): string | null {
+  if (blockers.length === 0) return null;
+  const [first, ...rest] = blockers;
+  const firstIssue = issuesByNumber.get(first);
+  const firstLabel = firstIssue ? `#${first} — ${firstIssue.title}` : `#${first}`;
+  if (rest.length === 0) return `Blocked by ${firstLabel}`;
+  return `Blocked by ${firstLabel} (+ ${rest.length} more)`;
+}
 
 export function GitIssuesTab() {
   const { activeMeshId } = useProbeContext();
@@ -70,6 +114,21 @@ export function GitIssuesTab() {
     if (next.has(n)) next.delete(n); else next.add(n);
     return next;
   });
+
+  // Cross-reference index for the blocked-by indicator. Built once per
+  // render of the loaded open issues list — both as a Set (for fast
+  // membership tests in the row render) and a Map (for resolving the
+  // blocker number → title in the tooltip text). First paint has an
+  // empty index because `issues` is `[]` until the IPC resolves, so
+  // every row's `stillBlockedBy` collapses to `[]` during loading.
+  // This is documented in the plan and pinned by the "first paint hides
+  // flags" test — the alternative ("show flag whenever blocked_by is
+  // non-empty") would be incorrect because we genuinely can't tell
+  // whether a blocker is still open without the loaded set.
+  const issuesByNumber = useMemo(
+    () => new Map(issues.map(i => [i.number, i])),
+    [issues],
+  );
 
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
@@ -308,30 +367,93 @@ export function GitIssuesTab() {
                     )}
                   </div>
 
-                  {/* Split spawn button — primary uses default provider, ▾ opens picker */}
-                  <div className="relative flex shrink-0" onMouseDown={e => e.stopPropagation()}>
-                    <button
-                      onClick={() => handleDefaultSpawn(issue)}
-                      disabled={spawning !== null}
-                      className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                    >
-                      {spawning === issue.number ? 'Spawning...' : 'Spawn'}
-                    </button>
-                    <button
-                      onClick={() => setOpenDropdown(openDropdown === issue.number ? null : issue.number)}
-                      disabled={spawning !== null}
-                      className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                      title="Choose provider"
-                    >
-                      ▾
-                    </button>
-                    {openDropdown === issue.number && (
-                      <ProviderDropdown
-                        meshId={issue.number}
-                        providers={providerList}
-                        onSelect={(providerId) => handleSpawn(issue, providerId)}
-                      />
-                    )}
+                  {/* Split spawn button — primary uses default provider, ▾ opens picker.
+                      Wrapped in flex-col so the blocked-by flag can stack directly
+                      under it (issue #481 follow-up). shrink-0 keeps the right
+                      column from being squeezed by long titles in the left column. */}
+                  <div className="flex flex-col items-end shrink-0" onMouseDown={e => e.stopPropagation()}>
+                    <div className="relative flex">
+                      <button
+                        onClick={() => handleDefaultSpawn(issue)}
+                        disabled={spawning !== null}
+                        className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        {spawning === issue.number ? 'Spawning...' : 'Spawn'}
+                      </button>
+                      <button
+                        onClick={() => setOpenDropdown(openDropdown === issue.number ? null : issue.number)}
+                        disabled={spawning !== null}
+                        className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                        title="Choose provider"
+                      >
+                        ▾
+                      </button>
+                      {openDropdown === issue.number && (
+                        <ProviderDropdown
+                          meshId={issue.number}
+                          providers={providerList}
+                          onSelect={(providerId) => handleSpawn(issue, providerId)}
+                        />
+                      )}
+                    </div>
+                    {(() => {
+                      // Cross-reference the parsed blocked_by list against the
+                      // loaded open-issues set. If at least one blocker is still
+                      // open, surface the red flag below the spawn button. This
+                      // is a warn, not a gate — the Spawn button stays enabled
+                      // so a user who's intentionally unblocking something can
+                      // still proceed (matches the user's "indicate what issue(s)
+                      // are needed to be done first" wording).
+                      const stillBlockedBy = issue.blocked_by.filter(n => issuesByNumber.has(n));
+                      if (stillBlockedBy.length === 0) return null;
+                      const tooltip = buildBlockedByTooltip(stillBlockedBy, issuesByNumber);
+                      if (!tooltip) return null;
+                      // Click target = the first blocker in source order. The
+                      // blocker is guaranteed to be in `issuesByNumber` (it's the
+                      // filter that put it in `stillBlockedBy`), so `url` is
+                      // always defined — the `?? ''` is just a type-system appeaser.
+                      // `openUrl` routes through the OS (Tauri 2 WebView drops
+                      // `target="_blank"` without an explicit capability we don't
+                      // grant) — mirrors the title-link pattern above.
+                      const firstBlocker = stillBlockedBy[0];
+                      const firstBlockerUrl = issuesByNumber.get(firstBlocker)?.url ?? '';
+                      return (
+                        <button
+                          data-blocked-by
+                          type="button"
+                          title={tooltip}
+                          aria-label={tooltip}
+                          onMouseDown={e => e.stopPropagation()}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (firstBlockerUrl) openUrl(firstBlockerUrl).catch(console.error);
+                          }}
+                          className="mt-1 inline-flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors"
+                        >
+                          {/* Flag SVG — inline (matches the existing empty/error
+                              SVGs above, no Lucide dep needed). 12×12 to fit
+                              under the spawn button in the 360px dock. */}
+                          <svg
+                            width="12"
+                            height="12"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+                            <line x1="4" y1="22" x2="4" y2="15" />
+                          </svg>
+                          <span className="text-[10px] font-medium leading-none">
+                            Blocked by #{firstBlocker}
+                          </span>
+                        </button>
+                      );
+                    })()}
                   </div>
                 </div>
               );
