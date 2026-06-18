@@ -54,6 +54,13 @@ _Avoid_: Local commits, un-pushed work
 An external, agent-agnostic supervisor that reads node state and drives nodes through Buildmesh's control API, rather than via the UI. The first coordinator is the user's remotely-hosted Hermes Agent (Nous Research); a future in-app "Buildmesh superagent" is intended to be a second coordinator on the same API. Buildmesh stays a "dumb" driver — the orchestration intelligence lives in the Coordinator.
 _Avoid_: Supervisor, orchestrator agent, Hermes (Hermes is one instance of a Coordinator, not the category)
 
+**Autopilot**:
+An automated background execution mode for a Mesh that polls a remote issue tracker and automatically spawns Agent Nodes when matching issues/PRs are detected.
+_Avoid_: Auto-worker, event listener
+
+**Autopilot Policy**:
+The set of configuration settings (trigger labels, concurrency limits, provider overrides, and success actions) that govern a Mesh's Autopilot behavior.
+
 **Node Digest**:
 A coordinator-facing read summary of a single Agent Node answering "what's going on, and does it need feedback?". Layered: an always-available spine from Buildmesh's own DB (lifecycle `status`, "needs feedback" = `awaiting_input`) enriched, for the Claude Code provider family only, with semantic content read from the agent's on-disk JSONL transcript. Non-supporting providers, or a transcript that fails to parse, degrade to the spine with the enrichment explicitly flagged unavailable (never silently omitted). The rendered terminal/TUI is deliberately **not** a digest source.
 _Avoid_: Node summary, status payload, snapshot
@@ -61,6 +68,8 @@ _Avoid_: Node summary, status payload, snapshot
 ## Relationships
 
 - A **Mesh** can have one or more **Agent Nodes**
+- A **Mesh** can have **Autopilot** enabled, governed by its **Autopilot Policy**
+- **Autopilot** automatically spawns **Agent Nodes** for matching issues or PRs, enforcing branched worktree mode
 - An **Agent Node** operates on a child worktree or branch of its parent **Mesh**
 - An **Agent Node** emits a **Node Turn** each time its agent yields control back to the user; attention-marking and session naming react to it independently
 - A **File Explorer Panel** shows context for either a **Mesh** or an **Agent Node**
