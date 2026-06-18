@@ -153,6 +153,32 @@ mod tests {
         assert!(!db::validate_coordinator_read_token_inner(&conn, "").unwrap());
     }
 
+    /// Issue #495: the minted read token is stored HASHED, never as cleartext.
+    /// A DB dump (a raw `SELECT` on `app_settings`) must not reveal the secret,
+    /// yet presenting the *raw* token still authenticates — the validator hashes
+    /// the incoming token and compares hashes.
+    #[test]
+    fn read_token_is_stored_hashed_not_cleartext() {
+        let conn = seeded_db();
+        let raw = db::generate_coordinator_read_token_inner(&conn).unwrap();
+        db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
+
+        // What sits in app_settings is SHA-256(raw), not the raw token.
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'coordinator_read_token'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(stored, raw, "raw token must never be persisted");
+        assert_eq!(stored, db::hash_token(&raw), "stored value must be SHA-256(raw)");
+        assert_eq!(stored.len(), 64, "a SHA-256 hex is 64 chars");
+
+        // The raw token the caller received still validates over the hash.
+        assert!(db::validate_coordinator_read_token_inner(&conn, &raw).unwrap());
+    }
+
     // --- Drive scope (issue #319) ---
 
     /// The drive scope is OFF by default: even with the master switch on, a drive
@@ -211,6 +237,28 @@ mod tests {
         assert!(db::validate_coordinator_drive_token_inner(&conn, &drive).unwrap());
         assert!(!db::validate_coordinator_drive_token_inner(&conn, "wrong").unwrap());
         assert!(!db::validate_coordinator_drive_token_inner(&conn, "").unwrap());
+    }
+
+    /// Issue #495: the drive token is likewise stored hashed, and the raw token
+    /// authenticates against the stored hash.
+    #[test]
+    fn drive_token_is_stored_hashed_not_cleartext() {
+        let conn = seeded_db();
+        db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
+        db::set_coordinator_drive_enabled_inner(&conn, true).unwrap();
+        let raw = db::generate_coordinator_drive_token_inner(&conn).unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'coordinator_drive_token'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(stored, raw, "raw drive token must never be persisted");
+        assert_eq!(stored, db::hash_token(&raw), "stored value must be SHA-256(raw)");
+
+        assert!(db::validate_coordinator_drive_token_inner(&conn, &raw).unwrap());
     }
 
     #[test]

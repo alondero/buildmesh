@@ -383,4 +383,52 @@ mod tests {
         let added_no_table = crate::db::ensure_column(&conn, "no_such_table", "x", "INTEGER").unwrap();
         assert!(!added_no_table, "missing-table case must report no change");
     }
+
+    /// Issue #495: a DB created before token hashing stores the coordinator
+    /// tokens as 32-char cleartext. `ensure_coordinator_tokens_hashed` must
+    /// rehash them in place so a DB dump no longer exposes the secret, while the
+    /// raw token the user already holds keeps validating. The root token is
+    /// deliberately left cleartext (Option 3 — the QR re-reads its raw value).
+    /// Re-running must be idempotent (never hash an already-hashed value).
+    #[test]
+    fn ensure_coordinator_tokens_hashed_rehashes_cleartext_idempotently() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        ).unwrap();
+        // Pre-hashing shape: 32-char cleartext tokens.
+        let raw_read = "0123456789abcdef0123456789abcdef";
+        let raw_drive = "fedcba9876543210fedcba9876543210";
+        let raw_root = "aaaabbbbccccddddeeeeffff00001111";
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES
+                ('coordinator_read_token', ?1),
+                ('coordinator_drive_token', ?2),
+                ('remote_access_token', ?3)",
+            rusqlite::params![raw_read, raw_drive, raw_root],
+        ).unwrap();
+
+        crate::db::ensure_coordinator_tokens_hashed(&conn).unwrap();
+
+        let stored = |key: &str| -> String {
+            conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| r.get(0)).unwrap()
+        };
+
+        // Both coordinator tokens are now their SHA-256 hash.
+        assert_eq!(stored("coordinator_read_token"), crate::db::hash_token(raw_read));
+        assert_eq!(stored("coordinator_drive_token"), crate::db::hash_token(raw_drive));
+        assert_ne!(stored("coordinator_read_token"), raw_read, "cleartext must be gone");
+
+        // The root token is intentionally NOT hashed (Option 3, issue #495).
+        assert_eq!(stored("remote_access_token"), raw_root, "root token stays cleartext");
+
+        // The raw token the user already configured still validates after migration.
+        crate::db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
+        assert!(crate::db::validate_coordinator_read_token_inner(&conn, raw_read).unwrap());
+
+        // Idempotent: a second run must not hash the hash.
+        let after_first = stored("coordinator_read_token");
+        crate::db::ensure_coordinator_tokens_hashed(&conn).unwrap();
+        assert_eq!(stored("coordinator_read_token"), after_first, "must not double-hash");
+    }
 }
