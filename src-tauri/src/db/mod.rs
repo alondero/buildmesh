@@ -99,6 +99,9 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
+    // Data migration (#495): rehash any coordinator token a pre-hashing build
+    // left as cleartext. Idempotent, so it's safe to run on every init.
+    ensure_coordinator_tokens_hashed(&conn)?;
 
     DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
     Ok(())
@@ -618,6 +621,18 @@ fn generate_token() -> String {
     hex::encode(bytes)
 }
 
+/// Hash a token for at-rest storage (issue #495). Returns the lowercase
+/// SHA-256 hex (64 chars). Tokens are high-entropy (128-bit random hex from
+/// `generate_token`), so a plain SHA-256 is the right primitive here — no salt
+/// or slow KDF, which exist to slow brute force on *low-entropy* passwords.
+/// Because a raw token is 32 chars and this output is 64, the length alone
+/// distinguishes a pre-hashing cleartext value from an already-hashed one
+/// (used by `ensure_coordinator_tokens_hashed` to migrate idempotently).
+pub(crate) fn hash_token(raw: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(raw.as_bytes()))
+}
+
 /// Get or create the root remote access token (stored in app_settings).
 pub fn get_or_create_root_token() -> SqlResult<String> {
     let db = get().lock().unwrap();
@@ -710,16 +725,19 @@ pub fn generate_coordinator_read_token() -> SqlResult<String> {
 }
 
 pub fn generate_coordinator_read_token_inner(conn: &Connection) -> SqlResult<String> {
+    // Return the raw token to the caller once; persist only its hash (#495) so a
+    // DB dump or rogue agent reading app_settings can't recover the secret.
     let token = generate_token();
     conn.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
-        params![COORDINATOR_READ_TOKEN_KEY, &token],
+        params![COORDINATOR_READ_TOKEN_KEY, hash_token(&token)],
     )?;
     Ok(token)
 }
 
-/// The stored read token, if one has been minted (and is non-empty). Used by
-/// the status command to report `has_token` without leaking the value.
+/// The stored read token *hash*, if one has been minted (and is non-empty).
+/// Used by the status command to report `has_token` — presence only; the value
+/// is a SHA-256 hash (#495), never the raw token.
 pub fn coordinator_read_token() -> SqlResult<Option<String>> {
     let db = get().lock().unwrap();
     coordinator_read_token_inner(&db)
@@ -748,8 +766,10 @@ pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> 
     if token.is_empty() || !coordinator_api_enabled_inner(conn)? {
         return Ok(false);
     }
+    // The DB holds only the hash (#495), so hash the presented token and compare
+    // hashes. The raw token never has to be reconstructed to authenticate.
     match coordinator_read_token_inner(conn)? {
-        Some(stored) => Ok(stored == token),
+        Some(stored) => Ok(stored == hash_token(token)),
         None => Ok(false),
     }
 }
@@ -795,17 +815,19 @@ pub fn generate_coordinator_drive_token() -> SqlResult<String> {
 }
 
 pub fn generate_coordinator_drive_token_inner(conn: &Connection) -> SqlResult<String> {
+    // Raw token returned once; only its hash is persisted (#495).
     let token = generate_token();
     conn.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
-        params![COORDINATOR_DRIVE_TOKEN_KEY, &token],
+        params![COORDINATOR_DRIVE_TOKEN_KEY, hash_token(&token)],
     )?;
     Ok(token)
 }
 
-/// The stored drive token, if one has been minted (and is non-empty). Only the
-/// validator reads it today (no process-global getter until a Settings slice
-/// reports drive state); kept `_inner` so a future caller can lock once.
+/// The stored drive token *hash*, if one has been minted (and is non-empty).
+/// Only the validator reads it today (no process-global getter until a Settings
+/// slice reports drive state); kept `_inner` so a future caller can lock once.
+/// The value is a SHA-256 hash (#495), never the raw token.
 pub fn coordinator_drive_token_inner(conn: &Connection) -> SqlResult<Option<String>> {
     let value: Option<String> = conn
         .query_row(
@@ -833,10 +855,47 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
     {
         return Ok(false);
     }
+    // Stored value is the hash (#495); compare against the hashed presentation.
     match coordinator_drive_token_inner(conn)? {
-        Some(stored) => Ok(stored == token),
+        Some(stored) => Ok(stored == hash_token(token)),
         None => Ok(false),
     }
+}
+
+/// Safety net (issue #495): rehash any coordinator token still stored as
+/// pre-hashing cleartext. A token minted before token hashing sits in
+/// `app_settings` as the 32-char raw hex output of `generate_token`; this
+/// rewrites it in place to its SHA-256 so a DB dump can no longer reveal the
+/// secret, while the raw token the user already holds keeps validating (the
+/// validator hashes the incoming token). Idempotent: a SHA-256 hex is 64 chars,
+/// so an already-hashed (or empty) value is left untouched.
+///
+/// The root token (`remote_access_token`) is deliberately excluded: the Remote
+/// Access QR re-reads its *raw* value on every open, so it stays cleartext until
+/// the Keychain/device-token slice moves it out of SQLite (PRD #494).
+pub(crate) fn ensure_coordinator_tokens_hashed(conn: &Connection) -> SqlResult<()> {
+    for key in [COORDINATOR_READ_TOKEN_KEY, COORDINATOR_DRIVE_TOKEN_KEY] {
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .ok();
+        // Only a raw token (the 32-char `generate_token` output) needs
+        // rewriting; a 64-char hash is already migrated and an empty value is
+        // nothing to hash.
+        if let Some(raw) = value {
+            if raw.len() == 32 {
+                conn.execute(
+                    "UPDATE app_settings SET value = ?2 WHERE key = ?1",
+                    params![key, hash_token(&raw)],
+                )?;
+                tracing::warn!("ensure_coordinator_tokens_hashed: rehashed cleartext {}", key);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Exposes migrate_if_needed for integration testing.
