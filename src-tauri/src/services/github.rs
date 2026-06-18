@@ -121,11 +121,61 @@ static BLOCKED_BY_SECTION_RE: Lazy<Regex> = Lazy::new(|| {
     .expect("BLOCKED_BY_SECTION_RE is a static literal — must compile")
 });
 
-/// Issue URL — matches `/issues/{N}` where N is one or more digits.
-/// Pull-request URLs (`/pull/N`) are intentionally NOT matched here, so
-/// PR mentions in the section are naturally excluded.
-static ISSUE_URL_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"/issues/(\d+)\b").expect("ISSUE_URL_RE is a static literal"));
+/// Issue reference — matches either:
+///
+/// - `/issues/{N}` URLs anywhere in the section (the format the manual
+///   issue editor emits),
+/// - bare `#NNN` text references at the start of a line, after a
+///   bullet marker (`-`, `*`, or `+`) — the format GitHub issue forms
+///   / templates auto-render the "Blocked by" field as (real shape of
+///   issue #503 in alondero/buildmesh).
+///
+/// The bare-ref alternative is line-anchored to a bullet marker for two
+/// reasons:
+///
+/// 1. **Avoids narrative false-positives.** A `#NNN` mentioned in
+///    prose inside the section ("unblocks once #500 ships") is not a
+///    blocker; only bullet items are.
+/// 2. **Avoids URL-fragment false-positives.** A `#NNN` mid-URL (e.g.
+///    a `/issues/481#issuecomment-12345` permalink) never appears
+///    right after a bullet marker.
+///
+/// Note: the URL alternative does NOT require `(?m)^` line-anchoring —
+/// GitHub users sometimes write a bare URL inside a bullet's prose
+/// ("See /issues/481 for context") and that should still be picked up.
+///
+/// `(?m)` enables `^`/`$` line-boundary matching for the bare-ref
+/// alternative; the URL alternative works position-by-position so the
+/// multi-line flag is harmless to it. The two share a single
+/// non-capturing group so `captures_iter` returns matches in source
+/// order, and the first alternative only matches `/issues/` (so
+/// `/pull/481` is naturally excluded).
+static BLOCKED_BY_REF_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)(?:/issues/(\d+)\b|^\s*[-*+]\s+#(\d+)\b)")
+        .expect("BLOCKED_BY_REF_RE is a static literal — must compile")
+});
+
+/// Markdown link — captures the text and URL of a `[text](url)` link.
+/// Used to strip link text from the section BEFORE bare-ref matching,
+/// so a `#NNN` inside `[title #NNN](url)` doesn't false-positive as a
+/// blocker. The URL form of the same link is preserved (replaced with
+/// just the URL), so the issue-URL regex still extracts the number.
+static MARKDOWN_LINK_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\[([^\]]*)\]\(([^)]*)\)")
+        .expect("MARKDOWN_LINK_RE is a static literal — must compile")
+});
+
+/// Markdown code span — matches a backtick-fenced inline code segment
+/// `` `#like this` ``. Stripped before bare-ref matching so a `#NNN`
+/// used as a literal identifier, command, or filename inside a code
+/// span (very common in issue bodies) is not extracted as a blocker.
+/// The strip is greedy on the backticks, so `` ``#500`` `` (two
+/// backticks) is also consumed. Newlines inside the span aren't
+/// supported (real inline code is single-line).
+static MARKDOWN_CODE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"`+[^`\n]*`+")
+        .expect("MARKDOWN_CODE_RE is a static literal — must compile")
+});
 
 /// Extract the list of GitHub issue numbers referenced under the issue
 /// body's `**Blocked by**` section. Returns an empty `Vec` when:
@@ -137,15 +187,37 @@ static ISSUE_URL_RE: Lazy<Regex> =
 /// - the body is larger than [`BLOCKED_BY_BODY_CAP`] bytes (the section
 ///   is unreachable in that case — see the cap's doc comment).
 ///
-/// Source order is preserved; duplicates are removed via `Vec::dedup`.
-/// The function is purely string-in / vec-out so it's trivially unit-testable
-/// without an Issue struct or a fixture.
+/// Source order is preserved; duplicates are removed via Vec membership
+/// check. The function is purely string-in / vec-out so it's trivially
+/// unit-testable without an Issue struct or a fixture.
 ///
-/// Only `/issues/N` URLs are matched. Bare `#NNN` text references are
-/// intentionally ignored — GitHub's issue editor's "Blocked by" UI always
-/// emits `[Title #N](issues/N)` links, and matching bare `#NNN` would risk
-/// false positives when an issue narrative mentions PRs or other issues in
-/// context.
+/// Both reference forms are extracted from within the section:
+///
+/// - `/issues/N` URLs anywhere (the manual issue editor),
+/// - bare `#NNN` text references at the start of a bullet line
+///   (GitHub issue forms / templates — the real shape of issue
+///   #503 in alondero/buildmesh). The bullet-anchor is required
+///   to avoid false positives on narrative mentions and on URL
+///   fragments like `#issuecomment-NNN`.
+///
+/// Two preprocessor passes run before ref extraction, in order:
+///
+/// 1. **Link-strip.** `[text](url)` → `url`. Removes the link's
+///    title so a `#NNN` inside `[title #NNN](url)` doesn't
+///    false-positive. The URL is preserved (it's what the
+///    issue-URL regex matches), so an issue listed via the
+///    manual editor's link form is still picked up. PR mentions
+///    like `[Related PR #480](.../pull/480)` correctly contribute
+///    nothing because the URL form lacks `/issues/`.
+/// 2. **Code-span-strip.** `` `#like this` `` → `` ``. Removes
+///    backtick-fenced inline code so a `#NNN` used as an
+///    identifier, command, or filename inside a code span
+///    doesn't false-positive.
+///
+/// Both passes return `Cow<str>` and borrow from `section` when
+/// there's no match, so the common case (no links, no code spans)
+/// is allocation-free apart from the `cleaned` join in the
+/// short-circuit above.
 pub fn parse_blocked_by(body: &str) -> Vec<i64> {
     if body.is_empty() {
         return Vec::new();
@@ -171,7 +243,8 @@ pub fn parse_blocked_by(body: &str) -> Vec<i64> {
     // Short-circuit on the "None" idiom. We strip leading bullet markers
     // (`*`, `-`, `+`) and leading/trailing whitespace, then lower-case
     // the result. "None.", "none", "None - can start immediately" all
-    // collapse to the same empty/blocker-free signal.
+    // collapse to the same empty/blocker-free signal. Runs BEFORE the
+    // link-strip pass so a `[None](url)` link's text is still detected.
     let cleaned: String = section
         .lines()
         .map(str::trim)
@@ -184,13 +257,39 @@ pub fn parse_blocked_by(body: &str) -> Vec<i64> {
         return Vec::new();
     }
 
-    // Extract `/issues/N` URLs. Dedupe while preserving source order —
-    // a real "Blocked by" section can list the same issue twice (editor
-    // copy/paste), and the frontend cross-reference against the loaded
-    // open-issues set is set-based so duplicates would just be redundant.
+    // Strip markdown link text — `[text](url)` → `url` — so a bare
+    // `#NNN` inside a link's title doesn't false-positive as a blocker.
+    // The URL form of the same link is preserved (it's what the
+    // issue-URL regex matches), so an issue listed via the manual
+    // editor's link form is still picked up. replace_all returns a
+    // `Cow<str>` that borrows from `section` when there's no match —
+    // no allocation in the common case.
+    let after_links = MARKDOWN_LINK_RE.replace_all(section, "$2");
+
+    // Strip backtick-fenced code spans — `` `#like this` `` → `` `` —
+    // so a `#NNN` used as an identifier/command/filename inside an
+    // inline code segment (very common in issue bodies) doesn't
+    // false-positive. Chained off `after_links` so the link-strip
+    // pass and the code-strip pass are independent of each other's
+    // match positions; both return `Cow<str>` that borrows from
+    // their input when no match is found, so the no-link-no-code
+    // case stays allocation-free apart from the `cleaned` join.
+    let stripped = MARKDOWN_CODE_RE.replace_all(after_links.as_ref(), "");
+
+    // Walk the section (with link text and code spans removed) and
+    // extract both `/issues/N` URLs and bullet-anchored bare `#NNN`
+    // references in source order. `captures_iter` returns matches by
+    // position, so a line that contains a link's URL (`/issues/N`) and
+    // another line that contains a bare ref (`- #N`) are interleaved
+    // in document order rather than batched by form. The dedupe
+    // covers both the same-number-twice case (editor copy/paste) and
+    // the link-URL-and-link-text-same-number case.
     let mut result: Vec<i64> = Vec::new();
-    for cap in ISSUE_URL_RE.captures_iter(section) {
-        if let Some(m) = cap.get(1) {
+    for cap in BLOCKED_BY_REF_RE.captures_iter(&stripped) {
+        // The regex has two alternatives; whichever group matched
+        // carries the number we want.
+        let m = cap.get(1).or_else(|| cap.get(2));
+        if let Some(m) = m {
             if let Ok(n) = m.as_str().parse::<i64>() {
                 if !result.contains(&n) {
                     result.push(n);
@@ -1320,13 +1419,29 @@ mod tests {
     // Blocked-by body parser — extracts the list of GitHub issue numbers
     // referenced under a `**Blocked by**` markdown section in an issue body.
     // The Issues Probe (issue #481) renders a red flag when an issue's
-    // blockers are still in the loaded open-issues list. The parser is
-    // intentionally URL-only (no `#NNN` text matching) because the GitHub
-    // editor's "Blocked by" UI always emits `[Title #N](issues/N)` links;
-    // matching bare `#NNN` would risk false positives when an issue
-    // mentions a PR or another issue in narrative context. Pull-request
-    // URLs (`/pull/N`) are naturally excluded because the regex only
-    // matches `/issues/N`.
+    // blockers are still in the loaded open-issues list. The parser
+    // matches BOTH reference forms:
+    //
+    //   - `/issues/N` URLs anywhere in the section (the format the
+    //     manual issue editor emits),
+    //   - bare `#NNN` text references at the start of a bullet line
+    //     (the format GitHub issue forms / templates auto-render the
+    //     "Blocked by" field as — real shape of issue #503 in
+    //     alondero/buildmesh).
+    //
+    // Two preprocessor passes strip false-positive sources before the
+    // ref extraction:
+    //
+    //   1. Markdown-link text — `[title #481](url)` → `url` so a
+    //      `#NNN` inside a link's title isn't picked up bare-style.
+    //   2. Backtick-fenced code spans — `` `#481` `` → `` `` so a
+    //      `#NNN` used as an identifier / command / filename isn't
+    //      picked up bare-style.
+    //
+    // The bare-ref form is line-anchored to a bullet marker so a `#NNN`
+    // in narrative prose ("unblocks once #500 ships") is excluded.
+    // PR mentions (`/pull/N`) are naturally excluded because the
+    // issue-URL regex only matches `/issues/N`.
     //
     // Bodies are assumed to be ≤64 KiB; the helper caps the scan to bound
     // regex memory. Real issue bodies from `list_issues_only` are <16 KiB
@@ -1403,6 +1518,123 @@ Some narrative below.";
 *   [Issue A #481](https://github.com/x/y/issues/481)
 ";
         assert_eq!(parse_blocked_by(body), vec![481]);
+    }
+
+    #[test]
+    fn parse_blocked_by_atx_heading_with_bare_reference() {
+        // Regression for issue #503 in alondero/buildmesh: the issue body
+        // was generated from a GitHub issue form (template) which renders
+        // the "Blocked by" field as a bare reference list (`- #NNN`),
+        // not the `[Title #N](issues/N)` link form that the manual editor
+        // emits. Before this fix, the URL-only parser returned `vec![]`
+        // for this body, so the Issues Probe never rendered the blocked-
+        // by flag — silently dropping the warning for every form-created
+        // issue in the repo.
+        let body = "\
+## Parent
+
+#494
+
+## What to build
+
+Add the global \"Drive Kill-Switch\" toggle and the `/admin/kill-switch` API.
+
+## Acceptance criteria
+
+- [ ] Setting saved in the database, defaulting to enabled.
+- [ ] Toggle is visible and editable in the desktop UI settings.
+- [ ] API routes reject write operations immediately with `403 Forbidden`.
+- [ ] Integration tests verify prompt rejection when the kill switch is off.
+
+## Blocked by
+
+- #500
+";
+        assert_eq!(parse_blocked_by(body), vec![500]);
+    }
+
+    #[test]
+    fn parse_blocked_by_atx_heading_with_bare_references_multiple() {
+        // An issue form can produce multiple bare references when the
+        // user picks 2+ blockers in the template's multi-select field.
+        // Source order is preserved.
+        let body = "\
+## Blocked by
+
+- #481
+- #482
+- #483
+";
+        assert_eq!(parse_blocked_by(body), vec![481, 482, 483]);
+    }
+
+    #[test]
+    fn parse_blocked_by_mixed_url_and_bare_references_source_order() {
+        // A section can mix URL form (manual editor) and bare form
+        // (issue form) — e.g. a user types one manually and the form
+        // auto-populates the other. Source order is preserved across
+        // the two alternatives, and a number that appears in both
+        // forms (URL + bare in link text, or repeated across lines)
+        // is deduped.
+        let body = "\
+## Blocked by
+
+- [First #481](https://github.com/x/y/issues/481)
+- #482
+- [Third #483](https://github.com/x/y/issues/483)
+";
+        assert_eq!(parse_blocked_by(body), vec![481, 482, 483]);
+    }
+
+    #[test]
+    fn parse_blocked_by_url_fragment_in_link_does_not_false_positive() {
+        // Regression F1: a GitHub permalink with a comment anchor
+        // (`#issuecomment-NNN`) must not contribute the comment
+        // number to the blocked-by list. The URL form picks up the
+        // issue; the bare-ref form, being line-anchored to a bullet
+        // marker, never reaches the fragment because it lives in the
+        // middle of the link's URL.
+        let body = "\
+**Blocked by**
+----------
+
+*   [Issue 481](https://github.com/x/y/issues/481#issuecomment-12345)
+";
+        assert_eq!(parse_blocked_by(body), vec![481]);
+    }
+
+    #[test]
+    fn parse_blocked_by_bare_ref_inside_code_span_excluded() {
+        // Regression F2: `#NNN` inside a backtick-fenced code span
+        // is literal content (an identifier, command, filename —
+        // common in issue bodies), not a blocker reference. The
+        // code-span strip pass removes the span before bare-ref
+        // matching, so `#500` inside backticks is not extracted.
+        let body = "\
+**Blocked by**
+----------
+
+*   Use the `kill_switch` helper from `#500` to disable writes
+";
+        assert!(parse_blocked_by(body).is_empty());
+    }
+
+    #[test]
+    fn parse_blocked_by_narrative_mention_inside_section_excluded() {
+        // Regression F3: a `#NNN` mentioned in narrative prose
+        // inside the section (not as a bullet item) is not a
+        // blocker. The bare-ref form requires a bullet marker, so
+        // a mention like "this unblocks once #500 ships" is left
+        // alone. Only the bullet items are extracted.
+        let body = "\
+**Blocked by**
+----------
+
+*   [Issue 481](https://github.com/x/y/issues/481)
+This unblocks once #500 ships — see the linked discussion.
+*   [Issue 600](https://github.com/x/y/issues/600)
+";
+        assert_eq!(parse_blocked_by(body), vec![481, 600]);
     }
 
     #[test]
