@@ -10,7 +10,7 @@ pub mod routes;
 pub mod ws;
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -124,11 +124,17 @@ pub fn start_http_server(app: tauri::AppHandle, port_offset: u16) {
     tauri::async_runtime::spawn(async move {
         let start = HTTP_PORT_START + port_offset;
         let end = HTTP_PORT_END + port_offset;
-        let port = try_bind_ports(start, end).await;
+
+        // Secure default (issue #496): bind loopback only. Exposing
+        // the server to the LAN is an explicit opt-in stored in the DB; until
+        // then external machines cannot reach the hub.
+        let lan_enabled = crate::db::lan_exposure_enabled().unwrap_or(false);
+        let port = try_bind_ports(start, end, lan_enabled).await;
 
         if let Some(port) = port {
             RESOLVED_HTTP_PORT.store(port, Ordering::SeqCst);
-            tracing::info!("HTTP server listening on http://0.0.0.0:{}", port);
+            let scope = if lan_enabled { "LAN (0.0.0.0)" } else { "loopback only" };
+            tracing::info!("HTTP server listening on port {} ({})", port, scope);
             let _ = app.emit("remote-access-port", serde_json::json!({ "port": port }));
         } else {
             tracing::error!(
@@ -140,28 +146,59 @@ pub fn start_http_server(app: tauri::AppHandle, port_offset: u16) {
     });
 }
 
-async fn try_bind_ports(start: u16, end: u16) -> Option<u16> {
-    for port in start..=end {
-        let addr = SocketAddr::from(([0, 0, 0, 0], port));
-        if let Ok(listener) = TcpListener::bind(&addr).await {
-            let port = addr.port();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match listener.accept().await {
-                        Ok((stream, addr)) => {
-                            tracing::debug!("HTTP connection from {}", addr);
-                            tauri::async_runtime::spawn(handle_connection(stream, addr));
-                        }
-                        Err(e) => {
-                            tracing::error!("HTTP accept error: {}", e);
-                        }
-                    }
+/// The addresses the server binds for `port`. The secure default is loopback
+/// only: IPv4 first (the attention hook posts to `127.0.0.1`) then IPv6
+/// loopback. With LAN exposure enabled we bind the IPv4 wildcard so phones on
+/// the LAN can reach the hub. The first entry is load-bearing; later ones are
+/// best-effort (see `try_bind_ports`).
+fn bind_addrs(port: u16, lan_enabled: bool) -> Vec<SocketAddr> {
+    if lan_enabled {
+        vec![SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))]
+    } else {
+        vec![
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        ]
+    }
+}
+
+/// Spawn the accept loop for one bound listener, handing each connection to
+/// `handle_connection`.
+fn spawn_accept_loop(listener: TcpListener) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    tracing::debug!("HTTP connection from {}", addr);
+                    tauri::async_runtime::spawn(handle_connection(stream, addr));
                 }
-            });
-            return Some(port);
-        } else {
-            tracing::debug!("Port {} already in use, trying next", port);
+                Err(e) => {
+                    tracing::error!("HTTP accept error: {}", e);
+                }
+            }
         }
+    });
+}
+
+async fn try_bind_ports(start: u16, end: u16, lan_enabled: bool) -> Option<u16> {
+    for port in start..=end {
+        let mut addrs = bind_addrs(port, lan_enabled).into_iter();
+        // The primary address must bind. If it's taken, the port is in use, so
+        // move to the next one. Secondary addresses (IPv6 loopback) are
+        // best-effort: a host with IPv6 disabled still serves over 127.0.0.1.
+        let primary = addrs.next().expect("bind_addrs is never empty");
+        let Ok(listener) = TcpListener::bind(&primary).await else {
+            tracing::debug!("Port {} already in use ({}), trying next", port, primary);
+            continue;
+        };
+        spawn_accept_loop(listener);
+        for addr in addrs {
+            match TcpListener::bind(&addr).await {
+                Ok(listener) => spawn_accept_loop(listener),
+                Err(e) => tracing::debug!("Secondary bind on {} failed: {}", addr, e),
+            }
+        }
+        return Some(port);
     }
     None
 }
@@ -239,7 +276,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
+async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     let mut lines = tokio::io::BufStream::new(stream);
     let mut request_line = String::new();
     if lines.read_line(&mut request_line).await.is_err() {
@@ -267,6 +304,19 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
         if headers.trim().is_empty() {
             break;
         }
+    }
+
+    // DNS-rebinding guard (issue #496): every request (including the WebSocket
+    // upgrades below) must carry a `Host` that targets this machine. A rogue
+    // browser page can re-resolve its domain to loopback but cannot forge
+    // `Host`, so an unmatched value is rejected before any routing. The server
+    // binds loopback only by default, so loopback/localhost are the only valid
+    // targets; the LAN interface-IP whitelist arrives with the LAN-exposure
+    // slice (which will pass the host's adapter IPs here instead of `&[]`).
+    let host = request::extract_header_value(&headers, "Host").unwrap_or("");
+    if !request::host_is_allowed(host, &[]) {
+        let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+        return;
     }
 
     // WebSocket upgrade: GET /ws/events?token=xxx — mobile event push.
@@ -419,7 +469,7 @@ async fn handle_connection(stream: TcpStream, _addr: SocketAddr) {
     // Attention webhook: POST /api/attention/{session_id}
     // Called by Claude Code's Stop hook — no token required (localhost-only).
     if method == "POST" && path_without_query.starts_with("/api/attention/") {
-        routes::attention::handle_post(&mut lines, &path_without_query).await;
+        routes::attention::handle_post(&mut lines, &path_without_query, addr).await;
         return;
     }
 
@@ -1080,5 +1130,120 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "handle_connection hung on WebSocket upgrade (regression)");
+    }
+
+    #[test]
+    fn bind_addrs_loopback_by_default() {
+        let addrs = bind_addrs(1992, false);
+        assert_eq!(addrs.len(), 2, "default binds IPv4 + IPv6 loopback");
+        assert!(addrs[0].is_ipv4() && addrs[0].ip().is_loopback(),
+            "IPv4 loopback must be primary (the attention hook posts to 127.0.0.1)");
+        assert!(addrs[1].is_ipv6() && addrs[1].ip().is_loopback());
+        assert!(addrs.iter().all(|a| a.ip().is_loopback()),
+            "the default must never expose beyond loopback");
+    }
+
+    #[test]
+    fn bind_addrs_lan_uses_ipv4_wildcard() {
+        let addrs = bind_addrs(1992, true);
+        assert_eq!(addrs.len(), 1);
+        assert!(addrs[0].ip().is_unspecified(), "LAN opt-in binds 0.0.0.0");
+    }
+
+    async fn get_request_with_host(path: &str, host: &str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(stream, peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nContent-Length: 0\r\n\r\n",
+            path, host
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read(&mut buf),
+        )
+        .await
+        .expect("request hung")
+        .expect("read failed");
+
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn host_header_rebinding_domain_is_rejected() {
+        // DNS-rebinding attempt: the attacker's domain rides in `Host` even
+        // when re-resolved to loopback. Rejected with 400 before any routing.
+        assert_eq!(get_request_with_host("/api/nodes", "evil.com").await, 400);
+        assert_eq!(get_request_with_host("/", "attacker.example:1992").await, 400);
+    }
+
+    #[tokio::test]
+    async fn host_header_loopback_passes_validation() {
+        // A loopback Host clears the rebinding guard; the request then fails the
+        // normal auth gate (401), proving the 400 is specific to bad Hosts.
+        assert_eq!(get_request_with_host("/api/nodes", "127.0.0.1:1992").await, 401);
+        assert_eq!(get_request_with_host("/api/nodes", "localhost").await, 401);
+        assert_eq!(get_request_with_host("/api/nodes", "[::1]:1992").await, 401);
+    }
+
+    async fn attention_post_with_peer(path: &str, peer: SocketAddr) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let path = path.to_string();
+
+        tokio::spawn(async move {
+            let (stream, _real_peer) = listener.accept().await.unwrap();
+            let mut lines = tokio::io::BufStream::new(stream);
+            routes::attention::handle_post(&mut lines, &path, peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read(&mut buf),
+        )
+        .await
+        .expect("attention webhook hung")
+        .expect("read failed");
+
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn attention_webhook_rejects_non_loopback_peer() {
+        // An external machine reaching the unauthenticated webhook is refused
+        // with 403 before the Node Turn is published.
+        let external: SocketAddr = "203.0.113.5:54321".parse().unwrap();
+        assert_eq!(attention_post_with_peer("/api/attention/42", external).await, 403);
+    }
+
+    #[tokio::test]
+    async fn attention_webhook_allows_loopback_peer() {
+        // A loopback peer clears the 403 gate and proceeds (503 here because
+        // APP_HANDLE is unset in tests), proving the gate is peer-specific.
+        let local: SocketAddr = "127.0.0.1:54321".parse().unwrap();
+        assert_eq!(attention_post_with_peer("/api/attention/42", local).await, 503);
     }
 }
