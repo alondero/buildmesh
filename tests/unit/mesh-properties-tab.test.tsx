@@ -38,6 +38,7 @@ const MESH: Mesh = {
   default_provider: null,
   base_ref: 'origin/main',
   scratchpad: '',
+  sandbox: false,
 };
 
 const MESH_CONFIG = {
@@ -50,6 +51,7 @@ const MESH_CONFIG = {
   use_worktree: true,
   worktree_mode: 'branched',
   default_provider: 'anthropic',
+  sandbox: true,
 };
 
 /**
@@ -89,6 +91,8 @@ function mockBackend() {
           authenticated: false,
         });
       case 'update_mesh_column':
+        return Promise.resolve();
+      case 'update_mesh_sandbox':
         return Promise.resolve();
       case 'git_sync':
       case 'get_git_branch_status':
@@ -325,6 +329,32 @@ describe('MeshPropertiesTab (issue #375)', () => {
       expect(columns).toContain('build_command');
       expect(columns).toContain('run_command');
     });
+  });
+
+  // macOS Seatbelt sandbox toggle (issue #497).
+  it('preloads the sandbox toggle from the mesh config', async () => {
+    await openPropertiesTab();
+    const sandbox = (await screen.findByLabelText(/Sandbox agent processes/i)) as HTMLInputElement;
+    expect(sandbox.type).toBe('checkbox');
+    // MESH_CONFIG.sandbox === true
+    expect(sandbox.checked).toBe(true);
+  });
+
+  it('saves the sandbox toggle on change via update_mesh_sandbox', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const sandbox = (await screen.findByLabelText(/Sandbox agent processes/i)) as HTMLInputElement;
+    // Starts checked (config), so a click turns it off.
+    await user.click(sandbox);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_sandbox', {
+        meshId: 42,
+        sandbox: false,
+      });
+    });
+    expect(sandbox.checked).toBe(false);
   });
 
   it('renders nothing when no mesh is selected (the probe shell handles the empty state)', () => {

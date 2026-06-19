@@ -15,4 +15,12 @@ export type Mesh = { id: number, name: string, path: string, layout: string, pos
  * (schema v17) and read back as the raw `String`. Empty string is a
  * normal, non-error state ("no notes yet").
  */
-scratchpad: string, };
+scratchpad: string, 
+/**
+ * macOS-only: when `true`, agent PTY processes spawned in this mesh are
+ * confined by a Seatbelt sandbox (`sandbox-exec`) that restricts read/write
+ * to the node's Git worktree (issue #497). Off by default; ignored on
+ * Windows/WSL (where the Windows AppContainer path is tracked separately).
+ * Persisted as `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
+ */
+sandbox: boolean, };

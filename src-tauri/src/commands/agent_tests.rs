@@ -96,11 +96,37 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(
             argv(&cmd),
             expected_wsl(binary, &[flag, "--session-id", "uuid-assign"])
+        );
+    }
+
+    /// The macOS Seatbelt `sandbox` flag (issue #497) is consumed only by
+    /// `spawn_environment::wrap`'s macOS branch. On the WSL path it must be a
+    /// no-op: turning it on must not leak `sandbox-exec` or any extra token into
+    /// the command. (The macOS `sandbox-exec` assembly itself is unit-tested in
+    /// `agent::sandbox`, which runs on every host since it isn't cfg-gated.)
+    #[test]
+    fn sandbox_flag_is_ignored_on_wsl_path() {
+        let (binary, flag) = anthropic_recipe();
+        let sandboxed = build_spawn_command(
+            &wsl_resolved(),
+            Provider::Anthropic,
+            &SessionIdMode::Assign("uuid-assign".to_string()),
+            SESSION_ID,
+            None,
+            None,
+            None,
+            true,
+        );
+        assert_eq!(
+            argv(&sandboxed),
+            expected_wsl(binary, &[flag, "--session-id", "uuid-assign"]),
+            "sandbox=true must not alter the WSL-wrapped command"
         );
     }
 
@@ -116,6 +142,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let args = argv(&cmd);
@@ -139,6 +166,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(
@@ -159,6 +187,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(
@@ -179,6 +208,7 @@ mod tests {
             Some("opus"),
             Some("high"),
             None,
+            false,
         );
 
         assert_eq!(
@@ -209,6 +239,7 @@ mod tests {
             None,
             None,
             Some("hello world"),
+            false,
         );
 
         assert_eq!(
@@ -237,6 +268,7 @@ mod tests {
             None,
             None,
             Some("Title\r\n\r\nLine 1\r\nLine 2\rLine 3"),
+            false,
         );
 
         assert_eq!(
@@ -267,6 +299,7 @@ mod tests {
             None,
             None,
             Some("Title\r\n\r\nLine 1\r\nLine 2\rLine 3"),
+            false,
         );
 
         assert_eq!(
@@ -308,6 +341,7 @@ mod tests {
             None,
             None,
             Some("hello world"),
+            false,
         );
 
         assert_eq!(
@@ -331,6 +365,7 @@ mod tests {
             Some(""),
             Some(""),
             Some(""),
+            false,
         );
 
         assert_eq!(argv(&cmd), expected_wsl("cwrap", &["--minimax"]));
@@ -347,6 +382,7 @@ mod tests {
             Some("opus"),
             Some("high"),
             Some("prefill text"),
+            false,
         );
 
         let args = argv(&cmd);
@@ -378,6 +414,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let args = argv(&cmd);
@@ -402,6 +439,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(
@@ -432,6 +470,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let args = argv(&cmd);
@@ -577,6 +616,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         let args = argv(&cmd);
@@ -606,6 +646,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(

@@ -214,6 +214,12 @@ pub struct Mesh {
     /// (schema v17) and read back as the raw `String`. Empty string is a
     /// normal, non-error state ("no notes yet").
     pub scratchpad: String,
+    /// macOS-only: when `true`, agent PTY processes spawned in this mesh are
+    /// confined by a Seatbelt sandbox (`sandbox-exec`) that restricts read/write
+    /// to the node's Git worktree (issue #497). Off by default; ignored on
+    /// Windows/WSL (where the Windows AppContainer path is tracked separately).
+    /// Persisted as `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
+    pub sandbox: bool,
 }
 
 /// An agent node — isolated agent working directory.
@@ -483,6 +489,8 @@ pub struct MeshRow {
     pub use_worktree: bool,
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
+    /// macOS Seatbelt sandbox toggle (issue #497) — see [`Mesh::sandbox`].
+    pub sandbox: bool,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -497,6 +505,7 @@ impl From<&Mesh> for MeshRow {
             use_worktree: mesh.use_worktree,
             worktree_mode: mesh.worktree_mode.clone(),
             default_provider: mesh.default_provider.clone(),
+            sandbox: mesh.sandbox,
         }
     }
 }
@@ -576,6 +585,7 @@ mod tests {
             default_provider: None,
             base_ref: "origin/main".to_string(),
             scratchpad: String::new(),
+            sandbox: true,
         }
     }
 
@@ -592,6 +602,7 @@ mod tests {
         assert!(!cfg.use_worktree);
         assert_eq!(cfg.worktree_mode.as_deref(), Some("branched"));
         assert_eq!(cfg.default_provider, None);
+        assert!(cfg.sandbox, "sandbox toggle must map through MeshRow::from");
     }
 
     #[test]
