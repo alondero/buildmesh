@@ -2,7 +2,9 @@
 //! runtime environment.
 //!
 //! - WSL (regardless of host): `wsl.exe --cd <path> -- <binary> <args...>`
-//! - macOS: direct invocation
+//! - macOS, `sandbox` on: `sandbox-exec -f <profile.sb> <binary> <args...>`
+//!   (Seatbelt containment to the worktree — see `agent::sandbox`, issue #497)
+//! - macOS, `sandbox` off: direct invocation
 //! - Windows native + PowerShell shell: `powershell.exe -NoLogo -EncodedCommand <base64>`
 //!   (used by cwrap providers so ANSI escapes propagate correctly through ConPTY)
 //! - Windows native + Cmd shell: `cmd.exe /c "<binary> <args>"`
@@ -60,6 +62,7 @@ pub fn wrap(
     env_type: EnvType,
     spawn_path: &str,
     session_id: i64,
+    sandbox: bool,
 ) -> CommandBuilder {
     let mut cmd = if env_type == EnvType::Wsl {
         tracing::info!("spawn_environment: building WSL command via wsl.exe");
@@ -68,10 +71,46 @@ pub fn wrap(
         c.args(recipe.base_args);
         c
     } else if cfg!(target_os = "macos") {
-        tracing::info!("spawn_environment: building macOS command for {}", recipe.binary);
-        let mut c = CommandBuilder::new(recipe.binary);
-        c.args(recipe.base_args);
-        c
+        // macOS Seatbelt sandbox (issue #497). When the Mesh has the sandbox
+        // toggle on, launch the agent through `sandbox-exec -f <profile>` so it
+        // can only read/write the worktree (see `agent::sandbox`). The profile
+        // write is the only fallible step; on failure we log loudly and fall
+        // back to a direct spawn rather than blocking the user — the toggle is
+        // opt-in, so a direct spawn matches the off state, not a silent bypass
+        // of an expected guarantee.
+        if sandbox {
+            match crate::agent::sandbox::seatbelt_command(
+                recipe.binary,
+                &recipe.base_args,
+                spawn_path,
+                session_id,
+            ) {
+                Ok(c) => {
+                    tracing::info!(
+                        "spawn_environment: building sandboxed macOS command (sandbox-exec) for {}",
+                        recipe.binary
+                    );
+                    c
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "spawn_environment: failed to write Seatbelt profile for session {} ({}); \
+                         falling back to UNSANDBOXED direct spawn for {}",
+                        session_id,
+                        e,
+                        recipe.binary
+                    );
+                    let mut c = CommandBuilder::new(recipe.binary);
+                    c.args(recipe.base_args);
+                    c
+                }
+            }
+        } else {
+            tracing::info!("spawn_environment: building macOS command for {}", recipe.binary);
+            let mut c = CommandBuilder::new(recipe.binary);
+            c.args(recipe.base_args);
+            c
+        }
     } else {
         match recipe.windows_shell {
             WindowsShell::PowerShell => {

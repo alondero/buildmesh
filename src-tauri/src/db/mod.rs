@@ -23,7 +23,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 17;
+const SCHEMA_VERSION: i32 = 18;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -99,6 +99,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
+    ensure_mesh_sandbox(&conn)?;
     // Data migration (#495): rehash any coordinator token a pre-hashing build
     // left as cleartext. Idempotent, so it's safe to run on every init.
     ensure_coordinator_tokens_hashed(&conn)?;
@@ -412,6 +413,18 @@ fn ensure_mesh_columns(conn: &Connection) -> SqlResult<()> {
 pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "meshes", "scratchpad", "TEXT NOT NULL DEFAULT ''")? {
         tracing::warn!("ensure_mesh_scratchpad: added missing scratchpad column");
+    }
+    Ok(())
+}
+
+/// Safety net (v18): ensure the `sandbox` column exists on `meshes`.
+/// Added for the macOS Seatbelt sandbox toggle (issue #497) — a per-mesh
+/// default for whether agent PTY processes are confined via `sandbox-exec`.
+/// Off by default (`0`): the feature is macOS-only and opt-in, so pre-v18 rows
+/// and non-macOS hosts simply read `false`. No backfill needed.
+pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "meshes", "sandbox", "INTEGER NOT NULL DEFAULT 0")? {
+        tracing::warn!("ensure_mesh_sandbox: added missing sandbox column");
     }
     Ok(())
 }
@@ -946,7 +959,7 @@ const MESH_COLUMNS: &str =
      COALESCE(model, ''), COALESCE(effort, ''), \
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
      COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
-     scratchpad";
+     scratchpad, COALESCE(sandbox, 0)";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -969,6 +982,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         default_provider: parse_str(row.get::<_, String>(12)?),
         base_ref: row.get::<_, String>(13)?,
         scratchpad: row.get(14)?,
+        sandbox: row.get::<_, i32>(15)? != 0,
     })
 }
 

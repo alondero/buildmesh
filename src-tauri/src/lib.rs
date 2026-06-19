@@ -184,6 +184,7 @@ pub fn run() {
             commands::mesh_properties::update_worktree_base_ref,
             commands::mesh_properties::remove_worktree_base_ref,
             commands::mesh_properties::update_mesh_use_worktree,
+            commands::mesh_properties::update_mesh_sandbox,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
             commands::scratchpad::get_mesh_scratchpad,
             commands::scratchpad::set_mesh_scratchpad,

@@ -390,6 +390,7 @@ mod tests {
             EnvType::Windows,
             &cwd.to_string_lossy(),
             -915_4001,
+            false,
         );
 
         let pair = open_pty_pair(24, 80).expect("open pty pair");

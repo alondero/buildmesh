@@ -189,6 +189,13 @@ export const updateMeshColumn = (
 export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
   _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
 
+/** Toggle the mesh's macOS Seatbelt sandbox default (issue #497). macOS-only at
+ *  runtime; on Windows/WSL the backend stores the flag but `spawn_environment`
+ *  ignores it. Dedicated command because it's a boolean with no settings.json
+ *  mirror — same shape as `updateMeshUseWorktree`. */
+export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
+  _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
+
 export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
   _invoke<void>('update_worktree_base_ref', { meshId, baseRef });
 

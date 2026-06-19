@@ -31,6 +31,7 @@ const MESH: Mesh = {
   position: 0,
   created_at: '2026-01-01',
   scratchpad: '',
+  sandbox: false,
 };
 
 const SESSIONS: DiscoveredSession[] = [

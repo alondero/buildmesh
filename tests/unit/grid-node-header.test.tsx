@@ -56,6 +56,7 @@ const NODE: AgentNode = {
   position: 0,
   created_at: new Date(0).toISOString(),
   scratchpad: '',
+  sandbox: false,
 };
 
 const MESH: Mesh = {

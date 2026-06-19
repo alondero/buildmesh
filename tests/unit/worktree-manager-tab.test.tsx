@@ -40,6 +40,7 @@ const MESH: Mesh = {
   default_provider: null,
   base_ref: 'origin/main',
   scratchpad: '',
+  sandbox: false,
 };
 
 // Healthy mesh — no drift, no hostage, no dirty, no unpushed. Surfaces the

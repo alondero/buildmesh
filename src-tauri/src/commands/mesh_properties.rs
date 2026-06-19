@@ -133,6 +133,21 @@ pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Resul
     Ok(())
 }
 
+/// Toggle the mesh's macOS Seatbelt sandbox default (issue #497). A boolean
+/// with no settings.json mirror, so it gets its own command rather than routing
+/// through the string-valued `update_mesh_column` allowlist — same shape as
+/// `update_mesh_use_worktree`.
+#[tauri::command]
+pub async fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
+    let db = db::get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET sandbox = ?1 WHERE id = ?2",
+        rusqlite::params![sandbox as i32, mesh_id],
+    )
+    .map_err(|e| format!("failed to update sandbox: {}", e))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
     let mesh = db::get_mesh_by_id(mesh_id)
