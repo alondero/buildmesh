@@ -19,8 +19,8 @@ use ts_rs::TS;
 /// this struct. The `session_id` field is Claude Code's CLI identifier and
 /// stays as-is per CONTEXT.md ambiguity #1.
 #[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "DiscoveredAgentNode.ts")]
-pub struct DiscoveredAgentNode {
+#[ts(export, export_to = "ArchivedAgentNode.ts")]
+pub struct ArchivedAgentNode {
     pub session_id: String,
     pub first_message: String,
     pub branch: Option<String>,
@@ -114,7 +114,7 @@ fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<
 
 /// Discover Claude Code sessions on disk for the given mesh path.
 /// Returns sessions that are NOT already tracked by active/idle/suspended Buildmesh nodes.
-pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<DiscoveredAgentNode>, String> {
+pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>, String> {
     let claude_dir = env::claude_dir();
     let projects_dir = claude_dir.join("projects");
 
@@ -132,7 +132,7 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<DiscoveredAgentNode
         .filter_map(|n| n.cli_session_id)
         .collect();
 
-    let mut sessions: Vec<DiscoveredAgentNode> = Vec::new();
+    let mut sessions: Vec<ArchivedAgentNode> = Vec::new();
 
     let entries = fs::read_dir(&projects_dir).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
@@ -186,7 +186,7 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<DiscoveredAgentNode
                         })
                 });
 
-                sessions.push(DiscoveredAgentNode {
+                sessions.push(ArchivedAgentNode {
                     session_id,
                     first_message,
                     branch,

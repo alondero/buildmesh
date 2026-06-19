@@ -7,7 +7,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import DiffScreen from "../../src/mobile/screens/DiffScreen";
 import { sortSessions } from "../../src/mobile/screens/SessionsScreen";
-import type { AgentNode, DiffResult, DiscoveredAgentNode } from "../../src/mobile/api";
+import type { AgentNode, DiffResult, ArchivedAgentNode } from "../../src/mobile/api";
 
 const node: AgentNode = {
   id: 5,
@@ -101,11 +101,12 @@ describe("DiffScreen", () => {
 
 describe("sortSessions", () => {
   it("sorts newest first, sessions without a timestamp last", () => {
-    // Fields match the generated `DiscoveredAgentNode` (issue #359): the sort
-    // key is `timestamp`, and sessions are identified by `session_id` — not
-    // the phantom `last_active_at`/`cli_session_id` the mobile type used to
-    // declare (which the wire never sends).
-    const s = (id: string, ts: string | null): DiscoveredAgentNode => ({
+    // Fields match the generated `ArchivedAgentNode` (issue #359; renamed from
+    // DiscoveredAgentNode after PR #523): the sort key is `timestamp`, and
+    // sessions are identified by `session_id` — not the phantom
+    // `last_active_at`/`cli_session_id` the mobile type used to declare
+    // (which the wire never sends).
+    const s = (id: string, ts: string | null): ArchivedAgentNode => ({
       session_id: id,
       first_message: "",
       branch: null,

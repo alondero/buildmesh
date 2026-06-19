@@ -1,7 +1,7 @@
 import { useState } from "react";
 import {
   AgentNode,
-  DiscoveredAgentNode,
+  ArchivedAgentNode,
   Mesh,
   discoverAgentNodes,
   importAndResume,
@@ -16,14 +16,14 @@ type Props = {
 };
 
 /// Newest activity first; nodes without a timestamp sink to the bottom.
-export function sortAgentNodes(nodes: DiscoveredAgentNode[]): DiscoveredAgentNode[] {
+export function sortAgentNodes(nodes: ArchivedAgentNode[]): ArchivedAgentNode[] {
   return [...nodes].sort((a, b) =>
     (b.timestamp ?? "").localeCompare(a.timestamp ?? ""),
   );
 }
 
-export default function DiscoveredNodesScreen({ mesh, onBack, onResumed }: Props) {
-  const [nodes, setNodes] = useState<DiscoveredAgentNode[] | null>(null);
+export default function ArchivedNodesScreen({ mesh, onBack, onResumed }: Props) {
+  const [nodes, setNodes] = useState<ArchivedAgentNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -44,7 +44,7 @@ export default function DiscoveredNodesScreen({ mesh, onBack, onResumed }: Props
       });
   }, [mesh.id]);
 
-  const resume = async (s: DiscoveredAgentNode) => {
+  const resume = async (s: ArchivedAgentNode) => {
     setBusyId(s.session_id);
     setError(null);
     try {
@@ -69,7 +69,7 @@ export default function DiscoveredNodesScreen({ mesh, onBack, onResumed }: Props
 
   return (
     <div data-testid="discovered-nodes-screen" className="screen">
-      <AppBar onBack={onBack} title="Discovered Nodes" subtitle={mesh.name} />
+      <AppBar onBack={onBack} title="Archive" subtitle={mesh.name} />
       <div style={{ padding: 12, paddingBottom: 0 }}>
         <input
           placeholder="Search by message, branch, worktree…"

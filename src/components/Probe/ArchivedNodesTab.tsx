@@ -1,8 +1,10 @@
 /**
- * DiscoveredNodesTab — the Probe Panel's 🕒 tab body (issue #378, renamed
- * in issue #490). The panel shows "Agent Nodes" discoverable on disk for
- * the current mesh (Claude Code CLI sessions that buildmesh has not yet
- * adopted) and offers a one-click resume.
+ * ArchivedNodesTab — the Probe Panel's Archive tab body (issue #378;
+ * renamed from DiscoveredNodesTab after PR #523 set the visible label
+ * to "Archive" / tooltip "Archived Nodes"). The panel shows agent
+ * nodes discoverable on disk for the current mesh (Claude Code CLI
+ * sessions that buildmesh has not yet adopted) and offers a one-click
+ * resume.
  *
  * Thin wrapper port of the legacy `SessionBrowserModal`. The dock
  * supplies the header and close button, so this component drops the
@@ -44,7 +46,7 @@ import {
   discoverAgentNodes,
   importDiscoveredAgentNode,
   listProviders,
-  type DiscoveredAgentNode,
+  type ArchivedAgentNode,
 } from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -77,7 +79,7 @@ function isResumableProvider(id: string): boolean {
   return ['anthropic', 'minimax', 'kimi'].includes(id);
 }
 
-export function DiscoveredNodesTab() {
+export function ArchivedNodesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   // `activeMeshPath` is the mesh root, NOT the focused worktree's
   // working directory — `discover_sessions` walks `.claude/projects/...`
@@ -91,7 +93,7 @@ export function DiscoveredNodesTab() {
   const setActiveNode = useAgentNodeStore((s) => s.setActiveNode);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
-  const [sessions, setSessions] = useState<DiscoveredAgentNode[]>([]);
+  const [sessions, setSessions] = useState<ArchivedAgentNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -151,7 +153,7 @@ export function DiscoveredNodesTab() {
   // Issue #492 — shared `useClickOutside` hook.
   useClickOutside(openDropdown, () => setOpenDropdown(null));
 
-  const handleResume = async (session: DiscoveredAgentNode, providerId: string) => {
+  const handleResume = async (session: ArchivedAgentNode, providerId: string) => {
     if (activeMeshId === null || activeMeshPath === null) return;
     setResuming(session.session_id);
     setOpenDropdown(null);
@@ -184,7 +186,7 @@ export function DiscoveredNodesTab() {
     }
   };
 
-  const handleDefaultResume = async (session: DiscoveredAgentNode) => {
+  const handleDefaultResume = async (session: ArchivedAgentNode) => {
     if (activeMeshId === null) return;
     const defaultProvider = await getDefaultProvider(activeMeshId);
     await handleResume(session, defaultProvider);

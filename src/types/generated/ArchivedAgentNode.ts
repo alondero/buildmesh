@@ -6,4 +6,4 @@
  * this struct. The `session_id` field is Claude Code's CLI identifier and
  * stays as-is per CONTEXT.md ambiguity #1.
  */
-export type DiscoveredAgentNode = { session_id: string, first_message: string, branch: string | null, cwd: string | null, timestamp: string | null, worktree_name: string | null, };
+export type ArchivedAgentNode = { session_id: string, first_message: string, branch: string | null, cwd: string | null, timestamp: string | null, worktree_name: string | null, };

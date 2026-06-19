@@ -53,10 +53,10 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onSelectProvider: vi.fn(),
     onOpenFilesProbe: vi.fn(),
     onOpenPropertiesProbe: vi.fn(),
-    // Issue #378 — the right-click "GitHub Issues" / "Previous Agent Nodes"    // entries route through the Probe Panel via the new probe-tab
-    // handlers. The legacy `onOpenGitHubIssues` / `onOpenSessionBrowser`
-    // props are gone; the modal components stay on disk but no
-    // consumer wires them up.
+    // Issue #378 — the right-click "GitHub Issues" / "Archive" entries route
+    // through the Probe Panel via the new probe-tab handlers. The legacy
+    // `onOpenGitHubIssues` / `onOpenSessionBrowser` props are gone; the
+    // modal components stay on disk but no consumer wires them up.
     onOpenIssuesProbe: vi.fn(),
     onOpenSessionHistoryProbe: vi.fn(),
     meshNodes: [],
@@ -119,7 +119,7 @@ describe('MeshItem', () => {
     expect(screen.getByText('Properties')).toBeTruthy();
     expect(screen.getByText('File Explorer')).toBeTruthy();
     expect(screen.getByText('GitHub Issues')).toBeTruthy();
-    expect(screen.getByText('Previous Agent Nodes')).toBeTruthy();
+    expect(screen.getByText('Archive')).toBeTruthy();
   });
 
   it('invokes the matching handler when a context-menu action is chosen', async () => {
@@ -141,14 +141,16 @@ describe('MeshItem', () => {
     expect(props.onOpenIssuesProbe).toHaveBeenCalledWith(3);
   });
 
-  it('routes the right-click "Previous Agent Nodes" entry to the Probe Panel (issue #378)', async () => {
-    // Issue #378 — the "Previous Agent Nodes" right-click item used to
-    // mount the legacy `SessionBrowserModal` via `onOpenSessionBrowser`.
-    // After the port it calls `onOpenSessionHistoryProbe`, which
-    // Sidebar wires to `openProbeTab('sessions')`.
+  it('routes the right-click "Archive" entry to the Probe Panel (issue #378)', async () => {
+    // Issue #378 — the "Archive" (formerly "Previous Agent Nodes")
+    // right-click item used to mount the legacy `SessionBrowserModal`
+    // via `onOpenSessionBrowser`. After the port it calls
+    // `onOpenSessionHistoryProbe`, which Sidebar wires to
+    // `openProbeTab('sessions')`. The button shows the short "Archive"
+    // label with a longer "Archived Nodes" tooltip.
     const { props } = renderMeshItem();
     fireEvent.contextMenu(screen.getByText('my-mesh'));
-    await userEvent.click(screen.getByText('Previous Agent Nodes'));
+    await userEvent.click(screen.getByText('Archive'));
     expect(props.onOpenSessionHistoryProbe).toHaveBeenCalledTimes(1);
     expect(props.onOpenSessionHistoryProbe).toHaveBeenCalledWith(3);
   });

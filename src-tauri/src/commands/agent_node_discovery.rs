@@ -7,11 +7,11 @@
 use crate::db;
 use crate::env;
 use crate::models::{AgentNode, Provider};
-use crate::services::agent_node_discovery::{self, DiscoveredAgentNode};
+use crate::services::agent_node_discovery::{self, ArchivedAgentNode};
 use tauri::command;
 
 #[command]
-pub async fn discover_agent_nodes(mesh_id: i64, mesh_path: String) -> Result<Vec<DiscoveredAgentNode>, String> {
+pub async fn discover_agent_nodes(mesh_id: i64, mesh_path: String) -> Result<Vec<ArchivedAgentNode>, String> {
     agent_node_discovery::discover(mesh_id, &mesh_path)
 }
 

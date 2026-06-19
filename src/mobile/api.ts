@@ -219,15 +219,17 @@ export async function createPr(
 
 // --- Stage 5: kick off new tasks --------------------------------------------
 
-// Generated from the Rust `DiscoveredAgentNode` struct (issue #359 + #490).
-// The mobile SPA previously hand-declared `cli_session_id`/`last_active_at`/
-// `provider` — none of which the wire sends (it sends `session_id` and
-// `timestamp`, and no provider field at all), so those reads were always
-// `undefined`. The generated type is the real wire shape. Renamed from
-// `DiscoveredAgentNode` in issue #490: the public surface uses "Agent Node";
-// the on-disk Claude Code session id (`session_id`) stays as-is.
-import type { DiscoveredAgentNode } from "../types/generated/DiscoveredAgentNode";
-export type { DiscoveredAgentNode };
+// Generated from the Rust `ArchivedAgentNode` struct (issue #359 + #490;
+// renamed to `ArchivedAgentNode` after PR #523 set the visible label to
+// "Archive"). The mobile SPA previously hand-declared `cli_session_id`/
+// `last_active_at`/`provider` — none of which the wire sends (it sends
+// `session_id` and `timestamp`, and no provider field at all), so those
+// reads were always `undefined`. The generated type is the real wire
+// shape. Renamed from `DiscoveredAgentNode` in issue #490: the public
+// surface uses "Agent Node"; the on-disk Claude Code session id
+// (`session_id`) stays as-is.
+import type { ArchivedAgentNode } from "../types/generated/ArchivedAgentNode";
+export type { ArchivedAgentNode };
 
 // Generated from the Rust `GitHubIssue` struct (src-tauri/src/commands/pr.rs) —
 // the same struct the desktop Tauri path serialises (issue #359). #358 widened
@@ -240,13 +242,13 @@ export type { GitHubIssue };
 
 export async function discoverAgentNodes(
   meshId: number,
-): Promise<DiscoveredAgentNode[]> {
+): Promise<ArchivedAgentNode[]> {
   return (await apiFetch(`/api/meshes/${meshId}/agent-nodes/discover`)).json();
 }
 
 export async function importAndResume(
   meshId: number,
-  session: DiscoveredAgentNode,
+  session: ArchivedAgentNode,
   provider?: string,
 ): Promise<AgentNode> {
   const resp = await apiFetch(
