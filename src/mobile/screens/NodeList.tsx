@@ -353,7 +353,7 @@ function MeshActionsSheet({
       <SheetButton
         onClick={onOpenAgentNodes}
         testId="mesh-sheet-discovered-nodes"
-        label="Discovered Nodes"
+        label="Archive"
         hint="Resume an existing CLI session"
       />
       <SheetButton

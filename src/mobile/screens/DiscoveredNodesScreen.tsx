@@ -69,7 +69,7 @@ export default function DiscoveredNodesScreen({ mesh, onBack, onResumed }: Props
 
   return (
     <div data-testid="discovered-nodes-screen" className="screen">
-      <AppBar onBack={onBack} title="Discovered Nodes" subtitle={mesh.name} />
+      <AppBar onBack={onBack} title="Archive" subtitle={mesh.name} />
       <div style={{ padding: 12, paddingBottom: 0 }}>
         <input
           placeholder="Search by message, branch, worktree…"
