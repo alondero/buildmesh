@@ -128,4 +128,73 @@ describe('ProjectFilesTab (#376)', () => {
       expect(state.probeOpen).toBe(true);
     });
   });
+
+  // Regression: the open-in-OS-file-manager button + folder-open icon were
+  // dropped from the FileExplorerPanel when it was deleted in ed0f8bc.
+  // Pin both the visible affordance and the Tauri call so a future
+  // refactor can't silently lose them again.
+  it('renders an "Open in file explorer" button that calls open_in_file_manager with the active path', async () => {
+    render(<ProjectFilesTab />);
+
+    // The header strip shows the active path as the button's title text —
+    // the legacy `FileExplorerPanel` rendered the same path as its
+    // header title (no node focused here → activePath is the mesh root).
+    await screen.findByText('Changed Files');
+    expect(screen.getByText('/repo')).toBeTruthy();
+
+    const openButton = screen.getByRole('button', { name: /open in file explorer/i });
+    // The button must render an SVG icon (Lucide folder-open) — pin that
+    // an `<svg>` lives inside the button so the glyph can't be silently
+    // replaced with text/emoji again.
+    expect(openButton.querySelector('svg')).toBeTruthy();
+
+    fireEvent.click(openButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('open_in_file_manager', {
+        path: '/repo',
+      });
+    });
+  });
+
+  it('uses the focused node\'s worktree path when one is active', async () => {
+    // The legacy panel used `context.path` which, for an agent context,
+    // resolved to the node's worktree dir — same as today's
+    // `activePath` when a node is focused. Pin that the button follows
+    // the same path semantics so opening Explorer lands the user in
+    // the worktree, not the mesh root.
+    useAgentNodeStore.setState({
+      agentNodes: [NODE],
+      activeNodeId: NODE.id,
+    });
+
+    render(<ProjectFilesTab />);
+
+    await screen.findByText('Changed Files');
+    expect(screen.getByText(NODE.path)).toBeTruthy();
+
+    const openButton = screen.getByRole('button', { name: /open in file explorer/i });
+    fireEvent.click(openButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('open_in_file_manager', {
+        path: NODE.path,
+      });
+    });
+  });
+
+  it('collapses the File Tree without affecting the open-in-explorer action', async () => {
+    // The collapse control must not steal clicks from the explorer
+    // button — pin that toggling the File Tree section doesn't unmount
+    // the header strip.
+    render(<ProjectFilesTab />);
+
+    const treeToggle = await screen.findByText('File Tree');
+    fireEvent.click(treeToggle);
+    fireEvent.click(treeToggle);
+
+    expect(
+      screen.getByRole('button', { name: /open in file explorer/i }),
+    ).toBeTruthy();
+  });
 });

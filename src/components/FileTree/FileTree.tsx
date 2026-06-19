@@ -9,6 +9,59 @@ import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { statusMeta } from '../Diff/Diff';
 
+/** Lucide-style glyphs for the tree rows. */
+function ChevronRightIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  );
+}
+
+function FolderIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </svg>
+  );
+}
+
+function FileIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+    </svg>
+  );
+}
+
 interface FileTreeProps {
   rootPath: string;
   /** Show M badges on changed files */
@@ -186,14 +239,26 @@ function TreeNode({
         }}
       >
         {node.is_dir ? (
-          <span className="text-text-muted w-3 text-center text-[10px]">
-            {expanded ? '▼' : '▶'}
+          <span
+            className={`w-3 h-3 flex items-center justify-center text-text-muted transition-transform ${
+              expanded ? 'rotate-90' : ''
+            }`}
+            // Decorative — the row itself owns expand on click. The
+            // rotate-on-state is the cheapest way to flip the chevron
+            // direction without swapping the SVG.
+            data-testid={expanded ? 'folder-expanded' : 'folder-collapsed'}
+          >
+            <ChevronRightIcon className="w-3 h-3" />
           </span>
         ) : (
-          <span className="w-3" />
+          <span className="w-3 h-3" />
         )}
-        <span className="text-text-muted text-sm">
-          {node.is_dir ? '📁' : '📄'}
+        <span className="w-3 h-3 flex items-center justify-center text-text-muted">
+          {node.is_dir ? (
+            <FolderIcon className="w-3 h-3" />
+          ) : (
+            <FileIcon className="w-3 h-3" />
+          )}
         </span>
         <span
           className={`flex-1 truncate ${

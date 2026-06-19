@@ -2,6 +2,26 @@ import { useState } from 'react';
 import { diffFileAgainstHead, type DiffResult } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 
+/** Lucide chevron-right, rotated 90° when the section is expanded.
+ *  Matches the FileTree rows' chevron — keeps the probe body's expand
+ *  affordance uniform (one SVG glyph, one rotation rule). */
+function ChevronRightIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
+  );
+}
+
 interface ChangedFilesSectionProps {
   /** Repo root whose uncommitted changes we list. */
   rootPath: string;
@@ -56,8 +76,12 @@ export function ChangedFilesSection({
         onClick={() => setExpanded(!expanded)}
         className="w-full flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-text-secondary hover:bg-bg-card transition-colors"
       >
-        <span className="text-text-muted w-3 text-center text-[10px]">
-          {expanded ? '▼' : '▶'}
+        <span
+          className={`w-3 h-3 flex items-center justify-center text-text-muted transition-transform ${
+            expanded ? 'rotate-90' : ''
+          }`}
+        >
+          <ChevronRightIcon className="w-3 h-3" />
         </span>
         <span className="flex-1 text-left">Changed Files</span>
         <span className="text-text-muted text-[10px]">{files.length}</span>

@@ -43,6 +43,7 @@ import {
   deleteWorktrees,
   getGitPruneInfo,
   getMeshProperties,
+  openInFileManager,
   pruneRemoteTracking,
   updateMeshColumn,
   updateMeshUseWorktree,
@@ -53,6 +54,40 @@ import {
   type MeshHealth,
   type WorktreeInfo,
 } from '../../lib/tauri';
+
+/** Lucide folder-open. */
+function FolderOpenIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2" />
+    </svg>
+  );
+}
+
+/**
+ * Open a path in the OS file manager. Centralised so the `RepoBlock`
+ * repo-path header and the per-worktree rows use the same try/catch —
+ * `open_in_file_manager` rejects when the path doesn't exist or isn't
+ * a directory (common for stale worktree rows after a `git worktree
+ * prune`), and we don't want one bad row to spam the console with a
+ * red error on every render.
+ */
+const openInExplorer = async (path: string) => {
+  try {
+    await openInFileManager(path);
+  } catch (e) {
+    console.error('Failed to open folder in file manager:', e);
+  }
+};
 
 const Badge = ({ color, text, title }: { color: string; text: string; title?: string }) => (
   <span
@@ -625,9 +660,26 @@ interface RepoBlockProps {
 function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) {
   return (
     <div className="space-y-3 rounded border border-border-subtle p-3">
-      <p className="text-[10px] font-mono text-text-muted truncate" title={repo.path}>
-        {repo.path}
-      </p>
+      {/* Repo path + open-in-explorer. `min-w-0` lets the path truncate
+          under the trailing icon instead of pushing it out of the card. */}
+      <div className="flex items-center justify-between gap-2">
+        <span
+          className="text-[10px] font-mono text-text-muted truncate flex-1 min-w-0"
+          title={repo.path}
+        >
+          {repo.path}
+        </span>
+        <button
+          type="button"
+          onClick={() => openInExplorer(repo.path)}
+          aria-label={`Open ${repo.path} in file explorer`}
+          title="Open in file explorer"
+          data-testid={`repo-open-${repo.path}`}
+          className="p-1 rounded text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors flex-shrink-0"
+        >
+          <FolderOpenIcon className="w-3.5 h-3.5" />
+        </button>
+      </div>
 
       {/* Local branches */}
       <div>
@@ -696,41 +748,64 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) 
               const key = worktreeKey(w.path);
               const name = w.path.split(/[/\\]/).pop() || w.path;
               return (
-                <label
+                <div
                   key={key}
                   title={w.is_active ? 'Active — cannot delete' : w.path}
-                  className={`flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
+                  className={`group flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
                     w.is_active
-                      ? 'opacity-60 cursor-not-allowed'
+                      ? 'opacity-60'
                       : 'cursor-pointer hover:bg-bg-overlay/40'
                   }`}
                 >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(key)}
-                    disabled={w.is_active}
-                    onChange={() => onToggle(key)}
-                    className="accent-accent-cyan disabled:cursor-not-allowed"
-                  />
-                  <span className="text-text-primary truncate flex-1">
-                    {name}
-                    {w.branch && (
-                      <span className="text-text-muted"> · {w.branch}</span>
-                    )}
-                  </span>
-                  <span className="flex items-center gap-1 flex-shrink-0">
-                    {w.is_active && (
-                      <Badge
-                        color="bg-accent-cyan/15 text-accent-cyan"
-                        text="active"
-                        title="Active — cannot delete"
-                      />
-                    )}
-                    {w.is_stale && (
-                      <Badge color="bg-status-warning/15 text-status-warning" text="stale" />
-                    )}
-                  </span>
-                </label>
+                  <label
+                    className={`flex items-center gap-2 flex-1 min-w-0 ${
+                      w.is_active ? 'cursor-not-allowed' : 'cursor-pointer'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(key)}
+                      disabled={w.is_active}
+                      onChange={() => onToggle(key)}
+                      className="accent-accent-cyan disabled:cursor-not-allowed flex-shrink-0"
+                    />
+                    <span className="text-text-primary truncate flex-1 min-w-0">
+                      {name}
+                      {w.branch && (
+                        <span className="text-text-muted"> · {w.branch}</span>
+                      )}
+                    </span>
+                    <span className="flex items-center gap-1 flex-shrink-0">
+                      {w.is_active && (
+                        <Badge
+                          color="bg-accent-cyan/15 text-accent-cyan"
+                          text="active"
+                          title="Active — cannot delete"
+                        />
+                      )}
+                      {w.is_stale && (
+                        <Badge color="bg-status-warning/15 text-status-warning" text="stale" />
+                      )}
+                    </span>
+                  </label>
+                  {/* Per-row open-in-explorer. Outside the inner `<label>`
+                      so clicking it doesn't toggle the row's checkbox —
+                      the label-vs-button DOM split isolates the click
+                      target (regression-tested). */}
+                  <button
+                    type="button"
+                    onClick={() => openInExplorer(w.path)}
+                    // Full path, not `name` — two worktrees in different
+                    // repos with the same directory name would sound
+                    // identical to a screen-reader user otherwise.
+                    aria-label={`Open ${w.path} in file explorer`}
+                    title="Open in file explorer"
+                    data-testid={`worktree-open-${key}`}
+                    className="p-1 rounded text-text-muted opacity-0 group-hover:opacity-100 hover:!opacity-100 hover:text-accent-cyan hover:bg-bg-card transition-opacity flex-shrink-0"
+                  >
+                    <FolderOpenIcon className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               );
             })}
           </div>

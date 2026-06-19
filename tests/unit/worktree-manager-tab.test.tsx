@@ -573,4 +573,74 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     const detached = screen.getByLabelText(/Detached/i) as HTMLInputElement;
     expect(detached.checked).toBe(false);
   });
+
+  // ── Open-in-file-explorer (regression for the lost affordance) ─────
+  // The 🌳 tab used to host an open-in-OS-file-manager action per
+  // worktree row in the legacy MeshPropertiesPanel; the lift to Probe
+  // (#377) kept the path text but dropped the icon button. The new
+  // tests pin both the repo-path button and the per-worktree button
+  // so the affordance can't be silently lost again.
+
+  it('renders a repo-path open-in-explorer button that calls open_in_file_manager with the repo path', async () => {
+    mockBackend();
+    await openWorktreesTab();
+
+    // Wait for the prune list to render before asserting on the button —
+    // the repo path appears only after `get_git_prune_info` resolves.
+    await screen.findByText('main');
+
+    const repoButton = screen.getByTestId('repo-open-/repos/demo');
+    // The button must render an SVG icon (Lucide folder-open) — pin
+    // that an `<svg>` lives inside the button so the glyph can't be
+    // silently replaced with text/emoji.
+    expect(repoButton.querySelector('svg')).toBeTruthy();
+
+    fireEvent.click(repoButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('open_in_file_manager', {
+        path: '/repos/demo',
+      });
+    });
+  });
+
+  it('renders a per-worktree open-in-explorer button that calls open_in_file_manager with that worktree path', async () => {
+    mockBackend();
+    await openWorktreesTab();
+
+    // Wait for the prune list to render. `orphan` is the worktree
+    // directory name (`/repos/demo/.worktrees/orphan`).
+    await screen.findByText('orphan');
+
+    const orphanButton = screen.getByTestId('worktree-open-w:/repos/demo/.worktrees/orphan');
+    expect(orphanButton.querySelector('svg')).toBeTruthy();
+
+    fireEvent.click(orphanButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('open_in_file_manager', {
+        path: '/repos/demo/.worktrees/orphan',
+      });
+    });
+  });
+
+  it('clicking a per-worktree open-in-explorer button does NOT toggle the row checkbox', async () => {
+    // The whole row used to be a <label> wrapping the checkbox — adding
+    // a button inside that label would have re-toggled the checkbox on
+    // every Explorer click. Pin that the structural fix (button outside
+    // the label) actually isolates the click target: a per-worktree
+    // open click leaves the selection set empty.
+    mockBackend();
+    await openWorktreesTab();
+    await screen.findByText('orphan');
+
+    const orphanButton = screen.getByTestId('worktree-open-w:/repos/demo/.worktrees/orphan');
+    fireEvent.click(orphanButton);
+
+    // Delete Selected is disabled iff no rows are selected — the
+    // clearest cross-test pin for "the click did NOT toggle the
+    // checkbox on the orphan row".
+    const deleteBtn = screen.getByRole('button', { name: /Delete Selected/i });
+    expect((deleteBtn as HTMLButtonElement).disabled).toBe(true);
+  });
 });
