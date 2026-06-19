@@ -20,6 +20,9 @@
 #[cfg(target_os = "windows")]
 pub mod appcontainer;
 
+#[cfg(target_os = "windows")]
+pub mod conpty;
+
 /// The single policy seam: should this spawn be sandboxed?
 ///
 /// Sandboxing is Windows-only for now (macOS Seatbelt is the #497 sibling) and

@@ -25,6 +25,10 @@ notify = "8"
 difference-rs = "3.2"
 syntect = "5"
 portable-pty = "0.8"
+# Needed to implement portable-pty's `MasterPty` trait, whose methods return
+# `anyhow::Error` (already in the dep tree via portable-pty); used by the
+# Windows AppContainer ConPTY spawn (sandbox::conpty, #498).
+anyhow = "1"
 git2 = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

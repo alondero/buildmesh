@@ -19,27 +19,31 @@
 
 use std::os::raw::c_void;
 
+/// A Windows `PSID`.
+pub type Psid = *mut c_void;
+
+/// `SID_AND_ATTRIBUTES` — one capability granted to the container.
+#[repr(C)]
+pub struct SidAndAttributes {
+    pub sid: Psid,
+    pub attributes: u32,
+}
+
+/// `SECURITY_CAPABILITIES` — passed as the
+/// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` value at `CreateProcess`. Held
+/// by the consumer (`sandbox::conpty`) only for the duration of that call; its
+/// pointers borrow from the owning [`AppContainerProfile`].
+#[repr(C)]
+pub struct SecurityCapabilities {
+    pub app_container_sid: Psid,
+    pub capabilities: *const SidAndAttributes,
+    pub capability_count: u32,
+    pub reserved: u32,
+}
+
 mod ffi {
+    use super::{Psid, SidAndAttributes};
     use std::os::raw::c_void;
-
-    pub type Psid = *mut c_void;
-
-    /// `SID_AND_ATTRIBUTES` — one capability granted to the container.
-    #[repr(C)]
-    pub struct SidAndAttributes {
-        pub sid: Psid,
-        pub attributes: u32,
-    }
-
-    /// `SECURITY_CAPABILITIES` — passed as the
-    /// `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES` value at `CreateProcess`.
-    #[repr(C)]
-    pub struct SecurityCapabilities {
-        pub app_container_sid: Psid,
-        pub capabilities: *const SidAndAttributes,
-        pub capability_count: u32,
-        pub reserved: u32,
-    }
 
     /// `SE_GROUP_ENABLED` — a capability must be enabled to take effect.
     pub const SE_GROUP_ENABLED: u32 = 0x0000_0004;
@@ -60,7 +64,7 @@ mod ffi {
             capabilities: *const SidAndAttributes,
             capability_count: u32,
             sid: *mut Psid,
-        ) -> i32; // HRESULT
+        ) -> i32; // HRESULT (uses the hoisted super:: types)
         pub fn DeriveAppContainerSidFromAppContainerName(
             app_container_name: *const u16,
             sid: *mut Psid,
@@ -100,11 +104,11 @@ fn to_wide(s: &str) -> Vec<u16> {
 /// re-spawn reuses the same profile rather than leaking a new one each time.
 pub struct AppContainerProfile {
     name: Vec<u16>,
-    sid: ffi::Psid,
+    sid: Psid,
     /// Capability SIDs, kept alive (and freed on drop) because `capabilities`
     /// holds raw pointers into them.
-    capability_sids: Vec<ffi::Psid>,
-    capabilities: Vec<ffi::SidAndAttributes>,
+    capability_sids: Vec<Psid>,
+    capabilities: Vec<SidAndAttributes>,
 }
 
 // The raw SID pointers are owned by this struct and only handed out as short-
@@ -124,13 +128,13 @@ impl AppContainerProfile {
 
         // Build capabilities first so their SIDs outlive the array that points
         // at them (both stored in the returned struct).
-        let mut capability_sids: Vec<ffi::Psid> = Vec::new();
+        let mut capability_sids: Vec<Psid> = Vec::new();
         if with_internet {
             capability_sids.push(convert_string_sid(INTERNET_CLIENT_SID)?);
         }
-        let capabilities: Vec<ffi::SidAndAttributes> = capability_sids
+        let capabilities: Vec<SidAndAttributes> = capability_sids
             .iter()
-            .map(|&sid| ffi::SidAndAttributes {
+            .map(|&sid| SidAndAttributes {
                 sid,
                 attributes: ffi::SE_GROUP_ENABLED,
             })
@@ -147,7 +151,7 @@ impl AppContainerProfile {
         // SAFETY: name/display/desc are null-terminated wide strings that
         // outlive the call; `sid` is written only on success and freed on drop.
         let sid = unsafe {
-            let mut sid: ffi::Psid = std::ptr::null_mut();
+            let mut sid: Psid = std::ptr::null_mut();
             let hr = ffi::CreateAppContainerProfile(
                 wname.as_ptr(),
                 display.as_ptr(),
@@ -181,8 +185,8 @@ impl AppContainerProfile {
     /// The `SECURITY_CAPABILITIES` to attach to a `STARTUPINFOEX` attribute list
     /// at `CreateProcess` time. The returned struct borrows raw pointers from
     /// `self`, so `self` must outlive the `CreateProcess` call.
-    pub fn security_capabilities(&self) -> ffi::SecurityCapabilities {
-        ffi::SecurityCapabilities {
+    pub fn security_capabilities(&self) -> SecurityCapabilities {
+        SecurityCapabilities {
             app_container_sid: self.sid,
             capabilities: if self.capabilities.is_empty() {
                 std::ptr::null()
@@ -196,7 +200,7 @@ impl AppContainerProfile {
 
     /// The container's SID, for ACL grants (a later slice grants the worktree
     /// dir to this SID).
-    pub fn app_container_sid(&self) -> ffi::Psid {
+    pub fn app_container_sid(&self) -> Psid {
         self.sid
     }
 
@@ -227,12 +231,12 @@ impl Drop for AppContainerProfile {
     }
 }
 
-fn convert_string_sid(s: &str) -> Result<ffi::Psid, String> {
+fn convert_string_sid(s: &str) -> Result<Psid, String> {
     let wide = to_wide(s);
     // SAFETY: `wide` is a null-terminated wide string; `sid` is written only on
     // a non-zero (success) return and freed by the owner with LocalFree.
     unsafe {
-        let mut sid: ffi::Psid = std::ptr::null_mut();
+        let mut sid: Psid = std::ptr::null_mut();
         if ffi::ConvertStringSidToSidW(wide.as_ptr(), &mut sid) == 0 {
             return Err(format!("ConvertStringSidToSidW failed for {}", s));
         }
@@ -240,7 +244,7 @@ fn convert_string_sid(s: &str) -> Result<ffi::Psid, String> {
     }
 }
 
-fn free_capability_sids(sids: &[ffi::Psid]) {
+fn free_capability_sids(sids: &[Psid]) {
     for &sid in sids {
         if !sid.is_null() {
             // SAFETY: each came from ConvertStringSidToSidW, freed once.
