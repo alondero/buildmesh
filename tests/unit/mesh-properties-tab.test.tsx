@@ -92,7 +92,13 @@ function mockBackend() {
         });
       case 'update_mesh_column':
       case 'update_mesh_sandbox':
+      case 'delete_mesh':
         return Promise.resolve();
+      case 'list_meshes':
+        // `useMeshStore.deleteMesh` refetches the mesh list after deletion.
+        // The default branch returns a list-shaped value so the .map() in
+        // `fetchMeshes` doesn't blow up when the refetch runs.
+        return Promise.resolve([]);
       case 'git_sync':
       case 'get_git_branch_status':
         return Promise.resolve({});
@@ -158,8 +164,9 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // The standalone sections from the legacy drawer.
     expect(screen.queryByText(/Branches & Worktrees/i)).toBeNull();
     expect(screen.queryByText('Uncommitted Changes')).toBeNull();
-    // The legacy drawer's footer.
-    expect(screen.queryByText(/Delete Mesh/i)).toBeNull();
+    // The Delete Mesh button IS supposed to come back (it lived on the
+    // legacy drawer's footer) — the new tab inherits the destructive
+    // operation. See the `Delete Mesh button` describe block below.
   });
 
   it('preloads the mesh config (Name, Model, Build/Run) from the backend', async () => {
@@ -398,5 +405,91 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // The Probe's "No project selected" empty state, not the form.
     expect(screen.getByText('No project selected')).toBeTruthy();
     expect(screen.queryByLabelText('Name')).toBeNull();
+  });
+});
+
+// Delete Mesh — restored from the legacy `MeshPropertiesPanel` (deleted in #380).
+// The footer button lived outside the form scroll-area, so the new tab renders
+// it INSIDE the form for layout simplicity (the probe is a vertical column,
+// not a fixed-height drawer). The destructive operation + confirmation dialog
+// + probe-close behaviour are ported verbatim from the legacy handleDelete.
+describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => {
+  it('renders a Delete Mesh button at the bottom of the form', async () => {
+    await openPropertiesTab();
+
+    // Only the trigger button is in the DOM at this point (no dialog yet).
+    const button = await screen.findByRole('button', { name: /delete mesh/i });
+    expect(button).toBeTruthy();
+  });
+
+  it('opens a confirmation dialog when the Delete Mesh button is clicked', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const trigger = await screen.findByRole('button', { name: /delete mesh/i });
+    await user.click(trigger);
+
+    // The dialog's unique confirmation copy — the trigger button never has
+    // this text, so this matcher is unambiguous.
+    expect(
+      await screen.findByText(/all its agent nodes/i)
+    ).toBeTruthy();
+    // The dialog heading is an <h2>; the trigger is a <button>, so this
+    // assertion also distinguishes the two "Delete Mesh" text nodes.
+    expect(
+      screen.getByRole('heading', { name: 'Delete Mesh' })
+    ).toBeTruthy();
+    // Two actions: Cancel + the destructive confirm (label "Delete", not
+    // "Delete Mesh" — that's only the trigger).
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeTruthy();
+    expect(
+      screen.getByRole('button', { name: 'Delete', exact: true })
+    ).toBeTruthy();
+  });
+
+  it('cancels without deleting when Cancel is pressed', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const trigger = await screen.findByRole('button', { name: /delete mesh/i });
+    await user.click(trigger);
+    await screen.findByText(/all its agent nodes/i);
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByText(/all its agent nodes/i)).toBeNull();
+    });
+    // The trigger is still in the DOM (no destructive call happened).
+    expect(
+      screen.getByRole('button', { name: /delete mesh/i })
+    ).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith('delete_mesh', expect.anything());
+  });
+
+  it('confirms: calls delete_mesh via the store, refetches, and closes the probe', async () => {
+    const user = userEvent.setup();
+    // `openPropertiesTab()` opens the probe by clicking the activity bar
+    // (handleTabClick toggles probeOpen false→true on a non-active tab).
+    await openPropertiesTab();
+    expect(useUIStore.getState().probeOpen).toBe(true);
+
+    const trigger = await screen.findByRole('button', { name: /delete mesh/i });
+    await user.click(trigger);
+    await screen.findByText(/all its agent nodes/i);
+
+    await user.click(
+      screen.getByRole('button', { name: 'Delete', exact: true })
+    );
+
+    // The store's `deleteMesh` calls `delete_mesh` and then `list_meshes`
+    // (to refresh the sidebar). We assert the destructive IPC fired with
+    // the right mesh id — that's the user-visible contract.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('delete_mesh', { meshId: 42 });
+    });
+    // Legacy parity: closing the drawer after delete. The probe is the
+    // drawer now, so `toggleProbe()` flips probeOpen to false.
+    expect(useUIStore.getState().probeOpen).toBe(false);
   });
 });
