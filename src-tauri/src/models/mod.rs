@@ -208,17 +208,20 @@ pub struct Mesh {
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
     pub base_ref: String, // default "origin/main"
-    /// Run this mesh's agent nodes inside an OS process sandbox (Windows
-    /// AppContainer #498 / macOS Seatbelt #497). Persisted as
-    /// `meshes.use_sandbox INTEGER NOT NULL DEFAULT 0`. Defaults `false`
-    /// until the native sandbox spawn path lands and is validated.
-    pub use_sandbox: bool,
     /// Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
     /// tab. Owned by Buildmesh only — never written to disk, never visible
     /// to agents. Persisted as `meshes.scratchpad TEXT NOT NULL DEFAULT ''`
     /// (schema v17) and read back as the raw `String`. Empty string is a
     /// normal, non-error state ("no notes yet").
     pub scratchpad: String,
+    /// OS-level agent process sandbox toggle. When `true`, agent PTY
+    /// processes spawned in this mesh are confined to the node's Git
+    /// worktree — macOS Seatbelt (`sandbox-exec`, #497) and Windows
+    /// AppContainer (#498) each read this flag and apply their own
+    /// confinement policy. Off by default (`false`); ignored on hosts
+    /// where neither native spawn is built. Persisted as
+    /// `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
+    pub sandbox: bool,
 }
 
 /// An agent node — isolated agent working directory.
@@ -488,8 +491,10 @@ pub struct MeshRow {
     pub use_worktree: bool,
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
-    /// Run this mesh's agent nodes inside an OS process sandbox (#498/#497).
-    pub use_sandbox: bool,
+    /// OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer
+    /// #498) — see [`Mesh::sandbox`]. The column is one; the OS-specific
+    /// spawn policy is decided at `spawn_environment::wrap` time.
+    pub sandbox: bool,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -504,7 +509,7 @@ impl From<&Mesh> for MeshRow {
             use_worktree: mesh.use_worktree,
             worktree_mode: mesh.worktree_mode.clone(),
             default_provider: mesh.default_provider.clone(),
-            use_sandbox: mesh.use_sandbox,
+            sandbox: mesh.sandbox,
         }
     }
 }
@@ -584,7 +589,7 @@ mod tests {
             default_provider: None,
             base_ref: "origin/main".to_string(),
             scratchpad: String::new(),
-            use_sandbox: false,
+            sandbox: true,
         }
     }
 
@@ -601,7 +606,7 @@ mod tests {
         assert!(!cfg.use_worktree);
         assert_eq!(cfg.worktree_mode.as_deref(), Some("branched"));
         assert_eq!(cfg.default_provider, None);
-        assert!(!cfg.use_sandbox);
+        assert!(cfg.sandbox, "sandbox toggle must map through MeshRow::from");
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! On Windows, agent processes can be confined to a restricted
 //! [`AppContainer`](appcontainer) so a rogue or prompt-injected agent cannot
 //! read host files outside its worktree, write the registry, or run arbitrary
-//! system tools. The per-mesh `use_sandbox` flag (Phase 1) opts in; this module
-//! is the execution side.
+//! system tools. The per-mesh `sandbox` flag (Phase 1, GH #498/#497) opts in;
+//! this module is the execution side.
 //!
 //! Layout mirrors the macOS Seatbelt sibling (#497):
 //!   * [`sandbox_enabled`] — the single policy seam that decides, for one
@@ -32,11 +32,11 @@ pub mod spawn;
 /// The single policy seam: should this spawn be sandboxed?
 ///
 /// Sandboxing is Windows-only for now (macOS Seatbelt is the #497 sibling) and
-/// strictly opt-in via the mesh's `use_sandbox` flag. Keeping the decision in
-/// one function means the per-node override (a later slice) extends exactly one
+/// strictly opt-in via the mesh's `sandbox` flag. Keeping the decision in one
+/// function means the per-node override (a later slice) extends exactly one
 /// call site rather than scattering `cfg!` checks through the spawn path.
-pub fn sandbox_enabled(mesh_use_sandbox: bool) -> bool {
-    cfg!(target_os = "windows") && mesh_use_sandbox
+pub fn sandbox_enabled(mesh_sandbox: bool) -> bool {
+    cfg!(target_os = "windows") && mesh_sandbox
 }
 
 #[cfg(test)]

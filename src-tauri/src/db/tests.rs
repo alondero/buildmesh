@@ -124,6 +124,45 @@ fn test_v8_to_v9_adds_source_issue_via_safety_net() {
     crate::db::ensure_agent_node_source_issue(&conn).unwrap();
 }
 
+/// Regression guard for the v18 sandbox column (issue #497): a pre-v18 `meshes`
+/// table (no `sandbox` column) must gain it via the safety net, and a second
+/// call must be a no-op. Mirrors the scratchpad (v17) safety-net test — the
+/// same migration-gate-skipped bug class that bit `source_issue`.
+#[test]
+fn test_ensure_mesh_sandbox_adds_column_and_is_idempotent() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE meshes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );",
+    )
+    .unwrap();
+
+    let present = |c: &rusqlite::Connection| -> bool {
+        c.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'sandbox'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    assert!(!present(&conn), "sandbox must be missing before the safety net runs");
+    crate::db::ensure_mesh_sandbox(&conn).unwrap();
+    assert!(present(&conn), "sandbox must exist after the safety net runs");
+    // Idempotent: a second call must not error.
+    crate::db::ensure_mesh_sandbox(&conn).unwrap();
+    // Default must be 0 (off) — the feature is opt-in.
+    conn.execute("INSERT INTO meshes (name, path) VALUES ('m', '/tmp/m')", []).unwrap();
+    let sandbox: i32 = conn
+        .query_row("SELECT sandbox FROM meshes WHERE name = 'm'", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(sandbox, 0, "sandbox must default to 0 (off)");
+}
+
 // --- Pending worktree removal queue ---
 
 /// In-memory schema with just the two tables the close path touches.

@@ -34,6 +34,10 @@ _Avoid_: File tree panel, sidebar drawer
 The Git reference a new Agent Node's worktree is created from (default `origin/main`). Configured per Mesh; surfaced in the UI as "Fresh" (the Base Ref) vs "Head" (the Mesh's current checkout).
 _Avoid_: Base branch, starting point, source branch
 
+**Sandbox**:
+A per-Mesh toggle (off by default) that confines an Agent Node's execution process to its Node Working Directory, denying the agent access to the rest of the machine — notably the home folder's credential stores (`~/.ssh`, `~/.aws`). On macOS this is realised with Seatbelt (`sandbox-exec` + a generated `.sb` profile, issue #497); the Windows equivalent (AppContainer) is tracked separately. SSH agent forwarding (the `SSH_AUTH_SOCK` socket, not the private key) is granted into the sandbox so Git fetch/push still authenticate. Stored on the `meshes` row and read at spawn; ignored on hosts without a sandbox backend.
+_Avoid_: jail, container (it is not a container), isolation mode
+
 **Changed Files Section**:
 A distinct view in the File Explorer Panel listing modified files with their addition/deletion line counts.
 _Avoid_: Modified files list

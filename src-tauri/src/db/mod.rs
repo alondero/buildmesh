@@ -13,7 +13,7 @@ mod mesh_tests;
 mod scratchpad_tests;
 
 #[cfg(test)]
-mod use_sandbox_tests;
+mod sandbox_tests;
 
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
@@ -26,7 +26,7 @@ use crate::models::*;
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version
-const SCHEMA_VERSION: i32 = 17;
+const SCHEMA_VERSION: i32 = 18;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -102,7 +102,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
-    ensure_mesh_use_sandbox(&conn)?;
+ensure_mesh_sandbox(&conn)?;
     // Data migration (#495): rehash any coordinator token a pre-hashing build
     // left as cleartext. Idempotent, so it's safe to run on every init.
     ensure_coordinator_tokens_hashed(&conn)?;
@@ -420,18 +420,16 @@ pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
-/// Safety net (GH #498): ensure the `use_sandbox` column exists on `meshes`.
-/// Added for the per-mesh "run agents in an OS sandbox" toggle (Windows
-/// AppContainer #498 / macOS Seatbelt #497 share this column).
+/// Safety net (v18): ensure the `sandbox` column exists on `meshes`.
+/// Added for the OS-level sandbox toggle — per-mesh default for whether agent
+/// PTY processes are confined (Windows AppContainer #498, macOS Seatbelt #497).
 ///
-/// Defaults to `0` (sandbox off): the native sandbox spawn path lands in a
-/// later slice, and flipping existing meshes into a deny-by-default container
-/// the instant they upgrade would be a surprising behaviour change. The
-/// default is revisited (toward on) once the native path is built and
-/// validated. Pre-existing rows therefore read back `false`.
-pub(crate) fn ensure_mesh_use_sandbox(conn: &Connection) -> SqlResult<()> {
-    if ensure_column(conn, "meshes", "use_sandbox", "INTEGER NOT NULL DEFAULT 0")? {
-        tracing::warn!("ensure_mesh_use_sandbox: added missing use_sandbox column");
+/// Off by default (`0`): the macOS Seatbelt path ships first (#497), the
+/// Windows AppContainer path follows (#498). Pre-v18 rows and hosts where the
+/// native spawn is not built simply read `false`. No backfill needed.
+pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "meshes", "sandbox", "INTEGER NOT NULL DEFAULT 0")? {
+        tracing::warn!("ensure_mesh_sandbox: added missing sandbox column");
     }
     Ok(())
 }
@@ -737,6 +735,33 @@ pub fn set_coordinator_api_enabled_inner(conn: &Connection, enabled: bool) -> Sq
     Ok(())
 }
 
+/// Whether the embedded HTTP/WS server may bind beyond loopback (issue #496).
+/// Off by default: a fresh install binds only `127.0.0.1`/`::1`, so external
+/// devices on the LAN cannot reach the hub without an explicit opt-in. Enabling
+/// it is what lets a phone connect over LAN/VPN (TLS for that path is a later
+/// slice). The secure default is enforced by `http::start_http_server` reading
+/// this before choosing its bind addresses. The settings toggle that writes
+/// this flag arrives with the LAN-exposure UI slice (PRD #494).
+const LAN_EXPOSURE_ENABLED_KEY: &str = "lan_exposure_enabled";
+
+/// Is LAN/VPN exposure enabled? Defaults to `false` (loopback-only) so a naive
+/// setup is never reachable from another machine.
+pub fn lan_exposure_enabled() -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    lan_exposure_enabled_inner(&db)
+}
+
+pub fn lan_exposure_enabled_inner(conn: &Connection) -> SqlResult<bool> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![LAN_EXPOSURE_ENABLED_KEY],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(value.as_deref() == Some("1"))
+}
+
 /// Mint (or replace) the read-scoped coordinator token, returning it. Minting a
 /// fresh token invalidates any previously issued one.
 pub fn generate_coordinator_read_token() -> SqlResult<String> {
@@ -966,7 +991,7 @@ const MESH_COLUMNS: &str =
      COALESCE(model, ''), COALESCE(effort, ''), \
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
      COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
-     scratchpad, COALESCE(use_sandbox, 0)";
+     scratchpad, COALESCE(sandbox, 0)";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -989,7 +1014,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         default_provider: parse_str(row.get::<_, String>(12)?),
         base_ref: row.get::<_, String>(13)?,
         scratchpad: row.get(14)?,
-        use_sandbox: row.get::<_, i32>(15)? != 0,
+        sandbox: row.get::<_, i32>(15)? != 0,
     })
 }
 
@@ -1204,22 +1229,24 @@ pub(crate) fn set_mesh_scratchpad_inner(
     Ok(())
 }
 
-/// Set a mesh's `use_sandbox` flag. A write matching zero rows is an error so
+/// Set a mesh's `sandbox` flag. A write matching zero rows is an error so
 /// a save that fires after the mesh was deleted doesn't silently report
-/// success — same contract as `set_mesh_scratchpad`.
-pub fn set_mesh_use_sandbox(id: i64, use_sandbox: bool) -> SqlResult<()> {
+/// success — same contract as `set_mesh_scratchpad`. Shared by the macOS
+/// Seatbelt (#497) and Windows AppContainer (#498) toggles: the column is
+/// one, the consumer OS-sandbox policy is decided at spawn time.
+pub fn set_mesh_sandbox(id: i64, sandbox: bool) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    set_mesh_use_sandbox_inner(&db, id, use_sandbox)
+    set_mesh_sandbox_inner(&db, id, sandbox)
 }
 
-pub(crate) fn set_mesh_use_sandbox_inner(
+pub(crate) fn set_mesh_sandbox_inner(
     conn: &Connection,
     id: i64,
-    use_sandbox: bool,
+    sandbox: bool,
 ) -> SqlResult<()> {
     let rows = conn.execute(
-        "UPDATE meshes SET use_sandbox = ?1 WHERE id = ?2",
-        params![use_sandbox as i32, id],
+        "UPDATE meshes SET sandbox = ?1 WHERE id = ?2",
+        params![sandbox as i32, id],
     )?;
     if rows == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);

@@ -176,6 +176,7 @@ fn normalize_prefill_newlines(text: &str) -> String {
 }
 
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
+#[allow(clippy::too_many_arguments)]
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
     provider_enum: Provider,
@@ -184,6 +185,7 @@ pub fn build_spawn_command(
     model_override: Option<&str>,
     effort_override: Option<&str>,
     prefill: Option<&str>,
+    sandbox: bool,
 ) -> CommandBuilder {
     let adapter = provider_enum.adapter();
     let platform = Platform::current();
@@ -244,7 +246,7 @@ pub fn build_spawn_command(
     }
 
     let mut cmd =
-        spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id);
+        spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
     if let Some(text) = prefill_via_env {
         cmd.env(PREFILL_ENV_VAR, text);
     }
@@ -586,9 +588,12 @@ pub async fn spawn_agent_inner(
     // 5. Read mesh row for use_worktree / model / effort / worktree_mode
     let row = env::mesh_row(&std::path::PathBuf::from(&node.path));
     let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
-    let use_sandbox = row.as_ref().map(|r| r.use_sandbox).unwrap_or(false);
     let model_override = row.as_ref().and_then(|r| r.model.as_deref());
     let effort_override = row.as_ref().and_then(|r| r.effort.as_deref());
+    // OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer #498).
+    // Off by default; the per-OS spawn policy is decided in `spawn_environment::wrap`
+    // and `crate::sandbox::spawn::spawn_sandboxed`.
+    let sandbox = row.as_ref().map(|r| r.sandbox).unwrap_or(false);
     let worktree_mode = row
         .as_ref()
         .and_then(|r| r.worktree_mode.as_deref())
@@ -900,6 +905,7 @@ pub async fn spawn_agent_inner(
         model_override,
         effort_override,
         prefill.as_deref(),
+        sandbox,
     );
 
     let emit_provider_error = |e: &String| {
@@ -916,7 +922,7 @@ pub async fn spawn_agent_inner(
     let (child, master): (
         Box<dyn portable_pty::Child + Send + Sync>,
         Box<dyn portable_pty::MasterPty + Send>,
-    ) = if crate::sandbox::sandbox_enabled(use_sandbox) {
+    ) = if crate::sandbox::sandbox_enabled(sandbox) {
         tracing::info!("spawn_agent_inner: spawning session {} inside AppContainer sandbox", session_id);
         sandbox_spawn(&cmd, session_id, &resolved.host_path, rows, cols)
             .inspect_err(|e| emit_provider_error(e))?

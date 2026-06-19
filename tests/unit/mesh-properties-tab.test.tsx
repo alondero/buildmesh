@@ -38,7 +38,7 @@ const MESH: Mesh = {
   default_provider: null,
   base_ref: 'origin/main',
   scratchpad: '',
-  use_sandbox: false,
+  sandbox: false,
 };
 
 const MESH_CONFIG = {
@@ -51,7 +51,7 @@ const MESH_CONFIG = {
   use_worktree: true,
   worktree_mode: 'branched',
   default_provider: 'anthropic',
-  use_sandbox: false,
+  sandbox: true,
 };
 
 /**
@@ -91,7 +91,7 @@ function mockBackend() {
           authenticated: false,
         });
       case 'update_mesh_column':
-      case 'update_mesh_use_sandbox':
+      case 'update_mesh_sandbox':
         return Promise.resolve();
       case 'git_sync':
       case 'get_git_branch_status':
@@ -330,6 +330,10 @@ describe('MeshPropertiesTab (issue #375)', () => {
     });
   });
 
+=======
+// OS-level sandbox toggle (macOS Seatbelt #497 / Windows AppContainer #498).
+  // The DB column is `sandbox` and is OS-agnostic at this layer; the OS-
+  // specific spawn policy is decided at `spawn_environment::wrap`.
   it('renders the Sandbox toggle as an editable checkbox (#498)', async () => {
     await openPropertiesTab();
     const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
@@ -337,10 +341,10 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(sandbox.disabled).toBe(false);
   });
 
-  it('preloads the saved use_sandbox state into the checkbox', async () => {
+  it('preloads the saved sandbox state into the checkbox', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_mesh_properties') {
-        return Promise.resolve({ ...MESH_CONFIG, use_sandbox: true });
+        return Promise.resolve({ ...MESH_CONFIG, sandbox: true });
       }
       if (cmd === 'list_providers') return Promise.resolve([]);
       if (cmd === 'detect_mesh_project')
@@ -360,18 +364,18 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(sandbox.checked).toBe(true);
   });
 
-  it('saves the Sandbox toggle on change via update_mesh_use_sandbox', async () => {
+  it('saves the Sandbox toggle on change via update_mesh_sandbox', async () => {
     const user = userEvent.setup();
     await openPropertiesTab();
 
     const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
-    expect(sandbox.checked).toBe(false);
+    expect(sandbox.checked).toBe(true);
     await user.click(sandbox);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_use_sandbox', {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_sandbox', {
         meshId: 42,
-        useSandbox: true,
+        sandbox: false,
       });
     });
   });

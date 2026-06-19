@@ -52,6 +52,7 @@ function makeMesh(id: number, name: string): Mesh {
     default_provider: null,
     base_ref: 'origin/main',
     scratchpad: '',
+    sandbox: false,
   };
 }
 

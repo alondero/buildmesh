@@ -67,7 +67,7 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
     // the `windows_shell` branch on Windows; on Unix that branch falls through
     // to a direct spawn of the binary, which is what we want for `/bin/sh`.
     let cwd = std::env::current_dir().unwrap();
-    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, &cwd.to_string_lossy(), session_id);
+    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, &cwd.to_string_lossy(), session_id, false);
 
     // Stage markers (visible with --nocapture) so a hang in the ConPTY stack
     // points at the exact call rather than reading as a silent stall.
@@ -283,6 +283,7 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
         EnvType::Windows,
         &cwd.to_string_lossy(),
         session_id,
+        false,
     );
 
     let pair = open_pty_pair(24, 80).expect("open pty pair");
@@ -368,6 +369,7 @@ fn windows_kill_session_closes_master() {
         EnvType::Windows,
         &cwd.to_string_lossy(),
         session_id,
+        false,
     );
 
     let pair = open_pty_pair(24, 80).expect("open pty pair");
@@ -475,6 +477,7 @@ fn windows_natural_child_exit_unblocks_reader_via_watcher() {
         EnvType::Windows,
         &cwd.to_string_lossy(),
         session_id,
+        false,
     );
 
     let pair = open_pty_pair(24, 80).expect("open pty pair");
