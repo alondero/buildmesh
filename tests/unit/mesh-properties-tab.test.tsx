@@ -38,6 +38,7 @@ const MESH: Mesh = {
   default_provider: null,
   base_ref: 'origin/main',
   scratchpad: '',
+  use_sandbox: false,
 };
 
 const MESH_CONFIG = {
@@ -50,6 +51,7 @@ const MESH_CONFIG = {
   use_worktree: true,
   worktree_mode: 'branched',
   default_provider: 'anthropic',
+  use_sandbox: false,
 };
 
 /**
@@ -89,6 +91,7 @@ function mockBackend() {
           authenticated: false,
         });
       case 'update_mesh_column':
+      case 'update_mesh_use_sandbox':
         return Promise.resolve();
       case 'git_sync':
       case 'get_git_branch_status':
@@ -324,6 +327,52 @@ describe('MeshPropertiesTab (issue #375)', () => {
       const columns = calls.map(([, args]) => (args as { column: string }).column);
       expect(columns).toContain('build_command');
       expect(columns).toContain('run_command');
+    });
+  });
+
+  it('renders the Sandbox toggle as an editable checkbox (#498)', async () => {
+    await openPropertiesTab();
+    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
+    expect(sandbox.type).toBe('checkbox');
+    expect(sandbox.disabled).toBe(false);
+  });
+
+  it('preloads the saved use_sandbox state into the checkbox', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_properties') {
+        return Promise.resolve({ ...MESH_CONFIG, use_sandbox: true });
+      }
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      if (cmd === 'detect_mesh_project')
+        return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context')
+        return Promise.resolve({
+          claude_md_exists: false,
+          agents_md_exists: false,
+          skills_dir_exists: false,
+          skill_count: 0,
+          agents_skills_exists: false,
+        });
+      return Promise.resolve({});
+    });
+    await openPropertiesTab();
+    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
+    expect(sandbox.checked).toBe(true);
+  });
+
+  it('saves the Sandbox toggle on change via update_mesh_use_sandbox', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
+    expect(sandbox.checked).toBe(false);
+    await user.click(sandbox);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_use_sandbox', {
+        meshId: 42,
+        useSandbox: true,
+      });
     });
   });
 

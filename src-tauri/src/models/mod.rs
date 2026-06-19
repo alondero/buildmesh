@@ -208,6 +208,11 @@ pub struct Mesh {
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
     pub base_ref: String, // default "origin/main"
+    /// Run this mesh's agent nodes inside an OS process sandbox (Windows
+    /// AppContainer #498 / macOS Seatbelt #497). Persisted as
+    /// `meshes.use_sandbox INTEGER NOT NULL DEFAULT 0`. Defaults `false`
+    /// until the native sandbox spawn path lands and is validated.
+    pub use_sandbox: bool,
     /// Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
     /// tab. Owned by Buildmesh only — never written to disk, never visible
     /// to agents. Persisted as `meshes.scratchpad TEXT NOT NULL DEFAULT ''`
@@ -483,6 +488,8 @@ pub struct MeshRow {
     pub use_worktree: bool,
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
+    /// Run this mesh's agent nodes inside an OS process sandbox (#498/#497).
+    pub use_sandbox: bool,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -497,6 +504,7 @@ impl From<&Mesh> for MeshRow {
             use_worktree: mesh.use_worktree,
             worktree_mode: mesh.worktree_mode.clone(),
             default_provider: mesh.default_provider.clone(),
+            use_sandbox: mesh.use_sandbox,
         }
     }
 }
@@ -576,6 +584,7 @@ mod tests {
             default_provider: None,
             base_ref: "origin/main".to_string(),
             scratchpad: String::new(),
+            use_sandbox: false,
         }
     }
 
@@ -592,6 +601,7 @@ mod tests {
         assert!(!cfg.use_worktree);
         assert_eq!(cfg.worktree_mode.as_deref(), Some("branched"));
         assert_eq!(cfg.default_provider, None);
+        assert!(!cfg.use_sandbox);
     }
 
     #[test]

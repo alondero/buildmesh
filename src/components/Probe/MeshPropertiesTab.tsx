@@ -35,6 +35,7 @@ import {
   getMeshProperties,
   listProviders,
   updateMeshColumn,
+  updateMeshUseSandbox,
   type ProviderInfo,
 } from '../../lib/tauri';
 import {
@@ -67,6 +68,7 @@ export function MeshPropertiesTab() {
     buildCommand: '',
     runCommand: '',
     defaultProvider: '',
+    useSandbox: false,
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
@@ -155,6 +157,7 @@ export function MeshPropertiesTab() {
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
           defaultProvider: config.default_provider ?? '',
+          useSandbox: config.use_sandbox,
         });
         setLoading(false);
       })
@@ -207,6 +210,11 @@ export function MeshPropertiesTab() {
   const saveDefaultProvider = async (value: string) => {
     if (activeMeshId === null) return;
     await updateMeshColumn(activeMeshId, 'default_provider', value);
+  };
+
+  const saveUseSandbox = async (value: boolean) => {
+    if (activeMeshId === null) return;
+    await updateMeshUseSandbox(activeMeshId, value);
   };
 
   const applyPreset = async (preset: ProjectPreset) => {
@@ -327,6 +335,33 @@ export function MeshPropertiesTab() {
               ))}
             </select>
           </Field>
+
+          {/* Sandbox toggle (#498 Windows AppContainer / #497 macOS Seatbelt).
+              Default-on lands once the native spawn path is validated; until
+              then this persists the per-mesh preference. */}
+          <div>
+            <label
+              htmlFor="mesh-prop-sandbox"
+              className="flex items-center gap-2 text-xs text-text-muted cursor-pointer"
+            >
+              <input
+                id="mesh-prop-sandbox"
+                type="checkbox"
+                checked={form.useSandbox}
+                onChange={async (e) => {
+                  const next = e.target.checked;
+                  setForm((p) => ({ ...p, useSandbox: next }));
+                  await saveUseSandbox(next);
+                }}
+                className="accent-accent-cyan"
+              />
+              <span className="text-text-primary">Sandbox agent processes</span>
+            </label>
+            <p className="mt-1 text-xs text-text-muted/70">
+              Run this mesh's agents inside an OS process sandbox, confining
+              filesystem access to the node's worktree.
+            </p>
+          </div>
 
           <Field label="Project preset" htmlFor="mesh-prop-preset">
             <select

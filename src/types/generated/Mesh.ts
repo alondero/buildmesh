@@ -9,6 +9,13 @@
  */
 export type Mesh = { id: number, name: string, path: string, layout: string, position: number, created_at: string, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, base_ref: string, 
 /**
+ * Run this mesh's agent nodes inside an OS process sandbox (Windows
+ * AppContainer #498 / macOS Seatbelt #497). Persisted as
+ * `meshes.use_sandbox INTEGER NOT NULL DEFAULT 0`. Defaults `false`
+ * until the native sandbox spawn path lands and is validated.
+ */
+use_sandbox: boolean, 
+/**
  * Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
  * tab. Owned by Buildmesh only — never written to disk, never visible
  * to agents. Persisted as `meshes.scratchpad TEXT NOT NULL DEFAULT ''`

@@ -189,6 +189,12 @@ export const updateMeshColumn = (
 export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
   _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
 
+/** Toggle whether this mesh's agent nodes run inside an OS process sandbox
+ *  (Windows AppContainer #498 / macOS Seatbelt #497). Dedicated command (typed
+ *  bool + zero-rows-is-an-error contract), like `updateMeshUseWorktree`. */
+export const updateMeshUseSandbox = (meshId: number, useSandbox: boolean) =>
+  _invoke<void>('update_mesh_use_sandbox', { meshId, useSandbox });
+
 export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
   _invoke<void>('update_worktree_base_ref', { meshId, baseRef });
 

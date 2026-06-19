@@ -24,4 +24,8 @@
  *
  * Generated to src/types/generated/MeshRow.ts (issue #404 / issue #474).
  */
-export type MeshRow = { name: string | null, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, base_ref: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, };
+export type MeshRow = { name: string | null, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, base_ref: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, 
+/**
+ * Run this mesh's agent nodes inside an OS process sandbox (#498/#497).
+ */
+use_sandbox: boolean, };

@@ -12,6 +12,9 @@ mod mesh_tests;
 #[cfg(test)]
 mod scratchpad_tests;
 
+#[cfg(test)]
+mod use_sandbox_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -99,6 +102,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
+    ensure_mesh_use_sandbox(&conn)?;
     // Data migration (#495): rehash any coordinator token a pre-hashing build
     // left as cleartext. Idempotent, so it's safe to run on every init.
     ensure_coordinator_tokens_hashed(&conn)?;
@@ -412,6 +416,22 @@ fn ensure_mesh_columns(conn: &Connection) -> SqlResult<()> {
 pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "meshes", "scratchpad", "TEXT NOT NULL DEFAULT ''")? {
         tracing::warn!("ensure_mesh_scratchpad: added missing scratchpad column");
+    }
+    Ok(())
+}
+
+/// Safety net (GH #498): ensure the `use_sandbox` column exists on `meshes`.
+/// Added for the per-mesh "run agents in an OS sandbox" toggle (Windows
+/// AppContainer #498 / macOS Seatbelt #497 share this column).
+///
+/// Defaults to `0` (sandbox off): the native sandbox spawn path lands in a
+/// later slice, and flipping existing meshes into a deny-by-default container
+/// the instant they upgrade would be a surprising behaviour change. The
+/// default is revisited (toward on) once the native path is built and
+/// validated. Pre-existing rows therefore read back `false`.
+pub(crate) fn ensure_mesh_use_sandbox(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "meshes", "use_sandbox", "INTEGER NOT NULL DEFAULT 0")? {
+        tracing::warn!("ensure_mesh_use_sandbox: added missing use_sandbox column");
     }
     Ok(())
 }
@@ -946,7 +966,7 @@ const MESH_COLUMNS: &str =
      COALESCE(model, ''), COALESCE(effort, ''), \
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
      COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
-     scratchpad";
+     scratchpad, COALESCE(use_sandbox, 0)";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -969,6 +989,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         default_provider: parse_str(row.get::<_, String>(12)?),
         base_ref: row.get::<_, String>(13)?,
         scratchpad: row.get(14)?,
+        use_sandbox: row.get::<_, i32>(15)? != 0,
     })
 }
 
@@ -1176,6 +1197,29 @@ pub(crate) fn set_mesh_scratchpad_inner(
     let rows = conn.execute(
         "UPDATE meshes SET scratchpad = ?1 WHERE id = ?2",
         params![content, id],
+    )?;
+    if rows == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+/// Set a mesh's `use_sandbox` flag. A write matching zero rows is an error so
+/// a save that fires after the mesh was deleted doesn't silently report
+/// success — same contract as `set_mesh_scratchpad`.
+pub fn set_mesh_use_sandbox(id: i64, use_sandbox: bool) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    set_mesh_use_sandbox_inner(&db, id, use_sandbox)
+}
+
+pub(crate) fn set_mesh_use_sandbox_inner(
+    conn: &Connection,
+    id: i64,
+    use_sandbox: bool,
+) -> SqlResult<()> {
+    let rows = conn.execute(
+        "UPDATE meshes SET use_sandbox = ?1 WHERE id = ?2",
+        params![use_sandbox as i32, id],
     )?;
     if rows == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);
