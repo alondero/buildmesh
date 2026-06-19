@@ -69,6 +69,10 @@ _Avoid_: Node summary, status payload, snapshot
 The list of GitHub issue numbers an open issue declares it depends on, parsed from the issue body's `**Blocked by**` markdown section (settext or ATX heading; `None` short-circuits to an empty list; `/pull/N` references are ignored — only `/issues/N` counts). Surfaces in the Issues Probe as a flag below the Spawn button when at least one referenced blocker is still in the repo's loaded open-issues set. The flag is a warn, not a gate — the Spawn button stays enabled so a user who's intentionally unblocking something can still proceed.
 _Avoid_: depends on, dependency list, blocking issue (singular)
 
+**Sandbox** (Agent Process Sandbox):
+A per-Mesh opt-in confinement for Agent Node PTY processes, exposed as the "Sandbox agent processes" toggle in the Mesh properties. Off by default; when on, every Agent Node spawned in the Mesh runs inside an OS-level deny-by-default container keyed to that node — macOS Seatbelt (`sandbox-exec`, #497) and Windows AppContainer (#498) each implement their own backend, sharing the single `meshes.sandbox` column. The OS-specific spawn policy is decided at one seam (`sandbox::sandbox_enabled`) so the per-OS implementation is swappable; the Mesh/UI layer is OS-agnostic. Sandboxed nodes can read/write their own worktree, reach the network (`internetClient` / `sandbox.network`), and run a curated PATH; everything else — the rest of `%USERPROFILE%`, host `%TEMP%`, the registry, system tools not on the curated PATH — is denied by default. See `docs/adr/0012-windows-appcontainer-agent-sandbox.md` for the Windows half.
+_Avoid_: container (when meaning OS-level confinement), jail, restricted shell
+
 ## Relationships
 
 - A **Mesh** can have one or more **Agent Nodes**
@@ -80,6 +84,7 @@ _Avoid_: depends on, dependency list, blocking issue (singular)
 - A **Mesh** can have a **drifted root** if its root HEAD is not on the Base Ref's branch
 - A **Mesh** can be in a **base branch hostage** state when one of its worktrees holds the Base Ref's branch
 - A **Mesh** can have **unpushed commits on root** that block the recovery actions
+- A **Mesh** can opt into a **Sandbox**; when on, every Agent Node spawned in the Mesh is confined to its worktree via the OS-level backend (macOS Seatbelt, Windows AppContainer)
 
 ## Example dialogue
 
@@ -88,6 +93,9 @@ _Avoid_: depends on, dependency list, blocking issue (singular)
 
 > **Dev:** "When the Issues Probe shows a red flag under an issue's Spawn button, what does that mean?"
 > **Domain expert:** "The issue's **Blocked by** list contains at least one issue that's still open in this repo — the flag is a warn, not a gate, so Spawn still works if the user is intentionally unblocking it."
+
+> **Dev:** "What happens if I flip on 'Sandbox agent processes' on a Mesh that's already running agents?"
+> **Domain expert:** "The flag is read at spawn time, so already-running Agent Nodes are unaffected. New Spawns from this Mesh on a sandboxing-capable host (macOS Seatbelt, Windows AppContainer) will run inside an OS-level deny-by-default container; on hosts with no sandbox backend yet, the flag is a no-op."
 
 ## Flagged ambiguities
 
