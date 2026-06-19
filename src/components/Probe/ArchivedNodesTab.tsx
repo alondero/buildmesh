@@ -1,8 +1,10 @@
 /**
- * DiscoveredNodesTab — the Probe Panel's 🕒 tab body (issue #378, renamed
- * in issue #490). The panel shows "Agent Nodes" discoverable on disk for
- * the current mesh (Claude Code CLI sessions that buildmesh has not yet
- * adopted) and offers a one-click resume.
+ * ArchivedNodesTab — the Probe Panel's Archive tab body (issue #378;
+ * renamed from DiscoveredNodesTab after PR #523 set the visible label
+ * to "Archive" / tooltip "Archived Nodes"). The panel shows agent
+ * nodes discoverable on disk for the current mesh (Claude Code CLI
+ * sessions that buildmesh has not yet adopted) and offers a one-click
+ * resume.
  *
  * Thin wrapper port of the legacy `SessionBrowserModal`. The dock
  * supplies the header and close button, so this component drops the
@@ -77,7 +79,7 @@ function isResumableProvider(id: string): boolean {
   return ['anthropic', 'minimax', 'kimi'].includes(id);
 }
 
-export function DiscoveredNodesTab() {
+export function ArchivedNodesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   // `activeMeshPath` is the mesh root, NOT the focused worktree's
   // working directory — `discover_sessions` walks `.claude/projects/...`

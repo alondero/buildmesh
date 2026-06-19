@@ -1,5 +1,7 @@
 /**
- * Tests for the Session History probe tab — issue #378.
+ * Tests for the Archive probe tab (issue #378; component renamed from
+ * ArchivedNodesTab → ArchivedNodesTab after PR #523 set the visible
+ * label to "Archive").
  *
  * Pins the migration invariants:
  *   - the tab discovers sessions for the active *mesh root* path (not
@@ -17,7 +19,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
-import { DiscoveredNodesTab } from '../../src/components/Probe/DiscoveredNodesTab';
+import { ArchivedNodesTab } from '../../src/components/Probe/ArchivedNodesTab';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
@@ -96,7 +98,7 @@ function mockBackend(opts: { sessions?: DiscoveredAgentNode[]; defaultProvider?:
   });
 }
 
-describe('DiscoveredNodesTab (#378)', () => {
+describe('ArchivedNodesTab (#378)', () => {
   beforeEach(() => {
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions', activeDiffFile: null });
     useMeshStore.setState({
@@ -108,7 +110,7 @@ describe('DiscoveredNodesTab (#378)', () => {
 
   it('lists discovered sessions for the active mesh', async () => {
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     expect(await screen.findByText('Add a /v2 endpoint')).toBeTruthy();
     expect(screen.getByText('Fix the wobble')).toBeTruthy();
@@ -119,7 +121,7 @@ describe('DiscoveredNodesTab (#378)', () => {
 
   it('filters by first_message text', async () => {
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'wobble');
@@ -132,7 +134,7 @@ describe('DiscoveredNodesTab (#378)', () => {
 
   it('filters by branch name', async () => {
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'feat/v2');
@@ -145,7 +147,7 @@ describe('DiscoveredNodesTab (#378)', () => {
 
   it('filters by worktree name', async () => {
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'agent-v2');
@@ -158,14 +160,14 @@ describe('DiscoveredNodesTab (#378)', () => {
 
   it('shows a "No previous sessions found" empty state when discovery is empty', async () => {
     mockBackend({ sessions: [] });
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     expect(await screen.findByText('No previous sessions found')).toBeTruthy();
   });
 
   it('shows "No matches" when a search filters everything out', async () => {
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'definitely-not-a-match');
@@ -176,7 +178,7 @@ describe('DiscoveredNodesTab (#378)', () => {
   it('does the import → spawn sequence on the primary Resume button and hides the probe', async () => {
     mockBackend();
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions' });
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     // `findAllByText` — each session row renders its own "Resume" button.
     // This test wants the first row's primary action.
@@ -214,7 +216,7 @@ describe('DiscoveredNodesTab (#378)', () => {
     // The session without a branch (`s-abc-2`) exercises the
     // `session.branch || 'main'` fallback at the import call site.
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     // `s-abc-1` is the first item; click the second Resume to hit the
     // fallback path.
@@ -232,7 +234,7 @@ describe('DiscoveredNodesTab (#378)', () => {
 
   it('uses the explicit provider from the `▾` picker for the resume', async () => {
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     // Open the picker for the first session via the "Choose provider"
     // title (stable selector on the caret half of the split button).
@@ -254,7 +256,7 @@ describe('DiscoveredNodesTab (#378)', () => {
     // opencode can't read session transcripts from disk and therefore
     // would corrupt a resume if surfaced.
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
@@ -277,7 +279,7 @@ describe('DiscoveredNodesTab (#378)', () => {
     // a picker option, the option button is still in the document when
     // the click handler runs.
     mockBackend();
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
@@ -302,7 +304,7 @@ describe('DiscoveredNodesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       return Promise.resolve({});
     });
-    render(<DiscoveredNodesTab />);
+    render(<ArchivedNodesTab />);
 
     expect(await screen.findByText('Failed to discover sessions')).toBeTruthy();
     expect(screen.getByText('claude dir not found')).toBeTruthy();

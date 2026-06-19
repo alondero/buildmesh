@@ -12,7 +12,7 @@ const TerminalScreen = lazy(() => import("./screens/TerminalScreen"));
 const ChangesScreen = lazy(() => import("./screens/ChangesScreen"));
 const DiffScreen = lazy(() => import("./screens/DiffScreen"));
 const CreatePrSheet = lazy(() => import("./screens/CreatePrSheet"));
-const DiscoveredNodesScreen = lazy(() => import("./screens/DiscoveredNodesScreen"));
+const ArchivedNodesScreen = lazy(() => import("./screens/ArchivedNodesScreen"));
 const IssuesScreen = lazy(() => import("./screens/IssuesScreen"));
 
 export type Screen =
@@ -198,7 +198,7 @@ export default function App() {
       )}
       {screen.kind === "sessions" && (
         <Suspense fallback={<ScreenLoading />}>
-          <DiscoveredNodesScreen
+          <ArchivedNodesScreen
             mesh={screen.mesh}
             onBack={goBack}
             onResumed={(node) => setScreen({ kind: "terminal", node })}

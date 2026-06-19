@@ -27,7 +27,7 @@ import { MeshPropertiesTab } from './MeshPropertiesTab';
 import { WorktreeManagerTab } from './WorktreeManagerTab';
 import { GitIssuesTab } from './GitIssuesTab';
 import { GitPullRequestsTab } from './GitPullRequestsTab';
-import { DiscoveredNodesTab } from './DiscoveredNodesTab';
+import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ScratchpadTab } from './ScratchpadTab';
 
 interface ProbeTabDef {
@@ -219,7 +219,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'worktrees') return <WorktreeManagerTab />;
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'pulls') return <GitPullRequestsTab />;
-  if (tab === 'sessions') return <DiscoveredNodesTab />;
+  if (tab === 'sessions') return <ArchivedNodesTab />;
   if (tab === 'scratchpad') return <ScratchpadTab />;
 
   return <ProbeTabPlaceholder tab={tab} />;

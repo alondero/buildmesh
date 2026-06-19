@@ -245,7 +245,7 @@ describe('ProbePanel', () => {
   });
 
   it('renders the Session History tab body (issue #378) when the 🕒 tab is open', async () => {
-    // Issue #378 — the 🕒 tab hosts the new `<DiscoveredNodesTab>`
+    // Issue #378 — the 🕒 tab hosts the new `<ArchivedNodesTab>`
     // (ported from `SessionBrowserModal`). The "Scanning sessions…"
     // canary is enough to prove the tab mounted before the mocked
     // `discover_agent_nodes` resolves.

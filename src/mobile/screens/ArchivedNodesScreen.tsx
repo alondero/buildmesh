@@ -22,7 +22,7 @@ export function sortAgentNodes(nodes: DiscoveredAgentNode[]): DiscoveredAgentNod
   );
 }
 
-export default function DiscoveredNodesScreen({ mesh, onBack, onResumed }: Props) {
+export default function ArchivedNodesScreen({ mesh, onBack, onResumed }: Props) {
   const [nodes, setNodes] = useState<DiscoveredAgentNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
