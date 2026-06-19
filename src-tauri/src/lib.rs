@@ -14,6 +14,7 @@ mod node_turn;
 mod preferences;
 pub mod process_util;
 mod pty;
+pub mod sandbox;
 mod services;
 mod session_capture;
 mod session_naming;
