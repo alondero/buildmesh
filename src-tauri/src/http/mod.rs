@@ -10,7 +10,7 @@ pub mod routes;
 pub mod ws;
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
@@ -125,7 +125,7 @@ pub fn start_http_server(app: tauri::AppHandle, port_offset: u16) {
         let start = HTTP_PORT_START + port_offset;
         let end = HTTP_PORT_END + port_offset;
 
-        // Secure default (issue #496): bind loopback only. Exposing
+        // Secure default (issue #496 / ADR-0012): bind loopback only. Exposing
         // the server to the LAN is an explicit opt-in stored in the DB; until
         // then external machines cannot reach the hub.
         let lan_enabled = crate::db::lan_exposure_enabled().unwrap_or(false);
@@ -276,6 +276,39 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The host's own interface IPs, enumerated once and cached. Consulted only to
+/// validate a non-loopback `Host` (an opt-in LAN client) — loopback and
+/// `localhost` short-circuit in `host_header_allowed`, so the common path never
+/// pays the enumeration, which can stall for seconds behind a VPN/Docker stack
+/// on Windows.
+static LOCAL_IPS: OnceLock<Vec<IpAddr>> = OnceLock::new();
+
+fn local_interface_ips() -> &'static [IpAddr] {
+    LOCAL_IPS.get_or_init(|| match local_ip_address::list_afinet_netifas() {
+        Ok(ifaces) => ifaces.into_iter().map(|(_, ip)| ip).collect(),
+        Err(e) => {
+            tracing::warn!("Host-header validation: interface enumeration failed: {}", e);
+            Vec::new()
+        }
+    })
+}
+
+/// Validate a request's `Host` header against this machine's identities to
+/// defeat DNS rebinding (ADR-0012). The fast path — `localhost` or any loopback
+/// IP — never enumerates interfaces; only a non-loopback IP `Host` (an opt-in
+/// LAN client) consults the cached interface list.
+fn host_header_allowed(host_header: &str) -> bool {
+    let hostname = request::strip_host_port(host_header.trim());
+    if hostname.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match hostname.parse::<IpAddr>() {
+        Ok(ip) if ip.is_loopback() => true,
+        Ok(_) => request::host_is_allowed(host_header, local_interface_ips()),
+        Err(_) => false,
+    }
+}
+
 async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     let mut lines = tokio::io::BufStream::new(stream);
     let mut request_line = String::new();
@@ -306,15 +339,12 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         }
     }
 
-    // DNS-rebinding guard (issue #496): every request (including the WebSocket
-    // upgrades below) must carry a `Host` that targets this machine. A rogue
-    // browser page can re-resolve its domain to loopback but cannot forge
-    // `Host`, so an unmatched value is rejected before any routing. The server
-    // binds loopback only by default, so loopback/localhost are the only valid
-    // targets; the LAN interface-IP whitelist arrives with the LAN-exposure
-    // slice (which will pass the host's adapter IPs here instead of `&[]`).
+    // DNS-rebinding guard (issue #496 / ADR-0012): every request — including the
+    // WebSocket upgrades below — must carry a `Host` that targets this machine.
+    // A rogue browser page can re-resolve its domain to loopback but cannot forge
+    // `Host`, so an unmatched value is rejected before any routing.
     let host = request::extract_header_value(&headers, "Host").unwrap_or("");
-    if !request::host_is_allowed(host, &[]) {
+    if !host_header_allowed(host) {
         let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
         return;
     }
@@ -467,7 +497,9 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     }
 
     // Attention webhook: POST /api/attention/{session_id}
-    // Called by Claude Code's Stop hook — no token required (localhost-only).
+    // Called by Claude Code's Stop hook — no token required, so the handler
+    // verifies the peer is loopback (issue #496) and rejects external callers
+    // with 403 before publishing the Node Turn.
     if method == "POST" && path_without_query.starts_with("/api/attention/") {
         routes::attention::handle_post(&mut lines, &path_without_query, addr).await;
         return;

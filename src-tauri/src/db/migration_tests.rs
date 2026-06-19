@@ -433,27 +433,21 @@ mod tests {
     }
 
     /// LAN exposure (issue #496) must default OFF so a fresh install binds only
-    /// loopback, and must reflect the stored flag once the (future) settings
-    /// toggle writes it.
+    /// loopback, and must round-trip once flipped on/off.
     #[test]
-    fn lan_exposure_defaults_off_and_reads_stored_flag() {
+    fn lan_exposure_defaults_off_and_round_trips() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         ).unwrap();
 
-        // Unset key -> loopback-only default.
+        // Unset key → loopback-only default.
         assert!(!crate::db::lan_exposure_enabled_inner(&conn).unwrap());
 
-        let store = |v: &str| conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('lan_exposure_enabled', ?1)",
-            [v],
-        ).unwrap();
-
-        store("1");
+        crate::db::set_lan_exposure_enabled_inner(&conn, true).unwrap();
         assert!(crate::db::lan_exposure_enabled_inner(&conn).unwrap());
 
-        store("0");
+        crate::db::set_lan_exposure_enabled_inner(&conn, false).unwrap();
         assert!(!crate::db::lan_exposure_enabled_inner(&conn).unwrap());
     }
 }
