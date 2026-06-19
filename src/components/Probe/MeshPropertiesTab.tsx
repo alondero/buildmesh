@@ -436,29 +436,6 @@ sandbox: config.sandbox,
               className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
-
-          {/* macOS Seatbelt sandbox toggle (issue #497). The wrapping-label
-              pattern lets getByLabelText resolve the checkbox in tests. Off by
-              default; macOS-only at runtime (Windows/WSL store but ignore it). */}
-          <div>
-            <label className="flex items-center gap-2 text-sm text-text-primary cursor-pointer">
-              <input
-                type="checkbox"
-                checked={form.sandbox}
-                onChange={(e) => void saveSandbox(e.target.checked)}
-                className="accent-accent-cyan"
-              />
-              <span>
-                Sandbox agent processes
-                <span className="text-text-muted/60"> (macOS only)</span>
-              </span>
-            </label>
-            <p className="mt-1 text-xs text-text-muted">
-              Confines agents to this mesh's worktree via macOS Seatbelt, denying
-              access to your home folder (<code>~/.ssh</code>, <code>~/.aws</code>,
-              …). SSH agent forwarding keeps Git push/fetch working.
-            </p>
-          </div>
         </>
       )}
     </div>
