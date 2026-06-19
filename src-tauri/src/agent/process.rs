@@ -188,6 +188,13 @@ impl AgentProcessRegistry {
                 join_with_timeout(handle, std::time::Duration::from_secs(2));
             }
         }
+
+        // Sandbox cleanup (issue #498): delete the node's AppContainer profile
+        // and revoke its worktree/toolchain ACE grants. No-op for unsandboxed
+        // sessions. Runs after the process tree is dead so nothing in the
+        // container is still using the granted directories.
+        #[cfg(target_os = "windows")]
+        crate::sandbox::spawn::cleanup(session_id);
     }
 }
 

@@ -68,7 +68,7 @@ export function MeshPropertiesTab() {
     buildCommand: '',
     runCommand: '',
     defaultProvider: '',
-    sandbox: false,
+sandbox: false,
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
@@ -157,7 +157,7 @@ export function MeshPropertiesTab() {
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
           defaultProvider: config.default_provider ?? '',
-          sandbox: config.sandbox,
+sandbox: config.sandbox,
         });
         setLoading(false);
       })
