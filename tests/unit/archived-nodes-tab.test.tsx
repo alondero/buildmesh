@@ -23,7 +23,7 @@ import { ArchivedNodesTab } from '../../src/components/Probe/ArchivedNodesTab';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
-import type { DiscoveredAgentNode } from '../../src/lib/tauri';
+import type { ArchivedAgentNode } from '../../src/lib/tauri';
 
 const MESH: Mesh = {
   id: 42,
@@ -36,7 +36,7 @@ const MESH: Mesh = {
   sandbox: false,
 };
 
-const SESSIONS: DiscoveredAgentNode[] = [
+const SESSIONS: ArchivedAgentNode[] = [
   {
     session_id: 's-abc-1',
     first_message: 'Add a /v2 endpoint',
@@ -77,7 +77,7 @@ const RESUMED_NODE = {
   created_at: '2026-01-01',
 };
 
-function mockBackend(opts: { sessions?: DiscoveredAgentNode[]; defaultProvider?: string } = {}) {
+function mockBackend(opts: { sessions?: ArchivedAgentNode[]; defaultProvider?: string } = {}) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'discover_agent_nodes':

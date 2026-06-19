@@ -10,7 +10,7 @@ import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DiffHunk } from '../types/generated/DiffHunk';
 import type { DiffLine } from '../types/generated/DiffLine';
 import type { DiffResult } from '../types/generated/DiffResult';
-import type { DiscoveredAgentNode } from '../types/generated/DiscoveredAgentNode';
+import type { ArchivedAgentNode } from '../types/generated/ArchivedAgentNode';
 import type { FileDiff } from '../types/generated/FileDiff';
 import type { FileNode } from '../types/generated/FileNode';
 import type { FreeResult } from '../types/generated/FreeResult';
@@ -547,10 +547,10 @@ export type { ProviderInfo };
 // Agent Node Discovery — generated from the Rust struct (issue #359 + #490,
 // re-exported here per #404 so call sites that import from `../lib/tauri`
 // keep working).
-export type { DiscoveredAgentNode };
+export type { ArchivedAgentNode };
 
 export const discoverAgentNodes = (meshId: number, meshPath: string) =>
-  _invoke<DiscoveredAgentNode[]>('discover_agent_nodes', { meshId, meshPath });
+  _invoke<ArchivedAgentNode[]>('discover_agent_nodes', { meshId, meshPath });
 
 export const importDiscoveredAgentNode = (
   meshId: number,

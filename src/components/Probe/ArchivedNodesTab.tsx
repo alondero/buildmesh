@@ -46,7 +46,7 @@ import {
   discoverAgentNodes,
   importDiscoveredAgentNode,
   listProviders,
-  type DiscoveredAgentNode,
+  type ArchivedAgentNode,
 } from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -93,7 +93,7 @@ export function ArchivedNodesTab() {
   const setActiveNode = useAgentNodeStore((s) => s.setActiveNode);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
-  const [sessions, setSessions] = useState<DiscoveredAgentNode[]>([]);
+  const [sessions, setSessions] = useState<ArchivedAgentNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -153,7 +153,7 @@ export function ArchivedNodesTab() {
   // Issue #492 — shared `useClickOutside` hook.
   useClickOutside(openDropdown, () => setOpenDropdown(null));
 
-  const handleResume = async (session: DiscoveredAgentNode, providerId: string) => {
+  const handleResume = async (session: ArchivedAgentNode, providerId: string) => {
     if (activeMeshId === null || activeMeshPath === null) return;
     setResuming(session.session_id);
     setOpenDropdown(null);
@@ -186,7 +186,7 @@ export function ArchivedNodesTab() {
     }
   };
 
-  const handleDefaultResume = async (session: DiscoveredAgentNode) => {
+  const handleDefaultResume = async (session: ArchivedAgentNode) => {
     if (activeMeshId === null) return;
     const defaultProvider = await getDefaultProvider(activeMeshId);
     await handleResume(session, defaultProvider);
