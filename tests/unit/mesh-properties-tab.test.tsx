@@ -379,6 +379,17 @@ describe('MeshPropertiesTab (issue #375)', () => {
     });
   });
 
+  // Regression: the legacy #497 macOS-Seatbelt-specific toggle used to render
+  // alongside the unified #498 OS-agnostic one, both bound to `form.sandbox`.
+  // The OS-agnostic surface (canonical per ADR 0012) is the only one allowed.
+  it('renders exactly one Sandbox toggle (no duplicate #497 macOS-only block)', async () => {
+    await openPropertiesTab();
+    // Regex matches both "Sandbox agent processes" and the old
+    // "Sandbox agent processes (macOS only)" accessible names.
+    const sandboxes = await screen.findAllByLabelText(/Sandbox agent processes/);
+    expect(sandboxes).toHaveLength(1);
+  });
+
   it('renders nothing when no mesh is selected (the probe shell handles the empty state)', () => {
     useMeshStore.setState({ meshes: [], meshesById: new Map(), selectedMeshId: null });
     useUIStore.setState({ probeOpen: true, probeTab: 'properties' });
