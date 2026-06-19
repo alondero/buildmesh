@@ -68,28 +68,6 @@ pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), St
     Ok(())
 }
 
-// --- Deprecation shims (issue #490). Forward old `*_session` IPC names to the
-// new `*_node` commands. Removed in the release after next. ---
-#[command]
-#[allow(clippy::needless_pass_by_value)]
-pub async fn register_attention_session(app: AppHandle, session_id: i64) -> Result<(), String> {
-    tracing::warn!(
-        target: "ipc_deprecation",
-        "register_attention_session is deprecated; use register_attention_node"
-    );
-    register_attention_node(app, session_id).await
-}
-
-#[command]
-#[allow(clippy::needless_pass_by_value)]
-pub async fn clear_attention_session(app: AppHandle, session_id: i64) -> Result<(), String> {
-    tracing::warn!(
-        target: "ipc_deprecation",
-        "clear_attention_session is deprecated; use clear_attention_node"
-    );
-    clear_attention_node(app, session_id).await
-}
-
 /// Whether a node is currently awaiting user input. Derived from the lifecycle
 /// `status` column — the single source of truth — rather than a mirrored
 /// in-memory set. The old set desynced two ways: it was empty after an app

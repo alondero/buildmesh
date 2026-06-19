@@ -81,31 +81,6 @@ pub fn unwatch_agent_node(node_id: i64) -> Result<(), String> {
     Ok(())
 }
 
-// --- Deprecation shims (issue #490). Forward old `watch_session` /
-// `unwatch_session` IPC names to the new `*_agent_node` commands. Removed in
-// the release after next. ---
-#[command]
-#[allow(clippy::needless_pass_by_value)]
-pub fn watch_session(
-    session_id: i64,
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
-    tracing::warn!(
-        target: "ipc_deprecation",
-        "watch_session is deprecated; use watch_agent_node"
-    );
-    watch_agent_node(session_id, app_handle)
-}
-
-#[command]
-pub fn unwatch_session(session_id: i64) -> Result<(), String> {
-    tracing::warn!(
-        target: "ipc_deprecation",
-        "unwatch_session is deprecated; use unwatch_agent_node"
-    );
-    unwatch_agent_node(session_id)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::env::{node_working_path, resolve_agent_path};

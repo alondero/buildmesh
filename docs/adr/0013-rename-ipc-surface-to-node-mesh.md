@@ -47,26 +47,18 @@ The following intentionally keep the word "session" because they are either the 
 
 ## Migration strategy
 
-### Two-release deprecation window
+### Hard cutover
 
-Each renamed `#[command]` keeps a 1-line deprecation shim that forwards to the new name and logs a `tracing::warn!` with `target: "ipc_deprecation"`. The old IPC name still resolves for one release. Wire shape is byte-identical on the shim signatures (the OLD param names are preserved). The shims are removed in the release after next.
+Buildmesh is a single-user desktop app. There is no production Coordinator (Hermes) consumer, no extension/plugin surface, and no third-party wire consumer to coordinate with. Each renamed `#[command]` replaces the old one in lockstep — no shim, no alias, no warn-on-first-call log. The same goes for the HTTP route dispatcher arms in `src-tauri/src/http/mod.rs` and the `src/lib/tauri.ts` TS wrappers.
 
-For HTTP routes: `src-tauri/src/http/mod.rs` keeps both the new and old path arms for one release. The old arm logs a `tracing::warn!` with `target: "http_route_deprecation"` and forwards to the new route. The load-bearing deprecation signal is the log volume — when no external consumer (e.g. the Hermes Coordinator) is hitting the old path for an extended period, the arm can be deleted. (A `Deprecation: true` response header was considered but not wired — the `BufStream` response shape doesn't make it easy to inject a header into a route handler's `write_json` call without an additional response wrapper.)
-
-### Frontend deprecation aliases
-
-For one release, `src/lib/tauri.ts` exports both the new wrappers (`createAgentNode`, `listMeshes`, etc.) AND the old wrappers (`createSession`, `listProjects`, etc.). The old wrappers are 1-line forwarders that call the new wrapper and emit a `logFrontend('warn', '[IPC:deprecated] wrapper=<oldName> → <newName>')` exactly once per wrapper name (via a module-level `Set<string>` of warned names). The warn allows operators to grep `buildmesh.log` for `IPC:deprecated:` lines and measure migration progress.
-
-### Coordinator (Hermes) upgrade window
-
-The mobile app is built into the same Tauri binary, so the new HTTP routes ship atomically with the desktop update. The Coordinator (Hermes Agent, Nous Research) is an external consumer of the old HTTP routes. The 2-release deprecation window covers Hermes' upgrade cycle. Old path responses include the deprecation log signal so we know when the shim is dead.
+If a future deployment gains an external consumer (e.g. a hosted Coordinator service that needs to roll out on its own schedule), the migration policy is **additive**: ship a deprecation shim that forwards to the new name with a `tracing::warn!` (Rust) or `frontendLog('warn', ...)` (TS) signal. Grep `buildmesh.log` for `ipc_deprecation` / `IPC:deprecated` to measure when the shim is dead and can be removed. The pattern from the initial PR (issue #490 plan) is preserved here for reference only — the live code does not include it.
 
 ## Trade-offs considered
 
 1. **Bundle the React file renames with the IPC rename (chosen)** — the issue notes "Decision point for the planner". We chose to bundle because: (a) the codebase would otherwise sit in a mixed-vocabulary state for one release, (b) every component and prop vocabulary is downstream of the IPC surface, and (c) the React file renames are mechanically simple (`git mv` + sed).
 2. **Rename `SessionStatus` enum (rejected)** — would break the AttentionHook wire protocol with already-deployed agents. CONTEXT.md ambiguity #1 explicitly says this stays.
 3. **Rename `cli_session_id` field (rejected)** — Claude Code's external CLI contract. The column on `agent_nodes` is the user's reference back to their CLI session. Breaking it would orphan every running session.
-4. **Hard cutover with no shim (rejected)** — would break external Coordinator consumers in production. The 2-release deprecation window is the safer migration path.
+4. **Add 1-line deprecation shims for an N+1 cleanup PR (rejected for this codebase)** — for a single-user app with no external consumers, the shims are dead code that just complicates the surface. Re-evaluate if a hosted Coordinator or extension surface lands.
 5. **Manual deprecation shim on the response (rejected)** — the `BufStream` response shape would require either pre-writing the headers (which route handlers overwrite) or wrapping the response stream. The log signal is the load-bearing deprecation mechanism; a response header is nice-to-have for the next iteration.
 
 ## Acceptance criteria

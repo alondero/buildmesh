@@ -636,17 +636,6 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
     Ok(resumed)
 }
 
-// --- Deprecation shim (issue #490). Removed in the release after next. ---
-#[command]
-#[allow(clippy::needless_pass_by_value)]
-pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
-    tracing::warn!(
-        target: "ipc_deprecation",
-        "auto_resume_sessions is deprecated; use auto_resume_agent_nodes"
-    );
-    auto_resume_agent_nodes(app).await
-}
-
 // ---------------------------------------------------------------------------
 // Lifecycle commands
 // ---------------------------------------------------------------------------

@@ -55,25 +55,6 @@ import type { WorktreeCloseSafety } from './worktreeClose';
 // declaration in source order.
 const ERROR_TEXT_CAP = 200;
 
-// Set of deprecation-alias wrapper names that have already logged their
-// first-call `frontendLog` warn. The warn is emitted exactly once per
-// wrapper name to measure migration progress (issue #490): when no log
-// appears for an extended period, the alias is dead and can be removed.
-const deprecationAliasesWarned = new Set<string>();
-
-/** One-shot deprecation-warn shim for the IPC wrapper aliases below
- *  (`createSession`, `listProjects`, etc.). Logs the FIRST call to the
- *  `warn` channel via `frontendLog` so the operator can grep
- *  `buildmesh.log` for `IPC:deprecated:` lines and measure how many
- *  call sites still hit the old wrapper. Subsequent calls in the
- *  same process are silent — the alias itself stays, the warn does
- *  not. Removed in the release after next (see ADR-0013). */
-function warnDeprecatedAliasOnce(oldName: string, newName: string) {
-  if (deprecationAliasesWarned.has(oldName)) return;
-  deprecationAliasesWarned.add(oldName);
-  logFrontend('warn', `[IPC:deprecated] wrapper=${oldName} → ${newName}`);
-}
-
 async function _invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     // Only pass `args` when defined so the call shape matches the
@@ -112,8 +93,6 @@ export type FileDiffStatus =
   | 'untracked';
 
 // Agent Node — renamed from `*Session` to `*AgentNode` in issue #490.
-// The old `*Session` exports below the new ones are 1-line deprecation
-// aliases (warn-on-first-call) kept alive for one release.
 export const createAgentNode = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) =>
   _invoke<AgentNode>('create_agent_node', { meshId, name, path, branch, provider, useWorktree });
 
@@ -135,40 +114,6 @@ export const renameAgentNode = (nodeId: number, name: string) =>
 /** Persist new grid positions for a set of nodes: `[nodeId, position]` pairs. */
 export const updateAgentNodePositions = (updates: [number, number][]) =>
   _invoke('update_agent_node_positions', { updates });
-
-// --- `*Session` deprecation aliases (issue #490) ---
-// Wire shape kept byte-identical: each alias still takes the old `sessionId`
-// param name and forwards to the new wrapper. Remove in the release after
-// next (ADR-0013).
-export const createSession = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) => {
-  warnDeprecatedAliasOnce('createSession', 'createAgentNode');
-  return _invoke<AgentNode>('create_session', { meshId, name, path, branch, provider, useWorktree });
-};
-
-export const listSessions = () => {
-  warnDeprecatedAliasOnce('listSessions', 'listAgentNodes');
-  return _invoke<AgentNode[]>('list_sessions');
-};
-
-export const getSession = (sessionId: number) => {
-  warnDeprecatedAliasOnce('getSession', 'getAgentNode');
-  return _invoke<AgentNode>('get_session', { sessionId });
-};
-
-export const deleteSession = (sessionId: number, removeWorktree = false) => {
-  warnDeprecatedAliasOnce('deleteSession', 'deleteAgentNode');
-  return _invoke('delete_session', { sessionId, removeWorktree });
-};
-
-export const renameSession = (sessionId: number, name: string) => {
-  warnDeprecatedAliasOnce('renameSession', 'renameAgentNode');
-  return _invoke('rename_session', { sessionId, name });
-};
-
-export const updateSessionPositions = (updates: [number, number][]) => {
-  warnDeprecatedAliasOnce('updateSessionPositions', 'updateAgentNodePositions');
-  return _invoke('update_session_positions', { updates });
-};
 
 // Mesh — renamed from `*Project` to `*Mesh` in issue #490.
 export const addMesh = () =>
@@ -192,42 +137,6 @@ export const updateMeshLayout = (meshId: number, layout: 'grid' | 'single') =>
 /** Persist new sidebar positions for a set of meshes: `[meshId, position]` pairs. */
 export const updateMeshPositions = (updates: [number, number][]) =>
   _invoke('update_mesh_positions', { updates });
-
-// --- `*Project` deprecation aliases (issue #490) ---
-export const addProject = () => {
-  warnDeprecatedAliasOnce('addProject', 'addMesh');
-  return _invoke<Mesh>('add_project');
-};
-
-export const createProject = (name: string, path: string) => {
-  warnDeprecatedAliasOnce('createProject', 'createMesh');
-  return _invoke<Mesh>('create_project', { name, path });
-};
-
-export const createTestProject = (name: string) => {
-  warnDeprecatedAliasOnce('createTestProject', 'createTestMesh');
-  return _invoke<Mesh>('create_test_project', { name });
-};
-
-export const listProjects = () => {
-  warnDeprecatedAliasOnce('listProjects', 'listMeshes');
-  return _invoke<Mesh[]>('list_projects');
-};
-
-export const deleteProject = (projectId: number) => {
-  warnDeprecatedAliasOnce('deleteProject', 'deleteMesh');
-  return _invoke('delete_project', { projectId });
-};
-
-export const updateProjectLayout = (projectId: number, layout: 'grid' | 'single') => {
-  warnDeprecatedAliasOnce('updateProjectLayout', 'updateMeshLayout');
-  return _invoke('update_project_layout', { projectId, layout });
-};
-
-export const updateProjectPositions = (updates: [number, number][]) => {
-  warnDeprecatedAliasOnce('updateProjectPositions', 'updateMeshPositions');
-  return _invoke('update_project_positions', { updates });
-};
 
 export const updateMeshName = (meshId: number, name: string) =>
   _invoke('update_mesh_name', { meshId, name });
@@ -375,17 +284,6 @@ export const watchAgentNode = (nodeId: number) =>
 export const unwatchAgentNode = (nodeId: number) =>
   _invoke('unwatch_agent_node', { nodeId });
 
-// --- `watchSession` / `unwatchSession` deprecation aliases (issue #490) ---
-export const watchSession = (sessionId: number) => {
-  warnDeprecatedAliasOnce('watchSession', 'watchAgentNode');
-  return _invoke('watch_session', { sessionId });
-};
-
-export const unwatchSession = (sessionId: number) => {
-  warnDeprecatedAliasOnce('unwatchSession', 'unwatchAgentNode');
-  return _invoke('unwatch_session', { sessionId });
-};
-
 // File tree
 export type { FileNode };
 
@@ -479,17 +377,6 @@ export const registerAttentionNode = (nodeId: number) =>
 
 export const clearAttentionNode = (nodeId: number) =>
   _invoke('clear_attention_node', { nodeId });
-
-// --- `registerAttentionSession` / `clearAttentionSession` deprecation aliases (issue #490) ---
-export const registerAttentionSession = (sessionId: number) => {
-  warnDeprecatedAliasOnce('registerAttentionSession', 'registerAttentionNode');
-  return _invoke('register_attention_session', { sessionId });
-};
-
-export const clearAttentionSession = (sessionId: number) => {
-  warnDeprecatedAliasOnce('clearAttentionSession', 'clearAttentionNode');
-  return _invoke('clear_attention_session', { sessionId });
-};
 
 export const isAttentionPending = (nodeId: number) =>
   _invoke<boolean>('is_attention_pending', { nodeId });
@@ -677,26 +564,6 @@ export const importDiscoveredAgentNode = (
     meshId, meshPath, cliSessionId, branch, worktreeName, provider
   });
 
-// --- `discoverSessions` / `importDiscoveredSession` deprecation aliases (issue #490) ---
-export const discoverSessions = (meshId: number, meshPath: string) => {
-  warnDeprecatedAliasOnce('discoverSessions', 'discoverAgentNodes');
-  return _invoke<DiscoveredAgentNode[]>('discover_sessions', { meshId, meshPath });
-};
-
-export const importDiscoveredSession = (
-  meshId: number,
-  meshPath: string,
-  cliSessionId: string,
-  branch: string,
-  worktreeName: string | null,
-  provider?: string,
-) => {
-  warnDeprecatedAliasOnce('importDiscoveredSession', 'importDiscoveredAgentNode');
-  return _invoke<AgentNode>('import_discovered_session', {
-    meshId, meshPath, cliSessionId, branch, worktreeName, provider
-  });
-};
-
 // ── App startup ────────────────────────────────────────────────────────────
 //
 // Re-attaches the in-process PTY for every node whose previous run was
@@ -704,12 +571,6 @@ export const importDiscoveredSession = (
 // were actually resumed.
 export const autoResumeAgentNodes = () =>
   _invoke<number[]>('auto_resume_agent_nodes');
-
-// --- `autoResumeSessions` deprecation alias (issue #490) ---
-export const autoResumeSessions = () => {
-  warnDeprecatedAliasOnce('autoResumeSessions', 'autoResumeAgentNodes');
-  return _invoke<number[]>('auto_resume_sessions');
-};
 
 // ── Paths & clipboard ──────────────────────────────────────────────────────
 //

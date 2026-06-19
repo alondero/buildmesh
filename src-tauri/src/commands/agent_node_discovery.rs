@@ -56,33 +56,3 @@ pub async fn import_discovered_agent_node(
 
     db::get_agent_node_by_id(node.id).map_err(|e| e.to_string())
 }
-
-// --- Deprecation shims (issue #490). Forward old `discover_sessions` /
-// `import_discovered_session` IPC names to the new `*_agent_node` commands.
-// The OLD param names are preserved on the shim signatures so the wire shape
-// stays byte-identical for one release. Removed in the release after next. ---
-
-#[command]
-pub async fn discover_sessions(mesh_id: i64, mesh_path: String) -> Result<Vec<DiscoveredAgentNode>, String> {
-    tracing::warn!(
-        target: "ipc_deprecation",
-        "discover_sessions is deprecated; use discover_agent_nodes"
-    );
-    discover_agent_nodes(mesh_id, mesh_path).await
-}
-
-#[command]
-pub async fn import_discovered_session(
-    mesh_id: i64,
-    mesh_path: String,
-    cli_session_id: String,
-    branch: String,
-    worktree_name: Option<String>,
-    provider: Option<String>,
-) -> Result<AgentNode, String> {
-    tracing::warn!(
-        target: "ipc_deprecation",
-        "import_discovered_session is deprecated; use import_discovered_agent_node"
-    );
-    import_discovered_agent_node(mesh_id, mesh_path, cli_session_id, branch, worktree_name, provider).await
-}

@@ -132,8 +132,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             // Agent Node (issue #490: renamed from `*_session` to `*_agent_node`).
-            // Old names kept in the handler list as 1-line deprecation shims
-            // for one release — see ADR-0013.
             commands::agent_node::create_agent_node,
             commands::agent_node::list_agent_nodes,
             commands::agent_node::get_agent_node,
@@ -141,12 +139,6 @@ pub fn run() {
             commands::agent_node::get_worktree_close_safety,
             commands::agent_node::rename_agent_node,
             commands::agent_node::update_agent_node_positions,
-            commands::agent_node::create_session,
-            commands::agent_node::list_sessions,
-            commands::agent_node::get_session,
-            commands::agent_node::delete_session,
-            commands::agent_node::rename_session,
-            commands::agent_node::update_session_positions,
             // Mesh (renamed from `*_project` to `*_mesh`).
             commands::mesh::add_mesh,
             commands::mesh::create_mesh,
@@ -155,13 +147,6 @@ pub fn run() {
             commands::mesh::delete_mesh,
             commands::mesh::update_mesh_layout,
             commands::mesh::update_mesh_positions,
-            commands::mesh::add_project,
-            commands::mesh::create_project,
-            commands::mesh::create_test_project,
-            commands::mesh::list_projects,
-            commands::mesh::delete_project,
-            commands::mesh::update_project_layout,
-            commands::mesh::update_project_positions,
             commands::mesh::get_root_token,
             commands::mesh::get_local_ip,
             commands::mesh::get_default_provider,
@@ -183,7 +168,6 @@ pub fn run() {
             commands::agent::send_to_agent,
             commands::agent::write_to_agent,
             commands::agent::auto_resume_agent_nodes,
-            commands::agent::auto_resume_sessions,
             commands::agent::debug_crash_snapshot,
             commands::agent::list_providers,
             commands::agent::spawn_issue_agent,
@@ -235,11 +219,9 @@ pub fn run() {
             commands::prune::delete_branches,
             commands::prune::delete_worktrees,
             commands::prune::prune_remote_tracking,
-            // File watcher (renamed from `watch_session` / `unwatch_session`)
+            // File watcher (renamed from `watch_session` / `unwatch_session` in issue #490)
             commands::file_watcher::watch_agent_node,
             commands::file_watcher::unwatch_agent_node,
-            commands::file_watcher::watch_session,
-            commands::file_watcher::unwatch_session,
             // Clipboard (native read bypasses macOS WKWebView permission popup)
             commands::clipboard::read_clipboard,
             // Frontend log bridge
@@ -247,8 +229,6 @@ pub fn run() {
             // Attention (renamed from `*_attention_session` to `*_attention_node`)
             commands::attention::register_attention_node,
             commands::attention::clear_attention_node,
-            commands::attention::register_attention_session,
-            commands::attention::clear_attention_session,
             commands::attention::is_attention_pending,
             // PR
             commands::pr::create_pr,
@@ -270,8 +250,6 @@ pub fn run() {
             // Agent Node Discovery (renamed from `session_discovery` to `agent_node_discovery`)
             commands::agent_node_discovery::discover_agent_nodes,
             commands::agent_node_discovery::import_discovered_agent_node,
-            commands::agent_node_discovery::discover_sessions,
-            commands::agent_node_discovery::import_discovered_session,
             // Usage
             commands::usage::get_all_provider_usage,
             commands::usage::set_minimax_api_key,
