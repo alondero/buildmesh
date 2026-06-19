@@ -818,4 +818,81 @@ mod tests {
             text
         );
     }
+
+    /// Integration: a sandboxed process can read a file in a directory that was
+    /// granted to its container SID via `acl::grant_dir` — the mechanism that
+    /// confines a real agent to (but lets it use) its worktree. Without the
+    /// grant the read would be denied (proven by the Phase 0 spike); here we
+    /// prove the grant *opens* exactly that access.
+    #[test]
+    fn sandboxed_process_reads_granted_directory() {
+        use crate::sandbox::acl;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!("bm-acl-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.txt"), "GRANTED_READ_OK\n").unwrap();
+
+        let profile =
+            AppContainerProfile::create_or_derive("com.alond.buildmesh.test-acl", false)
+                .expect("create profile");
+        let sid = profile.sid_string().expect("sid string");
+        acl::grant_dir(&dir, &sid, acl::Access::Full).expect("grant dir");
+
+        let cmdline = format!(
+            "C:\\Windows\\System32\\cmd.exe /c \"type {}\\marker.txt & pause\"",
+            dir.display()
+        );
+        let (mut child, pty) =
+            spawn_in_appcontainer(&cmdline, None, &[], 24, 80, Some(&profile)).expect("spawn");
+
+        let mut reader = pty.try_clone_reader().expect("reader");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(chunk) => {
+                    out.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&out).contains("GRANTED_READ_OK") {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        child.kill().ok();
+        drop(pty);
+        let _ = child.wait();
+        reader_thread.join().ok();
+
+        acl::revoke_dir(&dir, &sid).ok();
+        profile.delete().ok();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("GRANTED_READ_OK"),
+            "sandboxed process should read the granted file, got: {:?}",
+            text
+        );
+    }
 }

@@ -261,6 +261,32 @@ pub fn spawn_child(
         .map_err(|e| format!("failed to spawn agent: {}", e))
 }
 
+/// Spawn `cmd` inside an AppContainer sandbox (issue #498). Returns the same
+/// `Child`/`MasterPty` trait objects as the normal path. Windows-only; the
+/// non-Windows stub exists only so `spawn_agent_inner` compiles cross-platform
+/// (the `sandbox_enabled` seam never selects this branch off Windows).
+#[cfg(target_os = "windows")]
+fn sandbox_spawn(
+    cmd: &CommandBuilder,
+    session_id: i64,
+    host_path: &str,
+    rows: u16,
+    cols: u16,
+) -> Result<(Box<dyn portable_pty::Child + Send + Sync>, Box<dyn portable_pty::MasterPty + Send>), String> {
+    crate::sandbox::spawn::spawn_sandboxed(cmd, session_id, host_path, rows, cols)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn sandbox_spawn(
+    _cmd: &CommandBuilder,
+    _session_id: i64,
+    _host_path: &str,
+    _rows: u16,
+    _cols: u16,
+) -> Result<(Box<dyn portable_pty::Child + Send + Sync>, Box<dyn portable_pty::MasterPty + Send>), String> {
+    Err("process sandbox is only supported on Windows".to_string())
+}
+
 /// Ensures the attention hooks exist in `{project}/.claude/settings.local.json`.
 ///
 /// Writes a catch-all `Notification` hook (fires on permission prompts, idle
@@ -560,6 +586,7 @@ pub async fn spawn_agent_inner(
     // 5. Read mesh row for use_worktree / model / effort / worktree_mode
     let row = env::mesh_row(&std::path::PathBuf::from(&node.path));
     let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
+    let use_sandbox = row.as_ref().map(|r| r.use_sandbox).unwrap_or(false);
     let model_override = row.as_ref().and_then(|r| r.model.as_deref());
     let effort_override = row.as_ref().and_then(|r| r.effort.as_deref());
     let worktree_mode = row
@@ -860,11 +887,11 @@ pub async fn spawn_agent_inner(
         }
     }
 
-    // 8. Open PTY
-    tracing::debug!("spawn_agent_inner: opening PTY system");
-    let pair = open_pty_pair(rows, cols)?;
-
-    // 9. Build and spawn command
+    // 8-9. Build the command, then spawn it — either normally (portable-pty)
+    //       or, when the mesh opts in on Windows, inside an AppContainer sandbox
+    //       (issue #498). The sandbox path owns its ConPTY spawn but returns the
+    //       same `Child`/`MasterPty` trait objects, so everything downstream
+    //       (Job Object containment, reader thread, resize, kill) is identical.
     let cmd = build_spawn_command(
         &resolved,
         provider,
@@ -875,7 +902,7 @@ pub async fn spawn_agent_inner(
         prefill.as_deref(),
     );
 
-    let child = spawn_child(&pair, cmd).inspect_err(|e| {
+    let emit_provider_error = |e: &String| {
         let _ = app.emit(
             "provider-error",
             serde_json::json!({
@@ -884,7 +911,20 @@ pub async fn spawn_agent_inner(
                 "message": e
             }),
         );
-    })?;
+    };
+
+    let (child, master): (
+        Box<dyn portable_pty::Child + Send + Sync>,
+        Box<dyn portable_pty::MasterPty + Send>,
+    ) = if crate::sandbox::sandbox_enabled(use_sandbox) {
+        tracing::info!("spawn_agent_inner: spawning session {} inside AppContainer sandbox", session_id);
+        sandbox_spawn(&cmd, session_id, &resolved.host_path, rows, cols)
+            .inspect_err(|e| emit_provider_error(e))?
+    } else {
+        let pair = open_pty_pair(rows, cols)?;
+        let child = spawn_child(&pair, cmd).inspect_err(|e| emit_provider_error(e))?;
+        (child, pair.master)
+    };
 
     tracing::info!("spawn_agent_inner: process spawned successfully");
     timer.checkpoint("after_pty_spawn");
@@ -903,9 +943,8 @@ pub async fn spawn_agent_inner(
     }
 
     // 10. Setup IO
-    let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-    let master = pair.master;
+    let reader = master.try_clone_reader().map_err(|e| e.to_string())?;
+    let writer = master.take_writer().map_err(|e| e.to_string())?;
     let reader_alive = Arc::new(AtomicBool::new(true));
 
     // 11. Inject attention hook

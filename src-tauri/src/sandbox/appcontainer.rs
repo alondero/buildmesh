@@ -77,6 +77,9 @@ mod ffi {
         /// Allocates a SID from a string form (e.g. `S-1-15-3-1`). The result is
         /// freed with `LocalFree` (NOT `FreeSid`).
         pub fn ConvertStringSidToSidW(string_sid: *const u16, sid: *mut Psid) -> i32; // BOOL
+        /// Renders a SID to its string form (`S-1-15-2-...`). The output buffer
+        /// is allocated by the call and freed with `LocalFree`.
+        pub fn ConvertSidToStringSidW(sid: Psid, string_sid: *mut *mut u16) -> i32; // BOOL
         /// Frees a SID returned by `CreateAppContainerProfile` /
         /// `DeriveAppContainerSidFromAppContainerName`.
         pub fn FreeSid(sid: Psid) -> Psid;
@@ -202,6 +205,27 @@ impl AppContainerProfile {
     /// dir to this SID).
     pub fn app_container_sid(&self) -> Psid {
         self.sid
+    }
+
+    /// The container SID in string form (`S-1-15-2-...`), for `icacls` grants.
+    pub fn sid_string(&self) -> Result<String, String> {
+        // SAFETY: `self.sid` is a live SID; the output wide string is freed with
+        // LocalFree.
+        unsafe {
+            let mut out: *mut u16 = std::ptr::null_mut();
+            if ffi::ConvertSidToStringSidW(self.sid, &mut out) == 0 || out.is_null() {
+                return Err(format!("ConvertSidToStringSidW failed: {}", std::io::Error::last_os_error()));
+            }
+            // Read the NUL-terminated wide string.
+            let mut len = 0usize;
+            while *out.add(len) != 0 {
+                len += 1;
+            }
+            let slice = std::slice::from_raw_parts(out, len);
+            let s = String::from_utf16_lossy(slice);
+            ffi::LocalFree(out as *mut c_void);
+            Ok(s)
+        }
     }
 
     /// Delete the on-disk profile. Call when the owning node is removed so
