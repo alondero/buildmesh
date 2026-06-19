@@ -10,6 +10,12 @@ import type { SessionStatus } from "./SessionStatus";
  * generated `EnvType`/`Provider`/`SessionStatus` enums. `i64` fields use
  * `#[ts(as = "i32")]` / `Option<i32>` so they emit `number` / `number | null`
  * rather than ts-rs's default `bigint`.
+ *
+ * `#[derive(Default)]` (issue #457) so test fixtures and stub-only call
+ * sites can spread `..Default::default()` instead of re-listing every field
+ * on each new column. The enum defaults match each `from_db_str` fallback
+ * (Windows / Anthropic / Idle); scalars are zero/empty/false. Future
+ * `Option<T>` columns automatically inherit `None` with no fixture edits.
  */
 export type AgentNode = { id: number, mesh_id: number, name: string, path: string, branch: string, env: EnvType, provider: Provider, status: SessionStatus, cli_session_id: string | null, worktree_name: string | null, use_worktree: boolean, source_issue: number | null, 
 /**

@@ -50,7 +50,7 @@
  * either boundary).
  */
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import {
   getRepoPulls,
   getPrMergeability,
@@ -65,6 +65,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
+import { useClickOutside } from '../../hooks/useClickOutside';
 import { useUIStore } from '../../stores/uiStore';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 import { ProbeRow } from './ProbeRow';
@@ -344,17 +345,10 @@ export function GitPullRequestsTab() {
   // container carries a `data-dropdown-for` attribute set to the PR number,
   // matching the issue-tab pattern (memory:
   // feedback-probe-tab-test-and-jsdoc-gotchas — mousedown vs click race).
-  useEffect(() => {
-    if (openDropdown === null) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(`[data-dropdown-for="${openDropdown}"]`)) {
-        setOpenDropdown(null);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [openDropdown]);
+  // Issue #492 — shared `useClickOutside` hook; the scoped selector lives
+  // in the hook so a future caller cannot reintroduce the loose-selector
+  // drift that #492 fixed in Sidebar.
+  useClickOutside(openDropdown, () => setOpenDropdown(null));
 
   // Two-stage PR spawn (issue #420, extended by #443 for fork PRs) —
   // mirrors the issue-spawn flow in `GitIssuesTab`. Stage-1

@@ -183,28 +183,17 @@ pub fn layered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{EnvType, Provider};
+    use crate::models::Provider;
 
     fn node(status: SessionStatus, provider: Provider) -> AgentNode {
+        // `spine()` only reads `id` / `name` / `status` / `provider`; the
+        // rest spread through `..Default::default()` (issue #457).
         AgentNode {
             id: 7,
-            mesh_id: 1,
             name: "fix-login".to_string(),
-            path: "/tmp/fix-login".to_string(),
-            branch: "main".to_string(),
-            env: EnvType::Windows,
             provider,
             status,
-            cli_session_id: None,
-            worktree_name: None,
-            use_worktree: true,
-            source_issue: None,
-            source_pr: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            source_pr_pinned_sha: None,
-            position: 0,
-            created_at: Utc::now(),
+            ..Default::default()
         }
     }
 
