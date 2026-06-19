@@ -212,9 +212,11 @@ export function MeshPropertiesTab() {
     await updateMeshColumn(activeMeshId, 'default_provider', value);
   };
 
-  // Sandbox toggle (issue #497). Optimistic, matching the "do not revert on
+// Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
   // failure" rule of the other binary controls — reverting a checkbox the user
-  // just clicked is more confusing than an unchanged value.
+  // just clicked is more confusing than an unchanged value. The flag is OS-
+  // agnostic at the DB/UI layer; the OS-specific spawn policy is decided in
+  // `spawn_environment::wrap` on the backend.
   const saveSandbox = async (value: boolean) => {
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, sandbox: value }));
@@ -339,6 +341,33 @@ export function MeshPropertiesTab() {
               ))}
             </select>
           </Field>
+
+          {/* Sandbox toggle (#498 Windows AppContainer / #497 macOS Seatbelt).
+              Default-on lands once the native spawn path is validated; until
+              then this persists the per-mesh preference. */}
+          <div>
+            <label
+              htmlFor="mesh-prop-sandbox"
+              className="flex items-center gap-2 text-xs text-text-muted cursor-pointer"
+            >
+              <input
+                id="mesh-prop-sandbox"
+                type="checkbox"
+                checked={form.sandbox}
+                onChange={async (e) => {
+                  const next = e.target.checked;
+                  setForm((p) => ({ ...p, sandbox: next }));
+                  await saveSandbox(next);
+                }}
+                className="accent-accent-cyan"
+              />
+              <span className="text-text-primary">Sandbox agent processes</span>
+            </label>
+            <p className="mt-1 text-xs text-text-muted/70">
+              Run this mesh's agents inside an OS process sandbox, confining
+              filesystem access to the node's worktree.
+            </p>
+          </div>
 
           <Field label="Project preset" htmlFor="mesh-prop-preset">
             <select

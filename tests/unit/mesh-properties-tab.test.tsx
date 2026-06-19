@@ -91,7 +91,6 @@ function mockBackend() {
           authenticated: false,
         });
       case 'update_mesh_column':
-        return Promise.resolve();
       case 'update_mesh_sandbox':
         return Promise.resolve();
       case 'git_sync':
@@ -331,21 +330,45 @@ describe('MeshPropertiesTab (issue #375)', () => {
     });
   });
 
-  // macOS Seatbelt sandbox toggle (issue #497).
-  it('preloads the sandbox toggle from the mesh config', async () => {
+// OS-level sandbox toggle (macOS Seatbelt #497 / Windows AppContainer #498).
+  // The DB column is `sandbox` and is OS-agnostic at this layer; the OS-
+  // specific spawn policy is decided at `spawn_environment::wrap`.
+  it('renders the Sandbox toggle as an editable checkbox (#498)', async () => {
     await openPropertiesTab();
-    const sandbox = (await screen.findByLabelText(/Sandbox agent processes/i)) as HTMLInputElement;
+    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
     expect(sandbox.type).toBe('checkbox');
-    // MESH_CONFIG.sandbox === true
+    expect(sandbox.disabled).toBe(false);
+  });
+
+  it('preloads the saved sandbox state into the checkbox', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_properties') {
+        return Promise.resolve({ ...MESH_CONFIG, sandbox: true });
+      }
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      if (cmd === 'detect_mesh_project')
+        return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context')
+        return Promise.resolve({
+          claude_md_exists: false,
+          agents_md_exists: false,
+          skills_dir_exists: false,
+          skill_count: 0,
+          agents_skills_exists: false,
+        });
+      return Promise.resolve({});
+    });
+    await openPropertiesTab();
+    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
     expect(sandbox.checked).toBe(true);
   });
 
-  it('saves the sandbox toggle on change via update_mesh_sandbox', async () => {
+  it('saves the Sandbox toggle on change via update_mesh_sandbox', async () => {
     const user = userEvent.setup();
     await openPropertiesTab();
 
-    const sandbox = (await screen.findByLabelText(/Sandbox agent processes/i)) as HTMLInputElement;
-    // Starts checked (config), so a click turns it off.
+    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
+    expect(sandbox.checked).toBe(true);
     await user.click(sandbox);
 
     await waitFor(() => {
@@ -354,7 +377,6 @@ describe('MeshPropertiesTab (issue #375)', () => {
         sandbox: false,
       });
     });
-    expect(sandbox.checked).toBe(false);
   });
 
   it('renders nothing when no mesh is selected (the probe shell handles the empty state)', () => {

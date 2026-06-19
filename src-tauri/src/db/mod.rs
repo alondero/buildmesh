@@ -12,6 +12,9 @@ mod mesh_tests;
 #[cfg(test)]
 mod scratchpad_tests;
 
+#[cfg(test)]
+mod sandbox_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -99,7 +102,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_agent_node_source_pr_pinned_sha(&conn)?;
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
-    ensure_mesh_sandbox(&conn)?;
+ensure_mesh_sandbox(&conn)?;
     // Data migration (#495): rehash any coordinator token a pre-hashing build
     // left as cleartext. Idempotent, so it's safe to run on every init.
     ensure_coordinator_tokens_hashed(&conn)?;
@@ -418,10 +421,12 @@ pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
 }
 
 /// Safety net (v18): ensure the `sandbox` column exists on `meshes`.
-/// Added for the macOS Seatbelt sandbox toggle (issue #497) — a per-mesh
-/// default for whether agent PTY processes are confined via `sandbox-exec`.
-/// Off by default (`0`): the feature is macOS-only and opt-in, so pre-v18 rows
-/// and non-macOS hosts simply read `false`. No backfill needed.
+/// Added for the OS-level sandbox toggle — per-mesh default for whether agent
+/// PTY processes are confined (Windows AppContainer #498, macOS Seatbelt #497).
+///
+/// Off by default (`0`): the macOS Seatbelt path ships first (#497), the
+/// Windows AppContainer path follows (#498). Pre-v18 rows and hosts where the
+/// native spawn is not built simply read `false`. No backfill needed.
 pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "meshes", "sandbox", "INTEGER NOT NULL DEFAULT 0")? {
         tracing::warn!("ensure_mesh_sandbox: added missing sandbox column");
@@ -1217,6 +1222,31 @@ pub(crate) fn set_mesh_scratchpad_inner(
     let rows = conn.execute(
         "UPDATE meshes SET scratchpad = ?1 WHERE id = ?2",
         params![content, id],
+    )?;
+    if rows == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+/// Set a mesh's `sandbox` flag. A write matching zero rows is an error so
+/// a save that fires after the mesh was deleted doesn't silently report
+/// success — same contract as `set_mesh_scratchpad`. Shared by the macOS
+/// Seatbelt (#497) and Windows AppContainer (#498) toggles: the column is
+/// one, the consumer OS-sandbox policy is decided at spawn time.
+pub fn set_mesh_sandbox(id: i64, sandbox: bool) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    set_mesh_sandbox_inner(&db, id, sandbox)
+}
+
+pub(crate) fn set_mesh_sandbox_inner(
+    conn: &Connection,
+    id: i64,
+    sandbox: bool,
+) -> SqlResult<()> {
+    let rows = conn.execute(
+        "UPDATE meshes SET sandbox = ?1 WHERE id = ?2",
+        params![sandbox as i32, id],
     )?;
     if rows == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);

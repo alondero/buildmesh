@@ -189,10 +189,9 @@ export const updateMeshColumn = (
 export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
   _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
 
-/** Toggle the mesh's macOS Seatbelt sandbox default (issue #497). macOS-only at
- *  runtime; on Windows/WSL the backend stores the flag but `spawn_environment`
- *  ignores it. Dedicated command because it's a boolean with no settings.json
- *  mirror — same shape as `updateMeshUseWorktree`. */
+/** Toggle whether this mesh's agent nodes run inside an OS process sandbox
+ *  (Windows AppContainer #498 / macOS Seatbelt #497). Dedicated command (typed
+ *  bool + zero-rows-is-an-error contract), like `updateMeshUseWorktree`. */
 export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
   _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
 

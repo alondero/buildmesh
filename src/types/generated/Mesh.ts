@@ -17,10 +17,12 @@ export type Mesh = { id: number, name: string, path: string, layout: string, pos
  */
 scratchpad: string, 
 /**
- * macOS-only: when `true`, agent PTY processes spawned in this mesh are
- * confined by a Seatbelt sandbox (`sandbox-exec`) that restricts read/write
- * to the node's Git worktree (issue #497). Off by default; ignored on
- * Windows/WSL (where the Windows AppContainer path is tracked separately).
- * Persisted as `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
+ * OS-level agent process sandbox toggle. When `true`, agent PTY
+ * processes spawned in this mesh are confined to the node's Git
+ * worktree — macOS Seatbelt (`sandbox-exec`, #497) and Windows
+ * AppContainer (#498) each read this flag and apply their own
+ * confinement policy. Off by default (`false`); ignored on hosts
+ * where neither native spawn is built. Persisted as
+ * `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
  */
 sandbox: boolean, };

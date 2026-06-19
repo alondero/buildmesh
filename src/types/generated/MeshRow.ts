@@ -26,6 +26,8 @@
  */
 export type MeshRow = { name: string | null, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, base_ref: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, 
 /**
- * macOS Seatbelt sandbox toggle (issue #497) — see [`Mesh::sandbox`].
+ * OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer
+ * #498) — see [`Mesh::sandbox`]. The column is one; the OS-specific
+ * spawn policy is decided at `spawn_environment::wrap` time.
  */
 sandbox: boolean, };
