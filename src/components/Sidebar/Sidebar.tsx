@@ -12,6 +12,7 @@ import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { MeshItem } from './MeshItem';
 import { colorClassForProvider, type ProviderEntry } from './ProviderDropdown';
 import { useSidebarResize } from './useSidebarResize';
+import { useClickOutside } from '../../hooks/useClickOutside';
 
 export function Sidebar() {
   const { width, isResizing, handleMouseDown } = useSidebarResize();
@@ -49,14 +50,12 @@ export function Sidebar() {
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
 
   // Close the provider dropdown when clicking outside of it.
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      const target = e.target as HTMLElement;
-      if (openDropdownFor !== null && !target.closest('[data-dropdown-for]')) setOpenDropdownFor(null);
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [openDropdownFor]);
+  // Issue #492 — migrated to the shared `useClickOutside` hook. The
+  // previous inline useEffect used a LOOSE `[data-dropdown-for]` selector
+  // (no value), which would close the wrong dropdown if a future second
+  // sidebar dropdown were added; the hook's scoped selector
+  // `[data-dropdown-for="${openDropdownFor}"]` fixes that as a side effect.
+  useClickOutside(openDropdownFor, () => setOpenDropdownFor(null));
 
   const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
   const handleToggleDropdown = (mesh: Mesh) => setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
