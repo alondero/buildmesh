@@ -45,7 +45,7 @@
  *     only handles the former.
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   getRepoIssues,
@@ -57,6 +57,7 @@ import {
 import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { useClickOutside } from '../../hooks/useClickOutside';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
 /**
@@ -174,17 +175,10 @@ export function GitIssuesTab() {
 
   // Close the provider dropdown when clicking outside of it. The dropdown
   // container carries a `data-dropdown-for` attribute set to the issue number.
-  useEffect(() => {
-    if (openDropdown === null) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(`[data-dropdown-for="${openDropdown}"]`)) {
-        setOpenDropdown(null);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [openDropdown]);
+  // Issue #492 — shared `useClickOutside` hook replaces the hand-rolled
+  // add/removeEventListener pair; the hook pins the scoped selector so a
+  // future caller can't reintroduce the loose-selector drift from Sidebar.
+  useClickOutside(openDropdown, () => setOpenDropdown(null));
 
   // Two-stage spawn: stage-1 (`create_issue_node`) is a fast DB-only
   // IPC (~20ms) that returns a `pending` node + the prefill to hand
