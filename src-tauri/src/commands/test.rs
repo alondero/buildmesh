@@ -156,19 +156,19 @@ fn process_request(request: &str, app: &AppHandle) -> String {
         tracing::debug!("[test_server] Handling: cmd={}", rpc_req.cmd);
 
         match rpc_req.cmd.as_str() {
-            "create_test_project" => handle_create_test_project(&rpc_req.args),
-            "create_session" => handle_create_session(&rpc_req.args, app.clone()),
-            "list_projects" => handle_list_projects(),
-            "list_sessions" => handle_list_sessions(),
-            "get_session" => handle_get_session(&rpc_req.args),
+            "create_test_mesh" => handle_create_test_mesh(&rpc_req.args),
+            "create_agent_node" => handle_create_agent_node(&rpc_req.args, app.clone()),
+            "list_meshes" => handle_list_meshes(),
+            "list_agent_nodes" => handle_list_agent_nodes(),
+            "get_agent_node" => handle_get_agent_node(&rpc_req.args),
             "spawn_agent" => handle_spawn_agent(&rpc_req.args, app),
             "kill_agent" => handle_kill_agent(&rpc_req.args),
-            "delete_project" => handle_delete_project(&rpc_req.args),
-            "delete_session" => handle_delete_session(&rpc_req.args),
+            "delete_mesh" => handle_delete_mesh(&rpc_req.args),
+            "delete_agent_node" => handle_delete_agent_node(&rpc_req.args),
             "get_worktree_close_safety" => handle_get_worktree_close_safety(&rpc_req.args),
-            "archive_session" => handle_archive_session(&rpc_req.args),
+            "archive_agent_node" => handle_archive_agent_node(&rpc_req.args),
             "inject_test_output" => handle_inject_test_output(&rpc_req.args, app.clone()),
-            "set_active_session" => handle_set_active_session(&rpc_req.args, app.clone()),
+            "set_active_node" => handle_set_active_node(&rpc_req.args, app.clone()),
             "get_mesh_properties" => handle_get_mesh_properties(&rpc_req.args),
             "update_mesh_column" => handle_update_mesh_column(&rpc_req.args),
             "update_worktree_base_ref" => handle_update_worktree_base_ref(&rpc_req.args),
@@ -196,10 +196,10 @@ fn process_request(request: &str, app: &AppHandle) -> String {
     }
 }
 
-fn handle_create_test_project(args: &serde_json::Value) -> String {
+fn handle_create_test_mesh(args: &serde_json::Value) -> String {
     let name = args.get("name")
         .and_then(|v| v.as_str())
-        .unwrap_or("Test Project");
+        .unwrap_or("Test Mesh");
 
     match crate::db::create_mesh(name, &std::env::temp_dir().to_string_lossy()) {
         Ok(mesh) => JsonRpcResponse::success(&mesh),
@@ -207,9 +207,9 @@ fn handle_create_test_project(args: &serde_json::Value) -> String {
     }
 }
 
-fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
-    let mesh_id = args.get("projectId").and_then(|v| v.as_i64()).unwrap_or(0);
-    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Session");
+fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String {
+    let mesh_id = args.get("meshId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("Node");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("/tmp");
     let branch = args.get("branch").and_then(|v| v.as_str()).unwrap_or("main");
 
@@ -231,52 +231,52 @@ fn handle_create_session(args: &serde_json::Value, app: AppHandle) -> String {
         None,
     ) {
         Ok(node) => {
-            // Emit event so frontend session store can refetch via invoke()
-            let _ = app.emit("session-created", serde_json::json!({ "id": node.id }));
+            // Emit event so frontend agent-node store can refetch via invoke()
+            let _ = app.emit("node-created", serde_json::json!({ "id": node.id }));
             JsonRpcResponse::success(&node)
         }
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
-fn handle_list_projects() -> String {
+fn handle_list_meshes() -> String {
     match crate::db::list_meshes() {
         Ok(meshes) => JsonRpcResponse::success(&meshes),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
-fn handle_list_sessions() -> String {
+fn handle_list_agent_nodes() -> String {
     match crate::db::list_agent_nodes() {
         Ok(nodes) => JsonRpcResponse::success(&nodes),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
-fn handle_get_session(args: &serde_json::Value) -> String {
-    let session_id = args.get("sessionId")
+fn handle_get_agent_node(args: &serde_json::Value) -> String {
+    let node_id = args.get("nodeId")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    match crate::db::get_agent_node_by_id(session_id) {
+    match crate::db::get_agent_node_by_id(node_id) {
         Ok(node) => JsonRpcResponse::success(&node),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
 fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
-    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
     let provider = args.get("provider").and_then(|v| v.as_str()).unwrap_or("anthropic").to_string();
     let resume = args.get("resume").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(String::from);
 
-    tracing::info!("[test_server] spawn_agent: spawning thread for session_id={}", session_id);
+    tracing::info!("[test_server] spawn_agent: spawning thread for node_id={}", node_id);
 
     // Spawn a dedicated thread to avoid panics corrupting the async runtime
     let app_clone = app.clone();
     let result = std::thread::spawn(move || {
         tauri::async_runtime::block_on(crate::commands::agent::spawn_agent(
             app_clone,
-            session_id,
+            node_id,
             provider,
             resume,
             None,
@@ -289,7 +289,7 @@ fn handle_spawn_agent(args: &serde_json::Value, app: &AppHandle) -> String {
     match result {
         Ok(Ok(_)) => {
             tracing::info!("[test_server] spawn_agent returning success");
-            JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id }))
+            JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id }))
         }
         Ok(Err(e)) => {
             tracing::error!("[test_server] spawn_agent error: {}", e);
@@ -321,7 +321,7 @@ fn handle_spawn_handover_agent(args: &serde_json::Value, app: AppHandle) -> Stri
 
     match result {
         Ok(Ok(node)) => {
-            let _ = app.emit("session-created", serde_json::json!({ "id": node.id }));
+            let _ = app.emit("node-created", serde_json::json!({ "id": node.id }));
             JsonRpcResponse::success(&node)
         }
         Ok(Err(e)) => {
@@ -336,12 +336,12 @@ fn handle_spawn_handover_agent(args: &serde_json::Value, app: AppHandle) -> Stri
 }
 
 fn handle_kill_agent(args: &serde_json::Value) -> String {
-    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    let result = tauri::async_runtime::block_on(crate::commands::agent::kill_agent(session_id));
+    let result = tauri::async_runtime::block_on(crate::commands::agent::kill_agent(node_id));
 
     match result {
-        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id })),
         Err(e) => JsonRpcResponse::error(&e),
     }
 }
@@ -349,78 +349,78 @@ fn handle_kill_agent(args: &serde_json::Value) -> String {
 /// Inject fake terminal output into a session for testing purposes.
 /// This bypasses the PTY and directly emits 'agent-output' events.
 fn handle_inject_test_output(args: &serde_json::Value, app: AppHandle) -> String {
-    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
     let lines = args.get("lines").and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(String::from).collect::<Vec<_>>())
         .unwrap_or_else(|| vec!["Hello from test output!\n".to_string()]);
 
-    tracing::info!("[test_server] inject_test_output: session_id={} lines={}", session_id, lines.len());
+    tracing::info!("[test_server] inject_test_output: node_id={} lines={}", node_id, lines.len());
 
     for line in &lines {
         let _ = app.emit("agent-output", serde_json::json!({
-            "session_id": session_id,
+            "node_id": node_id,
             "line": line
         }));
     }
 
     JsonRpcResponse::success(&serde_json::json!({
-        "session_id": session_id,
+        "node_id": node_id,
         "lines_injected": lines.len()
     }))
 }
 
-fn handle_delete_project(args: &serde_json::Value) -> String {
-    let project_id = args.get("projectId").and_then(|v| v.as_i64()).unwrap_or(0);
+fn handle_delete_mesh(args: &serde_json::Value) -> String {
+    let mesh_id = args.get("meshId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match crate::db::delete_mesh(project_id) {
-        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "project_id": project_id })),
+    match crate::db::delete_mesh(mesh_id) {
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
-fn handle_delete_session(args: &serde_json::Value) -> String {
-    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+fn handle_delete_agent_node(args: &serde_json::Value) -> String {
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
     let remove_worktree = args.get("removeWorktree").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    match crate::services::agent_node::delete(session_id, remove_worktree) {
+    match crate::services::agent_node::delete(node_id, remove_worktree) {
         Ok(_) => {
             // The real app drains worktree removals in the background; the test
             // server flushes synchronously so E2E sees the directory gone when
             // the call returns.
             crate::services::agent_node::process_pending_removals();
-            JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id }))
+            JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id }))
         }
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
 fn handle_get_worktree_close_safety(args: &serde_json::Value) -> String {
-    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match crate::services::agent_node::get_worktree_close_safety(session_id) {
+    match crate::services::agent_node::get_worktree_close_safety(node_id) {
         Ok(safety) => JsonRpcResponse::success(&safety),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
-fn handle_archive_session(args: &serde_json::Value) -> String {
-    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+fn handle_archive_agent_node(args: &serde_json::Value) -> String {
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match crate::db::archive_agent_node(session_id) {
-        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id })),
+    match crate::db::archive_agent_node(node_id) {
+        Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id })),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
 }
 
-fn handle_set_active_session(args: &serde_json::Value, app: AppHandle) -> String {
-    let session_id = args.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+fn handle_set_active_node(args: &serde_json::Value, app: AppHandle) -> String {
+    let node_id = args.get("nodeId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    tracing::info!("[test_server] set_active_session: session_id={}", session_id);
+    tracing::info!("[test_server] set_active_node: node_id={}", node_id);
 
-    // Emit a frontend event that the session store listens to
-    let _ = app.emit("session-activated", serde_json::json!({ "session_id": session_id }));
+    // Emit a frontend event that the agent-node store listens to
+    let _ = app.emit("node-activated", serde_json::json!({ "node_id": node_id }));
 
-    JsonRpcResponse::success(&serde_json::json!({ "session_id": session_id }))
+    JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id }))
 }
 
 fn handle_get_mesh_properties(args: &serde_json::Value) -> String {

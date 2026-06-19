@@ -12,7 +12,7 @@ const TerminalScreen = lazy(() => import("./screens/TerminalScreen"));
 const ChangesScreen = lazy(() => import("./screens/ChangesScreen"));
 const DiffScreen = lazy(() => import("./screens/DiffScreen"));
 const CreatePrSheet = lazy(() => import("./screens/CreatePrSheet"));
-const SessionsScreen = lazy(() => import("./screens/SessionsScreen"));
+const DiscoveredNodesScreen = lazy(() => import("./screens/DiscoveredNodesScreen"));
 const IssuesScreen = lazy(() => import("./screens/IssuesScreen"));
 
 export type Screen =
@@ -154,7 +154,7 @@ export default function App() {
         <NodeList
           key={listKey}
           onOpenNode={(node) => navigate({ kind: "terminal", node })}
-          onOpenSessions={(mesh) => navigate({ kind: "sessions", mesh })}
+          onOpenAgentNodes={(mesh) => navigate({ kind: "sessions", mesh })}
           onOpenIssues={(mesh) => navigate({ kind: "issues", mesh })}
           onOffline={() => setOffline(true)}
           onAuthFailed={handleAuthFailed}
@@ -198,7 +198,7 @@ export default function App() {
       )}
       {screen.kind === "sessions" && (
         <Suspense fallback={<ScreenLoading />}>
-          <SessionsScreen
+          <DiscoveredNodesScreen
             mesh={screen.mesh}
             onBack={goBack}
             onResumed={(node) => setScreen({ kind: "terminal", node })}

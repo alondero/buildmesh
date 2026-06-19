@@ -1,12 +1,12 @@
-//! Session discovery — scans Claude Code's on-disk session storage to find
-//! resumable sessions that Buildmesh may not already track.
+//! Scans Claude Code's on-disk session storage to find resumable agent nodes
+//! that Buildmesh may not already track. The Claude-Code JSONL primitives
+//! (path encoding, synthetic-injection skipping, content-text extraction) live
+//! in `transcript_reader` so this discovery scan and the coordinator's
+//! transcript reader share one source of Claude-Code-format truth
+//! (ADR-0008). A format change breaks in one place.
 
 use crate::db;
 use crate::env;
-// The Claude-Code JSONL primitives (path encoding, synthetic-injection
-// skipping, content-text extraction) live in `transcript_reader` so this
-// discovery scan and the coordinator's transcript reader share one source of
-// Claude-Code-format truth (ADR-0008). A format change breaks in one place.
 use crate::services::transcript_reader::{encode_path, first_text_block, is_synthetic_message};
 use serde::Serialize;
 use std::fs;
@@ -14,12 +14,13 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use ts_rs::TS;
 
-/// A resumable Claude-Code session found on disk. Generated to
-/// src/types/generated/DiscoveredSession.ts (issue #359) — the same struct the
-/// desktop Tauri (`discover_sessions`) and mobile HTTP routes both serialise.
+/// A resumable Claude-Code session found on disk. The desktop Tauri
+/// `discover_agent_nodes` command and the mobile HTTP route both serialise
+/// this struct. The `session_id` field is Claude Code's CLI identifier and
+/// stays as-is per CONTEXT.md ambiguity #1.
 #[derive(Debug, Clone, Serialize, TS)]
-#[ts(export, export_to = "DiscoveredSession.ts")]
-pub struct DiscoveredSession {
+#[ts(export, export_to = "DiscoveredAgentNode.ts")]
+pub struct DiscoveredAgentNode {
     pub session_id: String,
     pub first_message: String,
     pub branch: Option<String>,
@@ -113,7 +114,7 @@ fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<
 
 /// Discover Claude Code sessions on disk for the given mesh path.
 /// Returns sessions that are NOT already tracked by active/idle/suspended Buildmesh nodes.
-pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<DiscoveredSession>, String> {
+pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<DiscoveredAgentNode>, String> {
     let claude_dir = env::claude_dir();
     let projects_dir = claude_dir.join("projects");
 
@@ -131,7 +132,7 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<DiscoveredSession>,
         .filter_map(|n| n.cli_session_id)
         .collect();
 
-    let mut sessions: Vec<DiscoveredSession> = Vec::new();
+    let mut sessions: Vec<DiscoveredAgentNode> = Vec::new();
 
     let entries = fs::read_dir(&projects_dir).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
@@ -185,7 +186,7 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<DiscoveredSession>,
                         })
                 });
 
-                sessions.push(DiscoveredSession {
+                sessions.push(DiscoveredAgentNode {
                     session_id,
                     first_message,
                     branch,

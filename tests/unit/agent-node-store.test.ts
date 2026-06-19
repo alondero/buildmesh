@@ -126,8 +126,21 @@ describe('useAgentNodeStore', () => {
       await mockEmit('attention-cleared', { session_id: 10 });
       expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 10)?.status).toBe('running');
 
-      await mockEmit('session-renamed', { session_id: 10, name: 'fix-auth-flow' });
+      await mockEmit('node-renamed', { node_id: 10, name: 'fix-auth-flow' });
       expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 10)?.name).toBe('fix-auth-flow');
+
+      // `node-created` is the internal event the Rust spawn paths
+      // (`create_issue_node`, `create_pr_node`, mobile HTTP `/nodes`) emit
+      // after committing a new node row (issue #490). The store refetches
+      // the full list rather than appending — the row is already committed
+      // by the time the event fires, so a refetch is race-free.
+      const newRow = makeNode({ id: 99, name: 'spawned-node' });
+      mockInvoke.mockResolvedValueOnce([newRow]);
+      await mockEmit('node-created', { id: 99 });
+      // fetchAgentNodes is async; await the microtask + the awaited promise.
+      await new Promise((r) => setTimeout(r, 0));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 99)).toBeDefined();
 
       useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 10, status: 'running' })] });
       await mockEmit('attention-needed', { session_id: 999 });
@@ -170,14 +183,14 @@ describe('useAgentNodeStore', () => {
         env: 'windows', provider: 'anthropic', status: 'idle', created_at: '',
         use_worktree: true, position: 0,
       };
-      mockInvoke.mockResolvedValueOnce(newNode); // create_session
+      mockInvoke.mockResolvedValueOnce(newNode); // create_agent_node
 
       const result = await useAgentNodeStore.getState().selectProviderForMesh(
         7, 'mesh-7', '/p', 'anthropic', undefined,
       );
 
       expect(result.id).toBe(42);
-      expect(mockInvoke).toHaveBeenCalledWith('create_session', {
+      expect(mockInvoke).toHaveBeenCalledWith('create_agent_node', {
         meshId: 7, name: 'mesh-7', path: '/p', branch: 'main',
         provider: 'anthropic', useWorktree: undefined,
       });
@@ -186,7 +199,7 @@ describe('useAgentNodeStore', () => {
       expect(useMeshStore.getState().selectedMeshId).toBe(7);
     });
 
-    it('passes useWorktree=false through to create_session (mesh-root spawn)', async () => {
+    it('passes useWorktree=false through to create_agent_node (mesh-root spawn)', async () => {
       // Alt-click on + spawns in the mesh root: that signal must reach the
       // backend, otherwise the new node gets a worktree it shouldn't have.
       const newNode = {
@@ -198,7 +211,7 @@ describe('useAgentNodeStore', () => {
 
       await useAgentNodeStore.getState().selectProviderForMesh(7, 'm', '/p', 'anthropic', false);
 
-      expect(mockInvoke).toHaveBeenCalledWith('create_session', expect.objectContaining({
+      expect(mockInvoke).toHaveBeenCalledWith('create_agent_node', expect.objectContaining({
         useWorktree: false,
       }));
     });
@@ -209,11 +222,11 @@ describe('useAgentNodeStore', () => {
       // "mesh selected but no node exists" half-applied state called out by
       // the issue.
       useMeshStore.setState({ selectedMeshId: 99 });
-      mockInvoke.mockRejectedValueOnce(new Error('create_session failed'));
+      mockInvoke.mockRejectedValueOnce(new Error('create_agent_node failed'));
 
       await expect(
         useAgentNodeStore.getState().selectProviderForMesh(7, 'm', '/p', 'anthropic', undefined)
-      ).rejects.toThrow('create_session failed');
+      ).rejects.toThrow('create_agent_node failed');
 
       expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
       expect(useMeshStore.getState().selectedMeshId).toBe(99); // unchanged
@@ -250,10 +263,10 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().deleteAgentNode(15);
 
       expect(prompt).not.toHaveBeenCalled();
-      expect(mockInvoke).toHaveBeenCalledWith('get_worktree_close_safety', { sessionId: 15 });
+      expect(mockInvoke).toHaveBeenCalledWith('get_worktree_close_safety', { nodeId: 15 });
       expect(mockInvoke).toHaveBeenCalledWith('kill_agent', { sessionId: 15 });
-      expect(mockInvoke).toHaveBeenCalledWith('delete_session', {
-        sessionId: 15,
+      expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {
+        nodeId: 15,
         removeWorktree: true,
       });
       expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
@@ -283,8 +296,8 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().deleteAgentNode(7);
 
       expect(prompt).toHaveBeenCalledWith(node, makeSafety({ has_uncommitted: true }));
-      expect(mockInvoke).toHaveBeenCalledWith('delete_session', {
-        sessionId: 7,
+      expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {
+        nodeId: 7,
         removeWorktree: false,
       });
       expect(useAgentNodeStore.getState().agentNodes).toEqual([]);
@@ -300,8 +313,8 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().deleteAgentNode(8);
 
       expect(prompt).toHaveBeenCalledWith(node, makeSafety({ has_unpushed: true }));
-      expect(mockInvoke).toHaveBeenCalledWith('delete_session', {
-        sessionId: 8,
+      expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {
+        nodeId: 8,
         removeWorktree: true,
       });
       expect(useAgentNodeStore.getState().agentNodes).toEqual([]);
@@ -316,7 +329,7 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().deleteAgentNode(9);
 
       expect(mockInvoke).toHaveBeenCalledTimes(1);
-      expect(mockInvoke).toHaveBeenCalledWith('get_worktree_close_safety', { sessionId: 9 });
+      expect(mockInvoke).toHaveBeenCalledWith('get_worktree_close_safety', { nodeId: 9 });
       expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
       expect(useAgentNodeStore.getState().activeNodeId).toBe(9);
     });
@@ -327,13 +340,13 @@ describe('useAgentNodeStore', () => {
       const deletePending = new Promise<void>((r) => { resolveDelete = r; });
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
-        if (cmd === 'delete_session') return deletePending;
+        if (cmd === 'delete_agent_node') return deletePending;
         return Promise.resolve(undefined);
       });
 
       const closePromise = useAgentNodeStore.getState().deleteAgentNode(15);
 
-      // The node must be gone optimistically while delete_session is still pending.
+      // The node must be gone optimistically while delete_agent_node is still pending.
       await vi.waitFor(() => {
         expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
         expect(useAgentNodeStore.getState().activeNodeId).toBeNull();
@@ -355,8 +368,8 @@ describe('useAgentNodeStore', () => {
 
       // A kill_agent failure must not abandon the DB-side delete, or the node
       // would resurrect on the next fetch.
-      expect(mockInvoke).toHaveBeenCalledWith('delete_session', {
-        sessionId: 22,
+      expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {
+        nodeId: 22,
         removeWorktree: true,
       });
       expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
@@ -433,15 +446,15 @@ describe('useAgentNodeStore', () => {
 
       await useAgentNodeStore.getState().deleteAgentNode(10);
 
-      expect(mockInvoke).toHaveBeenCalledWith('delete_session', {
-        sessionId: 10,
+      expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {
+        nodeId: 10,
         removeWorktree: false,
       });
     });
   });
 
   describe('renameAgentNode', () => {
-    it('optimistically updates the name and calls rename_session', async () => {
+    it('optimistically updates the name and calls rename_agent_node', async () => {
       useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 11, name: 'bold-keen-brook' })] });
       mockInvoke.mockResolvedValueOnce(undefined);
 
@@ -450,10 +463,10 @@ describe('useAgentNodeStore', () => {
       // The store reflects the new name.
       expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 11)?.name)
         .toBe('Refactor OAuth callback');
-      // And the backend was told the same name, with the camelCase sessionId
+      // And the backend was told the same name, with the camelCase nodeId
       // convention used by every other agent-node invoke call.
-      expect(mockInvoke).toHaveBeenCalledWith('rename_session', {
-        sessionId: 11,
+      expect(mockInvoke).toHaveBeenCalledWith('rename_agent_node', {
+        nodeId: 11,
         name: 'Refactor OAuth callback',
       });
     });
@@ -505,7 +518,7 @@ describe('useAgentNodeStore', () => {
       const positions = useAgentNodeStore.getState().agentNodes.map(n => n.position);
       expect(positions).toEqual([0, 1, 2]);
       // Persists the full new ordering for the mesh.
-      expect(mockInvoke).toHaveBeenCalledWith('update_session_positions', {
+      expect(mockInvoke).toHaveBeenCalledWith('update_agent_node_positions', {
         updates: [[2, 0], [3, 1], [1, 2]],
       });
     });
@@ -534,8 +547,8 @@ describe('useAgentNodeStore', () => {
       seed();
       const serverTruth = [makeNode({ id: 1, position: 0 }), makeNode({ id: 2, position: 1 }), makeNode({ id: 3, position: 2 })];
       mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'update_session_positions') return Promise.reject(new Error('db locked'));
-        if (cmd === 'list_sessions') return Promise.resolve(serverTruth);
+        if (cmd === 'update_agent_node_positions') return Promise.reject(new Error('db locked'));
+        if (cmd === 'list_agent_nodes') return Promise.resolve(serverTruth);
         return Promise.resolve(undefined);
       });
 
@@ -544,7 +557,7 @@ describe('useAgentNodeStore', () => {
       // The optimistic move is discarded: we resync from the backend's truth
       // (the refetch clears the transient error as it reloads).
       expect(order()).toEqual([1, 2, 3]);
-      expect(mockInvoke).toHaveBeenCalledWith('list_sessions');
+      expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
     });
   });
 
@@ -562,7 +575,7 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().swapAgentNodes(1, 3);
 
       expect(useAgentNodeStore.getState().agentNodes.map(n => n.id)).toEqual([3, 2, 1]);
-      expect(mockInvoke).toHaveBeenCalledWith('update_session_positions', {
+      expect(mockInvoke).toHaveBeenCalledWith('update_agent_node_positions', {
         updates: expect.arrayContaining([[1, 2], [3, 0]]),
       });
     });

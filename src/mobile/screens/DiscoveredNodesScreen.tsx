@@ -1,9 +1,9 @@
 import { useState } from "react";
 import {
   AgentNode,
-  DiscoveredSession,
+  DiscoveredAgentNode,
   Mesh,
-  discoverSessions,
+  discoverAgentNodes,
   importAndResume,
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
@@ -15,28 +15,28 @@ type Props = {
   onResumed: (node: AgentNode) => void;
 };
 
-/// Newest activity first; sessions without a timestamp sink to the bottom.
-export function sortSessions(sessions: DiscoveredSession[]): DiscoveredSession[] {
-  return [...sessions].sort((a, b) =>
+/// Newest activity first; nodes without a timestamp sink to the bottom.
+export function sortAgentNodes(nodes: DiscoveredAgentNode[]): DiscoveredAgentNode[] {
+  return [...nodes].sort((a, b) =>
     (b.timestamp ?? "").localeCompare(a.timestamp ?? ""),
   );
 }
 
-export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
-  const [sessions, setSessions] = useState<DiscoveredSession[] | null>(null);
+export default function DiscoveredNodesScreen({ mesh, onBack, onResumed }: Props) {
+  const [nodes, setNodes] = useState<DiscoveredAgentNode[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  // Resuming imports the session and spawns a real agent — expensive enough
+  // Resuming imports the node and spawns a real agent — expensive enough
   // that a stray tap shouldn't trigger it. First tap expands the card,
   // the explicit Resume button commits.
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useAsyncEffect((signal) => {
-    discoverSessions(mesh.id)
+    discoverAgentNodes(mesh.id)
       .then((s) => {
         if (signal.aborted) return;
-        setSessions(sortSessions(s));
+        setNodes(sortAgentNodes(s));
       })
       .catch((e) => {
         if (signal.aborted) return;
@@ -44,7 +44,7 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
       });
   }, [mesh.id]);
 
-  const resume = async (s: DiscoveredSession) => {
+  const resume = async (s: DiscoveredAgentNode) => {
     setBusyId(s.session_id);
     setError(null);
     try {
@@ -57,7 +57,7 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
     }
   };
 
-  const filtered = (sessions ?? []).filter((s) => {
+  const filtered = (nodes ?? []).filter((s) => {
     if (!filter.trim()) return true;
     const q = filter.toLowerCase();
     return (
@@ -68,14 +68,14 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
   });
 
   return (
-    <div data-testid="sessions-screen" className="screen">
-      <AppBar onBack={onBack} title="Previous Sessions" subtitle={mesh.name} />
+    <div data-testid="discovered-nodes-screen" className="screen">
+      <AppBar onBack={onBack} title="Discovered Nodes" subtitle={mesh.name} />
       <div style={{ padding: 12, paddingBottom: 0 }}>
         <input
           placeholder="Search by message, branch, worktree…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          data-testid="sessions-filter"
+          data-testid="discovered-nodes-filter"
           className="field"
         />
       </div>
@@ -85,15 +85,15 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
             {error}
           </div>
         )}
-        {!error && sessions === null && (
+        {!error && nodes === null && (
           <div style={{ padding: 24, textAlign: "center" }}>
             <PulseDots />
           </div>
         )}
-        {sessions !== null && filtered.length === 0 && (
-          <CenterNote testId="sessions-empty">
-            {sessions.length === 0
-              ? "No discoverable sessions for this mesh."
+        {nodes !== null && filtered.length === 0 && (
+          <CenterNote testId="discovered-nodes-empty">
+            {nodes.length === 0
+              ? "No discoverable nodes for this mesh."
               : "No matches."}
           </CenterNote>
         )}
@@ -106,7 +106,7 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
               role="button"
               tabIndex={0}
               onClick={() => setSelectedId(open ? null : s.session_id)}
-              data-testid={`session-${s.session_id}`}
+              data-testid={`node-${s.session_id}`}
               className="card"
               style={{
                 display: "block",
@@ -153,10 +153,10 @@ export default function SessionsScreen({ mesh, onBack, onResumed }: Props) {
                     className="btn-primary"
                     style={{ width: "100%" }}
                     disabled={busyId !== null}
-                    data-testid={`session-resume-${s.session_id}`}
+                    data-testid={`node-resume-${s.session_id}`}
                     onClick={() => resume(s)}
                   >
-                    {busy ? "Resuming…" : "Resume session"}
+                    {busy ? "Resuming…" : "Resume node"}
                   </button>
                 </div>
               )}

@@ -67,13 +67,13 @@ describe('central IPC error logging (#386)', () => {
   describe('invoke wrapper', () => {
     it('does not call logFrontend on success', async () => {
       mockInvoke.mockResolvedValueOnce({ id: 1 });
-      await api.getSession(1);
+      await api.getAgentNode(1);
       expect(mockLog).not.toHaveBeenCalled();
     });
 
     it('returns the resolved value unchanged', async () => {
       mockInvoke.mockResolvedValueOnce({ id: 7, name: 'x' });
-      const result = await api.getSession(7);
+      const result = await api.getAgentNode(7);
       expect(result).toEqual({ id: 7, name: 'x' });
     });
 
@@ -108,7 +108,10 @@ describe('central IPC error logging (#386)', () => {
       await expect(api.writeToAgent(7, 'long-payload-here')).rejects.toThrow('boom');
       const msg = mockLog.mock.calls[0][1];
       expect(msg).toContain('write_to_agent');
-      // sessionId is a number — printed as the TYPE ('number'), not the value
+      // `write_to_agent` is an `*_agent` IPC, which keeps the legacy
+      // `sessionId` arg key (the agent-process level uses process-id
+      // vocabulary per CONTEXT.md ambiguity #1). The number is printed
+      // as the TYPE ('number'), not the value.
       expect(msg).toContain('"sessionId":"number"');
       expect(msg).toContain('17 chars');
       expect(msg).not.toContain('long-payload-here');

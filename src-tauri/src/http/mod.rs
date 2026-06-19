@@ -551,7 +551,28 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             routes::pr::merge(&mut lines, mesh_id, pr_number, content_length).await;
             return;
         }
-        // POST /api/meshes/{id}/sessions/import-and-resume
+        // POST /api/meshes/{id}/agent-nodes/import-and-resume
+        if let Some(mesh_id) = path_segment_id(
+            &path_without_query,
+            "/api/meshes/",
+            "/agent-nodes/import-and-resume",
+        ) {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            routes::agent_nodes::import_and_resume(&mut lines, mesh_id, content_length).await;
+            return;
+        }
+        // POST /api/meshes/{id}/sessions/import-and-resume — DEPRECATION SHIM
+        // (issue #490). Forwards to the new /agent-nodes/ path. The
+        // `tracing::warn!` is the load-bearing deprecation signal — the
+        // log volume tells us when no external consumer (e.g. Hermes
+        // Coordinator) is still hitting the old path and the shim can be
+        // removed. Removed in the release after next — see ADR-0013.
         if let Some(mesh_id) = path_segment_id(
             &path_without_query,
             "/api/meshes/",
@@ -564,7 +585,11 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             let content_length: usize = request::extract_header_value(&headers, "Content-Length")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            routes::sessions::import_and_resume(&mut lines, mesh_id, content_length).await;
+            tracing::warn!(
+                target: "http_route_deprecation",
+                "POST /api/meshes/{{id}}/sessions/import-and-resume is deprecated; use /agent-nodes/import-and-resume"
+            );
+            routes::agent_nodes::import_and_resume(&mut lines, mesh_id, content_length).await;
             return;
         }
         // POST /api/meshes/{mid}/issues/{inum}/spawn
@@ -632,7 +657,25 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             routes::git::gh_auth(&mut lines).await;
             return;
         }
-        // GET /api/meshes/{id}/sessions/discover
+        // GET /api/meshes/{id}/agent-nodes/discover
+        if let Some(mesh_id) = path_segment_id(
+            &path_without_query,
+            "/api/meshes/",
+            "/agent-nodes/discover",
+        ) {
+            if !request::authenticate(&headers, token) {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
+            routes::agent_nodes::discover(&mut lines, mesh_id).await;
+            return;
+        }
+        // GET /api/meshes/{id}/sessions/discover — DEPRECATION SHIM
+        // (issue #490). Forwards to the new /agent-nodes/ path. The
+        // `tracing::warn!` is the load-bearing deprecation signal — the
+        // log volume tells us when no external consumer (e.g. Hermes
+        // Coordinator) is still hitting the old path and the shim can be
+        // removed. Removed in the release after next — see ADR-0013.
         if let Some(mesh_id) = path_segment_id(
             &path_without_query,
             "/api/meshes/",
@@ -642,7 +685,11 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
                 let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
                 return;
             }
-            routes::sessions::discover(&mut lines, mesh_id).await;
+            tracing::warn!(
+                target: "http_route_deprecation",
+                "GET /api/meshes/{{id}}/sessions/discover is deprecated; use /agent-nodes/discover"
+            );
+            routes::agent_nodes::discover(&mut lines, mesh_id).await;
             return;
         }
         // GET /api/meshes/{id}/issues
@@ -1030,7 +1077,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_discover_requires_token() {
+    async fn agent_nodes_discover_requires_token() {
+        // Issue #490: the `/agent-nodes/discover` path replaces the old
+        // `/sessions/discover`. Old path still exists as a deprecation shim
+        // (see `sessions_discover_deprecated` below) until the coordinator
+        // (Hermes) upgrade window closes.
+        assert_eq!(
+            get_request("/api/meshes/1/agent-nodes/discover").await,
+            401
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_discover_deprecated_still_authenticates() {
+        // The deprecation shim must still require a token (i.e. it does NOT
+        // become an open door) — a 401 here means auth is enforced before
+        // the deprecation header is written.
         assert_eq!(
             get_request("/api/meshes/1/sessions/discover").await,
             401

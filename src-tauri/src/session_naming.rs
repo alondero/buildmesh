@@ -406,9 +406,9 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
                 }
                 clear_node_state(node_id);
                 let _ = app_for_task.emit(
-                    "session-renamed",
+                    "node-renamed",
                     serde_json::json!({
-                        "session_id": node_id,
+                        "node_id": node_id,
                         "name": slug
                     }),
                 );

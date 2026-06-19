@@ -72,14 +72,14 @@ describe('useMeshStore', () => {
   });
 
   describe('deleteMesh', () => {
-    it('calls delete_project and refetches', async () => {
+    it('calls delete_mesh and refetches', async () => {
       mockInvoke
-        .mockResolvedValueOnce(undefined) // delete_project
-        .mockResolvedValueOnce([]); // list_projects (refetch)
+        .mockResolvedValueOnce(undefined) // delete_mesh
+        .mockResolvedValueOnce([]); // list_meshes (refetch)
 
       await useMeshStore.getState().deleteMesh(5);
 
-      expect(mockInvoke).toHaveBeenCalledWith('delete_project', { projectId: 5 });
+      expect(mockInvoke).toHaveBeenCalledWith('delete_mesh', { meshId: 5 });
     });
 
     it('sets error if deletion fails', async () => {
@@ -102,7 +102,7 @@ describe('useMeshStore', () => {
         meshes,
         meshesById: new Map(meshes.map(p => [p.id, p])),
       });
-      mockInvoke.mockResolvedValueOnce(undefined); // update_project_positions
+      mockInvoke.mockResolvedValueOnce(undefined); // update_mesh_positions
 
       await useMeshStore.getState().reorderMeshes(3, 0);
 
@@ -125,13 +125,13 @@ describe('useMeshStore', () => {
         meshesById: new Map(meshes.map(p => [p.id, p])),
       });
       mockInvoke
-        .mockRejectedValueOnce(new Error('Constraint violation')) // update_project_positions
-        .mockResolvedValueOnce(meshes); // list_projects refetch restores original order
+        .mockRejectedValueOnce(new Error('Constraint violation')) // update_mesh_positions
+        .mockResolvedValueOnce(meshes); // list_meshes refetch restores original order
 
       await useMeshStore.getState().reorderMeshes(2, 0);
 
-      // fetchMeshes is called as recovery, which calls list_projects
-      expect(mockInvoke).toHaveBeenCalledWith('list_projects');
+      // fetchMeshes is called as recovery, which calls list_meshes
+      expect(mockInvoke).toHaveBeenCalledWith('list_meshes');
     });
   });
 
@@ -151,7 +151,7 @@ describe('useMeshStore', () => {
       const state = useMeshStore.getState();
       expect(state.meshes[0].layout).toBe('grid');
       expect(state.meshesById.get(1)?.layout).toBe('grid');
-      expect(mockInvoke).toHaveBeenCalledWith('update_project_layout', { projectId: 1, layout: 'grid' });
+      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_layout', { meshId: 1, layout: 'grid' });
     });
 
     it('ignores update for unknown mesh id', async () => {

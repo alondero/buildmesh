@@ -26,11 +26,11 @@ declare global {
 }
 window.__terminalManager = terminalManager;
 
-export function AgentTerminal({ sessionId }: { sessionId: number }) {
+export function AgentTerminal({ nodeId }: { nodeId: number }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const instRef = useRef<TerminalInstance | null>(null);
   const scrollDisposableRef = useRef<{ dispose: () => void } | null>(null);
-  const isDragging = useUIStore(state => state.dragTargetNodeId === sessionId);
+  const isDragging = useUIStore(state => state.dragTargetNodeId === nodeId);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -43,7 +43,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   // re-render every open pane whenever any node's status flips (attention
   // events fire constantly while agents work); find() returns the same object
   // reference unless this specific node changed, so Zustand skips the render.
-  const node = useAgentNodeStore(state => state.agentNodes.find(s => s.id === sessionId));
+  const node = useAgentNodeStore(state => state.agentNodes.find(s => s.id === nodeId));
 
   // OS file drops (Explorer / Finder) are handled window-level in
   // useFileDropToTerminal — Tauri intercepts the native drop before the DOM, so
@@ -64,7 +64,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   };
 
   const handleCopy = () => {
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (inst && inst.term.hasSelection()) {
       navigator.clipboard.writeText(inst.term.getSelection()).catch(console.error);
     }
@@ -72,7 +72,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   };
 
   const handlePaste = () => {
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (inst) {
       // readClipboard uses pbpaste on macOS to bypass the WKWebView
       // clipboard-permission popup (macOS 14+). On other platforms it errors and
@@ -89,7 +89,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   };
 
   const handleSelectAll = () => {
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (inst) inst.term.selectAll();
     setContextMenu(null);
   };
@@ -100,13 +100,13 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   };
 
   const handleClear = () => {
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (inst) inst.term.clear();
     setContextMenu(null);
   };
 
   const handleHandover = async () => {
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (!inst || !inst.term.hasSelection()) { setContextMenu(null); return; }
     const selection = inst.term.getSelection();
     if (!selection.trim()) { setContextMenu(null); return; }
@@ -142,36 +142,36 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       requestAnimationFrame(() => searchInputRef.current?.focus());
     } else {
       setSearchQuery('');
-      const inst = terminalManager.getInstance(sessionId);
+      const inst = terminalManager.getInstance(nodeId);
       if (inst) inst.searchAddon.clearDecorations();
     }
-  }, [searchOpen, sessionId]);
+  }, [searchOpen, nodeId]);
 
   const handleSearchChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const query = e.target.value;
     setSearchQuery(query);
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (!inst) return;
     if (query) {
       inst.searchAddon.findNext(query, { incremental: true, decorations: SEARCH_DECORATIONS });
     } else {
       inst.searchAddon.clearDecorations();
     }
-  }, [sessionId]);
+  }, [nodeId]);
 
   const handleSearchNext = useCallback(() => {
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (inst && searchQuery) {
       inst.searchAddon.findNext(searchQuery, { decorations: SEARCH_DECORATIONS });
     }
-  }, [sessionId, searchQuery]);
+  }, [nodeId, searchQuery]);
 
   const handleSearchPrev = useCallback(() => {
-    const inst = terminalManager.getInstance(sessionId);
+    const inst = terminalManager.getInstance(nodeId);
     if (inst && searchQuery) {
       inst.searchAddon.findPrevious(searchQuery, { decorations: SEARCH_DECORATIONS });
     }
-  }, [sessionId, searchQuery]);
+  }, [nodeId, searchQuery]);
 
   const handleSearchKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -207,10 +207,10 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   }, []);
 
   useEffect(() => {
-    if (sessionId === activeNodeId && instRef.current) {
+    if (nodeId === activeNodeId && instRef.current) {
       instRef.current.term.focus();
     }
-  }, [activeNodeId, sessionId]);
+  }, [activeNodeId, nodeId]);
 
   // Focus guardian. In a multi-pane grid, background DOM churn — a re-render
   // that momentarily re-parents xterm's imperatively-appended `.xterm` element,
@@ -258,24 +258,24 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       // edge cases — chiefly a stray DOM reconciliation that drops focus
       // with no element waiting to receive it.
       queueMicrotask(() => {
-        if (sessionId !== useAgentNodeStore.getState().activeNodeId) return;
+        if (nodeId !== useAgentNodeStore.getState().activeNodeId) return;
         if (typeof document.hasFocus === 'function' && !document.hasFocus()) return;
         const active = document.activeElement;
         if (active && active !== document.body) return; // moved to a real control — leave it
         // Read the live instance from the registry (not instRef): a node closed
         // mid-flight is removed from the registry, so this skips it rather than
         // focusing a disposed xterm (dispose() doesn't null attachedContainer).
-        const inst = terminalManager.getInstance(sessionId);
+        const inst = terminalManager.getInstance(nodeId);
         if (!inst || !inst.attachedContainer) return;
-        console.warn(`[AgentTerminal] keyboard focus fell to <body> while node ${sessionId} was active — restoring terminal focus`);
+        console.warn(`[AgentTerminal] keyboard focus fell to <body> while node ${nodeId} was active — restoring terminal focus`);
         inst.term.focus();
       });
     };
     container.addEventListener('focusout', onFocusOut);
     return () => container.removeEventListener('focusout', onFocusOut);
-  }, [sessionId]);
+  }, [nodeId]);
 
-  // Attach/detach the xterm element. Keyed on sessionId ONLY. It used to also
+  // Attach/detach the xterm element. Keyed on nodeId ONLY. It used to also
   // depend on node.status, which meant every attention flip (running ↔
   // awaiting_input, many per minute while an agent works) tore the terminal
   // element out of the DOM and re-appended it — a visible reflow and a
@@ -293,7 +293,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     const container = containerRef.current;
     setAtBottom(true);
 
-    terminalManager.attach(sessionId, container).then((inst) => {
+    terminalManager.attach(nodeId, container).then((inst) => {
       if (signal.aborted || !inst) return;
       instRef.current = inst;
       inst.onFindRequest = () => setSearchOpen(true);
@@ -306,23 +306,23 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
       scrollDisposableRef.current = inst.term.onScroll(updateAtBottom);
       updateAtBottom();
 
-      if (sessionId === activeNodeId) {
+      if (nodeId === activeNodeId) {
         inst.term.focus();
       }
     });
 
     return () => {
-      const inst = terminalManager.getInstance(sessionId);
+      const inst = terminalManager.getInstance(nodeId);
       if (inst) inst.onFindRequest = null;
       scrollDisposableRef.current?.dispose(); // allow-dispose — scroll listener, not the xterm terminal
       scrollDisposableRef.current = null;
-      terminalManager.detach(sessionId);
+      terminalManager.detach(nodeId);
     };
   // activeNodeId is read once at attach time for the initial focus; the
   // dedicated focus effect above handles later changes, so it's intentionally
   // not a dependency here.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId]);
+  }, [nodeId]);
 
   // Auto-spawn the agent for a freshly created (idle) node. Separated from the
   // attach effect so it can react to the status becoming 'idle' without
@@ -342,16 +342,16 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
     if (!containerRef.current) return;
     const container = containerRef.current;
     (async () => {
-      const inst = await terminalManager.attach(sessionId, container);
+      const inst = await terminalManager.attach(nodeId, container);
       if (signal.aborted || !inst) return;
       const dims = inst.fitAddon.proposeDimensions();
       try {
-        await spawnAgent(sessionId, node.provider, dims?.rows, dims?.cols);
+        await spawnAgent(nodeId, node.provider, dims?.rows, dims?.cols);
       } catch (e) {
         console.error('[AgentTerminal] Failed to auto-spawn agent:', e);
       }
     })();
-  }, [sessionId, node?.provider, node?.status, spawnAgent]);
+  }, [nodeId, node?.provider, node?.status, spawnAgent]);
 
   // Resolve the default provider label for the handover menu item. The
   // `api.getDefaultProvider` and `api.listProviders` wrappers are memoised
@@ -380,7 +380,7 @@ export function AgentTerminal({ sessionId }: { sessionId: number }) {
   return (
     <div
       ref={containerRef}
-      data-node-id={sessionId}
+      data-node-id={nodeId}
       className="h-full w-full relative outline-none"
       style={{ padding: '4px' }}
       tabIndex={0}

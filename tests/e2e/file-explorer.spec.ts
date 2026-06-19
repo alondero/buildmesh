@@ -23,7 +23,7 @@ test.describe('file explorer', () => {
   test('folder icon does NOT crash when mesh has no nodes', async ({ page }) => {
     // Create a mesh via HTTP
     const mesh = await invokeViaHttp<{ id: number; name: string; path: string }>(
-      'create_test_project',
+      'create_test_mesh',
       { name: 'folder-test-empty' }
     );
 
@@ -60,13 +60,13 @@ test.describe('file explorer', () => {
 
     // Create a mesh with agent node via HTTP
     const mesh = await invokeViaHttp<{ id: number; name: string; path: string }>(
-      'create_test_project',
+      'create_test_mesh',
       { name: 'folder-test-with-agent' }
     );
 
     // Create an agent node
-    await invokeViaHttp('create_session', {
-      projectId: mesh.id,
+    await invokeViaHttp('create_agent_node', {
+      meshId: mesh.id,
       name: 'Test Agent',
       path: mesh.path,
       branch: 'main',

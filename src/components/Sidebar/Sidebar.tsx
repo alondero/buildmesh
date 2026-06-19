@@ -70,7 +70,7 @@ export function Sidebar() {
     openProbeTab('properties');
   };
 
-  // Issue #378 — the right-click "GitHub Issues" and "Previous Sessions"
+  // Issue #378 — the right-click "GitHub Issues" and "Discovered Nodes"
   // entries open the Probe Panel on the 🐙 / 🕒 tabs respectively. The
   // mesh is selected first (same dance as the Properties entry point) so
   // `useProbeContext` resolves to the right row before the tab mounts.

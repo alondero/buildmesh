@@ -68,7 +68,7 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
       />
       <div className="flex-1 flex flex-col overflow-hidden bg-black">
         <div className={`${isBuildRunOpen ? 'flex-[2]' : 'flex-1'} overflow-hidden`}>
-          <AgentTerminal sessionId={node.id} />
+          <AgentTerminal nodeId={node.id} />
         </div>
         {isBuildRunOpen && (
           <BuildRunTerminal

@@ -8,7 +8,7 @@ use tauri::{command, Emitter};
 
 /// Create a new agent node
 #[command]
-pub async fn create_session(
+pub async fn create_agent_node(
     mesh_id: i64,
     _name: String,
     path: String,
@@ -31,21 +31,21 @@ pub async fn create_session(
         None, // name_override — Tauri surface doesn't accept one
     )
         .map_err(|e| {
-            tracing::error!("create_session failed: {}", e);
+            tracing::error!("create_agent_node failed: {}", e);
             e.to_string()
         })
 }
 
 /// List all agent nodes
 #[command]
-pub async fn list_sessions() -> Result<Vec<AgentNode>, String> {
+pub async fn list_agent_nodes() -> Result<Vec<AgentNode>, String> {
     db::list_agent_nodes().map_err(|e| e.to_string())
 }
 
 /// Get agent node by ID
 #[command]
-pub async fn get_session(session_id: i64) -> Result<AgentNode, String> {
-    db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())
+pub async fn get_agent_node(node_id: i64) -> Result<AgentNode, String> {
+    db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())
 }
 
 /// Delete an agent node permanently.
@@ -55,12 +55,12 @@ pub async fn get_session(session_id: i64) -> Result<AgentNode, String> {
 /// background task that emits `worktree-cleanup-failed` if it can't finish — the
 /// node is already gone either way (#243).
 #[command]
-pub async fn delete_session(
-    session_id: i64,
+pub async fn delete_agent_node(
+    node_id: i64,
     remove_worktree: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    services::agent_node::delete(session_id, remove_worktree.unwrap_or(false))
+    services::agent_node::delete(node_id, remove_worktree.unwrap_or(false))
         .map_err(|e| e.to_string())?;
 
     drain_pending_removals(app);
@@ -86,16 +86,16 @@ pub fn drain_pending_removals(app: tauri::AppHandle) {
 
 /// Persist new grid positions for a batch of agent nodes (drag-to-reorder).
 /// The frontend sends the full new ordering for the affected mesh so the DB
-/// stays in sync with its optimistic update. Mirrors `update_project_positions`.
+/// stays in sync with its optimistic update. Mirrors `update_mesh_positions`.
 #[command]
-pub async fn update_session_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
+pub async fn update_agent_node_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
     db::update_agent_node_positions_batch(&updates).map_err(|e| e.to_string())
 }
 
 /// Check whether the node's worktree can be removed safely on close.
 #[command]
-pub async fn get_worktree_close_safety(session_id: i64) -> Result<WorktreeCloseSafety, String> {
-    services::agent_node::get_worktree_close_safety(session_id)
+pub async fn get_worktree_close_safety(node_id: i64) -> Result<WorktreeCloseSafety, String> {
+    services::agent_node::get_worktree_close_safety(node_id)
         .map_err(|e| e.to_string())
 }
 
@@ -119,11 +119,11 @@ pub fn validate_rename_name(name: &str) -> Result<String, String> {
 /// `should_trigger_rename` short-circuits on every subsequent turn. We also
 /// tear down the in-memory rename state via `session_naming::cleanup` so
 /// `SESSION_BUFFERS` doesn't keep growing for a node that no longer needs
-/// a rename. Emits the same `session-renamed` event as the LLM path so the
+/// a rename. Emits the same `node-renamed` event as the LLM path so the
 /// frontend store and any other listeners stay in sync.
 #[command]
-pub async fn rename_session(
-    session_id: i64,
+pub async fn rename_agent_node(
+    node_id: i64,
     name: String,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
@@ -131,18 +131,92 @@ pub async fn rename_session(
 
     // Drop any in-flight rename state FIRST so the LLM's eventual commit
     // hits our race guard (which re-reads the node's name from the DB).
-    crate::session_naming::cleanup(session_id);
+    crate::session_naming::cleanup(node_id);
 
-    db::update_agent_node_name(session_id, &trimmed).map_err(|e| e.to_string())?;
+    db::update_agent_node_name(node_id, &trimmed).map_err(|e| e.to_string())?;
 
     let _ = app.emit(
-        "session-renamed",
+        "node-renamed",
         serde_json::json!({
-            "session_id": session_id,
+            "node_id": node_id,
             "name": trimmed,
         }),
     );
     Ok(())
+}
+
+// --- Deprecation shims (issue #490). Forward old `*_session` IPC names to the
+// new `*_agent_node` commands. The OLD param names are preserved on the shim
+// signatures so the wire shape stays byte-identical for one release; the shim
+// body forwards to the new fn. Removed in the release after next. ---
+
+#[command]
+pub async fn create_session(
+    mesh_id: i64,
+    name: String,
+    path: String,
+    branch: String,
+    provider: Option<String>,
+    use_worktree: Option<bool>,
+) -> Result<AgentNode, String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "create_session is deprecated; use create_agent_node"
+    );
+    create_agent_node(mesh_id, name, path, branch, provider, use_worktree).await
+}
+
+#[command]
+pub async fn list_sessions() -> Result<Vec<AgentNode>, String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "list_sessions is deprecated; use list_agent_nodes"
+    );
+    list_agent_nodes().await
+}
+
+#[command]
+pub async fn get_session(session_id: i64) -> Result<AgentNode, String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "get_session is deprecated; use get_agent_node"
+    );
+    get_agent_node(session_id).await
+}
+
+#[command]
+pub async fn delete_session(
+    session_id: i64,
+    remove_worktree: Option<bool>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "delete_session is deprecated; use delete_agent_node"
+    );
+    delete_agent_node(session_id, remove_worktree, app).await
+}
+
+#[command]
+pub async fn update_session_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "update_session_positions is deprecated; use update_agent_node_positions"
+    );
+    update_agent_node_positions(updates).await
+}
+
+#[command]
+pub async fn rename_session(
+    session_id: i64,
+    name: String,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "rename_session is deprecated; use rename_agent_node"
+    );
+    rename_agent_node(session_id, name, app).await
 }
 
 #[cfg(test)]

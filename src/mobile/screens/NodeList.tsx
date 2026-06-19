@@ -18,7 +18,7 @@ import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
-  onOpenSessions: (mesh: Mesh) => void;
+  onOpenAgentNodes: (mesh: Mesh) => void;
   onOpenIssues: (mesh: Mesh) => void;
   onOffline: () => void;
   onAuthFailed: () => void;
@@ -46,7 +46,7 @@ const FALLBACK_PROVIDERS: Provider[] = [
 
 export default function NodeList({
   onOpenNode,
-  onOpenSessions,
+  onOpenAgentNodes,
   onOpenIssues,
   onOffline,
   onAuthFailed,
@@ -264,10 +264,10 @@ export default function NodeList({
         <MeshActionsSheet
           mesh={meshActions}
           onClose={() => setMeshActions(null)}
-          onOpenSessions={() => {
+          onOpenAgentNodes={() => {
             const m = meshActions;
             setMeshActions(null);
-            onOpenSessions(m);
+            onOpenAgentNodes(m);
           }}
           onOpenIssues={() => {
             const m = meshActions;
@@ -327,12 +327,12 @@ function SectionHeading({
 function MeshActionsSheet({
   mesh,
   onClose,
-  onOpenSessions,
+  onOpenAgentNodes,
   onOpenIssues,
 }: {
   mesh: Mesh;
   onClose: () => void;
-  onOpenSessions: () => void;
+  onOpenAgentNodes: () => void;
   onOpenIssues: () => void;
 }) {
   return (
@@ -351,9 +351,9 @@ function MeshActionsSheet({
         {mesh.name}
       </h3>
       <SheetButton
-        onClick={onOpenSessions}
-        testId="mesh-sheet-sessions"
-        label="Previous Sessions"
+        onClick={onOpenAgentNodes}
+        testId="mesh-sheet-discovered-nodes"
+        label="Discovered Nodes"
         hint="Resume an existing CLI session"
       />
       <SheetButton

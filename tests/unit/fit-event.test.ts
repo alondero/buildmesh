@@ -2,7 +2,7 @@
  * Unit tests for fit-terminals event timing
  *
  * Tests the double-timeout pattern used in SessionView.tsx (100ms + 300ms)
- * and TerminalContainer.tsx (100ms + 300ms on sessionId change).
+ * and TerminalContainer.tsx (100ms + 300ms on nodeId change).
  *
  * Using fake timers to avoid actual delays in tests.
  */

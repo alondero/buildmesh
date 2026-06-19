@@ -39,7 +39,7 @@ const TAB_LABELS = [
   'Worktree Manager',
   'Mesh Properties',
   'Git Issues',
-  'Session History',
+  'Discovered Nodes',
 ];
 
 function tabButton(label: string): HTMLElement {
@@ -135,7 +135,7 @@ describe('ProbePanel', () => {
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    expect(header.textContent).toContain('Session History');
+    expect(header.textContent).toContain('Discovered Nodes');
   });
 
   it('shows the active mesh name as a subheading in the header', () => {
@@ -242,12 +242,12 @@ describe('ProbePanel', () => {
   });
 
   it('renders the Session History tab body (issue #378) when the 🕒 tab is open', async () => {
-    // Issue #378 — the 🕒 tab hosts the new `<SessionHistoryTab>`
+    // Issue #378 — the 🕒 tab hosts the new `<DiscoveredNodesTab>`
     // (ported from `SessionBrowserModal`). The "Scanning sessions…"
     // canary is enough to prove the tab mounted before the mocked
-    // `discover_sessions` resolves.
+    // `discover_agent_nodes` resolves.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'discover_sessions') return Promise.resolve([]);
+      if (cmd === 'discover_agent_nodes') return Promise.resolve([]);
       if (cmd === 'list_providers') return Promise.resolve([]);
       return Promise.resolve({});
     });

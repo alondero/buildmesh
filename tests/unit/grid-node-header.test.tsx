@@ -41,7 +41,7 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: openUrlMock,
 }));
 
-import { GridNodeHeader } from '../../src/components/SessionView/GridNodeHeader';
+import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
 
 const NODE: AgentNode = {
   id: 1,

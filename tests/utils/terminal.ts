@@ -6,9 +6,9 @@ import type { Page } from '@playwright/test';
  */
 export async function getTerminalBoundingBox(
   page: Page,
-  sessionId: number
+  nodeId: number
 ): Promise<DOMRect | null> {
-  const selector = `[data-session-id="${sessionId}"] .xterm`;
+  const selector = `[data-session-id="${nodeId}"] .xterm`;
   const terminal = page.locator(selector);
   const count = await terminal.count();
   if (count === 0) return null;
@@ -20,10 +20,10 @@ export async function getTerminalBoundingBox(
  */
 export async function getTerminalCount(
   page: Page,
-  sessionId?: number
+  nodeId?: number
 ): Promise<number> {
-  if (sessionId !== undefined) {
-    return page.locator(`[data-session-id="${sessionId}"] .xterm`).count();
+  if (nodeId !== undefined) {
+    return page.locator(`[data-session-id="${nodeId}"] .xterm`).count();
   }
   return page.locator('.xterm').count();
 }
@@ -33,9 +33,9 @@ export async function getTerminalCount(
  */
 export async function clickSessionTab(
   page: Page,
-  sessionId: number
+  nodeId: number
 ): Promise<void> {
-  await page.click(`button[data-session-tab="${sessionId}"]`);
+  await page.click(`button[data-session-tab="${nodeId}"]`);
   // Wait for potential fit operations
   await page.waitForTimeout(50);
 }
@@ -45,7 +45,7 @@ export async function clickSessionTab(
  */
 export async function waitForTerminalFit(
   page: Page,
-  sessionId: number,
+  nodeId: number,
   timeout: number = 500
 ): Promise<void> {
   await page.waitForTimeout(timeout);
@@ -59,9 +59,9 @@ export async function waitForTerminalFit(
  */
 export async function hasNonMinimalDimensions(
   page: Page,
-  sessionId: number
+  nodeId: number
 ): Promise<boolean> {
-  const box = await getTerminalBoundingBox(page, sessionId);
+  const box = await getTerminalBoundingBox(page, nodeId);
   if (!box) return false;
   return box.width > 50 && box.height > 50;
 }
@@ -72,11 +72,11 @@ export async function hasNonMinimalDimensions(
  */
 export async function compareTerminalDimensions(
   page: Page,
-  sessionId: number,
+  nodeId: number,
   baseline: DOMRect,
   tolerance: number = 0.9
 ): Promise<{ width: boolean; height: boolean; overall: boolean }> {
-  const current = await getTerminalBoundingBox(page, sessionId);
+  const current = await getTerminalBoundingBox(page, nodeId);
   if (!current) return { width: false, height: false, overall: false };
 
   const widthOk = current.width >= baseline.width * tolerance;

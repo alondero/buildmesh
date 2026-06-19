@@ -102,13 +102,13 @@ export async function createTestSessionViaHttp(index: number): Promise<void> {
 
   // Create a test project first (uses temp directory)
   const project = await invokeViaHttp<{ id: number; name: string; path: string; created_at: string }>(
-    'create_test_project',
+    'create_test_mesh',
     { name: `Test Project ${index}` }
   );
 
   // Then create a session linked to that project
-  await invokeViaHttp('create_session', {
-    projectId: project.id,
+  await invokeViaHttp('create_agent_node', {
+    meshId: project.id,
     name: `Session ${index}`,
     path: project.path,
     branch: 'main',
@@ -123,11 +123,11 @@ export async function createTestSessionViaHttp(index: number): Promise<void> {
  * Call this in afterEach or afterAll to prevent test data from polluting the app.
  */
 export async function cleanupTestProjects(): Promise<void> {
-  for (const projectId of createdProjects) {
+  for (const meshId of createdProjects) {
     try {
-      await invokeViaHttp('delete_project', { projectId });
+      await invokeViaHttp('delete_mesh', { meshId });
     } catch (e) {
-      console.warn(`Failed to cleanup project ${projectId}:`, e);
+      console.warn(`Failed to cleanup project ${meshId}:`, e);
     }
   }
   createdProjects.length = 0;

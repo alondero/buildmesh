@@ -10,8 +10,8 @@ use crate::agent::spawn::inject_attention_hook;
 
 /// Add a mesh by opening a folder picker dialog
 #[command]
-pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
-    tracing::debug!("add_project called");
+pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
+    tracing::debug!("add_mesh called");
     let folder_path = app.dialog()
         .file()
         .blocking_pick_folder();
@@ -51,7 +51,7 @@ pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
 
 /// Create a new mesh
 #[command]
-pub async fn create_project(name: String, path: String) -> Result<Mesh, String> {
+pub async fn create_mesh(name: String, path: String) -> Result<Mesh, String> {
     let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
     inject_attention_hook(std::path::Path::new(&path));
     Ok(mesh)
@@ -59,32 +59,101 @@ pub async fn create_project(name: String, path: String) -> Result<Mesh, String> 
 
 /// Create a mesh for testing without dialog (uses temp directory)
 #[command]
-pub async fn create_test_project(name: String) -> Result<Mesh, String> {
+pub async fn create_test_mesh(name: String) -> Result<Mesh, String> {
     services::mesh::create_test(&name).map_err(|e| e.to_string())
 }
 
 /// List all meshes
 #[command]
-pub async fn list_projects() -> Result<Vec<Mesh>, String> {
+pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
     db::list_meshes().map_err(|e| e.to_string())
 }
 
 /// Delete a mesh and its nodes
 #[command]
-pub async fn delete_project(project_id: i64) -> Result<(), String> {
-    db::delete_mesh(project_id).map_err(|e| e.to_string())
+pub async fn delete_mesh(mesh_id: i64) -> Result<(), String> {
+    db::delete_mesh(mesh_id).map_err(|e| e.to_string())
 }
 
 /// Update a mesh's layout preference
 #[command]
-pub async fn update_project_layout(project_id: i64, layout: String) -> Result<(), String> {
-    services::mesh::update_layout(project_id, &layout).map_err(|e| e.to_string())
+pub async fn update_mesh_layout(mesh_id: i64, layout: String) -> Result<(), String> {
+    services::mesh::update_layout(mesh_id, &layout).map_err(|e| e.to_string())
 }
 
 /// Update multiple meshes' sort positions in the sidebar
 #[command]
-pub async fn update_project_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
+pub async fn update_mesh_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
     db::update_mesh_positions_batch(&updates).map_err(|e| e.to_string())
+}
+
+// --- Deprecation shims (issue #490). Forward old `*_project` IPC names to the
+// new `*_mesh` commands. The OLD param names are preserved on the shim
+// signatures so the wire shape stays byte-identical for one release. Removed
+// in the release after next. ---
+
+#[command]
+#[allow(clippy::needless_pass_by_value)]
+pub async fn add_project(app: tauri::AppHandle) -> Result<Mesh, String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "add_project is deprecated; use add_mesh"
+    );
+    add_mesh(app).await
+}
+
+#[command]
+pub async fn create_project(name: String, path: String) -> Result<Mesh, String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "create_project is deprecated; use create_mesh"
+    );
+    create_mesh(name, path).await
+}
+
+#[command]
+pub async fn create_test_project(name: String) -> Result<Mesh, String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "create_test_project is deprecated; use create_test_mesh"
+    );
+    create_test_mesh(name).await
+}
+
+#[command]
+pub async fn list_projects() -> Result<Vec<Mesh>, String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "list_projects is deprecated; use list_meshes"
+    );
+    list_meshes().await
+}
+
+#[command]
+pub async fn delete_project(project_id: i64) -> Result<(), String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "delete_project is deprecated; use delete_mesh"
+    );
+    delete_mesh(project_id).await
+}
+
+#[command]
+pub async fn update_project_layout(project_id: i64, layout: String) -> Result<(), String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "update_project_layout is deprecated; use update_mesh_layout"
+    );
+    update_mesh_layout(project_id, layout).await
+}
+
+#[command]
+pub async fn update_project_positions(updates: Vec<(i64, i64)>) -> Result<(), String> {
+    tracing::warn!(
+        target: "ipc_deprecation",
+        "update_project_positions is deprecated; use update_mesh_positions"
+    );
+    update_mesh_positions(updates).await
 }
 
 /// Get or create the root remote access token for the whole buildmesh instance

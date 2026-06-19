@@ -4,7 +4,7 @@ import { vi } from 'vitest';
 // Tauri API Mocks
 // ============================================================
 
-// Mock invoke - used for write_to_agent, list_sessions, etc.
+// Mock invoke - used for write_to_agent, list_agent_nodes, etc.
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockResolvedValue({}),
 }));
