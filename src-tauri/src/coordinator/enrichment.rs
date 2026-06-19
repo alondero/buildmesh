@@ -110,29 +110,20 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{EnvType, Provider, SessionStatus};
-    use chrono::Utc;
+    use crate::models::Provider;
 
     fn node(provider: Provider, cli_session_id: Option<&str>, use_worktree: bool) -> AgentNode {
+        // `path` / `worktree_name` / `use_worktree` drive `transcript_dir`
+        // (via `env::node_working_path`); `provider` gates transcript support;
+        // `cli_session_id` is the on-disk session lookup key. The rest spread
+        // through `..Default::default()` (issue #457).
         AgentNode {
-            id: 1,
-            mesh_id: 1,
-            name: "n".to_string(),
             path: "X:\\src\\proj".to_string(),
-            branch: "main".to_string(),
-            env: EnvType::Windows,
             provider,
-            status: SessionStatus::Running,
             cli_session_id: cli_session_id.map(str::to_string),
             worktree_name: Some("gentle-fox".to_string()),
             use_worktree,
-            source_issue: None,
-            source_pr: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            source_pr_pinned_sha: None,
-            position: 0,
-            created_at: Utc::now(),
+            ..Default::default()
         }
     }
 

@@ -2,5 +2,8 @@
 
 /**
  * Runtime environment — Windows or WSL
+ *
+ * `Windows` is `#[default]` so `AgentNode::default()` matches the existing
+ * `from_db_str` fallback ("unknown string → Windows"); issue #457.
  */
 export type EnvType = "windows" | "wsl";

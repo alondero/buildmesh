@@ -330,7 +330,6 @@ describe('MeshPropertiesTab (issue #375)', () => {
     });
   });
 
-=======
 // OS-level sandbox toggle (macOS Seatbelt #497 / Windows AppContainer #498).
   // The DB column is `sandbox` and is OS-agnostic at this layer; the OS-
   // specific spawn policy is decided at `spawn_environment::wrap`.

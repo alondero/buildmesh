@@ -921,26 +921,17 @@ mod tests {
     // ----- node → directory resolution (worktree vs root) ----------------
 
     fn make_node(path: &str, use_worktree: bool, worktree_name: Option<&str>) -> crate::models::AgentNode {
-        use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
+        // Only `path` / `use_worktree` / `worktree_name` drive the diff
+        // resolution under test (via `env::node_working_path`); the rest
+        // spread through `..Default::default()` so future optional columns
+        // don't reopen this fixture (issue #457).
+        use crate::models::AgentNode;
         AgentNode {
             id: 1,
-            mesh_id: 1,
-            name: "n".to_string(),
             path: path.to_string(),
-            branch: "base".to_string(),
-            env: EnvType::Windows,
-            provider: Provider::Anthropic,
-            status: SessionStatus::Idle,
-            cli_session_id: None,
             worktree_name: worktree_name.map(|s| s.to_string()),
             use_worktree,
-            source_issue: None,
-            source_pr: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            source_pr_pinned_sha: None,
-            position: 0,
-            created_at: chrono::Utc::now(),
+            ..Default::default()
         }
     }
 
