@@ -11,6 +11,7 @@
 
 use crate::env;
 use crate::models::AgentNode;
+use crate::secret_scrubber::SecretScrubber;
 use crate::services::transcript_reader::{self, TranscriptTail, UnavailableReason};
 
 /// The directory the agent's transcript is keyed under — the
@@ -37,7 +38,52 @@ pub fn transcript_tail(node: &AgentNode, tail: usize) -> TranscriptTail {
             reason: UnavailableReason::Unsupported,
         };
     }
-    transcript_reader::read_tail(node.cli_session_id.as_deref(), &transcript_dir(node), tail)
+    scrub_tail(transcript_reader::read_tail(
+        node.cli_session_id.as_deref(),
+        &transcript_dir(node),
+        tail,
+    ))
+}
+
+/// Mask any secrets the raw transcript echoed (tokens, passwords, private keys)
+/// before it leaves the host for an external Coordinator (ADR-0012 §5). Both the
+/// `GET /nodes/{id}/log` full tail and the `GET /nodes` digest's
+/// `last_assistant_message` flow through here, so every coordinator-facing
+/// transcript path is scrubbed at exactly one boundary. Scrubs the structured
+/// content only — turn text, each tool call's raw `input`, and the last
+/// assistant message — never the `{"status":…}` envelope, so the shape the
+/// Coordinator parses is untouched. An `Unavailable` tail carries no content and
+/// passes through verbatim.
+///
+/// Known residual (issue #499 follow-up): the `transcript_reader` truncates each
+/// turn text to `MAX_TURN_TEXT` and each tool-string leaf to `MAX_TOOL_STRING`
+/// *before* this runs, so a context-free token (one not in `key=value`/`Bearer`
+/// form) landing within ~100 bytes of a truncation boundary can leave a prefix
+/// shorter than the token rules' minimum length, which then isn't masked. The
+/// leaked prefix is always a fragment — the remainder is truncated away and
+/// never served — so it is not a usable credential. Closing it fully means
+/// scrubbing inside the reader before truncation; deferred to keep the
+/// JSONL-quarantine reader untouched in this slice.
+fn scrub_tail(tail: TranscriptTail) -> TranscriptTail {
+    match tail {
+        TranscriptTail::Available {
+            mut turns,
+            last_assistant_message,
+        } => {
+            for turn in &mut turns {
+                turn.text = SecretScrubber::scrub(&turn.text);
+                for call in &mut turn.tool_calls {
+                    SecretScrubber::scrub_json(&mut call.input);
+                }
+            }
+            TranscriptTail::Available {
+                turns,
+                last_assistant_message: last_assistant_message
+                    .map(|m| SecretScrubber::scrub(&m)),
+            }
+        }
+        other => other,
+    }
 }
 
 /// The enrichment a Node Digest layers on, in the shape `node_digest::layered`
@@ -55,10 +101,10 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
     if !node.provider.adapter().produces_readable_transcript() {
         return None;
     }
-    Some(transcript_reader::read_last_assistant_message(
+    Some(scrub_tail(transcript_reader::read_last_assistant_message(
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -152,6 +198,57 @@ mod tests {
             Some(TranscriptTail::Unavailable {
                 reason: UnavailableReason::NoSession
             })
+        );
+    }
+
+    /// Secrets the agent echoed in its transcript must be masked before the tail
+    /// leaves the host for a Coordinator (ADR-0012 §5). Covers all three content
+    /// surfaces: turn text, a tool call's raw `input`, and the last assistant
+    /// message.
+    #[test]
+    fn scrub_tail_masks_secrets_in_all_content_surfaces() {
+        use crate::services::transcript_reader::{ToolCall, Turn};
+        let tail = TranscriptTail::Available {
+            turns: vec![Turn {
+                role: "assistant".to_string(),
+                text: "exported GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345".to_string(),
+                tool_calls: vec![ToolCall {
+                    name: "Bash".to_string(),
+                    input: serde_json::json!({
+                        "command": "curl -H 'Authorization: Bearer abc123def456ghi789'"
+                    }),
+                }],
+            }],
+            last_assistant_message: Some("password=swordfish leaked".to_string()),
+        };
+        match scrub_tail(tail) {
+            TranscriptTail::Available {
+                turns,
+                last_assistant_message,
+            } => {
+                assert_eq!(turns[0].text, "exported GITHUB_TOKEN=[REDACTED]");
+                assert_eq!(
+                    turns[0].tool_calls[0].input["command"].as_str().unwrap(),
+                    "curl -H 'Authorization: Bearer [REDACTED]'"
+                );
+                assert_eq!(last_assistant_message.unwrap(), "password=[REDACTED] leaked");
+            }
+            other => panic!("expected Available, got {other:?}"),
+        }
+    }
+
+    /// An `Unavailable` tail has no content to scrub and must pass through
+    /// untouched — scrubbing must not change the typed degrade reason.
+    #[test]
+    fn scrub_tail_passes_unavailable_through_unchanged() {
+        let tail = TranscriptTail::Unavailable {
+            reason: UnavailableReason::NoSession,
+        };
+        assert_eq!(
+            scrub_tail(tail),
+            TranscriptTail::Unavailable {
+                reason: UnavailableReason::NoSession
+            }
         );
     }
 }

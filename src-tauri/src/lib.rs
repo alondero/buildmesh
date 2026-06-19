@@ -2,6 +2,7 @@
 //! AI Agent Orchestration Hub for Windows + WSL
 
 pub mod agent;
+pub mod autopilot;
 mod commands;
 mod coordinator;
 mod db;
@@ -14,6 +15,7 @@ mod node_turn;
 mod preferences;
 pub mod process_util;
 mod pty;
+pub mod secret_scrubber;
 mod services;
 mod session_capture;
 mod session_naming;
