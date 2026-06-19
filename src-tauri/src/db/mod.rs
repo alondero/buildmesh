@@ -740,8 +740,7 @@ pub fn set_coordinator_api_enabled_inner(conn: &Connection, enabled: bool) -> Sq
 /// devices on the LAN cannot reach the hub without an explicit opt-in. Enabling
 /// it is what lets a phone connect over LAN/VPN (TLS for that path is a later
 /// slice). The secure default is enforced by `http::start_http_server` reading
-/// this before choosing its bind addresses. The settings toggle that writes
-/// this flag arrives with the LAN-exposure UI slice (PRD #494).
+/// this before choosing its bind addresses.
 const LAN_EXPOSURE_ENABLED_KEY: &str = "lan_exposure_enabled";
 
 /// Is LAN/VPN exposure enabled? Defaults to `false` (loopback-only) so a naive
@@ -760,6 +759,20 @@ pub fn lan_exposure_enabled_inner(conn: &Connection) -> SqlResult<bool> {
         )
         .ok();
     Ok(value.as_deref() == Some("1"))
+}
+
+/// Flip the LAN/VPN exposure switch. Takes effect on the next server start.
+pub fn set_lan_exposure_enabled(enabled: bool) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    set_lan_exposure_enabled_inner(&db, enabled)
+}
+
+pub fn set_lan_exposure_enabled_inner(conn: &Connection, enabled: bool) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+        params![LAN_EXPOSURE_ENABLED_KEY, if enabled { "1" } else { "0" }],
+    )?;
+    Ok(())
 }
 
 /// Mint (or replace) the read-scoped coordinator token, returning it. Minting a
