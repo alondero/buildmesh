@@ -562,8 +562,7 @@ mod tests {
     use super::*;
     use crate::env::test_helpers::init_repo_with_commit as init_repo_for_test;
     use crate::git::worktree::create_git_worktree;
-    use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
-    use chrono::Utc;
+    use crate::models::AgentNode;
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -757,23 +756,10 @@ mod tests {
 
         let node = AgentNode {
             id: 1,
-            mesh_id: 1,
-            name: "agent-1".into(),
             path: root.to_string_lossy().into_owned(),
-            branch: "main".into(), // The Base Ref (NOT the agent's branch)
-            env: EnvType::Windows,
-            provider: Provider::Anthropic,
-            status: SessionStatus::Idle,
-            cli_session_id: None,
             worktree_name: Some("agent-1".into()),
             use_worktree: true,
-            source_issue: None,
-            source_pr: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            source_pr_pinned_sha: None,
-            position: 0,
-            created_at: Utc::now(),
+            ..Default::default()
         };
         (tmp, wt_dir.to_string_lossy().into_owned(), node)
     }
@@ -787,23 +773,9 @@ mod tests {
 
         let node = AgentNode {
             id: 2,
-            mesh_id: 1,
-            name: "root-agent".into(),
             path: root.to_string_lossy().into_owned(),
-            branch: "main".into(),
-            env: EnvType::Windows,
-            provider: Provider::Anthropic,
-            status: SessionStatus::Idle,
-            cli_session_id: None,
-            worktree_name: None,
             use_worktree: false,
-            source_issue: None,
-            source_pr: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            source_pr_pinned_sha: None,
-            position: 0,
-            created_at: Utc::now(),
+            ..Default::default()
         };
         (tmp, root.to_string_lossy().into_owned(), node)
     }

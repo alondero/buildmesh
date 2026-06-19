@@ -84,8 +84,7 @@ pub fn unwatch_session(session_id: i64) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use crate::env::{node_working_path, resolve_agent_path};
-    use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
-    use chrono::Utc;
+    use crate::models::AgentNode;
 
     #[test]
     fn test_watch_path_with_worktree_name() {
@@ -103,26 +102,14 @@ mod tests {
 
     /// Minimal Agent Node fixture; only `use_worktree`/`worktree_name`/`path`
     /// drive `node_working_path`. Mirrors the `env` module's fixture.
+    /// `..Default::default()` covers the rest so future optional columns
+    /// don't reopen this fixture (issue #457).
     fn node(use_worktree: bool, worktree_name: Option<&str>) -> AgentNode {
         AgentNode {
-            id: 1,
-            mesh_id: 1,
-            name: "n".to_string(),
             path: "/home/user/my-repo".to_string(),
-            branch: "main".to_string(),
-            env: EnvType::Wsl,
-            provider: Provider::Anthropic,
-            status: SessionStatus::Running,
-            cli_session_id: None,
             worktree_name: worktree_name.map(str::to_string),
             use_worktree,
-            source_issue: None,
-            source_pr: None,
-            head_repo_owner: None,
-            head_repo_clone_url: None,
-            source_pr_pinned_sha: None,
-            position: 0,
-            created_at: Utc::now(),
+            ..Default::default()
         }
     }
 
