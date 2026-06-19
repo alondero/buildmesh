@@ -39,7 +39,7 @@
  * `meshesById` directly.
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import {
   discoverAgentNodes,
   importDiscoveredAgentNode,
@@ -51,6 +51,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { useClickOutside } from '../../hooks/useClickOutside';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 
@@ -147,17 +148,8 @@ export function DiscoveredNodesTab() {
   // the option click (or the click on the option itself) from racing
   // the document-level mousedown handler and tearing the dropdown out
   // of the DOM before the click event lands.
-  useEffect(() => {
-    if (!openDropdown) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(`[data-dropdown-for="${openDropdown}"]`)) {
-        setOpenDropdown(null);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [openDropdown]);
+  // Issue #492 — shared `useClickOutside` hook.
+  useClickOutside(openDropdown, () => setOpenDropdown(null));
 
   const handleResume = async (session: DiscoveredAgentNode, providerId: string) => {
     if (activeMeshId === null || activeMeshPath === null) return;

@@ -1279,25 +1279,12 @@ mod tests {
             if self.should_fail {
                 return Err("mock db error".into());
             }
+            // `should_trigger_rename` only reads `node.name`; the rest
+            // spreads through `..Default::default()` (issue #457).
             Ok(AgentNode {
                 id,
-                mesh_id: 1,
                 name: self.node_name.clone(),
-                path: "/tmp/test".to_string(),
-                branch: "main".to_string(),
-                env: crate::models::EnvType::Windows,
-                provider: crate::models::Provider::Anthropic,
-                status: crate::models::SessionStatus::Running,
-                cli_session_id: None,
-                worktree_name: None,
-                use_worktree: false,
-                source_issue: None,
-                source_pr: None,
-                head_repo_owner: None,
-                head_repo_clone_url: None,
-                source_pr_pinned_sha: None,
-                position: 0,
-                created_at: chrono::Utc::now(),
+                ..Default::default()
             })
         }
         fn update_agent_node_name(&self, id: i64, name: &str) -> Result<(), String> {

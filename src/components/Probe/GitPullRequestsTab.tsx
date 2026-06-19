@@ -50,8 +50,7 @@
  * either boundary).
  */
 
-import { useState, useEffect } from 'react';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { useState } from 'react';
 import {
   getRepoPulls,
   getPrMergeability,
@@ -65,8 +64,11 @@ import {
 import { useMeshStore } from '../../stores/meshStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { useToggleSet } from '../../hooks/useToggleSet';
+import { useClickOutside } from '../../hooks/useClickOutside';
 import { useUIStore } from '../../stores/uiStore';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { ProbeRow } from './ProbeRow';
 
 type StateFilter = 'open' | 'closed';
 
@@ -223,15 +225,9 @@ export function GitPullRequestsTab() {
   // long PRs can stay expanded side-by-side. Reset on every load
   // below (mesh + open/closed filter both change the visible set of
   // PR numbers, so the prior Set would either no-op or re-open a
-  // different row).
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
-  const toggleExpanded = (n: number) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(n)) next.delete(n);
-      else next.add(n);
-      return next;
-    });
+  // different row). `useToggleSet` (issue #463) bundles the Set state
+  // + toggle closure + clear reset into one hook.
+  const expanded = useToggleSet<number>();
   // Bump to force the load effect to re-run — the previous run's signal
   // is aborted by useAsyncEffect's cleanup, so any in-flight getRepoPulls
   // drops its setState instead of clobbering the new run's result. Used
@@ -246,7 +242,7 @@ export function GitPullRequestsTab() {
     setConfirming(null);
     setMergeError({});
     // PR numbers don't carry across mesh/filter changes (issue #461).
-    setExpanded(new Set());
+    expanded.clear();
     (async () => {
       try {
         const result = await getRepoPulls(activeMeshId, stateFilter);
@@ -349,17 +345,10 @@ export function GitPullRequestsTab() {
   // container carries a `data-dropdown-for` attribute set to the PR number,
   // matching the issue-tab pattern (memory:
   // feedback-probe-tab-test-and-jsdoc-gotchas — mousedown vs click race).
-  useEffect(() => {
-    if (openDropdown === null) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(`[data-dropdown-for="${openDropdown}"]`)) {
-        setOpenDropdown(null);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, [openDropdown]);
+  // Issue #492 — shared `useClickOutside` hook; the scoped selector lives
+  // in the hook so a future caller cannot reintroduce the loose-selector
+  // drift that #492 fixed in Sidebar.
+  useClickOutside(openDropdown, () => setOpenDropdown(null));
 
   // Two-stage PR spawn (issue #420, extended by #443 for fork PRs) —
   // mirrors the issue-spawn flow in `GitIssuesTab`. Stage-1
@@ -564,249 +553,187 @@ export function GitPullRequestsTab() {
               const isSpawning = spawning === pr.number;
               const isDropdownOpen = openDropdown === pr.number;
               const rowSpawnError = spawnError[pr.number];
-              const isExpanded = expanded.has(pr.number);
-              // Local alias so the two anchor gates below stay in sync
-              // (issue #461 empty-URL guard, see memory).
-              const url = pr.url;
+              const isExpanded = expanded.isExpanded(pr.number);
               return (
-                <div
+                <ProbeRow
                   key={pr.number}
-                  data-pr-row={pr.number}
-                  className="flex flex-col gap-1 px-2 py-2 rounded hover:bg-bg-card transition-colors"
-                >
-                  <div className="flex items-start gap-2">
-                    {/* Title <a> uses onClick stopPropagation so navigating
-                        to GitHub doesn't also toggle expand (issue #461). */}
-                    <div
-                      className="flex-1 min-w-0 cursor-pointer"
-                      onClick={() => toggleExpanded(pr.number)}
-                    >
-                      {/* `min-w-0` on this nested flex + `min-w-0 flex-1`
-                          on the title <a>/<span> is required for the
-                          `truncate` class to actually take effect. Without
-                          it, a long PR title (PRs often have multi-clause
-                          titles) overflows the flex parent and wraps to
-                          multiple lines, visually colliding with the
-                          Merge/Spawn/View-changes buttons to the right.
-                          The outer wrapper already has `flex-1 min-w-0` so
-                          the title area is bounded; the inner flex must
-                          also be `min-w-0` for its children to shrink
-                          below their intrinsic content width. */}
-                      <div className="flex items-center gap-1 min-w-0">
-                        <span
-                          aria-hidden
-                          className={
-                            'text-text-muted text-[10px] w-3 text-center shrink-0 transition-transform ' +
-                            (isExpanded ? 'rotate-90' : '')
-                          }
+                  dataAttr="pr"
+                  rowKey={pr.number}
+                  number={pr.number}
+                  title={pr.title}
+                  url={pr.url}
+                  iconAriaLabel="Open pull request on GitHub"
+                  isExpanded={isExpanded}
+                  onToggle={() => expanded.toggle(pr.number)}
+                  body={pr.body}
+                  rightSlot={
+                    // Three action groups, all gated to the open filter
+                    // (closed PRs are read-only — no merge / spawn). The
+                    // `onMouseDown stopPropagation` on each wrapper keeps
+                    // the document-level mousedown click-outside handler
+                    // from closing the provider picker mid-click. The
+                    // rightSlot is a sibling of the clickable column, so
+                    // button clicks here don't bubble to the row's
+                    // `onToggle` — see `ProbeRow.tsx` for the layout.
+                    <>
+                      {/* Merge control — open PRs only. Icon-only button
+                          (git-merge SVG) reclaims the 360px dock from
+                          button text. `aria-label` carries the PR number
+                          for screen readers; `title` is the hover tooltip.
+                          In the confirm state we swap to a green check +
+                          muted x — same colour semantics the text version
+                          used (green = go, muted = dismiss). The Confirm
+                          button is intentionally larger than Cancel via
+                          `px-2.5` (vs `p-1.5`) so the eye lands on the
+                          safe-looking affirmative. */}
+                      {stateFilter === 'open' && (
+                        <div
+                          className="shrink-0 flex items-center gap-1"
+                          onMouseDown={(e) => e.stopPropagation()}
                         >
-                          ▸
-                        </span>
-                        <span className="text-xs text-accent-cyan font-mono">#{pr.number}</span>
-                        {url ? (
-                          // href/target/rel keep the link right-clickable,
-                          // keyboard-activatable, and AT-friendly. The onClick
-                          // routes through `openUrl` because the Tauri 2 WebView
-                          // is not a browser — `target="_blank"` is silently
-                          // dropped without `core:webview:allow-create-webview-window`
-                          // (which we don't grant). `e.preventDefault()` stops
-                          // the dead default action; `e.stopPropagation()` keeps
-                          // the row's expand-toggle out of the way. Mirrors the
-                          // PR-chip pattern in `GridNodeHeader.tsx:145` and the
-                          // web-links addon in `TerminalRegistry.ts:249`.
-                          <a
-                            href={url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              openUrl(url).catch(console.error);
-                            }}
-                            className="text-sm text-text-primary hover:underline ml-1 truncate min-w-0 flex-1"
-                            title="Open on GitHub"
-                          >
-                            {pr.title}
-                          </a>
-                        ) : (
-                          // Defensive guard: see memory
-                          // buildmesh-empty-url-frontend-guard. A bare
-                          // <a href=""> would self-navigate the WebView.
-                          <span className="text-sm text-text-primary ml-1 truncate min-w-0 flex-1">
-                            {pr.title}
-                          </span>
-                        )}
-                        {url && (
-                          // See title <a> above — Tauri 2 needs openUrl routing.
-                          <a
-                            href={url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              openUrl(url).catch(console.error);
-                            }}
-                            aria-label="Open pull request on GitHub"
-                            className="text-text-muted hover:text-accent-cyan transition-colors text-[11px] shrink-0"
-                            title="Open on GitHub"
-                          >
-                            ↗
-                          </a>
-                        )}
-                      </div>
-                      {pr.body && (
-                        isExpanded ? (
-                          <div
-                            data-pr-body-expanded
-                            className="mt-1 max-h-48 overflow-y-auto text-[10px] text-text-muted whitespace-pre-wrap break-words"
-                          >
-                            {pr.body}
-                          </div>
-                        ) : (
-                          <p className="text-[10px] text-text-muted mt-1 line-clamp-2">{pr.body}</p>
-                        )
+                          {isMerging ? (
+                            <span className="px-2 py-1 text-xs text-text-muted">Merging...</span>
+                          ) : isConfirming ? (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleMerge(pr)}
+                                aria-label={`Confirm squash merge of pull request #${pr.number}`}
+                                title="Confirm squash merge"
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
+                              >
+                                <CheckIcon className="w-3.5 h-3.5" />
+                                <span>Confirm</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirming(null)}
+                                aria-label={`Cancel merge of pull request #${pr.number}`}
+                                title="Cancel"
+                                className="p-1.5 rounded text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
+                              >
+                                <XIcon className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          ) : status.kind === 'mergeable' ? (
+                            <button
+                              type="button"
+                              onClick={() => setConfirming(pr.number)}
+                              disabled={merging !== null}
+                              aria-label={`Merge pull request #${pr.number}`}
+                              title="Merge pull request"
+                              className="p-1.5 rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                              <GitMergeIcon className="w-3.5 h-3.5" />
+                            </button>
+                          ) : status.kind === 'checking' ? (
+                            <span className="px-2 py-1 text-[10px] text-text-muted">Checking…</span>
+                          ) : (
+                            <span className="px-2 py-1 text-[10px] rounded bg-bg-card text-text-muted" title="This pull request can't be merged">
+                              {status.label}
+                            </span>
+                          )}
+                        </div>
                       )}
+
+                      {/* Split spawn button (issue #420) — open PRs only;
+                          closed PRs are read-only. Mirrors the issue-tab
+                          pattern: primary "Spawn" uses the mesh's default
+                          provider, the `▾` half opens a picker that
+                          bypasses the default. The row is disabled while
+                          any spawn is in flight (busy state shared across
+                          rows). The `data-dropdown-for` attribute feeds
+                          the click-outside handler in the spawn-effects
+                          block above. */}
+                      {stateFilter === 'open' && (
+                        <div
+                          className="relative flex shrink-0"
+                          data-dropdown-for={pr.number}
+                          onMouseDown={(e) => e.stopPropagation()}
+                        >
+                          {isSpawning ? (
+                            <button
+                              disabled
+                              className="px-2.5 py-1 text-xs font-medium rounded bg-accent-cyan/10 text-text-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                            >
+                              Spawning...
+                            </button>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => handleDefaultSpawn(pr)}
+                                disabled={spawning !== null}
+                                className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                              >
+                                Spawn
+                              </button>
+                              <button
+                                onClick={() => setOpenDropdown(isDropdownOpen ? null : pr.number)}
+                                disabled={spawning !== null}
+                                className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                title="Choose provider"
+                              >
+                                ▾
+                              </button>
+                              {isDropdownOpen && (
+                                <ProviderDropdown
+                                  meshId={pr.number}
+                                  providers={providerList}
+                                  onSelect={(providerId) => handleSpawn(pr, providerId)}
+                                />
+                              )}
+                            </>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Read-only "View changes" (issue #421). Always
+                          available for any state filter — the diff is
+                          useful on closed PRs too (review a merged change,
+                          compare with a rebase). `onMouseDown`
+                          stopPropagation mirrors the merge control so a
+                          future click-outside picker doesn't swallow the
+                          click. Icon-only (file-text SVG) — the visible
+                          "View changes" text ate ~80px of the 360px dock.
+                          Hover tooltip + aria-label preserve the semantics
+                          for sighted and AT users. */}
+                      <div
+                        className="shrink-0 flex items-center"
+                        onMouseDown={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleViewChanges(pr)}
+                          aria-label={`View changes in PR #${pr.number}`}
+                          title="Open the PR's diff in the center overlay"
+                          className="p-1.5 rounded text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
+                        >
+                          <FileTextIcon className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </>
+                  }
+                  belowSlot={
+                    // Inline merge / spawn error rows (issues #419, #420,
+                    // #444). Rendered below the title row, outside the
+                    // clickable column — clicking an error message no
+                    // longer toggles expand. This is a subtle UX
+                    // improvement: the user reading an error probably
+                    // doesn't expect their next click to collapse the
+                    // body. The error text is still findable via
+                    // `findByText` and tests still pass (no test covered
+                    // the "clicking the error toggles expand" behaviour,
+                    // which was almost certainly accidental anyway).
+                    <>
                       {rowError && (
                         <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowError}</p>
                       )}
                       {rowSpawnError && (
                         <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowSpawnError}</p>
                       )}
-                    </div>
-
-                  {/* Merge control — open PRs only; closed PRs are read-only.
-                      The action button is icon-only (git-merge SVG) to keep
-                      the 360px dock from being eaten by button text. The
-                      `aria-label` carries the PR number so screen readers
-                      announce "Merge pull request #201" and `title` gives
-                      mouse users a hover tooltip — the discoverability that
-                      used to come from visible text. In the confirm state
-                      we swap to a green check + muted x; the same colour
-                      semantics the text version used (green = go, muted =
-                      dismiss). The Confirm button is intentionally larger
-                      than Cancel via `px-2.5` (vs `p-1.5`) so the eye lands
-                      on the safe-looking affirmative — destructive-style
-                      confirm would invert this. */}
-                  {stateFilter === 'open' && (
-                    <div className="shrink-0 flex items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
-                      {isMerging ? (
-                        <span className="px-2 py-1 text-xs text-text-muted">Merging...</span>
-                      ) : isConfirming ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => handleMerge(pr)}
-                            aria-label={`Confirm squash merge of pull request #${pr.number}`}
-                            title="Confirm squash merge"
-                            className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
-                          >
-                            <CheckIcon className="w-3.5 h-3.5" />
-                            <span>Confirm</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setConfirming(null)}
-                            aria-label={`Cancel merge of pull request #${pr.number}`}
-                            title="Cancel"
-                            className="p-1.5 rounded text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
-                          >
-                            <XIcon className="w-3.5 h-3.5" />
-                          </button>
-                        </>
-                      ) : status.kind === 'mergeable' ? (
-                        <button
-                          type="button"
-                          onClick={() => setConfirming(pr.number)}
-                          disabled={merging !== null}
-                          aria-label={`Merge pull request #${pr.number}`}
-                          title="Merge pull request"
-                          className="p-1.5 rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        >
-                          <GitMergeIcon className="w-3.5 h-3.5" />
-                        </button>
-                      ) : status.kind === 'checking' ? (
-                        <span className="px-2 py-1 text-[10px] text-text-muted">Checking…</span>
-                      ) : (
-                        <span className="px-2 py-1 text-[10px] rounded bg-bg-card text-text-muted" title="This pull request can't be merged">
-                          {status.label}
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Split spawn button (issue #420) — open PRs only;
-                      closed PRs are read-only. Mirrors the issue-tab
-                      pattern: primary "Spawn" uses the mesh's default
-                      provider, the `▾` half opens a picker that bypasses
-                      the default. The row is disabled while any spawn
-                      is in flight (busy state shared across rows). The
-                      `data-dropdown-for` attribute feeds the click-outside
-                      handler in the spawn-effects block above. */}
-                  {stateFilter === 'open' && (
-                    <div
-                      className="relative flex shrink-0"
-                      data-dropdown-for={pr.number}
-                      onMouseDown={(e) => e.stopPropagation()}
-                    >
-                      {isSpawning ? (
-                        <button
-                          disabled
-                          className="px-2.5 py-1 text-xs font-medium rounded bg-accent-cyan/10 text-text-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        >
-                          Spawning...
-                        </button>
-                      ) : (
-                        <>
-                          <button
-                            onClick={() => handleDefaultSpawn(pr)}
-                            disabled={spawning !== null}
-                            className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                          >
-                            Spawn
-                          </button>
-                          <button
-                            onClick={() => setOpenDropdown(isDropdownOpen ? null : pr.number)}
-                            disabled={spawning !== null}
-                            className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                            title="Choose provider"
-                          >
-                            ▾
-                          </button>
-                          {isDropdownOpen && (
-                            <ProviderDropdown
-                              meshId={pr.number}
-                              providers={providerList}
-                              onSelect={(providerId) => handleSpawn(pr, providerId)}
-                            />
-                          )}
-                        </>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Read-only "View changes" (issue #421). Always available
-                      for any state filter — the diff is useful on closed PRs
-                      too (review a merged change, compare with a rebase).
-                      `onMouseDown` stopPropagation mirrors the merge control
-                      so a future click-outside picker (issue #373's dock
-                      pattern) doesn't swallow the click. Icon-only (file-text
-                      SVG) — the visible "View changes" text ate ~80px of the
-                      360px dock. Hover tooltip + aria-label preserve the
-                      semantics for sighted and AT users. */}
-                  <div className="shrink-0 flex items-center" onMouseDown={(e) => e.stopPropagation()}>
-                    <button
-                      type="button"
-                      onClick={() => handleViewChanges(pr)}
-                      aria-label={`View changes in PR #${pr.number}`}
-                      title="Open the PR's diff in the center overlay"
-                      className="p-1.5 rounded text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
-                    >
-                      <FileTextIcon className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                  </div>
-                </div>
+                    </>
+                  }
+                />
               );
             })}
           </div>

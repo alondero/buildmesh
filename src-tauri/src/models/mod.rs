@@ -5,10 +5,14 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Runtime environment — Windows or WSL
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// `Windows` is `#[default]` so `AgentNode::default()` matches the existing
+/// `from_db_str` fallback ("unknown string → Windows"); issue #457.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "EnvType.ts")]
 pub enum EnvType {
+    #[default]
     Windows,
     Wsl,
 }
@@ -43,10 +47,14 @@ impl EnvType {
 }
 
 /// Agent provider type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+///
+/// `Anthropic` is `#[default]` so `AgentNode::default()` matches the existing
+/// `from_db_str` fallback ("unknown string → Anthropic"); issue #457.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export, export_to = "Provider.ts")]
 pub enum Provider {
+    #[default]
     Anthropic,
     Minimax,
     Agy,
@@ -138,11 +146,15 @@ impl std::fmt::Display for Provider {
 // variant serialises to "awaiting_input" — matching `to_db_str` and every
 // frontend comparison. Under "lowercase" it became "awaitinginput", a value no
 // consumer matched (issue #359). Single-word variants are identical either way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+//
+// `Idle` is `#[default]` so `AgentNode::default()` matches the existing
+// `from_db_str` fallback ("unknown string → Idle"); issue #457.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "SessionStatus.ts")]
 pub enum SessionStatus {
     Running,
+    #[default]
     Idle,
     AwaitingInput,
     Error,
@@ -230,7 +242,13 @@ pub struct Mesh {
 /// generated `EnvType`/`Provider`/`SessionStatus` enums. `i64` fields use
 /// `#[ts(as = "i32")]` / `Option<i32>` so they emit `number` / `number | null`
 /// rather than ts-rs's default `bigint`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+///
+/// `#[derive(Default)]` (issue #457) so test fixtures and stub-only call
+/// sites can spread `..Default::default()` instead of re-listing every field
+/// on each new column. The enum defaults match each `from_db_str` fallback
+/// (Windows / Anthropic / Idle); scalars are zero/empty/false. Future
+/// `Option<T>` columns automatically inherit `None` with no fixture edits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "AgentNode.ts")]
 pub struct AgentNode {
     #[ts(as = "i32")]
@@ -614,6 +632,57 @@ mod tests {
         let mut mesh = sample_mesh();
         mesh.name = String::new();
         assert_eq!(MeshRow::from(&mesh).name, None);
+    }
+
+    /// Regression test for issue #457: `AgentNode::default()` exists so future
+    /// optional columns only need to be added to the struct, not to 8 test
+    /// fixtures. Defaults are chosen to match each enum's `from_db_str`
+    /// fallback semantics (`EnvType::Windows`, `Provider::Anthropic`,
+    /// `SessionStatus::Idle`) so an AgentNode built from `..Default::default()`
+    /// is a meaningful "no row loaded" stub — not a value that would silently
+    /// masquerade as a real row.
+    #[test]
+    fn agent_node_default_matches_fallback_semantics() {
+        let n = AgentNode::default();
+        assert_eq!(n.id, 0);
+        assert_eq!(n.mesh_id, 0);
+        assert_eq!(n.name, "");
+        assert_eq!(n.path, "");
+        assert_eq!(n.branch, "");
+        assert_eq!(n.env, EnvType::Windows);
+        assert_eq!(n.provider, Provider::Anthropic);
+        assert_eq!(n.status, SessionStatus::Idle);
+        assert_eq!(n.cli_session_id, None);
+        assert_eq!(n.worktree_name, None);
+        assert!(!n.use_worktree);
+        assert_eq!(n.source_issue, None);
+        assert_eq!(n.source_pr, None);
+        assert_eq!(n.head_repo_owner, None);
+        assert_eq!(n.head_repo_clone_url, None);
+        assert_eq!(n.source_pr_pinned_sha, None);
+        assert_eq!(n.position, 0);
+        // DateTime<Utc>::default() == UNIX epoch — not "now", but a
+        // well-defined placeholder that won't accidentally match a real row.
+        assert_eq!(n.created_at, chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap());
+    }
+
+    /// Companion to the above: a partially-overridden literal must compile
+    /// cleanly via `..Default::default()`, which is the migration pattern the
+    /// 8 fixtures will adopt. Pins the spread-syntax contract so a future
+    /// `non_exhaustive` or similar can't quietly break it.
+    #[test]
+    fn agent_node_partial_with_default_spread_works() {
+        let n = AgentNode {
+            id: 7,
+            path: "/tmp/fix-login".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(n.id, 7);
+        assert_eq!(n.path, "/tmp/fix-login");
+        // Untouched fields keep their defaults.
+        assert_eq!(n.env, EnvType::Windows);
+        assert_eq!(n.provider, Provider::Anthropic);
+        assert_eq!(n.status, SessionStatus::Idle);
     }
 
     #[test]
