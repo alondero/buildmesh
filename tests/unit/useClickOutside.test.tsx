@@ -158,17 +158,17 @@ describe('useClickOutside', () => {
       );
     }
     render(<TwoDropdowns />);
-    // Click on a div that is outside BOTH scoped dropdowns. Each instance's
-    // listener independently sees the target, checks its own selector, and
-    // closes.
+
+    // 1. Click outside both scoped dropdowns — each listener independently
+    //    sees the target, finds no scoped ancestor, and fires.
     fireEvent.mouseDown(screen.getByTestId('outside-both'));
     expect(closeA).toHaveBeenCalledTimes(1);
     expect(closeB).toHaveBeenCalledTimes(1);
 
-    // Click on inside-a: only closeA should fire... actually no, inside-a
-    // is outside the closeB's scoped selector, so both still fire. Click
-    // on inside-b: only closeB fires because inside-b is inside closeB's
-    // selector but outside closeA's.
+    // 2. Click on `inside-b` (data-dropdown-for="2"): matches closeB's
+    //    selector (no fire) but NOT closeA's selector (fires). This
+    //    verifies each listener is scoped to its own `open` value, not
+    //    to all instances sharing the same attribute.
     fireEvent.mouseDown(screen.getByTestId('inside-b'));
     expect(closeA).toHaveBeenCalledTimes(2);
     expect(closeB).toHaveBeenCalledTimes(1);
@@ -186,40 +186,61 @@ describe('useClickOutside', () => {
       );
     }
     render(<Probe />);
+    // Inside the custom-attribute element → must not fire.
     fireEvent.mouseDown(screen.getByTestId('inside-popover'));
     expect(onClose).not.toHaveBeenCalled();
+
+    // Outside the custom-attribute element → must fire. This proves the
+    // hook honours the third argument (without it, the default
+    // `data-dropdown-for` selector would match nothing in the DOM and
+    // every click would still count as outside — the inside-assertion
+    // alone wouldn't detect a silent no-op of the custom name).
+    fireEvent.mouseDown(screen.getByTestId('outside-popover'));
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('does not re-attach the listener on every render that produces a fresh onClose closure', () => {
-    // The ref pattern means the listener is keyed only on `open`, not on
-    // the onClose identity. We assert this indirectly: a parent that
-    // re-renders repeatedly while open stays at the same value must not
-    // cause the spy to double-fire (which would happen if the listener
-    // were being torn down + rebuilt per render and the second click
-    // reached a duplicate listener).
-    let renderCount = 0;
-    const onClose = vi.fn();
+  it('does not re-attach the listener when the parent re-renders with a fresh onClose closure (ref pattern)', () => {
+    // The hook reads `onClose` through a ref so the effect's only dep is
+    // `open` — a parent re-render that produces a new `() => setOpen(null)`
+    // closure must NOT cause a document add/removeEventListener churn.
+    // Without the ref pattern, this test would observe N `addEventListener`
+    // + N `removeEventListener` calls for N re-renders. With the ref
+    // pattern, we expect exactly one attach (the initial mount) and
+    // zero churn across the re-renders.
+    const addSpy = vi.spyOn(document, 'addEventListener');
+    const removeSpy = vi.spyOn(document, 'removeEventListener');
+
     function Probe() {
       const [, force] = useState(0);
-      renderCount++;
+      // Intentionally create a fresh closure each render so the
+      // onClose identity changes. Without the ref pattern, this would
+      // force an effect re-run.
+      const onClose = () => undefined;
       useClickOutside<number>(42, onClose);
       return (
         <div>
           <div data-dropdown-for="42" data-testid="inside">inside</div>
           <button data-testid="force" onClick={() => force(x => x + 1)} />
-          <div data-testid="outside">outside</div>
         </div>
       );
     }
     render(<Probe />);
-    const initialRenders = renderCount;
-    // Force a few re-renders.
+
+    const initialAttachCount = addSpy.mock.calls.filter(([t]) => t === 'mousedown').length;
+    const initialDetachCount = removeSpy.mock.calls.filter(([t]) => t === 'mousedown').length;
+    expect(initialAttachCount).toBe(1); // mounted once
+    expect(initialDetachCount).toBe(0); // nothing has unmounted
+
+    // Force several re-renders while `open` stays at 42.
     act(() => { screen.getByTestId('force').click(); });
     act(() => { screen.getByTestId('force').click(); });
-    expect(renderCount).toBeGreaterThan(initialRenders);
-    // One outside click → one onClose call. If the listener had been
-    // re-attached on each render, duplicate listeners could fire more.
-    fireEvent.mouseDown(screen.getByTestId('outside'));
-    expect(onClose).toHaveBeenCalledTimes(1);
+    act(() => { screen.getByTestId('force').click(); });
+
+    // No further mousedown attach/detach churn across re-renders.
+    expect(addSpy.mock.calls.filter(([t]) => t === 'mousedown')).toHaveLength(initialAttachCount);
+    expect(removeSpy.mock.calls.filter(([t]) => t === 'mousedown')).toHaveLength(initialDetachCount);
+
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
   });
 });

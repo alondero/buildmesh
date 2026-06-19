@@ -25,9 +25,9 @@
  *
  * `onClose` is read through a ref so callers do not need to memoize —
  * the listener is attached once per `open` flip, not on every render.
- * The same is true of `attributeName`; it is effectively config, but
- * reading via ref costs nothing and dodges a stale-closure trap if a
- * caller ever passes a dynamic value.
+ * `attributeName` is read fresh inside the effect (it's included in the
+ * effect's deps); callers who need a stable attribute name should pass
+ * a literal or a `useMemo`'d value. All current callers use the default.
  *
  * Out of scope
  * ------------
@@ -54,19 +54,19 @@ export function useClickOutside<T>(
   onClose: () => void,
   attributeName: string = 'data-dropdown-for',
 ): void {
-  // `onClose` and `attributeName` are read through refs so the listener
-  // attachment is keyed only on `open`. A fresh `() => setOpen(null)`
+  // `onClose` is read through a ref so the listener attachment is keyed
+  // only on `open` (and `attributeName`). A fresh `() => setOpen(null)`
   // closure each render would otherwise tear down + rebuild the document
-  // listener on every parent re-render.
+  // listener on every parent re-render. `attributeName` is a static config
+  // value in practice (all current callers use the default) and is
+  // included in the deps for correctness if a caller ever passes a
+  // dynamic value.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  const attributeNameRef = useRef(attributeName);
-  attributeNameRef.current = attributeName;
-
   useEffect(() => {
     if (open === null) return;
-    const selector = `[${attributeNameRef.current}="${String(open)}"]`;
+    const selector = `[${attributeName}="${String(open)}"]`;
     const handler = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest(selector)) return;
@@ -74,5 +74,5 @@ export function useClickOutside<T>(
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [open]);
+  }, [open, attributeName]);
 }
