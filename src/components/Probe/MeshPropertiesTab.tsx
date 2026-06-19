@@ -26,8 +26,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
+import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
 import {
   checkGhAuth,
@@ -60,6 +62,12 @@ export function MeshPropertiesTab() {
     activeMeshId !== null ? s.meshesById.get(activeMeshId) : undefined
   );
   const updateMeshName = useMeshStore((s) => s.updateMeshName);
+  // Delete Mesh — restored from the legacy `MeshPropertiesPanel` (deleted
+  // in #380). The store's `deleteMesh` calls `delete_mesh` and refetches
+  // the mesh list; `toggleProbe` closes the probe on success, matching
+  // the legacy `closePropertiesPanel()` behaviour.
+  const deleteMesh = useMeshStore((s) => s.deleteMesh);
+  const toggleProbe = useUIStore((s) => s.toggleProbe);
 
   const [form, setForm] = useState({
     name: '',
@@ -80,6 +88,11 @@ sandbox: false,
   // per mesh is cheap and avoids pulling in the heavy `useMeshGitStatus`
   // hook (which also fetches the file list and repo-ness).
   const [isGhAuthenticated, setIsGhAuthenticated] = useState(false);
+  // Delete-Mesh confirm dialog. Ported verbatim from the legacy
+  // `MeshPropertiesPanel` (deleted in #380) — the trigger button lives at
+  // the bottom of the form, and the dialog shares the
+  // `<ConfirmDialog>` shape used by the Worktree Manager tab.
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const mountedRef = useRef(true);
 
   useEffect(() => {
@@ -236,6 +249,22 @@ sandbox: config.sandbox,
     const preset = resolvePreset(id, detected?.node_scripts);
     if (!preset) return;
     await applyPreset(preset);
+  };
+
+  // Delete Mesh — ported from the legacy `MeshPropertiesPanel`. The store
+  // swallows IPC errors into `state.error` (mirrors the legacy try/catch),
+  // so closing the probe is unconditional on a non-throwing deleteMesh.
+  // `setShowDeleteConfirm(false)` runs first so the dialog unmounts before
+  // the probe closes (avoids a brief double-overlay flash).
+  const handleDelete = async () => {
+    if (activeMeshId === null) return;
+    try {
+      await deleteMesh(activeMeshId);
+      setShowDeleteConfirm(false);
+      toggleProbe();
+    } catch (e) {
+      console.error('Failed to delete mesh:', e);
+    }
   };
 
   // Without a focused mesh there is nothing to edit. The probe shell
@@ -436,7 +465,34 @@ sandbox: config.sandbox,
               className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
+
+          {/* Destructive zone — Delete Mesh (restored from the legacy
+              `MeshPropertiesPanel`, deleted in #380). Border-top separates
+              it from the config fields above so the destructive action is
+              visually distinct. The confirm dialog mirrors the pattern used
+              by the Worktree Manager tab and the legacy drawer. Sits where
+              the duplicate macOS-only Sandbox toggle used to live, before
+              #521 removed that block. */}
+          <div className="pt-3 border-t border-border-subtle">
+            <button
+              type="button"
+              onClick={() => setShowDeleteConfirm(true)}
+              className="w-full bg-status-error/10 hover:bg-status-error/20 text-status-error text-xs font-medium py-2 rounded transition-colors"
+            >
+              Delete Mesh
+            </button>
+          </div>
         </>
+      )}
+
+      {showDeleteConfirm && mesh && (
+        <ConfirmDialog
+          title="Delete Mesh"
+          message={`Delete "${mesh.name}" and all its agent nodes? This cannot be undone.`}
+          confirmLabel="Delete"
+          onConfirm={handleDelete}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
       )}
     </div>
   );
