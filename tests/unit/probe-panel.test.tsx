@@ -32,14 +32,17 @@ const NODE: AgentNode = {
   created_at: new Date(0).toISOString(),
 };
 
-/** The six tabs in the order the activity bar presents them (issue #374). */
+/** The six tabs in the order the activity bar presents them (issue #374).
+ *  The Archive entry uses its longer tooltip text because the activity-bar
+ *  button's accessible name resolves to `tooltip ?? label` (so SR users hear
+ *  the same disambiguating form as sighted hover). */
 const TAB_LABELS = [
   'Project Files',
   'Agent Changes',
   'Worktree Manager',
   'Mesh Properties',
   'Git Issues',
-  'Discovered Nodes',
+  'Archived Nodes',
 ];
 
 function tabButton(label: string): HTMLElement {
@@ -135,7 +138,7 @@ describe('ProbePanel', () => {
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    expect(header.textContent).toContain('Discovered Nodes');
+    expect(header.textContent).toContain('Archive');
   });
 
   it('shows the active mesh name as a subheading in the header', () => {

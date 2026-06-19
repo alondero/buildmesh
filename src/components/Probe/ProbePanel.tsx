@@ -33,9 +33,12 @@ import { ScratchpadTab } from './ScratchpadTab';
 interface ProbeTabDef {
   tab: ProbeTab;
   icon: string;
-  /** Full descriptive name — used for the header title, tooltip, and the
-   *  button's accessible name (aria-label). */
+  /** Full descriptive name — used for the header title, fallback tooltip,
+   *  and the button's accessible name (aria-label). */
   label: string;
+  /** Optional longer tooltip for the activity-bar button. Falls back to
+   *  `label` when omitted. */
+  tooltip?: string;
   /** Single-word caption shown under the icon in the narrow activity bar, so
    *  it stays legible at a readable size without wrapping. */
   short: string;
@@ -50,7 +53,7 @@ const PROBE_TABS: ProbeTabDef[] = [
   { tab: 'properties', icon: '⚙️', label: 'Mesh Properties', short: 'Properties' },
   { tab: 'issues', icon: '🐙', label: 'Git Issues', short: 'Issues' },
   { tab: 'pulls', icon: '🔀', label: 'Pull Requests', short: 'PRs' },
-  { tab: 'sessions', icon: '🕒', label: 'Discovered Nodes', short: 'Nodes' },
+  { tab: 'sessions', icon: '🕒', label: 'Archive', tooltip: 'Archived Nodes', short: 'Archive' },
   { tab: 'scratchpad', icon: '📝', label: 'Scratch Pad', short: 'Notes' },
 ];
 
@@ -148,16 +151,16 @@ export function ProbePanel() {
         aria-label="Probe tabs"
         className="flex flex-col w-16 shrink-0 py-1 border-l border-border-subtle bg-bg-surface"
       >
-        {PROBE_TABS.map(({ tab, icon, label, short }) => {
+        {PROBE_TABS.map(({ tab, icon, label, short, tooltip }) => {
           const isActive = probeOpen && probeTab === tab;
           return (
             <button
               key={tab}
               type="button"
               onClick={() => handleTabClick(tab)}
-              aria-label={label}
+              aria-label={tooltip ?? label}
               aria-pressed={isActive}
-              title={label}
+              title={tooltip ?? label}
               className={`flex flex-col items-center gap-1 px-1 py-2.5 transition-colors border-l-2 ${
                 isActive
                   ? 'text-accent-cyan border-accent-cyan bg-bg-highlight'

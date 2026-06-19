@@ -279,13 +279,14 @@ export function MeshItem({
           </button>
           <button
             onClick={() => { setContextMenu(null); onOpenSessionHistoryProbe(mesh.id); }}
+            title="Archived Nodes"
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"/>
               <polyline points="12 6 12 12 16 14"/>
             </svg>
-            Previous Agent Nodes
+            Archive
           </button>
           <button
             onClick={() => { setContextMenu(null); onOpenIssuesProbe(mesh.id); }}
