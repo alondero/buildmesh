@@ -717,6 +717,33 @@ pub fn set_coordinator_api_enabled_inner(conn: &Connection, enabled: bool) -> Sq
     Ok(())
 }
 
+/// Whether the embedded HTTP/WS server may bind beyond loopback (issue #496).
+/// Off by default: a fresh install binds only `127.0.0.1`/`::1`, so external
+/// devices on the LAN cannot reach the hub without an explicit opt-in. Enabling
+/// it is what lets a phone connect over LAN/VPN (TLS for that path is a later
+/// slice). The secure default is enforced by `http::start_http_server` reading
+/// this before choosing its bind addresses. The settings toggle that writes
+/// this flag arrives with the LAN-exposure UI slice (PRD #494).
+const LAN_EXPOSURE_ENABLED_KEY: &str = "lan_exposure_enabled";
+
+/// Is LAN/VPN exposure enabled? Defaults to `false` (loopback-only) so a naive
+/// setup is never reachable from another machine.
+pub fn lan_exposure_enabled() -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    lan_exposure_enabled_inner(&db)
+}
+
+pub fn lan_exposure_enabled_inner(conn: &Connection) -> SqlResult<bool> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![LAN_EXPOSURE_ENABLED_KEY],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(value.as_deref() == Some("1"))
+}
+
 /// Mint (or replace) the read-scoped coordinator token, returning it. Minting a
 /// fresh token invalidates any previously issued one.
 pub fn generate_coordinator_read_token() -> SqlResult<String> {

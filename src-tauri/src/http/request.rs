@@ -1,5 +1,7 @@
 //! HTTP request parsing helpers: tokens, headers, and response writers.
 
+use std::net::IpAddr;
+
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
@@ -58,6 +60,41 @@ pub fn session_cookie_header(token: &str) -> String {
         "Set-Cookie: bm_session={}; HttpOnly; SameSite=Lax; Path=/",
         token
     )
+}
+
+/// Strip the optional `:port` (and IPv6 brackets) from a `Host` header value,
+/// returning the bare hostname/IP. `127.0.0.1:1992` -> `127.0.0.1`,
+/// `[::1]:1992` -> `::1`, `localhost` -> `localhost`.
+pub fn strip_host_port(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 literal: `[::1]` or `[::1]:port`.
+        return rest.split(']').next().unwrap_or(rest);
+    }
+    // Hostname or IPv4, optionally `:port`.
+    host.split(':').next().unwrap_or(host)
+}
+
+/// Validate a request's `Host` header to defeat DNS rebinding. A browser cannot
+/// forge `Host`, so a rogue page that re-resolved its domain to `127.0.0.1`
+/// still sends `Host: evil.com` -- which matches nothing here and is rejected.
+///
+/// Accepts `localhost`, any loopback IP, and the host's own interface IPs
+/// (`local_ips`) so an opt-in LAN client reaching us on the box's LAN address
+/// passes. Any other domain name, or an empty header, is rejected.
+pub fn host_is_allowed(host_header: &str, local_ips: &[IpAddr]) -> bool {
+    let hostname = strip_host_port(host_header.trim());
+    if hostname.is_empty() {
+        return false;
+    }
+    if hostname.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match hostname.parse::<IpAddr>() {
+        Ok(ip) => ip.is_loopback() || local_ips.contains(&ip),
+        // A non-`localhost` domain name is never a legitimate target for the
+        // loopback/LAN server -- only the DNS-rebinding attacker uses one.
+        Err(_) => false,
+    }
 }
 
 pub fn extract_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
@@ -181,6 +218,45 @@ mod tests {
         assert!(header.contains("HttpOnly"));
         assert!(header.contains("SameSite=Lax"));
         assert!(header.contains("Path=/"));
+    }
+
+    #[test]
+    fn strip_host_port_handles_v4_v6_and_names() {
+        assert_eq!(strip_host_port("127.0.0.1:1992"), "127.0.0.1");
+        assert_eq!(strip_host_port("localhost:1992"), "localhost");
+        assert_eq!(strip_host_port("localhost"), "localhost");
+        assert_eq!(strip_host_port("[::1]:1992"), "::1");
+        assert_eq!(strip_host_port("[::1]"), "::1");
+        assert_eq!(strip_host_port("192.168.1.5"), "192.168.1.5");
+    }
+
+    #[test]
+    fn host_is_allowed_accepts_loopback_and_localhost() {
+        let none: &[IpAddr] = &[];
+        assert!(host_is_allowed("localhost", none));
+        assert!(host_is_allowed("LocalHost:1992", none));
+        assert!(host_is_allowed("127.0.0.1", none));
+        assert!(host_is_allowed("127.0.0.1:1992", none));
+        assert!(host_is_allowed("[::1]:1992", none));
+    }
+
+    #[test]
+    fn host_is_allowed_accepts_known_local_interface_ip() {
+        let local: Vec<IpAddr> = vec!["192.168.1.5".parse().unwrap()];
+        assert!(host_is_allowed("192.168.1.5:1992", &local));
+        // A different LAN IP that isn't ours is not whitelisted.
+        assert!(!host_is_allowed("192.168.1.99:1992", &local));
+    }
+
+    #[test]
+    fn host_is_allowed_rejects_rebinding_domains_and_empty() {
+        let local: Vec<IpAddr> = vec!["192.168.1.5".parse().unwrap()];
+        // The DNS-rebinding case: attacker's domain, even resolved to loopback,
+        // still arrives as its own name in Host.
+        assert!(!host_is_allowed("evil.com", &local));
+        assert!(!host_is_allowed("attacker.example:1992", &local));
+        assert!(!host_is_allowed("", &local));
+        assert!(!host_is_allowed("   ", &local));
     }
 
     #[test]
