@@ -551,11 +551,11 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             routes::pr::merge(&mut lines, mesh_id, pr_number, content_length).await;
             return;
         }
-        // POST /api/meshes/{id}/sessions/import-and-resume
+        // POST /api/meshes/{id}/agent-nodes/import-and-resume
         if let Some(mesh_id) = path_segment_id(
             &path_without_query,
             "/api/meshes/",
-            "/sessions/import-and-resume",
+            "/agent-nodes/import-and-resume",
         ) {
             if !request::authenticate(&headers, token) {
                 let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
@@ -564,7 +564,7 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             let content_length: usize = request::extract_header_value(&headers, "Content-Length")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0);
-            routes::sessions::import_and_resume(&mut lines, mesh_id, content_length).await;
+            routes::agent_nodes::import_and_resume(&mut lines, mesh_id, content_length).await;
             return;
         }
         // POST /api/meshes/{mid}/issues/{inum}/spawn
@@ -632,17 +632,17 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             routes::git::gh_auth(&mut lines).await;
             return;
         }
-        // GET /api/meshes/{id}/sessions/discover
+        // GET /api/meshes/{id}/agent-nodes/discover
         if let Some(mesh_id) = path_segment_id(
             &path_without_query,
             "/api/meshes/",
-            "/sessions/discover",
+            "/agent-nodes/discover",
         ) {
             if !request::authenticate(&headers, token) {
                 let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
                 return;
             }
-            routes::sessions::discover(&mut lines, mesh_id).await;
+            routes::agent_nodes::discover(&mut lines, mesh_id).await;
             return;
         }
         // GET /api/meshes/{id}/issues
@@ -1030,9 +1030,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sessions_discover_requires_token() {
+    async fn agent_nodes_discover_requires_token() {
         assert_eq!(
-            get_request("/api/meshes/1/sessions/discover").await,
+            get_request("/api/meshes/1/agent-nodes/discover").await,
             401
         );
     }

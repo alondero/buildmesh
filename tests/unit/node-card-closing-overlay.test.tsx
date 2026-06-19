@@ -22,14 +22,14 @@ vi.mock('../../src/components/Terminal/Terminal', () => ({
 vi.mock('../../src/components/Terminal/BuildRunTerminal', () => ({
   BuildRunTerminal: () => <div data-testid="build-run-terminal" />,
 }));
-vi.mock('../../src/components/SessionView/GridNodeHeader', () => ({
+vi.mock('../../src/components/AgentNodeView/GridNodeHeader', () => ({
   GridNodeHeader: () => <div data-testid="grid-node-header" />,
 }));
-vi.mock('../../src/components/SessionView/nodeDrag', () => ({
+vi.mock('../../src/components/AgentNodeView/nodeDrag', () => ({
   NodeDropCue: () => null,
 }));
 
-import { NodeCard } from '../../src/components/SessionView/NodeCard';
+import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {

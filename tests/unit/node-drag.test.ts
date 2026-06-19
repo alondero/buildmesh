@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeDropIntent } from '../../src/components/SessionView/nodeDrag';
+import { computeDropIntent } from '../../src/components/AgentNodeView/nodeDrag';
 
 // Geometry shared by most cases: target node occupies x ∈ [0, 100].
 const base = {

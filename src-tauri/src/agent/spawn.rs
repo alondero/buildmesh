@@ -508,7 +508,7 @@ fn start_reader(
                 let _ = app_clone.emit(
                     "resume-failed",
                     serde_json::json!({
-                        "session_id": session_id,
+                        "node_id": session_id,
                         "error": "Agent exited immediately after spawn — session may have expired"
                     }),
                 );
@@ -786,7 +786,7 @@ pub async fn spawn_agent_inner(
                             let _ = app.emit(
                                 "mesh-sync-warning",
                                 serde_json::json!({
-                                    "session_id": session_id,
+                                    "node_id": session_id,
                                     "mesh_path": node.path,
                                     "outcome": "pr_sha_drift",
                                     "pr_number": pr_number,
@@ -835,7 +835,7 @@ pub async fn spawn_agent_inner(
                         session_id,
                     );
                     let mut payload = serde_json::json!({
-                        "session_id": session_id,
+                        "node_id": session_id,
                         "mesh_path": node.path,
                         "outcome": outcome,
                         "pr_number": pr_number,
@@ -1101,7 +1101,7 @@ fn emit_sync_outcome_event(
             (
                 "mesh-sync-warning",
                 serde_json::json!({
-                    "session_id": session_id,
+                    "node_id": session_id,
                     "mesh_path": mesh_path,
                     "outcome": "diverged",
                     "new_commits": new_commits,
@@ -1118,7 +1118,7 @@ fn emit_sync_outcome_event(
             (
                 "mesh-sync-warning",
                 serde_json::json!({
-                    "session_id": session_id,
+                    "node_id": session_id,
                     "mesh_path": mesh_path,
                     "outcome": "repo_unusable",
                     "message": message,
@@ -1142,7 +1142,7 @@ fn emit_sync_outcome_event(
             (
                 "mesh-sync-warning",
                 serde_json::json!({
-                    "session_id": session_id,
+                    "node_id": session_id,
                     "mesh_path": mesh_path,
                     "outcome": "fetch_failed",
                     "message": message,

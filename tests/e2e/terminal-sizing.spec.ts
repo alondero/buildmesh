@@ -14,19 +14,19 @@
 import { test, expect, Page } from '@playwright/test';
 import { waitForTauriReady, createTestSessionViaHttp, cleanupTestProjects } from './utils/tauri-http';
 
-async function getTerminalBoundingBox(page: Page, _sessionId: number): Promise<DOMRect | null> {
+async function getTerminalBoundingBox(page: Page, _nodeId: number): Promise<DOMRect | null> {
   const xterm = page.locator(`.xterm`).first();
   if (!await xterm.isVisible()) return null;
   return await xterm.boundingBox();
 }
 
-async function waitForTerminalFit(page: Page, _sessionId: number, timeout = 300): Promise<void> {
+async function waitForTerminalFit(page: Page, _nodeId: number, timeout = 300): Promise<void> {
   await page.waitForTimeout(timeout);
 }
 
 // Helper to switch to a session by clicking its tab
-async function switchToSession(page: Page, sessionId: number) {
-  const tab = page.locator(`button[data-session-tab="${sessionId}"]`);
+async function switchToSession(page: Page, nodeId: number) {
+  const tab = page.locator(`button[data-session-tab="${nodeId}"]`);
   if (await tab.isVisible()) {
     await tab.click();
     await page.waitForTimeout(50);

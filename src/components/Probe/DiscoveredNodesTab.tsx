@@ -1,5 +1,8 @@
 /**
- * SessionHistoryTab — the Probe Panel's 🕒 tab body (issue #378).
+ * DiscoveredNodesTab — the Probe Panel's 🕒 tab body (issue #378, renamed
+ * in issue #490). The panel shows "Agent Nodes" discoverable on disk for
+ * the current mesh (Claude Code CLI sessions that buildmesh has not yet
+ * adopted) and offers a one-click resume.
  *
  * Thin wrapper port of the legacy `SessionBrowserModal`. The dock
  * supplies the header and close button, so this component drops the
@@ -28,20 +31,20 @@
  * Why `activeMeshPath` from the probe context (not `activePath`)
  * ---------------------------------------------------------------
  * `activePath` resolves to the focused node's working directory (a
- * worktree subdir) when a node is active, but `discover_sessions` walks
- * `.claude/projects/<project>/sessions-index.json` from the *mesh
- * root* — the same place `import_discovered_session` needs to attach
- * the imported node to. The probe context hook exposes
+ * worktree subdir) when a node is active, but `discover_agent_nodes`
+ * walks `.claude/projects/<project>/sessions-index.json` from the
+ * *mesh root* — the same place `import_discovered_agent_node` needs
+ * to attach the imported node to. The probe context hook exposes
  * `activeMeshPath` for exactly this case; we don't reach into
  * `meshesById` directly.
  */
 
 import { useState, useMemo } from 'react';
 import {
-  discoverSessions,
-  importDiscoveredSession,
+  discoverAgentNodes,
+  importDiscoveredAgentNode,
   listProviders,
-  type DiscoveredSession,
+  type DiscoveredAgentNode,
 } from '../../lib/tauri';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
@@ -74,7 +77,7 @@ function isResumableProvider(id: string): boolean {
   return ['anthropic', 'minimax', 'kimi'].includes(id);
 }
 
-export function SessionHistoryTab() {
+export function DiscoveredNodesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
   // `activeMeshPath` is the mesh root, NOT the focused worktree's
   // working directory — `discover_sessions` walks `.claude/projects/...`
@@ -88,7 +91,7 @@ export function SessionHistoryTab() {
   const setActiveNode = useAgentNodeStore((s) => s.setActiveNode);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
 
-  const [sessions, setSessions] = useState<DiscoveredSession[]>([]);
+  const [sessions, setSessions] = useState<DiscoveredAgentNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
@@ -113,7 +116,7 @@ export function SessionHistoryTab() {
     if (activeMeshId === null || activeMeshPath === null) return;
     const load = async () => {
       try {
-        const result = await discoverSessions(activeMeshId, activeMeshPath);
+        const result = await discoverAgentNodes(activeMeshId, activeMeshPath);
         if (signal.aborted) return;
         setSessions(result);
       } catch (e) {
@@ -148,12 +151,12 @@ export function SessionHistoryTab() {
   // Issue #492 — shared `useClickOutside` hook.
   useClickOutside(openDropdown, () => setOpenDropdown(null));
 
-  const handleResume = async (session: DiscoveredSession, providerId: string) => {
+  const handleResume = async (session: DiscoveredAgentNode, providerId: string) => {
     if (activeMeshId === null || activeMeshPath === null) return;
     setResuming(session.session_id);
     setOpenDropdown(null);
     try {
-      const node = await importDiscoveredSession(
+      const node = await importDiscoveredAgentNode(
         activeMeshId,
         activeMeshPath,
         session.session_id,
@@ -181,7 +184,7 @@ export function SessionHistoryTab() {
     }
   };
 
-  const handleDefaultResume = async (session: DiscoveredSession) => {
+  const handleDefaultResume = async (session: DiscoveredAgentNode) => {
     if (activeMeshId === null) return;
     const defaultProvider = await getDefaultProvider(activeMeshId);
     await handleResume(session, defaultProvider);

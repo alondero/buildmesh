@@ -1,11 +1,16 @@
-//! Session resume routes for the mobile SPA.
+//! Agent-node discovery routes for the mobile SPA.
 //!
-//! "Discovered sessions" are external CLI runs (Claude Code, Gemini, ...)
+//! "Discovered nodes" are external CLI runs (Claude Code, Gemini, ...)
 //! that buildmesh found on disk but doesn't yet track. The mobile flow:
-//!   1. GET /api/meshes/{id}/sessions/discover → list them
-//!   2. POST /api/meshes/{id}/sessions/import-and-resume → create the
+//!   1. GET /api/meshes/{id}/agent-nodes/discover → list them
+//!   2. POST /api/meshes/{id}/agent-nodes/import-and-resume → create the
 //!      agent node, store the cli_session_id, and immediately spawn the
 //!      agent with `--resume` so the user lands on a live terminal.
+//!
+//! Renamed from `sessions.rs` in issue #490: the public HTTP surface uses
+//! "Agent Node" vocabulary. The old `/sessions/*` paths are kept alive in
+//! the dispatcher (src/http/mod.rs) for one release as a deprecation shim
+//! with a `Deprecation: true` response header.
 
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
@@ -25,9 +30,9 @@ pub async fn discover(
             return;
         }
     };
-    match crate::services::session_discovery::discover(mesh_id, &mesh.path) {
-        Ok(sessions) => {
-            let body = serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".to_string());
+    match crate::services::agent_node_discovery::discover(mesh_id, &mesh.path) {
+        Ok(nodes) => {
+            let body = serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(e) => {

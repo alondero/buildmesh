@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
-import { SessionView } from './components/SessionView/SessionView';
+import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { useMeshStore } from './stores/meshStore';
@@ -201,7 +201,7 @@ function App() {
         // terminals and event listeners are mounted
         setTimeout(async () => {
           try {
-            const resumed = await api.autoResumeSessions();
+            const resumed = await api.autoResumeAgentNodes();
             if (resumed.length > 0) {
               console.log(`[App] Auto-resumed ${resumed.length} sessions`);
               await fetchAgentNodes();
@@ -218,8 +218,8 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const unlisten = listen<{ session_id: number; error: string }>('resume-failed', (event) => {
-      addToast('Resume', `Session ${event.payload.session_id}: ${event.payload.error}`);
+    const unlisten = listen<{ node_id: number; error: string }>('resume-failed', (event) => {
+      addToast('Resume', `Node ${event.payload.node_id}: ${event.payload.error}`);
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
@@ -250,7 +250,7 @@ function App() {
   // treatment for any non-blocking runtime issue.
   useEffect(() => {
     const unlisten = listen<{
-      session_id: number;
+      node_id: number;
       mesh_path: string;
       outcome: 'diverged' | 'fetch_failed' | 'repo_unusable' | 'pr_head_unfetchable' | 'pr_sha_drift';
       new_commits?: number;
@@ -294,7 +294,7 @@ function App() {
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#09090f] text-[#e0e0e0]">
       <Sidebar />
-      <SessionView />
+      <AgentNodeView />
       <ProbePanel />
 
       <WorktreeCloseDialog />

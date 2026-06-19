@@ -3,7 +3,7 @@
  *
  * Symptom: at app startup, an auto-resumed agent node wraps its first lines
  * of PTY output at FitAddon's 80x24 fallback regardless of how wide the
- * pane actually is. The backend's `auto_resume_sessions` hardcodes 80x24
+ * pane actually is. The backend's `auto_resume_agent_nodes` hardcodes 80x24
  * when calling `open_pty_pair`, and the frontend's attach-effect fires
  * `resize_agent(real cols)` before the agent process is up — so the
  * resize is silently rejected with "Agent not running" and never re-tries.
@@ -116,11 +116,11 @@ vi.mock('@xterm/addon-web-links', () => ({
   WebLinksAddon: class { dispose = vi.fn(); constructor(_h?: unknown) {} },
 }));
 
-function emitAgentSpawned(sessionId: number, rows: number, cols: number) {
+function emitAgentSpawned(nodeId: number, rows: number, cols: number) {
   const callbacks = eventCallbacks.get('agent-spawned');
   if (!callbacks) throw new Error('no listener registered for agent-spawned');
   for (const cb of callbacks) {
-    cb({ payload: { session_id: sessionId, rows, cols } });
+    cb({ payload: { session_id: nodeId, rows, cols } });
   }
 }
 

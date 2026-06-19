@@ -17,11 +17,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
-import { SessionHistoryTab } from '../../src/components/Probe/SessionHistoryTab';
+import { DiscoveredNodesTab } from '../../src/components/Probe/DiscoveredNodesTab';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
-import type { DiscoveredSession } from '../../src/lib/tauri';
+import type { DiscoveredAgentNode } from '../../src/lib/tauri';
 
 const MESH: Mesh = {
   id: 42,
@@ -34,7 +34,7 @@ const MESH: Mesh = {
   sandbox: false,
 };
 
-const SESSIONS: DiscoveredSession[] = [
+const SESSIONS: DiscoveredAgentNode[] = [
   {
     session_id: 's-abc-1',
     first_message: 'Add a /v2 endpoint',
@@ -75,20 +75,20 @@ const RESUMED_NODE = {
   created_at: '2026-01-01',
 };
 
-function mockBackend(opts: { sessions?: DiscoveredSession[]; defaultProvider?: string } = {}) {
+function mockBackend(opts: { sessions?: DiscoveredAgentNode[]; defaultProvider?: string } = {}) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
-      case 'discover_sessions':
+      case 'discover_agent_nodes':
         return Promise.resolve(opts.sessions ?? SESSIONS);
       case 'list_providers':
         return Promise.resolve(PROVIDERS);
       case 'get_default_provider':
         return Promise.resolve(opts.defaultProvider ?? 'anthropic');
-      case 'import_discovered_session':
+      case 'import_discovered_agent_node':
         return Promise.resolve(RESUMED_NODE);
       case 'spawn_agent':
         return Promise.resolve(undefined);
-      case 'list_sessions':
+      case 'list_agent_nodes':
         return Promise.resolve([]);
       default:
         return Promise.resolve({});
@@ -96,7 +96,7 @@ function mockBackend(opts: { sessions?: DiscoveredSession[]; defaultProvider?: s
   });
 }
 
-describe('SessionHistoryTab (#378)', () => {
+describe('DiscoveredNodesTab (#378)', () => {
   beforeEach(() => {
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions', activeDiffFile: null });
     useMeshStore.setState({
@@ -108,7 +108,7 @@ describe('SessionHistoryTab (#378)', () => {
 
   it('lists discovered sessions for the active mesh', async () => {
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     expect(await screen.findByText('Add a /v2 endpoint')).toBeTruthy();
     expect(screen.getByText('Fix the wobble')).toBeTruthy();
@@ -119,7 +119,7 @@ describe('SessionHistoryTab (#378)', () => {
 
   it('filters by first_message text', async () => {
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'wobble');
@@ -132,7 +132,7 @@ describe('SessionHistoryTab (#378)', () => {
 
   it('filters by branch name', async () => {
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'feat/v2');
@@ -145,7 +145,7 @@ describe('SessionHistoryTab (#378)', () => {
 
   it('filters by worktree name', async () => {
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'agent-v2');
@@ -158,14 +158,14 @@ describe('SessionHistoryTab (#378)', () => {
 
   it('shows a "No previous sessions found" empty state when discovery is empty', async () => {
     mockBackend({ sessions: [] });
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     expect(await screen.findByText('No previous sessions found')).toBeTruthy();
   });
 
   it('shows "No matches" when a search filters everything out', async () => {
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'definitely-not-a-match');
@@ -176,7 +176,7 @@ describe('SessionHistoryTab (#378)', () => {
   it('does the import → spawn sequence on the primary Resume button and hides the probe', async () => {
     mockBackend();
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions' });
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     // `findAllByText` — each session row renders its own "Resume" button.
     // This test wants the first row's primary action.
@@ -184,7 +184,7 @@ describe('SessionHistoryTab (#378)', () => {
     await userEvent.click(resumes[0]);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('import_discovered_session', {
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', {
         meshId: 42,
         meshPath: '/repos/demo',
         cliSessionId: 's-abc-1',
@@ -196,7 +196,7 @@ describe('SessionHistoryTab (#378)', () => {
     // spawn_agent is the slow IPC that rehydrates the session into a
     // running PTY. The store's `spawnAgent` wraps the same command and
     // is asserted via the wire; the field name on the wire is
-    // `sessionId` (matching the original tauri command's snake_case).
+    // `nodeId` (matching the original tauri command's snake_case).
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('spawn_agent', expect.objectContaining({
         sessionId: 99,
@@ -214,7 +214,7 @@ describe('SessionHistoryTab (#378)', () => {
     // The session without a branch (`s-abc-2`) exercises the
     // `session.branch || 'main'` fallback at the import call site.
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     // `s-abc-1` is the first item; click the second Resume to hit the
     // fallback path.
@@ -222,7 +222,7 @@ describe('SessionHistoryTab (#378)', () => {
     await userEvent.click(resumes[1]);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('import_discovered_session', expect.objectContaining({
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
         cliSessionId: 's-abc-2',
         branch: 'main',
         worktreeName: null,
@@ -232,7 +232,7 @@ describe('SessionHistoryTab (#378)', () => {
 
   it('uses the explicit provider from the `▾` picker for the resume', async () => {
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     // Open the picker for the first session via the "Choose provider"
     // title (stable selector on the caret half of the split button).
@@ -243,7 +243,7 @@ describe('SessionHistoryTab (#378)', () => {
     await userEvent.click(minimaxOption);
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('import_discovered_session', expect.objectContaining({
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
         provider: 'minimax',
       }));
     });
@@ -254,7 +254,7 @@ describe('SessionHistoryTab (#378)', () => {
     // opencode can't read session transcripts from disk and therefore
     // would corrupt a resume if surfaced.
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
@@ -277,7 +277,7 @@ describe('SessionHistoryTab (#378)', () => {
     // a picker option, the option button is still in the document when
     // the click handler runs.
     mockBackend();
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
@@ -290,19 +290,19 @@ describe('SessionHistoryTab (#378)', () => {
 
     // The resume call landed, so the click event reached its handler.
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('import_discovered_session', expect.objectContaining({
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
         provider: 'minimax',
       }));
     });
   });
 
-  it('surfaces backend errors from discover_sessions with the raw message', async () => {
+  it('surfaces backend errors from discover_agent_nodes with the raw message', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'discover_sessions') return Promise.reject(new Error('claude dir not found'));
+      if (cmd === 'discover_agent_nodes') return Promise.reject(new Error('claude dir not found'));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       return Promise.resolve({});
     });
-    render(<SessionHistoryTab />);
+    render(<DiscoveredNodesTab />);
 
     expect(await screen.findByText('Failed to discover sessions')).toBeTruthy();
     expect(screen.getByText('claude dir not found')).toBeTruthy();

@@ -36,7 +36,7 @@ export const useMeshStore = create<MeshState>((set) => ({
   fetchMeshes: async () => {
     set({ loading: true, error: null });
     try {
-      const meshes = await api.listProjects();
+      const meshes = await api.listMeshes();
       const meshesById = new Map(meshes.map((p) => [p.id, p]));
       set({ meshes, meshesById, loading: false });
     } catch (e) {
@@ -46,7 +46,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   addMesh: async () => {
     try {
-      const mesh = await api.addProject();
+      const mesh = await api.addMesh();
       set((state) => ({
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]])
@@ -58,7 +58,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   addTestMesh: async (name) => {
     try {
-      const mesh = await api.createTestProject(name);
+      const mesh = await api.createTestMesh(name);
       set((state) => ({
         meshes: [...state.meshes, mesh],
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]])
@@ -72,7 +72,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   createMesh: async (name, path) => {
     try {
-      await api.createProject(name, path);
+      await api.createMesh(name, path);
       await useMeshStore.getState().fetchMeshes();
     } catch (e) {
       set({ error: String(e) });
@@ -81,7 +81,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   deleteMesh: async (id) => {
     try {
-      await api.deleteProject(id);
+      await api.deleteMesh(id);
       await useMeshStore.getState().fetchMeshes();
     } catch (e) {
       set({ error: String(e) });
@@ -92,7 +92,7 @@ export const useMeshStore = create<MeshState>((set) => ({
 
   updateMeshLayout: async (id, layout) => {
     try {
-      await api.updateProjectLayout(id, layout);
+      await api.updateMeshLayout(id, layout);
       set((state) => {
         const existing = state.meshesById.get(id);
         if (!existing) return state;
@@ -123,7 +123,7 @@ export const useMeshStore = create<MeshState>((set) => ({
       // Send ALL meshes' positions so DB stays in sync with optimistic update
       const currentMeshes = updatedMeshes!;
       const updates = currentMeshes.map((p) => [p.id, p.position] as [number, number]);
-      await api.updateProjectPositions(updates);
+      await api.updateMeshPositions(updates);
     } catch (e) {
       set({ error: String(e) });
       await useMeshStore.getState().fetchMeshes();

@@ -10,7 +10,7 @@ import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DiffHunk } from '../types/generated/DiffHunk';
 import type { DiffLine } from '../types/generated/DiffLine';
 import type { DiffResult } from '../types/generated/DiffResult';
-import type { DiscoveredSession } from '../types/generated/DiscoveredSession';
+import type { DiscoveredAgentNode } from '../types/generated/DiscoveredAgentNode';
 import type { FileDiff } from '../types/generated/FileDiff';
 import type { FileNode } from '../types/generated/FileNode';
 import type { FreeResult } from '../types/generated/FreeResult';
@@ -59,7 +59,7 @@ async function _invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<
   try {
     // Only pass `args` when defined so the call shape matches the
     // pre-wrapper `invoke('cmd')` form (some tests assert on
-    // argument count, e.g. `toHaveBeenCalledWith('list_projects')`).
+    // argument count, e.g. `toHaveBeenCalledWith('list_meshes')`).
     return args === undefined
       ? await _rawInvoke<T>(cmd)
       : await _rawInvoke<T>(cmd, args);
@@ -92,51 +92,51 @@ export type FileDiffStatus =
   | 'renamed'
   | 'untracked';
 
-// Agent Node
-export const createSession = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) =>
-  _invoke<AgentNode>('create_session', { meshId, name, path, branch, provider, useWorktree });
+// Agent Node — renamed from `*Session` to `*AgentNode` in issue #490.
+export const createAgentNode = (meshId: number, name: string, path: string, branch: string, provider?: string, useWorktree?: boolean) =>
+  _invoke<AgentNode>('create_agent_node', { meshId, name, path, branch, provider, useWorktree });
 
-export const listSessions = () =>
-  _invoke<AgentNode[]>('list_sessions');
+export const listAgentNodes = () =>
+  _invoke<AgentNode[]>('list_agent_nodes');
 
-export const getSession = (sessionId: number) =>
-  _invoke<AgentNode>('get_session', { sessionId });
+export const getAgentNode = (nodeId: number) =>
+  _invoke<AgentNode>('get_agent_node', { nodeId });
 
-export const getWorktreeCloseSafety = (sessionId: number) =>
-  _invoke<WorktreeCloseSafety>('get_worktree_close_safety', { sessionId });
+export const getWorktreeCloseSafety = (nodeId: number) =>
+  _invoke<WorktreeCloseSafety>('get_worktree_close_safety', { nodeId });
 
-export const deleteSession = (sessionId: number, removeWorktree = false) =>
-  _invoke('delete_session', { sessionId, removeWorktree });
+export const deleteAgentNode = (nodeId: number, removeWorktree = false) =>
+  _invoke('delete_agent_node', { nodeId, removeWorktree });
 
-export const renameSession = (sessionId: number, name: string) =>
-  _invoke('rename_session', { sessionId, name });
+export const renameAgentNode = (nodeId: number, name: string) =>
+  _invoke('rename_agent_node', { nodeId, name });
 
 /** Persist new grid positions for a set of nodes: `[nodeId, position]` pairs. */
-export const updateSessionPositions = (updates: [number, number][]) =>
-  _invoke('update_session_positions', { updates });
+export const updateAgentNodePositions = (updates: [number, number][]) =>
+  _invoke('update_agent_node_positions', { updates });
 
-// Mesh
-export const addProject = () =>
-  _invoke<Mesh>('add_project');
+// Mesh — renamed from `*Project` to `*Mesh` in issue #490.
+export const addMesh = () =>
+  _invoke<Mesh>('add_mesh');
 
-export const createProject = (name: string, path: string) =>
-  _invoke<Mesh>('create_project', { name, path });
+export const createMesh = (name: string, path: string) =>
+  _invoke<Mesh>('create_mesh', { name, path });
 
-export const createTestProject = (name: string) =>
-  _invoke<Mesh>('create_test_project', { name });
+export const createTestMesh = (name: string) =>
+  _invoke<Mesh>('create_test_mesh', { name });
 
-export const listProjects = () =>
-  _invoke<Mesh[]>('list_projects');
+export const listMeshes = () =>
+  _invoke<Mesh[]>('list_meshes');
 
-export const deleteProject = (projectId: number) =>
-  _invoke('delete_project', { projectId });
+export const deleteMesh = (meshId: number) =>
+  _invoke('delete_mesh', { meshId });
 
-export const updateProjectLayout = (projectId: number, layout: 'grid' | 'single') =>
-  _invoke('update_project_layout', { projectId, layout });
+export const updateMeshLayout = (meshId: number, layout: 'grid' | 'single') =>
+  _invoke('update_mesh_layout', { meshId, layout });
 
 /** Persist new sidebar positions for a set of meshes: `[meshId, position]` pairs. */
-export const updateProjectPositions = (updates: [number, number][]) =>
-  _invoke('update_project_positions', { updates });
+export const updateMeshPositions = (updates: [number, number][]) =>
+  _invoke('update_mesh_positions', { updates });
 
 export const updateMeshName = (meshId: number, name: string) =>
   _invoke('update_mesh_name', { meshId, name });
@@ -278,11 +278,11 @@ export const diffNodeFileAgainstBase = (nodeId: number, filePath: string) =>
   _invoke<DiffResult>('diff_node_file_against_base', { nodeId, filePath });
 
 // File watcher
-export const watchSession = (sessionId: number) =>
-  _invoke('watch_session', { sessionId });
+export const watchAgentNode = (nodeId: number) =>
+  _invoke('watch_agent_node', { nodeId });
 
-export const unwatchSession = (sessionId: number) =>
-  _invoke('unwatch_session', { sessionId });
+export const unwatchAgentNode = (nodeId: number) =>
+  _invoke('unwatch_agent_node', { nodeId });
 
 // File tree
 export type { FileNode };
@@ -372,14 +372,14 @@ export const pruneRemoteTracking = (worktreePath: string) =>
   _invoke<void>('prune_remote_tracking', { worktreePath });
 
 // Attention
-export const registerAttentionSession = (sessionId: number) =>
-  _invoke('register_attention_session', { sessionId });
+export const registerAttentionNode = (nodeId: number) =>
+  _invoke('register_attention_node', { nodeId });
 
-export const clearAttentionSession = (sessionId: number) =>
-  _invoke('clear_attention_session', { sessionId });
+export const clearAttentionNode = (nodeId: number) =>
+  _invoke('clear_attention_node', { nodeId });
 
-export const isAttentionPending = (sessionId: number) =>
-  _invoke<boolean>('is_attention_pending', { sessionId });
+export const isAttentionPending = (nodeId: number) =>
+  _invoke<boolean>('is_attention_pending', { nodeId });
 
 // PR
 export const createPr = (sessionId: number, title: string, body: string) =>
@@ -544,14 +544,15 @@ export const listProviders = (): Promise<ProviderInfo[]> => {
  *  in `src-tauri/src/agent/provider/mod.rs` (issue #404). */
 export type { ProviderInfo };
 
-// Session Discovery — generated from the Rust struct (issue #359, re-exported
-// here per #404 so call sites that import from `../lib/tauri` keep working).
-export type { DiscoveredSession };
+// Agent Node Discovery — generated from the Rust struct (issue #359 + #490,
+// re-exported here per #404 so call sites that import from `../lib/tauri`
+// keep working).
+export type { DiscoveredAgentNode };
 
-export const discoverSessions = (meshId: number, meshPath: string) =>
-  _invoke<DiscoveredSession[]>('discover_sessions', { meshId, meshPath });
+export const discoverAgentNodes = (meshId: number, meshPath: string) =>
+  _invoke<DiscoveredAgentNode[]>('discover_agent_nodes', { meshId, meshPath });
 
-export const importDiscoveredSession = (
+export const importDiscoveredAgentNode = (
   meshId: number,
   meshPath: string,
   cliSessionId: string,
@@ -559,7 +560,7 @@ export const importDiscoveredSession = (
   worktreeName: string | null,
   provider?: string,
 ) =>
-  _invoke<AgentNode>('import_discovered_session', {
+  _invoke<AgentNode>('import_discovered_agent_node', {
     meshId, meshPath, cliSessionId, branch, worktreeName, provider
   });
 
@@ -568,8 +569,8 @@ export const importDiscoveredSession = (
 // Re-attaches the in-process PTY for every node whose previous run was
 // interrupted (status === 'suspended'). Returns the ids of the nodes that
 // were actually resumed.
-export const autoResumeSessions = () =>
-  _invoke<number[]>('auto_resume_sessions');
+export const autoResumeAgentNodes = () =>
+  _invoke<number[]>('auto_resume_agent_nodes');
 
 // ── Paths & clipboard ──────────────────────────────────────────────────────
 //

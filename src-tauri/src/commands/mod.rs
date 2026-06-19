@@ -4,6 +4,8 @@ pub mod agent;
 pub mod clipboard;
 #[cfg(test)]
 pub mod agent_tests;
+pub mod agent_node;
+pub mod agent_node_discovery;
 pub mod ai_context;
 pub mod attention;
 pub mod build_run;
@@ -15,15 +17,13 @@ pub mod frontend_log;
 pub mod git;
 #[cfg(test)]
 pub mod git_tests;
-pub mod mesh_properties;
-pub mod pr;
 pub mod mesh;
+pub mod mesh_properties;
 pub mod preferences;
+pub mod pr;
 pub mod project_detect;
 pub mod prune;
-pub mod agent_node;
 pub mod remote;
 pub mod scratchpad;
-pub mod session_discovery;
 pub mod test;
 pub mod usage;

@@ -9,7 +9,7 @@
  * (baked in at spawn time) and the first banner lines were permanently
  * wrapped.
  *
- * Fix: the auto-spawn effect must `await terminalManager.attach(sessionId,
+ * Fix: the auto-spawn effect must `await terminalManager.attach(nodeId,
  * container)` instead of `getOrCreate`, so `proposeDimensions()` sees the
  * real layout. This test exercises the actual `AgentTerminal` component with
  * a wide container and asserts `spawn_agent` is invoked with cols > 80.
@@ -56,7 +56,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
-  // spawnAgent -> fetchAgentNodes -> invoke('list_sessions') is what keeps the
+  // spawnAgent -> fetchAgentNodes -> invoke('list_agent_nodes') is what keeps the
   // store's agentNodes in sync post-spawn. If we return a non-array (the
   // default `{}` from `mockResolvedValue({})`) the store writes that to
   // state.agentNodes and the next render explodes on `find()`. Return [].
@@ -64,7 +64,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   // lookups (issue #405); Terminal.tsx's handover-label effect reads them
   // on every node mount, so the mock must satisfy it with deterministic data.
   invoke: vi.fn().mockImplementation((cmd: string) => {
-    if (cmd === 'list_sessions') return Promise.resolve([]);
+    if (cmd === 'list_agent_nodes') return Promise.resolve([]);
     if (cmd === 'list_providers') return Promise.resolve([
       { id: 'anthropic', label: 'Claude' },
     ]);
@@ -247,7 +247,7 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
     // fast path the buggy code takes.
     await terminalManager.getOrCreate(IDLE_NODE.id);
 
-    const { container } = render(<AgentTerminal sessionId={IDLE_NODE.id} />);
+    const { container } = render(<AgentTerminal nodeId={IDLE_NODE.id} />);
     setContainerSize(container, IDLE_NODE.id, WIDE_WIDTH, WIDE_HEIGHT);
 
     await act(async () => {

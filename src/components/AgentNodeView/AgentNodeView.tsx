@@ -7,7 +7,7 @@ import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
-import { watchSession, unwatchSession } from '../../lib/tauri';
+import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { NodeCard, type BuildRunState } from './NodeCard';
@@ -138,10 +138,10 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
   );
 }
 
-export function SessionView() {
+export function AgentNodeView() {
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   // Granular selectors: subscribing to the whole store (useAgentNodeStore())
-  // re-rendered SessionView on every unrelated change — including each
+  // re-rendered the view on every unrelated change — including each
   // attention status flip — even though only agentNodes/activeNodeId affect
   // this view.
   const agentNodes = useAgentNodeStore(state => state.agentNodes);
@@ -179,9 +179,9 @@ export function SessionView() {
 
   useEffect(() => {
     if (!activeNode) return;
-    watchSession(activeNode.id).catch(console.error);
+    watchAgentNode(activeNode.id).catch(console.error);
     return () => {
-      unwatchSession(activeNode.id).catch(console.error);
+      unwatchAgentNode(activeNode.id).catch(console.error);
     };
   // cli_session_id is set after spawn — re-watch so the watcher picks up the newly created worktree
   }, [activeNode?.id, activeNode?.cli_session_id]);

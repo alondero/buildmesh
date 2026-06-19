@@ -57,10 +57,10 @@ test.describe('agent output', () => {
     // Clean up test project and sessions
     try {
       // List projects and delete ones with test-related names
-      const projects = await invokeViaHttp('list_projects') as Array<{id: number; name: string}>;
+      const projects = await invokeViaHttp('list_meshes') as Array<{id: number; name: string}>;
       for (const project of projects) {
         if (project.name.includes('Test') || project.name.includes('Agent Output') || project.name.includes('Cwrap')) {
-          await invokeViaHttp('delete_project', { projectId: project.id });
+          await invokeViaHttp('delete_mesh', { meshId: project.id });
         }
       }
     } catch (e) {
@@ -91,12 +91,12 @@ test.describe('agent output', () => {
     const lastTimeBefore = getLogTimestamp(lastLineBefore);
 
     // Create a test project
-    const project = await invokeViaHttp('create_test_project', { name: 'Agent Output Test' }) as { id: number };
+    const project = await invokeViaHttp('create_test_mesh', { name: 'Agent Output Test' }) as { id: number };
     expect(project.id).toBeGreaterThan(0);
 
     // Create a session
-    const session = await invokeViaHttp('create_session', {
-      projectId: project.id,
+    const session = await invokeViaHttp('create_agent_node', {
+      meshId: project.id,
       name: 'Test Session',
       path: 'X:\\src\\playbook',
       branch: 'main',
@@ -106,7 +106,7 @@ test.describe('agent output', () => {
 
     // Spawn an agent
     const spawnResult = await invokeViaHttp('spawn_agent', {
-      sessionId: session.id,
+      nodeId: session.id,
       provider: 'anthropic',
     });
 
@@ -181,9 +181,9 @@ test.describe('agent output', () => {
     expect(serverReady).toBe(true);
 
     // Create project and session
-    const project = await invokeViaHttp('create_test_project', { name: 'Cwrap Exit Test' }) as { id: number };
-    const session = await invokeViaHttp('create_session', {
-      projectId: project.id,
+    const project = await invokeViaHttp('create_test_mesh', { name: 'Cwrap Exit Test' }) as { id: number };
+    const session = await invokeViaHttp('create_agent_node', {
+      meshId: project.id,
       name: 'Cwrap Test',
       path: 'X:\\src\\playbook',
       branch: 'main',

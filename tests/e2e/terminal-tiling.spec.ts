@@ -7,7 +7,7 @@
 import { test, expect, Page } from '@playwright/test';
 import { waitForTauriReady, createTestSessionViaHttp } from './utils/tauri-http';
 
-async function waitForTerminalFit(page: Page, _sessionId: number, timeout = 300): Promise<void> {
+async function waitForTerminalFit(page: Page, _nodeId: number, timeout = 300): Promise<void> {
   await page.waitForTimeout(timeout);
 }
 

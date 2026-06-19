@@ -112,7 +112,7 @@ vi.mock('@xterm/addon-fit', () => {
   return { FitAddon: MockFitAddon };
 });
 
-describe('terminal container reuse on sessionId change (single-pane mesh switch)', () => {
+describe('terminal container reuse on nodeId change (single-pane mesh switch)', () => {
   beforeEach(() => {
     mockListeners.clear();
     vi.clearAllMocks();
@@ -139,7 +139,7 @@ describe('terminal container reuse on sessionId change (single-pane mesh switch)
     expect(inst!.term.element!.parentElement).toBeNull();
   });
 
-  it('reusing the same container with a new sessionId leaves only one terminal element', async () => {
+  it('reusing the same container with a new nodeId leaves only one terminal element', async () => {
     // Simulate single-pane SessionView: mesh A's only node attaches to container.
     const container = document.createElement('div');
 

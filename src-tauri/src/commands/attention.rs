@@ -47,24 +47,24 @@ pub(crate) fn mark_attention_with(sink: &dyn AttentionSink, node_id: i64) {
     tracing::info!("Node {} awaiting user input (Node Turn)", node_id);
 }
 
-/// Register that a session is awaiting user input. Publishes a Node Turn so both
+/// Register that a node is awaiting user input. Publishes a Node Turn so both
 /// attention-marking and session naming react.
 #[command]
-pub async fn register_attention_session(app: AppHandle, session_id: i64) -> Result<(), String> {
-    crate::node_turn::publish(session_id, &app);
+pub async fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
+    crate::node_turn::publish(node_id, &app);
     Ok(())
 }
 
-/// Clear the attention state for a session — called when the user resumes it.
+/// Clear the attention state for a node — called when the user resumes it.
 #[command]
-pub async fn clear_attention_session(app: AppHandle, session_id: i64) -> Result<(), String> {
-    db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
+pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
+    db::update_agent_node_status(node_id, SessionStatus::Running).map_err(|e| e.to_string())?;
     app.emit(
         "attention-cleared",
-        serde_json::json!({ "session_id": session_id }),
+        serde_json::json!({ "node_id": node_id }),
     )
     .map_err(|e| e.to_string())?;
-    tracing::info!("Session {} attention cleared", session_id);
+    tracing::info!("Node {} attention cleared", node_id);
     Ok(())
 }
 

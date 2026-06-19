@@ -285,11 +285,12 @@ pub fn create_issue_node(
     )
     .map_err(|e| e.to_string())?;
 
-    // Reuse the existing semantic event so the frontend's `session-created`
-    // listener (which already triggers `fetchAgentNodes`) picks up the
-    // new node without us adding a new event-name coupling.
+    // The frontend `agentNodeStore.initAttentionListeners` listens for
+    // `node-created` and refetches the list — issue #490 renamed this event
+    // alongside the `*_agent_node` IPC surface. The `id` field is the new
+    // node's row id.
     let _ = app.emit(
-        "session-created",
+        "node-created",
         serde_json::json!({ "id": node.id }),
     );
 
@@ -454,7 +455,7 @@ pub fn create_pr_node(
 
     // Mirrors `create_issue_node` — see that block for the rationale.
     let _ = app.emit(
-        "session-created",
+        "node-created",
         serde_json::json!({ "id": node.id }),
     );
 
@@ -576,32 +577,32 @@ pub async fn spawn_handover_agent(
     Ok(node)
 }
 
-/// Auto-resume all suspended sessions that have a stored CLI session ID.
+/// Auto-resume all suspended nodes that have a stored CLI session ID.
 /// Called by the frontend on startup after event listeners are ready.
 #[command]
-pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
+pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String> {
     let nodes = db::list_suspended_nodes().map_err(|e| e.to_string())?;
 
     if nodes.is_empty() {
-        tracing::info!("auto_resume_sessions: no suspended sessions to resume");
+        tracing::info!("auto_resume_agent_nodes: no suspended nodes to resume");
         return Ok(vec![]);
     }
 
-    tracing::info!("auto_resume_sessions: resuming {} sessions", nodes.len());
+    tracing::info!("auto_resume_agent_nodes: resuming {} nodes", nodes.len());
     let mut resumed: Vec<i64> = Vec::new();
 
     for node in &nodes {
         let cli_id = match &node.cli_session_id {
             Some(id) if !id.is_empty() => id.clone(),
             _ => {
-                tracing::warn!("auto_resume_sessions: node {} has no cli_session_id, skipping", node.id);
+                tracing::warn!("auto_resume_agent_nodes: node {} has no cli_session_id, skipping", node.id);
                 db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
                 continue;
             }
         };
 
         if !node.provider.adapter().auto_resume_on_startup() {
-            tracing::info!("auto_resume_sessions: skipping non-resumable node {} ({:?})", node.id, node.provider);
+            tracing::info!("auto_resume_agent_nodes: skipping non-resumable node {} ({:?})", node.id, node.provider);
             db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
             continue;
         }
@@ -617,13 +618,13 @@ pub async fn auto_resume_sessions(app: AppHandle) -> Result<Vec<i64>, String> {
         }).await {
             Ok(()) => {
                 resumed.push(node.id);
-                tracing::info!("auto_resume_sessions: resumed node {}", node.id);
+                tracing::info!("auto_resume_agent_nodes: resumed node {}", node.id);
             }
             Err(e) => {
-                tracing::error!("auto_resume_sessions: failed to resume node {}: {}", node.id, e);
+                tracing::error!("auto_resume_agent_nodes: failed to resume node {}: {}", node.id, e);
                 db::update_agent_node_status(node.id, SessionStatus::Error).ok();
                 let _ = app.emit("resume-failed", serde_json::json!({
-                    "session_id": node.id,
+                    "node_id": node.id,
                     "error": e
                 }));
             }

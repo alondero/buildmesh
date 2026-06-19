@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
-import { CenterDiffOverlay } from '../../src/components/SessionView/CenterDiffOverlay';
+import { CenterDiffOverlay } from '../../src/components/AgentNodeView/CenterDiffOverlay';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';

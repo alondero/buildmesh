@@ -19,10 +19,10 @@ async function clickProjectByName(page: Page, projectName: string) {
 }
 
 // Use HTTP test server to set active session
-async function setActiveSession(page: Page, sessionId: number) {
+async function setActiveSession(page: Page, nodeId: number) {
   // Use invokeViaHttp which works via fetch to 127.0.0.1:1991
-  // Pass as 'sessionId' not 'id' to match the test server handler
-  await invokeViaHttp('set_active_session', { sessionId });
+  // Pass as 'nodeId' not 'id' to match the test server handler
+  await invokeViaHttp('set_active_node', { nodeId });
 }
 
 test.describe('project switching terminal visibility', () => {
@@ -50,7 +50,7 @@ test.describe('project switching terminal visibility', () => {
     await page.waitForTimeout(1000);
 
     // Get session IDs via the HTTP test server (same as createTestSessionViaHttp uses)
-    const sessions = await invokeViaHttp<any[]>('list_sessions', {});
+    const sessions = await invokeViaHttp<any[]>('list_agent_nodes', {});
 
     console.log(`Found ${sessions?.length || 0} sessions in store`);
 
@@ -63,7 +63,7 @@ test.describe('project switching terminal visibility', () => {
 
     // Now inject fake terminal content via window.__terminalManager
     // Extract just the IDs for the terminal manager
-    const sessionIds = sessions.map((s: any) => s.id);
+    const nodeIds = sessions.map((s: any) => s.id);
     await page.evaluate(async (ids: number[]) => {
       const tm = (window as any).__terminalManager;
       if (!tm || !ids || ids.length === 0) return;
@@ -76,7 +76,7 @@ test.describe('project switching terminal visibility', () => {
         inst.term.write('Session active\r\n');
         inst.term.write('\x1b[32m✓ Ready\x1b[0m\r\n');
       }
-    }, sessionIds);
+    }, nodeIds);
 
     // Get initial terminal visibility and dimensions
     const initialXterm = page.locator('.xterm').first();

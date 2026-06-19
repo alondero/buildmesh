@@ -124,12 +124,12 @@ test.describe('built exe app launch', () => {
       const serverReady = await waitForPort(1991, 10000);
       expect(serverReady).toBe(true);
 
-      // Call create_test_project via HTTP
+      // Call create_test_mesh via HTTP
       const response = await fetch('http://127.0.0.1:1991/invoke', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          cmd: 'create_test_project',
+          cmd: 'create_test_mesh',
           args: { name: 'Launch Test Project' }
         })
       });

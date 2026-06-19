@@ -11,13 +11,13 @@ use tauri::{command, Emitter};
 static WATCHERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, RecommendedWatcher>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-/// Start watching a session's worktree for file changes
+/// Start watching an agent node's worktree for file changes
 #[command]
-pub fn watch_session(
-    session_id: i64,
+pub fn watch_agent_node(
+    node_id: i64,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     // The directory actually watched: the canonical Node Working Directory
     // (host form), which gates on `use_worktree` and trims the name. Using the
     // canonical resolver means a Root Node with a stale `worktree_name` watches
@@ -48,7 +48,7 @@ pub fn watch_session(
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("File watcher error for session {}: {:?}", session_id, e);
+                    tracing::warn!("File watcher error for node {}: {:?}", node_id, e);
                 }
             }
         },
@@ -68,16 +68,16 @@ pub fn watch_session(
     }
 
     let mut watchers = WATCHERS.lock().unwrap();
-    watchers.insert(session_id, watcher);
+    watchers.insert(node_id, watcher);
 
     Ok(())
 }
 
-/// Stop watching a session
+/// Stop watching an agent node
 #[command]
-pub fn unwatch_session(session_id: i64) -> Result<(), String> {
+pub fn unwatch_agent_node(node_id: i64) -> Result<(), String> {
     let mut watchers = WATCHERS.lock().unwrap();
-    watchers.remove(&session_id);
+    watchers.remove(&node_id);
     Ok(())
 }
 

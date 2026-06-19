@@ -1,20 +1,24 @@
-//! Session discovery commands — find resumable Claude Code sessions on disk
+//! Agent node discovery commands — find resumable Claude Code sessions on disk
+//!
+//! Renamed from `session_discovery` in issue #490: the public IPC surface
+//! uses "Agent Node" vocabulary; the on-disk Claude Code CLI session id
+//! stays as `cli_session_id` per CONTEXT.md ambiguity #1.
 
 use crate::db;
 use crate::env;
 use crate::models::{AgentNode, Provider};
-use crate::services::session_discovery::{self, DiscoveredSession};
+use crate::services::agent_node_discovery::{self, DiscoveredAgentNode};
 use tauri::command;
 
 #[command]
-pub async fn discover_sessions(mesh_id: i64, mesh_path: String) -> Result<Vec<DiscoveredSession>, String> {
-    session_discovery::discover(mesh_id, &mesh_path)
+pub async fn discover_agent_nodes(mesh_id: i64, mesh_path: String) -> Result<Vec<DiscoveredAgentNode>, String> {
+    agent_node_discovery::discover(mesh_id, &mesh_path)
 }
 
 /// Import a discovered session as a new agent node with the correct worktree/path settings,
 /// then set its cli_session_id so it's ready for resume.
 #[command]
-pub async fn import_discovered_session(
+pub async fn import_discovered_agent_node(
     mesh_id: i64,
     mesh_path: String,
     cli_session_id: String,
@@ -41,7 +45,7 @@ pub async fn import_discovered_session(
         worktree_name.as_deref(),
         None,
         None,
-        None, // source_pr_pinned_sha — session-discovery path doesn't pin a PR SHA
+        None, // source_pr_pinned_sha — agent-node-discovery path doesn't pin a PR SHA
         use_worktree,
         None,
         None,

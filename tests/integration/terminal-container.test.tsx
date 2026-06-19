@@ -129,7 +129,7 @@ describe('TerminalManager', () => {
     terminalManager.dispose(3);
   });
 
-  it('getOrCreate returns instance for same sessionId', async () => {
+  it('getOrCreate returns instance for same nodeId', async () => {
     const instance = await terminalManager.getOrCreate(1);
     expect(instance).not.toBeNull();
     const instance2 = await terminalManager.getOrCreate(1);

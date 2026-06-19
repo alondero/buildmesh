@@ -50,7 +50,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockImplementation((cmd: string) => {
-    if (cmd === 'list_sessions') return Promise.resolve([]);
+    if (cmd === 'list_agent_nodes') return Promise.resolve([]);
     // `list_providers` / `get_default_provider` are the new wrapper-memoised
     // lookups (issue #405); Terminal.tsx's handover-label effect reads them
     // on every node mount, so the mock must satisfy it with deterministic data.
@@ -180,7 +180,7 @@ const MESH: Mesh = {
 };
 
 async function mountAndSettle() {
-  const result = render(<AgentTerminal sessionId={RUNNING_NODE.id} />);
+  const result = render(<AgentTerminal nodeId={RUNNING_NODE.id} />);
   await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
   const inst = terminalManager.getInstance(RUNNING_NODE.id);
   if (!inst) throw new Error('terminal instance was not created');

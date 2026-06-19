@@ -37,7 +37,7 @@ describe('TerminalManager', () => {
   });
 
   describe('getOrCreate', () => {
-    it('creates a new instance on first call for a sessionId', async () => {
+    it('creates a new instance on first call for a nodeId', async () => {
       const instance = await terminalManager.getOrCreate(1);
       expect(instance).not.toBeNull();
       expect(instance!.term).toBeDefined();
@@ -45,13 +45,13 @@ describe('TerminalManager', () => {
       expect(instance!.unlisten).toBeDefined();
     });
 
-    it('returns the same instance on subsequent calls with same sessionId', async () => {
+    it('returns the same instance on subsequent calls with same nodeId', async () => {
       const first = await terminalManager.getOrCreate(1);
       const second = await terminalManager.getOrCreate(1);
       expect(first).toBe(second);
     });
 
-    it('creates separate instances for different sessionIds', async () => {
+    it('creates separate instances for different nodeIds', async () => {
       const inst1 = await terminalManager.getOrCreate(1);
       const inst2 = await terminalManager.getOrCreate(2);
       expect(inst1).not.toBe(inst2);

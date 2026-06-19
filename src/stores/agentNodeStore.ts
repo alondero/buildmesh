@@ -33,7 +33,7 @@ async function persistPositions(
   set({ agentNodes: merged });
   try {
     const updates = updatedMeshNodes.map(n => [n.id, n.position] as [number, number]);
-    await api.updateSessionPositions(updates);
+    await api.updateAgentNodePositions(updates);
   } catch (e) {
     set({ error: String(e) });
     await get().fetchAgentNodes();
@@ -111,7 +111,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   fetchAgentNodes: async () => {
     set({ loading: true, error: null });
     try {
-      const agentNodes = await api.listSessions();
+      const agentNodes = await api.listAgentNodes();
       set({ agentNodes, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -125,6 +125,11 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         if (listenersAttached) return;
         listenersAttached = true;
 
+        // `attention-needed` / `attention-cleared` are the external AttentionHook
+        // protocol — the `session_id` payload key is the wire contract with
+        // already-deployed agent hooks (CONTEXT.md ambiguity #1 says this stays
+        // as "session" intentionally). Map to the internal `node_id` alias for
+        // vocabulary consistency inside the store.
         await listen<{ session_id: number }>('attention-needed', (event) => {
           const nodeId = event.payload.session_id;
           set((state) => ({
@@ -143,8 +148,11 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
           }));
         });
 
-        await listen<{ session_id: number; name: string }>('session-renamed', (event) => {
-          const { session_id: nodeId, name } = event.payload;
+        // `node-renamed` is the internal event emitted by `rename_agent_node`
+        // (renamed from `session-renamed` in issue #490). The payload key
+        // follows: `node_id`, not `session_id`.
+        await listen<{ node_id: number; name: string }>('node-renamed', (event) => {
+          const { node_id: nodeId, name } = event.payload;
           set((state) => ({
             agentNodes: state.agentNodes.map((s) =>
               s.id === nodeId ? { ...s, name } : s
@@ -152,21 +160,21 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
           }));
         });
 
-        // Listen for session-created events. Two sources emit this:
+        // Listen for node-created events. Two sources emit this:
         //   1. The two-stage desktop spawn flow: `create_issue_node` emits it
         //      after creating the `pending` node, so the sidebar picks up the
         //      new node before stage-2 (start_node_background) finishes.
-        //   2. The HTTP-based E2E test server, which creates sessions out of band.
+        //   2. The HTTP-based E2E test server, which creates nodes out of band.
         // In both cases the cleanest recovery is to refetch the full list — the
         // row is already committed by the time the event fires, so we can never
         // lose a node by racing the IPC.
-        await listen<{ id: number }>('session-created', async () => {
+        await listen<{ id: number }>('node-created', async () => {
           await get().fetchAgentNodes();
         });
 
-        // Listen for session-activated events from test server (HTTP-based E2E tests)
-        await listen<{ session_id: number }>('session-activated', (event) => {
-          const nodeId = event.payload.session_id;
+        // Listen for node-activated events from test server (HTTP-based E2E tests)
+        await listen<{ node_id: number }>('node-activated', (event) => {
+          const nodeId = event.payload.node_id;
           set({ activeNodeId: nodeId });
         });
 
@@ -199,7 +207,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
 
   createAgentNode: async (meshId, name, path, branch, provider?: string, useWorktree?: boolean): Promise<AgentNode> => {
     try {
-      const node = await api.createSession(meshId, name, path, branch, provider, useWorktree);
+      const node = await api.createAgentNode(meshId, name, path, branch, provider, useWorktree);
       set((state) => ({ agentNodes: [...state.agentNodes, node] }));
       return node;
     } catch (e) {
@@ -279,7 +287,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         } catch (e) {
           console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
         }
-        await api.deleteSession(id, removeWorktree);
+        await api.deleteAgentNode(id, removeWorktree);
       } catch (e) {
         set({ error: String(e) });
       }
@@ -295,7 +303,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     const prior = get().agentNodes.find(s => s.id === id);
     if (!prior) return;
     // Optimistic update so the UI reflects the new name before the
-    // round-trip. The backend emits `session-renamed` on success, which
+    // round-trip. The backend emits `node-renamed` on success, which
     // is a no-op for us (already matches) and keeps other windows in sync.
     set((state) => ({
       agentNodes: state.agentNodes.map(s =>
@@ -303,7 +311,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       ),
     }));
     try {
-      await api.renameSession(id, name);
+      await api.renameAgentNode(id, name);
     } catch (e) {
       // Roll back the optimistic update so the UI shows the prior name
       // again. The user can retry or fix the input.

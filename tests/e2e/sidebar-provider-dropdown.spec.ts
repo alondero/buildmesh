@@ -26,7 +26,7 @@ test.describe('sidebar provider dropdown', () => {
   test('clicking + button shows provider dropdown', async ({ page }) => {
     // Create a project first so we have something to click +
     const project = await invokeViaHttp<{ id: number; name: string; path: string }>(
-      'create_test_project',
+      'create_test_mesh',
       { name: `Provider Dropdown Test ${Date.now()}` }
     );
     await page.waitForTimeout(500);
@@ -46,7 +46,7 @@ test.describe('sidebar provider dropdown', () => {
 
   test('selecting provider creates session and spawns agent', async ({ page }) => {
     const project = await invokeViaHttp<{ id: number; name: string; path: string }>(
-      'create_test_project',
+      'create_test_mesh',
       { name: `Spawn Test ${Date.now()}` }
     );
     await page.waitForTimeout(500);
@@ -77,12 +77,12 @@ test.describe('sidebar provider dropdown', () => {
   test('session has cross button to archive it', async ({ page }) => {
     // Create project and session
     const project = await invokeViaHttp<{ id: number; name: string; path: string }>(
-      'create_test_project',
+      'create_test_mesh',
       { name: `Archive Test ${Date.now()}` }
     );
 
-    await invokeViaHttp('create_session', {
-      projectId: project.id,
+    await invokeViaHttp('create_agent_node', {
+      meshId: project.id,
       name: 'To Be Archived',
       path: project.path,
       branch: 'main',

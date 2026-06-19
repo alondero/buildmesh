@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
-import { CenterDiffOverlay } from '../../src/components/SessionView/CenterDiffOverlay';
+import { CenterDiffOverlay } from '../../src/components/AgentNodeView/CenterDiffOverlay';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
@@ -243,7 +243,7 @@ describe('PrDiffView (#421)', () => {
       activeNodeId: focusedNode.id,
     });
     // Production flow: the caller (the "View changes" button) writes
-    // LIST_CTX into the store; the parent (SessionView) sees
+    // LIST_CTX into the store; the parent (AgentNodeView) sees
     // `activeDiffFile !== null` and mounts CenterDiffOverlay. We mirror
     // that exactly so the overlay's mount-time effect runs against the
     // real production state.

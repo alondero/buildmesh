@@ -27,7 +27,7 @@ import { MeshPropertiesTab } from './MeshPropertiesTab';
 import { WorktreeManagerTab } from './WorktreeManagerTab';
 import { GitIssuesTab } from './GitIssuesTab';
 import { GitPullRequestsTab } from './GitPullRequestsTab';
-import { SessionHistoryTab } from './SessionHistoryTab';
+import { DiscoveredNodesTab } from './DiscoveredNodesTab';
 import { ScratchpadTab } from './ScratchpadTab';
 
 interface ProbeTabDef {
@@ -50,7 +50,7 @@ const PROBE_TABS: ProbeTabDef[] = [
   { tab: 'properties', icon: '⚙️', label: 'Mesh Properties', short: 'Properties' },
   { tab: 'issues', icon: '🐙', label: 'Git Issues', short: 'Issues' },
   { tab: 'pulls', icon: '🔀', label: 'Pull Requests', short: 'PRs' },
-  { tab: 'sessions', icon: '🕒', label: 'Session History', short: 'History' },
+  { tab: 'sessions', icon: '🕒', label: 'Discovered Nodes', short: 'Nodes' },
   { tab: 'scratchpad', icon: '📝', label: 'Scratch Pad', short: 'Notes' },
 ];
 
@@ -216,7 +216,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'worktrees') return <WorktreeManagerTab />;
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'pulls') return <GitPullRequestsTab />;
-  if (tab === 'sessions') return <SessionHistoryTab />;
+  if (tab === 'sessions') return <DiscoveredNodesTab />;
   if (tab === 'scratchpad') return <ScratchpadTab />;
 
   return <ProbeTabPlaceholder tab={tab} />;
