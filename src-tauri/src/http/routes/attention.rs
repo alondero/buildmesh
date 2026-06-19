@@ -5,6 +5,11 @@
 //! publishing the Node Turn fans out to attention-marking and session naming.
 //!
 //! No token required: the hook is configured locally and runs over localhost.
+//! Because it is unauthenticated, the handler verifies the client peer address
+//! is loopback (issue #496) — an external machine cannot spoof attention events
+//! even if it can reach the port.
+
+use std::net::SocketAddr;
 
 use tokio::net::TcpStream;
 
@@ -13,7 +18,15 @@ use crate::http::request;
 pub async fn handle_post(
     lines: &mut tokio::io::BufStream<TcpStream>,
     path_without_query: &str,
+    peer: SocketAddr,
 ) {
+    // Loopback-only: the Claude Code hook always posts from 127.0.0.1/::1. A
+    // non-loopback peer is an external spoof attempt — refuse before doing work.
+    if !peer.ip().is_loopback() {
+        let _ = request::write_status_only(lines, "403 Forbidden").await;
+        return;
+    }
+
     let session_id: Option<i64> = path_without_query
         .strip_prefix("/api/attention/")
         .and_then(|s| s.parse().ok());

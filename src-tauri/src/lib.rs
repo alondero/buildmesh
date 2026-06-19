@@ -2,6 +2,7 @@
 //! AI Agent Orchestration Hub for Windows + WSL
 
 pub mod agent;
+pub mod autopilot;
 mod commands;
 mod coordinator;
 mod db;
@@ -14,6 +15,7 @@ mod node_turn;
 mod preferences;
 pub mod process_util;
 mod pty;
+pub mod secret_scrubber;
 mod services;
 mod session_capture;
 mod session_naming;
@@ -184,7 +186,7 @@ pub fn run() {
             commands::mesh_properties::update_worktree_base_ref,
             commands::mesh_properties::remove_worktree_base_ref,
             commands::mesh_properties::update_mesh_use_worktree,
-            commands::mesh_properties::update_mesh_use_sandbox,
+            commands::mesh_properties::update_mesh_sandbox,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
             commands::scratchpad::get_mesh_scratchpad,
             commands::scratchpad::set_mesh_scratchpad,

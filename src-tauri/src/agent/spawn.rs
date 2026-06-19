@@ -176,6 +176,7 @@ fn normalize_prefill_newlines(text: &str) -> String {
 }
 
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
+#[allow(clippy::too_many_arguments)]
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
     provider_enum: Provider,
@@ -184,6 +185,7 @@ pub fn build_spawn_command(
     model_override: Option<&str>,
     effort_override: Option<&str>,
     prefill: Option<&str>,
+    sandbox: bool,
 ) -> CommandBuilder {
     let adapter = provider_enum.adapter();
     let platform = Platform::current();
@@ -244,7 +246,7 @@ pub fn build_spawn_command(
     }
 
     let mut cmd =
-        spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id);
+        spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
     if let Some(text) = prefill_via_env {
         cmd.env(PREFILL_ENV_VAR, text);
     }
@@ -562,6 +564,9 @@ pub async fn spawn_agent_inner(
     let use_worktree = row.as_ref().map(|r| r.use_worktree).unwrap_or(true);
     let model_override = row.as_ref().and_then(|r| r.model.as_deref());
     let effort_override = row.as_ref().and_then(|r| r.effort.as_deref());
+    // Mesh-level macOS Seatbelt sandbox toggle (issue #497). Off by default; only
+    // consumed by `spawn_environment::wrap`'s macOS branch — Windows/WSL ignore it.
+    let sandbox = row.as_ref().map(|r| r.sandbox).unwrap_or(false);
     let worktree_mode = row
         .as_ref()
         .and_then(|r| r.worktree_mode.as_deref())
@@ -873,6 +878,7 @@ pub async fn spawn_agent_inner(
         model_override,
         effort_override,
         prefill.as_deref(),
+        sandbox,
     );
 
     let child = spawn_child(&pair, cmd).inspect_err(|e| {

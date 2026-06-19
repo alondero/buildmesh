@@ -136,11 +136,11 @@ pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Resul
 /// Toggle whether this mesh's agent nodes run inside an OS process sandbox
 /// (Windows AppContainer #498 / macOS Seatbelt #497). Dedicated command (not
 /// the generic `update_mesh_column` allowlist) so it takes a typed `bool` and
-/// the zero-rows-is-an-error contract is enforced in `db::set_mesh_use_sandbox`.
+/// the zero-rows-is-an-error contract is enforced in `db::set_mesh_sandbox`.
 #[tauri::command]
-pub async fn update_mesh_use_sandbox(mesh_id: i64, use_sandbox: bool) -> Result<(), String> {
-    db::set_mesh_use_sandbox(mesh_id, use_sandbox)
-        .map_err(|e| format!("failed to update use_sandbox: {}", e))
+pub async fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), String> {
+    db::set_mesh_sandbox(mesh_id, sandbox)
+        .map_err(|e| format!("failed to update sandbox: {}", e))
 }
 
 #[tauri::command]

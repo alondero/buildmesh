@@ -9,17 +9,20 @@
  */
 export type Mesh = { id: number, name: string, path: string, layout: string, position: number, created_at: string, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, base_ref: string, 
 /**
- * Run this mesh's agent nodes inside an OS process sandbox (Windows
- * AppContainer #498 / macOS Seatbelt #497). Persisted as
- * `meshes.use_sandbox INTEGER NOT NULL DEFAULT 0`. Defaults `false`
- * until the native sandbox spawn path lands and is validated.
- */
-use_sandbox: boolean, 
-/**
  * Free-form scratch pad text for the Probe Panel "📝 Scratch Pad"
  * tab. Owned by Buildmesh only — never written to disk, never visible
  * to agents. Persisted as `meshes.scratchpad TEXT NOT NULL DEFAULT ''`
  * (schema v17) and read back as the raw `String`. Empty string is a
  * normal, non-error state ("no notes yet").
  */
-scratchpad: string, };
+scratchpad: string, 
+/**
+ * OS-level agent process sandbox toggle. When `true`, agent PTY
+ * processes spawned in this mesh are confined to the node's Git
+ * worktree — macOS Seatbelt (`sandbox-exec`, #497) and Windows
+ * AppContainer (#498) each read this flag and apply their own
+ * confinement policy. Off by default (`false`); ignored on hosts
+ * where neither native spawn is built. Persisted as
+ * `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
+ */
+sandbox: boolean, };

@@ -21,7 +21,7 @@ export type MeshColumn =
   | 'buildCommand'
   | 'runCommand'
   | 'useWorktree'
-  | 'useSandbox'
+  | 'sandbox'
   | 'baseRef';
 
 interface MeshPropertiesState {
@@ -120,8 +120,8 @@ export const useMeshPropertiesStore = create<MeshPropertiesState>((set, get) => 
         case 'useWorktree':
           await api.updateMeshUseWorktree(meshId, Boolean(value));
           break;
-        case 'useSandbox':
-          await api.updateMeshUseSandbox(meshId, Boolean(value));
+        case 'sandbox':
+          await api.updateMeshSandbox(meshId, Boolean(value));
           break;
         case 'baseRef':
           await api.updateWorktreeBaseRef(meshId, String(value));

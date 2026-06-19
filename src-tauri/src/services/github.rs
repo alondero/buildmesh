@@ -67,6 +67,48 @@ pub struct Issue {
     /// defaults in the mobile screen. Empty when the issue has no labels.
     #[serde(default, deserialize_with = "deserialize_label_names")]
     pub labels: Vec<String>,
+    /// GitHub login of the issue's author (`user.login` in the API response).
+    /// Captured so Autopilot's collaborator gate (ADR-0012 §5) can check the
+    /// author's push access before auto-running a trigger. `#[serde(default)]`
+    /// plus the `user.login` projection keeps a partial response parsing — the
+    /// value is then `""`, which the gate treats as "unknown → require approval".
+    ///
+    /// `alias = "user"` is load-bearing: `deserialize_with` keys off the *field*
+    /// name, but GitHub sends the author under the `user` key — the alias routes
+    /// `user`'s value into this field while keeping the field's own name
+    /// `author` for serialisation.
+    #[serde(default, alias = "user", deserialize_with = "deserialize_user_login")]
+    pub author: String,
+}
+
+/// Private GitHub wire shape for the `user` object on an issue/PR. We only need
+/// the `login`. Either GitHub's `user: { login, … }` object or a bare login
+/// string: the object form is what GitHub sends; the bare-string form makes
+/// [`deserialize_user_login`] tolerant of `Issue`'s *own* serialised output
+/// (where `author` is a plain string), so a serialize→deserialize round-trip of
+/// an `Issue` doesn't error on the author field.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawUser {
+    Object {
+        #[serde(default)]
+        login: String,
+    },
+    Bare(String),
+}
+
+/// Project `user: { login, … }` (or a bare login string) → the `login` string at
+/// deserialise time, so `Issue.author` is the natural `String` the collaborator
+/// gate expects. `#[serde(default)]` on the field means this is only called when
+/// the `user` key is present; an absent `user` leaves `author` at its default `""`.
+fn deserialize_user_login<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match RawUser::deserialize(deserializer)? {
+        RawUser::Object { login } => login,
+        RawUser::Bare(login) => login,
+    })
 }
 
 /// Private GitHub wire shape for a single label entry. The public API only
@@ -351,6 +393,14 @@ pub struct PullRequest {
     /// fork-PR payloads — same `#[serde(default)]` rationale as `head_ref`.
     #[serde(default)]
     pub head_sha: String,
+    /// GitHub login of the PR's author (`user.login`). Captured for Autopilot's
+    /// collaborator gate (ADR-0012 §5) — the author of an external PR is the
+    /// identity whose push access the gate checks before auto-running. Distinct
+    /// from `head_repo_owner`: for a fork PR the author and the fork owner are
+    /// usually the same person, but the gate is about *who opened the PR*, which
+    /// `user.login` answers directly. Empty when the API omits `user`.
+    #[serde(default)]
+    pub author: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -412,8 +462,13 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             pub state: String,
             #[serde(default)]
             pub head: Option<HeadHelper>,
+            // The PR author lives under a top-level `user` object, the same
+            // `{login}` shape as `head.repo.owner`. Lifted to `author` below.
+            #[serde(default)]
+            pub user: Option<OwnerHelper>,
         }
         let raw = Raw::deserialize(deserializer)?;
+        let author = raw.user.map(|u| u.login).unwrap_or_default();
         // Project `head.repo.owner.login` → `head_repo_owner` and
         // `head.repo.clone_url` → `head_repo_clone_url` at deserialise time so
         // the public struct stays flat (the same reason the `head.ref` →
@@ -446,6 +501,7 @@ impl<'de> serde::Deserialize<'de> for PullRequest {
             head_repo_owner,
             head_repo_clone_url,
             head_sha,
+            author,
         })
     }
 }
@@ -479,6 +535,47 @@ pub struct PrFile {
     pub previous_filename: Option<String>,
 }
 
+/// A user's push-access level on a repository, as reported by
+/// `GET /repos/{owner}/{repo}/collaborators/{username}/permission`. GitHub's
+/// `permission` field collapses its granular roles to four legacy values:
+/// `maintain` reports as `write` and `triage` as `read`. So `Admin`/`Write`
+/// exactly mean "has push access" and `Read`/`None` mean "does not" — which is
+/// the trust boundary Autopilot's collaborator gate keys off (ADR-0012 §5).
+/// An unrecognised value parses to `None` (conservative: an unknown level is
+/// never granted auto-run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollaboratorPermission {
+    Admin,
+    Write,
+    Read,
+    None,
+}
+
+impl CollaboratorPermission {
+    /// Map GitHub's `permission` string to the enum. The legacy field only ever
+    /// emits `admin`/`write`/`read`/`none`, but the granular role names
+    /// (`maintain`, `triage`) are mapped too so reading `role_name` later needs
+    /// no change here. Anything unknown falls to `None`, so a future GitHub
+    /// change can only ever *withhold* auto-run, never grant it by accident.
+    pub fn from_api_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "admin" => CollaboratorPermission::Admin,
+            "write" | "maintain" => CollaboratorPermission::Write,
+            "read" | "triage" => CollaboratorPermission::Read,
+            _ => CollaboratorPermission::None,
+        }
+    }
+
+    /// `true` when this level can push to the repo (`Admin` or `Write`).
+    pub fn has_push_access(self) -> bool {
+        matches!(
+            self,
+            CollaboratorPermission::Admin | CollaboratorPermission::Write
+        )
+    }
+}
+
 /// A lightweight GitHub API client.
 pub struct GitHubClient {
     client: Client,
@@ -508,6 +605,53 @@ impl GitHubClient {
             Ok(r) => r.status().is_success(),
             Err(_) => false,
         }
+    }
+
+    /// Fetch a user's push-access level on a repo via
+    /// `GET /repos/{owner}/{repo}/collaborators/{username}/permission`. A `404`
+    /// means the caller can't see the collaborator (e.g. a private repo it lacks
+    /// access to) or the user has no association with the repo — both map to
+    /// `None` (no push access), so a non-collaborator trigger is *gated* rather
+    /// than erroring. Other non-success statuses propagate as `GitHubError::Api`,
+    /// mirroring `find_open_pr_for_branch`'s 404-is-a-value handling.
+    ///
+    /// Seam: the only caller is `autopilot::gate_trigger`, part of the
+    /// not-yet-built Autopilot trigger pipeline (issue #499 ships the gate
+    /// helpers; the pipeline that drives them is a later slice). `allow(dead_code)`
+    /// until that lands — the logic it feeds is covered by the gate's tests.
+    #[allow(dead_code)]
+    pub fn collaborator_permission(
+        &self,
+        owner: &str,
+        repo: &str,
+        username: &str,
+    ) -> Result<CollaboratorPermission, GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/collaborators/{username}/permission"
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(CollaboratorPermission::None);
+        }
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        #[derive(Deserialize)]
+        struct PermissionResponse {
+            #[serde(default)]
+            permission: String,
+        }
+        let parsed: PermissionResponse = resp.json()?;
+        Ok(CollaboratorPermission::from_api_str(&parsed.permission))
     }
 
     /// List open issues (excluding pull requests) for a repository.
@@ -1011,6 +1155,7 @@ mod tests {
             "body": "Expose url/labels/state on the wire",
             "html_url": "https://github.com/alondero/buildmesh/issues/358",
             "state": "open",
+            "user": {"login": "alondero", "id": 42, "type": "User"},
             "labels": [
                 {"id": 1, "name": "bug", "color": "d73a4a", "default": true},
                 {"id": 2, "name": "good first issue", "color": "7057ff", "default": false}
@@ -1022,7 +1167,93 @@ mod tests {
         assert_eq!(issue.body, "Expose url/labels/state on the wire");
         assert_eq!(issue.html_url, "https://github.com/alondero/buildmesh/issues/358");
         assert_eq!(issue.state, "open");
+        // The collaborator gate (ADR-0012 §5) reads `author` from `user.login`.
+        assert_eq!(issue.author, "alondero");
         assert_eq!(issue.labels, vec!["bug".to_string(), "good first issue".to_string()]);
+    }
+
+    #[test]
+    fn issue_author_defaults_empty_when_user_absent() {
+        // A partial response without `user` must leave `author` at "" rather
+        // than failing — the gate treats "" as "unknown → require approval".
+        let json = r#"{ "number": 7, "title": "Legacy issue" }"#;
+        let issue: Issue = serde_json::from_str(json).expect("partial shape must parse");
+        assert_eq!(issue.author, "", "missing user defaults author to empty");
+    }
+
+    #[test]
+    fn issue_survives_serialize_deserialize_round_trip() {
+        // `Issue` derives both Serialize and Deserialize; serialising emits
+        // `author` as a bare string. Re-deserialising must not error on that
+        // string (the `author` field's deserializer expects `user.login`) — the
+        // untagged `RawUser::Bare` arm covers it.
+        let json = r#"{ "number": 5, "title": "t", "user": {"login": "octocat"} }"#;
+        let issue: Issue = serde_json::from_str(json).expect("parses from GitHub shape");
+        let serialised = serde_json::to_string(&issue).expect("serialises");
+        let round: Issue = serde_json::from_str(&serialised).expect("round-trips");
+        assert_eq!(round.author, "octocat");
+        assert_eq!(round.number, 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Collaborator permission — the wire→enum mapping the Autopilot gate keys
+    // off (ADR-0012 §5). GitHub's legacy `permission` field is one of
+    // admin/write/read/none; `has_push_access` is the trust boundary.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn collaborator_permission_maps_legacy_values() {
+        assert_eq!(CollaboratorPermission::from_api_str("admin"), CollaboratorPermission::Admin);
+        assert_eq!(CollaboratorPermission::from_api_str("write"), CollaboratorPermission::Write);
+        assert_eq!(CollaboratorPermission::from_api_str("read"), CollaboratorPermission::Read);
+        assert_eq!(CollaboratorPermission::from_api_str("none"), CollaboratorPermission::None);
+    }
+
+    #[test]
+    fn collaborator_permission_maps_granular_roles_and_is_case_insensitive() {
+        // `maintain` can push → Write; `triage` cannot → Read. Mixed case and
+        // stray whitespace (defensive) still parse.
+        assert_eq!(
+            CollaboratorPermission::from_api_str("  Maintain "),
+            CollaboratorPermission::Write
+        );
+        assert_eq!(CollaboratorPermission::from_api_str("TRIAGE"), CollaboratorPermission::Read);
+    }
+
+    #[test]
+    fn collaborator_permission_unknown_value_is_conservative_none() {
+        // An unrecognised level must never grant push — it falls to None.
+        assert_eq!(
+            CollaboratorPermission::from_api_str("superadmin"),
+            CollaboratorPermission::None
+        );
+        assert_eq!(CollaboratorPermission::from_api_str(""), CollaboratorPermission::None);
+    }
+
+    #[test]
+    fn has_push_access_only_for_admin_and_write() {
+        assert!(CollaboratorPermission::Admin.has_push_access());
+        assert!(CollaboratorPermission::Write.has_push_access());
+        assert!(!CollaboratorPermission::Read.has_push_access());
+        assert!(!CollaboratorPermission::None.has_push_access());
+    }
+
+    #[test]
+    fn collaborator_permission_parses_from_api_response_shape() {
+        // Pin the `{permission, role_name, user}` shape `collaborator_permission`
+        // parses, so a GitHub change surfaces here rather than at runtime.
+        #[derive(Deserialize)]
+        struct PermissionResponse {
+            #[serde(default)]
+            permission: String,
+        }
+        let json = r#"{"permission": "write", "role_name": "write", "user": {"login": "jane"}}"#;
+        let parsed: PermissionResponse =
+            serde_json::from_str(json).expect("permission shape parses");
+        assert_eq!(
+            CollaboratorPermission::from_api_str(&parsed.permission),
+            CollaboratorPermission::Write
+        );
     }
 
     #[test]
@@ -1128,6 +1359,7 @@ mod tests {
             "body": "Lists open/closed PRs and merges mergeable ones",
             "draft": false,
             "state": "open",
+            "user": {"login": "contributor-jane", "id": 99, "type": "User"},
             "head": {
                 "ref": "feat/420-pr-spawn",
                 "sha": "0123456789abcdef0123456789abcdef01234567"
@@ -1141,6 +1373,9 @@ mod tests {
         assert!(!pr.draft);
         assert_eq!(pr.state, "open");
         assert_eq!(pr.head_ref, "feat/420-pr-spawn");
+        // The collaborator gate keys off *who opened the PR* — `user.login`,
+        // projected to `author` through the custom Deserialize.
+        assert_eq!(pr.author, "contributor-jane");
         // Issue #444 — `head_sha` is the exact-pinning handle used by the
         // PR-spawn drift check. It MUST survive the projection through the
         // custom Deserialize so `create_pr_node` can persist it for stage-2.

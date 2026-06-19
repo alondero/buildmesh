@@ -191,6 +191,7 @@ const MESH: Mesh = {
   position: 0,
   created_at: new Date(0).toISOString(),
   scratchpad: '',
+  sandbox: false,
 };
 
 // jsdom doesn't lay out, so we have to fabricate offsetWidth/offsetHeight.

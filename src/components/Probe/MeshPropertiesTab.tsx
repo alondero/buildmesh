@@ -35,7 +35,7 @@ import {
   getMeshProperties,
   listProviders,
   updateMeshColumn,
-  updateMeshUseSandbox,
+  updateMeshSandbox,
   type ProviderInfo,
 } from '../../lib/tauri';
 import {
@@ -68,7 +68,7 @@ export function MeshPropertiesTab() {
     buildCommand: '',
     runCommand: '',
     defaultProvider: '',
-    useSandbox: false,
+    sandbox: false,
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
@@ -157,7 +157,7 @@ export function MeshPropertiesTab() {
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
           defaultProvider: config.default_provider ?? '',
-          useSandbox: config.use_sandbox,
+          sandbox: config.sandbox,
         });
         setLoading(false);
       })
@@ -212,9 +212,15 @@ export function MeshPropertiesTab() {
     await updateMeshColumn(activeMeshId, 'default_provider', value);
   };
 
-  const saveUseSandbox = async (value: boolean) => {
+// Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
+  // failure" rule of the other binary controls — reverting a checkbox the user
+  // just clicked is more confusing than an unchanged value. The flag is OS-
+  // agnostic at the DB/UI layer; the OS-specific spawn policy is decided in
+  // `spawn_environment::wrap` on the backend.
+  const saveSandbox = async (value: boolean) => {
     if (activeMeshId === null) return;
-    await updateMeshUseSandbox(activeMeshId, value);
+    setForm((p) => ({ ...p, sandbox: value }));
+    await updateMeshSandbox(activeMeshId, value);
   };
 
   const applyPreset = async (preset: ProjectPreset) => {
@@ -347,11 +353,11 @@ export function MeshPropertiesTab() {
               <input
                 id="mesh-prop-sandbox"
                 type="checkbox"
-                checked={form.useSandbox}
+                checked={form.sandbox}
                 onChange={async (e) => {
                   const next = e.target.checked;
-                  setForm((p) => ({ ...p, useSandbox: next }));
-                  await saveUseSandbox(next);
+                  setForm((p) => ({ ...p, sandbox: next }));
+                  await saveSandbox(next);
                 }}
                 className="accent-accent-cyan"
               />
@@ -430,6 +436,29 @@ export function MeshPropertiesTab() {
               className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
+
+          {/* macOS Seatbelt sandbox toggle (issue #497). The wrapping-label
+              pattern lets getByLabelText resolve the checkbox in tests. Off by
+              default; macOS-only at runtime (Windows/WSL store but ignore it). */}
+          <div>
+            <label className="flex items-center gap-2 text-sm text-text-primary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.sandbox}
+                onChange={(e) => void saveSandbox(e.target.checked)}
+                className="accent-accent-cyan"
+              />
+              <span>
+                Sandbox agent processes
+                <span className="text-text-muted/60"> (macOS only)</span>
+              </span>
+            </label>
+            <p className="mt-1 text-xs text-text-muted">
+              Confines agents to this mesh's worktree via macOS Seatbelt, denying
+              access to your home folder (<code>~/.ssh</code>, <code>~/.aws</code>,
+              …). SSH agent forwarding keeps Git push/fetch working.
+            </p>
+          </div>
         </>
       )}
     </div>
