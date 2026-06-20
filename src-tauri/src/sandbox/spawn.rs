@@ -7,10 +7,12 @@
 //! `MasterPty` so `spawn_agent_inner` registers them exactly like the
 //! unsandboxed `PtyPair`.
 //!
-//! The default agent chain (`cwrap → bash → claude.exe`) runs grant-free this
-//! way: Git's `bash`/`git` carry the app-package ACE, and `claude.exe` lives in
-//! the user profile (granted without elevation). System `node`/msys2 would need
-//! admin and are deliberately not on the curated PATH.
+//! The default agent chain runs `claude.exe` directly (post-#531 cwrap
+//! absorption), so the chain that needs to stay grant-free inside the
+//! AppContainer is just `claude.exe` itself (and anything it shells out to,
+//! like `git`). `claude.exe` lives in the user profile (granted without
+//! elevation); Git's `bash`/`git` carry the app-package ACE. System `node` /
+//! msys2 would need admin and are deliberately not on the curated PATH.
 
 #![cfg(target_os = "windows")]
 
@@ -245,22 +247,27 @@ mod tests {
         );
     }
 
-    /// LIVE DIAGNOSTIC (ignored by default) — reproduce the "cwrap exits ~500ms
-    /// after spawning inside the AppContainer" blocker (GH #498 handoff). The
-    /// production reader thread streams the child's ConPTY bytes to the UI but
-    /// never to `buildmesh.log`, so we know the agent dies but not why. This
-    /// exercises the *real* `spawn_sandboxed` (real per-node AppContainer profile,
-    /// real worktree/.claude/.local-bin grants, real owned ConPTY) with the exact
-    /// argv the post-PowerShell-fix path builds for Anthropic on Windows
-    /// (`cmd.exe /c cwrap --anthropic`), captures every byte the child emits, and
-    /// prints it with the child's exit code.
+    /// LIVE DIAGNOSTIC (ignored by default) — historical repro for the
+    /// "cwrap exits ~500ms after spawning inside the AppContainer" blocker
+    /// (GH #498 handoff). The production reader thread streams the child's
+    /// ConPTY bytes to the UI but never to `buildmesh.log`, so we know the
+    /// agent dies but not why. This exercises the *real* `spawn_sandboxed`
+    /// (real per-node AppContainer profile, real worktree/.claude/.local-bin
+    /// grants, real owned ConPTY) and captures every byte the child emits,
+    /// then prints the captured output together with the child's exit code.
     ///
-    /// Run manually:
+    /// Default argv exercises the current production path (`claude.exe`,
+    /// post-#531 cwrap absorption). The original #498 reproduction targeted
+    /// the now-archived `cwrap.cmd` launcher, which is no longer shipped
+    /// with the dev host toolchain; the original diagnostic lives in git
+    /// history (PR #531 merge commit and earlier).
+    ///
+    /// Run manually (default):
     /// ```text
     /// cargo test -p buildmesh sandbox::spawn::tests::repro_cwrap_exit_in_sandbox -- --ignored --nocapture
     /// ```
     #[test]
-    #[ignore = "live: spawns real cwrap+claude into an AppContainer; needs the dev host toolchain"]
+    #[ignore = "live: spawns real claude.exe into an AppContainer; needs the dev host toolchain"]
     fn repro_cwrap_exit_in_sandbox() {
         use std::io::Read;
         use std::sync::mpsc;
@@ -269,15 +276,15 @@ mod tests {
         // A throwaway dir stands in for the node's worktree — granted Full to the
         // container SID exactly like a real node, so the grant surface matches.
         let worktree =
-            std::env::temp_dir().join(format!("bm-repro-cwrap-{}", std::process::id()));
+            std::env::temp_dir().join(format!("bm-repro-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&worktree).unwrap();
 
-        // Default: exactly what `spawn_environment::wrap` emits for Anthropic on
-        // Windows once the sandbox PowerShell→cmd translation has run. Override
-        // the args (everything after `cmd.exe /c`) via BM_REPRO_ARGS to probe
-        // individual links of the cmd→bash→claude chain without recompiling.
+        // Default: the current production claude.exe direct path (post-#531).
+        // Override via BM_REPRO_ARGS to probe other launchers on PATH. The
+        // original #498 reproduction targeted `cwrap.cmd`, which was archived
+        // when cwrap was absorbed into buildmesh — see the doc above.
         let args_str =
-            std::env::var("BM_REPRO_ARGS").unwrap_or_else(|_| "cwrap --anthropic".to_string());
+            std::env::var("BM_REPRO_ARGS").unwrap_or_else(|_| "claude.exe --dangerously-skip-permissions".to_string());
         let extra: Vec<String> = args_str.split_whitespace().map(String::from).collect();
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.arg("/c");
@@ -358,12 +365,12 @@ mod tests {
 
         let text = String::from_utf8_lossy(&out);
         eprintln!(
-            "\n===== CWRAP SANDBOX REPRO — exit_code={:?}, {} bytes =====",
+            "\n===== SANDBOX SPAWN REPRO — exit_code={:?}, {} bytes =====",
             exit_code,
             out.len()
         );
         eprintln!("{}", text);
-        eprintln!("===== END CWRAP SANDBOX REPRO =====\n");
+        eprintln!("===== END SANDBOX SPAWN REPRO =====\n");
     }
 
     /// LIVE VERIFICATION (ignored by default) — drive the *real* production path
