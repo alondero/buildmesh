@@ -1053,7 +1053,10 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         path: row.get(3)?,
         branch: row.get(4)?,
         env: EnvType::from_db_str(&row.get::<_, String>(5)?),
-        provider: Provider::from_db_str(&row.get::<_, String>(6)?),
+        // Stored verbatim (issue #535): the harness/profile id round-trips as
+        // an opaque String; resolution to a concrete executor happens at the
+        // spawn seam via `preferences::resolve_harness_provider`.
+        provider: row.get::<_, String>(6)?,
         status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
@@ -1313,7 +1316,7 @@ pub fn create_agent_node(
     path: &str,
     branch: &str,
     env: EnvType,
-    provider: Provider,
+    provider: &str,
     worktree_name: Option<&str>,
     source_issue: Option<i64>,
     source_pr: Option<i64>,
@@ -1343,7 +1346,7 @@ pub fn create_agent_node(
             path,
             branch,
             env.to_string(),
-            provider.to_string(),
+            provider,
             worktree_name,
             source_issue,
             source_pr,

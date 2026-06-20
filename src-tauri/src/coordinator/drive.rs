@@ -143,7 +143,11 @@ impl DriveTarget for RegistryTarget {
 
     fn is_plain_terminal(&self, node_id: i64) -> bool {
         crate::db::get_agent_node_by_id(node_id)
-            .map(|n| n.provider.adapter().is_plain_terminal())
+            .map(|n| {
+                crate::preferences::resolve_harness_provider(&n.provider)
+                    .adapter()
+                    .is_plain_terminal()
+            })
             .unwrap_or(false)
     }
 

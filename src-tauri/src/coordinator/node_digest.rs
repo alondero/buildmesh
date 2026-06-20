@@ -147,7 +147,7 @@ pub fn spine(
         id: node.id,
         name: node.name.clone(),
         mesh: mesh_name.to_string(),
-        provider: node.provider.to_string(),
+        provider: node.provider.clone(),
         status: node.status.to_db_str().to_string(),
         needs_feedback,
         // The moment a node became blocked IS its last status change, so reuse
@@ -191,7 +191,8 @@ mod tests {
         AgentNode {
             id: 7,
             name: "fix-login".to_string(),
-            provider,
+            // `provider` is stored as its harness-id string (issue #535).
+            provider: provider.to_string(),
             status,
             ..Default::default()
         }

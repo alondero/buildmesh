@@ -249,15 +249,17 @@ pub struct Mesh {
 /// An agent node — isolated agent working directory.
 ///
 /// Generated to src/types/generated/AgentNode.ts (issue #359); references the
-/// generated `EnvType`/`Provider`/`SessionStatus` enums. `i64` fields use
+/// generated `EnvType`/`SessionStatus` enums. `provider` is an opaque harness
+/// id `String` (issue #535), not the legacy `Provider` enum. `i64` fields use
 /// `#[ts(as = "i32")]` / `Option<i32>` so they emit `number` / `number | null`
 /// rather than ts-rs's default `bigint`.
 ///
 /// `#[derive(Default)]` (issue #457) so test fixtures and stub-only call
 /// sites can spread `..Default::default()` instead of re-listing every field
 /// on each new column. The enum defaults match each `from_db_str` fallback
-/// (Windows / Anthropic / Idle); scalars are zero/empty/false. Future
-/// `Option<T>` columns automatically inherit `None` with no fixture edits.
+/// (Windows / Idle); `provider` defaults to `""` (treated as Anthropic by the
+/// resolver); scalars are zero/empty/false. Future `Option<T>` columns
+/// automatically inherit `None` with no fixture edits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "AgentNode.ts")]
 pub struct AgentNode {
@@ -269,7 +271,15 @@ pub struct AgentNode {
     pub path: String,         // absolute path to node directory
     pub branch: String,
     pub env: EnvType,         // windows or wsl
-    pub provider: Provider,   // anthropic or minimax
+    /// Stored harness/profile id (e.g. "anthropic", "minimax", "terminal", or a
+    /// user-defined profile id). Kept as an opaque `String` rather than the
+    /// legacy [`Provider`] enum so user-defined harness profiles survive the
+    /// DB round-trip — `Provider::from_db_str` would flatten any unknown id to
+    /// Anthropic. Resolved to a concrete executor at the spawn seam via
+    /// `preferences::resolve_harness_provider` (ADR-0014 / issue #535). Empty
+    /// string is treated as "anthropic" by the resolver, so `Default` is a
+    /// behaviour-preserving stub.
+    pub provider: String,
     pub status: SessionStatus,
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
     pub worktree_name: Option<String>,   // git worktree name (same as name for claude-backed providers)
@@ -661,7 +671,9 @@ mod tests {
         assert_eq!(n.path, "");
         assert_eq!(n.branch, "");
         assert_eq!(n.env, EnvType::Windows);
-        assert_eq!(n.provider, Provider::Anthropic);
+        // provider is now an opaque String; default is "" (resolver treats it
+        // as anthropic), so the fallback semantics are preserved (issue #535).
+        assert_eq!(n.provider, "");
         assert_eq!(n.status, SessionStatus::Idle);
         assert_eq!(n.cli_session_id, None);
         assert_eq!(n.worktree_name, None);
@@ -692,7 +704,7 @@ mod tests {
         assert_eq!(n.path, "/tmp/fix-login");
         // Untouched fields keep their defaults.
         assert_eq!(n.env, EnvType::Windows);
-        assert_eq!(n.provider, Provider::Anthropic);
+        assert_eq!(n.provider, "");
         assert_eq!(n.status, SessionStatus::Idle);
     }
 

@@ -6,7 +6,7 @@
 
 use crate::db;
 use crate::env;
-use crate::models::{AgentNode, Provider};
+use crate::models::AgentNode;
 use crate::services::agent_node_discovery::{self, ArchivedAgentNode};
 use tauri::command;
 
@@ -29,10 +29,9 @@ pub async fn import_discovered_agent_node(
     let session_name = crate::session_naming::on_spawn();
     let resolved = env::resolve_agent_path(&mesh_path, None);
     let env_type = resolved.env_type;
-    let provider_enum = provider
-        .as_deref()
-        .map(Provider::from_db_str)
-        .unwrap_or(Provider::Anthropic);
+    // Store the harness/profile id verbatim (issue #535); resolution to a
+    // concrete executor happens at the spawn seam. Absent → "anthropic".
+    let provider_id = provider.as_deref().unwrap_or("anthropic");
 
     let use_worktree = worktree_name.is_some();
     let node = db::create_agent_node(
@@ -41,7 +40,7 @@ pub async fn import_discovered_agent_node(
         &mesh_path,
         &branch,
         env_type,
-        provider_enum,
+        provider_id,
         worktree_name.as_deref(),
         None,
         None,
