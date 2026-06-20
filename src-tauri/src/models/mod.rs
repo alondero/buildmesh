@@ -200,7 +200,17 @@ impl SessionStatus {
 /// Generated to src/types/generated/Mesh.ts (issue #359). `i64` fields carry
 /// `#[ts(as = "i32")]` so they emit `number` (serde_json sends JS numbers, not
 /// the `bigint` ts-rs defaults to for 64-bit ints).
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+///
+/// `#[derive(Default)]` (issue #518) so test fixtures and stub-only call
+/// sites can spread `..Default::default()` instead of re-listing every field
+/// on each new column. Follow-up to the `AgentNode` migration in #457.
+/// Semantics are Option A (zero-value stub): every scalar is `0`/`""`/
+/// `false` and every `Option<T>` is `None`. `created_at` defaults to
+/// UNIX epoch (chrono's `DateTime::<Utc>::default()`), which is a
+/// well-defined placeholder that won't accidentally match a real row.
+/// Future `Option<T>` columns automatically inherit `None` with no
+/// fixture edits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "Mesh.ts")]
 pub struct Mesh {
     #[ts(as = "i32")]
@@ -591,23 +601,24 @@ mod tests {
     use std::io::Write;
 
     fn sample_mesh() -> Mesh {
+        // Spread `..Default::default()` for every field this fixture doesn't
+        // intentionally exercise (issue #518 follow-up to #457). Keeping only
+        // the fields the consumer tests assert on: name + base_ref + the
+        // `Option<T>` columns that need a non-default value, plus the two
+        // scalar toggles (`use_worktree`, `sandbox`) whose values the tests
+        // pin explicitly. A future `Mesh` column just needs to be added to
+        // the struct — this fixture stays unchanged.
         Mesh {
             id: 1,
             name: "demo".to_string(),
             path: "/repo".to_string(),
-            layout: "grid".to_string(),
-            position: 0,
-            created_at: Utc::now(),
             build_command: Some("npm run build".to_string()),
-            run_command: None,
             model: Some("opus".to_string()),
-            effort: None,
-            use_worktree: false,
             worktree_mode: Some("branched".to_string()),
-            default_provider: None,
             base_ref: "origin/main".to_string(),
-            scratchpad: String::new(),
+            use_worktree: false,
             sandbox: true,
+            ..Default::default()
         }
     }
 
@@ -683,6 +694,61 @@ mod tests {
         assert_eq!(n.env, EnvType::Windows);
         assert_eq!(n.provider, Provider::Anthropic);
         assert_eq!(n.status, SessionStatus::Idle);
+    }
+
+    /// Regression test for issue #518: `Mesh::default()` exists so future
+    /// optional columns only need to be added to the struct, not to
+    /// `sample_mesh()`. Follow-up to #457 (which did the same for
+    /// `AgentNode`).
+    ///
+    /// Option A semantics (zero-value stub — see issue body): every field
+    /// at its mechanical zero. There is no enum on `Mesh` to align with a
+    /// `from_db_str` fallback, so the choice is uniform. A `Mesh` built
+    /// from `..Default::default()` is a "no row loaded" placeholder — not
+    /// a value that would silently masquerade as a real DB row.
+    #[test]
+    fn mesh_default_matches_fallback_semantics() {
+        let m = Mesh::default();
+        assert_eq!(m.id, 0);
+        assert_eq!(m.name, "");
+        assert_eq!(m.path, "");
+        assert_eq!(m.layout, "");
+        assert_eq!(m.position, 0);
+        assert_eq!(
+            m.created_at,
+            chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap()
+        );
+        assert_eq!(m.build_command, None);
+        assert_eq!(m.run_command, None);
+        assert_eq!(m.model, None);
+        assert_eq!(m.effort, None);
+        assert!(!m.use_worktree);
+        assert_eq!(m.worktree_mode, None);
+        assert_eq!(m.default_provider, None);
+        assert_eq!(m.base_ref, "");
+        assert_eq!(m.scratchpad, "");
+        assert!(!m.sandbox);
+    }
+
+    /// Companion to the above: a partially-overridden literal must compile
+    /// cleanly via `..Default::default()`, which is the migration pattern
+    /// `sample_mesh()` will adopt. Pins the spread-syntax contract so a
+    /// future `non_exhaustive` or similar can't quietly break it.
+    #[test]
+    fn mesh_partial_with_default_spread_works() {
+        let m = Mesh {
+            id: 7,
+            name: "fixture".to_string(),
+            path: "/repo".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(m.id, 7);
+        assert_eq!(m.name, "fixture");
+        assert_eq!(m.path, "/repo");
+        // Untouched fields keep their defaults.
+        assert!(!m.use_worktree);
+        assert!(!m.sandbox);
+        assert_eq!(m.base_ref, "");
     }
 
     #[test]

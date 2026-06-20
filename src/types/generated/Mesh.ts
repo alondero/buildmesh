@@ -6,6 +6,16 @@
  * Generated to src/types/generated/Mesh.ts (issue #359). `i64` fields carry
  * `#[ts(as = "i32")]` so they emit `number` (serde_json sends JS numbers, not
  * the `bigint` ts-rs defaults to for 64-bit ints).
+ *
+ * `#[derive(Default)]` (issue #518) so test fixtures and stub-only call
+ * sites can spread `..Default::default()` instead of re-listing every field
+ * on each new column. Follow-up to the `AgentNode` migration in #457.
+ * Semantics are Option A (zero-value stub): every scalar is `0`/`""`/
+ * `false` and every `Option<T>` is `None`. `created_at` defaults to
+ * UNIX epoch (chrono's `DateTime::<Utc>::default()`), which is a
+ * well-defined placeholder that won't accidentally match a real row.
+ * Future `Option<T>` columns automatically inherit `None` with no
+ * fixture edits.
  */
 export type Mesh = { id: number, name: string, path: string, layout: string, position: number, created_at: string, build_command: string | null, run_command: string | null, model: string | null, effort: string | null, use_worktree: boolean, worktree_mode: string | null, default_provider: string | null, base_ref: string, 
 /**

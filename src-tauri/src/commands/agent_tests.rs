@@ -664,4 +664,187 @@ mod tests {
             Some(crate::http_server::current_http_port().to_string())
         );
     }
+
+    // ----- validate_pr_spawn_inputs (issue #471) -------------------------
+    //
+    // Regression: the previous fork-info gate in `create_pr_node` had two
+    // guards whose composition let a malformed request through. Guard 1
+    // (XOR on `head_repo_owner` / `head_repo_clone_url` Some-ness) checked
+    // fork-info completeness; guard 2 rejected `head_ref=""` ONLY when
+    // `head_repo_owner` was None — meaning a request with an empty
+    // `head_ref` but populated fork info skipped both guards and stage-2
+    // (`spawn_agent_inner`) tried to check out a branch named "".
+    //
+    // `validate_pr_spawn_inputs` splits the gate into two independent
+    // rejections:
+    //   1. fork info must be both-present or both-absent (XOR),
+    //   2. `head_ref` must be non-empty (unconditional).
+    //
+    // Truth table (× = accept, ✗ = reject):
+    //
+    //   head_ref  owner  url      |  before  |  after (#471)
+    //   -----------------------------------------------
+    //   "feat/x"  None   None    |    ×     |    ×
+    //   "feat/x"  Some   None    |    ✗     |    ✗
+    //   "feat/x"  None   Some    |    ✗     |    ✗
+    //   "feat/x"  Some   Some    |    ×     |    ×
+    //   ""        None   None    |    ✗     |    ✗
+    //   ""        Some   None    |    ✗     |    ✗
+    //   ""        None   Some    |    ✗     |    ✗
+    //   ""        Some   Some    |  **×**   |  **✗**   ← the #471 fix
+
+    fn run_gate(
+        head_ref: &str,
+        owner: Option<&str>,
+        url: Option<&str>,
+    ) -> Result<(String, Option<String>, Option<String>), String> {
+        crate::commands::agent::validate_pr_spawn_inputs(
+            head_ref,
+            owner.map(str::to_string),
+            url.map(str::to_string),
+        )
+    }
+
+    /// Regression for issue #471. The previous fork-info gate let
+    /// `head_ref=""` through when fork info was populated (a stale
+    /// `head` object from a previously-rendered fork row). After the
+    /// fix, this is rejected outright because stage-2 cannot check out
+    /// a branch named "".
+    #[test]
+    fn empty_head_ref_with_populated_fork_info_is_rejected() {
+        let result = run_gate(
+            "",
+            Some("alice"),
+            Some("https://github.com/alice/buildmesh.git"),
+        );
+        let err = result.expect_err(
+            "head_ref=\"\" with fork info populated must be rejected \
+             (issue #471: previous gate let this through to stage-2)",
+        );
+        assert!(
+            err.contains("head_ref") && err.to_lowercase().contains("required"),
+            "error must clearly name the missing head_ref, got: {:?}",
+            err
+        );
+    }
+
+    /// Whitespace-only `head_ref` is the same class of malformed input —
+    /// the trim happens at the gate, not at the service layer.
+    #[test]
+    fn whitespace_only_head_ref_with_populated_fork_info_is_rejected() {
+        let result = run_gate(
+            "   \t  ",
+            Some("alice"),
+            Some("https://github.com/alice/buildmesh.git"),
+        );
+        assert!(
+            result.is_err(),
+            "whitespace-only head_ref must be rejected like an empty one",
+        );
+    }
+
+    /// Existing behaviour preserved: same-repo PR with an empty
+    /// `head_ref` is still rejected.
+    #[test]
+    fn empty_head_ref_with_no_fork_info_is_rejected() {
+        let result = run_gate("", None, None);
+        assert!(result.is_err(), "existing rejection must be preserved");
+    }
+
+    /// Same-repo PR (the common case) is accepted.
+    #[test]
+    fn same_repo_pr_with_head_ref_is_accepted() {
+        let (head_ref, owner, url) =
+            run_gate("feat/x", None, None).expect("same-repo PR with head_ref must be accepted");
+        assert_eq!(head_ref, "feat/x");
+        assert_eq!(owner, None);
+        assert_eq!(url, None);
+    }
+
+    /// Fork PR with both fields populated is accepted.
+    #[test]
+    fn fork_pr_with_head_ref_and_full_fork_info_is_accepted() {
+        let (head_ref, owner, url) = run_gate(
+            "feat/x",
+            Some("alice"),
+            Some("https://github.com/alice/buildmesh.git"),
+        )
+        .expect("fork PR with head_ref and full fork info must be accepted");
+        assert_eq!(head_ref, "feat/x");
+        assert_eq!(owner.as_deref(), Some("alice"));
+        assert_eq!(url.as_deref(), Some("https://github.com/alice/buildmesh.git"));
+    }
+
+    /// Fork-info completeness gate: only one of the two fields is an
+    /// unfixable request — we need the clone URL to register the remote
+    /// and the owner login for the remote alias. Same behaviour on both
+    /// sides of the XOR.
+    #[test]
+    fn fork_info_only_owner_without_url_is_rejected() {
+        let err = run_gate("feat/x", Some("alice"), None)
+            .expect_err("owner without clone_url must be rejected");
+        assert!(
+            err.contains("fork info is incomplete"),
+            "error must clearly name the fork-info completeness gate: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn fork_info_only_url_without_owner_is_rejected() {
+        let err = run_gate("feat/x", None, Some("https://github.com/alice/x.git"))
+            .expect_err("clone_url without owner must be rejected");
+        assert!(
+            err.contains("fork info is incomplete"),
+            "error must clearly name the fork-info completeness gate: {:?}",
+            err
+        );
+    }
+
+    /// Surrounding whitespace is trimmed from the fork-info strings so
+    /// `Some(" alice ")` and `Some("alice")` reach the service layer as
+    /// identical values. (The empty-after-trim case collapses to `None`,
+    /// matching the behaviour at the existing trim site.)
+    #[test]
+    fn fork_info_strings_are_trimmed() {
+        let (head_ref, owner, url) = run_gate(
+            "feat/x",
+            Some("  alice  "),
+            Some("  https://github.com/alice/x.git  "),
+        )
+        .expect("trimmed fork info must be accepted");
+        assert_eq!(head_ref, "feat/x");
+        assert_eq!(owner.as_deref(), Some("alice"));
+        assert_eq!(url.as_deref(), Some("https://github.com/alice/x.git"));
+    }
+
+    /// A whitespace-only fork-info value collapses to `None` so it doesn't
+    /// produce an `Some("")` for the service layer. This matches the
+    /// pre-existing behaviour of the inline `filter(|s| !s.is_empty())`.
+    #[test]
+    fn whitespace_only_fork_info_collapses_to_none() {
+        let (head_ref, owner, url) = run_gate("feat/x", Some("   "), None)
+            .expect("whitespace-only owner collapses to None (no fork info)");
+        assert_eq!(head_ref, "feat/x");
+        assert_eq!(owner, None);
+        assert_eq!(url, None);
+    }
+
+    /// `head_ref` is trimmed before being returned so a whitespace-padded
+    /// branch name (e.g. an upstream payload that wrapped `head.ref` in
+    /// spaces) lands on `node.branch` as the bare ref. Without this, the
+    /// gate's empty-check passes on the trimmed value but `node.branch`
+    /// keeps the padding, and stage-2's `git fetch origin <padded>`
+    /// fails to match the real ref.
+    #[test]
+    fn padded_head_ref_is_trimmed() {
+        let (head_ref, owner, url) = run_gate("  feat/x  ", None, None)
+            .expect("padded head_ref must be accepted (trimmed, not rejected)");
+        assert_eq!(
+            head_ref, "feat/x",
+            "padded head_ref must be trimmed before reaching the service layer"
+        );
+        assert_eq!(owner, None);
+        assert_eq!(url, None);
+    }
 }
