@@ -611,7 +611,7 @@ describe('GitPullRequestsTab', () => {
       if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
-      if (cmd === 'create_pr_node') return Promise.reject(new Error("This PR's head branch is on a fork — worktree adoption for fork PRs isn't supported yet"));
+      if (cmd === 'create_pr_node') return Promise.reject(new Error("PR's fork info is incomplete (head_repo_owner and head_repo_clone_url must both be present, or both absent). Reload the PR list and retry."));
       return Promise.resolve({});
     });
     useUIStore.setState({ probeOpen: true, probeTab: 'pulls' });
@@ -626,7 +626,7 @@ describe('GitPullRequestsTab', () => {
     });
     // The error message surfaces inline on the row.
     expect(
-      await screen.findByText(/This PR's head branch is on a fork/),
+      await screen.findByText(/PR's fork info is incomplete/),
     ).toBeTruthy();
     // The dock stays open so the user can try a different PR.
     expect(useUIStore.getState().probeOpen).toBe(true);

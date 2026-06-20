@@ -345,6 +345,79 @@ pub(crate) fn format_pr_prefill(
     }
 }
 
+/// Validate and normalise the inputs to a PR-spawn request.
+///
+/// Two independent rejections (issue #471):
+///
+/// 1. **Fork-info completeness** — `head_repo_owner` and `head_repo_clone_url`
+///    must both be present or both absent. A fork PR with only one is
+///    unfixable from the spawn path: stage-2 needs the clone URL to register
+///    `git remote add fork-<login>` and the owner login for the remote alias.
+///    (The original #420 gate rejected ALL fork PRs by checking
+///    `head_ref.is_empty()`; that was correct at the time because the wire
+///    shape didn't carry fork info. Issue #443 added fork-info fields and the
+///    "fork info present" XOR check replaced it.)
+///
+/// 2. **Empty `head_ref`** — unconditionally rejected. Stage-2
+///    (`spawn_agent_inner`) reads `node.branch` (= `head_ref`) to check out
+///    the PR's commits; an empty branch lands on the mesh's `base_ref` or
+///    fails outright, giving the user a wrong-commit agent with no signal.
+///    This is independent of fork info: a request with `head_ref=""` AND
+///    populated fork fields (e.g. a stale `head` object from a previously
+///    rendered fork row) must also be rejected.
+///
+/// Surrounding whitespace on every input is trimmed:
+/// - `head_ref`: trimmed and returned — a padded `" feat/x "` lands on
+///   `node.branch` as `"feat/x"` so stage-2's `git fetch origin <ref>`
+///   matches the real ref. Without this, a whitespace-padded `head_ref`
+///   passes the empty check but `git checkout` fails on the persisted
+///   branch.
+/// - fork-info strings: trimmed and the empty-after-trim case collapses
+///   to `None` so `Some(" alice ")` and `Some("alice")` reach the service
+///   layer as identical values; `Some(" ")` collapses to `None` (no fork
+///   info).
+///
+/// Returns the cleaned `(head_ref, head_repo_owner, head_repo_clone_url)`
+/// triple on success so the caller can forward them without re-trimming.
+/// Pure function — unit-tested exhaustively against the truth table in
+/// `commands::agent_tests`.
+pub(crate) fn validate_pr_spawn_inputs(
+    head_ref: &str,
+    head_repo_owner: Option<String>,
+    head_repo_clone_url: Option<String>,
+) -> Result<(String, Option<String>, Option<String>), String> {
+    let head_ref = head_ref.trim().to_string();
+    let head_repo_owner = head_repo_owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let head_repo_clone_url = head_repo_clone_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    if (head_repo_owner.is_some()) ^ (head_repo_clone_url.is_some()) {
+        return Err(
+            "PR's fork info is incomplete (head_repo_owner and head_repo_clone_url \
+             must both be present, or both absent). Reload the PR list and retry."
+                .to_string(),
+        );
+    }
+
+    if head_ref.is_empty() {
+        return Err(
+            "PR's head_ref is required (got an empty value). \
+             Reload the PR list so the panel can re-fetch the head branch, \
+             then retry the spawn."
+                .to_string(),
+        );
+    }
+
+    Ok((head_ref, head_repo_owner, head_repo_clone_url))
+}
+
 /// Fast stage-1 of the PR-spawn flow. Creates a `Pending` agent node row
 /// with the originating PR number stamped on `source_pr` and the PR's head
 /// ref stored in `branch`. The caller is expected to invoke
@@ -380,36 +453,18 @@ pub fn create_pr_node(
     head_repo_owner: Option<String>,
     head_repo_clone_url: Option<String>,
 ) -> Result<IssueNodeDraft, String> {
-    // Two inputs gate the fork path. Both must be present for the spawn to
-    // proceed with a fork PR — the spawn-time `git remote add` needs the
-    // clone URL, and the alias `fork-<login>` needs the owner login. If the
-    // frontend passes a fork PR with only `head_ref` (an old client or a
-    // partial API response), surface that as a clear error rather than
-    // silently spawning on the mesh's base ref. (The previous #420 guard
-    // rejected ALL fork PRs by checking `head_ref.is_empty()`; that was
-    // correct at the time because the wire shape didn't carry fork info.
-    // Now that it does, the gate is "fork info present" rather than
-    // "same-repo".)
-    let head_repo_owner = head_repo_owner.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let head_repo_clone_url = head_repo_clone_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    if (head_repo_owner.is_some()) ^ (head_repo_clone_url.is_some()) {
-        return Err(
-            "PR's fork info is incomplete (head_repo_owner and head_repo_clone_url \
-             must both be present, or both absent). Reload the PR list and retry."
-                .to_string(),
-        );
-    }
-    if head_ref.trim().is_empty() && head_repo_owner.is_none() {
-        return Err(
-            "This PR's head branch is on a fork, but no clone URL was provided. \
-             Reload the PR list so the panel can pull the fork's clone URL, \
-             then retry the spawn."
-                .to_string(),
-        );
-    }
+    // Issue #471 — the gate is split into two independent rejections. See
+    // `validate_pr_spawn_inputs` for the truth table; both guards are tested
+    // exhaustively in `commands::agent_tests`. The helper also returns the
+    // trimmed `head_ref` so a whitespace-padded ref (e.g. `" feat/x "` from
+    // an upstream payload quirk) is normalised before it reaches the
+    // service layer as `node.branch` — without the trim, stage-2's
+    // `git fetch origin <ref>` would fail on the persisted branch.
+    let (head_ref, head_repo_owner, head_repo_clone_url) = validate_pr_spawn_inputs(
+        &head_ref,
+        head_repo_owner,
+        head_repo_clone_url,
+    )?;
 
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(&mesh)
@@ -448,8 +503,8 @@ pub fn create_pr_node(
         Some(pr_number),      // source_pr — the key field for stage-2 worktree adoption
         pinned_sha_opt,       // source_pr_pinned_sha — exact-pinning handle (issue #444)
         Some(&initial_name),
-        head_repo_owner,      // fork meta (issue #443) — None for same-repo PRs
-        head_repo_clone_url,
+        head_repo_owner.as_deref(),  // fork meta (issue #443) — None for same-repo PRs
+        head_repo_clone_url.as_deref(),
     )
     .map_err(|e| e.to_string())?;
 
