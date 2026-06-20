@@ -4,6 +4,14 @@ Buildmesh is an orchestration platform for AI coding agents that work in paralle
 
 ## Language
 
+**Agent Harness**:
+The configured execution environment, binary recipe, and credentials (such as API keys or base URLs) required to launch and communicate with a specific AI coding agent. Only the `Terminal` harness is always available; all other harnesses must be explicitly enabled and configured by the user.
+_Avoid_: Provider (use when referring to the raw service provider, but canonicalize on Agent Harness for the configuration/execution context).
+
+**Claude Code (Compatible API)**:
+A type of Agent Harness that executes the standard `claude` / `claude.exe` binary, but redirects it to a third-party or compatible LLM provider by overriding environment variables (e.g. `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`) at spawn time.
+
+
 **Mesh**:
 A project workspace associated with a local Git repository root path.
 _Avoid_: Project, repo, folder
