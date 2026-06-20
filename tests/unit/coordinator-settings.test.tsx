@@ -32,6 +32,8 @@ function mockBackend(coordinator: CoordinatorState = { enabled: false, hasToken:
         return Promise.resolve({ default_provider: null, minimax_api_key: null });
       case 'list_providers':
         return Promise.resolve([]);
+      case 'get_provider_accounts':
+        return Promise.resolve([]);
       case 'get_all_provider_usage':
         return Promise.resolve([]);
       default:
