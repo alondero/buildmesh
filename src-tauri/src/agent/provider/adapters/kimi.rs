@@ -1,4 +1,7 @@
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::provider_conf::read_providers_conf;
+use crate::agent::provider::{
+    claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 
 pub struct KimiAdapter;
 pub static KIMI: KimiAdapter = KimiAdapter;
@@ -50,5 +53,33 @@ impl AgentProvider for KimiAdapter {
 
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Linux]
+    }
+
+    /// Windows AppContainer sandbox: spawn claude.exe directly (cwrap → bash
+    /// can't init in the container).
+    fn sandbox_direct_recipe(&self, _platform: Platform) -> Option<SpawnRecipe> {
+        Some(claude_direct_recipe())
+    }
+
+    /// The Kimi backend env cwrap's `kimi` arm would export, rebuilt in-process
+    /// from `~/.claude/providers.conf` (mirrors `~/.local/bin/cwrap`).
+    fn sandbox_provider_env(&self) -> Vec<(String, String)> {
+        let conf = read_providers_conf();
+        let mut env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), "https://api.moonshot.ai/anthropic".to_string()),
+            ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
+            ("ANTHROPIC_MODEL".to_string(), "kimi-k2.6".to_string()),
+            ("ANTHROPIC_SMALL_FAST_MODEL".to_string(), "kimi-k2.5".to_string()),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), "kimi-k2.5".to_string()),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), "kimi-k2.6".to_string()),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), "kimi-k2.5".to_string()),
+        ];
+        match conf.get("MOONSHOT_API_KEY").filter(|v| !v.is_empty()) {
+            Some(key) => env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), key.clone())),
+            None => tracing::error!(
+                "sandbox Kimi spawn: MOONSHOT_API_KEY missing from ~/.claude/providers.conf — claude will fail to authenticate"
+            ),
+        }
+        env
     }
 }
