@@ -74,6 +74,25 @@ pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
     }
 }
 
+/// The backend-selecting environment variables cwrap's launcher `unset` before
+/// `exec claude`. Claude-backed providers reset these on every spawn so a value
+/// inherited from buildmesh's own process environment (e.g. an `ANTHROPIC_*`
+/// override exported in the shell that launched the app) can't leak into the
+/// agent — reproducing the clean slate cwrap gave each session. Mirrors the
+/// `unset ...` block in `~/.local/bin/cwrap`. See [`AgentProvider::resets_backend_env`].
+pub const CLAUDE_BACKEND_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "API_TIMEOUT_MS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+];
+
 /// UI metadata declared by an adapter. The `id` is supplied separately via
 /// `AgentProvider::id()` so the two can't diverge.
 #[derive(Debug, Clone)]
@@ -204,5 +223,17 @@ pub trait AgentProvider: Send + Sync {
     /// non-cwrap providers. MiniMax/Kimi read their API keys from `~/.claude/providers.conf`.
     fn provider_env(&self) -> Vec<(String, String)> {
         Vec::new()
+    }
+
+    /// Whether this provider's launcher resets [`CLAUDE_BACKEND_ENV_VARS`] before
+    /// applying [`provider_env`](Self::provider_env). True for the claude-backed
+    /// family (Anthropic, MiniMax, Kimi): cwrap `unset` those vars before
+    /// `exec claude`, so any value inherited from buildmesh's environment is
+    /// cleared first to give the agent the same clean slate. Anthropic exports
+    /// nothing of its own, so the reset is its whole contribution. False for
+    /// native-binary providers (Codex, OpenCode, Agy) that never went through
+    /// cwrap and don't read these vars.
+    fn resets_backend_env(&self) -> bool {
+        false
     }
 }

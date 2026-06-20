@@ -587,11 +587,16 @@ async fn summarize_and_rename_with(
         }
     };
 
-    // Inject the MiniMax backend env (ANTHROPIC_BASE_URL, API token, model
-    // routing) so `claude` talks to the MiniMax endpoint instead of the
-    // built-in Anthropic subscription. Replaces the env `cwrap --minimax`
-    // would have sourced from `~/.claude/providers.conf` — same source of
-    // truth, rebuilt in-process by `MinimaxAdapter::provider_env`.
+    // Clear any inherited claude backend env (cwrap `unset` parity) so a value
+    // exported in buildmesh's own environment can't override the MiniMax routing
+    // below, then inject the MiniMax backend env (ANTHROPIC_BASE_URL, API token,
+    // model routing) so `claude` talks to the MiniMax endpoint instead of the
+    // built-in Anthropic subscription. Replaces the env `cwrap --minimax` would
+    // have sourced from `~/.claude/providers.conf` — same source of truth,
+    // rebuilt in-process by `MinimaxAdapter::provider_env`.
+    for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
+        cmd.env_remove(k);
+    }
     for (k, v) in crate::agent::provider::adapters::MINIMAX.provider_env() {
         cmd.env(k, v);
     }

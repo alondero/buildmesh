@@ -49,4 +49,12 @@ impl AgentProvider for AnthropicAdapter {
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Macos, Platform::Linux]
     }
+
+    /// Reset the inherited claude backend env (cwrap `unset` parity). Anthropic
+    /// exports nothing of its own — `provider_env` is empty — so clearing any
+    /// inherited `ANTHROPIC_*` override is its whole contribution, keeping the
+    /// built-in subscription on the default Anthropic endpoint.
+    fn resets_backend_env(&self) -> bool {
+        true
+    }
 }

@@ -5,7 +5,7 @@
 //! PTY-specific helpers (open_pty_pair, spawn_child) live in `process.rs`.
 
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
-use crate::agent::provider::Platform;
+use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
@@ -228,6 +228,18 @@ pub fn build_spawn_command(
 
     let mut cmd =
         spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
+
+    // Reset the claude backend env vars cwrap would have `unset` before
+    // `exec claude`, so a value inherited from buildmesh's own environment can't
+    // leak into the agent. For Anthropic this clean slate is the whole job (it
+    // exports nothing); MiniMax/Kimi reset then set their own below. On the WSL
+    // path this only clears the wsl.exe launcher's env — harmless, since only
+    // WSLENV-listed vars cross the boundary anyway.
+    if adapter.resets_backend_env() {
+        for k in CLAUDE_BACKEND_ENV_VARS {
+            cmd.env_remove(k);
+        }
+    }
 
     // Inject the backend-selecting env variables (MiniMax/Kimi base URL,
     // API token, model routing). Empty for Anthropic.

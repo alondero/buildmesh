@@ -389,6 +389,42 @@ mod tests {
         );
     }
 
+    /// cwrap `unset` the claude backend env vars before `exec claude`, so a value
+    /// inherited from the launching shell never reached the agent. The direct
+    /// spawn must reproduce that clean slate: an `ANTHROPIC_*` value present in
+    /// buildmesh's own process environment must NOT leak into a claude-backed
+    /// agent. Anthropic exports nothing of its own, so the reset is the whole job
+    /// — the inherited value must be cleared, not passed through.
+    ///
+    /// Native (non-WSL) path only: a `claude.exe` child inherits buildmesh's full
+    /// environment block, whereas a WSL child only receives vars bridged via
+    /// `WSLENV`. So this leak is observable only on the direct-inherit path.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn anthropic_clears_inherited_backend_env() {
+        // Simulate buildmesh launched from a shell that already exported a
+        // provider override (e.g. a developer who ran `cwrap --minimax` in the
+        // same terminal before starting the app).
+        unsafe { std::env::set_var("ANTHROPIC_BASE_URL", "https://leaked.example/anthropic"); }
+        let cmd = build_spawn_command(
+            &windows_resolved(),
+            Provider::Anthropic,
+            &SessionIdMode::None,
+            SESSION_ID,
+            None,
+            None,
+            None,
+            false,
+        );
+        let leaked = env_of(&cmd, "ANTHROPIC_BASE_URL");
+        unsafe { std::env::remove_var("ANTHROPIC_BASE_URL"); }
+        assert_eq!(
+            leaked, None,
+            "inherited ANTHROPIC_BASE_URL must be cleared for the Anthropic spawn (cwrap `unset` parity), not leaked: {:?}",
+            leaked
+        );
+    }
+
     /// WSL keeps the `--prefill` CLI arg: `wsl.exe` passes a multi-line argv
     /// through intact (no cmd.exe in the chain), and a Windows env var does not
     /// cross into the WSL environment without `WSLENV`. So the env transport must

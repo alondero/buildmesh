@@ -51,6 +51,10 @@ impl AgentProvider for MinimaxAdapter {
         &[Platform::Windows, Platform::Linux]
     }
 
+    fn resets_backend_env(&self) -> bool {
+        true
+    }
+
     /// The MiniMax backend env cwrap's `minimax` arm would export, rebuilt
     /// in-process from `~/.claude/providers.conf` (mirrors `~/.local/bin/cwrap`).
     fn provider_env(&self) -> Vec<(String, String)> {
