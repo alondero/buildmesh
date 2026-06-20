@@ -300,9 +300,17 @@ mod tests {
     }
 
     /// Multi-line prefill survives as a normal argv — no env-var transport engages.
+    ///
+    /// `portable_pty::CommandBuilder` inherits the parent env, so a
+    /// `BUILDMESH_PREFILL` leaked into the test runner's shell would make
+    /// `get_env` return `Some(...)` and fail the "must not set" assertion
+    /// below. Clear it so the test is hermetic regardless of the runner's
+    /// env (mirrors the WSL sibling test).
     #[cfg(target_os = "windows")]
     #[test]
     fn anthropic_prefill_goes_argv_not_env() {
+        unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
+
         let cmd = build_spawn_command(
             &windows_resolved(),
             Provider::Anthropic,

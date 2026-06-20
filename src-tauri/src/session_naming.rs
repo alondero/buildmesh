@@ -37,6 +37,10 @@ use tauri::{AppHandle, Emitter};
 
 use crate::models::AgentNode;
 
+// `MinimaxAdapter::provider_env` is a trait method on `AgentProvider`; the
+// trait must be in scope to call it.
+use crate::agent::provider::AgentProvider;
+
 // ---------------------------------------------------------------------------
 // Repository trait — abstracts DB calls for testability
 // ---------------------------------------------------------------------------
@@ -556,21 +560,41 @@ async fn summarize_and_rename_with(
 
     tracing::info!("session_naming: running summarize command for node {} ({} chars)", node_id, clean_buffer.len());
 
+    // Compose the full prompt (instructions + terminal log) so Claude Code's
+    // `--print` mode can read it from stdin. `claude --print` reads the user
+    // message from stdin when no positional arg is given — passing both an
+    // arg AND piping stdin is implementation-defined across Claude Code
+    // versions, so we use the stdin-only mode for reliability.
+    let full_input = format!("{}\n\nTerminal log to summarize:\n{}", prompt, clean_buffer);
+
     let mut cmd = {
 #[cfg(target_os = "windows")]
             {
-                let mut c = tokio::process::Command::new("C:\\Windows\\System32\\cmd.exe");
-                c.args(["/c", "cwrap", "--minimax", "-p", prompt]);
+                // `claude.exe` is a native binary — no `cmd.exe /c` wrapper
+                // needed (cwrap's `.cmd` shim is gone with the cwrap absorption).
+                // `CREATE_NO_WINDOW` (0x08000000) keeps the brief console flash
+                // off-screen for a one-shot background rename.
+                let mut c = tokio::process::Command::new("claude.exe");
+                c.args(["--print"]);
                 c.creation_flags(0x08000000);
                 c
             }
         #[cfg(not(target_os = "windows"))]
         {
-            let mut c = tokio::process::Command::new("cwrap");
-            c.args(["--minimax", "-p", &prompt]);
+            let mut c = tokio::process::Command::new("claude");
+            c.args(["--print"]);
             c
         }
     };
+
+    // Inject the MiniMax backend env (ANTHROPIC_BASE_URL, API token, model
+    // routing) so `claude` talks to the MiniMax endpoint instead of the
+    // built-in Anthropic subscription. Replaces the env `cwrap --minimax`
+    // would have sourced from `~/.claude/providers.conf` — same source of
+    // truth, rebuilt in-process by `MinimaxAdapter::provider_env`.
+    for (k, v) in crate::agent::provider::adapters::MINIMAX.provider_env() {
+        cmd.env(k, v);
+    }
 
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
@@ -583,9 +607,9 @@ async fn summarize_and_rename_with(
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             stdin
-                .write_all(clean_buffer.as_bytes())
+                .write_all(full_input.as_bytes())
                 .await
-                .map_err(|e| format!("failed to write buffer to CLI: {}", e))?;
+                .map_err(|e| format!("failed to write prompt+buffer to CLI: {}", e))?;
         }
         child
             .wait_with_output()

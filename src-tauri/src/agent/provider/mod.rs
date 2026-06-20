@@ -33,8 +33,10 @@ impl Platform {
 }
 
 /// Shell to use when wrapping a Windows-native spawn.
-/// cwrap providers spawn under powershell so ANSI escape sequences propagate
-/// correctly; node-shim providers (`.cmd` batch files) use cmd.exe.
+/// Codex spawns under PowerShell so ANSI escape sequences propagate
+/// correctly through ConPTY; node-shim providers (`.cmd` batch files like
+/// OpenCode) use cmd.exe. The Claude Code family (Anthropic, MiniMax, Kimi)
+/// uses `Direct` now that cwrap is absorbed — see `claude_direct_recipe`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsShell {
     PowerShell,
@@ -52,14 +54,14 @@ pub struct SpawnRecipe {
     pub windows_shell: WindowsShell,
 }
 
-/// The bash-free claude invocation used by the Windows OS-sandbox path
-/// ([`AgentProvider::sandbox_direct_recipe`]). Inside an AppContainer the
-/// `cwrap → MSYS2 bash → claude` chain dies in the loader
-/// (`STATUS_DLL_INIT_FAILED`) because MSYS2's runtime can't initialize in the
-/// container's restricted object namespace — but the native `claude.exe` runs
-/// fine. We target the `.exe` explicitly (the bare `claude` is itself a bash
-/// shim) and spawn it directly, with no PowerShell/cmd/ba/// The bash-free claude invocation. We target the native executable/script
-/// and spawn it directly, with no PowerShell/cmd/bash wrapper.
+/// The direct `claude` / `claude.exe` invocation used by every claude-backed
+/// provider (Anthropic, MiniMax, Kimi) on every platform — cwrap's launcher
+/// role is absorbed into buildmesh. On Windows we target `claude.exe`
+/// explicitly (the bare `claude` is a bash shim); on macOS/Linux we use the
+/// `claude` shell script on PATH. Spawned directly via `spawn_environment::
+/// wrap`'s `WindowsShell::Direct` branch — no PowerShell, cmd.exe, or bash
+/// wrapper, so the AppContainer restriction that motivated the old sandbox-
+/// only seam no longer applies.
 pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
     let binary = match platform {
         Platform::Windows => "claude.exe",

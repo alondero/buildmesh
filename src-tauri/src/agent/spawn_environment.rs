@@ -6,7 +6,7 @@
 //!   (Seatbelt containment to the worktree — see `agent::sandbox`, issue #497)
 //! - macOS, `sandbox` off: direct invocation
 //! - Windows native + PowerShell shell: `powershell.exe -NoLogo -EncodedCommand <base64>`
-//!   (used by cwrap providers so ANSI escapes propagate correctly through ConPTY)
+//!   (used by Codex so ANSI escapes propagate correctly through ConPTY)
 //! - Windows native + Cmd shell: `cmd.exe /c "<binary> <args>"`
 //!   (used by node-shim providers whose binary is a `.cmd` batch file)
 //! - Windows native + Direct: spawn the binary directly (rare; mainly for tests)

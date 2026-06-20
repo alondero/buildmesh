@@ -73,8 +73,6 @@ fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) ->
     format!("origin/{}", branch)
 }
 
-
-
 /// Per-spawn timing log. Records elapsed milliseconds at each
 /// `checkpoint(name)` call and at the end via `total()`. Output goes to
 /// `buildmesh.log` via the existing `tracing` setup — no extra plumbing.
@@ -153,10 +151,12 @@ pub enum SessionIdMode {
 /// Collapse `\r\n` and bare `\r` to `\n` in prefill text.
 ///
 /// GitHub issue/PR bodies come back from the REST API with CRLF line endings.
-/// A bare carriage return reaching an agent's TUI input (notably cwrap → ConPTY
-/// on Windows) is interpreted as Enter, submitting the prompt after the first
-/// line — so an issue-seeded agent only ever sees its first line. macOS (`claude`
-/// spawned directly) tolerates CRLF, which is why this only bit Windows.
+/// A bare carriage return reaching an agent's TUI input (notably when the
+/// agent is launched through `cmd.exe` or PowerShell on Windows) is
+/// interpreted as Enter, submitting the prompt after the first line — so an
+/// issue-seeded agent only ever sees its first line. macOS and Linux
+/// (`claude` spawned directly) tolerate CRLF, which is why this only bit
+/// Windows.
 fn normalize_prefill_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -455,11 +455,11 @@ fn start_reader(
 
     std::thread::spawn(move || {
         // The SpawnTimer in spawn_agent_inner stops at process *creation*
-        // (`after_pty_spawn`), so the PowerShell → cwrap → Node → agent-CLI
-        // boot tail is invisible to it. Log the gap from spawn to the first
-        // byte of PTY output here — that first byte is the earliest signal the
-        // agent process is actually alive and producing a UI. Same
-        // `spawn_timing:` prefix so it sits alongside the other checkpoints.
+        // (`after_pty_spawn`), so the shell → agent-CLI boot tail is invisible
+        // to it. Log the gap from spawn to the first byte of PTY output here —
+        // that first byte is the earliest signal the agent process is actually
+        // alive and producing a UI. Same `spawn_timing:` prefix so it sits
+        // alongside the other checkpoints.
         let mut first_chunk = true;
         pump_pty_output(reader, |data| {
             if first_chunk {
