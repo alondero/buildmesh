@@ -439,7 +439,14 @@ mod tests {
         });
 
         let mut out = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        // BM_REPRO_SECS widens the observation window so an external probe
+        // (e.g. `Get-NetTCPConnection -OwningProcess <pid>`) can inspect the hung
+        // process's socket state before the test tears it down (#528 loopback probe).
+        let secs: u64 = std::env::var("BM_REPRO_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let deadline = Instant::now() + Duration::from_secs(secs);
         let mut exit_code: Option<u32> = None;
         while Instant::now() < deadline {
             if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
