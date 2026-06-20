@@ -115,6 +115,11 @@ pub struct ProviderInfo {
     pub label: String,
     pub color: String,
     pub icon: String,
+    /// True for the hardcoded legacy [`crate::models::Provider`] enum entries,
+    /// false for dynamic harness profiles (issue #536). The launch menu and the
+    /// default-provider dropdown group the two: dynamic profiles first, then a
+    /// "Legacy" header over the enum-backed rows.
+    pub legacy: bool,
 }
 
 /// Behaviour an agent provider must declare.

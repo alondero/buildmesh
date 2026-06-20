@@ -64,8 +64,9 @@ function mockBackend() {
     switch (cmd) {
       case 'list_providers':
         return Promise.resolve([
-          { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '' },
-          { id: 'minimax', label: 'Minimax', color: '#000', icon: '' },
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', legacy: false },
+          { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', legacy: true },
+          { id: 'minimax', label: 'Minimax', color: '#000', icon: '', legacy: true },
         ]);
       case 'get_mesh_properties':
         return Promise.resolve(MESH_CONFIG);
@@ -189,6 +190,22 @@ describe('MeshPropertiesTab (issue #375)', () => {
 
     const provider = screen.getByLabelText('Default provider') as HTMLSelectElement;
     expect(provider.value).toBe('anthropic');
+  });
+
+  it('groups the default-provider options into Profiles and Legacy optgroups (#536)', async () => {
+    await openPropertiesTab();
+
+    const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
+    const groups = provider.querySelectorAll('optgroup');
+    const labels = Array.from(groups).map((g) => g.getAttribute('label'));
+    expect(labels).toEqual(['Profiles', 'Legacy']);
+
+    // Dynamic profile under Profiles; legacy enum providers under Legacy.
+    const profiles = provider.querySelector('optgroup[label="Profiles"]');
+    const legacy = provider.querySelector('optgroup[label="Legacy"]');
+    expect(profiles?.querySelector('option[value="claude"]')).toBeTruthy();
+    expect(legacy?.querySelector('option[value="anthropic"]')).toBeTruthy();
+    expect(legacy?.querySelector('option[value="minimax"]')).toBeTruthy();
   });
 
   it('saves text fields on blur via update_mesh_column', async () => {

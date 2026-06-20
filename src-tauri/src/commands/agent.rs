@@ -34,6 +34,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
                 label: ui.label,
                 color: ui.color,
                 icon: ui.icon,
+                legacy: true,
             }
         })
         .collect();
@@ -58,6 +59,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
                     label: profile.name,
                     color: ui.color,
                     icon: ui.icon,
+                    legacy: false,
                 })
             }),
     );
@@ -882,6 +884,25 @@ mod tests {
             terminals.len() >= 2,
             "expected both the legacy and profile-backed Terminal rows, got {}",
             terminals.len()
+        );
+    }
+
+    #[test]
+    fn available_providers_flags_legacy_enum_rows_and_clears_it_for_profiles() {
+        // The "Legacy" header in the UI keys off ProviderInfo.legacy: enum-backed
+        // rows are legacy=true, dynamic harness profiles are legacy=false (#536).
+        let providers = available_providers();
+        // anthropic only exists as a legacy enum row (no detected "anthropic"
+        // profile in a bare test env), so it must be flagged legacy.
+        assert!(
+            providers.iter().any(|p| p.id == "anthropic" && p.legacy),
+            "legacy enum providers must be flagged legacy=true"
+        );
+        // The profile-backed Terminal row (id "terminal") must be present with
+        // legacy=false, distinguishing it from the legacy Terminal enum row.
+        assert!(
+            providers.iter().any(|p| p.id == "terminal" && !p.legacy),
+            "dynamic harness profiles must be flagged legacy=false"
         );
     }
 }

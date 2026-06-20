@@ -308,7 +308,12 @@ fn argv_to_cmdline(argv: &[std::ffi::OsString]) -> String {
 }
 
 /// Build the child environment: inherit the command's full env, prepend
-/// grant-free Git to PATH, and redirect TEMP/TMP into `tmp` (writable).
+/// grant-free Git to PATH, and redirect the temp vars into `tmp` (writable).
+///
+/// `TMPDIR` is dropped alongside `TEMP`/`TMP`: a Git-Bash / MSYS host sets it to
+/// the host temp, and the sandbox child shells out to `bash` (git hooks), which
+/// honours `TMPDIR` — so leaving the host value would both leak the host path
+/// and point writes at a directory the restricted token can't write to.
 fn curated_env(cmd: &CommandBuilder, tmp: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut path_set = false;
@@ -316,7 +321,10 @@ fn curated_env(cmd: &CommandBuilder, tmp: &str) -> Vec<(String, String)> {
         if k.eq_ignore_ascii_case("path") {
             out.push((k.to_string(), format!("{};{};{}", GIT_CMD, GIT_BIN, v)));
             path_set = true;
-        } else if k.eq_ignore_ascii_case("temp") || k.eq_ignore_ascii_case("tmp") {
+        } else if k.eq_ignore_ascii_case("temp")
+            || k.eq_ignore_ascii_case("tmp")
+            || k.eq_ignore_ascii_case("tmpdir")
+        {
             // Replaced below with the sandbox temp dir.
         } else {
             out.push((k.to_string(), v.to_string()));
@@ -327,6 +335,7 @@ fn curated_env(cmd: &CommandBuilder, tmp: &str) -> Vec<(String, String)> {
     }
     out.push(("TEMP".to_string(), tmp.to_string()));
     out.push(("TMP".to_string(), tmp.to_string()));
+    out.push(("TMPDIR".to_string(), tmp.to_string()));
     out
 }
 
@@ -915,15 +924,20 @@ mod tests {
         let mut cmd = CommandBuilder::new("x.exe");
         cmd.env("PATH", r"C:\msys64\usr\bin");
         cmd.env("TEMP", r"C:\Users\me\AppData\Local\Temp");
+        cmd.env("TMPDIR", r"C:\Users\me\AppData\Local\Temp");
         let env = curated_env(&cmd, r"C:\wt\.bm-sandbox-tmp");
 
         let path = env.iter().find(|(k, _)| k.eq_ignore_ascii_case("path")).unwrap();
         assert!(path.1.starts_with(GIT_CMD), "Git must win on PATH: {}", path.1);
         assert!(path.1.contains(r"C:\msys64\usr\bin"), "original PATH preserved");
 
-        let temp = env.iter().find(|(k, _)| k == "TEMP").unwrap();
-        assert_eq!(temp.1, r"C:\wt\.bm-sandbox-tmp");
-        // The host TEMP must not survive.
+        // Every temp var points at the sandbox dir.
+        for key in ["TEMP", "TMP", "TMPDIR"] {
+            let var = env.iter().find(|(k, _)| k == key)
+                .unwrap_or_else(|| panic!("{key} must be set"));
+            assert_eq!(var.1, r"C:\wt\.bm-sandbox-tmp", "{key} redirected to sandbox tmp");
+        }
+        // The host temp must not survive under any var (TEMP/TMP/TMPDIR or other).
         assert!(!env.iter().any(|(_, v)| v.contains(r"AppData\Local\Temp")));
     }
 }

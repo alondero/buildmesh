@@ -61,3 +61,7 @@ coverage/
 .worktrees/
 # Git-bash / Cygwin crash dumps (sh.exe.stackdump, bash.exe.stackdump, …)
 *.stackdump
+# Stray hand-compiled test binaries left at the repo root (e.g. the sandbox
+# spike's test_user_buf.exe). Build output belongs under target/, never here.
+/*.exe
+/*.pdb

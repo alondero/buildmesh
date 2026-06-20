@@ -177,6 +177,32 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
     profiles
 }
 
+/// Merge startup-detected harness profiles into stored preferences (issue #536).
+///
+/// Additive and idempotent: a detected profile whose `id` is not already stored
+/// is appended; existing entries are never overwritten or removed. So a profile
+/// the user renamed survives, and re-running the scan every launch (the chosen
+/// cadence) only ever *adds* newly-installed tools. Returns the number of
+/// profiles added; disk is written only when that is non-zero.
+///
+/// Detected ids never collide with the code-defined defaults (Terminal), which
+/// live outside the stored `harness_profiles` list and are re-merged on read by
+/// [`harness_profiles`].
+pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, String> {
+    let mut prefs = load()?;
+    let before = prefs.harness_profiles.len();
+    for profile in detected {
+        if !prefs.harness_profiles.iter().any(|p| p.id == profile.id) {
+            prefs.harness_profiles.push(profile);
+        }
+    }
+    let added = prefs.harness_profiles.len() - before;
+    if added > 0 {
+        save(prefs)?;
+    }
+    Ok(added)
+}
+
 /// Resolve a stored `provider`/profile id to the legacy [`Provider`] executor
 /// that should actually spawn it. If the id names a harness profile, the
 /// profile's `harness` field is parsed; otherwise the id is parsed directly —
@@ -443,6 +469,67 @@ mod tests {
             assert_eq!(resolve_harness_provider("minimax"), Provider::Minimax);
             // An unknown id falls through to the Anthropic default.
             assert_eq!(resolve_harness_provider("totally-unknown"), Provider::Anthropic);
+        });
+    }
+
+    #[test]
+    fn merge_detected_profiles_appends_new_and_reports_count() {
+        with_temp_dir(|_| {
+            let detected = vec![
+                HarnessProfile { id: "claude".into(), name: "Claude Code".into(), harness: "anthropic".into() },
+                HarnessProfile { id: "codex".into(), name: "Codex".into(), harness: "codex".into() },
+            ];
+            let added = merge_detected_profiles(detected).unwrap();
+            assert_eq!(added, 2);
+            *CACHE.lock().unwrap() = None; // force a disk read
+            let profiles = harness_profiles();
+            assert!(profiles.iter().any(|p| p.id == "claude"));
+            assert!(profiles.iter().any(|p| p.id == "codex"));
+            // Terminal default is still present alongside the detected profiles.
+            assert!(profiles.iter().any(|p| p.id == "terminal"));
+        });
+    }
+
+    #[test]
+    fn merge_detected_profiles_is_idempotent() {
+        with_temp_dir(|_| {
+            let detected = vec![HarnessProfile {
+                id: "claude".into(),
+                name: "Claude Code".into(),
+                harness: "anthropic".into(),
+            }];
+            assert_eq!(merge_detected_profiles(detected.clone()).unwrap(), 1);
+            // A second identical scan adds nothing.
+            assert_eq!(merge_detected_profiles(detected).unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn merge_detected_profiles_never_overwrites_a_user_customized_entry() {
+        with_temp_dir(|_| {
+            // User renamed their Claude profile.
+            save(AppPreferences {
+                harness_profiles: vec![HarnessProfile {
+                    id: "claude".into(),
+                    name: "My Claude (subscription)".into(),
+                    harness: "anthropic".into(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            // The scan re-detects "claude" with the default label — but the
+            // user's name must win (id already present → skipped).
+            let added = merge_detected_profiles(vec![HarnessProfile {
+                id: "claude".into(),
+                name: "Claude Code".into(),
+                harness: "anthropic".into(),
+            }])
+            .unwrap();
+            assert_eq!(added, 0);
+            *CACHE.lock().unwrap() = None;
+            let claude = harness_profiles().into_iter().find(|p| p.id == "claude").unwrap();
+            assert_eq!(claude.name, "My Claude (subscription)");
         });
     }
 

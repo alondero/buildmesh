@@ -174,7 +174,7 @@ export function GitIssuesTab() {
       .then(backendProviders => {
         if (signal.aborted) return;
         setProviderList(
-          backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
+          backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id), legacy: p.legacy })),
         );
       })
       .catch(err => console.error('listProviders failed:', err));

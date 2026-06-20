@@ -64,4 +64,45 @@ await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
     render(<ProviderDropdown meshId={1} providers={[]} onSelect={() => {}} />);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
+
+  it('groups legacy providers under a "Legacy" header below the dynamic ones (#536)', () => {
+    const mixed: ProviderEntry[] = [
+      { id: 'claude', label: 'Claude Code', color: 'bg-blue-500', legacy: false },
+      { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500', legacy: true },
+      { id: 'codex', label: 'Codex', color: 'bg-gray-500', legacy: true },
+    ];
+    const { container } = render(<ProviderDropdown meshId={1} providers={mixed} onSelect={() => {}} />);
+
+    // The header is present once.
+    expect(screen.getByText('Legacy')).toBeTruthy();
+
+    // The dynamic profile renders before the Legacy header; the legacy ones after.
+    const text = container.textContent ?? '';
+    expect(text.indexOf('Claude Code')).toBeLessThan(text.indexOf('Legacy'));
+    expect(text.indexOf('Legacy')).toBeLessThan(text.indexOf('Anthropic'));
+  });
+
+  it('shows no "Legacy" header when every entry is dynamic', () => {
+    const dynamicOnly: ProviderEntry[] = [
+      { id: 'claude', label: 'Claude Code', color: 'bg-blue-500', legacy: false },
+      { id: 'terminal', label: 'Terminal', color: 'bg-gray-500', legacy: false },
+    ];
+    render(<ProviderDropdown meshId={1} providers={dynamicOnly} onSelect={() => {}} />);
+    expect(screen.queryByText('Legacy')).toBeNull();
+    expect(screen.getAllByRole('button')).toHaveLength(2);
+  });
+
+  it('keeps both same-id rows actionable across the dynamic/legacy split', async () => {
+    // A detected "terminal" profile and the legacy "terminal" enum share an id;
+    // namespaced React keys must let both render as separate buttons.
+    const onSelect = vi.fn();
+    const sameId: ProviderEntry[] = [
+      { id: 'terminal', label: 'Terminal (profile)', color: 'bg-gray-500', legacy: false },
+      { id: 'terminal', label: 'Terminal (legacy)', color: 'bg-gray-500', legacy: true },
+    ];
+    render(<ProviderDropdown meshId={1} providers={sameId} onSelect={onSelect} />);
+    expect(screen.getByRole('button', { name: 'Terminal (profile)' })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Terminal (legacy)' }));
+    expect(onSelect).toHaveBeenCalledWith('terminal', false);
+  });
 });
