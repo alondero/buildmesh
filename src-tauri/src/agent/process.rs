@@ -189,12 +189,11 @@ impl AgentProcessRegistry {
             }
         }
 
-        // Sandbox cleanup (issue #498): delete the node's AppContainer profile
-        // and revoke its worktree/toolchain ACE grants. No-op for unsandboxed
-        // sessions. Runs after the process tree is dead so nothing in the
-        // container is still using the granted directories.
+        // Sandbox cleanup (issue #498/#528): revoke the node's restricted-token
+        // worktree ACE grant. No-op for unsandboxed sessions. Runs after the
+        // process tree is dead so nothing is still using the granted directory.
         #[cfg(target_os = "windows")]
-        crate::sandbox::spawn::cleanup(session_id);
+        crate::sandbox::spawn::cleanup_restricted(session_id);
     }
 }
 

@@ -24,6 +24,9 @@ pub mod appcontainer;
 pub mod conpty;
 
 #[cfg(target_os = "windows")]
+pub mod restricted_token;
+
+#[cfg(target_os = "windows")]
 pub mod acl;
 
 #[cfg(target_os = "windows")]

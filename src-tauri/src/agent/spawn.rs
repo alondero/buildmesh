@@ -283,10 +283,20 @@ pub fn spawn_child(
         .map_err(|e| format!("failed to spawn agent: {}", e))
 }
 
-/// Spawn `cmd` inside an AppContainer sandbox (issue #498). Returns the same
+/// Spawn `cmd` inside the Windows agent sandbox. Returns the same
 /// `Child`/`MasterPty` trait objects as the normal path. Windows-only; the
 /// non-Windows stub exists only so `spawn_agent_inner` compiles cross-platform
 /// (the `sandbox_enabled` seam never selects this branch off Windows).
+///
+/// Uses the **restricted-token** primitive (ADR-0014), not the AppContainer:
+/// the AppContainer's object-namespace isolation hung `claude.exe` at libuv's
+/// named-pipe creation (#528) and blocked loopback (#533). The §4 spike proved
+/// the restricted token fixes both. It is launched **permissive**
+/// (`include_user_sid = true`) — read-confinement is *not* delivered here (a
+/// same-user token can't deny home reads while MSYS `bash` runs; see the spike's
+/// `tradeoff` test and ADR-0014 §Spike result), so home grants are unnecessary
+/// (`grant_home = false`). Deny-by-default reads are a tracked follow-up
+/// (separate-user principal / WSL).
 #[cfg(target_os = "windows")]
 fn sandbox_spawn(
     cmd: &CommandBuilder,
@@ -295,7 +305,7 @@ fn sandbox_spawn(
     rows: u16,
     cols: u16,
 ) -> Result<(Box<dyn portable_pty::Child + Send + Sync>, Box<dyn portable_pty::MasterPty + Send>), String> {
-    crate::sandbox::spawn::spawn_sandboxed(cmd, session_id, host_path, rows, cols)
+    crate::sandbox::spawn::spawn_sandboxed_restricted(cmd, session_id, host_path, rows, cols, false, true)
 }
 
 #[cfg(not(target_os = "windows"))]
