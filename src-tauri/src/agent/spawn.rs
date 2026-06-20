@@ -73,21 +73,7 @@ fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) ->
     format!("origin/{}", branch)
 }
 
-/// Binary name the cwrap provider launcher resolves to (Anthropic/Minimax/Kimi).
-/// Mirrors the `binary: "cwrap"` declared in those adapters' spawn recipes; kept
-/// here as the single point the prefill-transport gate matches against.
-const CWRAP_BINARY: &str = "cwrap";
 
-/// Environment variable carrying prefill text to a cwrap-launched provider.
-///
-/// cwrap reads `$BUILDMESH_PREFILL` and forwards it to `claude --prefill`. We use
-/// the environment rather than a CLI arg because on Windows the cwrap providers
-/// are launched through `cwrap.cmd` → `cmd.exe`, whose command line is truncated
-/// at the first newline — so a multi-line prefill passed as an argv element loses
-/// everything after line one (the exact "only the first line is pre-filled"
-/// symptom). The process environment block is inherited intact by every shell
-/// layer, so the full text survives. See `build_spawn_command`.
-pub const PREFILL_ENV_VAR: &str = "BUILDMESH_PREFILL";
 
 /// Per-spawn timing log. Records elapsed milliseconds at each
 /// `checkpoint(name)` call and at the end via `total()`. Output goes to
@@ -188,51 +174,28 @@ pub fn build_spawn_command(
     sandbox: bool,
 ) -> CommandBuilder {
     let adapter = provider_enum.adapter();
-    let platform = Platform::current();
-
-    // Windows AppContainer sandbox: cwrap routes through MSYS2 bash, which can't
-    // initialize inside an AppContainer (STATUS_DLL_INIT_FAILED — the container's
-    // restricted object namespace breaks the MSYS2 runtime), so cwrap-backed
-    // providers reach claude.exe directly instead. Only on a Windows host and a
-    // non-WSL target (WSL has its own Linux userspace; macOS uses Seatbelt).
-    // `sandbox_direct_recipe` is `None` for non-cwrap providers, leaving them on
-    // their normal path. (First slice of absorbing cwrap into buildmesh.)
-    let sandbox_direct = if sandbox && resolved.env_type != EnvType::Wsl && cfg!(target_os = "windows")
-    {
-        adapter.sandbox_direct_recipe(platform)
+    let platform = if resolved.env_type == EnvType::Wsl {
+        Platform::Linux
     } else {
-        None
+        Platform::current()
     };
-    let use_sandbox_direct = sandbox_direct.is_some();
+
     // The base recipe before session-id / override / prefill args are layered on.
-    let base_recipe = || {
-        sandbox_direct
-            .clone()
-            .unwrap_or_else(|| adapter.spawn_recipe(platform))
-    };
+    let base_recipe = || adapter.spawn_recipe(platform);
 
     let mut recipe = match session_id_mode {
         SessionIdMode::Resume(id) => {
-            // Subcommand-style resume recipes (Codex) only apply off the
-            // sandbox-direct path; cwrap-backed providers append `--resume` to
-            // the direct claude.exe recipe instead.
-            match (!use_sandbox_direct)
-                .then(|| adapter.spawn_recipe_for_resume(platform, id))
-                .flatten()
-            {
-                Some(resume_recipe) => {
-                    tracing::info!("spawn_agent: using resume recipe for session {}", id);
-                    resume_recipe
+            if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(platform, id) {
+                tracing::info!("spawn_agent: using resume recipe for session {}", id);
+                resume_recipe
+            } else {
+                let mut r = base_recipe();
+                let args = adapter.resume_args(id);
+                if !args.is_empty() {
+                    tracing::info!("spawn_agent: resuming session {}", id);
+                    r.base_args.extend(args);
                 }
-                None => {
-                    let mut r = base_recipe();
-                    let args = adapter.resume_args(id);
-                    if !args.is_empty() {
-                        tracing::info!("spawn_agent: resuming session {}", id);
-                        r.base_args.extend(args);
-                    }
-                    r
-                }
+                r
             }
         }
         SessionIdMode::Assign(id) => {
@@ -256,36 +219,43 @@ pub fn build_spawn_command(
         }
     }
 
-    // Prefill transport. cwrap providers launched on a non-WSL host receive the
-    // prefill through `$BUILDMESH_PREFILL` rather than a `--prefill` CLI arg,
-    // because the `cwrap.cmd` → cmd.exe launcher on Windows truncates a
-    // multi-line argv at the first newline (see PREFILL_ENV_VAR). WSL keeps the
-    // CLI arg: `wsl.exe` passes multi-line argv through intact, and a Windows env
-    // var does not cross into the WSL environment without `WSLENV`. Direct
-    // `claude`/`codex` spawns (macOS, Codex) also stay on the CLI arg.
-    let mut prefill_via_env: Option<String> = None;
     if adapter.supports_prefill() {
         if let Some(text) = prefill.filter(|s| !s.is_empty()) {
             let normalized = normalize_prefill_newlines(text);
-            if recipe.binary == CWRAP_BINARY && resolved.env_type != EnvType::Wsl {
-                prefill_via_env = Some(normalized);
-            } else {
-                recipe.base_args.extend(adapter.prefill_args(&normalized));
-            }
+            recipe.base_args.extend(adapter.prefill_args(&normalized));
         }
     }
 
     let mut cmd =
         spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
-    if let Some(text) = prefill_via_env {
-        cmd.env(PREFILL_ENV_VAR, text);
-    }
-    // On the sandbox-direct path claude.exe is spawned without cwrap, so the
-    // backend-selecting env cwrap would have exported (MiniMax/Kimi base URL,
-    // API token, model routing) is injected here. Empty for Anthropic.
-    if use_sandbox_direct {
-        for (k, v) in adapter.sandbox_provider_env() {
+
+    // Inject the backend-selecting env variables (MiniMax/Kimi base URL,
+    // API token, model routing). Empty for Anthropic.
+    let env_vars = adapter.provider_env();
+    if !env_vars.is_empty() {
+        for (k, v) in &env_vars {
             cmd.env(k, v);
+        }
+        if resolved.env_type == EnvType::Wsl {
+            // Append the key names to WSLENV so they propagate into WSL
+            let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+            for (k, _) in &env_vars {
+                let suffix = "/u";
+                let entry = format!("{}{}", k, suffix);
+                let already_has = wslenv.split(':').any(|part| {
+                    part.split('/').next() == Some(k)
+                });
+                if !already_has {
+                    if wslenv.is_empty() {
+                        wslenv = entry;
+                    } else {
+                        wslenv = format!("{}:{}", wslenv, entry);
+                    }
+                }
+            }
+            if !wslenv.is_empty() {
+                cmd.env("WSLENV", wslenv);
+            }
         }
     }
     cmd

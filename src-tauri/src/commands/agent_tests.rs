@@ -59,15 +59,9 @@ mod tests {
         cmd.get_env(key).map(|v| v.to_string_lossy().into_owned())
     }
 
-    /// The Anthropic recipe is the one piece of expected data that varies by host:
-    /// macOS spawns `claude --dangerously-skip-permissions`, everywhere else
-    /// `cwrap --anthropic`. Returned as literal test data, not derived from code under test.
+    /// The Anthropic recipe binary and arg inside WSL.
     fn anthropic_recipe() -> (&'static str, &'static str) {
-        if cfg!(target_os = "macos") {
-            ("claude", "--dangerously-skip-permissions")
-        } else {
-            ("cwrap", "--anthropic")
-        }
+        ("claude", "--dangerously-skip-permissions")
     }
 
     /// Build the expected WSL-wrapped argv: `wsl.exe --cd <path> -- <binary> <inner...>`.
@@ -154,10 +148,10 @@ mod tests {
         );
     }
 
-    /// Minimax is a cwrap provider on every host, so its recipe is stable:
-    /// `cwrap --minimax --session-id <uuid>`.
+    /// Minimax is a claude-backed provider on every host, so it builds a direct
+    /// claude command.
     #[test]
-    fn minimax_assign_builds_cwrap_command() {
+    fn minimax_assign_builds_claude_command() {
         let cmd = build_spawn_command(
             &wsl_resolved(),
             Provider::Minimax,
@@ -171,14 +165,14 @@ mod tests {
 
         assert_eq!(
             argv(&cmd),
-            expected_wsl("cwrap", &["--minimax", "--session-id", "mm-1"])
+            expected_wsl("claude", &["--dangerously-skip-permissions", "--session-id", "mm-1"])
         );
     }
 
-    /// Kimi is a cwrap provider on every host, so its recipe is stable:
-    /// `cwrap --kimi --session-id <uuid>`.
+    /// Kimi is a claude-backed provider on every host, so it builds a direct
+    /// claude command.
     #[test]
-    fn kimi_assign_builds_cwrap_command() {
+    fn kimi_assign_builds_claude_command() {
         let cmd = build_spawn_command(
             &wsl_resolved(),
             Provider::Kimi,
@@ -192,7 +186,7 @@ mod tests {
 
         assert_eq!(
             argv(&cmd),
-            expected_wsl("cwrap", &["--kimi", "--session-id", "ki-1"])
+            expected_wsl("claude", &["--dangerously-skip-permissions", "--session-id", "ki-1"])
         );
     }
 
@@ -214,9 +208,9 @@ mod tests {
         assert_eq!(
             argv(&cmd),
             expected_wsl(
-                "cwrap",
+                "claude",
                 &[
-                    "--minimax",
+                    "--dangerously-skip-permissions",
                     "--session-id",
                     "mm-2",
                     "--model",
@@ -244,20 +238,11 @@ mod tests {
 
         assert_eq!(
             argv(&cmd),
-            expected_wsl("cwrap", &["--minimax", "--prefill", "hello world"])
+            expected_wsl("claude", &["--dangerously-skip-permissions", "--prefill", "hello world"])
         );
     }
 
     /// Prefill CRLF (and bare CR) are normalised to LF before reaching the provider.
-    ///
-    /// Regression for: handover prefills containing Windows line endings only
-    /// pre-filled the first line in the agent's TUI. A bare `\r` typed into
-    /// cwrap → ConPTY submits the prompt after line one. The argv the spawn
-    /// command builds must contain LF-only prefill text.
-    ///
-    /// (The GitHub-issue spawn path no longer ships the issue body — just a
-    /// short URL-bearing instruction — but selected text in the handover flow
-    /// can still carry CRLF, so this guarantee is still meaningful.)
     #[test]
     fn prefill_crlf_normalised_to_lf() {
         let cmd = build_spawn_command(
@@ -274,64 +259,23 @@ mod tests {
         assert_eq!(
             argv(&cmd),
             expected_wsl(
-                "cwrap",
-                &["--minimax", "--prefill", "Title\n\nLine 1\nLine 2\nLine 3"]
+                "claude",
+                &["--dangerously-skip-permissions", "--prefill", "Title\n\nLine 1\nLine 2\nLine 3"]
             )
         );
     }
 
-    /// On the Windows-native cwrap path, multi-line prefill is delivered through
-    /// the `BUILDMESH_PREFILL` environment variable — NOT as a `--prefill` CLI
-    /// arg. The `cwrap.cmd` → cmd.exe launcher truncates a multi-line argv at the
-    /// first newline (cmd.exe's command line is line-oriented), so an agent
-    /// seeded with a handover/issue body would only ever see its first line. The
-    /// environment block is inherited intact by every shell layer, so cwrap reads
-    /// the full text from `$BUILDMESH_PREFILL` and forwards it to `claude`.
-    ///
-    /// Also asserts CRLF / bare-CR normalisation still applies to the env value.
-    #[test]
-    fn prefill_for_cwrap_goes_via_env_on_windows_native() {
-        let cmd = build_spawn_command(
-            &windows_resolved(),
-            Provider::Minimax,
-            &SessionIdMode::None,
-            SESSION_ID,
-            None,
-            None,
-            Some("Title\r\n\r\nLine 1\r\nLine 2\rLine 3"),
-            false,
-        );
-
-        assert_eq!(
-            env_of(&cmd, "BUILDMESH_PREFILL").as_deref(),
-            Some("Title\n\nLine 1\nLine 2\nLine 3"),
-            "multi-line prefill must be delivered via the environment on the cwrap Windows path"
-        );
-
-        let args = argv(&cmd);
-        assert!(
-            !args.iter().any(|a| a == "--prefill"),
-            "prefill must NOT be passed as a CLI flag on the cwrap Windows path (cmd.exe truncates it): {:?}",
-            args
-        );
-    }
-
     // -----------------------------------------------------------------------
-    // Windows AppContainer sandbox: cwrap → MSYS2 bash can't initialize inside
-    // an AppContainer (STATUS_DLL_INIT_FAILED), so cwrap-backed providers reach
-    // claude.exe directly. These pin the bash-free composition. Windows-only:
-    // the sandbox-direct seam is gated on a Windows host (AppContainer is a
-    // Win32 feature) and the cwrap recipe only exists on the Windows/Linux
-    // platform branch. (GH: absorb cwrap into buildmesh.)
+    // Windows direct execution (no cwrap, no bash): cwrap-backed providers reach
+    // claude.exe directly. These pin the direct composition. Windows-only:
+    // the direct recipe is gated on a Windows host and the cwrap recipe is retired.
+    // (GH: absorb cwrap into buildmesh.)
     // -----------------------------------------------------------------------
 
-    /// Anthropic + sandbox on the Windows-native path spawns `claude.exe`
-    /// directly — NOT `cwrap` and NOT `powershell.exe`/`cmd.exe`. The provider
-    /// flag `--anthropic` (cwrap's own, not a claude arg) is dropped, and
-    /// `--dangerously-skip-permissions` (which cwrap would have added) is present.
+    /// Anthropic on the Windows-native path spawns `claude.exe` directly.
     #[cfg(target_os = "windows")]
     #[test]
-    fn anthropic_sandbox_spawns_claude_exe_directly() {
+    fn anthropic_spawns_claude_exe_directly() {
         let cmd = build_spawn_command(
             &windows_resolved(),
             Provider::Anthropic,
@@ -340,7 +284,7 @@ mod tests {
             None,
             None,
             None,
-            true,
+            false,
         );
 
         assert_eq!(
@@ -351,17 +295,14 @@ mod tests {
                 "--session-id".to_string(),
                 "uuid-assign".to_string(),
             ],
-            "sandboxed Anthropic must spawn claude.exe directly (no cwrap/bash, no PowerShell)"
+            "Anthropic must spawn claude.exe directly"
         );
     }
 
-    /// On the sandbox-direct path the chain is native claude.exe with no cmd.exe
-    /// or bash, so multi-line prefill survives as a normal argv — the
-    /// `$BUILDMESH_PREFILL` env transport (a cmd.exe-truncation workaround) must
-    /// NOT engage. CRLF/bare-CR normalisation still applies.
+    /// Multi-line prefill survives as a normal argv — no env-var transport engages.
     #[cfg(target_os = "windows")]
     #[test]
-    fn anthropic_sandbox_prefill_goes_argv_not_env() {
+    fn anthropic_prefill_goes_argv_not_env() {
         let cmd = build_spawn_command(
             &windows_resolved(),
             Provider::Anthropic,
@@ -370,7 +311,7 @@ mod tests {
             None,
             None,
             Some("Title\r\n\r\nLine 1\rLine 2"),
-            true,
+            false,
         );
 
         let args = argv(&cmd);
@@ -383,20 +324,17 @@ mod tests {
         );
         assert!(
             env_of(&cmd, "BUILDMESH_PREFILL").is_none(),
-            "the sandbox-direct path must NOT use the env-var prefill transport: {:?}",
+            "must NOT use the env-var prefill transport: {:?}",
             args
         );
         assert_eq!(args.first().map(String::as_str), Some("claude.exe"));
     }
 
-    /// MiniMax + sandbox spawns claude.exe directly and injects the backend env
-    /// cwrap would have exported (read in-process from ~/.claude/providers.conf,
-    /// since bash can't run it). We assert the non-secret backend env is set and
-    /// the cwrap provider flag `--minimax` is gone; the API token (if any on the
-    /// dev host) is not asserted on, to keep the test secret-free and hermetic.
+    /// MiniMax spawns claude.exe directly and injects the backend env
+    /// cwrap would have exported.
     #[cfg(target_os = "windows")]
     #[test]
-    fn minimax_sandbox_spawns_claude_directly_with_backend_env() {
+    fn minimax_spawns_claude_directly_with_backend_env() {
         let cmd = build_spawn_command(
             &windows_resolved(),
             Provider::Minimax,
@@ -405,16 +343,11 @@ mod tests {
             None,
             None,
             None,
-            true,
+            false,
         );
 
         let args = argv(&cmd);
         assert_eq!(args.first().map(String::as_str), Some("claude.exe"));
-        assert!(
-            !args.iter().any(|a| a == "--minimax"),
-            "cwrap's --minimax provider flag must not leak to claude.exe: {:?}",
-            args
-        );
         assert_eq!(
             env_of(&cmd, "ANTHROPIC_MODEL").as_deref(),
             Some("MiniMax-M3[1m]"),
@@ -426,11 +359,11 @@ mod tests {
         );
     }
 
-    /// Regression guard: with sandbox OFF, the Windows-native Anthropic spawn is
-    /// unchanged — it still goes through the PowerShell-wrapped cwrap recipe.
+    /// Regression guard: even with sandbox OFF, the Windows-native Anthropic spawn
+    /// now goes to claude.exe directly instead of PowerShell/cwrap.
     #[cfg(target_os = "windows")]
     #[test]
-    fn anthropic_unsandboxed_windows_still_uses_powershell_cwrap() {
+    fn anthropic_unsandboxed_windows_spawns_claude_exe_directly() {
         let cmd = build_spawn_command(
             &windows_resolved(),
             Provider::Anthropic,
@@ -443,8 +376,8 @@ mod tests {
         );
         assert_eq!(
             argv(&cmd).first().map(String::as_str),
-            Some("powershell.exe"),
-            "unsandboxed Windows path must be unchanged (PowerShell-wrapped cwrap)"
+            Some("claude.exe"),
+            "unsandboxed Windows path must spawn claude.exe directly"
         );
     }
 
@@ -454,15 +387,6 @@ mod tests {
     /// NOT engage for WSL spawns.
     #[test]
     fn prefill_stays_argv_for_wsl() {
-        // portable_pty::CommandBuilder inherits the parent process env, so
-        // a BUILDMESH_PREFILL leaked into the test runner's shell — e.g. by
-        // a Claude Code attention-hook spawn (which is how the orchestrating
-        // agent sets *its* prefill) — would make `get_env` return Some(...)
-        // and fail the "must not set" assertion below. Clear it so the test
-        // is hermetic regardless of the runner's env. Safe to scope: no
-        // other test in this module reads BUILDMESH_PREFILL, and the
-        // sibling Windows test always sets the value via `cmd.env()`, so a
-        // clear here doesn't change its observed outcome.
         unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
 
         let cmd = build_spawn_command(
@@ -478,11 +402,16 @@ mod tests {
 
         assert_eq!(
             argv(&cmd),
-            expected_wsl("cwrap", &["--minimax", "--prefill", "hello world"])
+            expected_wsl("claude", &["--dangerously-skip-permissions", "--prefill", "hello world"])
         );
         assert!(
             env_of(&cmd, "BUILDMESH_PREFILL").is_none(),
             "the WSL path must not set the prefill env var"
+        );
+        // MiniMax env keys must be propagated to WSLENV
+        assert!(
+            env_of(&cmd, "WSLENV").is_some(),
+            "WSLENV must be set to propagate MiniMax environment variables"
         );
     }
 
@@ -500,7 +429,7 @@ mod tests {
             false,
         );
 
-        assert_eq!(argv(&cmd), expected_wsl("cwrap", &["--minimax"]));
+        assert_eq!(argv(&cmd), expected_wsl("claude", &["--dangerously-skip-permissions"]));
     }
 
     /// Agy applies model and prefill overrides when passed.
@@ -742,8 +671,8 @@ mod tests {
     fn windows_powershell_launcher_uses_no_profile() {
         let cmd = build_spawn_command(
             &windows_resolved(),
-            Provider::Anthropic,
-            &SessionIdMode::Assign("ps-1".to_string()),
+            Provider::Codex,
+            &SessionIdMode::Resume("ps-1".to_string()),
             SESSION_ID,
             None,
             None,
@@ -760,7 +689,7 @@ mod tests {
                 "-NoProfile".to_string(),
                 "-EncodedCommand".to_string(),
             ],
-            "cwrap PowerShell launcher must pass -NoProfile to skip the user profile: {:?}",
+            "Codex PowerShell launcher must pass -NoProfile to skip the user profile: {:?}",
             args
         );
         assert_eq!(args.len(), 5, "expected the Base64 payload as the 5th arg: {:?}", args);

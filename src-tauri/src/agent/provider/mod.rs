@@ -58,10 +58,15 @@ pub struct SpawnRecipe {
 /// (`STATUS_DLL_INIT_FAILED`) because MSYS2's runtime can't initialize in the
 /// container's restricted object namespace — but the native `claude.exe` runs
 /// fine. We target the `.exe` explicitly (the bare `claude` is itself a bash
-/// shim) and spawn it directly, with no PowerShell/cmd/bash wrapper.
-pub fn claude_direct_recipe() -> SpawnRecipe {
+/// shim) and spawn it directly, with no PowerShell/cmd/ba/// The bash-free claude invocation. We target the native executable/script
+/// and spawn it directly, with no PowerShell/cmd/bash wrapper.
+pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
+    let binary = match platform {
+        Platform::Windows => "claude.exe",
+        _ => "claude",
+    };
     SpawnRecipe {
-        binary: "claude.exe",
+        binary,
         base_args: vec!["--dangerously-skip-permissions".into()],
         windows_shell: WindowsShell::Direct,
     }
@@ -191,27 +196,11 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
-    /// Bash-free spawn recipe for the Windows AppContainer sandbox. cwrap routes
-    /// through MSYS2 `bash`, which can't initialize inside an AppContainer
-    /// (`STATUS_DLL_INIT_FAILED`), so cwrap-backed providers (Anthropic, MiniMax,
-    /// Kimi) return [`claude_direct_recipe`] here to reach `claude.exe` directly.
-    /// The provider-selecting backend env that cwrap would have exported is
-    /// supplied separately by [`sandbox_provider_env`](Self::sandbox_provider_env).
-    ///
-    /// Returns `None` for providers that don't go through cwrap (they already
-    /// spawn a native binary). Consumed by `build_spawn_command` only on a
-    /// Windows host with the sandbox toggle on and a non-WSL target. First slice
-    /// of absorbing cwrap into buildmesh.
-    fn sandbox_direct_recipe(&self, _platform: Platform) -> Option<SpawnRecipe> {
-        None
-    }
-
     /// Backend-selecting environment that `cwrap` would export for this provider,
-    /// reconstructed in-process so [`sandbox_direct_recipe`](Self::sandbox_direct_recipe)
-    /// can launch `claude.exe` without bash. Empty for Anthropic (the built-in
-    /// subscription needs no overrides) and for non-cwrap providers. MiniMax/Kimi
-    /// read their API keys from `~/.claude/providers.conf`.
-    fn sandbox_provider_env(&self) -> Vec<(String, String)> {
+    /// reconstructed in-process so that we can launch `claude`/`claude.exe` without bash.
+    /// Empty for Anthropic (the built-in subscription needs no overrides) and for
+    /// non-cwrap providers. MiniMax/Kimi read their API keys from `~/.claude/providers.conf`.
+    fn provider_env(&self) -> Vec<(String, String)> {
         Vec::new()
     }
 }

@@ -741,9 +741,9 @@ mod tests {
     #[test]
     fn provider_adapter_recipe_windows() {
         use crate::agent::provider::Platform;
-        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
-        assert_eq!(Provider::Minimax.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
-        assert_eq!(Provider::Kimi.adapter().spawn_recipe(Platform::Windows).binary, "cwrap");
+        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows).binary, "claude.exe");
+        assert_eq!(Provider::Minimax.adapter().spawn_recipe(Platform::Windows).binary, "claude.exe");
+        assert_eq!(Provider::Kimi.adapter().spawn_recipe(Platform::Windows).binary, "claude.exe");
         assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows).binary, "agy");
         assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
         assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows).binary, "codex");

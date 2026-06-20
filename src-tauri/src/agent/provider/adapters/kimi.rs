@@ -1,6 +1,6 @@
 use crate::agent::provider::provider_conf::read_providers_conf;
 use crate::agent::provider::{
-    claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
+    claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta,
 };
 
 pub struct KimiAdapter;
@@ -19,12 +19,8 @@ impl AgentProvider for KimiAdapter {
         }
     }
 
-    fn spawn_recipe(&self, _platform: Platform) -> SpawnRecipe {
-        SpawnRecipe {
-            binary: "cwrap",
-            base_args: vec!["--kimi".into()],
-            windows_shell: WindowsShell::PowerShell,
-        }
+    fn spawn_recipe(&self, platform: Platform) -> SpawnRecipe {
+        claude_direct_recipe(platform)
     }
 
     fn supports_resume(&self) -> bool {
@@ -55,15 +51,9 @@ impl AgentProvider for KimiAdapter {
         &[Platform::Windows, Platform::Linux]
     }
 
-    /// Windows AppContainer sandbox: spawn claude.exe directly (cwrap → bash
-    /// can't init in the container).
-    fn sandbox_direct_recipe(&self, _platform: Platform) -> Option<SpawnRecipe> {
-        Some(claude_direct_recipe())
-    }
-
     /// The Kimi backend env cwrap's `kimi` arm would export, rebuilt in-process
     /// from `~/.claude/providers.conf` (mirrors `~/.local/bin/cwrap`).
-    fn sandbox_provider_env(&self) -> Vec<(String, String)> {
+    fn provider_env(&self) -> Vec<(String, String)> {
         let conf = read_providers_conf();
         let mut env = vec![
             ("ANTHROPIC_BASE_URL".to_string(), "https://api.moonshot.ai/anthropic".to_string()),
@@ -77,7 +67,7 @@ impl AgentProvider for KimiAdapter {
         match conf.get("MOONSHOT_API_KEY").filter(|v| !v.is_empty()) {
             Some(key) => env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), key.clone())),
             None => tracing::error!(
-                "sandbox Kimi spawn: MOONSHOT_API_KEY missing from ~/.claude/providers.conf — claude will fail to authenticate"
+                "Kimi spawn: MOONSHOT_API_KEY missing from ~/.claude/providers.conf — claude will fail to authenticate"
             ),
         }
         env
