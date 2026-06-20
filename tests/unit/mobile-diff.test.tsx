@@ -1,12 +1,12 @@
 /**
  * Mobile DiffScreen: hunks render with @@ headers so consecutive hunks
- * don't run together as one misleading block, and sessions sort newest
- * first in the sessions screen helper.
+ * don't run together as one misleading block, and nodes sort newest
+ * first in the archive screen helper.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import DiffScreen from "../../src/mobile/screens/DiffScreen";
-import { sortSessions } from "../../src/mobile/screens/SessionsScreen";
+import { sortAgentNodes } from "../../src/mobile/screens/ArchivedNodesScreen";
 import type { AgentNode, DiffResult, ArchivedAgentNode } from "../../src/mobile/api";
 
 const node: AgentNode = {
@@ -99,11 +99,11 @@ describe("DiffScreen", () => {
   });
 });
 
-describe("sortSessions", () => {
-  it("sorts newest first, sessions without a timestamp last", () => {
+describe("sortAgentNodes", () => {
+  it("sorts newest first, nodes without a timestamp last", () => {
     // Fields match the generated `ArchivedAgentNode` (issue #359; renamed from
     // DiscoveredAgentNode after PR #523): the sort key is `timestamp`, and
-    // sessions are identified by `session_id` — not the phantom
+    // nodes are identified by `session_id` — not the phantom
     // `last_active_at`/`cli_session_id` the mobile type used to declare
     // (which the wire never sends).
     const s = (id: string, ts: string | null): ArchivedAgentNode => ({
@@ -114,7 +114,7 @@ describe("sortSessions", () => {
       timestamp: ts,
       worktree_name: null,
     });
-    const sorted = sortSessions([
+    const sorted = sortAgentNodes([
       s("old", "2026-06-01T00:00:00Z"),
       s("none", null),
       s("new", "2026-06-10T00:00:00Z"),
