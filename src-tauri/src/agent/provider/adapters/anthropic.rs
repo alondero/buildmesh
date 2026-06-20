@@ -1,4 +1,6 @@
-use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 
 pub struct AnthropicAdapter;
 pub static ANTHROPIC: AnthropicAdapter = AnthropicAdapter;
@@ -57,5 +59,13 @@ impl AgentProvider for AnthropicAdapter {
 
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Windows, Platform::Macos, Platform::Linux]
+    }
+
+    /// In the Windows AppContainer sandbox, reach claude.exe directly — the
+    /// cwrap → MSYS2 bash chain can't initialize there. Anthropic uses the
+    /// built-in subscription, so no backend env override is needed (the default
+    /// empty `sandbox_provider_env` applies).
+    fn sandbox_direct_recipe(&self, _platform: Platform) -> Option<SpawnRecipe> {
+        Some(claude_direct_recipe())
     }
 }

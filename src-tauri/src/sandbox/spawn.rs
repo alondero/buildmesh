@@ -68,6 +68,15 @@ pub fn spawn_sandboxed(
             granted.push(dir);
         }
     }
+    // claude.exe reads and writes its top-level config/state in `~/.claude.json`
+    // — a file in the home *root*, a sibling of the granted `~/.claude` dir, not
+    // inside it. Without access claude stalls during startup config load (it
+    // never renders its TUI). Granted as a single file (no dir inheritance).
+    for file in optional_file_grants() {
+        if file.exists() && acl::grant_file(&file, &sid, Access::Full).is_ok() {
+            granted.push(file);
+        }
+    }
 
     // A per-spawn temp dir inside the worktree (already writable for the
     // container) so the agent's TEMP writes don't hit the denied host TEMP.
@@ -127,6 +136,16 @@ fn optional_grants() -> Vec<(PathBuf, Access)> {
             (home.join(".local").join("bin"), Access::ReadExecute),
             (home.join(".claude"), Access::Full),
         ],
+        None => Vec::new(),
+    }
+}
+
+/// Home-root files (not inside any granted directory) the default agent chain
+/// needs. `~/.claude.json` holds claude.exe's config, project history, and OAuth
+/// state — read and written every session, so granted Full.
+fn optional_file_grants() -> Vec<PathBuf> {
+    match std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        Some(home) => vec![home.join(".claude.json")],
         None => Vec::new(),
     }
 }
@@ -224,6 +243,305 @@ mod tests {
             argv_to_cmdline(cmd.get_argv()),
             "powershell.exe -NoProfile -EncodedCommand AAAA"
         );
+    }
+
+    /// LIVE DIAGNOSTIC (ignored by default) — reproduce the "cwrap exits ~500ms
+    /// after spawning inside the AppContainer" blocker (GH #498 handoff). The
+    /// production reader thread streams the child's ConPTY bytes to the UI but
+    /// never to `buildmesh.log`, so we know the agent dies but not why. This
+    /// exercises the *real* `spawn_sandboxed` (real per-node AppContainer profile,
+    /// real worktree/.claude/.local-bin grants, real owned ConPTY) with the exact
+    /// argv the post-PowerShell-fix path builds for Anthropic on Windows
+    /// (`cmd.exe /c cwrap --anthropic`), captures every byte the child emits, and
+    /// prints it with the child's exit code.
+    ///
+    /// Run manually:
+    /// ```text
+    /// cargo test -p buildmesh sandbox::spawn::tests::repro_cwrap_exit_in_sandbox -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "live: spawns real cwrap+claude into an AppContainer; needs the dev host toolchain"]
+    fn repro_cwrap_exit_in_sandbox() {
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        // A throwaway dir stands in for the node's worktree — granted Full to the
+        // container SID exactly like a real node, so the grant surface matches.
+        let worktree =
+            std::env::temp_dir().join(format!("bm-repro-cwrap-{}", std::process::id()));
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // Default: exactly what `spawn_environment::wrap` emits for Anthropic on
+        // Windows once the sandbox PowerShell→cmd translation has run. Override
+        // the args (everything after `cmd.exe /c`) via BM_REPRO_ARGS to probe
+        // individual links of the cmd→bash→claude chain without recompiling.
+        let args_str =
+            std::env::var("BM_REPRO_ARGS").unwrap_or_else(|_| "cwrap --anthropic".to_string());
+        let extra: Vec<String> = args_str.split_whitespace().map(String::from).collect();
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.arg("/c");
+        for a in &extra {
+            cmd.arg(a);
+        }
+        cmd.cwd(&worktree);
+        // BM_REPRO_FRESH_CONFIG=1 points claude at an empty CLAUDE_CONFIG_DIR
+        // inside the (granted) worktree — isolates "is the early-init hang driven
+        // by the user's ~/.claude config (MCP servers, statusline) or by the
+        // runtime/OS?".
+        if std::env::var("BM_REPRO_FRESH_CONFIG").is_ok() {
+            let cfg = worktree.join(".cfg");
+            let _ = std::fs::create_dir_all(&cfg);
+            cmd.env("CLAUDE_CONFIG_DIR", cfg.to_string_lossy().into_owned());
+            eprintln!("REPRO using fresh CLAUDE_CONFIG_DIR={}", cfg.display());
+        }
+        eprintln!("REPRO running: cmd.exe /c {}", args_str);
+
+        // Negative id so it can never collide with a real node row.
+        let session_id: i64 = -987_654;
+        let (mut child, pty) = spawn_sandboxed(
+            &cmd,
+            session_id,
+            &worktree.to_string_lossy(),
+            40,
+            120,
+        )
+        .expect("spawn_sandboxed");
+
+        let mut reader = pty.try_clone_reader().expect("reader");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let secs: u64 = std::env::var("BM_REPRO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(12);
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        let mut exit_code: Option<u32> = None;
+        while Instant::now() < deadline {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                out.extend_from_slice(&chunk);
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                exit_code = Some(status.exit_code());
+                // The child has exited; drain whatever ConPTY still has buffered
+                // (it does not EOF the pipe on exit) for a short grace window.
+                let drain = Instant::now() + Duration::from_millis(800);
+                while Instant::now() < drain {
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
+                        out.extend_from_slice(&chunk);
+                    }
+                }
+                break;
+            }
+        }
+
+        child.kill().ok();
+        drop(pty);
+        let _ = child.wait();
+        reader_thread.join().ok();
+
+        // Revoke the ACEs + delete the profile, then remove the throwaway dir.
+        cleanup(session_id);
+        let _ = std::fs::remove_dir_all(&worktree);
+
+        let text = String::from_utf8_lossy(&out);
+        eprintln!(
+            "\n===== CWRAP SANDBOX REPRO — exit_code={:?}, {} bytes =====",
+            exit_code,
+            out.len()
+        );
+        eprintln!("{}", text);
+        eprintln!("===== END CWRAP SANDBOX REPRO =====\n");
+    }
+
+    /// LIVE VERIFICATION (ignored by default) — drive the *real* production path
+    /// (`build_spawn_command` → `spawn_sandboxed`) for a sandboxed Anthropic node
+    /// and confirm claude.exe boots inside the AppContainer instead of dying in
+    /// the loader the way `cwrap → bash` did. A booted claude streams its TUI and
+    /// stays alive (exit_code stays None); a failure exits fast with an error in
+    /// the captured bytes.
+    ///
+    /// Run manually:
+    /// ```text
+    /// cargo test -p buildmesh sandbox::spawn::tests::repro_anthropic_sandbox_direct_boots -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "live: spawns real claude.exe into an AppContainer; needs the dev host toolchain"]
+    fn repro_anthropic_sandbox_direct_boots() {
+        use crate::agent::spawn::{build_spawn_command, SessionIdMode};
+        use crate::env::ResolvedPath;
+        use crate::models::{EnvType, Provider};
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let worktree =
+            std::env::temp_dir().join(format!("bm-repro-direct-{}", std::process::id()));
+        std::fs::create_dir_all(&worktree).unwrap();
+        let wt = worktree.to_string_lossy().into_owned();
+
+        let resolved = ResolvedPath {
+            host_path: wt.clone(),
+            spawn_path: wt.clone(),
+            raw_path: wt.clone(),
+            env_type: EnvType::Windows,
+        };
+        let session_id: i64 = -987_655;
+        let cmd = build_spawn_command(
+            &resolved,
+            Provider::Anthropic,
+            &SessionIdMode::None,
+            session_id,
+            None,
+            None,
+            None,
+            true, // sandbox
+        );
+        eprintln!(
+            "REPRO direct argv: {:?}",
+            cmd.get_argv()
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        );
+
+        let (mut child, pty) =
+            spawn_sandboxed(&cmd, session_id, &wt, 40, 120).expect("spawn_sandboxed");
+        eprintln!("REPRO_CLAUDE_PID={:?}", child.process_id());
+
+        let mut reader = pty.try_clone_reader().expect("reader");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut exit_code: Option<u32> = None;
+        while Instant::now() < deadline {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                out.extend_from_slice(&chunk);
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                exit_code = Some(status.exit_code());
+                let drain = Instant::now() + Duration::from_millis(800);
+                while Instant::now() < drain {
+                    if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
+                        out.extend_from_slice(&chunk);
+                    }
+                }
+                break;
+            }
+        }
+        let still_alive = exit_code.is_none();
+
+        child.kill().ok();
+        drop(pty);
+        let _ = child.wait();
+        reader_thread.join().ok();
+        cleanup(session_id);
+        let _ = std::fs::remove_dir_all(&worktree);
+
+        let text = String::from_utf8_lossy(&out);
+        eprintln!(
+            "\n===== ANTHROPIC SANDBOX-DIRECT — still_alive={}, exit_code={:?}, {} bytes =====",
+            still_alive,
+            exit_code,
+            out.len()
+        );
+        eprintln!("{}", text);
+        eprintln!("===== END ANTHROPIC SANDBOX-DIRECT =====\n");
+    }
+
+    /// CONTROL (ignored) — spawn claude.exe the SAME no-stdin way but through a
+    /// normal PTY with NO AppContainer. Distinguishes a real container blocker
+    /// from a reproduction artifact: if claude renders here but hangs in the
+    /// sandboxed repro, the AppContainer is the cause; if it ALSO hangs here, the
+    /// repro's no-input ConPTY is the artifact (claude needs terminal I/O the
+    /// dumb reader doesn't provide) and production may behave differently.
+    ///
+    /// Run: cargo test -p buildmesh sandbox::spawn::tests::control_claude_no_sandbox -- --ignored --nocapture
+    #[test]
+    #[ignore = "live: spawns real claude.exe (no sandbox) through a normal PTY"]
+    fn control_claude_no_sandbox() {
+        use portable_pty::{native_pty_system, PtySize};
+        use std::io::Read;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let worktree =
+            std::env::temp_dir().join(format!("bm-control-{}", std::process::id()));
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let pty = native_pty_system()
+            .openpty(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty");
+        let mut cmd = CommandBuilder::new("cmd.exe");
+        cmd.args(["/c", "claude.exe", "--dangerously-skip-permissions"]);
+        cmd.cwd(&worktree);
+        let mut child = pty.slave.spawn_command(cmd).expect("spawn");
+        drop(pty.slave);
+
+        let mut reader = pty.master.try_clone_reader().expect("reader");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = reader.read(&mut buf) {
+                if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let secs: u64 = std::env::var("BM_REPRO_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(15);
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        let mut exit_code: Option<u32> = None;
+        while Instant::now() < deadline {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(200)) {
+                out.extend_from_slice(&chunk);
+            }
+            if let Ok(Some(s)) = child.try_wait() {
+                exit_code = Some(s.exit_code());
+                break;
+            }
+        }
+        let still_alive = exit_code.is_none();
+        child.kill().ok();
+        drop(pty.master);
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&worktree);
+
+        let text = String::from_utf8_lossy(&out);
+        eprintln!(
+            "\n===== CONTROL (no sandbox) — still_alive={}, exit_code={:?}, {} bytes =====",
+            still_alive, exit_code, out.len()
+        );
+        eprintln!("{}", text);
+        eprintln!("===== END CONTROL =====\n");
     }
 
     #[test]

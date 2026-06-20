@@ -54,6 +54,34 @@ pub fn grant_dir(dir: &Path, sid: &str, access: Access) -> Result<(), String> {
     }
 }
 
+/// Grant `sid` the given access on a single `file` (no inheritance flags —
+/// `(OI)(CI)` are container-only and icacls rejects them on a leaf). Used for
+/// home-root files the agent needs that live outside any granted directory
+/// (e.g. `~/.claude.json`). Revoked via [`revoke_dir`], which works on files too.
+pub fn grant_file(file: &Path, sid: &str, access: Access) -> Result<(), String> {
+    let perms = match access {
+        Access::ReadExecute => "(RX)",
+        Access::Full => "(F)",
+    };
+    let spec = format!("*{}:{}", sid, perms);
+    let output = crate::process_util::command_no_window("icacls")
+        .arg(file)
+        .arg("/grant")
+        .arg(&spec)
+        .output()
+        .map_err(|e| format!("failed to run icacls: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "icacls /grant {} on {} failed: {}",
+            spec,
+            file.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
 /// Remove `sid`'s grant from `dir`. Best-effort cleanup on close — a failure is
 /// reported but a stale ACE on a directory that's about to be deleted is not
 /// worth blocking close over.

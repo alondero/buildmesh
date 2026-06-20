@@ -190,23 +190,53 @@ pub fn build_spawn_command(
     let adapter = provider_enum.adapter();
     let platform = Platform::current();
 
+    // Windows AppContainer sandbox: cwrap routes through MSYS2 bash, which can't
+    // initialize inside an AppContainer (STATUS_DLL_INIT_FAILED — the container's
+    // restricted object namespace breaks the MSYS2 runtime), so cwrap-backed
+    // providers reach claude.exe directly instead. Only on a Windows host and a
+    // non-WSL target (WSL has its own Linux userspace; macOS uses Seatbelt).
+    // `sandbox_direct_recipe` is `None` for non-cwrap providers, leaving them on
+    // their normal path. (First slice of absorbing cwrap into buildmesh.)
+    let sandbox_direct = if sandbox && resolved.env_type != EnvType::Wsl && cfg!(target_os = "windows")
+    {
+        adapter.sandbox_direct_recipe(platform)
+    } else {
+        None
+    };
+    let use_sandbox_direct = sandbox_direct.is_some();
+    // The base recipe before session-id / override / prefill args are layered on.
+    let base_recipe = || {
+        sandbox_direct
+            .clone()
+            .unwrap_or_else(|| adapter.spawn_recipe(platform))
+    };
+
     let mut recipe = match session_id_mode {
         SessionIdMode::Resume(id) => {
-            if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(platform, id) {
-                tracing::info!("spawn_agent: using resume recipe for session {}", id);
-                resume_recipe
-            } else {
-                let mut r = adapter.spawn_recipe(platform);
-                let args = adapter.resume_args(id);
-                if !args.is_empty() {
-                    tracing::info!("spawn_agent: resuming session {}", id);
-                    r.base_args.extend(args);
+            // Subcommand-style resume recipes (Codex) only apply off the
+            // sandbox-direct path; cwrap-backed providers append `--resume` to
+            // the direct claude.exe recipe instead.
+            match (!use_sandbox_direct)
+                .then(|| adapter.spawn_recipe_for_resume(platform, id))
+                .flatten()
+            {
+                Some(resume_recipe) => {
+                    tracing::info!("spawn_agent: using resume recipe for session {}", id);
+                    resume_recipe
                 }
-                r
+                None => {
+                    let mut r = base_recipe();
+                    let args = adapter.resume_args(id);
+                    if !args.is_empty() {
+                        tracing::info!("spawn_agent: resuming session {}", id);
+                        r.base_args.extend(args);
+                    }
+                    r
+                }
             }
         }
         SessionIdMode::Assign(id) => {
-            let mut r = adapter.spawn_recipe(platform);
+            let mut r = base_recipe();
             let args = adapter.session_assign_args(id);
             if !args.is_empty() {
                 tracing::info!("spawn_agent: assigning session-id {}", id);
@@ -214,7 +244,7 @@ pub fn build_spawn_command(
             }
             r
         }
-        SessionIdMode::None => adapter.spawn_recipe(platform),
+        SessionIdMode::None => base_recipe(),
     };
 
     if adapter.supports_model_override() {
@@ -249,6 +279,14 @@ pub fn build_spawn_command(
         spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
     if let Some(text) = prefill_via_env {
         cmd.env(PREFILL_ENV_VAR, text);
+    }
+    // On the sandbox-direct path claude.exe is spawned without cwrap, so the
+    // backend-selecting env cwrap would have exported (MiniMax/Kimi base URL,
+    // API token, model routing) is injected here. Empty for Anthropic.
+    if use_sandbox_direct {
+        for (k, v) in adapter.sandbox_provider_env() {
+            cmd.env(k, v);
+        }
     }
     cmd
 }
