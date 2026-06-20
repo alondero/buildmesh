@@ -43,6 +43,12 @@ fn profile_name(session_id: i64) -> String {
 }
 
 /// Spawn `cmd` for `session_id` inside a per-node AppContainer.
+///
+/// **Superseded (ADR-0014).** The AppContainer hung `claude.exe` (#528); the
+/// production seam (`agent::spawn::sandbox_spawn`) now uses
+/// [`spawn_sandboxed_restricted`]. This fn + [`cleanup`] are retained only as the
+/// record exercised by the ignored `repro_*` diagnostic tests — do not re-wire
+/// them into production without restoring the matching [`cleanup`] call.
 pub fn spawn_sandboxed(
     cmd: &CommandBuilder,
     session_id: i64,
@@ -139,8 +145,11 @@ pub fn cleanup(session_id: i64) {
 //
 // `include_user_sid` is the unresolved §4 trade-off (see `RestrictedToken::new`):
 // `true` lets msys `bash` / claude boot but re-opens home reads; `false` denies
-// home reads but breaks `bash`. This is the spike spawn path; production
-// `spawn_sandboxed` keeps using the AppContainer until the ADR is resolved.
+// home reads but breaks `bash`. **This is the live production spawn path** —
+// `agent::spawn::sandbox_spawn` calls it with `(grant_home=false,
+// include_user_sid=true)`, fixing the #528 hang and #533 loopback. Read
+// confinement (the strict `include_user_sid=false` mode) is deferred to #542;
+// `spawn_sandboxed` above (AppContainer) is the superseded predecessor.
 // ---------------------------------------------------------------------------
 
 /// Per-node cleanup for the restricted-token path: revoke the grants.

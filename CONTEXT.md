@@ -43,7 +43,7 @@ The Git reference a new Agent Node's worktree is created from (default `origin/m
 _Avoid_: Base branch, starting point, source branch
 
 **Sandbox**:
-A per-Mesh toggle (off by default) that confines an Agent Node's execution process to its Node Working Directory, denying the agent access to the rest of the machine — notably the home folder's credential stores (`~/.ssh`, `~/.aws`). On macOS this is realised with Seatbelt (`sandbox-exec` + a generated `.sb` profile, issue #497); the Windows equivalent (AppContainer) is tracked separately. SSH agent forwarding (the `SSH_AUTH_SOCK` socket, not the private key) is granted into the sandbox so Git fetch/push still authenticate. Stored on the `meshes` row and read at spawn; ignored on hosts without a sandbox backend.
+A per-Mesh toggle (off by default) that confines an Agent Node's execution process to its Node Working Directory, denying the agent access to the rest of the machine — notably the home folder's credential stores (`~/.ssh`, `~/.aws`). On macOS this is realised with Seatbelt (`sandbox-exec` + a generated `.sb` profile, issue #497); on Windows with a restricted token (issue #528, ADR-0014 — pivoted off the original AppContainer, which hung `claude.exe`). SSH agent forwarding (the `SSH_AUTH_SOCK` socket, not the private key) is granted into the sandbox so Git fetch/push still authenticate. Stored on the `meshes` row and read at spawn; ignored on hosts without a sandbox backend. (Windows read/write confinement is deferred to #542; the current Windows backend fixes the hang/loopback but does not yet deny home reads.)
 _Avoid_: jail, container (it is not a container), isolation mode
 
 **Changed Files Section**:
@@ -82,7 +82,7 @@ The list of GitHub issue numbers an open issue declares it depends on, parsed fr
 _Avoid_: depends on, dependency list, blocking issue (singular)
 
 **Sandbox** (Agent Process Sandbox):
-A per-Mesh opt-in confinement for Agent Node PTY processes, exposed as the "Sandbox agent processes" toggle in the Mesh properties. Off by default; when on, every Agent Node spawned in the Mesh runs inside an OS-level deny-by-default container keyed to that node — macOS Seatbelt (`sandbox-exec`, #497) and Windows AppContainer (#498) each implement their own backend, sharing the single `meshes.sandbox` column. The OS-specific spawn policy is decided at one seam (`sandbox::sandbox_enabled`) so the per-OS implementation is swappable; the Mesh/UI layer is OS-agnostic. Sandboxed nodes can read/write their own worktree, reach the network (`internetClient` / `sandbox.network`), and run a curated PATH; everything else — the rest of `%USERPROFILE%`, host `%TEMP%`, the registry, system tools not on the curated PATH — is denied by default. See `docs/adr/0012-windows-appcontainer-agent-sandbox.md` for the Windows half.
+A per-Mesh opt-in confinement for Agent Node PTY processes, exposed as the "Sandbox agent processes" toggle in the Mesh properties. Off by default; when on, every Agent Node spawned in the Mesh runs under an OS-level confinement keyed to that node — macOS Seatbelt (`sandbox-exec`, #497) and the Windows restricted token (#528, ADR-0014) each implement their own backend, sharing the single `meshes.sandbox` column. The OS-specific spawn policy is decided at one seam (`sandbox::sandbox_enabled`) so the per-OS implementation is swappable; the Mesh/UI layer is OS-agnostic. On macOS the agent can read/write its own worktree and reach the network, with everything else denied by default. On Windows the restricted token currently fixes the AppContainer hang (#528) and loopback (#533) but does **not** yet deny home reads/writes — deny-by-default file confinement is tracked in #542 (a same-user token can't separate user files from the user-keyed kernel objects MSYS `bash` needs). See `docs/adr/0014-pivot-windows-sandbox-off-appcontainer.md` (current) and `0012-windows-appcontainer-agent-sandbox.md` (the superseded AppContainer attempt).
 _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 
 ## Relationships
@@ -96,7 +96,7 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 - A **Mesh** can have a **drifted root** if its root HEAD is not on the Base Ref's branch
 - A **Mesh** can be in a **base branch hostage** state when one of its worktrees holds the Base Ref's branch
 - A **Mesh** can have **unpushed commits on root** that block the recovery actions
-- A **Mesh** can opt into a **Sandbox**; when on, every Agent Node spawned in the Mesh is confined to its worktree via the OS-level backend (macOS Seatbelt, Windows AppContainer)
+- A **Mesh** can opt into a **Sandbox**; when on, every Agent Node spawned in the Mesh runs under the OS-level backend (macOS Seatbelt, Windows restricted token)
 
 ## Example dialogue
 
@@ -107,7 +107,7 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 > **Domain expert:** "The issue's **Blocked by** list contains at least one issue that's still open in this repo — the flag is a warn, not a gate, so Spawn still works if the user is intentionally unblocking it."
 
 > **Dev:** "What happens if I flip on 'Sandbox agent processes' on a Mesh that's already running agents?"
-> **Domain expert:** "The flag is read at spawn time, so already-running Agent Nodes are unaffected. New Spawns from this Mesh on a sandboxing-capable host (macOS Seatbelt, Windows AppContainer) will run inside an OS-level deny-by-default container; on hosts with no sandbox backend yet, the flag is a no-op."
+> **Domain expert:** "The flag is read at spawn time, so already-running Agent Nodes are unaffected. New Spawns from this Mesh on a sandboxing-capable host (macOS Seatbelt, Windows restricted token) will run under the OS-level backend; on hosts with no sandbox backend yet, the flag is a no-op."
 
 ## Flagged ambiguities
 

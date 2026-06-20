@@ -33,6 +33,33 @@ If you use Claude Code / Antigravity / OpenCode from your shell and find yoursel
 - **AI context portability**: share `CLAUDE.md`, `.claude/skills`, and friends with Codex, OpenCode, and Antigravity via `AGENTS.md` + `.agents/skills` git symlinks — no per-provider duplication.
 - **Dev / Stable side-by-side profiles**: run an in-development build (`buildmesh-dev`) without interrupting the stable hub you orchestrate agents from.
 
+## Agent sandboxing (security)
+
+A prompt-injected or runaway agent runs real shell commands on your machine. Each
+**Mesh** has an opt-in **Sandbox** toggle (off by default) that confines every
+agent node spawned from it to its own Git worktree, using the host OS's native
+confinement — **Seatbelt** on macOS, a **restricted token** on Windows. The toggle
+is read at spawn time, so flipping it never disturbs already-running agents, and on
+a host with no backend it's a safe no-op.
+
+### What it protects against
+
+| Capability | macOS (Seatbelt, #497) | Windows (restricted token, #528) |
+|---|---|---|
+| Agent can spawn child processes (`bash`, `git`, `ripgrep`, hooks) | ✅ | ✅ |
+| Agent reaches the network (Anthropic API, `git push`) | ✅ | ✅ |
+| Agent reaches the hub on loopback (attention hook → `127.0.0.1`) | ✅ | ✅ (fixed in #533) |
+| **Writes** confined to the worktree (rest of disk read-only/denied) | ✅ | ⏳ not yet — see #542 |
+| **Reads** of home credentials (`~/.ssh`, `~/.aws`, registry) denied | ✅ | ⏳ not yet — see #542 |
+
+The Windows backend was pivoted off a per-node AppContainer ([ADR-0014](docs/adr/0014-pivot-windows-sandbox-off-appcontainer.md)): the AppContainer's private object namespace hung `claude.exe` at libuv's named-pipe creation (#528) and blocked loopback (#533). The restricted token fixes both. Deny-by-default **read/write confinement** on Windows is deferred to **#542** — a same-user restricted token can't deny home reads while MSYS `bash` runs (both are secured by the same user SID), so the surviving path is a separate low-privilege user principal (or WSL). Until then the Windows sandbox fixes the hang and loopback but does **not** yet restrict file access.
+
+### What it is *not*
+
+- **Not a container or VM.** It's an OS access-control boundary on a single process tree, not virtualization or namespacing.
+- **Not network egress control.** A sandboxed agent still reaches the internet (it has to, for the model API) — the sandbox limits *filesystem and host* access, not where data can be sent.
+- **Not a guarantee the agent binary is trustworthy.** It confines what the agent process can touch; it doesn't vet the agent or its dependencies.
+
 ## Keyboard shortcuts
 
 - `Alt + 1–9` — switch to agent node N

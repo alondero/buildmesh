@@ -920,6 +920,75 @@ mod tests {
         );
     }
 
+    /// End-to-end for the ADR-0014 production path: spawn `cmd /c` under a real
+    /// restricted token via `CreateProcessAsUserW` and read its output. This is
+    /// the CI cover for the #528 fix's spawn wiring — it exercises the
+    /// `Confinement::RestrictedToken` branch (1-attribute list, `CreateProcessAsUserW`)
+    /// without needing the live `claude.exe`/auth the `spike_*` tests require. Uses
+    /// the strict token (`new(false)`) so it also proves a maximally-restricted
+    /// token can still stream ConPTY I/O. Mirrors `plain_conpty_streams_child_output`.
+    #[test]
+    fn spawns_command_under_restricted_token_and_reads_output() {
+        use crate::sandbox::restricted_token::RestrictedToken;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let token = RestrictedToken::new(false).expect("build restricted token");
+        let (mut child, pty) = spawn_with_restricted_token(
+            "C:\\Windows\\System32\\cmd.exe /c \"echo SANDBOX_OK & pause\"",
+            None,
+            &[],
+            24,
+            80,
+            &token,
+        )
+        .expect("spawn under restricted token");
+
+        let mut reader = pty.try_clone_reader().expect("reader");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut buf = [0u8; 1024];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut out = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(chunk) => {
+                    out.extend_from_slice(&chunk);
+                    if String::from_utf8_lossy(&out).contains("SANDBOX_OK") {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        child.kill().ok();
+        drop(pty);
+        let _ = child.wait();
+        reader_thread.join().ok();
+
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("SANDBOX_OK"),
+            "restricted-token ConPTY (CreateProcessAsUserW) should stream child output, got: {:?}",
+            text
+        );
+    }
+
     /// Integration: a sandboxed process can read a file in a directory that was
     /// granted to its container SID via `acl::grant_dir` — the mechanism that
     /// confines a real agent to (but lets it use) its worktree. Without the

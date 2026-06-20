@@ -65,11 +65,12 @@ mod ffi {
     pub type BOOL = i32;
     pub type DWORD = u32;
 
-    // Token access rights (winnt.h).
+    // Token access rights (winnt.h). The result must be usable by
+    // CreateProcessAsUserW (ASSIGN_PRIMARY + DUPLICATE) and readable by
+    // CreateRestrictedToken / GetTokenInformation (QUERY).
     pub const TOKEN_ASSIGN_PRIMARY: DWORD = 0x0001;
     pub const TOKEN_DUPLICATE: DWORD = 0x0002;
     pub const TOKEN_QUERY: DWORD = 0x0008;
-    pub const TOKEN_ADJUST_DEFAULT: DWORD = 0x0080;
 
     // TOKEN_INFORMATION_CLASS values we use.
     pub const TOKEN_LOGON_SID: i32 = 28;
@@ -219,10 +220,7 @@ impl RestrictedToken {
             let mut proc_token: HANDLE = std::ptr::null_mut();
             if ffi::OpenProcessToken(
                 ffi::GetCurrentProcess(),
-                ffi::TOKEN_DUPLICATE
-                    | ffi::TOKEN_QUERY
-                    | ffi::TOKEN_ASSIGN_PRIMARY
-                    | ffi::TOKEN_ADJUST_DEFAULT,
+                ffi::TOKEN_DUPLICATE | ffi::TOKEN_QUERY | ffi::TOKEN_ASSIGN_PRIMARY,
                 &mut proc_token,
             ) == 0
             {
@@ -234,8 +232,13 @@ impl RestrictedToken {
             //    confined process can attach to the interactive window station /
             //    desktop it is launched onto.
             let logon_buf = get_token_logon_sid(proc_token.0)?;
+            // Guard on group_count > 0: an interactive token always carries a
+            // logon SID, but if TokenLogonSid ever reports zero groups, groups[0]
+            // would be an uninitialised read whose garbage Psid CreateRestrictedToken
+            // would then dereference. Null → the logon SID is simply omitted below.
             let logon_sid = (logon_buf.as_ptr() as *const ffi::TOKEN_GROUPS_HEADER)
                 .as_ref()
+                .filter(|g| g.group_count > 0)
                 .map(|g| g.groups[0].sid)
                 .unwrap_or(std::ptr::null_mut());
 
