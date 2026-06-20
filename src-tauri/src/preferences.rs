@@ -7,10 +7,34 @@
 //! Precedence is applied at the call site: per-mesh value → app pref → hardcoded
 //! fallback (`anthropic` for providers).
 
+use crate::models::Provider;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{OnceLock, Mutex};
 use ts_rs::TS;
+
+/// A user-selectable **Agent Harness** profile (ADR-0014 / PRD #534).
+///
+/// The harness (the executor binary recipe) is being split out from the
+/// **Model Provider** (credentials/endpoint). This struct is the first
+/// concrete shape of that split: `id` is the value stored in the DB
+/// `provider` column and on the wire, `name` is the menu label, and
+/// `harness` names the backing executor — for now a legacy [`Provider`]
+/// id, resolved by [`resolve_harness_provider`]. Later slices will give
+/// `harness` richer meaning (its own binary recipe) and retire the
+/// duplicated legacy [`Provider`] enum.
+///
+/// Generated to src/types/generated/HarnessProfile.ts (issue #535).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "HarnessProfile.ts")]
+pub struct HarnessProfile {
+    /// Stable id — stored in `agent_nodes.provider` and sent over the wire.
+    pub id: String,
+    /// Menu label shown in the launch dropdown.
+    pub name: String,
+    /// Backing executor; for this slice a legacy [`Provider`] id.
+    pub harness: String,
+}
 
 /// User-editable, persisted preferences applied across all meshes.
 ///
@@ -28,6 +52,12 @@ pub struct AppPreferences {
     /// Google Cloud project for Antigravity/Gemini quota API. Defaults to "cloudshell-gca".
     #[serde(default)]
     pub google_cloud_project: Option<String>,
+    /// User customizations to the code-defined default harness profiles.
+    /// Merged over [`default_harness_profiles`] by `id` (user wins) in
+    /// [`harness_profiles`]; the defaults are always present even when this
+    /// is empty, so a built-in like Terminal can never go missing.
+    #[serde(default)]
+    pub harness_profiles: Vec<HarnessProfile>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -107,6 +137,56 @@ pub fn default_provider() -> Option<String> {
             tracing::warn!("preferences::default_provider load failed, falling back: {}", e);
             None
         }
+    }
+}
+
+/// The code-defined harness profiles that always exist regardless of what
+/// `preferences.json` stores. Terminal is the first (and, this slice, only)
+/// one — a plain-shell harness that injects no provider env, which is why
+/// it's the tracer-bullet for the dynamic profile machinery (issue #535).
+pub fn default_harness_profiles() -> Vec<HarnessProfile> {
+    vec![HarnessProfile {
+        id: "terminal".to_string(),
+        name: "Terminal".to_string(),
+        harness: "terminal".to_string(),
+    }]
+}
+
+/// The effective harness profile list: the code-defined defaults with the
+/// user's stored `harness_profiles` merged over them by `id`. A stored
+/// profile whose `id` matches a default replaces it (user wins); a stored
+/// profile with a new `id` is appended. Defaults are always present, so a
+/// built-in like Terminal can never be removed by an empty or partial
+/// `preferences.json`.
+pub fn harness_profiles() -> Vec<HarnessProfile> {
+    let mut profiles = default_harness_profiles();
+    let stored = match load() {
+        Ok(prefs) => prefs.harness_profiles,
+        Err(e) => {
+            tracing::warn!("preferences::harness_profiles load failed, using defaults: {}", e);
+            Vec::new()
+        }
+    };
+    for profile in stored {
+        if let Some(existing) = profiles.iter_mut().find(|p| p.id == profile.id) {
+            *existing = profile;
+        } else {
+            profiles.push(profile);
+        }
+    }
+    profiles
+}
+
+/// Resolve a stored `provider`/profile id to the legacy [`Provider`] executor
+/// that should actually spawn it. If the id names a harness profile, the
+/// profile's `harness` field is parsed; otherwise the id is parsed directly —
+/// the "alongside-legacy" path, so existing enum ids (`"anthropic"`, etc.)
+/// still resolve without a matching profile. Unknown ids fall through
+/// `Provider::from_db_str`'s Anthropic default (preserving prior behaviour).
+pub fn resolve_harness_provider(profile_id: &str) -> Provider {
+    match harness_profiles().into_iter().find(|p| p.id == profile_id) {
+        Some(profile) => Provider::from_db_str(&profile.harness),
+        None => Provider::from_db_str(profile_id),
     }
 }
 
@@ -249,5 +329,128 @@ mod tests {
             let prefs = load().unwrap();
             assert_eq!(prefs, AppPreferences::default());
         });
+    }
+
+    #[test]
+    fn default_harness_profiles_include_terminal() {
+        let defaults = default_harness_profiles();
+        let terminal = defaults.iter().find(|p| p.id == "terminal").unwrap();
+        assert_eq!(terminal.name, "Terminal");
+        assert_eq!(terminal.harness, "terminal");
+    }
+
+    #[test]
+    fn harness_profiles_always_contains_terminal_with_none_stored() {
+        with_temp_dir(|_| {
+            // No preferences.json on disk → only the code-defined defaults.
+            let profiles = harness_profiles();
+            assert!(profiles.iter().any(|p| p.id == "terminal"));
+        });
+    }
+
+    #[test]
+    fn harness_profiles_round_trips_a_stored_user_profile() {
+        with_temp_dir(|_| {
+            let custom = HarnessProfile {
+                id: "kimi-via-claude".to_string(),
+                name: "Kimi (via Claude)".to_string(),
+                harness: "kimi".to_string(),
+            };
+            save(AppPreferences {
+                harness_profiles: vec![custom.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            let profiles = harness_profiles();
+            // Default Terminal plus the appended user profile.
+            assert!(profiles.iter().any(|p| p.id == "terminal"));
+            assert!(profiles.contains(&custom));
+        });
+    }
+
+    #[test]
+    fn harness_profiles_user_overrides_default_by_id() {
+        with_temp_dir(|_| {
+            // A stored profile with id "terminal" replaces the default label,
+            // but Terminal is still present (override, not append).
+            save(AppPreferences {
+                harness_profiles: vec![HarnessProfile {
+                    id: "terminal".to_string(),
+                    name: "My Shell".to_string(),
+                    harness: "terminal".to_string(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            let profiles = harness_profiles();
+            let terminals: Vec<_> = profiles.iter().filter(|p| p.id == "terminal").collect();
+            assert_eq!(terminals.len(), 1, "override by id, not append");
+            assert_eq!(terminals[0].name, "My Shell");
+        });
+    }
+
+    #[test]
+    fn harness_profiles_new_id_appends() {
+        with_temp_dir(|_| {
+            save(AppPreferences {
+                harness_profiles: vec![HarnessProfile {
+                    id: "codex-fast".to_string(),
+                    name: "Codex (fast)".to_string(),
+                    harness: "codex".to_string(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            let profiles = harness_profiles();
+            assert!(profiles.iter().any(|p| p.id == "terminal"));
+            assert!(profiles.iter().any(|p| p.id == "codex-fast"));
+        });
+    }
+
+    #[test]
+    fn resolve_harness_provider_maps_terminal_profile() {
+        with_temp_dir(|_| {
+            assert_eq!(resolve_harness_provider("terminal"), Provider::Terminal);
+        });
+    }
+
+    #[test]
+    fn resolve_harness_provider_uses_profile_harness_field() {
+        with_temp_dir(|_| {
+            // A profile whose harness is "anthropic" resolves to Anthropic,
+            // even though its id ("claude-profile") is not a legacy enum value.
+            save(AppPreferences {
+                harness_profiles: vec![HarnessProfile {
+                    id: "claude-profile".to_string(),
+                    name: "Claude Profile".to_string(),
+                    harness: "anthropic".to_string(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(resolve_harness_provider("claude-profile"), Provider::Anthropic);
+        });
+    }
+
+    #[test]
+    fn resolve_harness_provider_falls_back_through_from_db_str() {
+        with_temp_dir(|_| {
+            // A legacy id with no matching profile resolves directly.
+            assert_eq!(resolve_harness_provider("minimax"), Provider::Minimax);
+            // An unknown id falls through to the Anthropic default.
+            assert_eq!(resolve_harness_provider("totally-unknown"), Provider::Anthropic);
+        });
+    }
+
+    #[test]
+    fn app_preferences_defaults_harness_profiles_to_empty_when_key_absent() {
+        // Additive wire: an older preferences.json without the key deserializes
+        // with an empty Vec rather than failing.
+        let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.harness_profiles, Vec::new());
     }
 }

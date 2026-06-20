@@ -213,7 +213,7 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("/tmp");
     let branch = args.get("branch").and_then(|v| v.as_str()).unwrap_or("main");
 
-    use crate::models::{EnvType, Provider};
+    use crate::models::EnvType;
 
     match crate::db::create_agent_node(
         mesh_id,
@@ -221,7 +221,7 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
         path,
         branch,
         EnvType::Windows,
-        Provider::Anthropic,
+        "anthropic",
         Some(name),
         None,
         None,

@@ -33,7 +33,7 @@ fn transcript_dir(node: &AgentNode) -> String {
 /// captured a session). Pure over the node + filesystem, so it is unit-testable
 /// without a DB.
 pub fn transcript_tail(node: &AgentNode, tail: usize) -> TranscriptTail {
-    if !node.provider.adapter().produces_readable_transcript() {
+    if !crate::preferences::resolve_harness_provider(&node.provider).adapter().produces_readable_transcript() {
         return TranscriptTail::Unavailable {
             reason: UnavailableReason::Unsupported,
         };
@@ -98,7 +98,7 @@ fn scrub_tail(tail: TranscriptTail) -> TranscriptTail {
 /// with long histories that turns N full-file parses into N bounded ones. The
 /// full-tail [`transcript_tail`] is reserved for the on-demand `/log` drill-in.
 pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
-    if !node.provider.adapter().produces_readable_transcript() {
+    if !crate::preferences::resolve_harness_provider(&node.provider).adapter().produces_readable_transcript() {
         return None;
     }
     Some(scrub_tail(transcript_reader::read_last_assistant_message(
@@ -119,7 +119,9 @@ mod tests {
         // through `..Default::default()` (issue #457).
         AgentNode {
             path: "X:\\src\\proj".to_string(),
-            provider,
+            // `provider` is stored as its harness-id string (issue #535); the
+            // resolver maps it back to an executor for the capability gate.
+            provider: provider.to_string(),
             cli_session_id: cli_session_id.map(str::to_string),
             worktree_name: Some("gentle-fox".to_string()),
             use_worktree,

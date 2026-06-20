@@ -17,7 +17,6 @@ use tokio::net::TcpStream;
 
 use crate::db;
 use crate::http::request;
-use crate::models::Provider;
 
 pub async fn discover(
     lines: &mut tokio::io::BufStream<TcpStream>,
@@ -94,11 +93,9 @@ pub async fn import_and_resume(
     let session_name = crate::session_naming::on_spawn();
     let resolved = crate::env::resolve_agent_path(&mesh.path, None);
     let env_type = resolved.env_type;
-    let provider_enum = req
-        .provider
-        .as_deref()
-        .map(Provider::from_db_str)
-        .unwrap_or(Provider::Anthropic);
+    // Store the harness/profile id verbatim (issue #535); resolve to a concrete
+    // executor only at the spawn seam. Absent provider defaults to "anthropic".
+    let provider_id = req.provider.as_deref().unwrap_or("anthropic");
 
     let use_worktree = req.worktree_name.is_some();
     let node = match db::create_agent_node(
@@ -107,7 +104,7 @@ pub async fn import_and_resume(
         &mesh.path,
         &req.branch,
         env_type,
-        provider_enum,
+        provider_id,
         req.worktree_name.as_deref(),
         None,
         None,
@@ -147,7 +144,7 @@ pub async fn import_and_resume(
         app,
         crate::agent::spawn::SpawnOptions {
             session_id: node.id,
-            provider: provider_enum,
+            provider: crate::preferences::resolve_harness_provider(provider_id),
             resume: Some(req.cli_session_id.clone()),
             rows: req.rows,
             cols: req.cols,

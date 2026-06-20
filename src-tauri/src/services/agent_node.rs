@@ -3,7 +3,7 @@
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
-use crate::models::{AgentNode, PendingWorktreeRemoval, Provider, SessionStatus};
+use crate::models::{AgentNode, PendingWorktreeRemoval, SessionStatus};
 
 /// Error type for agent node service operations
 #[derive(Debug)]
@@ -104,9 +104,11 @@ pub fn create_with_source_pr_fork(
 
     let resolved = env::resolve_agent_path(path, worktree_db_name);
     let env_type = resolved.env_type;
-    let provider_enum = provider
-        .map(Provider::from_db_str)
-        .unwrap_or(Provider::Anthropic);
+    // Store the harness/profile id verbatim (issue #535) — no premature parse
+    // to the legacy `Provider` enum, which would flatten an unknown profile id
+    // to Anthropic. Resolution happens at the spawn seam. An absent provider
+    // defaults to "anthropic", matching the prior `Provider::Anthropic` default.
+    let provider_id = provider.unwrap_or("anthropic");
 
     let node = db::create_agent_node(
         mesh_id,
@@ -114,7 +116,7 @@ pub fn create_with_source_pr_fork(
         path,
         branch,
         env_type,
-        provider_enum,
+        provider_id,
         worktree_db_name,
         source_issue,
         source_pr,

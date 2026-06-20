@@ -93,7 +93,7 @@ pub async fn create(
         app,
         crate::agent::spawn::SpawnOptions {
             session_id: node_id,
-            provider: crate::models::Provider::from_db_str(&req.provider),
+            provider: crate::preferences::resolve_harness_provider(&req.provider),
             resume: None,
             rows: req.rows,
             cols: req.cols,

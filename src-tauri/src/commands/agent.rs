@@ -22,7 +22,8 @@ use ts_rs::TS;
 /// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     let host = Platform::current();
-    Provider::all()
+    // Legacy enum list — each adapter keyed off the static `Provider`.
+    let mut providers: Vec<ProviderInfo> = Provider::all()
         .iter()
         .map(|p| p.adapter())
         .filter(|adapter| adapter.available_on().contains(&host))
@@ -35,7 +36,33 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
                 icon: ui.icon,
             }
         })
-        .collect()
+        .collect();
+
+    // Dynamic harness profiles (ADR-0014 / issue #535), appended alongside the
+    // legacy list. `id`/`label` come from the profile; `color`/`icon` borrow
+    // the backing executor's UI so a profile row looks like its harness. A
+    // duplicate "Terminal" row (one legacy, one profile-backed) is accepted for
+    // this tracer-bullet slice — it proves the dynamic list is composed.
+    providers.extend(
+        crate::preferences::harness_profiles()
+            .into_iter()
+            .filter_map(|profile| {
+                // Resolve once per profile (the filter + ui lookup share it).
+                let adapter = crate::preferences::resolve_harness_provider(&profile.id).adapter();
+                if !adapter.available_on().contains(&host) {
+                    return None;
+                }
+                let ui = adapter.ui();
+                Some(ProviderInfo {
+                    id: profile.id,
+                    label: profile.name,
+                    color: ui.color,
+                    icon: ui.icon,
+                })
+            }),
+    );
+
+    providers
 }
 
 #[command]
@@ -59,7 +86,7 @@ pub async fn spawn_agent(
 ) -> Result<(), String> {
     crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
         session_id,
-        provider: Provider::from_db_str(&provider),
+        provider: crate::preferences::resolve_harness_provider(&provider),
         resume,
         rows: rows.unwrap_or(24),
         cols: cols.unwrap_or(80),
@@ -104,9 +131,9 @@ async fn spawn_new_agent_impl(
         initial_name.as_deref(),
     ).map_err(|e| e.to_string())?;
 
-    // Parse once and reuse — the from_db_str allocation isn't free, and any
-    // future change to the parsing rule should only need to update one site.
-    let provider = Provider::from_db_str(&effective_provider);
+    // Resolve once and reuse — the profile lookup isn't free, and any future
+    // change to the resolution rule should only need to update one site.
+    let provider = crate::preferences::resolve_harness_provider(&effective_provider);
 
     let prefill_text = if provider.adapter().supports_prefill() {
         Some(prefill)
@@ -581,7 +608,9 @@ async fn start_node_inner(
     prefill: Option<&str>,
 ) -> Result<(), String> {
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    let provider = node.provider;
+    // `node.provider` is the stored harness id (String); resolve it to a
+    // concrete executor at this spawn seam (issue #535).
+    let provider = crate::preferences::resolve_harness_provider(&node.provider);
     let prefill_text = if provider.adapter().supports_prefill() {
         prefill.filter(|s| !s.is_empty()).map(String::from)
     } else {
@@ -656,7 +685,10 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
             }
         };
 
-        if !node.provider.adapter().auto_resume_on_startup() {
+        // `node.provider` is the stored harness id (String); resolve it to a
+        // concrete executor for both the capability check and the spawn (#535).
+        let provider = crate::preferences::resolve_harness_provider(&node.provider);
+        if !provider.adapter().auto_resume_on_startup() {
             tracing::info!("auto_resume_agent_nodes: skipping non-resumable node {} ({:?})", node.id, node.provider);
             db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
             continue;
@@ -664,7 +696,7 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
 
         match crate::agent::spawn::spawn_agent_inner(&app, SpawnOptions {
             session_id: node.id,
-            provider: node.provider,
+            provider,
             resume: Some(cli_id),
             rows: 24,
             cols: 80,
@@ -731,12 +763,17 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
 fn should_skip_attention_signals(session_id: i64) -> bool {
     db::get_agent_node_by_id(session_id)
         .ok()
-        .map(|n| provider_is_plain_terminal(n.provider))
+        .map(|n| provider_is_plain_terminal(&n.provider))
         .unwrap_or(false)
 }
 
-fn provider_is_plain_terminal(provider: Provider) -> bool {
-    provider.adapter().is_plain_terminal()
+/// Whether the stored harness id resolves to a plain shell. Resolving through
+/// the harness profile (not just the legacy enum) ensures a node spawned via
+/// the **Terminal profile** still skips LLM attention signals (issue #535).
+fn provider_is_plain_terminal(provider: &str) -> bool {
+    crate::preferences::resolve_harness_provider(provider)
+        .adapter()
+        .is_plain_terminal()
 }
 
 #[command]
@@ -811,27 +848,40 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Provider;
 
     #[test]
     fn plain_terminal_provider_skips_attention_signals() {
-        assert!(provider_is_plain_terminal(Provider::Terminal));
+        // The "terminal" harness id resolves to the plain-shell executor.
+        assert!(provider_is_plain_terminal("terminal"));
     }
 
     #[test]
     fn llm_providers_do_emit_attention_signals() {
-        for p in [
-            Provider::Anthropic,
-            Provider::Minimax,
-            Provider::Kimi,
-            Provider::Agy,
-            Provider::OpenCode,
-            Provider::Codex,
-        ] {
+        for id in ["anthropic", "minimax", "kimi", "agy", "opencode", "codex"] {
             assert!(
-                !provider_is_plain_terminal(p),
-                "LLM provider {p:?} should not skip attention signals"
+                !provider_is_plain_terminal(id),
+                "LLM provider {id:?} should not skip attention signals"
             );
         }
+    }
+
+    #[test]
+    fn available_providers_includes_a_profile_sourced_terminal() {
+        // The dynamic list is the legacy enum list concatenated with the
+        // harness profiles, so the Terminal profile appears in addition to the
+        // legacy Terminal — proving the profile list is composed (issue #535).
+        let providers = available_providers();
+        let terminals: Vec<_> = providers.iter().filter(|p| p.id == "terminal").collect();
+        assert!(
+            terminals.iter().any(|p| p.label == "Terminal"),
+            "expected a profile-sourced Terminal (id=\"terminal\", label=\"Terminal\")"
+        );
+        // The duplicate is allowed and expected for this slice: one legacy, one
+        // profile-backed. Both carry id "terminal".
+        assert!(
+            terminals.len() >= 2,
+            "expected both the legacy and profile-backed Terminal rows, got {}",
+            terminals.len()
+        );
     }
 }
