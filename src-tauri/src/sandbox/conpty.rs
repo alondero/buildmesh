@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use portable_pty::{Child, ChildKiller, ExitStatus, MasterPty, PtySize};
 
 use super::appcontainer::AppContainerProfile;
+use super::restricted_token::RestrictedToken;
 
 #[allow(non_snake_case, non_camel_case_types)]
 mod ffi {
@@ -180,6 +181,26 @@ mod ffi {
         ) -> BOOL;
         pub fn CloseHandle(hObject: HANDLE) -> BOOL;
     }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        /// Like `CreateProcessW` but launches the child under `hToken` — the
+        /// restricted/low-IL token that confines a sandboxed agent (ADR-0014).
+        /// Identical parameter list to `CreateProcessW` with `hToken` prepended.
+        pub fn CreateProcessAsUserW(
+            hToken: HANDLE,
+            lpApplicationName: *const u16,
+            lpCommandLine: *mut u16,
+            lpProcessAttributes: *const SECURITY_ATTRIBUTES,
+            lpThreadAttributes: *const SECURITY_ATTRIBUTES,
+            bInheritHandles: BOOL,
+            dwCreationFlags: DWORD,
+            lpEnvironment: *const c_void,
+            lpCurrentDirectory: *const u16,
+            lpStartupInfo: *mut STARTUPINFOW,
+            lpProcessInformation: *mut PROCESS_INFORMATION,
+        ) -> BOOL;
+    }
 }
 
 use ffi::HANDLE;
@@ -250,11 +271,26 @@ fn env_block(env: &[(String, String)]) -> Option<Vec<u16>> {
     Some(block)
 }
 
-/// Spawn `command_line` inside the AppContainer described by `profile`, attached
-/// to a fresh ConPTY of `rows`x`cols`. `cwd`/`env` configure the child.
-///
-/// Returns the child (process handle wrapper) and the master PTY (pipes +
-/// pseudoconsole) implementing portable-pty's traits.
+/// How a spawned process is confined. The owned ConPTY seam is identical for all
+/// three; only the process-creation inputs differ (ADR-0014 §3):
+///   * [`None`](Confinement::None) — plain `CreateProcessW`, 1-attribute list.
+///   * [`AppContainer`](Confinement::AppContainer) — `CreateProcessW` with a
+///     2-attribute list (`PSEUDOCONSOLE` + `SECURITY_CAPABILITIES`). The legacy
+///     #498 primitive; superseded by `RestrictedToken` (kept for the existing
+///     tests / cleanup story until the pivot fully lands).
+///   * [`RestrictedToken`](Confinement::RestrictedToken) — `CreateProcessAsUserW`
+///     under a restricted/low-IL token, 1-attribute list. The ADR-0014 primitive:
+///     no AppContainer object namespace, so libuv named-pipe creation, MSYS
+///     `bash`, and loopback all work (resolves #528 / #533 / Blocker #1).
+pub enum Confinement<'a> {
+    None,
+    AppContainer(&'a AppContainerProfile),
+    RestrictedToken(&'a RestrictedToken),
+}
+
+/// Spawn `command_line` inside the AppContainer described by `profile` (or
+/// unconfined when `None`), attached to a fresh ConPTY of `rows`x`cols`.
+/// `cwd`/`env` configure the child.
 pub fn spawn_in_appcontainer(
     command_line: &str,
     cwd: Option<&str>,
@@ -263,6 +299,44 @@ pub fn spawn_in_appcontainer(
     cols: u16,
     profile: Option<&AppContainerProfile>,
 ) -> Result<(SandboxChild, SandboxPty), String> {
+    let confinement = match profile {
+        Some(p) => Confinement::AppContainer(p),
+        None => Confinement::None,
+    };
+    spawn_confined(command_line, cwd, env, rows, cols, confinement)
+}
+
+/// Spawn `command_line` under the restricted/low-integrity `token` via
+/// `CreateProcessAsUserW`, attached to a fresh ConPTY (ADR-0014, #528).
+pub fn spawn_with_restricted_token(
+    command_line: &str,
+    cwd: Option<&str>,
+    env: &[(String, String)],
+    rows: u16,
+    cols: u16,
+    token: &RestrictedToken,
+) -> Result<(SandboxChild, SandboxPty), String> {
+    spawn_confined(command_line, cwd, env, rows, cols, Confinement::RestrictedToken(token))
+}
+
+/// The shared owned-ConPTY spawn core. Returns the child (process handle wrapper)
+/// and the master PTY (pipes + pseudoconsole) implementing portable-pty's traits.
+fn spawn_confined(
+    command_line: &str,
+    cwd: Option<&str>,
+    env: &[(String, String)],
+    rows: u16,
+    cols: u16,
+    confinement: Confinement,
+) -> Result<(SandboxChild, SandboxPty), String> {
+    let appcontainer = match confinement {
+        Confinement::AppContainer(p) => Some(p),
+        _ => None,
+    };
+    let restricted_token = match confinement {
+        Confinement::RestrictedToken(t) => Some(t),
+        _ => None,
+    };
     // SAFETY: every handle created is tracked and closed on its owning struct's
     // drop or explicitly before an early return; structs passed to Win32 are
     // zero-initialised POD with their exact sizes.
@@ -297,8 +371,9 @@ pub fn spawn_in_appcontainer(
         drop(stdout_write);
 
         // --- proc-thread attribute list: PSEUDOCONSOLE (+ SECURITY_CAPABILITIES
-        // when sandboxed) ---
-        let attr_count: u32 = if profile.is_some() { 2 } else { 1 };
+        // for the AppContainer path only; the restricted-token path confines via
+        // the token at CreateProcessAsUserW, not a proc-thread attribute) ---
+        let attr_count: u32 = if appcontainer.is_some() { 2 } else { 1 };
         let mut size: usize = 0;
         ffi::InitializeProcThreadAttributeList(std::ptr::null_mut(), attr_count, 0, &mut size);
         let mut attr_buf = vec![0u8; size];
@@ -321,7 +396,7 @@ pub fn spawn_in_appcontainer(
             return Err(format!("UpdateProcThreadAttribute(PSEUDOCONSOLE) failed: {}", IoError::last_os_error()));
         }
 
-        let sec_caps = profile.map(|p| p.security_capabilities());
+        let sec_caps = appcontainer.map(|p| p.security_capabilities());
         if let Some(sec_caps) = sec_caps.as_ref() {
             if ffi::UpdateProcThreadAttribute(
                 attr_list,
@@ -353,24 +428,50 @@ pub fn spawn_in_appcontainer(
         let env_w = env_block(env);
 
         let mut pi: ffi::PROCESS_INFORMATION = std::mem::zeroed();
-        let ok = ffi::CreateProcessW(
-            std::ptr::null(),
-            cmdline_w.as_mut_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            0, // bInheritHandles=FALSE — the ConPTY attaches via the proc-thread
-               // attribute, not inherited handles (matches portable-pty).
-            ffi::EXTENDED_STARTUPINFO_PRESENT | ffi::CREATE_UNICODE_ENVIRONMENT,
-            env_w
-                .as_ref()
-                .map(|b| b.as_ptr() as *const std::os::raw::c_void)
-                .unwrap_or(std::ptr::null()),
-            cwd_w.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null()),
-            &mut si.StartupInfo,
-            &mut pi,
-        );
+        // bInheritHandles=FALSE — the ConPTY attaches via the proc-thread
+        // attribute, not inherited handles (matches portable-pty).
+        let creation_flags = ffi::EXTENDED_STARTUPINFO_PRESENT | ffi::CREATE_UNICODE_ENVIRONMENT;
+        let env_ptr = env_w
+            .as_ref()
+            .map(|b| b.as_ptr() as *const std::os::raw::c_void)
+            .unwrap_or(std::ptr::null());
+        let cwd_ptr = cwd_w.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null());
+        let (ok, create_fn) = if let Some(token) = restricted_token {
+            (
+                ffi::CreateProcessAsUserW(
+                    token.raw(),
+                    std::ptr::null(),
+                    cmdline_w.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    creation_flags,
+                    env_ptr,
+                    cwd_ptr,
+                    &mut si.StartupInfo,
+                    &mut pi,
+                ),
+                "CreateProcessAsUserW",
+            )
+        } else {
+            (
+                ffi::CreateProcessW(
+                    std::ptr::null(),
+                    cmdline_w.as_mut_ptr(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    0,
+                    creation_flags,
+                    env_ptr,
+                    cwd_ptr,
+                    &mut si.StartupInfo,
+                    &mut pi,
+                ),
+                "CreateProcessW",
+            )
+        };
         if ok == 0 {
-            return Err(format!("CreateProcessW failed: {}", IoError::last_os_error()));
+            return Err(format!("{} failed: {}", create_fn, IoError::last_os_error()));
         }
         // The thread handle is unused; close it so it doesn't leak.
         ffi::CloseHandle(pi.hThread);
