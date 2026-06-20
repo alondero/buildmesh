@@ -31,15 +31,27 @@ function readStdin() {
 
 // Shell separators that break a command line into independently-running segments.
 const SEGMENT_SEP = /&&|\|\||[;&|\n]/;
-// `git [global-opts] commit` as a REAL subcommand. Only dash-options and the two
-// arg-taking global opts (`-C <path>`, `-c <name=val>`) may sit between `git` and
-// `commit` — so `git push origin commit-branch` (a non-dash token before a word
-// containing "commit") is NOT matched and can never be mistaken for a commit.
-const GIT_COMMIT_RE = /(^|\s)git\s+(?:-[Cc]\s+\S+\s+|-\S+\s+)*commit\b/;
-const GIT_ADD_RE = /(^|\s)git\s+(?:-[Cc]\s+\S+\s+|-\S+\s+)*(?:add|stage)\b/;
+// `git [global-opts] commit` as a REAL subcommand, anchored to the START of a segment
+// (a git invocation is the command leader, not a "git commit" substring inside a quoted
+// arg or heredoc body). Only dash-options and the two arg-taking global opts
+// (`-C <path>`, `-c <name=val>`) may sit between `git` and `commit` — so
+// `git push origin commit-branch` is NOT matched and can't be mistaken for a commit.
+const GIT_COMMIT_RE = /^\s*git\s+(?:-[Cc]\s+\S+\s+|-\S+\s+)*commit\b/;
+const GIT_ADD_RE = /^\s*git\s+(?:-[Cc]\s+\S+\s+|-\S+\s+)*(?:add|stage)\b/;
+
+export function stripHeredocs(cmd) {
+  // Remove heredoc BODIES (<<EOF / <<'EOF' / <<"EOF" / <<-EOF) before analysis. Their
+  // prose can contain the words "git commit"/"git add" and shell separators (a PR body
+  // or commit message passed to `gh ... <<EOF` or `git commit -F - <<EOF`), which must
+  // never be mistaken for real commands. The leading `git commit -F -` (if any) survives.
+  return String(cmd ?? "").replace(
+    /<<-?\s*(["']?)([A-Za-z_]\w*)\1[\s\S]*?(?:\n|^)[ \t]*\2(?=\s|$)/g,
+    " <<heredoc ",
+  );
+}
 
 export function classifyCommand(cmd) {
-  const c = String(cmd ?? "");
+  const c = stripHeredocs(cmd);
   // Scope detection to the segment that actually runs `git commit`. Scanning the whole
   // command string mis-fires: another piped command's flags (`ls -la && git commit`) or
   // a quoted message ("run git add first") would otherwise be read as commit flags.

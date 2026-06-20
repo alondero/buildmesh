@@ -59,6 +59,25 @@ describe("classifyCommand", () => {
   it("skips when a staging command runs earlier in a subshell chain", () => {
     expect(plain("(cd x && git add .) && git commit -m y").isPlainCommit).toBe(false);
   });
+
+  it("does NOT flag `gh pr create` whose heredoc body merely mentions git commit", () => {
+    // The dog-food bug: a PR body describing the hook contains "&& git commit".
+    const cmd =
+      "gh pr create --body-file - <<'EOF'\n" +
+      "Adds a hook that denies a plain `git commit` with nothing staged.\n" +
+      "It is segment-scoped so `ls -la && git commit` is handled.\n" +
+      "EOF";
+    expect(plain(cmd).isCommit).toBe(false);
+  });
+
+  it("still flags a real `git commit -F - <<EOF` (heredoc is the message, not a command)", () => {
+    const cmd = "git commit -F - <<'EOF'\nfix: do thing\n\nmentions git add in the body\nEOF";
+    expect(plain(cmd)).toEqual({ isCommit: true, isPlainCommit: true });
+  });
+
+  it("does NOT flag a non-git command that quotes 'git commit'", () => {
+    expect(plain('echo "remember to git commit later"').isCommit).toBe(false);
+  });
 });
 
 describe("decide", () => {
