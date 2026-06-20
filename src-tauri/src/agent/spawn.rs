@@ -5,7 +5,7 @@
 //! PTY-specific helpers (open_pty_pair, spawn_child) live in `process.rs`.
 
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
-use crate::agent::provider::Platform;
+use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
@@ -72,22 +72,6 @@ fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) ->
     let branch = crate::commands::git::get_default_branch(mesh_path.to_string());
     format!("origin/{}", branch)
 }
-
-/// Binary name the cwrap provider launcher resolves to (Anthropic/Minimax/Kimi).
-/// Mirrors the `binary: "cwrap"` declared in those adapters' spawn recipes; kept
-/// here as the single point the prefill-transport gate matches against.
-const CWRAP_BINARY: &str = "cwrap";
-
-/// Environment variable carrying prefill text to a cwrap-launched provider.
-///
-/// cwrap reads `$BUILDMESH_PREFILL` and forwards it to `claude --prefill`. We use
-/// the environment rather than a CLI arg because on Windows the cwrap providers
-/// are launched through `cwrap.cmd` → `cmd.exe`, whose command line is truncated
-/// at the first newline — so a multi-line prefill passed as an argv element loses
-/// everything after line one (the exact "only the first line is pre-filled"
-/// symptom). The process environment block is inherited intact by every shell
-/// layer, so the full text survives. See `build_spawn_command`.
-pub const PREFILL_ENV_VAR: &str = "BUILDMESH_PREFILL";
 
 /// Per-spawn timing log. Records elapsed milliseconds at each
 /// `checkpoint(name)` call and at the end via `total()`. Output goes to
@@ -167,10 +151,12 @@ pub enum SessionIdMode {
 /// Collapse `\r\n` and bare `\r` to `\n` in prefill text.
 ///
 /// GitHub issue/PR bodies come back from the REST API with CRLF line endings.
-/// A bare carriage return reaching an agent's TUI input (notably cwrap → ConPTY
-/// on Windows) is interpreted as Enter, submitting the prompt after the first
-/// line — so an issue-seeded agent only ever sees its first line. macOS (`claude`
-/// spawned directly) tolerates CRLF, which is why this only bit Windows.
+/// A bare carriage return reaching an agent's TUI input (notably when the
+/// agent is launched through `cmd.exe` or PowerShell on Windows) is
+/// interpreted as Enter, submitting the prompt after the first line — so an
+/// issue-seeded agent only ever sees its first line. macOS and Linux
+/// (`claude` spawned directly) tolerate CRLF, which is why this only bit
+/// Windows.
 fn normalize_prefill_newlines(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -188,51 +174,28 @@ pub fn build_spawn_command(
     sandbox: bool,
 ) -> CommandBuilder {
     let adapter = provider_enum.adapter();
-    let platform = Platform::current();
-
-    // Windows AppContainer sandbox: cwrap routes through MSYS2 bash, which can't
-    // initialize inside an AppContainer (STATUS_DLL_INIT_FAILED — the container's
-    // restricted object namespace breaks the MSYS2 runtime), so cwrap-backed
-    // providers reach claude.exe directly instead. Only on a Windows host and a
-    // non-WSL target (WSL has its own Linux userspace; macOS uses Seatbelt).
-    // `sandbox_direct_recipe` is `None` for non-cwrap providers, leaving them on
-    // their normal path. (First slice of absorbing cwrap into buildmesh.)
-    let sandbox_direct = if sandbox && resolved.env_type != EnvType::Wsl && cfg!(target_os = "windows")
-    {
-        adapter.sandbox_direct_recipe(platform)
+    let platform = if resolved.env_type == EnvType::Wsl {
+        Platform::Linux
     } else {
-        None
+        Platform::current()
     };
-    let use_sandbox_direct = sandbox_direct.is_some();
+
     // The base recipe before session-id / override / prefill args are layered on.
-    let base_recipe = || {
-        sandbox_direct
-            .clone()
-            .unwrap_or_else(|| adapter.spawn_recipe(platform))
-    };
+    let base_recipe = || adapter.spawn_recipe(platform);
 
     let mut recipe = match session_id_mode {
         SessionIdMode::Resume(id) => {
-            // Subcommand-style resume recipes (Codex) only apply off the
-            // sandbox-direct path; cwrap-backed providers append `--resume` to
-            // the direct claude.exe recipe instead.
-            match (!use_sandbox_direct)
-                .then(|| adapter.spawn_recipe_for_resume(platform, id))
-                .flatten()
-            {
-                Some(resume_recipe) => {
-                    tracing::info!("spawn_agent: using resume recipe for session {}", id);
-                    resume_recipe
+            if let Some(resume_recipe) = adapter.spawn_recipe_for_resume(platform, id) {
+                tracing::info!("spawn_agent: using resume recipe for session {}", id);
+                resume_recipe
+            } else {
+                let mut r = base_recipe();
+                let args = adapter.resume_args(id);
+                if !args.is_empty() {
+                    tracing::info!("spawn_agent: resuming session {}", id);
+                    r.base_args.extend(args);
                 }
-                None => {
-                    let mut r = base_recipe();
-                    let args = adapter.resume_args(id);
-                    if !args.is_empty() {
-                        tracing::info!("spawn_agent: resuming session {}", id);
-                        r.base_args.extend(args);
-                    }
-                    r
-                }
+                r
             }
         }
         SessionIdMode::Assign(id) => {
@@ -256,36 +219,55 @@ pub fn build_spawn_command(
         }
     }
 
-    // Prefill transport. cwrap providers launched on a non-WSL host receive the
-    // prefill through `$BUILDMESH_PREFILL` rather than a `--prefill` CLI arg,
-    // because the `cwrap.cmd` → cmd.exe launcher on Windows truncates a
-    // multi-line argv at the first newline (see PREFILL_ENV_VAR). WSL keeps the
-    // CLI arg: `wsl.exe` passes multi-line argv through intact, and a Windows env
-    // var does not cross into the WSL environment without `WSLENV`. Direct
-    // `claude`/`codex` spawns (macOS, Codex) also stay on the CLI arg.
-    let mut prefill_via_env: Option<String> = None;
     if adapter.supports_prefill() {
         if let Some(text) = prefill.filter(|s| !s.is_empty()) {
             let normalized = normalize_prefill_newlines(text);
-            if recipe.binary == CWRAP_BINARY && resolved.env_type != EnvType::Wsl {
-                prefill_via_env = Some(normalized);
-            } else {
-                recipe.base_args.extend(adapter.prefill_args(&normalized));
-            }
+            recipe.base_args.extend(adapter.prefill_args(&normalized));
         }
     }
 
     let mut cmd =
         spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
-    if let Some(text) = prefill_via_env {
-        cmd.env(PREFILL_ENV_VAR, text);
+
+    // Reset the claude backend env vars cwrap would have `unset` before
+    // `exec claude`, so a value inherited from buildmesh's own environment can't
+    // leak into the agent. For Anthropic this clean slate is the whole job (it
+    // exports nothing); MiniMax/Kimi reset then set their own below. On the WSL
+    // path this only clears the wsl.exe launcher's env — harmless, since only
+    // WSLENV-listed vars cross the boundary anyway.
+    if adapter.resets_backend_env() {
+        for k in CLAUDE_BACKEND_ENV_VARS {
+            cmd.env_remove(k);
+        }
     }
-    // On the sandbox-direct path claude.exe is spawned without cwrap, so the
-    // backend-selecting env cwrap would have exported (MiniMax/Kimi base URL,
-    // API token, model routing) is injected here. Empty for Anthropic.
-    if use_sandbox_direct {
-        for (k, v) in adapter.sandbox_provider_env() {
+
+    // Inject the backend-selecting env variables (MiniMax/Kimi base URL,
+    // API token, model routing). Empty for Anthropic.
+    let env_vars = adapter.provider_env();
+    if !env_vars.is_empty() {
+        for (k, v) in &env_vars {
             cmd.env(k, v);
+        }
+        if resolved.env_type == EnvType::Wsl {
+            // Append the key names to WSLENV so they propagate into WSL
+            let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
+            for (k, _) in &env_vars {
+                let suffix = "/u";
+                let entry = format!("{}{}", k, suffix);
+                let already_has = wslenv.split(':').any(|part| {
+                    part.split('/').next() == Some(k)
+                });
+                if !already_has {
+                    if wslenv.is_empty() {
+                        wslenv = entry;
+                    } else {
+                        wslenv = format!("{}:{}", wslenv, entry);
+                    }
+                }
+            }
+            if !wslenv.is_empty() {
+                cmd.env("WSLENV", wslenv);
+            }
         }
     }
     cmd
@@ -485,11 +467,11 @@ fn start_reader(
 
     std::thread::spawn(move || {
         // The SpawnTimer in spawn_agent_inner stops at process *creation*
-        // (`after_pty_spawn`), so the PowerShell → cwrap → Node → agent-CLI
-        // boot tail is invisible to it. Log the gap from spawn to the first
-        // byte of PTY output here — that first byte is the earliest signal the
-        // agent process is actually alive and producing a UI. Same
-        // `spawn_timing:` prefix so it sits alongside the other checkpoints.
+        // (`after_pty_spawn`), so the shell → agent-CLI boot tail is invisible
+        // to it. Log the gap from spawn to the first byte of PTY output here —
+        // that first byte is the earliest signal the agent process is actually
+        // alive and producing a UI. Same `spawn_timing:` prefix so it sits
+        // alongside the other checkpoints.
         let mut first_chunk = true;
         pump_pty_output(reader, |data| {
             if first_chunk {

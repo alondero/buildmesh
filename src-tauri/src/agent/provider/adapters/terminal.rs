@@ -5,9 +5,9 @@
 //! <path> --` to whatever binary/args the recipe provides.
 //!
 //! `WindowsShell::Direct` is the right choice on Windows: we ARE the
-//! shell, so there is no intermediate wrapper to mangle ANSI. (cwrap
-//! providers use `WindowsShell::PowerShell` because `cwrap.cmd` does
-//! not propagate ANSI through cmd.exe; we don't have that problem.)
+//! shell, so there is no intermediate wrapper to mangle ANSI. (Codex
+//! uses `WindowsShell::PowerShell` because its binary needs ANSI
+//! propagation through ConPTY; we don't have that problem.)
 //! Empty `base_args` keeps the spawned command literal —
 //! `["powershell.exe"]` on Windows or `["sh"]` on macOS/Linux — and
 //! matches the shape `build_shell_command` uses for the Build/Run

@@ -1,5 +1,5 @@
 use crate::agent::provider::{
-    claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell,
+    claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta,
 };
 
 pub struct AnthropicAdapter;
@@ -19,18 +19,7 @@ impl AgentProvider for AnthropicAdapter {
     }
 
     fn spawn_recipe(&self, platform: Platform) -> SpawnRecipe {
-        match platform {
-            Platform::Macos => SpawnRecipe {
-                binary: "claude",
-                base_args: vec!["--dangerously-skip-permissions".into()],
-                windows_shell: WindowsShell::Direct,
-            },
-            Platform::Windows | Platform::Linux => SpawnRecipe {
-                binary: "cwrap",
-                base_args: vec!["--anthropic".into()],
-                windows_shell: WindowsShell::PowerShell,
-            },
-        }
+        claude_direct_recipe(platform)
     }
 
     fn supports_resume(&self) -> bool {
@@ -61,11 +50,11 @@ impl AgentProvider for AnthropicAdapter {
         &[Platform::Windows, Platform::Macos, Platform::Linux]
     }
 
-    /// In the Windows AppContainer sandbox, reach claude.exe directly — the
-    /// cwrap → MSYS2 bash chain can't initialize there. Anthropic uses the
-    /// built-in subscription, so no backend env override is needed (the default
-    /// empty `sandbox_provider_env` applies).
-    fn sandbox_direct_recipe(&self, _platform: Platform) -> Option<SpawnRecipe> {
-        Some(claude_direct_recipe())
+    /// Reset the inherited claude backend env (cwrap `unset` parity). Anthropic
+    /// exports nothing of its own — `provider_env` is empty — so clearing any
+    /// inherited `ANTHROPIC_*` override is its whole contribution, keeping the
+    /// built-in subscription on the default Anthropic endpoint.
+    fn resets_backend_env(&self) -> bool {
+        true
     }
 }

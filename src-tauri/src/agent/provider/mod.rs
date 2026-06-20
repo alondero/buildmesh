@@ -33,8 +33,10 @@ impl Platform {
 }
 
 /// Shell to use when wrapping a Windows-native spawn.
-/// cwrap providers spawn under powershell so ANSI escape sequences propagate
-/// correctly; node-shim providers (`.cmd` batch files) use cmd.exe.
+/// Codex spawns under PowerShell so ANSI escape sequences propagate
+/// correctly through ConPTY; node-shim providers (`.cmd` batch files like
+/// OpenCode) use cmd.exe. The Claude Code family (Anthropic, MiniMax, Kimi)
+/// uses `Direct` now that cwrap is absorbed — see `claude_direct_recipe`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsShell {
     PowerShell,
@@ -52,20 +54,44 @@ pub struct SpawnRecipe {
     pub windows_shell: WindowsShell,
 }
 
-/// The bash-free claude invocation used by the Windows OS-sandbox path
-/// ([`AgentProvider::sandbox_direct_recipe`]). Inside an AppContainer the
-/// `cwrap → MSYS2 bash → claude` chain dies in the loader
-/// (`STATUS_DLL_INIT_FAILED`) because MSYS2's runtime can't initialize in the
-/// container's restricted object namespace — but the native `claude.exe` runs
-/// fine. We target the `.exe` explicitly (the bare `claude` is itself a bash
-/// shim) and spawn it directly, with no PowerShell/cmd/bash wrapper.
-pub fn claude_direct_recipe() -> SpawnRecipe {
+/// The direct `claude` / `claude.exe` invocation used by every claude-backed
+/// provider (Anthropic, MiniMax, Kimi) on every platform — cwrap's launcher
+/// role is absorbed into buildmesh. On Windows we target `claude.exe`
+/// explicitly (the bare `claude` is a bash shim); on macOS/Linux we use the
+/// `claude` shell script on PATH. Spawned directly via `spawn_environment::
+/// wrap`'s `WindowsShell::Direct` branch — no PowerShell, cmd.exe, or bash
+/// wrapper, so the AppContainer restriction that motivated the old sandbox-
+/// only seam no longer applies.
+pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
+    let binary = match platform {
+        Platform::Windows => "claude.exe",
+        _ => "claude",
+    };
     SpawnRecipe {
-        binary: "claude.exe",
+        binary,
         base_args: vec!["--dangerously-skip-permissions".into()],
         windows_shell: WindowsShell::Direct,
     }
 }
+
+/// The backend-selecting environment variables cwrap's launcher `unset` before
+/// `exec claude`. Claude-backed providers reset these on every spawn so a value
+/// inherited from buildmesh's own process environment (e.g. an `ANTHROPIC_*`
+/// override exported in the shell that launched the app) can't leak into the
+/// agent — reproducing the clean slate cwrap gave each session. Mirrors the
+/// `unset ...` block in `~/.local/bin/cwrap`. See [`AgentProvider::resets_backend_env`].
+pub const CLAUDE_BACKEND_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "API_TIMEOUT_MS",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+];
 
 /// UI metadata declared by an adapter. The `id` is supplied separately via
 /// `AgentProvider::id()` so the two can't diverge.
@@ -191,27 +217,23 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
-    /// Bash-free spawn recipe for the Windows AppContainer sandbox. cwrap routes
-    /// through MSYS2 `bash`, which can't initialize inside an AppContainer
-    /// (`STATUS_DLL_INIT_FAILED`), so cwrap-backed providers (Anthropic, MiniMax,
-    /// Kimi) return [`claude_direct_recipe`] here to reach `claude.exe` directly.
-    /// The provider-selecting backend env that cwrap would have exported is
-    /// supplied separately by [`sandbox_provider_env`](Self::sandbox_provider_env).
-    ///
-    /// Returns `None` for providers that don't go through cwrap (they already
-    /// spawn a native binary). Consumed by `build_spawn_command` only on a
-    /// Windows host with the sandbox toggle on and a non-WSL target. First slice
-    /// of absorbing cwrap into buildmesh.
-    fn sandbox_direct_recipe(&self, _platform: Platform) -> Option<SpawnRecipe> {
-        None
+    /// Backend-selecting environment that `cwrap` would export for this provider,
+    /// reconstructed in-process so that we can launch `claude`/`claude.exe` without bash.
+    /// Empty for Anthropic (the built-in subscription needs no overrides) and for
+    /// non-cwrap providers. MiniMax/Kimi read their API keys from `~/.claude/providers.conf`.
+    fn provider_env(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
 
-    /// Backend-selecting environment that `cwrap` would export for this provider,
-    /// reconstructed in-process so [`sandbox_direct_recipe`](Self::sandbox_direct_recipe)
-    /// can launch `claude.exe` without bash. Empty for Anthropic (the built-in
-    /// subscription needs no overrides) and for non-cwrap providers. MiniMax/Kimi
-    /// read their API keys from `~/.claude/providers.conf`.
-    fn sandbox_provider_env(&self) -> Vec<(String, String)> {
-        Vec::new()
+    /// Whether this provider's launcher resets [`CLAUDE_BACKEND_ENV_VARS`] before
+    /// applying [`provider_env`](Self::provider_env). True for the claude-backed
+    /// family (Anthropic, MiniMax, Kimi): cwrap `unset` those vars before
+    /// `exec claude`, so any value inherited from buildmesh's environment is
+    /// cleared first to give the agent the same clean slate. Anthropic exports
+    /// nothing of its own, so the reset is its whole contribution. False for
+    /// native-binary providers (Codex, OpenCode, Agy) that never went through
+    /// cwrap and don't read these vars.
+    fn resets_backend_env(&self) -> bool {
+        false
     }
 }

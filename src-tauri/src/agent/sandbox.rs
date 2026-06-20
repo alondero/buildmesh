@@ -291,8 +291,8 @@ mod tests {
     #[test]
     fn seatbelt_command_wraps_binary_with_sandbox_exec() {
         let session_id = -97_001; // negative => unlikely to collide with a real session temp file
-        let args = vec!["--anthropic".to_string(), "--session-id".to_string(), "abc".to_string()];
-        let cmd = seatbelt_command("cwrap", &args, WORKTREE, session_id).expect("write profile");
+        let args = vec!["--dangerously-skip-permissions".to_string(), "--session-id".to_string(), "abc".to_string()];
+        let cmd = seatbelt_command("claude", &args, WORKTREE, session_id).expect("write profile");
 
         let got = argv(&cmd);
         assert_eq!(got[0], SANDBOX_EXEC, "must invoke sandbox-exec: {got:?}");
@@ -301,7 +301,7 @@ mod tests {
         assert!(profile_file.ends_with(".sb"), "profile path must be a .sb file: {got:?}");
         assert_eq!(
             &got[3..],
-            &["cwrap", "--anthropic", "--session-id", "abc"],
+            &["claude", "--dangerously-skip-permissions", "--session-id", "abc"],
             "inner binary + args must follow the profile, unchanged: {got:?}"
         );
 
