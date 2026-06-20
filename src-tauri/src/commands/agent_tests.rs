@@ -34,9 +34,11 @@ mod tests {
         }
     }
 
-    /// Windows-native (non-WSL) resolution — the path where cwrap providers are
-    /// launched through `cwrap.cmd` → cmd.exe and a multi-line `--prefill` argv
-    /// would be truncated at the first newline.
+    /// Windows-native (non-WSL) resolution — the path where claude-backed
+    /// providers (Anthropic, MiniMax, Kimi) launch `claude.exe` directly
+    /// through ConPTY. Pre-#531, a multi-line `--prefill` argv would have been
+    /// truncated at the first newline by the `cwrap.cmd` → cmd.exe chain;
+    /// post-#531 the argv goes straight into the owned ConPTY untouched.
     fn windows_resolved() -> ResolvedPath {
         ResolvedPath {
             host_path: SPAWN_PATH.to_string(),

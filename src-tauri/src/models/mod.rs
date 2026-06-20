@@ -272,7 +272,7 @@ pub struct AgentNode {
     pub provider: Provider,   // anthropic or minimax
     pub status: SessionStatus,
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
-    pub worktree_name: Option<String>,   // git worktree name (same as name for cwrap providers)
+    pub worktree_name: Option<String>,   // git worktree name (same as name for claude-backed providers)
     pub use_worktree: bool,  // true = commands run in worktree, false = repo root
     #[ts(as = "Option<i32>")]
     pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
@@ -834,12 +834,12 @@ mod tests {
         assert!(Provider::Codex.adapter().supports_resume());
     }
 
-    /// The "produces a readable transcript" capability (#317) — only the Claude
-    /// Code family (the three `cwrap` providers) writes a transcript the
-    /// coordinator read API can drill into. Everything else degrades to a
+    /// The "produces a readable transcript" capability (#317) — only the three
+    /// claude-backed providers (Anthropic, MiniMax, Kimi) write a transcript
+    /// the coordinator read API can drill into. Everything else degrades to a
     /// spine-only digest flagged `unsupported`, so this matrix is load-bearing.
     #[test]
-    fn only_cwrap_providers_produce_a_readable_transcript() {
+    fn only_claude_backed_providers_produce_a_readable_transcript() {
         assert!(Provider::Anthropic.adapter().produces_readable_transcript());
         assert!(Provider::Minimax.adapter().produces_readable_transcript());
         assert!(Provider::Kimi.adapter().produces_readable_transcript());

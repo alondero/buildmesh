@@ -1,12 +1,17 @@
-//! Read `~/.claude/providers.conf` — the shell `KEY=value` file that `cwrap`
-//! sources for third-party backend API keys (MiniMax, Kimi).
+//! Read `~/.claude/providers.conf` — the shell `KEY=value` file that used to be
+//! sourced by the now-archived `cwrap` launcher for third-party backend API
+//! keys (MiniMax, Kimi).
 //!
-//! The Windows OS-sandbox path can't run `cwrap`: it routes through MSYS2
-//! `bash`, which fails to initialize inside an AppContainer
-//! (`STATUS_DLL_INIT_FAILED`). So the MiniMax/Kimi adapters reconstruct the
-//! backend environment in-process from this same file and inject it directly
-//! into the claude.exe spawn. First slice of absorbing cwrap into buildmesh
-//! (see the cwrap-absorption tracking issue).
+//! Post-#531 (cwrap absorption), the third-party-backend claude-backed
+//! adapters (MiniMax, Kimi) read this file via their `provider_env()` impl
+//! and inject the resulting `ANTHROPIC_*` vars directly into the
+//! `claude` / `claude.exe` spawn. Anthropic's `provider_env()` returns
+//! empty (the built-in subscription needs no overrides) so it never reads
+//! this file. The AppContainer sandbox path happens to share the same need
+//! for the same reason (cwrap can't run inside an AppContainer — its MSYS2
+//! `bash` shim fails to initialize with `STATUS_DLL_INIT_FAILED`), but the
+//! readers above are what call `read_providers_conf`; the sandbox profile
+//! itself doesn't touch this file.
 
 use std::collections::HashMap;
 

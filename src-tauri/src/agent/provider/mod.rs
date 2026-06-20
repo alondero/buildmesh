@@ -145,8 +145,8 @@ pub trait AgentProvider: Send + Sync {
 
     /// Whether this provider writes a transcript the coordinator read API can
     /// parse into a Node Digest's rich layer (ADR-0008). The Claude Code family
-    /// — everything launched through `cwrap` (Anthropic, MiniMax, Kimi) — runs
-    /// real Claude Code with a swapped backend, so it writes Claude Code's
+    /// (Anthropic, MiniMax, Kimi) runs real Claude Code with a swapped backend,
+    /// so it writes Claude Code's
     /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
     /// `services::transcript_reader` knows how to read. Providers with their own
     /// transcript format (Codex) or none (OpenCode, Agy, Terminal) return
@@ -217,10 +217,14 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
-    /// Backend-selecting environment that `cwrap` would export for this provider,
-    /// reconstructed in-process so that we can launch `claude`/`claude.exe` without bash.
-    /// Empty for Anthropic (the built-in subscription needs no overrides) and for
-    /// non-cwrap providers. MiniMax/Kimi read their API keys from `~/.claude/providers.conf`.
+    /// Backend-selecting environment for this provider — the `ANTHROPIC_*`
+    /// variables that select which upstream API/model the Claude Code binary
+    /// talks to. Empty for Anthropic (the built-in subscription needs no
+    /// overrides) and for the non-Claude providers (Codex, OpenCode, Agy,
+    /// Terminal) which use their own binaries. MiniMax/Kimi read their API
+    /// keys from `~/.claude/providers.conf` via
+    /// [`provider_conf::read_providers_conf`] and emit the corresponding
+    /// `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` here.
     fn provider_env(&self) -> Vec<(String, String)> {
         Vec::new()
     }
