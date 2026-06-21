@@ -166,4 +166,18 @@ describe('tauri.ts provider memoisation (#405)', () => {
     await api.listProviders();
     expect(callsTo('list_providers')).toBe(2);
   });
+
+  // Issue #573: reordering harnesses changes the menu order, so the cached
+  // provider list must be busted to surface the new order on the next read.
+  it('setHarnessOrder() invokes the command and invalidates the cached provider list', async () => {
+    mockProviderIpc();
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(1);
+
+    await api.setHarnessOrder(['minimax', 'anthropic']);
+    expect(mockInvoke).toHaveBeenCalledWith('set_harness_order', { order: ['minimax', 'anthropic'] });
+
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(2);
+  });
 });

@@ -95,6 +95,7 @@ fn compose_provider_menu(
     profiles: Vec<crate::preferences::HarnessProfile>,
     accounts: Vec<crate::preferences::ProviderAccount>,
     host: Platform,
+    order: &[String],
 ) -> Vec<ProviderInfo> {
     let mut rows: Vec<ProviderInfo> = profiles
         .iter()
@@ -112,7 +113,7 @@ fn compose_provider_menu(
             }
         }
     }
-    order_providers(rows)
+    order_providers(rows, order)
 }
 
 /// Returns the list of agent providers available on this host platform.
@@ -122,18 +123,33 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         crate::preferences::harness_profiles(),
         crate::preferences::provider_accounts(),
         Platform::current(),
+        &crate::preferences::harness_order(),
     )
 }
 
-/// Order the provider menu: every real harness first (keeping their existing
-/// order), with the plain `terminal` row pushed to the bottom — it's the
-/// least-common pick, so it shouldn't sit at the top of the launch menu
-/// (issue #534). Pure and stable (no disk / globals) so the ordering is the
-/// unit-test seam and the relative order of the real harnesses is preserved.
-fn order_providers(mut providers: Vec<ProviderInfo>) -> Vec<ProviderInfo> {
-    // `sort_by_key` is stable: `false` (0) keeps real harnesses ahead of the
-    // `true` (1) terminal rows without disturbing their relative order.
-    providers.sort_by_key(|p| p.id == "terminal");
+/// Order the provider menu by the user's stored harness order, with the plain
+/// `terminal` row always pinned to the bottom (issue #534 / #573).
+///
+/// `order` is the persisted list of harness-row ids (Terminal excluded — it's
+/// forced last regardless of where it appears). Each row's rank is its index in
+/// `order`; a row whose id isn't in the list (a newly-detected harness) ranks
+/// just below `usize::MAX` so it appends at the end *above* Terminal. An
+/// uninstalled harness simply isn't among `providers`, so its id sits dormant in
+/// `order` and its slot is restored verbatim when it reappears.
+///
+/// Pure and stable (no disk / globals) so the ordering is the unit-test seam:
+/// the `(is_terminal, rank)` tuple key sorts Terminal last via the bool, ranks
+/// the rest by stored order, and the stable sort keeps equal-rank newcomers in
+/// their input order.
+fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]) -> Vec<ProviderInfo> {
+    providers.sort_by_key(|p| {
+        let is_terminal = p.id == "terminal";
+        let rank = order
+            .iter()
+            .position(|id| *id == p.id)
+            .unwrap_or(usize::MAX - 1);
+        (is_terminal, rank)
+    });
     providers
 }
 
@@ -1012,10 +1028,78 @@ mod tests {
             icon: String::new(),
             resumable: false,
         };
-        let ordered = order_providers(vec![row("terminal"), row("claude"), row("codex")]);
+        // With no stored order, the two real harnesses keep their input order
+        // and Terminal sorts last.
+        let ordered = order_providers(vec![row("terminal"), row("claude"), row("codex")], &[]);
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
-        // Terminal last; the two real harnesses keep their input order.
         assert_eq!(ids, vec!["claude", "codex", "terminal"]);
+    }
+
+    /// Issue #573: the stored harness order drives the row order, Terminal still
+    /// pinned last even if it appears mid-list in the stored order.
+    #[test]
+    fn order_providers_applies_stored_order() {
+        let row = |id: &str| ProviderInfo {
+            id: id.to_string(),
+            label: id.to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+        };
+        let order = vec!["codex".to_string(), "terminal".to_string(), "claude".to_string()];
+        let ordered = order_providers(vec![row("claude"), row("terminal"), row("codex")], &order);
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        // codex before claude per the stored order; terminal forced last
+        // despite sitting in the middle of `order`.
+        assert_eq!(ids, vec!["codex", "claude", "terminal"]);
+    }
+
+    /// Issue #573 AC: a newly-detected harness (not yet in the stored order)
+    /// appends at the end of the real harnesses, above Terminal.
+    #[test]
+    fn order_providers_new_harness_appends_above_terminal() {
+        let row = |id: &str| ProviderInfo {
+            id: id.to_string(),
+            label: id.to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+        };
+        let order = vec!["claude".to_string(), "codex".to_string()];
+        // "newbie" was just detected and isn't in the saved order.
+        let ordered = order_providers(
+            vec![row("terminal"), row("newbie"), row("codex"), row("claude")],
+            &order,
+        );
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude", "codex", "newbie", "terminal"]);
+    }
+
+    /// Issue #573 AC: an uninstalled harness keeps its saved slot — when it
+    /// reappears among the rows it lands back in its stored position rather than
+    /// being appended.
+    #[test]
+    fn order_providers_uninstalled_keeps_slot() {
+        let row = |id: &str| ProviderInfo {
+            id: id.to_string(),
+            label: id.to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+        };
+        // Saved order had minimax between claude and codex; it was uninstalled
+        // (absent from rows) for a while, now it's back.
+        let order = vec![
+            "claude".to_string(),
+            "minimax".to_string(),
+            "codex".to_string(),
+        ];
+        let ordered = order_providers(
+            vec![row("codex"), row("claude"), row("minimax"), row("terminal")],
+            &order,
+        );
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["claude", "minimax", "codex", "terminal"]);
     }
 
     // ----- compose_provider_menu (issue #568) ----------------------------
@@ -1052,6 +1136,7 @@ mod tests {
             vec![profile("terminal", "terminal")],
             vec![acct("minimax", true, Some("sk-mm")), acct("kimi", true, Some("sk-moon"))],
             Platform::Windows,
+            &[],
         );
         let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
         assert!(ids.contains(&"minimax"), "keyed MiniMax must appear in the menu");
@@ -1073,6 +1158,7 @@ mod tests {
                 acct("anthropic", true, Some("x")),   // self-auth → not claude_compatible
             ],
             Platform::Windows,
+            &[],
         );
         let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["terminal"], "none of these should reach the menu");
@@ -1086,6 +1172,7 @@ mod tests {
             vec![profile("claude", "anthropic")],
             vec![acct("claude", true, Some("k"))],
             Platform::Windows,
+            &[],
         );
         assert_eq!(menu.iter().filter(|p| p.id == "claude").count(), 1);
     }

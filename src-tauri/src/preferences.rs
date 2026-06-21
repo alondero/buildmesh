@@ -189,6 +189,13 @@ pub struct AppPreferences {
     /// empty. Custom (non-built-in) entries are appended (issue #537).
     #[serde(default)]
     pub provider_accounts: Vec<ProviderAccount>,
+    /// User-chosen order of the spawn-menu harness rows, as a list of row ids
+    /// (issue #573 / ADR-0016). `Terminal` is excluded — it's always forced to
+    /// the bottom by `commands::agent::order_providers`. A row whose id isn't
+    /// listed (a newly-detected harness) appends after the listed ones; an
+    /// uninstalled harness keeps its saved slot here until it reappears.
+    #[serde(default)]
+    pub harness_order: Vec<String>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -306,6 +313,29 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
         }
     }
     profiles
+}
+
+/// The user's stored spawn-menu harness order — a list of row ids applied by
+/// `commands::agent::order_providers` (issue #573). Empty when never set, in
+/// which case the menu keeps its natural derivation order (Terminal still last).
+/// A load failure is logged and treated as "no stored order".
+pub fn harness_order() -> Vec<String> {
+    match load() {
+        Ok(prefs) => prefs.harness_order,
+        Err(e) => {
+            tracing::warn!("preferences::harness_order load failed, using natural order: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Persist the spawn-menu harness order (issue #573). `Terminal` is filtered out
+/// before storing — it's always forced last by the ordering logic, so keeping it
+/// out of the stored list avoids a redundant (and potentially misleading) slot.
+pub fn set_harness_order(order: Vec<String>) -> Result<(), String> {
+    let mut prefs = load()?;
+    prefs.harness_order = order.into_iter().filter(|id| id != "terminal").collect();
+    save(prefs)
 }
 
 /// Merge startup-detected harness profiles into stored preferences (issue #536).
@@ -932,6 +962,34 @@ mod tests {
         // with an empty Vec rather than failing.
         let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(prefs.harness_profiles, Vec::new());
+    }
+
+    // ─── Harness order (issue #573) ──────────────────────────────────────────
+
+    #[test]
+    fn app_preferences_defaults_harness_order_to_empty_when_key_absent() {
+        let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.harness_order, Vec::<String>::new());
+    }
+
+    #[test]
+    fn harness_order_round_trips_through_set_and_read() {
+        with_temp_dir(|_| {
+            assert_eq!(harness_order(), Vec::<String>::new());
+            set_harness_order(vec!["codex".into(), "claude".into()]).unwrap();
+            *CACHE.lock().unwrap() = None; // force a disk read
+            assert_eq!(harness_order(), vec!["codex".to_string(), "claude".to_string()]);
+        });
+    }
+
+    #[test]
+    fn set_harness_order_filters_out_terminal() {
+        with_temp_dir(|_| {
+            // Terminal is forced last by the ordering logic, so it's never stored.
+            set_harness_order(vec!["claude".into(), "terminal".into(), "codex".into()]).unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(harness_order(), vec!["claude".to_string(), "codex".to_string()]);
+        });
     }
 
     // ─── Provider accounts (issue #537) ──────────────────────────────────────

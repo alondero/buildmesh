@@ -36,4 +36,12 @@ harness_profiles: Array<HarnessProfile>,
  * [`provider_accounts`]; the built-ins are always present even when this is
  * empty. Custom (non-built-in) entries are appended (issue #537).
  */
-provider_accounts: Array<ProviderAccount>, };
+provider_accounts: Array<ProviderAccount>, 
+/**
+ * User-chosen order of the spawn-menu harness rows, as a list of row ids
+ * (issue #573 / ADR-0016). `Terminal` is excluded — it's always forced to
+ * the bottom by `commands::agent::order_providers`. A row whose id isn't
+ * listed (a newly-detected harness) appends after the listed ones; an
+ * uninstalled harness keeps its saved slot here until it reappears.
+ */
+harness_order: Array<string>, };

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { HarnessOrderList } from './HarnessOrderList';
 import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
@@ -450,6 +451,28 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
   const handleRefresh = () => fetchUsage(true);
 
+  // Persist a new spawn-menu harness order (issue #573). Optimistically reorder
+  // the local `providers` list to match — keeping any non-listed rows (Terminal)
+  // appended at the end, exactly as the backend re-derives them — and roll back
+  // on failure so the visible order never lies about what was stored. The
+  // backend emits `provider-list-changed`, so the sidebar / probes re-read live.
+  const handleReorderHarnesses = async (order: string[]) => {
+    const previous = providers;
+    const byId = new Map(providers.map(p => [p.id, p]));
+    const reordered = [
+      ...(order.map(id => byId.get(id)).filter(Boolean) as ProviderInfo[]),
+      ...providers.filter(p => !order.includes(p.id)),
+    ];
+    setProviders(reordered);
+    setError(null);
+    try {
+      await api.setHarnessOrder(order);
+    } catch (e) {
+      setProviders(previous);
+      setError(String(e));
+    }
+  };
+
   const handleSave = async (newValue: string) => {
     const previous = selected;
     setSelected(newValue);
@@ -631,6 +654,16 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         {error && (
           <div className="mt-4 text-status-error text-base">{error}</div>
+        )}
+
+        {providers.filter(p => p.id !== 'terminal').length >= 2 && (
+          <div className="mt-8 pt-5 border-t border-border-subtle">
+            <h3 className="text-xl font-semibold text-text-primary mb-2">Spawn menu order</h3>
+            <p className="text-base text-text-muted mb-4">
+              Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last.
+            </p>
+            <HarnessOrderList providers={providers} onReorder={handleReorderHarnesses} />
+          </div>
         )}
 
         <div className="mt-8 pt-5 border-t border-border-subtle">

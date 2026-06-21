@@ -654,6 +654,19 @@ export const setAppDefaultProvider = (provider: string | null) =>
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });
 
+/** Persist the spawn-menu harness order (issue #573). `order` is the list of
+ *  harness-row ids top-to-bottom; Terminal is filtered out backend-side and is
+ *  always pinned last. Busts the cached provider list AFTER the write resolves
+ *  (same reasoning as `upsertProviderAccount`) so the next `listProviders` reads
+ *  the reordered menu. */
+export const setHarnessOrder = async (order: string[]) => {
+  try {
+    return await _invoke('set_harness_order', { order });
+  } finally {
+    providerListPromise = null;
+  }
+};
+
 // ── Model provider accounts (issue #537) ───────────────────────────────────
 //
 // Generated from `crate::preferences::{ProviderAccount, BillingMode}`. A custom

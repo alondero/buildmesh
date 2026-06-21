@@ -22,6 +22,19 @@ pub async fn set_app_default_provider(provider: Option<String>) -> Result<(), St
     preferences::save(prefs)
 }
 
+/// Persist the user's spawn-menu harness order (issue #573). `order` is the list
+/// of harness-row ids in the desired top-to-bottom order; `Terminal` is filtered
+/// out backend-side (it's always forced last). Emits `provider-list-changed` so
+/// every spawn surface (sidebar menu, Probe tabs) drops its cached provider list
+/// and re-reads the reordered menu — the same cross-component invalidation used
+/// by the account commands.
+#[command]
+pub async fn set_harness_order(app: AppHandle, order: Vec<String>) -> Result<(), String> {
+    preferences::set_harness_order(order)?;
+    let _ = app.emit("provider-list-changed", ());
+    Ok(())
+}
+
 /// The effective model-provider account list — code-defined built-ins with the
 /// user's stored overrides merged in (issue #537). The settings UI renders this
 /// rather than the raw `provider_accounts` override list so the built-ins are
