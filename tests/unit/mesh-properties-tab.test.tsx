@@ -63,10 +63,11 @@ function mockBackend() {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'list_providers':
+        // Post-#538 the list is purely dynamic harness profiles (no `legacy`).
         return Promise.resolve([
-          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', legacy: false },
-          { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', legacy: true },
-          { id: 'minimax', label: 'Minimax', color: '#000', icon: '', legacy: true },
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '' },
+          { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '' },
+          { id: 'codex', label: 'Codex', color: '#000', icon: '' },
         ]);
       case 'get_mesh_properties':
         return Promise.resolve(MESH_CONFIG);
@@ -192,20 +193,16 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(provider.value).toBe('anthropic');
   });
 
-  it('groups the default-provider options into Profiles and Legacy optgroups (#536)', async () => {
+  it('lists the default-provider options as a flat list with no optgroups (#538)', async () => {
     await openPropertiesTab();
 
     const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
-    const groups = provider.querySelectorAll('optgroup');
-    const labels = Array.from(groups).map((g) => g.getAttribute('label'));
-    expect(labels).toEqual(['Profiles', 'Legacy']);
-
-    // Dynamic profile under Profiles; legacy enum providers under Legacy.
-    const profiles = provider.querySelector('optgroup[label="Profiles"]');
-    const legacy = provider.querySelector('optgroup[label="Legacy"]');
-    expect(profiles?.querySelector('option[value="claude"]')).toBeTruthy();
-    expect(legacy?.querySelector('option[value="anthropic"]')).toBeTruthy();
-    expect(legacy?.querySelector('option[value="minimax"]')).toBeTruthy();
+    // The "Profiles"/"Legacy" optgroups were retired — every harness profile is
+    // a flat option (plus the leading "<Default>" entry).
+    expect(provider.querySelectorAll('optgroup')).toHaveLength(0);
+    expect(provider.querySelector('option[value="claude"]')).toBeTruthy();
+    expect(provider.querySelector('option[value="anthropic"]')).toBeTruthy();
+    expect(provider.querySelector('option[value="codex"]')).toBeTruthy();
   });
 
   it('saves text fields on blur via update_mesh_column', async () => {

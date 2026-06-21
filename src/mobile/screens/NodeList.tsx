@@ -36,12 +36,13 @@ export const STATUS_META: Record<NodeStatus, { color: string; label: string }> =
   pending: { color: "#9c27b0", label: "starting" },
 };
 
+// Offline fallback shown only when the /providers fetch fails. The live list is
+// the user's dynamic harness profiles; this is a degraded static default (issue
+// #538 dropped the legacy enum rows / `legacy` flag).
 const FALLBACK_PROVIDERS: Provider[] = [
-  { id: "anthropic", label: "Anthropic (Claude)", color: "#1d7cfc", icon: "A", legacy: true },
-  { id: "minimax", label: "MiniMax", color: "#6366f1", icon: "M", legacy: true },
-  { id: "kimi", label: "Kimi", color: "#00c4c4", icon: "K", legacy: true },
-  { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G", legacy: true },
-  { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O", legacy: true },
+  { id: "anthropic", label: "Anthropic (Claude)", color: "#1d7cfc", icon: "A" },
+  { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G" },
+  { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O" },
 ];
 
 export default function NodeList({

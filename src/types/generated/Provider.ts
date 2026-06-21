@@ -6,4 +6,4 @@
  * `Anthropic` is `#[default]` so `AgentNode::default()` matches the existing
  * `from_db_str` fallback ("unknown string → Anthropic"); issue #457.
  */
-export type Provider = "anthropic" | "minimax" | "agy" | "opencode" | "codex" | "kimi" | "terminal";
+export type Provider = "anthropic" | "agy" | "opencode" | "codex" | "terminal";

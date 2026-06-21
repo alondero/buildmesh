@@ -2,16 +2,12 @@
 //! sourced by the now-archived `cwrap` launcher for third-party backend API
 //! keys (MiniMax, Kimi).
 //!
-//! Post-#531 (cwrap absorption), the third-party-backend claude-backed
-//! adapters (MiniMax, Kimi) read this file via their `provider_env()` impl
-//! and inject the resulting `ANTHROPIC_*` vars directly into the
-//! `claude` / `claude.exe` spawn. Anthropic's `provider_env()` returns
-//! empty (the built-in subscription needs no overrides) so it never reads
-//! this file. The AppContainer sandbox path happens to share the same need
-//! for the same reason (cwrap can't run inside an AppContainer — its MSYS2
-//! `bash` shim fails to initialize with `STATUS_DLL_INIT_FAILED`), but the
-//! readers above are what call `read_providers_conf`; the sandbox profile
-//! itself doesn't touch this file.
+//! Post-#538, node *spawns* no longer read this file: a custom Claude-compatible
+//! profile carries its endpoint in a model-provider account, injected at spawn by
+//! [`crate::preferences::resolve_provider_env`]. The one remaining reader is
+//! [`minimax_backend_env`], used by the session-naming helper
+//! ([`crate::session_naming`]) to run a cheap MiniMax model for node slugs — that
+//! side-channel keeps its hardcoded `~/.claude/providers.conf` routing.
 
 use std::collections::HashMap;
 
@@ -50,6 +46,54 @@ pub fn parse_providers_conf(contents: &str) -> HashMap<String, String> {
         }
     }
     map
+}
+
+/// Build the MiniMax backend `ANTHROPIC_*` env from `~/.claude/providers.conf` —
+/// the variables the absorbed `cwrap --minimax` arm exported.
+///
+/// This is the **naming side-channel only**. Node *spawns* now resolve their
+/// backend env per-profile from the configured model-provider account (see
+/// [`crate::preferences::resolve_provider_env`]); the hardcoded MiniMax routing
+/// that used to live in `minimax.rs`'s `provider_env()` survives here for the
+/// session-naming helper ([`crate::session_naming`]), which deliberately runs a
+/// cheap MiniMax model to summarise a node into a slug regardless of the node's
+/// own provider. A missing `MINIMAX_API_KEY` is logged (the naming `claude
+/// --print` call would then fail to authenticate) but never panics.
+pub fn minimax_backend_env() -> Vec<(String, String)> {
+    let conf = read_providers_conf();
+    let base_url = conf
+        .get("MINIMAX_BASE_URL")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .unwrap_or_else(|| "https://api.minimax.io/anthropic".to_string());
+    let mut env = vec![
+        ("ANTHROPIC_BASE_URL".to_string(), base_url),
+        ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
+        ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(), "1".to_string()),
+        ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(), "512000".to_string()),
+        ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
+        ("ANTHROPIC_SMALL_FAST_MODEL".to_string(), "MiniMax-M2.7".to_string()),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), "MiniMax-M2.7".to_string()),
+    ];
+    // Prefer the legacy `~/.claude/providers.conf` key (Adam's existing setup),
+    // then fall back to the key configured via the #537 Accounts UI
+    // (`minimax_api_key_resolved` reads the minimax account key then the legacy
+    // flat field), so a user who only set their key in the new UI still gets a
+    // working naming side-channel.
+    let api_key = conf
+        .get("MINIMAX_API_KEY")
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .or_else(crate::preferences::minimax_api_key_resolved);
+    match api_key {
+        Some(key) => env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), key)),
+        None => tracing::error!(
+            "MiniMax naming: no MINIMAX_API_KEY in ~/.claude/providers.conf nor a configured MiniMax account key — claude --print will fail to authenticate"
+        ),
+    }
+    env
 }
 
 fn strip_matched_quotes(s: &str) -> String {

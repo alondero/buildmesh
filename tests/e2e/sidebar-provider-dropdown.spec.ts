@@ -36,12 +36,13 @@ test.describe('sidebar provider dropdown', () => {
     await plusButton.click();
     await page.waitForTimeout(300);
 
-    // Dropdown should appear with provider options
-    await expect(page.locator('text=Anthropic').first()).toBeVisible();
-    await expect(page.locator('text=Minimax').first()).toBeVisible();
-    await expect(page.locator('text=Kimi').first()).toBeVisible();
-    await expect(page.locator('text=Agy').first()).toBeVisible();
-    await expect(page.locator('text=OpenCode').first()).toBeVisible();
+    // Dropdown shows dynamic harness profiles. Terminal is the always-present
+    // default; the retired legacy enum rows ("Minimax"/"Kimi") and the "Legacy"
+    // header must NOT appear (issue #538).
+    await expect(page.locator('text=Terminal').first()).toBeVisible();
+    await expect(page.locator('text=Minimax')).toHaveCount(0);
+    await expect(page.locator('text=Kimi')).toHaveCount(0);
+    await expect(page.locator('text=Legacy')).toHaveCount(0);
   });
 
   test('selecting provider creates session and spawns agent', async ({ page }) => {
@@ -56,8 +57,8 @@ test.describe('sidebar provider dropdown', () => {
     await plusButton.click();
     await page.waitForTimeout(300);
 
-    // Click Anthropic to spawn agent
-    await page.locator('text=Anthropic').first().click();
+    // Click Terminal (the always-present default profile) to spawn a session.
+    await page.locator('text=Terminal').first().click();
     await page.waitForTimeout(1500);
 
     // A session should now appear in the sidebar

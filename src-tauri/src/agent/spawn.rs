@@ -162,10 +162,19 @@ fn normalize_prefill_newlines(text: &str) -> String {
 }
 
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
+///
+/// `backend_env` is the per-profile backend selection resolved by the caller
+/// (`preferences::resolve_provider_env(&node.provider)`): the `ANTHROPIC_*`
+/// variables a custom Claude-compatible profile (MiniMax/Kimi/DeepSeek) needs to
+/// target its endpoint. Empty for the built-in Anthropic subscription and for
+/// the native-binary providers. Passed in (rather than resolved here) so this
+/// function stays a pure composition of its inputs — no disk / preferences-cache
+/// access — and the env injection can be unit-tested with an explicit list.
 #[allow(clippy::too_many_arguments)]
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
     provider_enum: Provider,
+    backend_env: &[(String, String)],
     session_id_mode: &SessionIdMode,
     session_id: i64,
     model_override: Option<&str>,
@@ -231,31 +240,33 @@ pub fn build_spawn_command(
 
     // Reset the claude backend env vars cwrap would have `unset` before
     // `exec claude`, so a value inherited from buildmesh's own environment can't
-    // leak into the agent. For Anthropic this clean slate is the whole job (it
-    // exports nothing); MiniMax/Kimi reset then set their own below. On the WSL
-    // path this only clears the wsl.exe launcher's env — harmless, since only
-    // WSLENV-listed vars cross the boundary anyway.
+    // leak into the agent. For the built-in Anthropic subscription this clean
+    // slate is the whole job (no overrides follow); a custom Claude-compatible
+    // profile resets then sets its own `backend_env` below. On the WSL path this
+    // only clears the wsl.exe launcher's env — harmless, since only WSLENV-listed
+    // vars cross the boundary anyway.
     if adapter.resets_backend_env() {
         for k in CLAUDE_BACKEND_ENV_VARS {
             cmd.env_remove(k);
         }
     }
 
-    // Inject the backend-selecting env variables (MiniMax/Kimi base URL,
-    // API token, model routing). Empty for Anthropic.
-    let env_vars = adapter.provider_env();
-    if !env_vars.is_empty() {
-        for (k, v) in &env_vars {
+    // Inject the per-profile backend-selecting env (custom Claude-compatible
+    // base URL, API token, model) resolved by the caller from the node's paired
+    // provider account. Empty for the built-in Anthropic subscription and the
+    // native-binary providers.
+    if !backend_env.is_empty() {
+        for (k, v) in backend_env {
             cmd.env(k, v);
         }
         if resolved.env_type == EnvType::Wsl {
             // Append the key names to WSLENV so they propagate into WSL
             let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
-            for (k, _) in &env_vars {
+            for (k, _) in backend_env {
                 let suffix = "/u";
                 let entry = format!("{}{}", k, suffix);
                 let already_has = wslenv.split(':').any(|part| {
-                    part.split('/').next() == Some(k)
+                    part.split('/').next() == Some(k.as_str())
                 });
                 if !already_has {
                     if wslenv.is_empty() {
@@ -927,9 +938,15 @@ pub async fn spawn_agent_inner(
     //       (issue #498). The sandbox path owns its ConPTY spawn but returns the
     //       same `Child`/`MasterPty` trait objects, so everything downstream
     //       (Job Object containment, reader thread, resize, kill) is identical.
+    // The node's stored `provider` is the harness-profile id; resolve its paired
+    // model-provider account into the `ANTHROPIC_*` backend env (issue #538). A
+    // built-in/absent account yields an empty list → vanilla claude on the
+    // Anthropic subscription.
+    let backend_env = crate::preferences::resolve_provider_env(&node.provider);
     let cmd = build_spawn_command(
         &resolved,
         provider,
+        &backend_env,
         &session_id_mode,
         session_id,
         model_override,

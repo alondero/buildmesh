@@ -363,30 +363,13 @@ sandbox: config.sandbox,
               className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               <option value="">&lt;Default&gt; (Anthropic)</option>
-              {/* Dynamic harness profiles first, then the hardcoded legacy enum
-                  providers under a "Legacy" optgroup (PRD #534 / issue #536). */}
-              {providers.some((p) => !p.legacy) && (
-                <optgroup label="Profiles">
-                  {providers
-                    .filter((p) => !p.legacy)
-                    .map((p) => (
-                      <option key={`dyn-${p.id}`} value={p.id}>
-                        {p.label}
-                      </option>
-                    ))}
-                </optgroup>
-              )}
-              {providers.some((p) => p.legacy) && (
-                <optgroup label="Legacy">
-                  {providers
-                    .filter((p) => p.legacy)
-                    .map((p) => (
-                      <option key={`legacy-${p.id}`} value={p.id}>
-                        {p.label}
-                      </option>
-                    ))}
-                </optgroup>
-              )}
+              {/* The user's dynamic harness profiles — the legacy enum rows and
+                  their "Legacy" optgroup were retired in issue #538. */}
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
             </select>
           </Field>
 

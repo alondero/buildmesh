@@ -9,7 +9,7 @@ use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::provider::{Platform, ProviderInfo};
 use crate::agent::spawn::SpawnOptions;
 use crate::db;
-use crate::models::{Provider, SessionStatus};
+use crate::models::SessionStatus;
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
@@ -22,49 +22,28 @@ use ts_rs::TS;
 /// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     let host = Platform::current();
-    // Legacy enum list — each adapter keyed off the static `Provider`.
-    let mut providers: Vec<ProviderInfo> = Provider::all()
-        .iter()
-        .map(|p| p.adapter())
-        .filter(|adapter| adapter.available_on().contains(&host))
-        .map(|adapter| {
+    // Only the user's dynamic harness profiles are offered (issue #538 retired
+    // the hardcoded legacy [`Provider`] enum rows and the "Legacy" grouping).
+    // `id`/`label` come from the profile; `color`/`icon` borrow the backing
+    // executor's UI so a profile row looks like its harness. Profiles whose
+    // backing executor isn't available on this host are filtered out.
+    crate::preferences::harness_profiles()
+        .into_iter()
+        .filter_map(|profile| {
+            // Resolve once per profile (the filter + ui lookup share it).
+            let adapter = crate::preferences::resolve_harness_provider(&profile.id).adapter();
+            if !adapter.available_on().contains(&host) {
+                return None;
+            }
             let ui = adapter.ui();
-            ProviderInfo {
-                id: adapter.id().into(),
-                label: ui.label,
+            Some(ProviderInfo {
+                id: profile.id,
+                label: profile.name,
                 color: ui.color,
                 icon: ui.icon,
-                legacy: true,
-            }
+            })
         })
-        .collect();
-
-    // Dynamic harness profiles (ADR-0014 / issue #535), appended alongside the
-    // legacy list. `id`/`label` come from the profile; `color`/`icon` borrow
-    // the backing executor's UI so a profile row looks like its harness. A
-    // duplicate "Terminal" row (one legacy, one profile-backed) is accepted for
-    // this tracer-bullet slice — it proves the dynamic list is composed.
-    providers.extend(
-        crate::preferences::harness_profiles()
-            .into_iter()
-            .filter_map(|profile| {
-                // Resolve once per profile (the filter + ui lookup share it).
-                let adapter = crate::preferences::resolve_harness_provider(&profile.id).adapter();
-                if !adapter.available_on().contains(&host) {
-                    return None;
-                }
-                let ui = adapter.ui();
-                Some(ProviderInfo {
-                    id: profile.id,
-                    label: profile.name,
-                    color: ui.color,
-                    icon: ui.icon,
-                    legacy: false,
-                })
-            }),
-    );
-
-    providers
+        .collect()
 }
 
 #[command]
@@ -859,6 +838,9 @@ mod tests {
 
     #[test]
     fn llm_providers_do_emit_attention_signals() {
+        // Every non-terminal harness id resolves to an LLM executor, so none skip
+        // attention signals. "minimax"/"kimi" are legacy ids that now resolve to
+        // the Anthropic executor (still an LLM, still not plain-terminal).
         for id in ["anthropic", "minimax", "kimi", "agy", "opencode", "codex"] {
             assert!(
                 !provider_is_plain_terminal(id),
@@ -868,41 +850,25 @@ mod tests {
     }
 
     #[test]
-    fn available_providers_includes_a_profile_sourced_terminal() {
-        // The dynamic list is the legacy enum list concatenated with the
-        // harness profiles, so the Terminal profile appears in addition to the
-        // legacy Terminal — proving the profile list is composed (issue #535).
+    fn available_providers_lists_only_harness_profiles_with_no_legacy_rows() {
+        // Issue #538: the list is purely the dynamic harness profiles — no
+        // hardcoded enum rows. In a bare test env (no detection) that's just the
+        // code-defined Terminal default, present exactly once (no duplicate
+        // legacy Terminal).
         let providers = available_providers();
         let terminals: Vec<_> = providers.iter().filter(|p| p.id == "terminal").collect();
-        assert!(
-            terminals.iter().any(|p| p.label == "Terminal"),
-            "expected a profile-sourced Terminal (id=\"terminal\", label=\"Terminal\")"
-        );
-        // The duplicate is allowed and expected for this slice: one legacy, one
-        // profile-backed. Both carry id "terminal".
-        assert!(
-            terminals.len() >= 2,
-            "expected both the legacy and profile-backed Terminal rows, got {}",
+        assert_eq!(
+            terminals.len(),
+            1,
+            "expected exactly one (profile-sourced) Terminal row, got {}",
             terminals.len()
         );
-    }
-
-    #[test]
-    fn available_providers_flags_legacy_enum_rows_and_clears_it_for_profiles() {
-        // The "Legacy" header in the UI keys off ProviderInfo.legacy: enum-backed
-        // rows are legacy=true, dynamic harness profiles are legacy=false (#536).
-        let providers = available_providers();
-        // anthropic only exists as a legacy enum row (no detected "anthropic"
-        // profile in a bare test env), so it must be flagged legacy.
+        assert_eq!(terminals[0].label, "Terminal");
+        // The retired legacy-only enum rows (e.g. bare "anthropic") must NOT
+        // appear without a matching harness profile.
         assert!(
-            providers.iter().any(|p| p.id == "anthropic" && p.legacy),
-            "legacy enum providers must be flagged legacy=true"
-        );
-        // The profile-backed Terminal row (id "terminal") must be present with
-        // legacy=false, distinguishing it from the legacy Terminal enum row.
-        assert!(
-            providers.iter().any(|p| p.id == "terminal" && !p.legacy),
-            "dynamic harness profiles must be flagged legacy=false"
+            !providers.iter().any(|p| p.id == "anthropic"),
+            "legacy enum rows must not be listed once the profile list is the sole source"
         );
     }
 }

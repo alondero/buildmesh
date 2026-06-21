@@ -528,6 +528,7 @@ mod tests {
         let cmd = build_spawn_command(
             &resolved,
             Provider::Anthropic,
+            &[], // no per-profile backend env (built-in Anthropic subscription)
             &SessionIdMode::None,
             session_id,
             None,
@@ -885,6 +886,7 @@ mod tests {
         let cmd = build_spawn_command(
             &resolved,
             Provider::Anthropic,
+            &[], // no per-profile backend env (built-in Anthropic subscription)
             &SessionIdMode::None,
             session_id,
             None,

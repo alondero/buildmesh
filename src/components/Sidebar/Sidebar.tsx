@@ -23,7 +23,7 @@ export function Sidebar() {
   useEffect(() => {
     listProviders()
       .then(backendProviders => setProviderData(
-        backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id), legacy: p.legacy })),
+        backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
       ))
       .catch(err => console.error('listProviders failed:', err));
   }, []);
