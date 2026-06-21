@@ -40,6 +40,23 @@ pub fn run() {
             // Wire the preferences module to the same on-disk location as the DB.
             preferences::init(app_dir.clone());
 
+            // Auto-detect installed agent harnesses and populate dynamic profiles
+            // (PRD #534 / issue #536). A dep-free in-process PATH scan — a few
+            // hundred cached stat() calls, typically a couple of ms — so it runs
+            // inline here. Additive merge: only newly-found tools are added, so
+            // it's safe to re-run on every launch. Failure is non-fatal (the
+            // legacy provider list still works), so we log and continue.
+            let scan_start = std::time::Instant::now();
+            let detected = agent::detection::detect_installed_profiles();
+            match preferences::merge_detected_profiles(detected) {
+                Ok(added) => tracing::info!(
+                    "Harness detection: {} new profile(s) added in {:?}",
+                    added,
+                    scan_start.elapsed()
+                ),
+                Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
+            }
+
             // Set up file-based logging with tracing
             let log_dir = app_dir.join("logs");
             std::fs::create_dir_all(&log_dir)?;

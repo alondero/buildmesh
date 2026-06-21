@@ -8,4 +8,11 @@
  * is added so the type participates in the ts-rs `export` derive (the project
  * pattern is `Serialize + Deserialize + TS` for every generated wire type).
  */
-export type ProviderInfo = { id: string, label: string, color: string, icon: string, };
+export type ProviderInfo = { id: string, label: string, color: string, icon: string, 
+/**
+ * True for the hardcoded legacy [`crate::models::Provider`] enum entries,
+ * false for dynamic harness profiles (issue #536). The launch menu and the
+ * default-provider dropdown group the two: dynamic profiles first, then a
+ * "Legacy" header over the enum-backed rows.
+ */
+legacy: boolean, };
