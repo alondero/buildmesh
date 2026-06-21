@@ -66,6 +66,14 @@ _Avoid_: Local commits, un-pushed work
 An external, agent-agnostic supervisor that reads node state and drives nodes through Buildmesh's control API, rather than via the UI. The first coordinator is the user's remotely-hosted Hermes Agent (Nous Research); a future in-app "Buildmesh superagent" is intended to be a second coordinator on the same API. Buildmesh stays a "dumb" driver — the orchestration intelligence lives in the Coordinator.
 _Avoid_: Supervisor, orchestrator agent, Hermes (Hermes is one instance of a Coordinator, not the category)
 
+**Role** (API):
+The authorization tier a request to the embedded HTTP/WS server resolves to, from its credential (issue #500, ADR-0015). Two **disjoint surfaces**, not a hierarchy: **Admin** — the root token, owning the mobile `/api/*` surface and the WebSockets; and **Coordinator** — the read- or drive-scoped tokens, owning `/nodes*` (drive implies read). A credential is accepted only on its own surface: a Coordinator token on an admin route is `403 Forbidden` (valid but wrong role), distinct from `401 Unauthorized` (no valid credential). Credentials travel only in headers/cookies — `Authorization: Bearer` or the HttpOnly `bm_session` cookie — never a `?token=` URL parameter.
+_Avoid_: permission level, scope (reserve "scope" for the read/drive split within the Coordinator role)
+
+**WS ticket**:
+A short-lived (30s), single-use credential minted by the authenticated `POST /api/ws-ticket` and passed as `?ticket=` on a WebSocket upgrade (issue #500). It exists because a browser can't set headers on a WS upgrade and proxies strip cookies there; because a ticket can only be obtained through a cookie/header-protected fetch, a cross-site page cannot forge the upgrade.
+_Avoid_: WS token, handshake key
+
 **Autopilot**:
 An automated background execution mode for a Mesh that polls a remote issue tracker and automatically spawns Agent Nodes when matching issues/PRs are detected.
 _Avoid_: Auto-worker, event listener

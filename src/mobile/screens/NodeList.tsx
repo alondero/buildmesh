@@ -82,7 +82,7 @@ export default function NodeList({
   // Live attention events via /ws/events. On any event, refetch so the
   // list reflects the new status immediately rather than waiting for the
   // 5-second poll. WS drop falls back to polling silently.
-  useWsEvents(refresh);
+  useWsEvents(refresh, onAuthFailed);
 
   // Lazy-load the provider list; fallback gives the user something to tap
   // even if the request 401s or the server hasn't woken up yet.
@@ -520,19 +520,36 @@ function ProviderPicker({
 /// Auto-reconnects with simple backoff (1/2/4/8s) — losing the events
 /// stream falls back to the 5-second poll, so an outage is invisible
 /// beyond a brief lag.
-function useWsEvents(onEvent: () => void) {
+function useWsEvents(onEvent: () => void, onAuthError: () => void) {
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  const onAuthErrorRef = useRef(onAuthError);
+  onAuthErrorRef.current = onAuthError;
 
   useAsyncEffect((signal) => {
     let ws: WebSocket | null = null;
     let reconnectTimer: number | null = null;
     let attempt = 0;
 
-    const connect = () => {
+    const connect = async () => {
+      if (signal.aborted) return;
+      // Mint a single-use WS ticket (issue #500) before opening the socket.
+      let url: string;
+      try {
+        url = await eventsWsUrl();
+      } catch (e) {
+        // A 401/403 from the mint means the cookie is gone — re-minting would
+        // loop forever, so surface it for re-auth instead of backing off.
+        if (isAuthError(e)) {
+          onAuthErrorRef.current();
+          return;
+        }
+        scheduleReconnect();
+        return;
+      }
       if (signal.aborted) return;
       try {
-        ws = new WebSocket(eventsWsUrl());
+        ws = new WebSocket(url);
       } catch {
         scheduleReconnect();
         return;

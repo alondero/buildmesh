@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { readStoredToken, rememberToken, validateToken } from "../api";
+import { login, readStoredToken, rememberToken } from "../api";
 
 type Props = {
   onConnected: () => void;
@@ -14,35 +14,42 @@ export default function Connect({ onConnected, notice }: Props) {
   const [busy, setBusy] = useState(false);
   const stored = readStoredToken();
 
-  // If the page was opened with `?token=` (initial QR code scan), persist it
-  // and proceed immediately. The server has already set the bm_session cookie
-  // on this exact request, so no extra round-trip is needed.
+  // If the page was opened with `?token=` (initial QR code scan), read the
+  // token from the URL via JS, exchange it for the bm_session cookie, then
+  // strip it from the URL (issue #500 — the token is never sent to the server
+  // as a query param it validates). The shell loaded publicly to run this code.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const urlToken = params.get("token");
-    if (urlToken) {
-      rememberToken(urlToken);
-      onConnected();
-    }
-  }, [onConnected]);
+    if (!urlToken) return;
+    // Drop the token from the address bar regardless of outcome — it should
+    // never linger in history.
+    params.delete("token");
+    const rest = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (rest ? "?" + rest : ""),
+    );
+    connectWith(urlToken);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Probe the token against the API first: navigating straight to ?token=
-  // with a bad token would land on the server's raw 401 page with no way
-  // back to this form. Only reload (to get the HttpOnly cookie set) once we
-  // know the token is good.
+  // Exchange the token for the HttpOnly session cookie via POST /api/session.
+  // A bad token reports inline (no dead-end on a raw 401 page); an unreachable
+  // app throws and we show the network hint.
   const connectWith = async (token: string) => {
     setBusy(true);
     setError(null);
     try {
-      const ok = await validateToken(token);
+      const ok = await login(token);
       if (!ok) {
         setError("Invalid token — re-scan the QR code from the desktop app.");
         setBusy(false);
         return;
       }
       rememberToken(token);
-      window.location.href =
-        window.location.pathname + "?token=" + encodeURIComponent(token);
+      onConnected();
     } catch {
       setError(
         "Can't reach the desktop app. Is Buildmesh running and on the same network?",

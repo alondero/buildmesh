@@ -1,10 +1,11 @@
 // Shared types and HTTP client for the mobile SPA.
 //
-// Authentication: on the initial `/v2?token=ROOT` load the server sets an
-// HttpOnly bm_session cookie. Subsequent fetches send it automatically via
-// `credentials: "include"`. The raw token stays in localStorage as a
-// fallback for the WS handshake (some proxies strip cookies there) and so
-// the browser can re-authenticate after the cookie expires.
+// Authentication (issue #500): the QR/pasted root token is POSTed to
+// `/api/session` (Authorization: Bearer) by `login()`, which sets an HttpOnly
+// bm_session cookie. Subsequent fetches send it automatically via
+// `credentials: "include"` — the token never rides a URL. WebSocket upgrades
+// use a single-use `?ticket=` minted by `mintWsTicket()`. The raw token stays
+// in localStorage so the browser can re-`login()` after the cookie expires.
 
 const TOKEN_STORAGE_KEY = "buildmesh_token";
 
@@ -72,15 +73,10 @@ function fallbackMessage(status: number): string {
 }
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  // The cookie handles auth for browsers that obey credentials:include. We
-  // also append ?token=... when available so the very first request after
-  // a fresh page load (cookie not yet set) succeeds against the API.
-  const token = readStoredToken();
-  const url =
-    token && !path.includes("token=")
-      ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token)
-      : path;
-  const resp = await fetch(url, {
+  // Auth is the HttpOnly bm_session cookie, sent automatically via
+  // credentials:include. The token never rides the URL (issue #500); the
+  // cookie is minted once by `login()` (POST /api/session).
+  const resp = await fetch(path, {
     credentials: "include",
     ...init,
   });
@@ -103,13 +99,25 @@ export function isAuthError(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 401 || e.status === 403);
 }
 
-/// Probe a token against the API before committing to the full-page
-/// ?token= reload — a bad token would otherwise dead-end on the server's
-/// raw 401 page with no way back to the connect form.
-export async function validateToken(token: string): Promise<boolean> {
-  const resp = await fetch("/api/meshes?token=" + encodeURIComponent(token), {
-    credentials: "include",
-  });
+/// Exchange the root token for an HttpOnly bm_session cookie (issue #500). The
+/// token is sent in the `Authorization: Bearer` header — never the URL — to
+/// `POST /api/session`, which validates it and sets the cookie on success.
+/// Returns `false` for a bad token (so the connect form can recover) and throws
+/// only when the desktop app is unreachable.
+export async function login(token: string): Promise<boolean> {
+  let resp: Response;
+  try {
+    resp = await fetch("/api/session", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      credentials: "include",
+    });
+  } catch {
+    // Network-level failure (app down / wrong network) — distinct from a
+    // rejected token, so surface it as a throw the caller turns into the
+    // "can't reach the desktop app" message.
+    throw new ApiError(0, fallbackMessage(0));
+  }
   if (resp.status === 401 || resp.status === 403) return false;
   if (!resp.ok) throw new ApiError(resp.status, fallbackMessage(resp.status));
   return true;
@@ -304,21 +312,34 @@ export async function spawnFromIssue(
   return resp.json();
 }
 
-/// Build the WS URL for a given node id. We prefer the page's own host:port
-/// so the v2 SPA works regardless of which fallback port (1992/1993/1994)
-/// the embedded server bound to — the legacy mobile_app.html hardcoded 1992.
-export function terminalWsUrl(nodeId: number): string {
-  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const host = window.location.host; // includes :port
-  const token = readStoredToken() ?? "";
-  return `${proto}//${host}/ws/terminal/${nodeId}?token=${encodeURIComponent(token)}`;
+// Generated from the Rust `WsTicket` struct (issue #500) — the body of
+// POST /api/ws-ticket. No hand-declared interface, no drift.
+import type { WsTicket } from "../types/generated/WsTicket";
+
+/// Mint a single-use WebSocket handshake ticket (issue #500). The long-lived
+/// token never rides the WS URL; instead this cookie-authenticated POST returns
+/// a short-lived ticket the upgrade carries as `?ticket=`.
+export async function mintWsTicket(): Promise<string> {
+  const resp = await apiFetch("/api/ws-ticket", { method: "POST" });
+  const j = (await resp.json()) as WsTicket;
+  return j.ticket;
 }
 
-export function eventsWsUrl(): string {
+/// Build the WS URL for a given node id. Mints a fresh ticket per connection
+/// (single-use), and prefers the page's own host:port so the SPA works
+/// regardless of which fallback port (1992/1993/1994) the server bound to.
+export async function terminalWsUrl(nodeId: number): Promise<string> {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const host = window.location.host; // includes :port
+  const ticket = await mintWsTicket();
+  return `${proto}//${host}/ws/terminal/${nodeId}?ticket=${encodeURIComponent(ticket)}`;
+}
+
+export async function eventsWsUrl(): Promise<string> {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  const token = readStoredToken() ?? "";
-  return `${proto}//${host}/ws/events?token=${encodeURIComponent(token)}`;
+  const ticket = await mintWsTicket();
+  return `${proto}//${host}/ws/events?ticket=${encodeURIComponent(ticket)}`;
 }
 
 export type EventMsg =

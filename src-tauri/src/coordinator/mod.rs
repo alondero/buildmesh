@@ -17,60 +17,17 @@ pub mod drive;
 pub mod enrichment;
 pub mod node_digest;
 
-/// Pull a bearer token out of an `Authorization: Bearer <token>` header. This
-/// is the natural shape for an external agent / `curl -H` and for the later
-/// MCP wrap; `?token=` stays a supported fallback (see [`authenticate_read`]).
-fn bearer_token(headers: &str) -> Option<String> {
-    let value = crate::http::request::extract_header_value(headers, "Authorization")?;
-    value
-        .strip_prefix("Bearer ")
-        .map(|t| t.trim().to_string())
-        .filter(|t| !t.is_empty())
-}
-
-/// Authenticate a request for READ access to the coordinator surface. Accepts
-/// the token from either an `Authorization: Bearer` header or a `?token=` URL
-/// param (curl convenience). Returns `false` — never touching the database —
-/// when no token is presented, so an unauthenticated probe can't even reach a
-/// DB lookup. Validation rejects unless the API is enabled AND the token
-/// matches the minted read token.
-pub fn authenticate_read(headers: &str, url_token: Option<String>) -> bool {
-    let Some(token) = bearer_token(headers).or_else(|| url_token.filter(|t| !t.is_empty())) else {
-        return false;
-    };
-    crate::db::validate_coordinator_read_token(&token).unwrap_or(false)
-}
-
-/// Authenticate a request for DRIVE (write) access to the coordinator surface
-/// (issue #319). Same token-presentation shape as [`authenticate_read`], but
-/// validated against the *drive-scoped* token: a read-only token is rejected
-/// here, and drive must be independently enabled. No token presented → `false`
-/// without touching the DB.
-pub fn authenticate_drive(headers: &str, url_token: Option<String>) -> bool {
-    let Some(token) = bearer_token(headers).or_else(|| url_token.filter(|t| !t.is_empty())) else {
-        return false;
-    };
-    crate::db::validate_coordinator_drive_token(&token).unwrap_or(false)
-}
+// Request authentication for the coordinator surface now flows through the
+// unified RBAC layer (`http::auth`, issue #500): the dispatcher calls
+// `auth::guard(.., CoordinatorRead | CoordinatorWrite)`, which resolves the
+// bearer token against the read/drive validators below. The standalone
+// `authenticate_read`/`authenticate_drive` helpers were removed when that layer
+// landed — the scope checks and disabled-by-default gating still live in
+// `db::validate_coordinator_{read,drive}_token`.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn bearer_token_extracts_and_trims() {
-        let headers = "Host: localhost\r\nAuthorization: Bearer deadbeef\r\n";
-        assert_eq!(bearer_token(headers), Some("deadbeef".to_string()));
-    }
-
-    #[test]
-    fn bearer_token_none_without_header_or_scheme() {
-        assert_eq!(bearer_token("Host: localhost\r\n"), None);
-        // A non-Bearer scheme is not a coordinator token.
-        assert_eq!(bearer_token("Authorization: Basic abc\r\n"), None);
-        // Empty after the scheme is rejected.
-        assert_eq!(bearer_token("Authorization: Bearer \r\n"), None);
-    }
 
     // --- Integration test: the read pipe end-to-end over an in-memory DB ---
     //

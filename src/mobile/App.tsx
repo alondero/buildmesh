@@ -45,12 +45,15 @@ export function parentOf(s: Screen): Screen {
 }
 
 export default function App() {
-  // If the URL has ?token=, the server has already set bm_session and we
-  // can land directly on the node list. Otherwise check localStorage —
-  // if it has a token, Connect.tsx will offer "Use saved session".
+  // Bootstrap (issue #500): a fresh `?token=` load has NO cookie yet — the
+  // token must be exchanged for one via POST /api/session — so route through
+  // Connect, which performs that login then calls onConnected. With a stored
+  // token (returning user) land on the list optimistically: a still-valid
+  // cookie just works, and an expired one trips handleAuthFailed → Connect.
   const initial: Screen = (() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("token") || readStoredToken()) return { kind: "list" };
+    if (params.get("token")) return { kind: "connect" };
+    if (readStoredToken()) return { kind: "list" };
     return { kind: "connect" };
   })();
 
@@ -116,21 +119,6 @@ export default function App() {
     };
   }, []);
 
-  // Clean the token out of the URL once we've taken it from the query string
-  // — the server set the cookie, so it's no longer needed there.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("token")) {
-      params.delete("token");
-      const newSearch = params.toString();
-      window.history.replaceState(
-        null,
-        "",
-        window.location.pathname + (newSearch ? "?" + newSearch : ""),
-      );
-    }
-  }, []);
-
   const handleAuthFailed = useCallback(() => {
     clearStoredToken();
     setAuthNotice("Connection expired — scan the QR code again to reconnect.");
@@ -169,6 +157,7 @@ export default function App() {
           <TerminalScreen
             node={screen.node}
             onBack={goBack}
+            onAuthFailed={handleAuthFailed}
             onOpenChanges={() =>
               navigate({ kind: "changes", node: screen.node })
             }
