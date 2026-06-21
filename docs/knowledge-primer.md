@@ -107,6 +107,16 @@ On app restart, the frontend calls `auto_resume_nodes` which iterates all `Suspe
 ### Early-Exit Detection
 The PTY reader thread records `spawned_at`. If the reader exits within 3 seconds, the agent node is marked `Error` and a `resume-failed` event is emitted. This catches failed `--resume` attempts where the agent CLI exits because the session has expired.
 
+### `AgentNode.branch` is overloaded (base ref vs PR head ref)
+The `branch` field on `AgentNode` (see Rust doc comment at `src-tauri/src/models/mod.rs`) means two different things depending on spawn source:
+
+- **Issue-spawned, hand-spawned, and handover-spawned nodes** — `branch` holds the mesh's `base_ref` (resolved via `commands::git::get_default_branch`, typically `origin/main`).
+- **PR-spawned nodes** (issue #420, where `source_pr.is_some()`) — `branch` holds the PR's `head_ref` instead. The worktree is cut from `origin/<head_ref>` (or `fork-<owner>/<head_ref>` for fork PRs, issue #443) so the agent lands on the same commits the PR is built from.
+
+**Disambiguator:** `source_pr.is_some()`. When set, treat `branch` as the PR head ref; otherwise as the mesh's base ref.
+
+**Canonical reader:** `spawn_agent_inner` in `src-tauri/src/agent/spawn.rs` derives the actual worktree `base_ref` from this field — see the `worktree_base_ref = if node.source_pr.is_some()` branch (around the PR-spawn fetch block). New code that needs the worktree's base ref should NOT reimplement the overload — call into `spawn_agent_inner`'s resolution or use the same `if source_pr.is_some()` pattern. The `commands::agent::create_pr_node` row-creation comment ("the *row* (`source_pr` is set, `branch` is the head ref) and in stage-2's `git fetch origin <head_ref>` worktree adoption") is the other half of the contract: the write side chooses the head ref precisely so the read side's `if source_pr.is_some()` switch lands on the right branch.
+
 ## Agent Process Architecture
 
 ### ProcessRegistry — Runtime State

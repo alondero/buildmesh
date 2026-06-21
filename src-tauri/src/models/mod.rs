@@ -265,6 +265,21 @@ pub struct AgentNode {
     pub mesh_id: i64,
     pub name: String,
     pub path: String,         // absolute path to node directory
+    /// Branch the worktree was cut from — **overloaded** based on spawn source.
+    ///
+    /// For issue-spawned, hand-spawned, and handover-spawned nodes, this holds
+    /// the mesh's `base_ref` (resolved via `commands::git::get_default_branch`,
+    /// typically `origin/main`). For PR-spawned nodes (`source_pr.is_some()`,
+    /// issue #420), this holds the PR's `head_ref` instead, and
+    /// `spawn_agent_inner` fetches `origin/<head_ref>` (or
+    /// `fork-<owner>/<head_ref>` for fork PRs, issue #443) to cut the worktree
+    /// from the same commits the PR is built on.
+    ///
+    /// Disambiguate with `source_pr.is_some()` — when set, treat this field
+    /// as the PR head ref, otherwise as the mesh's base ref. The canonical
+    /// reader is `spawn_agent_inner` in `agent/spawn.rs` (see
+    /// `worktree_base_ref` derivation around `if node.source_pr.is_some()`);
+    /// new readers should not reimplement the overload decision.
     pub branch: String,
     pub env: EnvType,         // windows or wsl
     /// Stored harness/profile id (e.g. "anthropic", "minimax", "terminal", or a
