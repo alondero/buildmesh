@@ -39,10 +39,16 @@ export const STATUS_META: Record<NodeStatus, { color: string; label: string }> =
 // Offline fallback shown only when the /providers fetch fails. The live list is
 // the user's dynamic harness profiles; this is a degraded static default (issue
 // #538 dropped the legacy enum rows / `legacy` flag).
+// `resumable` mirrors the Rust derivation in `ProviderInfo`:
+// `supports_resume() && produces_readable_transcript()` (models/mod.rs).
+// Anthropic is the only adapter that produces a readable transcript, so it's
+// the only fallback row the resume picker (issue #550) should surface. Keeping
+// the flag honest here matters: if /providers 401s and we fall back, the user
+// still won't see ghost rows they can't actually resume.
 const FALLBACK_PROVIDERS: Provider[] = [
-  { id: "anthropic", label: "Anthropic (Claude)", color: "#1d7cfc", icon: "A" },
-  { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G" },
-  { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O" },
+  { id: "anthropic", label: "Anthropic (Claude)", color: "#1d7cfc", icon: "A", resumable: true },
+  { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G", resumable: false },
+  { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O", resumable: false },
 ];
 
 export default function NodeList({
