@@ -170,6 +170,9 @@ pub fn run() {
             // App preferences (buildmesh-wide)
             commands::preferences::get_app_preferences,
             commands::preferences::set_app_default_provider,
+            commands::preferences::get_provider_accounts,
+            commands::preferences::upsert_provider_account,
+            commands::preferences::remove_provider_account,
             // Coordinator read API (ADR-0008)
             commands::coordinator::get_coordinator_status,
             commands::coordinator::set_coordinator_api_enabled,

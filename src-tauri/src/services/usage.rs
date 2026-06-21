@@ -28,6 +28,24 @@ pub struct UsageWindow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "BillingBalance.ts")]
+/// Cash-balance view for a pay-as-you-go account (issue #537). The Accounts panel
+/// renders this instead of percentage [`UsageWindow`] bars when an account's
+/// `billing_mode` is `pay_as_you_go`. Field names are camelCase on the wire.
+///
+/// Generated to src/types/generated/BillingBalance.ts (issue #537).
+pub struct BillingBalance {
+    /// Credits / cash remaining, in `currency`.
+    pub remaining: f64,
+    /// Spend so far in the current billing month, if the provider reports it.
+    #[serde(rename = "monthlySpend")]
+    #[ts(rename = "monthlySpend")]
+    pub monthly_spend: Option<f64>,
+    /// ISO 4217 currency code (e.g. "USD", "CNY").
+    pub currency: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "ProviderUsage.ts")]
 /// Generated to src/types/generated/ProviderUsage.ts (issue #404). `loggedIn`
 /// is camelCase on the wire per `#[ts(rename = "loggedIn")]`.
@@ -37,6 +55,10 @@ pub struct ProviderUsage {
     #[ts(rename = "loggedIn")]
     pub logged_in: bool,
     pub windows: Vec<UsageWindow>,
+    /// Cash balance for pay-as-you-go accounts; `None` for plan accounts, which
+    /// report utilization via `windows` instead (issue #537).
+    #[serde(default)]
+    pub balance: Option<BillingBalance>,
     pub detail: Option<String>,
     pub error: Option<String>,
 }
@@ -122,6 +144,7 @@ fn logged_out(provider: &str, error: String) -> ProviderUsage {
         provider: provider.to_string(),
         logged_in: false,
         windows: vec![],
+        balance: None,
         detail: None,
         error: Some(error),
     }
@@ -139,6 +162,7 @@ fn fetch_usage(
         provider: provider.to_string(),
         logged_in: true,
         windows: vec![],
+        balance: None,
         detail: None,
         error: Some(error),
     };
@@ -161,6 +185,7 @@ fn fetch_usage(
                 provider: provider.to_string(),
                 logged_in: true,
                 windows,
+                balance: None,
                 detail,
                 error: None,
             },
@@ -350,6 +375,40 @@ fn parse_minimax_response(body: &str) -> Result<(Vec<UsageWindow>, Option<String
         None
     };
     Ok((windows, detail))
+}
+
+/// Parses a pay-as-you-go cash-balance response into a [`BillingBalance`]
+/// (issue #537). Mirrors the `base_resp`-wrapped envelope MiniMax uses for its
+/// other endpoints; the inner field names below are the documented/assumed shape.
+///
+// TODO(#537 follow-up): the live cash-balance endpoint is unverified — MiniMax's
+// known `token_plan/remains` endpoint returns plan percentages, not cash. This
+// parser + its mock tests prove the BillingBalance pipeline; wiring an actual
+// HTTP fetch is deferred per the agreed slice (real endpoint not yet confirmed).
+// `allow(dead_code)`: exercised by the mock tests below, not yet by a live fetch.
+#[allow(dead_code)]
+fn parse_minimax_balance(body: &str) -> Result<BillingBalance, UsageError> {
+    #[derive(Deserialize)]
+    struct BalanceInfo {
+        // Required so a percentages-only (`token_plan/remains`) body fails loudly
+        // rather than silently reporting a zero balance.
+        remaining: f64,
+        #[serde(default)]
+        month_spend: Option<f64>,
+        #[serde(default)]
+        currency: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        balance: BalanceInfo,
+    }
+    let resp: Resp = serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    Ok(BillingBalance {
+        remaining: resp.balance.remaining,
+        monthly_spend: resp.balance.month_spend,
+        // Default to USD when the provider omits a currency code.
+        currency: resp.balance.currency.unwrap_or_else(|| "USD".to_string()),
+    })
 }
 
 pub fn minimax_usage(api_key: &str) -> ProviderUsage {
@@ -809,6 +868,41 @@ mod tests {
         let (windows, detail) = parse_minimax_response(json).unwrap();
         assert!(windows.is_empty());
         assert_eq!(detail.as_deref(), Some("No active token plan quotas found"));
+    }
+
+    #[test]
+    fn parse_minimax_balance_valid() {
+        // Pay-as-you-go cash balance (issue #537): remaining + monthly spend +
+        // currency, wrapped in the same base_resp envelope as the other endpoints.
+        let json = r#"{
+            "balance": { "remaining": 42.5, "month_spend": 7.25, "currency": "USD" },
+            "base_resp": { "status_code": 0, "status_msg": "success" }
+        }"#;
+        let balance = parse_minimax_balance(json).unwrap();
+        assert_eq!(balance.remaining, 42.5);
+        assert_eq!(balance.monthly_spend, Some(7.25));
+        assert_eq!(balance.currency, "USD");
+    }
+
+    #[test]
+    fn parse_minimax_balance_defaults_currency_and_optional_spend() {
+        // Currency + spend are optional; currency falls back to USD, spend to None.
+        let json = r#"{ "balance": { "remaining": 100.0 } }"#;
+        let balance = parse_minimax_balance(json).unwrap();
+        assert_eq!(balance.remaining, 100.0);
+        assert_eq!(balance.monthly_spend, None);
+        assert_eq!(balance.currency, "USD");
+    }
+
+    #[test]
+    fn parse_minimax_balance_rejects_percentage_only_body() {
+        // A plan-percentage body (no `balance` object) must fail loudly rather
+        // than masquerade as a zero balance.
+        let json = r#"{
+            "model_remains": [],
+            "base_resp": { "status_code": 0, "status_msg": "success" }
+        }"#;
+        assert!(parse_minimax_balance(json).is_err());
     }
 
     #[test]

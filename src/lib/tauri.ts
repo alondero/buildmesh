@@ -5,6 +5,8 @@ import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
 import type { AppPreferences } from '../types/generated/AppPreferences';
+import type { BillingBalance } from '../types/generated/BillingBalance';
+import type { BillingMode } from '../types/generated/BillingMode';
 import type { BranchInfo } from '../types/generated/BranchInfo';
 import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DiffHunk } from '../types/generated/DiffHunk';
@@ -28,6 +30,7 @@ import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
+import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RestoreResult } from '../types/generated/RestoreResult';
@@ -637,6 +640,23 @@ export const setAppDefaultProvider = (provider: string | null) =>
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });
 
+// ── Model provider accounts (issue #537) ───────────────────────────────────
+//
+// Generated from `crate::preferences::{ProviderAccount, BillingMode}`. A custom
+// (non-built-in) account upsert also registers a paired harness profile backend
+// -side so it appears in spawn menus.
+export type { ProviderAccount, BillingMode };
+
+/** The merged built-in + custom account list the settings UI renders. */
+export const getProviderAccounts = () =>
+  _invoke<ProviderAccount[]>('get_provider_accounts');
+
+export const upsertProviderAccount = (account: ProviderAccount) =>
+  _invoke('upsert_provider_account', { account });
+
+export const removeProviderAccount = (id: string) =>
+  _invoke('remove_provider_account', { id });
+
 // ── Provider usage (Accounts & Usage panel) ────────────────────────────────
 //
 // Generated from `crate::services::usage::{ProviderUsage, UsageWindow}`
@@ -644,7 +664,7 @@ export const setMinimaxApiKey = (key: string | null) =>
 // `#[ts(rename = "...")]` on some fields, so the camelCase / snake_case
 // mix is exact — `usedPercent` / `resetsAt` / `loggedIn` are camelCase on
 // the wire, the rest are snake_case.
-export type { UsageWindow, ProviderUsage };
+export type { UsageWindow, ProviderUsage, BillingBalance };
 
 export const getAllProviderUsage = (forceRefresh: boolean) =>
   _invoke<ProviderUsage[]>('get_all_provider_usage', { forceRefresh });

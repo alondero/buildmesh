@@ -1,13 +1,24 @@
 import { useState, useEffect } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import * as api from '../../lib/tauri';
-import type { ProviderInfo, ProviderUsage, UsageWindow } from '../../lib/tauri';
+import type {
+  ProviderInfo,
+  ProviderUsage,
+  UsageWindow,
+  ProviderAccount,
+  BillingBalance,
+} from '../../lib/tauri';
 
 interface AppSettingsModalProps {
   onClose: () => void;
 }
 
 const NO_OVERRIDE = '__no_override__';
+
+// Built-ins can only be disabled, never removed (a "remove" just reverts them to
+// the code default), so we hide the Remove action for these ids. Kept in sync with
+// `preferences::default_provider_accounts`.
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax'];
 
 export function UsageBar({ window }: { window: UsageWindow }) {
   const percent = window.usedPercent ?? 0;
@@ -31,6 +42,279 @@ export function UsageBar({ window }: { window: UsageWindow }) {
   );
 }
 
+/** Cash-balance view for a pay-as-you-go account (issue #537) — shown instead of
+ *  percentage bars. */
+export function BalanceCard({ balance }: { balance: BillingBalance }) {
+  const fmt = (n: number) => `${balance.currency} ${n.toFixed(2)}`;
+  return (
+    <div className="mt-2 space-y-1">
+      <div className="flex justify-between text-base">
+        <span className="text-text-muted">Balance remaining</span>
+        <span className="font-medium text-text-primary">{fmt(balance.remaining)}</span>
+      </div>
+      {balance.monthlySpend != null && (
+        <div className="flex justify-between text-base">
+          <span className="text-text-muted">Spent this month</span>
+          <span className="text-text-primary">{fmt(balance.monthlySpend)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One model-provider account: enable toggle, collapsible credential editor, and
+ *  a usage view chosen by billing mode (percentage bars vs cash balance). */
+export function AccountCard({
+  account,
+  usage,
+  usageLoading,
+  onSave,
+  onRemove,
+}: {
+  account: ProviderAccount;
+  usage?: ProviderUsage;
+  usageLoading: boolean;
+  onSave: (account: ProviderAccount) => Promise<boolean>;
+  onRemove?: (id: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<ProviderAccount>(account);
+  const [showCreds, setShowCreds] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  // Re-sync the editable draft when the parent reloads accounts (e.g. after save).
+  useEffect(() => setDraft(account), [account]);
+
+  const isCustom = !BUILTIN_PROVIDER_IDS.includes(account.id);
+  const payg = account.billing_mode === 'pay_as_you_go';
+
+  const toggleEnabled = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      await onSave({ ...account, enabled });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveDraft = async () => {
+    setBusy(true);
+    try {
+      await onSave(draft);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const renderUsage = () => {
+    if (!account.enabled) return <p className="text-base text-text-muted">Disabled</p>;
+    if (!usage && !usageLoading) return <p className="text-base text-text-muted">Unable to load usage data</p>;
+    if (!usage) return null;
+    if (!usage.loggedIn) {
+      return (
+        <div>
+          <p className="text-base text-status-warning">{payg ? 'No API key' : 'Not logged in'}</p>
+          <p className="text-sm text-text-muted mt-1">
+            {payg ? `Enter an API key for ${account.name} above` : `Run the ${account.name} CLI login first`}
+          </p>
+        </div>
+      );
+    }
+    if (usage.error) return <p className="text-base text-status-error">{usage.error}</p>;
+    if (payg) {
+      return usage.balance ? (
+        <BalanceCard balance={usage.balance} />
+      ) : (
+        <p className="text-sm text-text-muted">Balance unavailable</p>
+      );
+    }
+    return (
+      <div>
+        {usage.windows.map(w => (
+          <UsageBar key={w.label} window={w} />
+        ))}
+        {usage.detail && <p className="text-sm text-accent-cyan mt-2">{usage.detail}</p>}
+      </div>
+    );
+  };
+
+  return (
+    <div className="border border-border-subtle rounded-lg p-5">
+      <div className="flex items-center gap-3 mb-3">
+        <ProviderIcon providerId={account.id} className="h-6 w-6" />
+        <span className="text-lg font-medium text-text-primary">{account.name}</span>
+        {usageLoading && account.enabled && (
+          <span className="ml-auto text-base text-text-muted">Loading...</span>
+        )}
+        <label className={`flex items-center gap-2 text-base text-text-secondary cursor-pointer ${usageLoading && account.enabled ? '' : 'ml-auto'}`}>
+          <input
+            type="checkbox"
+            checked={account.enabled}
+            disabled={busy}
+            onChange={e => toggleEnabled(e.target.checked)}
+            className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+            aria-label={`Enable ${account.name}`}
+          />
+          <span>Enabled</span>
+        </label>
+      </div>
+
+      {renderUsage()}
+
+      <button
+        onClick={() => setShowCreds(v => !v)}
+        className="mt-3 text-sm text-accent-cyan hover:text-accent-cyan/80"
+      >
+        {showCreds ? 'Hide credentials' : 'Edit credentials'}
+      </button>
+
+      {showCreds && (
+        <div className="mt-3 space-y-3">
+          <div>
+            <label className="block text-sm text-text-muted mb-1">API key</label>
+            <input
+              type="password"
+              value={draft.api_key ?? ''}
+              onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
+              placeholder="Enter API key..."
+              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              aria-label={`${account.name} API key`}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Base URL</label>
+            <input
+              type="text"
+              value={draft.base_url ?? ''}
+              onChange={e => setDraft({ ...draft, base_url: e.target.value || null })}
+              placeholder="https://api.example.com/v1"
+              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              aria-label={`${account.name} base URL`}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Custom models (comma-separated)</label>
+            <input
+              type="text"
+              value={draft.models.join(', ')}
+              onChange={e =>
+                setDraft({
+                  ...draft,
+                  models: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
+                })
+              }
+              placeholder="model-a, model-b"
+              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              aria-label={`${account.name} custom models`}
+            />
+          </div>
+          <div>
+            <label className="block text-sm text-text-muted mb-1">Billing</label>
+            <select
+              value={draft.billing_mode}
+              onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
+              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              aria-label={`${account.name} billing mode`}
+            >
+              <option value="plan">Plan / subscription (percentage)</option>
+              <option value="pay_as_you_go">Pay-as-you-go (balance)</option>
+            </select>
+          </div>
+          <div className="flex gap-3">
+            <button
+              onClick={saveDraft}
+              disabled={busy}
+              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+            >
+              {busy ? 'Saving...' : 'Save'}
+            </button>
+            {isCustom && onRemove && (
+              <button
+                onClick={() => onRemove(account.id)}
+                disabled={busy}
+                className="px-5 py-2 bg-status-error/15 text-status-error text-base rounded hover:bg-status-error/25 disabled:opacity-50"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Inline form to create a custom Claude-compatible provider (AC2). */
+export function AddCustomProviderForm({
+  onAdd,
+  onCancel,
+}: {
+  onAdd: (name: string, baseUrl: string, apiKey: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [name, setName] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await onAdd(name, baseUrl, apiKey);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border border-border-subtle rounded-lg p-5 space-y-3">
+      <p className="text-base text-text-secondary">
+        Custom Claude-compatible provider — pairs the <span className="font-mono">claude</span>{' '}
+        harness with your endpoint (e.g. "DeepSeek via Claude Code").
+      </p>
+      <input
+        type="text"
+        value={name}
+        onChange={e => setName(e.target.value)}
+        placeholder="Name (e.g. DeepSeek via Claude Code)"
+        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        aria-label="Custom provider name"
+      />
+      <input
+        type="text"
+        value={baseUrl}
+        onChange={e => setBaseUrl(e.target.value)}
+        placeholder="Base URL (https://api.deepseek.com/anthropic)"
+        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        aria-label="Custom provider base URL"
+      />
+      <input
+        type="password"
+        value={apiKey}
+        onChange={e => setApiKey(e.target.value)}
+        placeholder="API key"
+        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        aria-label="Custom provider API key"
+      />
+      <div className="flex gap-3">
+        <button
+          onClick={submit}
+          disabled={busy || !name.trim()}
+          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+        >
+          {busy ? 'Adding...' : 'Add provider'}
+        </button>
+        <button
+          onClick={onCancel}
+          disabled={busy}
+          className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selected, setSelected] = useState<string>(NO_OVERRIDE);
@@ -39,8 +323,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [loaded, setLoaded] = useState(false);
   const [usageData, setUsageData] = useState<ProviderUsage[]>([]);
   const [usageLoading, setUsageLoading] = useState(false);
-  const [minimaxKey, setMinimaxKey] = useState('');
-  const [minimaxKeySaving, setMinimaxKeySaving] = useState(false);
+  const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
+  const [addingCustom, setAddingCustom] = useState(false);
   const [coordEnabled, setCoordEnabled] = useState(false);
   const [coordHasToken, setCoordHasToken] = useState(false);
   const [coordToken, setCoordToken] = useState<string | null>(null);
@@ -50,15 +334,16 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   useEffect(() => {
     const init = async () => {
       try {
-        const [prefs, providerList, coord] = await Promise.all([
+        const [prefs, providerList, accountList, coord] = await Promise.all([
           api.getAppPreferences(),
           api.listProviders(),
+          api.getProviderAccounts(),
           api.getCoordinatorStatus(),
         ]);
         setProviders(providerList);
+        setAccounts(accountList);
         const stored = prefs.default_provider;
         setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
-        setMinimaxKey(prefs.minimax_api_key || '');
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
         setLoaded(true);
@@ -101,17 +386,62 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  const handleSaveMinimaxKey = async () => {
-    setMinimaxKeySaving(true);
+  // Persist an account, then reload the merged list + usage so the card reflects
+  // the new enabled/billing state. Rolls the local list back on failure so the
+  // toggle never lies about what the backend stored.
+  // Returns whether the save succeeded so callers (e.g. the add-custom form) can
+  // keep their UI open on failure instead of dismissing over the error.
+  const handleSaveAccount = async (account: ProviderAccount): Promise<boolean> => {
+    const previous = accounts;
+    setAccounts(prev => prev.map(a => (a.id === account.id ? account : a)));
+    setError(null);
     try {
-      const key = minimaxKey.trim() || null;
-      await api.setMinimaxApiKey(key);
+      await api.upsertProviderAccount(account);
+      setAccounts(await api.getProviderAccounts());
+      fetchUsage(true);
+      return true;
+    } catch (e) {
+      setAccounts(previous);
+      setError(String(e));
+      return false;
+    }
+  };
+
+  const handleRemoveAccount = async (id: string) => {
+    setError(null);
+    try {
+      await api.removeProviderAccount(id);
+      setAccounts(await api.getProviderAccounts());
       fetchUsage(true);
     } catch (e) {
-      console.error('Failed to save MiniMax key:', e);
-    } finally {
-      setMinimaxKeySaving(false);
+      setError(String(e));
     }
+  };
+
+  // Create a custom Claude-compatible account (AC2). The backend also registers a
+  // paired harness profile so it shows up in spawn menus. `id` is slugified from
+  // the name; a blank or colliding name is rejected up front.
+  const handleAddCustom = async (name: string, baseUrl: string, apiKey: string) => {
+    const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+    if (!id) {
+      setError('Custom provider needs a name');
+      return;
+    }
+    if (accounts.some(a => a.id === id)) {
+      setError(`A provider with id "${id}" already exists`);
+      return;
+    }
+    const ok = await handleSaveAccount({
+      id,
+      name: name.trim(),
+      enabled: true,
+      billing_mode: 'pay_as_you_go',
+      api_key: apiKey.trim() || null,
+      base_url: baseUrl.trim() || null,
+      models: [],
+    });
+    // Keep the form open (with the user's entries) if the backend rejected it.
+    if (ok) setAddingCustom(false);
   };
 
   // Flip the master kill-switch. Optimistic, with rollback on failure so the
@@ -160,50 +490,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  const getUsageForProvider = (providerId: string) =>
-    usageData.find(u => u.provider === providerId);
-
-  const ProviderCard = ({ providerId, label }: { providerId: string; label: string }) => {
-    const usage = getUsageForProvider(providerId);
-
-    return (
-      <div className="border border-border-subtle rounded-lg p-5">
-        <div className="flex items-center gap-3 mb-3">
-          <ProviderIcon providerId={providerId} className="h-6 w-6" />
-          <span className="text-lg font-medium text-text-primary">{label}</span>
-          {usageLoading && <span className="ml-auto text-base text-text-muted">Loading...</span>}
-        </div>
-
-        {!usage && !usageLoading && (
-          <p className="text-base text-text-muted">Unable to load usage data</p>
-        )}
-
-        {usage && !usage.loggedIn && (
-          <div>
-            <p className="text-base text-status-warning">Not logged in</p>
-            <p className="text-sm text-text-muted mt-1">
-              Run the {label} CLI login first
-            </p>
-          </div>
-        )}
-
-        {usage && usage.loggedIn && usage.error && (
-          <p className="text-base text-status-error">{usage.error}</p>
-        )}
-
-        {usage && usage.loggedIn && !usage.error && (
-          <div>
-            {usage.windows.map(w => (
-              <UsageBar key={w.label} window={w} />
-            ))}
-            {usage.detail && (
-              <p className="text-sm text-accent-cyan mt-2">{usage.detail}</p>
-            )}
-          </div>
-        )}
-      </div>
-    );
-  };
+  const usageFor = (providerId: string) => usageData.find(u => u.provider === providerId);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
@@ -261,38 +548,34 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             </button>
           </div>
 
+          <p className="text-base text-text-muted mb-4">
+            Enable the accounts you use; only enabled providers are polled. Keys and URLs are
+            stored locally in <span className="font-mono">preferences.json</span>.
+          </p>
+
           <div className="space-y-4">
-            <ProviderCard providerId="anthropic" label="Anthropic / Claude" />
-            <ProviderCard providerId="agy" label="Google / Antigravity" />
-            <ProviderCard providerId="codex" label="OpenAI / Codex" />
-            <ProviderCard providerId="minimax" label="MiniMax" />
+            {accounts.map(account => (
+              <AccountCard
+                key={account.id}
+                account={account}
+                usage={usageFor(account.id)}
+                usageLoading={usageLoading}
+                onSave={handleSaveAccount}
+                onRemove={handleRemoveAccount}
+              />
+            ))}
           </div>
 
-          <div className="mt-5 border border-border-subtle rounded-lg p-5">
-            <div className="flex items-center gap-3 mb-3">
-              <ProviderIcon providerId="minimax" className="h-6 w-6" />
-              <span className="text-lg font-medium text-text-primary">MiniMax API Key</span>
-            </div>
-            <p className="text-base text-text-muted mb-3">
-              Stored locally in preferences.json
-            </p>
-            <div className="flex gap-3">
-              <input
-                type="password"
-                value={minimaxKey}
-                onChange={e => setMinimaxKey(e.target.value)}
-                placeholder="Enter API key..."
-                className="flex-1 bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-              />
-              <button
-                onClick={handleSaveMinimaxKey}
-                disabled={minimaxKeySaving}
-                className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
-              >
-                {minimaxKeySaving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
-          </div>
+          {addingCustom ? (
+            <AddCustomProviderForm onAdd={handleAddCustom} onCancel={() => setAddingCustom(false)} />
+          ) : (
+            <button
+              onClick={() => setAddingCustom(true)}
+              className="mt-4 text-base text-accent-cyan hover:text-accent-cyan/80"
+            >
+              + Add custom provider
+            </button>
+          )}
         </div>
 
         <div className="mt-8 pt-5 border-t border-border-subtle">

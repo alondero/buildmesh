@@ -36,6 +36,60 @@ pub struct HarnessProfile {
     pub harness: String,
 }
 
+/// How a [`ProviderAccount`] is billed — drives how usage is rendered (issue #537).
+///
+/// `Plan` accounts (seat/subscription) show utilization percentage bars; `PayAsYouGo`
+/// accounts (API credits) show a cash [`crate::services::usage::BillingBalance`] card.
+///
+/// Generated to src/types/generated/BillingMode.ts (issue #537).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "BillingMode.ts")]
+pub enum BillingMode {
+    /// Seat / subscription plan — utilization is a percentage of a quota.
+    #[default]
+    Plan,
+    /// Pay-as-you-go API credits — utilization is a remaining cash balance.
+    PayAsYouGo,
+}
+
+/// A user-configurable **Model Provider account** (ADR-0014 / PRD #534).
+///
+/// This is the credentials/endpoint half of the harness↔provider split: a
+/// [`HarnessProfile`] names the executor, a `ProviderAccount` names *where* and
+/// *with what key* it talks to a model service. Built-in accounts (anthropic,
+/// codex, agy, minimax) are code-defined in [`default_provider_accounts`] and
+/// merged over by `id`, exactly like harness profiles; users may add custom
+/// Claude-compatible accounts (e.g. "DeepSeek via Claude Code") with their own
+/// base URL and key.
+///
+/// NOTE (#537 slice boundary): `base_url`/`api_key` are *stored* here but not yet
+/// injected at spawn time — that wiring lands in #538 via the `claude` adapter.
+///
+/// Generated to src/types/generated/ProviderAccount.ts (issue #537).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "ProviderAccount.ts")]
+pub struct ProviderAccount {
+    /// Stable id — "anthropic" | "minimax" | a custom id like "deepseek".
+    pub id: String,
+    /// Display label shown in the Accounts panel.
+    pub name: String,
+    /// When false, usage is not polled and the account is not offered for spawning.
+    pub enabled: bool,
+    /// Billing model — chooses percentage bars vs cash-balance card.
+    pub billing_mode: BillingMode,
+    /// API key for usage fetching / custom endpoints. Stored plaintext in
+    /// preferences.json (matches the legacy `minimax_api_key` convention).
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Custom Claude-compatible base URL (used at spawn in #538).
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Custom model identifiers offered for this account.
+    #[serde(default)]
+    pub models: Vec<String>,
+}
+
 /// User-editable, persisted preferences applied across all meshes.
 ///
 /// Generated to src/types/generated/AppPreferences.ts (issue #404).
@@ -46,7 +100,9 @@ pub struct AppPreferences {
     /// `None` means "no app-wide override — use the hardcoded fallback".
     #[serde(default)]
     pub default_provider: Option<String>,
-    /// MiniMax API key for usage fetching. Stored plaintext in preferences.json.
+    /// MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
+    /// (#537) — kept so existing preferences.json files still load and the stored
+    /// key survives via [`minimax_api_key_resolved`]'s read-through fallback.
     #[serde(default)]
     pub minimax_api_key: Option<String>,
     /// Google Cloud project for Antigravity/Gemini quota API. Defaults to "cloudshell-gca".
@@ -58,6 +114,12 @@ pub struct AppPreferences {
     /// is empty, so a built-in like Terminal can never go missing.
     #[serde(default)]
     pub harness_profiles: Vec<HarnessProfile>,
+    /// User customizations to the code-defined default model-provider accounts.
+    /// Merged over [`default_provider_accounts`] by `id` (user wins) in
+    /// [`provider_accounts`]; the built-ins are always present even when this is
+    /// empty. Custom (non-built-in) entries are appended (issue #537).
+    #[serde(default)]
+    pub provider_accounts: Vec<ProviderAccount>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -213,6 +275,127 @@ pub fn resolve_harness_provider(profile_id: &str) -> Provider {
     match harness_profiles().into_iter().find(|p| p.id == profile_id) {
         Some(profile) => Provider::from_db_str(&profile.harness),
         None => Provider::from_db_str(profile_id),
+    }
+}
+
+/// The code-defined model-provider accounts that always exist regardless of
+/// what `preferences.json` stores — the four providers Buildmesh can fetch usage
+/// for. They default to **enabled** so the Accounts panel keeps working out of
+/// the box; the user can disable any of them (issue #537). MiniMax is the
+/// pay-as-you-go exemplar; the rest are seat/subscription plans.
+pub fn default_provider_accounts() -> Vec<ProviderAccount> {
+    let plan = |id: &str, name: &str| ProviderAccount {
+        id: id.to_string(),
+        name: name.to_string(),
+        enabled: true,
+        billing_mode: BillingMode::Plan,
+        api_key: None,
+        base_url: None,
+        models: Vec::new(),
+    };
+    vec![
+        plan("anthropic", "Anthropic / Claude"),
+        plan("codex", "OpenAI / Codex"),
+        plan("agy", "Google / Antigravity"),
+        ProviderAccount {
+            id: "minimax".to_string(),
+            name: "MiniMax".to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            api_key: None,
+            base_url: None,
+            models: Vec::new(),
+        },
+    ]
+}
+
+/// True when `id` names a code-defined built-in account. Custom accounts (which
+/// the user adds) are everything else; only those get a paired harness profile
+/// in [`upsert_provider_account`].
+pub fn is_builtin_account(id: &str) -> bool {
+    default_provider_accounts().iter().any(|a| a.id == id)
+}
+
+/// The effective account list: code-defined defaults with the user's stored
+/// `provider_accounts` merged over them by `id` (user wins / new ids append).
+/// Mirrors [`harness_profiles`] so a built-in can never be removed by an empty
+/// or partial `preferences.json`.
+pub fn provider_accounts() -> Vec<ProviderAccount> {
+    let stored = match load() {
+        Ok(prefs) => prefs.provider_accounts,
+        Err(e) => {
+            tracing::warn!("preferences::provider_accounts load failed, using defaults: {}", e);
+            Vec::new()
+        }
+    };
+    merge_provider_accounts(default_provider_accounts(), stored)
+}
+
+/// Pure merge — defaults first, then each stored account overrides by `id` or
+/// appends. Split out from [`provider_accounts`] so it's unit-testable without disk.
+fn merge_provider_accounts(
+    mut accounts: Vec<ProviderAccount>,
+    stored: Vec<ProviderAccount>,
+) -> Vec<ProviderAccount> {
+    for account in stored {
+        if let Some(existing) = accounts.iter_mut().find(|a| a.id == account.id) {
+            *existing = account;
+        } else {
+            accounts.push(account);
+        }
+    }
+    accounts
+}
+
+/// Resolve the effective MiniMax API key: the minimax account's `api_key`, then
+/// the legacy flat `minimax_api_key` field (read-through so a key stored before
+/// #537 isn't lost). Empty strings are treated as absent. A single `load()` feeds
+/// both layers so the result is a consistent snapshot even under a concurrent save.
+pub fn minimax_api_key_resolved() -> Option<String> {
+    let non_empty = |s: Option<String>| s.filter(|v| !v.is_empty());
+    let prefs = match load() {
+        Ok(prefs) => prefs,
+        Err(_) => return None,
+    };
+    let from_account = merge_provider_accounts(default_provider_accounts(), prefs.provider_accounts.clone())
+        .into_iter()
+        .find(|a| a.id == "minimax")
+        .and_then(|a| a.api_key);
+    non_empty(from_account).or_else(|| non_empty(prefs.minimax_api_key))
+}
+
+/// Upsert a provider account into `prefs` (by `id`). For a **custom** account
+/// (id not built-in), also ensures a paired [`HarnessProfile`] exists so the
+/// custom Claude-compatible provider shows up in spawn menus — AC2's "pair the
+/// claude harness with a custom provider". Pure: mutates the passed `prefs` so
+/// the command layer stays a thin load→mutate→save.
+pub fn upsert_provider_account(prefs: &mut AppPreferences, account: ProviderAccount) {
+    if !is_builtin_account(&account.id) {
+        let profile = HarnessProfile {
+            id: account.id.clone(),
+            name: account.name.clone(),
+            harness: "anthropic".to_string(),
+        };
+        if let Some(existing) = prefs.harness_profiles.iter_mut().find(|p| p.id == profile.id) {
+            *existing = profile;
+        } else {
+            prefs.harness_profiles.push(profile);
+        }
+    }
+    if let Some(existing) = prefs.provider_accounts.iter_mut().find(|a| a.id == account.id) {
+        *existing = account;
+    } else {
+        prefs.provider_accounts.push(account);
+    }
+}
+
+/// Remove a stored provider account by `id` (and its paired custom harness
+/// profile, if any). Built-in defaults can't truly be deleted — removing a
+/// built-in's stored override just reverts it to the code default.
+pub fn remove_provider_account(prefs: &mut AppPreferences, id: &str) {
+    prefs.provider_accounts.retain(|a| a.id != id);
+    if !is_builtin_account(id) {
+        prefs.harness_profiles.retain(|p| p.id != id);
     }
 }
 
@@ -539,5 +722,188 @@ mod tests {
         // with an empty Vec rather than failing.
         let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(prefs.harness_profiles, Vec::new());
+    }
+
+    // ─── Provider accounts (issue #537) ──────────────────────────────────────
+
+    fn custom_account(id: &str) -> ProviderAccount {
+        ProviderAccount {
+            id: id.to_string(),
+            name: format!("Custom {id}"),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            api_key: Some("sk-test".to_string()),
+            base_url: Some("https://example.com/v1".to_string()),
+            models: vec!["model-a".to_string()],
+        }
+    }
+
+    #[test]
+    fn default_provider_accounts_cover_the_four_fetchable_providers() {
+        let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "minimax"]);
+        // MiniMax is the pay-as-you-go exemplar; the rest are plans.
+        let minimax = default_provider_accounts().into_iter().find(|a| a.id == "minimax").unwrap();
+        assert_eq!(minimax.billing_mode, BillingMode::PayAsYouGo);
+        assert!(default_provider_accounts().iter().all(|a| a.enabled));
+    }
+
+    #[test]
+    fn app_preferences_defaults_provider_accounts_to_empty_when_key_absent() {
+        let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.provider_accounts, Vec::new());
+    }
+
+    #[test]
+    fn billing_mode_serializes_snake_case() {
+        assert_eq!(serde_json::to_string(&BillingMode::Plan).unwrap(), "\"plan\"");
+        assert_eq!(
+            serde_json::to_string(&BillingMode::PayAsYouGo).unwrap(),
+            "\"pay_as_you_go\""
+        );
+    }
+
+    #[test]
+    fn merge_provider_accounts_override_by_id_and_append() {
+        let defaults = default_provider_accounts();
+        let stored = vec![
+            // Override the built-in minimax (disable it).
+            ProviderAccount {
+                id: "minimax".to_string(),
+                name: "MiniMax".to_string(),
+                enabled: false,
+                billing_mode: BillingMode::PayAsYouGo,
+                api_key: None,
+                base_url: None,
+                models: Vec::new(),
+            },
+            // Append a custom account.
+            custom_account("deepseek"),
+        ];
+        let merged = merge_provider_accounts(defaults, stored);
+        // Four built-ins, no duplicate minimax, plus the custom one.
+        assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
+        assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
+        assert!(merged.iter().any(|a| a.id == "deepseek"));
+        assert_eq!(merged.len(), 5);
+    }
+
+    #[test]
+    fn provider_accounts_round_trips_a_disabled_override_and_custom() {
+        with_temp_dir(|_| {
+            save(AppPreferences {
+                provider_accounts: vec![
+                    // Disable a built-in via stored override.
+                    ProviderAccount {
+                        id: "codex".to_string(),
+                        name: "OpenAI / Codex".to_string(),
+                        enabled: false,
+                        billing_mode: BillingMode::Plan,
+                        api_key: None,
+                        base_url: None,
+                        models: Vec::new(),
+                    },
+                    custom_account("glm"),
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            let all = provider_accounts();
+            // Built-ins always present; the codex override carries enabled=false;
+            // the custom account is appended. (The enabled→poll filtering itself
+            // lives in commands::usage::accounts_to_poll.)
+            assert!(all.iter().any(|a| a.id == "glm"));
+            assert!(all.iter().any(|a| a.id == "anthropic"));
+            assert!(!all.iter().find(|a| a.id == "codex").unwrap().enabled);
+        });
+    }
+
+    #[test]
+    fn minimax_api_key_resolved_prefers_account_then_legacy_field() {
+        with_temp_dir(|_| {
+            // Legacy flat field only → read-through fallback.
+            save(AppPreferences {
+                minimax_api_key: Some("legacy-key".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(minimax_api_key_resolved(), Some("legacy-key".to_string()));
+
+            // Account key present → wins over the legacy field.
+            save(AppPreferences {
+                minimax_api_key: Some("legacy-key".to_string()),
+                provider_accounts: vec![ProviderAccount {
+                    id: "minimax".to_string(),
+                    name: "MiniMax".to_string(),
+                    enabled: true,
+                    billing_mode: BillingMode::PayAsYouGo,
+                    api_key: Some("account-key".to_string()),
+                    base_url: None,
+                    models: Vec::new(),
+                }],
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(minimax_api_key_resolved(), Some("account-key".to_string()));
+
+            // Nothing set → None.
+            save(AppPreferences::default()).unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(minimax_api_key_resolved(), None);
+        });
+    }
+
+    #[test]
+    fn upsert_custom_account_adds_paired_harness_profile() {
+        let mut prefs = AppPreferences::default();
+        upsert_provider_account(&mut prefs, custom_account("deepseek"));
+        assert!(prefs.provider_accounts.iter().any(|a| a.id == "deepseek"));
+        let profile = prefs.harness_profiles.iter().find(|p| p.id == "deepseek").unwrap();
+        assert_eq!(profile.harness, "anthropic");
+        assert_eq!(profile.name, "Custom deepseek");
+    }
+
+    #[test]
+    fn upsert_builtin_account_does_not_add_a_profile() {
+        let mut prefs = AppPreferences::default();
+        upsert_provider_account(
+            &mut prefs,
+            ProviderAccount {
+                id: "minimax".to_string(),
+                name: "MiniMax".to_string(),
+                enabled: true,
+                billing_mode: BillingMode::PayAsYouGo,
+                api_key: Some("k".to_string()),
+                base_url: None,
+                models: Vec::new(),
+            },
+        );
+        assert!(prefs.provider_accounts.iter().any(|a| a.id == "minimax"));
+        assert!(prefs.harness_profiles.is_empty(), "built-ins get no paired profile");
+    }
+
+    #[test]
+    fn upsert_existing_account_overrides_in_place() {
+        let mut prefs = AppPreferences::default();
+        upsert_provider_account(&mut prefs, custom_account("glm"));
+        let mut updated = custom_account("glm");
+        updated.enabled = false;
+        upsert_provider_account(&mut prefs, updated);
+        assert_eq!(prefs.provider_accounts.iter().filter(|a| a.id == "glm").count(), 1);
+        assert!(!prefs.provider_accounts.iter().find(|a| a.id == "glm").unwrap().enabled);
+        assert_eq!(prefs.harness_profiles.iter().filter(|p| p.id == "glm").count(), 1);
+    }
+
+    #[test]
+    fn remove_custom_account_drops_account_and_paired_profile() {
+        let mut prefs = AppPreferences::default();
+        upsert_provider_account(&mut prefs, custom_account("deepseek"));
+        remove_provider_account(&mut prefs, "deepseek");
+        assert!(!prefs.provider_accounts.iter().any(|a| a.id == "deepseek"));
+        assert!(!prefs.harness_profiles.iter().any(|p| p.id == "deepseek"));
     }
 }
