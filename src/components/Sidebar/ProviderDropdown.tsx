@@ -9,6 +9,7 @@ export type ProviderEntry = { id: string; label: string; color: string };
 export function colorClassForProvider(providerId: string): string {
   const map: Record<string, string> = {
     anthropic: 'bg-blue-500',
+    claude: 'bg-blue-500', // Detected Claude Code profile id (#534).
     minimax: 'bg-indigo-500',
     kimi: 'bg-cyan-500',
     agy: 'bg-emerald-500',

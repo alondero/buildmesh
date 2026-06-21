@@ -68,6 +68,13 @@ function TerminalIcon({ className, title }: { className?: string; title?: string
 type InlineIconProps = { className?: string; title?: string };
 const INLINE_ICONS: Record<string, (props: InlineIconProps) => React.JSX.Element> = {
   anthropic: ClaudeCodeIcon,
+  // Startup auto-detection (detection.rs) registers Claude Code with the
+  // profile id "claude", so the harness-profile rows and any node spawned with
+  // it key off "claude" — not the legacy "anthropic" id. Both must resolve to
+  // the Claude Code mark or the row falls through to the gray-dot fallback
+  // (#534). Custom Claude-compatible providers (their own slug id) still fall
+  // back today — branded icons for those land with the provider redesign.
+  claude: ClaudeCodeIcon,
   codex: OpenAIIcon,
   opencode: OpenCodeIcon,
   kimi: KimiIcon,
@@ -85,6 +92,7 @@ const COLORED_IMAGES: Record<string, string> = {
 // any other surface that needs the provider's brand colour as a fill.
 const PROVIDER_CHIP_COLORS: Record<string, string> = {
   anthropic: '#1d7cfc',
+  claude:    '#1d7cfc', // Detected Claude Code profile id (#534) — same brand blue.
   minimax:   '#6366f1',
   kimi:      '#00c4c4',
   agy:       '#10b981',
