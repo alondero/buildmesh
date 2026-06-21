@@ -448,10 +448,52 @@ pub(crate) fn validate_pr_spawn_inputs(
 /// Returns the same `IssueNodeDraft` wire shape as `create_issue_node`; the
 /// frontend reuses the generated `IssueNodeDraft.ts` import (the structure
 /// is identical: flattened `AgentNode` + `prefill`).
+///
+/// Thin Tauri wrapper — all logic lives in [`create_pr_node_impl`], which is
+/// `pub(crate)` so unit tests can exercise the gate + DB + name/prefill
+/// + provider-resolution seams without a Tauri `AppHandle` (which is only
+/// needed to emit the `node-created` event here). Mirrors the
+/// `validate_pr_spawn_inputs` extraction in #471 — same pattern: a pure
+/// inner function is testable in isolation, the `#[command]` macro wraps it
+/// with the AppHandle-bound event emission.
 #[command]
 #[allow(clippy::too_many_arguments)]
 pub fn create_pr_node(
     app: tauri::AppHandle,
+    mesh_id: i64,
+    pr_number: i64,
+    pr_title: String,
+    head_ref: String,
+    head_sha: String,
+    provider: Option<String>,
+    head_repo_owner: Option<String>,
+    head_repo_clone_url: Option<String>,
+) -> Result<IssueNodeDraft, String> {
+    let draft = create_pr_node_impl(
+        mesh_id,
+        pr_number,
+        pr_title,
+        head_ref,
+        head_sha,
+        provider,
+        head_repo_owner,
+        head_repo_clone_url,
+    )?;
+    // Mirrors `create_issue_node` — see that block for the rationale.
+    let _ = app.emit("node-created", serde_json::json!({ "id": draft.node.id }));
+    Ok(draft)
+}
+
+/// Inner implementation of [`create_pr_node`] — see that function's doc
+/// comment for the high-level overview. Exposed as `pub(crate)` so the
+/// integration tests in `mod tests` can pin the seams (gate, mesh lookup,
+/// name+prefill wiring, provider resolution, SHA exact-pinning) without
+/// needing a Tauri `AppHandle`. Side effects limited to the DB write
+/// (`create_pending_with_source_pr_fork`) and a `tracing::info!` log —
+/// the `node-created` Tauri event is the only AppHandle-bound concern,
+/// and it stays in the command wrapper.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_pr_node_impl(
     mesh_id: i64,
     pr_number: i64,
     pr_title: String,
@@ -515,12 +557,6 @@ pub fn create_pr_node(
         head_repo_clone_url.as_deref(),
     )
     .map_err(|e| e.to_string())?;
-
-    // Mirrors `create_issue_node` — see that block for the rationale.
-    let _ = app.emit(
-        "node-created",
-        serde_json::json!({ "id": node.id }),
-    );
 
     tracing::info!(
         "create_pr_node: created pending node {} for PR #{} (head_ref={}, head_sha={}, head_repo_owner={:?}) on mesh {}",
@@ -869,6 +905,412 @@ mod tests {
         assert!(
             !providers.iter().any(|p| p.id == "anthropic"),
             "legacy enum rows must not be listed once the profile list is the sole source"
+        );
+    }
+
+    // ----- create_pr_node_impl seams (issue #445) -----------------------
+    //
+    // `create_pr_node` is a Tauri command that needs an `AppHandle` only to
+    // emit `node-created`. The inner `create_pr_node_impl` is the unit of
+    // logic — gate + DB lookup + name/prefill + provider chain + SHA pin —
+    // and is what these tests pin.
+    //
+    // These tests stand up a real on-disk SQLite DB via `db::init` (the
+    // global `DB` OnceCell is one-shot per process, so we serialise on
+    // `TEST_LOCK` and only initialise on the first test). The `meshes.path`
+    // column is UNIQUE — we point each test at its own temp git repo, and
+    // `resolve_github_owner_repo` only needs `origin` set to a GitHub URL
+    // for the mesh-lookup seam to produce (owner, repo).
+    //
+    // The exact-pinning / fork-meta / provider / name assertions all read
+    // back the persisted `AgentNode` row via `IssueNodeDraft.node`, so a
+    // refactor that drops one of the fields surfaced in the function body
+    // (e.g. the SHA pin, the fork fields, the `pr{N}-` prefix) would fail
+    // the corresponding test rather than silently regress to the legacy
+    // `base_ref`-fallback path on stage-2.
+
+    /// Serialises tests that touch the global DB — `db::init` is a one-shot
+    /// OnceCell and the test files share one process. Held for the duration
+    /// of every test in this section.
+    static PR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// One-shot guard for `db::init`. The first test to run triggers
+    /// initialisation; subsequent tests see the Once has fired and skip.
+    /// `std::sync::Once` is process-scoped, so this is automatically
+    /// correct across the whole `cargo test` invocation — unlike a
+    /// marker file, which persists across runs and would let the
+    /// (process-fresh) DB OnceCell stay `None` on the next run.
+    ///
+    /// We combine this with a `db::is_initialized()` check so we don't
+    /// race with other test files (e.g. `db::mesh_tests`) that also
+    /// call `db::init` directly: whichever test runs first wins, and
+    /// the other tests see "already initialised" and skip without
+    /// unwrapping the error (which is what those tests do, and why
+    /// they break if we beat them to it).
+    static DB_INIT: std::sync::Once = std::sync::Once::new();
+
+    /// Per-process scratch path for the test DB. `db::init` is one-shot,
+    /// so the first test to call this picks a path and every later
+    /// call gets the same one — fine because the global DB static
+    /// remembers the result regardless of path.
+    ///
+    /// The path ends in `.db` because `db::init` calls
+    /// `Connection::open(path)`, which expects a *file* (not a
+    /// directory). A bare `temp_dir()/buildmesh_pr_node_test_<pid>` would
+    /// create a directory, and `Connection::open` would fail with
+    /// "Not a database" (or, on first open, succeed but then
+    /// misbehave). `db::mesh_tests` uses the same `*.db` suffix — the
+    /// shape is the contract.
+    fn pr_test_db_path() -> std::path::PathBuf {
+        use std::sync::OnceLock;
+        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+        PATH.get_or_init(|| {
+            let p = std::env::temp_dir().join(format!(
+                "buildmesh_pr_node_test_{}.db",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&p);
+            p
+        })
+        .clone()
+    }
+
+    /// `db::init` the global DB if it hasn't been already. Called from
+    /// each test that touches `create_pr_node_impl` (the function reads
+    /// `db::get_mesh_by_id` which panics on an uninitialised DB).
+    ///
+    /// The `DB` static is a one-shot `OnceCell` — if another test in the
+    /// same binary (e.g. `db::mesh_tests`) already initialised it to a
+    /// different path, we leave it alone: the schema is identical
+    /// (always migrated to the current `SCHEMA_VERSION`), and
+    /// `db::create_mesh` / `db::get_mesh_by_id` operate on whichever
+    /// DB is global — so we share whatever the other test set up. The
+    /// `db::is_initialized()` check is the polite form of "don't
+    /// trample a peer's init" so `db::mesh_tests` doesn't break on
+    /// `.unwrap()`.
+    fn ensure_pr_db() {
+        if crate::db::is_initialized() {
+            return;
+        }
+        DB_INIT.call_once(|| {
+            let _ = crate::db::init(&pr_test_db_path());
+        });
+    }
+
+    /// Create a temp git repo with a known `origin` URL, and insert a
+    /// `meshes` row pointing at it. Returns `(temp_dir, mesh_id)` — caller
+    /// MUST hold `temp_dir` for the test's lifetime (its `Drop` wipes the
+    /// path). Each test gets its own dir so the `meshes.path` UNIQUE
+    /// constraint is satisfied.
+    fn create_test_mesh(name: &str, origin_url: &str) -> (tempfile::TempDir, i64) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let path = tmp.path().to_path_buf();
+        // `Repository::init` returns a handle to the new repo — use it
+        // directly for `remote_set_url` rather than re-opening. The URL
+        // itself is never fetched from in these tests; we only need
+        // `parse_owner_repo` to recognise it as GitHub-shaped.
+        let repo = git2::Repository::init(&path).expect("git init");
+        repo.remote_set_url("origin", origin_url)
+            .expect("remote_set_url");
+        let mesh = crate::db::create_mesh(name, path.to_str().unwrap())
+            .expect("create_mesh");
+        (tmp, mesh.id)
+    }
+
+    /// The gate is split across `validate_pr_spawn_inputs` (truth table in
+    /// `commands::agent_tests`) and `db::get_mesh_by_id` (mesh existence).
+    /// Pin the "fork-PR guard" half here: a request with `head_ref = ""`
+    /// must short-circuit at the gate, BEFORE we even look at the DB —
+    /// the spawn path can't check out a branch named `""` on stage-2.
+    ///
+    /// The user-facing wording matters: the panel renders this verbatim
+    /// and the user needs to know to "Reload the PR list" rather than
+    /// "fork PRs aren't supported" (the legacy wording pre-#443).
+    #[test]
+    fn create_pr_node_impl_rejects_empty_head_ref() {
+        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_db();
+
+        let err = create_pr_node_impl(
+            1,           // mesh_id — irrelevant; gate short-circuits before DB read
+            420,
+            "any title".to_string(),
+            "".to_string(),
+            "".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect_err("head_ref=\"\" must be rejected (cannot check out branch \"\")");
+
+        assert!(
+            err.contains("head_ref") && err.to_lowercase().contains("required"),
+            "error must name the missing head_ref, got: {:?}",
+            err
+        );
+        // Must NOT use the pre-#443 wording ("fork PRs not supported") —
+        // that's the legacy gate, the post-#443 path accepts fork PRs
+        // that carry full fork info.
+        assert!(
+            !err.to_lowercase().contains("fork prs not supported"),
+            "error must use the post-#443 wording, not the legacy 'fork PRs not supported': {:?}",
+            err
+        );
+    }
+
+    /// The XOR gate in `validate_pr_spawn_inputs` (issue #471) must
+    /// surface as a "fork info is incomplete" error from the public
+    /// function — not silently proceed (which would spawn on the wrong
+    /// commits because stage-2 can't register a fork remote).
+    #[test]
+    fn create_pr_node_impl_rejects_incomplete_fork_info() {
+        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_db();
+
+        let err = create_pr_node_impl(
+            1,
+            420,
+            "any title".to_string(),
+            "feat/443-fork".to_string(),
+            "".to_string(),
+            None,
+            Some("alice".to_string()),     // owner present
+            None,                          // clone_url MISSING — XOR violation
+        )
+        .expect_err("owner without clone_url must be rejected");
+
+        assert!(
+            err.contains("fork info is incomplete"),
+            "error must name the fork-info completeness gate, got: {:?}",
+            err
+        );
+    }
+
+    /// A `mesh_id` that doesn't exist in the DB must propagate as an
+    /// error from `db::get_mesh_by_id` — not panic, not silently
+    /// fall through to `db::create_mesh`. The spawn flow has no recovery
+    /// here; surfacing the error to the panel is the only sane behaviour.
+    #[test]
+    fn create_pr_node_impl_rejects_unknown_mesh_id() {
+        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_db();
+
+        // Use a mesh id that the freshly-init'd DB cannot possibly have
+        // (no `create_mesh` was called in this test).
+        let err = create_pr_node_impl(
+            999_999_999,
+            420,
+            "any title".to_string(),
+            "feat/420-pr-spawn".to_string(),
+            "".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect_err("unknown mesh_id must be rejected");
+
+        // `db::get_mesh_by_id` returns a rusqlite error containing
+        // "Query returned no rows" when the id is missing — that
+        // wording is the diagnostic, not a contract the panel parses.
+        // We just assert it's a non-empty error string.
+        assert!(
+            !err.is_empty(),
+            "mesh-not-found must produce a non-empty error, got empty string"
+        );
+    }
+
+    /// The seam the issue calls out most explicitly: the returned
+    /// `IssueNodeDraft` must carry the prefill from `format_pr_prefill`
+    /// AND the node name from `pr_node_name`. Both pieces are computed
+    /// from the SAME `(pr_number, pr_title)` pair, so a refactor that
+    /// accidentally passes a different value to one of them (e.g. a
+    /// stale `pr_title` from a closure) would break the user's mental
+    /// model: the agent gets a prefill referring to a different PR
+    /// than the one whose name appears in the sidebar.
+    #[test]
+    fn create_pr_node_impl_wires_name_and_prefill_seam() {
+        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_db();
+
+        let (_tmp, mesh_id) = create_test_mesh(
+            "pr-seam-test",
+            "https://github.com/alondero/buildmesh.git",
+        );
+
+        let pr_number: i64 = 445;
+        let pr_title = "test(pr-spawn): Rust unit tests for create_pr_node + fetch_single_ref";
+
+        let draft = create_pr_node_impl(
+            mesh_id,
+            pr_number,
+            pr_title.to_string(),
+            "feat/445-pr-spawn".to_string(),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect("create_pr_node_impl with valid inputs must succeed");
+
+        // Prefill seam: matches the helper exactly.
+        let expected_prefill = format_pr_prefill(
+            "alondero",
+            "buildmesh",
+            pr_number,
+            pr_title,
+        );
+        assert_eq!(
+            draft.prefill, expected_prefill,
+            "returned prefill must match format_pr_prefill exactly — \
+             a divergence means the agent gets the wrong PR URL"
+        );
+
+        // Name seam: matches `pr_node_name` (the `pr{N}-` prefix) and
+        // matches what the service layer persisted on `node.name`.
+        let expected_name = crate::session_naming::pr_node_name(pr_number, pr_title);
+        assert_eq!(
+            draft.node.name, expected_name,
+            "returned node.name must match pr_node_name exactly — \
+             a divergence means the sidebar shows a different PR than the agent is reviewing"
+        );
+        // Sanity: the name carries the `pr` prefix (vs `gh` for issue-spawn).
+        assert!(
+            draft.node.name.starts_with("pr445-"),
+            "PR-spawned node name must use the pr{{N}}- prefix, got: {:?}",
+            draft.node.name
+        );
+
+        // Also: the head_ref is persisted on `node.branch` (stage-2
+        // reads it from there, not from the original input).
+        assert_eq!(
+            draft.node.branch, "feat/445-pr-spawn",
+            "head_ref must be persisted on node.branch for stage-2 worktree adoption"
+        );
+        assert_eq!(
+            draft.node.source_pr,
+            Some(pr_number),
+            "source_pr must be set to the originating PR number"
+        );
+    }
+
+    /// `resolve_default_provider` is layered: explicit (caller) → per-mesh
+    /// (DB) → app-wide → "anthropic" fallback. The PR-spawn path
+    /// threads `(caller, mesh.default_provider, default_provider())`
+    /// through — pin each tier so a refactor that swaps the order
+    /// (e.g. accidentally calls `default_provider()` BEFORE the
+    /// per-mesh value) surfaces as a test failure.
+    #[test]
+    fn create_pr_node_impl_resolves_provider_chain() {
+        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_db();
+
+        // Case 1: explicit caller value wins (no mesh, no app default).
+        let (_tmp, mesh_id) =
+            create_test_mesh("pr-provider-explicit", "https://github.com/x/y.git");
+        let draft = create_pr_node_impl(
+            mesh_id,
+            1,
+            "t".to_string(),
+            "feat/a".to_string(),
+            "".to_string(),
+            Some("minimax".to_string()), // explicit
+            None,
+            None,
+        )
+        .expect("explicit provider must be accepted");
+        assert_eq!(
+            draft.node.provider, "minimax",
+            "explicit caller value must override mesh/app defaults"
+        );
+        // Cleanup so the next sub-case can use a fresh mesh with the
+        // same path (UNIQUE constraint).
+        crate::db::delete_mesh(mesh_id).expect("delete_mesh");
+
+        // Case 2: per-mesh default wins when caller is absent. We
+        // mutate the mesh row's `default_provider` via direct SQL
+        // (no app-level setter for it; the column is set on insert via
+        // `meshes.default_provider` and only the React UI mutates it
+        // through `commands::mesh_properties`, not a `db::` helper).
+        let (_tmp2, mesh_id2) =
+            create_test_mesh("pr-provider-mesh", "https://github.com/x/y.git");
+        let db = crate::db::get().lock().unwrap();
+        db.execute(
+            "UPDATE meshes SET default_provider = ?1 WHERE id = ?2",
+            rusqlite::params!["agy", mesh_id2],
+        )
+        .expect("set default_provider");
+        drop(db);
+        let draft = create_pr_node_impl(
+            mesh_id2,
+            2,
+            "t".to_string(),
+            "feat/b".to_string(),
+            "".to_string(),
+            None, // no explicit — fall through
+            None,
+            None,
+        )
+        .expect("mesh default must be accepted");
+        assert_eq!(
+            draft.node.provider, "agy",
+            "per-mesh default must win when no explicit caller value is given"
+        );
+    }
+
+    /// Issue #444 — the SHA exact-pinning seam. A non-empty `head_sha`
+    /// must be persisted on `node.source_pr_pinned_sha` so stage-2 can
+    /// compare it against the post-fetch local SHA and emit a
+    /// `pr_sha_drift` `mesh-sync-warning` if the PR was force-pushed.
+    /// An empty `head_sha` (partial GitHub response) must persist as
+    /// `None` so the drift check is skipped (fail-open semantics).
+    ///
+    /// Each case uses its own tempdir (different `meshes.path`), so the
+    /// `UNIQUE(path)` constraint is satisfied without any explicit DB
+    /// cleanup — the rows just accumulate for the test process and get
+    /// swept at the global tempdir's `Drop`.
+    #[test]
+    fn create_pr_node_impl_persists_pinned_sha_for_drift_check() {
+        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_db();
+
+        // Case A: non-empty head_sha persists verbatim.
+        let (_tmp_a, mesh_id_a) =
+            create_test_mesh("pr-sha-pin-a", "https://github.com/x/y.git");
+        let sha = "abcdef0123456789abcdef0123456789abcdef01";
+        let draft_a = create_pr_node_impl(
+            mesh_id_a,
+            1,
+            "t".to_string(),
+            "feat/a".to_string(),
+            sha.to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect("non-empty head_sha must be accepted");
+        assert_eq!(
+            draft_a.node.source_pr_pinned_sha.as_deref(),
+            Some(sha),
+            "non-empty head_sha must persist as source_pr_pinned_sha for stage-2 drift check"
+        );
+
+        // Case B: empty head_sha persists as None.
+        let (_tmp_b, mesh_id_b) =
+            create_test_mesh("pr-sha-pin-b", "https://github.com/x/y.git");
+        let draft_b = create_pr_node_impl(
+            mesh_id_b,
+            2,
+            "t".to_string(),
+            "feat/b".to_string(),
+            "".to_string(),
+            None,
+            None,
+            None,
+        )
+        .expect("empty head_sha must be accepted (drift check skipped)");
+        assert_eq!(
+            draft_b.node.source_pr_pinned_sha, None,
+            "empty head_sha must persist as None (skip drift check, fail-open)"
         );
     }
 }

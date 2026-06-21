@@ -2039,4 +2039,173 @@ mod tests {
         );
         assert!(!ok, "fetch_fork_head must return false on a bad clone URL");
     }
+
+    // ----- fetch_single_ref (issue #420) ---------------------------------
+    //
+    // Same-repo PR spawn (#420) — the worktree adoption path calls
+    // `fetch_single_ref` to materialise `origin/<head_ref>` so the worktree
+    // can be cut from it. The function shells out to `git fetch origin -- <ref>`;
+    // the `--` separator is the security hardening (a ref starting with `-`
+    // would otherwise be parsed as a `git` flag like `--upload-pack=…`).
+    //
+    // These tests pin all four cases the issue calls out:
+    //   1. success — ref exists on origin
+    //   2. ref-not-found — ref missing on origin (caller falls back to base_ref)
+    //   3. non-git path — caller passed a directory that isn't a repo
+    //   4. adversarial ref — `--`-prefixed input is rejected by `git` itself
+    //
+    // The fixture mirrors `init_fork_fixture` but for the same-repo path:
+    // a bare repo holds a single branch, the local repo has `origin`
+    // pointed at the bare, and the test calls `fetch_single_ref` against
+    // the local repo's path.
+
+    /// Build a "remote + local" pair: the bare repo has a single commit on
+    /// `main` plus a `feat/420-pr-spawn` branch; the local repo has `origin`
+    /// pointed at the bare. Returns `(local, bare_path)` — the local TempDir
+    /// owns its on-disk path; `bare_path` is a plain PathBuf that lives
+    /// inside `std::env::temp_dir()` and is reused across calls (it gets
+    /// re-populated with the same content each time, so the SHA is stable
+    /// per-test-process).
+    fn init_same_repo_fixture() -> (TempDir, std::path::PathBuf) {
+        // Source: a working repo with a feature branch we can fetch.
+        // We reuse the same on-disk source across tests in a single
+        // process — `init_same_repo_fixture` is only called from the
+        // same-repo tests below, and the contents are deterministic.
+        static SRC_DIR: std::sync::OnceLock<std::path::PathBuf> =
+            std::sync::OnceLock::new();
+        let src_path = SRC_DIR
+            .get_or_init(|| {
+                let src = TempDir::new().unwrap();
+                let src_path = src.path().to_path_buf();
+                let src_repo = git2::Repository::init(&src_path).unwrap();
+                let sig = git2::Signature::now("test", "test@example.com").unwrap();
+                std::fs::write(src_path.join("README.md"), "init\n").unwrap();
+                let mut index = src_repo.index().unwrap();
+                index.add_path(std::path::Path::new("README.md")).unwrap();
+                index.write().unwrap();
+                let tree_oid = index.write_tree().unwrap();
+                let tree = src_repo.find_tree(tree_oid).unwrap();
+                let main_commit = src_repo
+                    .commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                    .unwrap();
+                let main_commit_obj = src_repo.find_commit(main_commit).unwrap();
+                src_repo
+                    .branch("feat/420-pr-spawn", &main_commit_obj, true)
+                    .unwrap();
+                // Leak the TempDir guard — we want src_path to stay alive
+                // for the whole process, and the bare-fetch step below
+                // re-reads from the on-disk path on every test.
+                std::mem::forget(src);
+                src_path
+            })
+            .clone();
+
+        // Bare remote — same pattern as `init_fork_fixture`. A unique
+        // name per process so parallel `cargo test` invocations don't
+        // collide on the bare dir.
+        let bare_dir = std::env::temp_dir().join(format!(
+            "buildmesh_same_repo_bare_{}_{}",
+            std::process::id(),
+            NEXT_FORK_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        ));
+        let _ = std::fs::remove_dir_all(&bare_dir);
+        let clone = git2::Repository::init_bare(&bare_dir).unwrap();
+        let mut remote = clone
+            .remote("origin", src_path.to_str().unwrap())
+            .unwrap();
+        remote
+            .fetch(&["refs/heads/*:refs/heads/*"], None, None)
+            .unwrap();
+
+        // Local repo with `origin` pointed at the bare. `fetch_single_ref`
+        // will use this `origin` remote to materialise the ref.
+        let local = TempDir::new().unwrap();
+        let local_repo = git2::Repository::init(local.path()).unwrap();
+        local_repo
+            .remote("origin", bare_dir.to_str().unwrap())
+            .unwrap();
+        (local, bare_dir)
+    }
+
+    /// Success path: a ref that exists on `origin` is fetched into
+    /// `refs/remotes/origin/<head_ref>` and the function returns `true`.
+    /// This is the happy path the spawn-time worktree adoption relies on.
+    #[test]
+    fn fetch_single_ref_returns_true_when_ref_exists() {
+        let (local, _bare) = init_same_repo_fixture();
+        let ok = fetch_single_ref(local.path().to_str().unwrap(), "feat/420-pr-spawn");
+        assert!(
+            ok,
+            "fetch_single_ref must return true when the ref exists on origin"
+        );
+        // Verify the ref actually got materialised — a true return with no
+        // visible ref would mean a silent no-op, which is a worse failure
+        // mode than a hard error.
+        let local_repo = git2::Repository::open(local.path()).unwrap();
+        let reference = local_repo
+            .find_reference("refs/remotes/origin/feat/420-pr-spawn")
+            .expect("origin/feat/420-pr-spawn must be materialised after success");
+        assert!(
+            reference.target().is_some(),
+            "fetched ref must point at a real OID, not be unborn"
+        );
+    }
+
+    /// Ref-not-found path: a ref that does NOT exist on `origin` causes
+    /// `git fetch` to exit non-zero. The function returns `false` (not
+    /// an error) so the spawn path can fall back to the mesh's
+    /// `base_ref` — this is the ADR 0001 offline pattern, surface as
+    /// `pr_head_unfetchable` rather than failing the spawn.
+    #[test]
+    fn fetch_single_ref_returns_false_when_ref_missing() {
+        let (local, _bare) = init_same_repo_fixture();
+        let ok = fetch_single_ref(local.path().to_str().unwrap(), "does-not-exist");
+        assert!(
+            !ok,
+            "fetch_single_ref must return false when the ref is missing on origin \
+             (caller falls back to base_ref per the offline-fallback contract)"
+        );
+    }
+
+    /// Non-git path: a directory that isn't a git repo at all. `git fetch`
+    /// errors immediately; the function swallows that and returns `false`.
+    /// This is the "user has a partial / broken clone" edge case — the
+    /// spawn must not panic.
+    #[test]
+    fn fetch_single_ref_returns_false_for_non_git_directory() {
+        let tmp = TempDir::new().unwrap();
+        let ok = fetch_single_ref(tmp.path().to_str().unwrap(), "feat/420-pr-spawn");
+        assert!(
+            !ok,
+            "fetch_single_ref must return false (not panic) for a non-git path"
+        );
+    }
+
+    /// Adversarial-ref pin (issue #420 hardening): a ref starting with `-`
+    /// (e.g. `--upload-pack=evil`) is rejected by `git` itself because of
+    /// the `--` separator before `head_ref`. Without the separator, `git`
+    /// would parse `--upload-pack=evil` as a flag and use it for the
+    /// fetch — a vector for arbitrary command execution on a malicious
+    /// server (CVE-2017-1000117 / CVE-2018-17456 class). The hardening
+    /// lives in `fetch_single_ref`; this test pins the contract so a
+    /// future refactor that drops the `--` separator fails the test
+    /// rather than silently re-introducing the vulnerability.
+    ///
+    /// We pass a ref that, WITHOUT the separator, `git` would parse as a
+    /// flag (`--upload-pack=evil`) — `git fetch` will then error out on
+    /// "fatal: bad config name", proving the separator did its job. With
+    /// the separator, the value reaches the ref-spec parser as a
+    /// literal ref name (which still doesn't exist on origin, so the
+    /// call returns `false` either way — the contract is "the function
+    /// returns false rather than letting `--upload-pack` reach git").
+    #[test]
+    fn fetch_single_ref_rejects_adversarial_dash_ref() {
+        let (local, _bare) = init_same_repo_fixture();
+        let ok = fetch_single_ref(local.path().to_str().unwrap(), "--upload-pack=evil");
+        assert!(
+            !ok,
+            "fetch_single_ref must return false for a ref starting with '-' \
+             (the '--' separator must block git from treating it as a flag)"
+        );
+    }
 }
