@@ -10,9 +10,11 @@
  *   - the primary Resume button does the import → set-active → spawn
  *     sequence and toggles the probe off so the user lands on the
  *     terminal
- *   - the `▾` provider picker only exposes Claude Code-backed
- *     providers (anthropic / minimax / kimi), because the others
- *     don't read session transcripts from disk and can't resume
+ *   - the `▾` provider picker only exposes providers whose backend-
+ *     supplied `resumable` flag is true. The flag replaces the
+ *     hardcoded `['anthropic','minimax','kimi']` allow-list so a
+ *     custom Claude-compatible profile (e.g. "DeepSeek via Claude")
+ *     shows up automatically (#550 follow-up).
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -23,6 +25,7 @@ import { ArchivedNodesTab } from '../../src/components/Probe/ArchivedNodesTab';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import type { ArchivedAgentNode } from '../../src/lib/tauri';
 
 const MESH: Mesh = {
@@ -56,11 +59,26 @@ const SESSIONS: ArchivedAgentNode[] = [
 ];
 
 const PROVIDERS = [
-  { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '' },
-  { id: 'minimax', label: 'Minimax', color: '#000', icon: '' },
-  { id: 'kimi', label: 'Kimi', color: '#000', icon: '' },
-  { id: 'opencode', label: 'OpenCode', color: '#000', icon: '' },
-  { id: 'antigravity', label: 'Antigravity', color: '#000', icon: '' },
+  // `resumable: true` mirrors the backend derivation
+  // `supports_resume() && produces_readable_transcript()` for the Claude-
+  // backed executor (which includes the legacy "minimax"/"kimi" ids that
+  // resolve to the Anthropic adapter per #538).
+  { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', resumable: true },
+  { id: 'minimax', label: 'Minimax', color: '#000', icon: '', resumable: true },
+  { id: 'kimi', label: 'Kimi', color: '#000', icon: '', resumable: true },
+  // OpenCode / Antigravity write transcripts the coordinator read API
+  // doesn't parse, so resume would corrupt the session — backend sets
+  // `resumable: false` and the picker hides them.
+  { id: 'opencode', label: 'OpenCode', color: '#000', icon: '', resumable: false },
+  { id: 'antigravity', label: 'Antigravity', color: '#000', icon: '', resumable: false },
+];
+
+// Custom Claude-compatible profile — the exact case the old id allow-list
+// silently hid. A user-defined id + name; the `resumable` flag is what
+// matters for picker inclusion.
+const CUSTOM_PROVIDERS = [
+  ...PROVIDERS,
+  { id: 'deepseek-via-claude', label: 'DeepSeek (via Claude)', color: '#000', icon: '', resumable: true },
 ];
 
 const RESUMED_NODE = {
@@ -77,13 +95,17 @@ const RESUMED_NODE = {
   created_at: '2026-01-01',
 };
 
-function mockBackend(opts: { sessions?: ArchivedAgentNode[]; defaultProvider?: string } = {}) {
+function mockBackend(opts: {
+  sessions?: ArchivedAgentNode[];
+  defaultProvider?: string;
+  providers?: typeof PROVIDERS;
+} = {}) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'discover_agent_nodes':
         return Promise.resolve(opts.sessions ?? SESSIONS);
       case 'list_providers':
-        return Promise.resolve(PROVIDERS);
+        return Promise.resolve(opts.providers ?? PROVIDERS);
       case 'get_default_provider':
         return Promise.resolve(opts.defaultProvider ?? 'anthropic');
       case 'import_discovered_agent_node':
@@ -252,9 +274,11 @@ describe('ArchivedNodesTab (#378)', () => {
   });
 
   it('only exposes resumable providers in the `▾` picker', async () => {
-    // The picker filters to Claude Code-backed providers; antigravity and
-    // opencode can't read session transcripts from disk and therefore
-    // would corrupt a resume if surfaced.
+    // The picker filters by the backend-supplied `resumable` flag (the
+    // resolved adapter's `supports_resume() && produces_readable_transcript()`).
+    // Antigravity and OpenCode write transcripts the coordinator read API
+    // can't parse, so the backend reports `resumable: false` and the
+    // picker hides them.
     mockBackend();
     render(<ArchivedNodesTab />);
 
@@ -266,6 +290,39 @@ describe('ArchivedNodesTab (#378)', () => {
     expect(screen.getByText('Kimi')).toBeTruthy();
     expect(screen.queryByText('OpenCode')).toBeNull();
     expect(screen.queryByText('Antigravity')).toBeNull();
+  });
+
+  it('exposes custom Claude-compatible profiles in the `▾` picker (issue #550 follow-up)', async () => {
+    // Regression: the picker used to filter by a hardcoded
+    // `['anthropic','minimax','kimi']` id allow-list, which silently hid
+    // any custom Claude-compatible profile (e.g. "DeepSeek via Claude").
+    // The fix is a backend-supplied `resumable` flag on ProviderInfo, so
+    // the frontend just renders whatever the backend reports.
+    //
+    // `listProviders` is memoised module-wide (issue #405), so a previous
+    // test's cached promise would otherwise shadow this mock and the
+    // dropdown would only see `PROVIDERS`. Reset the cache *before*
+    // re-installing the mock so the next `listProviders()` call hits the
+    // freshly-installed mock.
+    __resetProviderCachesForTests();
+    mockBackend({ providers: CUSTOM_PROVIDERS });
+    render(<ArchivedNodesTab />);
+
+    const carets = await screen.findAllByTitle('Choose provider');
+    fireEvent.click(carets[0]);
+    await screen.findByText('Anthropic');
+
+    // The user-chosen label must appear — the picker no longer cares
+    // about the underlying id, only the `resumable` flag.
+    expect(screen.getByText('DeepSeek (via Claude)')).toBeTruthy();
+    // Picking it should round-trip to the backend with that exact id.
+    const deepseekOption = screen.getByText('DeepSeek (via Claude)');
+    await userEvent.click(deepseekOption);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
+        provider: 'deepseek-via-claude',
+      }));
+    });
   });
 
   it('does not close the picker when the user clicks INSIDE the dropdown (no race)', async () => {

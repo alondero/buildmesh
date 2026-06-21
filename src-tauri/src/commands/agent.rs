@@ -18,6 +18,45 @@ use ts_rs::TS;
 // Provider listing
 // ---------------------------------------------------------------------------
 
+/// Compose the `ProviderInfo` row for a single harness profile on the
+/// current host platform. Pure (no disk / DB / globals) so unit tests can
+/// exercise the per-profile derivation — including the `resumable` flag —
+/// without touching the preferences module's `APP_DATA_DIR` / `CACHE`
+/// shared state (which is global per-process and would otherwise race
+/// against other tests).
+///
+/// Extracted from `available_providers` so the per-profile logic can be
+/// pinned without driving `harness_profiles()` (which reads from disk and
+/// shares a `OnceLock`). Resolves the executor via `profile.harness` (the
+/// stored profile field that names the backing [`Provider`]) rather than
+/// `preferences::resolve_harness_provider(&profile.id)` — that helper
+/// reads disk via `harness_profiles()` to look up an id, which would
+/// defeat the test isolation. For the `available_providers` call site
+/// the two paths are equivalent (every profile iterated here comes from
+/// `harness_profiles()` and so its id→harness lookup is a no-op).
+fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platform) -> Option<ProviderInfo> {
+    let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
+    if !adapter.available_on().contains(&host) {
+        return None;
+    }
+    let ui = adapter.ui();
+    // Backend-derived answer to "can this provider resume an archived
+    // session in place?" — both flags must be true: supports_resume()
+    // gates the CLI flag, produces_readable_transcript() gates the
+    // coordinator read API that rehydrates the session. The archived-node
+    // resume picker consumes this so a custom Claude-compatible profile
+    // (e.g. "DeepSeek via Claude") shows up without the old hardcoded id
+    // allow-list (#550 follow-up).
+    let resumable = adapter.supports_resume() && adapter.produces_readable_transcript();
+    Some(ProviderInfo {
+        id: profile.id.clone(),
+        label: profile.name.clone(),
+        color: ui.color,
+        icon: ui.icon,
+        resumable,
+    })
+}
+
 /// Returns the list of agent providers available on this host platform.
 /// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
@@ -29,20 +68,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     // backing executor isn't available on this host are filtered out.
     crate::preferences::harness_profiles()
         .into_iter()
-        .filter_map(|profile| {
-            // Resolve once per profile (the filter + ui lookup share it).
-            let adapter = crate::preferences::resolve_harness_provider(&profile.id).adapter();
-            if !adapter.available_on().contains(&host) {
-                return None;
-            }
-            let ui = adapter.ui();
-            Some(ProviderInfo {
-                id: profile.id,
-                label: profile.name,
-                color: ui.color,
-                icon: ui.icon,
-            })
-        })
+        .filter_map(|profile| provider_info_for(&profile, host))
         .collect()
 }
 
@@ -1312,5 +1338,137 @@ mod tests {
             draft_b.node.source_pr_pinned_sha, None,
             "empty head_sha must persist as None (skip drift check, fail-open)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // ProviderInfo.resumable flag (issue #550 follow-up)
+    //
+    // The frontend's archived-node resume picker used to filter providers via
+    // a hardcoded `['anthropic','minimax','kimi']` allow-list, which silently
+    // hid custom Claude-compatible harness profiles (e.g. "DeepSeek via
+    // Claude") from the picker. The fix is a backend-supplied `resumable` flag
+    // on ProviderInfo, derived from the resolved adapter's
+    // `supports_resume() && produces_readable_transcript()` so every dynamic
+    // Claude-compatible profile (which all share the `anthropic` executor,
+    // see `preferences::resolve_harness_provider`) advertises itself correctly.
+    // -----------------------------------------------------------------------
+
+    /// Pin the negative case for `resumable`: Terminal is always present
+    /// (code-defined default), and a plain shell neither supports resume nor
+    /// produces a readable transcript, so the flag must be `false`. This
+    /// test runs in the bare-test env (no `with_temp_dir`), so the only row
+    /// `available_providers()` sees is Terminal.
+    #[test]
+    fn available_providers_marks_terminal_as_not_resumable() {
+        let providers = available_providers();
+        let terminal = providers
+            .iter()
+            .find(|p| p.id == "terminal")
+            .expect("Terminal profile always present");
+        assert!(
+            !terminal.resumable,
+            "Terminal is a plain shell — resumable must be false"
+        );
+    }
+
+    /// Pin the positive case: a stored harness profile whose backing executor
+    /// is the Claude-backed `anthropic` adapter must advertise `resumable=true`
+    /// so it shows up in the archived-node resume picker. Mirrors the
+    /// "DeepSeek via Claude" / "Kimi via Claude" pattern from issue #537 —
+    /// any id, any user-chosen name; the resumability is purely a property of
+    /// the resolved adapter, not the stored id.
+    ///
+    /// Tested against `provider_info_for` (the pure helper) rather than
+    /// `available_providers` so this test doesn't drive the preferences
+    /// module's `APP_DATA_DIR` / `CACHE` globals — which are shared across
+    /// the `preferences::tests` module's `with_temp_dir` and would race.
+    #[test]
+    fn provider_info_marks_claude_backed_profile_as_resumable() {
+        use crate::preferences::HarnessProfile;
+        let deepseek = HarnessProfile {
+            // Custom id + user-chosen name — the exact pattern that the old
+            // allow-list silently filtered out.
+            id: "deepseek-via-claude".to_string(),
+            name: "DeepSeek (via Claude)".to_string(),
+            harness: "anthropic".to_string(),
+        };
+        let info = provider_info_for(&deepseek, Platform::Windows)
+            .expect("anthropic-backed profile is available on Windows");
+        assert!(
+            info.resumable,
+            "claude-backed profile must be resumable=true so it shows up in the resume picker"
+        );
+    }
+
+    /// Negative companion to the previous test: the `harness` field must
+    /// actually drive the executor resolution. If a profile pins
+    /// `harness: "opencode"`, `resumable` must be `false` even though the
+    /// id is user-chosen and the test env has no stored profiles. This
+    /// pins that `provider_info_for` consults `profile.harness` directly
+    /// (via `Provider::from_db_str`) rather than silently falling through
+    /// to Anthropic on the id.
+    #[test]
+    fn provider_info_consults_harness_field_not_id_fallback() {
+        use crate::preferences::HarnessProfile;
+        let custom_opencode = HarnessProfile {
+            // Custom id, but `harness: "opencode"` — must NOT collapse to
+            // Anthropic. (The previous version of `provider_info_for`
+            // resolved via `resolve_harness_provider(&profile.id)`, whose
+            // fallback path returned Anthropic for unknown ids and would
+            // have silently made this test pass for the wrong reason.)
+            id: "custom-opencode-flavor".to_string(),
+            name: "Custom OpenCode".to_string(),
+            harness: "opencode".to_string(),
+        };
+        let info = provider_info_for(&custom_opencode, Platform::Windows)
+            .expect("OpenCode-backed profile is available on Windows");
+        assert!(
+            !info.resumable,
+            "OpenCode-backed profile must be resumable=false; the harness field drives resolution"
+        );
+    }
+
+    /// Pin that the same pure helper marks a non-resumable profile correctly.
+    /// `Terminal`'s adapter (`is_plain_terminal`) returns false for
+    /// `produces_readable_transcript` and false for `supports_resume`, so
+    /// the derived flag must be false regardless of host.
+    #[test]
+    fn provider_info_marks_terminal_as_not_resumable() {
+        use crate::preferences::HarnessProfile;
+        let terminal = HarnessProfile {
+            id: "terminal".to_string(),
+            name: "Terminal".to_string(),
+            harness: "terminal".to_string(),
+        };
+        let info = provider_info_for(&terminal, Platform::Windows)
+            .expect("Terminal is available on Windows");
+        assert!(
+            !info.resumable,
+            "Terminal is plain shell — resumable must be false"
+        );
+    }
+
+    /// Pin the legacy-id contract: the `minimax`/`kimi` ids that archived
+    /// nodes still carry on disk resolve to the Anthropic executor (per
+    /// `Provider::from_db_str`) and therefore advertise `resumable=true`.
+    /// This is the regression case the frontend's hardcoded
+    /// `['anthropic','minimax','kimi']` allow-list used to encode as a
+    /// stringly-typed list — now it's a single derivation rule.
+    #[test]
+    fn provider_info_marks_legacy_minimax_kimi_ids_as_resumable() {
+        use crate::preferences::HarnessProfile;
+        for (id, label) in [("minimax", "Minimax"), ("kimi", "Kimi")] {
+            let profile = HarnessProfile {
+                id: id.to_string(),
+                name: label.to_string(),
+                harness: id.to_string(),
+            };
+            let info = provider_info_for(&profile, Platform::Windows)
+                .unwrap_or_else(|| panic!("{id} must be available on Windows"));
+            assert!(
+                info.resumable,
+                "legacy id {id:?} resolves to Anthropic (issue #538) and must be resumable"
+            );
+        }
     }
 }

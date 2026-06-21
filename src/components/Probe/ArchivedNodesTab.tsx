@@ -16,14 +16,13 @@
  * The primary "Resume" button uses the mesh's resolved default provider
  * (explicit > per-mesh > app-wide > "anthropic" fallback, enforced
  * server-side). The `▾` half of the split button opens a provider
- * picker filtered to Claude-Code-backed ids by `isResumableProvider`
- * (`anthropic` plus the legacy `minimax`/`kimi` ids that archived nodes
- * may still carry) — the other backends don't (yet) read their session
- * transcripts from disk and so can't resume a discovered session in-place.
- * NOTE: this id allow-list predates dynamic harness profiles (#536/#537);
- * a custom Claude-compatible profile carries a user-chosen id and so is
- * not matched here. Resuming into custom profiles needs a backend-supplied
- * resumability flag on `ProviderInfo` — tracked as a follow-up, not #538.
+ * picker filtered to providers that advertise `resumable: true` on
+ * their backend-supplied `ProviderInfo` row. The backend derives the
+ * flag from the resolved adapter's `supports_resume() && produces_readable_transcript()`,
+ * so every Claude-compatible profile (custom ids like "DeepSeek via
+ * Claude", "Kimi via Claude" included) advertises itself correctly
+ * — the picker no longer hides them behind a hardcoded id allow-list
+ * (#550 follow-up; see also buildmesh-gh538-unified-claude-harness).
  *
  * After a successful import we:
  *   1. `setActiveNode(node.id)` — focus the freshly-imported card.
@@ -59,7 +58,7 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { ProviderIcon } from '../Providers/ProviderIcon';
-import { colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { colorClassForProvider } from '../Sidebar/ProviderDropdown';
 
 function timeAgo(isoString: string): string {
   const now = Date.now();
@@ -75,13 +74,13 @@ function timeAgo(isoString: string): string {
   return new Date(isoString).toLocaleDateString();
 }
 
-// Filter providers to only those that support resume (Claude Code-backed
-// providers that read their session transcripts from disk). The picker
-// mirrors the legacy modal's behaviour; adding a new resumable provider
-// just means adding its id here.
-function isResumableProvider(id: string): boolean {
-  return ['anthropic', 'minimax', 'kimi'].includes(id);
-}
+// Mirror the ProviderInfo wire shape with only the columns the picker
+// needs (id/label/color for the row UI; resumable drives the filter).
+// The legacy `isResumableProvider(['anthropic','minimax','kimi'])` allow-
+// list was removed in #550 follow-up — custom Claude-compatible profiles
+// (e.g. "DeepSeek via Claude") share the `anthropic` adapter and now
+// advertise `resumable: true` themselves.
+type ResumableProvider = { id: string; label: string; color: string; resumable: boolean };
 
 export function ArchivedNodesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
@@ -103,16 +102,26 @@ export function ArchivedNodesTab() {
   const [search, setSearch] = useState('');
   const [resuming, setResuming] = useState<string | null>(null);
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
-  const [providerList, setProviderList] = useState<ProviderEntry[]>([]);
+  const [providerList, setProviderList] = useState<ResumableProvider[]>([]);
 
   // Fetch providers once at mount. Platform filtering is enforced
   // server-side; the list is stable for the lifetime of a session.
+  // The `resumable` flag comes straight from the backend
+  // (`ProviderInfo.resumable`, derived from
+  // `supports_resume() && produces_readable_transcript()`) so custom
+  // Claude-compatible profiles (e.g. "DeepSeek via Claude") advertise
+  // themselves correctly without a frontend allow-list (#550 follow-up).
   useAsyncEffect((signal) => {
     listProviders()
       .then(backendProviders => {
         if (signal.aborted) return;
         setProviderList(
-          backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
+          backendProviders.map(p => ({
+            id: p.id,
+            label: p.label,
+            color: colorClassForProvider(p.id),
+            resumable: p.resumable,
+          })),
         );
       })
       .catch(err => console.error('listProviders failed:', err));
@@ -196,8 +205,13 @@ export function ArchivedNodesTab() {
     await handleResume(session, defaultProvider);
   };
 
-  // Filter providers to only those that support resume (Claude Code-backed)
-  const resumableProviders = providerList.filter(p => isResumableProvider(p.id));
+  // Filter providers to only those that support resume. The backend
+  // sets `ProviderInfo.resumable` from the resolved adapter's
+  // `supports_resume() && produces_readable_transcript()` so custom
+  // Claude-compatible profiles (e.g. "DeepSeek via Claude") appear
+  // here automatically — no frontend allow-list to maintain (#550
+  // follow-up).
+  const resumableProviders = providerList.filter(p => p.resumable);
 
   return (
     <div className="flex flex-col h-full">

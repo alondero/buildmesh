@@ -5,8 +5,17 @@
  * purely from the user's dynamic harness profiles (issue #538 retired the
  * legacy enum-backed rows and the `legacy` grouping flag).
  *
+ * `resumable` is the backend-derived answer to "can this provider resume an
+ * archived/discovered session in-place?" — derived from the resolved
+ * adapter's `supports_resume() && produces_readable_transcript()`. The frontend
+ * uses it to populate the archived-node resume picker (issue #550 follow-up);
+ * a custom Claude-compatible harness profile (e.g. "DeepSeek via Claude")
+ * shares the `anthropic` adapter, so it advertises itself correctly without
+ * the old hardcoded `['anthropic','minimax','kimi']` allow-list that
+ * silently filtered those profiles out.
+ *
  * Generated to src/types/generated/ProviderInfo.ts (issue #404). `Deserialize`
  * is added so the type participates in the ts-rs `export` derive (the project
  * pattern is `Serialize + Deserialize + TS` for every generated wire type).
  */
-export type ProviderInfo = { id: string, label: string, color: string, icon: string, };
+export type ProviderInfo = { id: string, label: string, color: string, icon: string, resumable: boolean, };
