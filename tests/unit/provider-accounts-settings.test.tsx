@@ -5,10 +5,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import type { ProviderAccount } from '../../src/lib/tauri';
 
+const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, haiku: null };
+
 function builtinAccounts(): ProviderAccount[] {
   return [
-    { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', api_key: null, base_url: null, models: [] },
-    { id: 'minimax', name: 'MiniMax', enabled: true, billing_mode: 'pay_as_you_go', api_key: null, base_url: null, models: [] },
+    { id: 'anthropic', name: 'Anthropic / Claude', enabled: true, billing_mode: 'plan', claude_compatible: false, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
+    { id: 'minimax', name: 'MiniMax', enabled: true, billing_mode: 'pay_as_you_go', claude_compatible: true, api_key: null, base_url: null, model_tiers: NO_TIERS, models: [] },
   ];
 }
 

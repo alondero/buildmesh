@@ -53,6 +53,58 @@ pub enum BillingMode {
     PayAsYouGo,
 }
 
+/// Per-tier Claude model overrides for a Claude-compatible provider account
+/// (issue #567 — restores the cwrap capability).
+///
+/// Claude Code asks its backend for several model *aliases*: a primary, a cheap
+/// "small/fast" model for background tasks (titles, etc.), and the Sonnet / Opus
+/// / Haiku defaults. Each field here, when set, maps to the matching env var the
+/// `claude` binary reads (see [`provider_account_env`]):
+///   - `default`    → `ANTHROPIC_MODEL`
+///   - `small_fast` → `ANTHROPIC_SMALL_FAST_MODEL`
+///   - `sonnet`     → `ANTHROPIC_DEFAULT_SONNET_MODEL`
+///   - `opus`       → `ANTHROPIC_DEFAULT_OPUS_MODEL`
+///   - `haiku`      → `ANTHROPIC_DEFAULT_HAIKU_MODEL`
+///
+/// Only meaningful for Claude-compatible providers (MiniMax, Kimi, custom) — it's
+/// irrelevant for Antigravity / Codex, which is why the UI shows these fields only
+/// for Claude-compatible accounts. Built-in MiniMax/Kimi ship these pre-filled
+/// with the values the absorbed `cwrap` launcher used (byte-for-byte parity).
+///
+/// Generated to src/types/generated/ModelTiers.ts (issue #567).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "ModelTiers.ts")]
+pub struct ModelTiers {
+    /// Primary model — `ANTHROPIC_MODEL`.
+    #[serde(default)]
+    pub default: Option<String>,
+    /// Cheap background model — `ANTHROPIC_SMALL_FAST_MODEL`.
+    #[serde(default)]
+    pub small_fast: Option<String>,
+    /// `ANTHROPIC_DEFAULT_SONNET_MODEL`.
+    #[serde(default)]
+    pub sonnet: Option<String>,
+    /// `ANTHROPIC_DEFAULT_OPUS_MODEL`.
+    #[serde(default)]
+    pub opus: Option<String>,
+    /// `ANTHROPIC_DEFAULT_HAIKU_MODEL`.
+    #[serde(default)]
+    pub haiku: Option<String>,
+}
+
+impl ModelTiers {
+    /// True when no tier is set — used to fall back to the legacy flat `models`
+    /// list for back-compat (issue #567).
+    fn is_empty(&self) -> bool {
+        let blank = |s: &Option<String>| s.as_deref().is_none_or(|v| v.is_empty());
+        blank(&self.default)
+            && blank(&self.small_fast)
+            && blank(&self.sonnet)
+            && blank(&self.opus)
+            && blank(&self.haiku)
+    }
+}
+
 /// A user-configurable **Model Provider account** (ADR-0014 / PRD #534).
 ///
 /// This is the credentials/endpoint half of the harness↔provider split: a
@@ -63,8 +115,8 @@ pub enum BillingMode {
 /// Claude-compatible accounts (e.g. "DeepSeek via Claude Code") with their own
 /// base URL and key.
 ///
-/// NOTE (#537 slice boundary): `base_url`/`api_key` are *stored* here but not yet
-/// injected at spawn time — that wiring lands in #538 via the `claude` adapter.
+/// `base_url`/`api_key`/`model_tiers` are injected at spawn time by
+/// [`resolve_provider_env`] for a Claude-compatible profile (#538/#567).
 ///
 /// Generated to src/types/generated/ProviderAccount.ts (issue #537).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -78,14 +130,31 @@ pub struct ProviderAccount {
     pub enabled: bool,
     /// Billing model — chooses percentage bars vs cash-balance card.
     pub billing_mode: BillingMode,
+    /// Whether this is a Claude-compatible provider configured with its own
+    /// key/endpoint (MiniMax, Kimi, custom). When true the UI shows credential +
+    /// model-tier fields, and a keyed+enabled account appears in the spawn menu as
+    /// a Claude-Code-backed provider (#568). False for self-authenticating
+    /// built-ins (anthropic/codex/agy), which hold no creds in Buildmesh.
+    ///
+    /// **Derived from `id` on read** ([`merge_provider_accounts`] normalizes it) —
+    /// the stored value is not authoritative, so an older `preferences.json` that
+    /// predates this field still gates correctly.
+    #[serde(default)]
+    pub claude_compatible: bool,
     /// API key for usage fetching / custom endpoints. Stored plaintext in
     /// preferences.json (matches the legacy `minimax_api_key` convention).
     #[serde(default)]
     pub api_key: Option<String>,
-    /// Custom Claude-compatible base URL (used at spawn in #538).
+    /// Custom Claude-compatible base URL injected as `ANTHROPIC_BASE_URL` at spawn.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Custom model identifiers offered for this account.
+    /// Per-tier Claude model overrides injected as `ANTHROPIC_*` model vars at
+    /// spawn (issue #567). Supersedes the flat `models` list below.
+    #[serde(default)]
+    pub model_tiers: ModelTiers,
+    /// **Deprecated** by `model_tiers` (#567). Retained for back-compat reads: when
+    /// `model_tiers` is empty, [`provider_account_env`] still derives the primary
+    /// (`models[0]`) and small/fast (`models[1]`) from this list.
     #[serde(default)]
     pub models: Vec<String>,
 }
@@ -278,42 +347,83 @@ pub fn resolve_harness_provider(profile_id: &str) -> Provider {
     }
 }
 
-/// The code-defined model-provider accounts that always exist regardless of
-/// what `preferences.json` stores — the four providers Buildmesh can fetch usage
-/// for. They default to **enabled** so the Accounts panel keeps working out of
-/// the box; the user can disable any of them (issue #537). MiniMax is the
-/// pay-as-you-go exemplar; the rest are seat/subscription plans.
+/// Built-in accounts that authenticate via their own CLI (`~/.claude`,
+/// `~/.codex`, …) and therefore hold no credentials in Buildmesh. Everything
+/// else — MiniMax, Kimi, and any custom account — is a Claude-compatible keyed
+/// provider (PRD #534 limits custom endpoints to Claude-compatible in V1).
+const SELF_AUTH_BUILTIN_IDS: [&str; 3] = ["anthropic", "codex", "agy"];
+
+/// Whether `id` names a Claude-compatible keyed provider — one that carries an
+/// API key/endpoint, shows credential + model-tier fields in the UI, and can
+/// appear in the spawn menu once configured. Self-authenticating built-ins are
+/// the only exceptions (issue #568).
+pub fn is_claude_compatible_id(id: &str) -> bool {
+    !SELF_AUTH_BUILTIN_IDS.contains(&id)
+}
+
+/// The code-defined model-provider accounts that always exist regardless of what
+/// `preferences.json` stores. They default to **enabled** so the Accounts panel
+/// keeps working out of the box; the user can disable any of them (issue #537).
+///
+/// MiniMax and Kimi are first-class Claude-compatible providers (issue #566):
+/// they ship the base URL + per-tier model map the absorbed `cwrap` launcher used
+/// (byte-for-byte parity), so the user only needs to add an API key. Kimi has no
+/// usage fetcher yet (pragmatic scope), so it defaults to **disabled** — enabling
+/// it and adding a key is the single opt-in step before it appears in the menu.
 pub fn default_provider_accounts() -> Vec<ProviderAccount> {
-    let plan = |id: &str, name: &str| ProviderAccount {
+    let self_auth = |id: &str, name: &str| ProviderAccount {
         id: id.to_string(),
         name: name.to_string(),
         enabled: true,
         billing_mode: BillingMode::Plan,
+        claude_compatible: false,
         api_key: None,
         base_url: None,
+        model_tiers: ModelTiers::default(),
         models: Vec::new(),
     };
+    let tiers = |default: &str, fast: &str| ModelTiers {
+        default: Some(default.to_string()),
+        small_fast: Some(fast.to_string()),
+        sonnet: Some(default.to_string()),
+        opus: Some(default.to_string()),
+        haiku: Some(fast.to_string()),
+    };
     vec![
-        plan("anthropic", "Anthropic / Claude"),
-        plan("codex", "OpenAI / Codex"),
-        plan("agy", "Google / Antigravity"),
+        self_auth("anthropic", "Anthropic / Claude"),
+        self_auth("codex", "OpenAI / Codex"),
+        self_auth("agy", "Google / Antigravity"),
         ProviderAccount {
             id: "minimax".to_string(),
             name: "MiniMax".to_string(),
             enabled: true,
             billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
             api_key: None,
-            base_url: None,
+            base_url: Some("https://api.minimax.io/anthropic".to_string()),
+            // cwrap parity: M3 primary on Sonnet/Opus, M2.7 on small-fast/Haiku.
+            model_tiers: tiers("MiniMax-M3[1m]", "MiniMax-M2.7"),
+            models: Vec::new(),
+        },
+        ProviderAccount {
+            id: "kimi".to_string(),
+            name: "Kimi".to_string(),
+            enabled: false,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: None,
+            base_url: Some("https://api.moonshot.ai/anthropic".to_string()),
+            // cwrap parity: k2.6 primary on Opus, k2.5 on small-fast/Sonnet/Haiku.
+            model_tiers: ModelTiers {
+                default: Some("kimi-k2.6".to_string()),
+                small_fast: Some("kimi-k2.5".to_string()),
+                sonnet: Some("kimi-k2.5".to_string()),
+                opus: Some("kimi-k2.6".to_string()),
+                haiku: Some("kimi-k2.5".to_string()),
+            },
             models: Vec::new(),
         },
     ]
-}
-
-/// True when `id` names a code-defined built-in account. Custom accounts (which
-/// the user adds) are everything else; only those get a paired harness profile
-/// in [`upsert_provider_account`].
-pub fn is_builtin_account(id: &str) -> bool {
-    default_provider_accounts().iter().any(|a| a.id == id)
 }
 
 /// The effective account list: code-defined defaults with the user's stored
@@ -333,6 +443,10 @@ pub fn provider_accounts() -> Vec<ProviderAccount> {
 
 /// Pure merge — defaults first, then each stored account overrides by `id` or
 /// appends. Split out from [`provider_accounts`] so it's unit-testable without disk.
+///
+/// `claude_compatible` is **re-derived from the id** on every account afterwards,
+/// so it's always correct regardless of what was stored (an older
+/// `preferences.json` predating the field, or a stale value sent from the UI).
 fn merge_provider_accounts(
     mut accounts: Vec<ProviderAccount>,
     stored: Vec<ProviderAccount>,
@@ -343,6 +457,9 @@ fn merge_provider_accounts(
         } else {
             accounts.push(account);
         }
+    }
+    for account in accounts.iter_mut() {
+        account.claude_compatible = is_claude_compatible_id(&account.id);
     }
     accounts
 }
@@ -364,24 +481,15 @@ pub fn minimax_api_key_resolved() -> Option<String> {
     non_empty(from_account).or_else(|| non_empty(prefs.minimax_api_key))
 }
 
-/// Upsert a provider account into `prefs` (by `id`). For a **custom** account
-/// (id not built-in), also ensures a paired [`HarnessProfile`] exists so the
-/// custom Claude-compatible provider shows up in spawn menus — AC2's "pair the
-/// claude harness with a custom provider". Pure: mutates the passed `prefs` so
-/// the command layer stays a thin load→mutate→save.
+/// Upsert a provider account into `prefs` (by `id`). Pure: mutates the passed
+/// `prefs` so the command layer stays a thin load→mutate→save.
+///
+/// No longer materializes a paired [`HarnessProfile`]: the spawn menu is now
+/// *derived* from the accounts list (see `commands::agent::compose_provider_menu`),
+/// so an enabled, keyed, Claude-compatible account — built-in MiniMax/Kimi or a
+/// custom endpoint alike — appears automatically, and clearing its key or
+/// disabling it removes it with no second list to keep in sync (issue #568).
 pub fn upsert_provider_account(prefs: &mut AppPreferences, account: ProviderAccount) {
-    if !is_builtin_account(&account.id) {
-        let profile = HarnessProfile {
-            id: account.id.clone(),
-            name: account.name.clone(),
-            harness: "anthropic".to_string(),
-        };
-        if let Some(existing) = prefs.harness_profiles.iter_mut().find(|p| p.id == profile.id) {
-            *existing = profile;
-        } else {
-            prefs.harness_profiles.push(profile);
-        }
-    }
     if let Some(existing) = prefs.provider_accounts.iter_mut().find(|a| a.id == account.id) {
         *existing = account;
     } else {
@@ -389,14 +497,11 @@ pub fn upsert_provider_account(prefs: &mut AppPreferences, account: ProviderAcco
     }
 }
 
-/// Remove a stored provider account by `id` (and its paired custom harness
-/// profile, if any). Built-in defaults can't truly be deleted — removing a
-/// built-in's stored override just reverts it to the code default.
+/// Remove a stored provider account by `id`. Built-in defaults can't truly be
+/// deleted — removing a built-in's stored override just reverts it to the code
+/// default (which carries no key, so it drops out of the derived spawn menu).
 pub fn remove_provider_account(prefs: &mut AppPreferences, id: &str) {
     prefs.provider_accounts.retain(|a| a.id != id);
-    if !is_builtin_account(id) {
-        prefs.harness_profiles.retain(|p| p.id != id);
-    }
 }
 
 /// Build the backend-selecting `ANTHROPIC_*` environment for a claude-backed
@@ -419,20 +524,43 @@ pub fn resolve_provider_env(profile_id: &str) -> Vec<(String, String)> {
     provider_account_env(provider_accounts().iter().find(|a| a.id == profile_id))
 }
 
+/// Resolve an account's effective per-tier models: its [`ModelTiers`] if set,
+/// otherwise derived from the deprecated flat `models` list for back-compat
+/// (issue #567) — `models[0]` is the primary and Sonnet/Opus, `models[1]` (if
+/// present, else `models[0]`) is small/fast and Haiku, exactly the mapping the
+/// old flat-list path produced.
+fn effective_tiers(account: &ProviderAccount) -> ModelTiers {
+    if !account.model_tiers.is_empty() {
+        return account.model_tiers.clone();
+    }
+    let models: Vec<&str> = account.models.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+    let Some(&primary) = models.first() else {
+        return ModelTiers::default();
+    };
+    let fast = models.get(1).copied().unwrap_or(primary);
+    ModelTiers {
+        default: Some(primary.to_string()),
+        small_fast: Some(fast.to_string()),
+        sonnet: Some(primary.to_string()),
+        opus: Some(primary.to_string()),
+        haiku: Some(fast.to_string()),
+    }
+}
+
 /// Pure translation of an optional account into `ANTHROPIC_*` env pairs — the
 /// disk-free half of [`resolve_provider_env`], unit-tested directly. Only
 /// non-empty fields emit a var, so a partially-filled account never injects a
 /// blank `ANTHROPIC_BASE_URL` (which `claude` would treat as a real, broken URL).
 ///
-/// For a **custom endpoint** (non-empty `base_url`) this pins the full model
-/// routing and a long timeout, reproducing what the deleted MiniMax/Kimi
-/// adapters did: Claude Code asks for several model *aliases* — a primary, a
-/// cheap "small/fast" model for background work (titles, etc.), and the
-/// sonnet/opus/haiku defaults — and its built-in `claude-*` slugs would 404
+/// For a **custom endpoint** (non-empty `base_url`) this pins the full per-tier
+/// model routing and a long timeout, reproducing what the deleted MiniMax/Kimi
+/// adapters (and `cwrap` before them) did: Claude Code asks for several model
+/// *aliases* — a primary, a cheap "small/fast" model for background work, and the
+/// Sonnet/Opus/Haiku defaults — and its built-in `claude-*` slugs would 404
 /// against a third-party endpoint, so every alias is mapped onto a configured
-/// model (the second `models` entry, if any, is the cheap small/fast one). On
-/// the default Anthropic endpoint the slugs are valid, so only `ANTHROPIC_MODEL`
-/// is pinned and Claude Code keeps its own alias routing.
+/// model from [`ModelTiers`]. On the default Anthropic endpoint the slugs are
+/// valid, so only `ANTHROPIC_MODEL` is pinned and Claude Code keeps its own alias
+/// routing.
 fn provider_account_env(account: Option<&ProviderAccount>) -> Vec<(String, String)> {
     let Some(account) = account else {
         return Vec::new();
@@ -445,18 +573,21 @@ fn provider_account_env(account: Option<&ProviderAccount>) -> Vec<(String, Strin
     if let Some(key) = account.api_key.as_deref().filter(|s| !s.is_empty()) {
         env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), key.to_string()));
     }
-    let models: Vec<&str> = account.models.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
-    if let Some(&primary) = models.first() {
-        env.push(("ANTHROPIC_MODEL".to_string(), primary.to_string()));
+    let tiers = effective_tiers(account);
+    let model = |v: &Option<String>| v.as_deref().filter(|s| !s.is_empty()).map(str::to_string);
+    if let Some(primary) = model(&tiers.default) {
+        env.push(("ANTHROPIC_MODEL".to_string(), primary.clone()));
         if base_url.is_some() {
-            let fast = models.get(1).copied().unwrap_or(primary);
+            // A custom endpoint needs every alias pinned. Each tier falls back to
+            // the primary so a partially-filled map never sends a `claude-*` slug.
+            let fast = model(&tiers.small_fast).unwrap_or_else(|| primary.clone());
             for (k, v) in [
-                ("ANTHROPIC_SMALL_FAST_MODEL", fast),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", primary),
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", primary),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", fast),
+                ("ANTHROPIC_SMALL_FAST_MODEL", fast.clone()),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", model(&tiers.sonnet).unwrap_or_else(|| primary.clone())),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", model(&tiers.opus).unwrap_or_else(|| primary.clone())),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", model(&tiers.haiku).unwrap_or(fast)),
             ] {
-                env.push((k.to_string(), v.to_string()));
+                env.push((k.to_string(), v));
             }
         }
     } else if base_url.is_some() {
@@ -811,20 +942,33 @@ mod tests {
             name: format!("Custom {id}"),
             enabled: true,
             billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
             api_key: Some("sk-test".to_string()),
             base_url: Some("https://example.com/v1".to_string()),
+            model_tiers: ModelTiers::default(),
             models: vec!["model-a".to_string()],
         }
     }
 
     #[test]
-    fn default_provider_accounts_cover_the_four_fetchable_providers() {
+    fn default_provider_accounts_cover_the_builtin_providers() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "minimax"]);
-        // MiniMax is the pay-as-you-go exemplar; the rest are plans.
-        let minimax = default_provider_accounts().into_iter().find(|a| a.id == "minimax").unwrap();
-        assert_eq!(minimax.billing_mode, BillingMode::PayAsYouGo);
-        assert!(default_provider_accounts().iter().all(|a| a.enabled));
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "minimax", "kimi"]);
+        // MiniMax + Kimi are the pay-as-you-go, Claude-compatible exemplars; the
+        // self-auth built-ins are plans and not Claude-compatible.
+        let by_id = |id: &str| default_provider_accounts().into_iter().find(|a| a.id == id).unwrap();
+        assert_eq!(by_id("minimax").billing_mode, BillingMode::PayAsYouGo);
+        assert!(by_id("minimax").claude_compatible);
+        assert!(by_id("kimi").claude_compatible);
+        assert!(!by_id("anthropic").claude_compatible);
+        assert!(!by_id("codex").claude_compatible);
+        // MiniMax + Kimi ship the cwrap base URL + per-tier map so a key is all
+        // the user needs to add.
+        assert_eq!(by_id("minimax").base_url.as_deref(), Some("https://api.minimax.io/anthropic"));
+        assert_eq!(by_id("kimi").base_url.as_deref(), Some("https://api.moonshot.ai/anthropic"));
+        assert_eq!(by_id("minimax").model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
+        // Kimi has no usage fetcher yet, so it's the one built-in disabled by default.
+        assert!(!by_id("kimi").enabled);
     }
 
     #[test]
@@ -852,19 +996,36 @@ mod tests {
                 name: "MiniMax".to_string(),
                 enabled: false,
                 billing_mode: BillingMode::PayAsYouGo,
+                claude_compatible: true,
                 api_key: None,
                 base_url: None,
+                model_tiers: ModelTiers::default(),
                 models: Vec::new(),
             },
             // Append a custom account.
             custom_account("deepseek"),
         ];
         let merged = merge_provider_accounts(defaults, stored);
-        // Four built-ins, no duplicate minimax, plus the custom one.
+        // Five built-ins, no duplicate minimax, plus the custom one.
         assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
         assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
         assert!(merged.iter().any(|a| a.id == "deepseek"));
-        assert_eq!(merged.len(), 5);
+        assert_eq!(merged.len(), 6);
+    }
+
+    #[test]
+    fn merge_provider_accounts_rederives_claude_compatible_from_id() {
+        // A stored override that lies about claude_compatible (e.g. an older
+        // preferences.json, or a stale UI payload) is corrected on read.
+        let stored = vec![
+            // Self-auth built-in falsely flagged compatible → forced false.
+            ProviderAccount { claude_compatible: true, ..custom_account("anthropic") },
+            // Custom account with the default-false flag → forced true.
+            ProviderAccount { claude_compatible: false, ..custom_account("deepseek") },
+        ];
+        let merged = merge_provider_accounts(default_provider_accounts(), stored);
+        assert!(!merged.iter().find(|a| a.id == "anthropic").unwrap().claude_compatible);
+        assert!(merged.iter().find(|a| a.id == "deepseek").unwrap().claude_compatible);
     }
 
     #[test]
@@ -878,8 +1039,10 @@ mod tests {
                         name: "OpenAI / Codex".to_string(),
                         enabled: false,
                         billing_mode: BillingMode::Plan,
+                        claude_compatible: false,
                         api_key: None,
                         base_url: None,
+                        model_tiers: ModelTiers::default(),
                         models: Vec::new(),
                     },
                     custom_account("glm"),
@@ -919,8 +1082,10 @@ mod tests {
                     name: "MiniMax".to_string(),
                     enabled: true,
                     billing_mode: BillingMode::PayAsYouGo,
+                    claude_compatible: true,
                     api_key: Some("account-key".to_string()),
                     base_url: None,
+                    model_tiers: ModelTiers::default(),
                     models: Vec::new(),
                 }],
                 ..Default::default()
@@ -937,32 +1102,14 @@ mod tests {
     }
 
     #[test]
-    fn upsert_custom_account_adds_paired_harness_profile() {
+    fn upsert_account_stores_it_without_a_paired_profile() {
+        // The spawn menu is derived from accounts now (see
+        // commands::agent::compose_provider_menu), so upsert never materializes a
+        // harness profile — for a custom account or a built-in alike (#568).
         let mut prefs = AppPreferences::default();
         upsert_provider_account(&mut prefs, custom_account("deepseek"));
         assert!(prefs.provider_accounts.iter().any(|a| a.id == "deepseek"));
-        let profile = prefs.harness_profiles.iter().find(|p| p.id == "deepseek").unwrap();
-        assert_eq!(profile.harness, "anthropic");
-        assert_eq!(profile.name, "Custom deepseek");
-    }
-
-    #[test]
-    fn upsert_builtin_account_does_not_add_a_profile() {
-        let mut prefs = AppPreferences::default();
-        upsert_provider_account(
-            &mut prefs,
-            ProviderAccount {
-                id: "minimax".to_string(),
-                name: "MiniMax".to_string(),
-                enabled: true,
-                billing_mode: BillingMode::PayAsYouGo,
-                api_key: Some("k".to_string()),
-                base_url: None,
-                models: Vec::new(),
-            },
-        );
-        assert!(prefs.provider_accounts.iter().any(|a| a.id == "minimax"));
-        assert!(prefs.harness_profiles.is_empty(), "built-ins get no paired profile");
+        assert!(prefs.harness_profiles.is_empty(), "no paired profile is created");
     }
 
     #[test]
@@ -974,16 +1121,14 @@ mod tests {
         upsert_provider_account(&mut prefs, updated);
         assert_eq!(prefs.provider_accounts.iter().filter(|a| a.id == "glm").count(), 1);
         assert!(!prefs.provider_accounts.iter().find(|a| a.id == "glm").unwrap().enabled);
-        assert_eq!(prefs.harness_profiles.iter().filter(|p| p.id == "glm").count(), 1);
     }
 
     #[test]
-    fn remove_custom_account_drops_account_and_paired_profile() {
+    fn remove_account_drops_it() {
         let mut prefs = AppPreferences::default();
         upsert_provider_account(&mut prefs, custom_account("deepseek"));
         remove_provider_account(&mut prefs, "deepseek");
         assert!(!prefs.provider_accounts.iter().any(|a| a.id == "deepseek"));
-        assert!(!prefs.harness_profiles.iter().any(|p| p.id == "deepseek"));
     }
 
     // ─── Spawn-time backend env injection (issue #538) ───────────────────────
@@ -1042,8 +1187,10 @@ mod tests {
             name: "My Claude".to_string(),
             enabled: true,
             billing_mode: BillingMode::Plan,
+            claude_compatible: true,
             api_key: Some("sk-ant".to_string()),
             base_url: None,
+            model_tiers: ModelTiers::default(),
             models: vec!["claude-opus-4-8".to_string()],
         };
         let env = provider_account_env(Some(&account));
@@ -1070,18 +1217,74 @@ mod tests {
             name: "X".to_string(),
             enabled: true,
             billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
             api_key: Some(String::new()),
             base_url: Some(String::new()),
+            model_tiers: ModelTiers::default(),
             models: vec![String::new()],
         };
         assert!(provider_account_env(Some(&account)).is_empty());
     }
 
     #[test]
-    fn resolve_provider_env_reads_the_paired_account_by_profile_id() {
+    fn provider_account_env_uses_model_tiers_over_flat_models() {
+        // model_tiers wins when set; the deprecated flat list is ignored (#567).
+        let mut account = custom_account("glm");
+        account.models = vec!["IGNORED".to_string()];
+        account.model_tiers = ModelTiers {
+            default: Some("GLM-4.6".to_string()),
+            small_fast: Some("GLM-4-Flash".to_string()),
+            sonnet: Some("GLM-4.6".to_string()),
+            opus: Some("GLM-4.6-Max".to_string()),
+            haiku: Some("GLM-4-Flash".to_string()),
+        };
+        let env = provider_account_env(Some(&account));
+        assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "GLM-4.6".to_string())));
+        assert!(env.contains(&("ANTHROPIC_SMALL_FAST_MODEL".to_string(), "GLM-4-Flash".to_string())));
+        assert!(env.contains(&("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), "GLM-4.6-Max".to_string())));
+        assert!(env.contains(&("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), "GLM-4.6".to_string())));
+        assert!(env.contains(&("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), "GLM-4-Flash".to_string())));
+        assert!(!env.iter().any(|(_, v)| v == "IGNORED"), "flat models is superseded by tiers");
+    }
+
+    #[test]
+    fn builtin_minimax_account_reproduces_cwrap_model_routing() {
+        // The regression that motivated this change: a keyed MiniMax must pin the
+        // full per-tier model map (byte-for-byte cwrap parity) so Claude Code never
+        // sends a `claude-opus-*` slug to MiniMax.
+        let mut minimax = default_provider_accounts().into_iter().find(|a| a.id == "minimax").unwrap();
+        minimax.api_key = Some("sk-mm".to_string());
+        let env = provider_account_env(Some(&minimax));
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("ANTHROPIC_BASE_URL"), Some("https://api.minimax.io/anthropic"));
+        assert_eq!(get("ANTHROPIC_AUTH_TOKEN"), Some("sk-mm"));
+        assert_eq!(get("ANTHROPIC_MODEL"), Some("MiniMax-M3[1m]"));
+        assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("MiniMax-M2.7"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("MiniMax-M3[1m]"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("MiniMax-M3[1m]"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("MiniMax-M2.7"));
+        assert_eq!(get("API_TIMEOUT_MS"), Some("3000000"));
+    }
+
+    #[test]
+    fn builtin_kimi_account_reproduces_cwrap_model_routing() {
+        let mut kimi = default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
+        kimi.api_key = Some("sk-moon".to_string());
+        let env = provider_account_env(Some(&kimi));
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("ANTHROPIC_BASE_URL"), Some("https://api.moonshot.ai/anthropic"));
+        assert_eq!(get("ANTHROPIC_MODEL"), Some("kimi-k2.6"));
+        assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("kimi-k2.5"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("kimi-k2.6"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("kimi-k2.5"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("kimi-k2.5"));
+    }
+
+    #[test]
+    fn resolve_provider_env_reads_the_account_by_profile_id() {
         // AC: ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN are injected for a
-        // custom compatible profile. A custom account pairs a harness profile by
-        // shared id, so resolving by that id finds the account's endpoint.
+        // Claude-compatible provider. The node's stored provider id is the account
+        // id, so resolving by that id finds the account's endpoint.
         with_temp_dir(|_| {
             let mut prefs = AppPreferences::default();
             upsert_provider_account(&mut prefs, custom_account("deepseek"));
@@ -1091,6 +1294,31 @@ mod tests {
             let env = resolve_provider_env("deepseek");
             assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://example.com/v1".to_string())));
             assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-test".to_string())));
+        });
+    }
+
+    #[test]
+    fn resolve_provider_env_for_keyed_builtin_minimax_injects_cwrap_env() {
+        // The real spawn path: a node stored with provider="minimax" resolves the
+        // built-in MiniMax account (merged with the user's stored key) and gets the
+        // full cwrap model routing — the end-to-end fix for "can't spawn MiniMax".
+        with_temp_dir(|_| {
+            let mut prefs = AppPreferences::default();
+            // Store only the key; base_url + tiers come from the code default.
+            upsert_provider_account(
+                &mut prefs,
+                ProviderAccount {
+                    api_key: Some("sk-mm".to_string()),
+                    ..default_provider_accounts().into_iter().find(|a| a.id == "minimax").unwrap()
+                },
+            );
+            save(prefs).unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            let env = resolve_provider_env("minimax");
+            assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://api.minimax.io/anthropic".to_string())));
+            assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-mm".to_string())));
+            assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string())));
         });
     }
 
