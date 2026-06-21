@@ -33,6 +33,15 @@ impl From<rusqlite::Error> for AgentNodeError {
 /// handover, hand-spawn). Fork PRs call [`create_with_source_pr_fork`]
 /// directly with the fork fields populated (issue #443). `source_pr_pinned_sha`
 /// (issue #444) is the exact-pinning handle — `None` skips the drift check.
+///
+/// `source_pr` and `source_pr_pinned_sha` are **structurally** rejected here
+/// (asserted at function entry) so a future caller that mistakenly passes
+/// `Some(_)` for either — an importer, a resume-by-URL path, a migration
+/// script — fails loudly at the boundary rather than silently writing a
+/// `source_pr` onto a node that didn't actually come from a PR. The PR-spawn
+/// entry point is [`create_with_source_pr_fork`], which is the only function
+/// that should ever pass `Some(_)` for these fields. Pinning test lives in
+/// `services::agent_node::tests` (issue #448).
 #[allow(clippy::too_many_arguments)]
 pub fn create(
     mesh_id: i64,
@@ -45,6 +54,18 @@ pub fn create(
     use_worktree_override: Option<bool>,
     name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
+    assert!(
+        source_pr.is_none(),
+        "services::agent_node::create refuses source_pr=Some(_); \
+         the non-PR wrappers must persist source_pr=None so spawn_agent_inner's \
+         'is this a PR-spawned node?' branch (node.source_pr.is_some()) stays a \
+         reliable signal. Use create_with_source_pr_fork for PR spawns."
+    );
+    assert!(
+        source_pr_pinned_sha.is_none(),
+        "services::agent_node::create refuses source_pr_pinned_sha=Some(_); \
+         use create_with_source_pr_fork for PR spawns that need SHA pinning."
+    );
     // Single insert path; fork fields are None for the non-fork entry point.
     create_with_source_pr_fork(
         mesh_id,
@@ -137,7 +158,9 @@ pub fn create_with_source_pr_fork(
 /// is expected to invoke `start_node_background` to do the slow work
 /// (git fetch, worktree create, PTY spawn) and update the status to
 /// `Running` on success or `Error` on failure. The source-pr / fork-repo
-/// fields follow the same contract as [`create`].
+/// fields follow the same contract as [`create`]: `source_pr` and
+/// `source_pr_pinned_sha` must be `None` here; the PR-spawn entry point
+/// is [`create_pending_with_source_pr_fork`] (issue #448).
 #[allow(clippy::too_many_arguments)]
 pub fn create_pending(
     mesh_id: i64,
@@ -149,6 +172,16 @@ pub fn create_pending(
     source_pr_pinned_sha: Option<&str>,
     name_override: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
+    assert!(
+        source_pr.is_none(),
+        "services::agent_node::create_pending refuses source_pr=Some(_); \
+         use create_pending_with_source_pr_fork for PR spawns."
+    );
+    assert!(
+        source_pr_pinned_sha.is_none(),
+        "services::agent_node::create_pending refuses source_pr_pinned_sha=Some(_); \
+         use create_pending_with_source_pr_fork for PR spawns that need SHA pinning."
+    );
     // Single insert path; fork fields are None for the non-fork entry point.
     create_pending_with_source_pr_fork(
         mesh_id,
@@ -428,4 +461,227 @@ mod tests {
         assert_eq!(failures[0].0.node_name, "wt-bad");
     }
 
+    // -------------------------------------------------------------------
+    // Issue #448 — pin the `source_pr = None` invariant on the issue-spawn
+    // and hand-spawn paths. `services::agent_node::create` and
+    // `create_pending` are the only entry points non-PR spawns go through
+    // (issue-spawn, handover, generic mobile spawn, Tauri hand-spawn);
+    // `spawn_agent_inner` uses `node.source_pr.is_some()` to decide whether
+    // to take the worktree-adoption path. A future caller — resume-by-URL
+    // (#37), an importer, a migration script — could silently write a
+    // `source_pr` onto a node that didn't actually come from a PR, and the
+    // user would see a confusing "could not fetch PR head ref" warning on
+    // a node spawned from a regular issue.
+    //
+    // The wrappers now refuse `Some(_)` for `source_pr` and
+    // `source_pr_pinned_sha` at function entry (PR-spawn fields). The PR-spawn
+    // entry points (`create_with_source_pr_fork` /
+    // `create_pending_with_source_pr_fork`) remain the only functions that
+    // can write a non-`None` `source_pr` — those tests live with the PR-spawn
+    // callers in `commands::agent_tests`.
+    //
+    // Two complementary tests cover the invariant:
+    //
+    //   * Positive (happy-path) tests exercise `create` / `create_pending`
+    //     with `source_pr = None` and assert the persisted row reads back
+    //     `source_pr = None`. These need a real DB row, so they call
+    //     `ensure_db_init()` which lazily inits the global DB.
+    //
+    //   * Negative `#[should_panic]` tests call the wrappers with
+    //     `source_pr = Some(_)`. The assertion fires before any DB call, so
+    //     these don't need a DB at all — they catch a regression at the
+    //     wrapper boundary with zero infrastructure.
+    // -------------------------------------------------------------------
+
+    use std::sync::Once;
+
+    /// Lazily initialise the global DB exactly once per test process. The
+    /// underlying `db::init` uses a process-global `OnceCell`, so calling
+    /// it twice is an error; this guard makes the second-and-later call a
+    /// no-op even if another test in the binary (e.g. `db::mesh_tests`)
+    /// already won the race. The temp path is process-unique so a sibling
+    /// test running with `--test-threads=1` and this one never collide on
+    /// the SQLite file.
+    fn ensure_db_init() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let temp_path = std::env::temp_dir().join(format!(
+                "buildmesh_agent_node_invariant_{}.db",
+                std::process::id()
+            ));
+            // `db::init` returns `Err` if another test already set the
+            // global DB (e.g. `db::mesh_tests` running first). That's fine
+            // for our tests — they only read the global DB and create their
+            // own mesh rows with a unique path.
+            let _ = crate::db::init(&temp_path);
+        });
+    }
+
+    /// Create a fresh mesh in the global DB at a unique per-test path and
+    /// return its id. Each call uses a monotonic counter so parallel tests
+    /// can't collide on the `meshes.path` UNIQUE constraint.
+    fn fresh_mesh() -> i64 {
+        ensure_db_init();
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        let path = format!("/tmp/buildmesh_invariant_test_{}", id);
+        crate::db::create_mesh(&format!("invariant-{}", id), &path)
+            .expect("fresh_mesh: create_mesh should succeed")
+            .id
+    }
+
+    #[test]
+    fn create_returns_node_with_source_pr_none() {
+        // The wrapper contract: passing `source_pr = None` for an
+        // issue-spawn / hand-spawn call persists `source_pr = None`.
+        let mesh_id = fresh_mesh();
+
+        let node = create(
+            mesh_id,
+            "/tmp/buildmesh_invariant_test",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create with source_pr=None must succeed");
+
+        assert_eq!(
+            node.source_pr, None,
+            "issue-spawn wrapper must persist source_pr=None"
+        );
+        assert_eq!(
+            node.source_pr_pinned_sha, None,
+            "issue-spawn wrapper must persist source_pr_pinned_sha=None"
+        );
+        assert_eq!(
+            node.source_issue, None,
+            "hand-spawn wrapper must persist source_issue=None when not supplied"
+        );
+    }
+
+    #[test]
+    fn create_pending_returns_node_with_source_pr_none_and_pending_status() {
+        // `create_pending` is the fast stage-1 of the two-stage issue-spawn
+        // flow — it must also persist `source_pr = None` so stage-2's
+        // `node.source_pr.is_some()` branch doesn't accidentally fire.
+        let mesh_id = fresh_mesh();
+
+        let node = create_pending(
+            mesh_id,
+            "/tmp/buildmesh_invariant_test",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("create_pending with source_pr=None must succeed");
+
+        assert_eq!(
+            node.source_pr, None,
+            "create_pending must persist source_pr=None"
+        );
+        assert_eq!(
+            node.source_pr_pinned_sha, None,
+            "create_pending must persist source_pr_pinned_sha=None"
+        );
+        assert_eq!(
+            node.status,
+            SessionStatus::Pending,
+            "create_pending must leave the row in Pending so the frontend \
+             can distinguish stage-1-done from idle-and-ready-to-resume"
+        );
+    }
+
+    #[test]
+    fn create_with_source_issue_set_keeps_source_pr_independent() {
+        // Optional step 4 from the issue: when `source_issue = Some(N)`,
+        // `source_pr` must still come back as `None` — the two source
+        // fields are independent columns on the row.
+        let mesh_id = fresh_mesh();
+
+        let node = create(
+            mesh_id,
+            "/tmp/buildmesh_invariant_test",
+            "main",
+            Some("anthropic"),
+            Some(123),
+            None,
+            None,
+            None,
+            Some("gh123-test-slug"),
+        )
+        .expect("create with source_issue=Some(N), source_pr=None must succeed");
+
+        assert_eq!(
+            node.source_issue,
+            Some(123),
+            "source_issue must round-trip independently of source_pr"
+        );
+        assert_eq!(
+            node.source_pr, None,
+            "source_pr must remain None even when source_issue is set"
+        );
+        assert_eq!(node.source_pr_pinned_sha, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "source_pr=Some(_)")]
+    fn create_rejects_source_pr_some() {
+        // A future caller — resume-by-URL, importer, migration script —
+        // tries to set `source_pr` on a node that didn't actually come
+        // from a PR. The wrapper must refuse at the boundary rather than
+        // silently persist it. The assertion fires before any DB call, so
+        // we don't even need `ensure_db_init()` here — a missing DB is the
+        // strongest possible failure signal for this regression.
+        let _ = create(
+            /* mesh_id */ 0,
+            "/tmp/never-read",
+            "main",
+            None,
+            None,
+            Some(42),
+            None,
+            None,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "source_pr=Some(_)")]
+    fn create_pending_rejects_source_pr_some() {
+        let _ = create_pending(
+            /* mesh_id */ 0,
+            "/tmp/never-read",
+            "main",
+            None,
+            None,
+            Some(42),
+            None,
+            None,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "source_pr_pinned_sha=Some(_)")]
+    fn create_rejects_source_pr_pinned_sha_some() {
+        // Same boundary for the SHA-pinning field (#444) — a caller that
+        // tries to pin the head SHA on a non-PR spawn gets the same
+        // refused-at-entry treatment.
+        let _ = create(
+            /* mesh_id */ 0,
+            "/tmp/never-read",
+            "main",
+            None,
+            None,
+            None,
+            Some("deadbeef"),
+            None,
+            None,
+        );
+    }
 }
