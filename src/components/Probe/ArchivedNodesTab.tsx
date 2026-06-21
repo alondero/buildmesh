@@ -44,7 +44,7 @@
  * `meshesById` directly.
  */
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import {
   discoverAgentNodes,
   importDiscoveredAgentNode,
@@ -57,6 +57,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { colorClassForProvider } from '../Sidebar/ProviderDropdown';
 
@@ -105,16 +106,18 @@ export function ArchivedNodesTab() {
   const [providerList, setProviderList] = useState<ResumableProvider[]>([]);
 
   // Fetch providers once at mount. Platform filtering is enforced
-  // server-side; the list is stable for the lifetime of a session.
-  // The `resumable` flag comes straight from the backend
+  // server-side; the `resumable` flag comes straight from the backend
   // (`ProviderInfo.resumable`, derived from
   // `supports_resume() && produces_readable_transcript()`) so custom
   // Claude-compatible profiles (e.g. "DeepSeek via Claude") advertise
   // themselves correctly without a frontend allow-list (#550 follow-up).
-  useAsyncEffect((signal) => {
+  // Wrapped in useCallback so `useProviderListInvalidation` can re-fire the
+  // same fetch on the `provider-list-changed` event when the user adds or
+  // removes an account in App Settings — without that, our local list goes
+  // stale and the picker keeps showing accounts that no longer exist.
+  const refreshProviderList = useCallback(() => {
     listProviders()
       .then(backendProviders => {
-        if (signal.aborted) return;
         setProviderList(
           backendProviders.map(p => ({
             id: p.id,
@@ -126,6 +129,11 @@ export function ArchivedNodesTab() {
       })
       .catch(err => console.error('listProviders failed:', err));
   }, []);
+
+  useAsyncEffect(() => {
+    refreshProviderList();
+  }, [refreshProviderList]);
+  useProviderListInvalidation(refreshProviderList);
 
   useAsyncEffect((signal) => {
     if (activeMeshId === null || activeMeshPath === null) return;

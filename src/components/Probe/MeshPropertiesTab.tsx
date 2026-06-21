@@ -24,11 +24,12 @@
  * meshes re-runs the load effect.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
 import {
@@ -102,13 +103,19 @@ sandbox: false,
     };
   }, []);
 
-  // Fetch the provider list once on mount; the catalogue is static for the
-  // life of the session, so a re-fetch per mesh switch would be wasted work.
-  useEffect(() => {
+  // Fetch the provider list once on mount; the catalogue is mostly static
+  // for the life of the session, so a re-fetch per mesh switch would be
+  // wasted work — but it CAN change when the user adds or removes a custom
+  // provider in App Settings, so the hook below re-fires this fetch on the
+  // `provider-list-changed` event.
+  const refreshProviders = useCallback(() => {
     listProviders()
       .then(setProviders)
       .catch(() => setProviders([]));
   }, []);
+
+  useEffect(() => { refreshProviders(); }, [refreshProviders]);
+  useProviderListInvalidation(refreshProviders);
 
   // Lightweight `gh auth status` probe per active mesh. The result is
   // local to the section that needs it, so we don't need to share it via

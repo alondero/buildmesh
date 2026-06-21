@@ -3,7 +3,7 @@
 //! See `crate::preferences` for the persistence layer.
 
 use crate::preferences::{self, AppPreferences, ProviderAccount};
-use tauri::command;
+use tauri::{command, AppHandle, Emitter};
 
 /// Read the persisted buildmesh-wide preferences. Always returns a value —
 /// a missing or malformed file yields `AppPreferences::default()`.
@@ -36,22 +36,32 @@ pub async fn get_provider_accounts() -> Result<Vec<ProviderAccount>, String> {
 /// custom Claude-compatible provider appears in spawn menus — see
 /// [`preferences::upsert_provider_account`]. Invalidates the usage cache so a
 /// changed key/enabled-state is reflected on the next panel refresh.
+///
+/// Emits `provider-list-changed` so frontend consumers (Sidebar spawn menu,
+/// Probe tabs that list provider options) drop their locally-cached provider
+/// list and re-read. The tauri.ts `listProviders` cache is also busted in the
+/// JS wrapper, but that only helps callers within the same component — other
+/// components with their own `providerData` state need an explicit signal.
 #[command]
-pub async fn upsert_provider_account(account: ProviderAccount) -> Result<(), String> {
+pub async fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -> Result<(), String> {
     let mut prefs = preferences::load()?;
     preferences::upsert_provider_account(&mut prefs, account);
     preferences::save(prefs)?;
     crate::services::usage::invalidate_cache();
+    let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
 
 /// Remove a stored provider account (and its paired custom harness profile, if
 /// any). Removing a built-in just reverts it to the code-defined default.
+/// Emits `provider-list-changed` for the same cross-component invalidation
+/// reason as [`upsert_provider_account`].
 #[command]
-pub async fn remove_provider_account(id: String) -> Result<(), String> {
+pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), String> {
     let mut prefs = preferences::load()?;
     preferences::remove_provider_account(&mut prefs, &id);
     preferences::save(prefs)?;
     crate::services::usage::invalidate_cache();
+    let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
