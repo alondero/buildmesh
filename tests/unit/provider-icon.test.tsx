@@ -26,6 +26,17 @@ describe('ProviderIcon', () => {
     }
   });
 
+  it('renders the Claude Code mark for the detected "claude" profile id (#534)', () => {
+    // Startup auto-detection (detection.rs) registers Claude Code with id
+    // "claude", but the icon map historically only keyed the Claude mark under
+    // "anthropic" — so a Claude Code row, and any node spawned with it, fell
+    // through to the gray-dot fallback instead of showing the logo.
+    const { container } = render(<ProviderIcon providerId="claude" />);
+    expect(container.querySelector('svg')).toBeTruthy();
+    // Not the neutral fallback dot.
+    expect(container.querySelector('span')).toBeNull();
+  });
+
   it('falls back to a coloured dot span for unknown provider ids', () => {
     const { container } = render(<ProviderIcon providerId="mystery" />);
     const span = container.querySelector('span');

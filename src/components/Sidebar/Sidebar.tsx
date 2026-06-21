@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -20,13 +20,18 @@ export function Sidebar() {
 
   // Fetch available providers from the backend. Platform filtering (e.g. macOS-only
   // Anthropic) is decided server-side via AgentProvider::available_on().
-  useEffect(() => {
+  // Refetchable so the spawn menu picks up providers added in App Settings
+  // without an app restart — the settings modal busts the listProviders cache
+  // on upsert/remove, so this re-read returns the updated catalogue (#534).
+  const refreshProviders = useCallback(() => {
     listProviders()
       .then(backendProviders => setProviderData(
         backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
       ))
       .catch(err => console.error('listProviders failed:', err));
   }, []);
+
+  useEffect(() => { refreshProviders(); }, [refreshProviders]);
 
   const meshes = useMeshStore(state => state.meshes);
   const addMesh = useMeshStore(state => state.addMesh);
@@ -140,7 +145,11 @@ export function Sidebar() {
           </button>
         </div>
 
-        {appSettingsOpen && <AppSettingsModal onClose={() => setAppSettingsOpen(false)} />}
+        {appSettingsOpen && (
+          <AppSettingsModal
+            onClose={() => { setAppSettingsOpen(false); refreshProviders(); }}
+          />
+        )}
         {remoteAccessOpen && <RemoteAccessModal onClose={() => setRemoteAccessOpen(false)} />}
 
         {/* Meshes list */}

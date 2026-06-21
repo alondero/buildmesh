@@ -665,11 +665,28 @@ export type { ProviderAccount, BillingMode };
 export const getProviderAccounts = () =>
   _invoke<ProviderAccount[]>('get_provider_accounts');
 
-export const upsertProviderAccount = (account: ProviderAccount) =>
-  _invoke('upsert_provider_account', { account });
+export const upsertProviderAccount = async (account: ProviderAccount) => {
+  try {
+    return await _invoke('upsert_provider_account', { account });
+  } finally {
+    // A custom account upsert registers a paired harness profile backend-side,
+    // so the spawn-menu catalogue changes — bust the cached provider list. Bust
+    // AFTER the write resolves, not before: a concurrent listProviders() during
+    // the in-flight write would otherwise repopulate the cache with the pre-add
+    // catalogue and leave the new provider missing until the next bust (#534).
+    providerListPromise = null;
+  }
+};
 
-export const removeProviderAccount = (id: string) =>
-  _invoke('remove_provider_account', { id });
+export const removeProviderAccount = async (id: string) => {
+  try {
+    return await _invoke('remove_provider_account', { id });
+  } finally {
+    // Removing a custom account drops its paired harness profile — same
+    // bust-after-resolve reasoning as the upsert above (#534).
+    providerListPromise = null;
+  }
+};
 
 // ── Provider usage (Accounts & Usage panel) ────────────────────────────────
 //

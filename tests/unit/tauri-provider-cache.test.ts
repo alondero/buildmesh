@@ -130,4 +130,38 @@ describe('tauri.ts provider memoisation (#405)', () => {
     expect(await api.getDefaultProvider(9)).toBe('minimax');
     expect(callsTo('get_default_provider')).toBe(2);
   });
+
+  // Issue #534: adding/removing a provider account can register or drop a
+  // paired harness profile, which changes the spawn-menu catalogue. The cached
+  // provider list must be busted so the next read re-hits IPC instead of
+  // serving the pre-change list (the reported "Kimi never shows up" bug).
+  it('upsertProviderAccount() invalidates the cached provider list', async () => {
+    mockProviderIpc();
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(1);
+
+    await api.upsertProviderAccount({
+      id: 'kimi',
+      name: 'Kimi',
+      enabled: true,
+      billing_mode: 'pay_as_you_go',
+      api_key: 'k',
+      base_url: 'https://api.moonshot.cn/anthropic',
+      models: [],
+    });
+
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(2);
+  });
+
+  it('removeProviderAccount() invalidates the cached provider list', async () => {
+    mockProviderIpc();
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(1);
+
+    await api.removeProviderAccount('kimi');
+
+    await api.listProviders();
+    expect(callsTo('list_providers')).toBe(2);
+  });
 });

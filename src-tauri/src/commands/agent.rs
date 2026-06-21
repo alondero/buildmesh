@@ -66,10 +66,23 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     // `id`/`label` come from the profile; `color`/`icon` borrow the backing
     // executor's UI so a profile row looks like its harness. Profiles whose
     // backing executor isn't available on this host are filtered out.
-    crate::preferences::harness_profiles()
+    let providers = crate::preferences::harness_profiles()
         .into_iter()
         .filter_map(|profile| provider_info_for(&profile, host))
-        .collect()
+        .collect();
+    order_providers(providers)
+}
+
+/// Order the provider menu: every real harness first (keeping their existing
+/// order), with the plain `terminal` row pushed to the bottom — it's the
+/// least-common pick, so it shouldn't sit at the top of the launch menu
+/// (issue #534). Pure and stable (no disk / globals) so the ordering is the
+/// unit-test seam and the relative order of the real harnesses is preserved.
+fn order_providers(mut providers: Vec<ProviderInfo>) -> Vec<ProviderInfo> {
+    // `sort_by_key` is stable: `false` (0) keeps real harnesses ahead of the
+    // `true` (1) terminal rows without disturbing their relative order.
+    providers.sort_by_key(|p| p.id == "terminal");
+    providers
 }
 
 #[command]
@@ -932,6 +945,25 @@ mod tests {
             !providers.iter().any(|p| p.id == "anthropic"),
             "legacy enum rows must not be listed once the profile list is the sole source"
         );
+    }
+
+    /// Issue #534: Terminal is the least-common pick, so it must sort to the
+    /// bottom of the provider menu while every real harness keeps its relative
+    /// order. `order_providers` is the pure seam (no disk / globals) so the
+    /// ordering can be pinned without driving `harness_profiles()`.
+    #[test]
+    fn order_providers_sorts_terminal_to_the_bottom() {
+        let row = |id: &str| ProviderInfo {
+            id: id.to_string(),
+            label: id.to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+        };
+        let ordered = order_providers(vec![row("terminal"), row("claude"), row("codex")]);
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        // Terminal last; the two real harnesses keep their input order.
+        assert_eq!(ids, vec!["claude", "codex", "terminal"]);
     }
 
     // ----- create_pr_node_impl seams (issue #445) -----------------------

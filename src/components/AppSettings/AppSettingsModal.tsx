@@ -397,7 +397,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.upsertProviderAccount(account);
-      setAccounts(await api.getProviderAccounts());
+      // Independent reads — fetch in parallel. The upsert may register a paired
+      // harness profile, so re-read the provider catalogue too, keeping this
+      // modal's default-provider dropdown in step with the new entry (#534).
+      const [accountList, providerList] = await Promise.all([
+        api.getProviderAccounts(),
+        api.listProviders(),
+      ]);
+      setAccounts(accountList);
+      setProviders(providerList);
       fetchUsage(true);
       return true;
     } catch (e) {
@@ -411,7 +419,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.removeProviderAccount(id);
-      setAccounts(await api.getProviderAccounts());
+      const [accountList, providerList] = await Promise.all([
+        api.getProviderAccounts(),
+        api.listProviders(),
+      ]);
+      setAccounts(accountList);
+      setProviders(providerList);
       fetchUsage(true);
     } catch (e) {
       setError(String(e));
