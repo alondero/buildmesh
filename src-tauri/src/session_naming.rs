@@ -66,7 +66,7 @@ impl SessionNamingRepository for DbSessionNamingRepository {
 // ---------------------------------------------------------------------------
 
 static ADJECTIVES: &[&str] = &[
-    "amber", "bold", "brave", "bright", "calm", "clean", "clear", "cool",
+    "bold", "brave", "bright", "calm", "clean", "clear", "cool",
     "crisp", "dark", "deep", "dry", "eager", "early", "easy", "fair",
     "fast", "fine", "firm", "flat", "fond", "free", "fresh", "full",
     "glad", "gold", "good", "grand", "great", "green", "happy", "hard",
@@ -79,8 +79,263 @@ static ADJECTIVES: &[&str] = &[
     "soft", "solid", "sour", "spare", "steep", "still", "strong", "sure",
     "sweet", "tall", "tame", "thick", "thin", "tight", "tiny", "tough",
     "true", "vast", "warm", "weak", "wide", "wild", "wise", "young",
-    "zany",
+    "zany", "able", "abundant", "adept", "adrift", "aged", "agile", "ailing",
+    "airy", "ajar", "alert", "alien", "aloof", "alpine", "amazed", "ambient",
+    "amused", "ancient", "angry", "angular", "animated", "annoyed", "arcane", "ardent",
+    "arid", "artful", "ashen", "astute", "attentive", "august", "avid", "azure",
+    "balmy", "banal", "barbed", "barren", "bashful", "battered", "bawdy", "beatific",
+    "bedecked", "berserk", "bitter", "blazing", "blessed", "blissful", "blooming", "blotched",
+    "blunt", "blurry", "blushing", "boisterous", "bonded", "bony", "bossy", "bouncy",
+    "brassy", "brazen", "breezy", "brief", "brisk", "brittle", "broad", "brooding",
+    "brutal", "bubbly", "burly", "bustling", "buttery", "buzzy", "cackling", "caged",
+    "caked", "callous", "candid", "canny", "capable", "capricious", "carefree", "caring",
+    "carnal", "casual", "caustic", "cautious", "ceaseless", "cerise", "certain", "chalky",
+    "charred", "charming", "cheery", "chilled", "chilly", "chirpy", "chiseled", "chosen",
+    "chunky", "cinder", "clammy", "classy", "cleanly", "cloistered", "cloudy", "cloven",
+    "clumsy", "cluttered", "coastal", "coaxial", "coded", "cogent", "colossal", "comely",
+    "comfy", "compact", "composed", "concise", "concord", "confused", "content", "cooking",
+    "coolest", "coppery", "cordial", "cosmic", "covert", "craggy", "cramped", "crass",
+    "crazed", "creaky", "creamy", "creeky", "crinkled", "crispier", "crispy", "crooked",
+    "crumbly", "crunchy", "crystalline", "culinary", "cunning", "curdled", "curly", "cushy",
+    "dainty", "dapper", "dappled", "daring", "darkish", "darling", "dashing", "dazed",
+    "debonair", "decrepit", "dedicated", "defiant", "deft", "delicate", "delicious", "delirious",
+    "demure", "dense", "derelict", "desolate", "desperate", "destined", "devout", "dimpled",
+    "dingy", "direct", "dirty", "discrete", "distant", "distressed", "dizzy", "docile",
+    "doddery", "dogged", "doleful", "dopey", "dormant", "doting", "dotted", "doughty",
+    "dour", "dowdy", "downy", "drab", "drained", "drastic", "dreamy", "drenched",
+    "drizzly", "droll", "drowsy", "drunken", "dubious", "dulcet", "dusky", "dwarfed",
+    "eagerly", "earnest", "earthen", "earthy", "eastern", "eatable", "ebony", "echoing",
+    "edgy", "elated", "elderly", "elfin", "elite", "embered", "emerald", "eminent",
+    "empty", "enamored", "enchanted", "encircled", "endless", "energized", "enigmatic", "envious",
+    "equable", "errant", "eternal", "ethereal", "evanescent", "even", "exalted",
+    "expected", "exultant", "fabled", "faded", "faint", "faithful", "falling", "fallow",
+    "famed", "famished", "fancy", "fanged", "fantastic", "faraway", "farcical", "fateful",
+    "fatigued", "faulty", "fearless", "fearsome", "feathered", "feeble", "feisty", "feline",
+    "feral", "fervent", "fevered", "fibrous", "fiery", "filmy", "filthy", "fired",
+    "fitted", "flagging", "flagrant", "flaky", "flaming", "flared", "flashy", "flatly",
+    "fledgling", "flickering", "flippant", "floral", "flowing", "fluent", "fluffy", "flushed",
+    "fluted", "flying", "foamy", "focused", "foggy", "foiled", "footloose", "forbidden",
+    "forested", "forged", "formal", "foul", "fragrant", "frail", "frank", "frantic",
+    "freaky", "fretful", "frilled", "frisky", "frosty", "frozen", "frugal",
+    "fumbling", "fuming", "fungus", "furious", "furtive", "fussy", "fuzzy", "gabled",
+    "galactic", "gallant", "gaping", "garbled", "gaseous", "gauzy", "gawky", "gelid",
+    "genial", "gentle", "ghastly", "ghostly", "giddy", "giggly", "gilded", "glacial",
+    "glaring", "glassy", "gleaming", "glib", "glistening", "glittering", "gloomy", "gloppy",
+    "glorious", "glossy", "gnarled", "godly", "golden", "gooey", "gorgeous", "graceful",
+    "gracious", "graded", "grainy", "grandiose", "granular", "graphic", "grateful", "grating",
+    "gravelly", "greasy", "grim", "grimy", "grinning", "gripping", "gritty", "groggy",
+    "grooved", "gross", "grotesque", "grouchy", "grubby", "grudging", "gruesome", "grumpy",
+    "guarded", "gummy", "gurgling", "gushing", "gusty", "gutsy", "haggard", "hairless",
+    "hairy", "hallowed", "halting", "handmade", "handy", "haphazard", "haptic", "harassed",
+    "hardened", "harmful", "harried", "harsh", "haughty", "haunting", "hawkish", "hazy",
+    "hearty", "heated", "heavenly", "hefty", "hellish", "helpful", "helpless", "heraldic",
+    "heroic", "hidden", "hilly", "hoary", "hoggish", "hollow", "homesick", "honest",
+    "honeyed", "honorable", "hooded", "hopeful", "horned", "horrific", "hospitable", "hostile",
+    "hotter", "howling", "huddled", "hued", "humble", "humid", "humorous", "hunched",
+    "hungry", "hurried", "hushed", "husky", "hybrid", "icy", "ideal", "idiotic",
+    "idle", "idolized", "ignoble", "illicit", "immense", "immodest", "immortal", "impaled",
+    "impartial", "impish", "implicit", "impolite", "impotent", "improved", "impudent", "impulsive",
+    "inbound", "inbred", "incensed", "incoming", "indecent", "indigo", "indoor", "induced",
+    "indulgent", "inert", "infant", "infested", "infinite", "inflamed", "inflexible", "ingenious",
+    "ingrained", "inherent", "inland", "innate", "inner", "innocent", "inquisitive", "insane",
+    "inspired", "insular", "intact", "intense", "intent", "internal", "intimate", "intricate",
+    "inverted", "invisible", "inviting", "ionic", "irate", "ironic", "irregular", "itchy",
+    "jaded", "jagged", "jaunty", "jazzy", "jealous", "jellied", "jerky", "jittery",
+    "jointed", "jolly", "jovial", "joyful", "joyous", "jubilant", "judicious", "juicy",
+    "jumbled", "jumpy", "junior", "kaleidoscopic", "kempt", "khaki", "kindly", "kingly",
+    "knotty", "knowing", "labored", "laboured", "lacerated", "lacking", "lackluster", "lacy",
+    "ladylike", "lambent", "languid", "lanky", "larcenous", "lasting", "latent",
+    "lavish", "lawful", "lax", "leaden", "leafy", "legal", "legendary", "leggy",
+    "leisure", "lengthy", "lenient", "lessened", "lethal", "lethargic", "level", "lewd",
+    "liable", "liberated", "lifeless", "lifted", "lighted", "limber", "limpid", "linear",
+    "lined", "lingering", "lithe", "livid", "loaded", "lofty", "logical", "lonely",
+    "longing", "loopy", "loose", "lordly", "loutish", "lovable", "lovely", "loving",
+    "lowery", "loyal", "lucid", "ludicrous", "lumbering", "luminous", "lumpy", "lunar",
+    "lunatic", "lurid", "lush", "lustrous", "luxuriant", "lyrical", "macabre", "maddened",
+    "magic", "magnetic", "magnificent", "maid", "maiden", "majestic", "maligned", "malty",
+    "manful", "manic", "manly", "mantled", "marginal", "marine", "marked", "maroon",
+    "marshy", "martial", "marvelous", "masculine", "masked", "massive", "masterful", "masterly",
+    "matchless", "maternal", "matted", "mature", "maxed", "meager", "mean", "meandering",
+    "measly", "measured", "meaty", "mechanical", "medieval", "meek", "melded", "mellow",
+    "melodic", "melodious", "melted", "memorable", "menacing", "mental", "merciless", "mercurial",
+    "merged", "merry", "meshed", "messy", "metallic", "meteoric", "meticulous", "mighty",
+    "migrated", "milky", "mimic", "mingling", "miniature", "minimal", "minor", "minty",
+    "miraculous", "mirthful", "mischievous", "miserable", "miserly", "misguided", "misty", "mixed",
+    "mnemonic", "mobile", "mocking", "modal", "modern", "modest", "modified", "modish",
+    "moldy", "molten", "momentous", "monetary", "monolithic", "monstrous", "moody", "moonlit",
+    "moral", "morbid", "mordant", "mossy", "mothlike", "motionless", "mottled", "mountainous",
+    "mournful", "mousy", "movable", "mucky", "muddled", "muffled", "murky", "muscled",
+    "mushy", "musical", "musty", "mutinous", "mutual", "myriad", "mystic", "mystical",
+    "mythic", "nagging", "nameless", "narrow", "nascent", "nasty", "natty", "naughty",
+    "nebulous", "nefarious", "nervous", "nested", "neutral", "newfound", "newsworthy", "nicer",
+    "nimble", "nipping", "nocturnal", "nodding", "noiseless", "noisy", "nonchalant", "nondescript",
+    "normal", "northern", "nostalgic", "notable", "noted", "noteworthy", "novel", "noxious",
+    "numb", "numbered", "nurturing", "oaken", "obedient", "oblique", "oblivious", "obscure",
+    "observant", "obsessed", "obsolete", "obstinate", "obvious", "offhand", "offshore", "oily",
+    "okay", "olden", "ominous", "omnivorous", "online", "opaque", "operatic", "opulent",
+    "orbited", "ordered", "orderly", "ordinary", "organic", "organized", "ornate", "orphaned",
+    "other", "otherworldly", "outbound", "outgoing", "outraged", "outright", "outward", "oval",
+    "overcast", "overdue", "overgrown", "overjoyed", "overt", "overweight", "overwrought", "owing",
+    "pacific", "packaged", "padded", "painful", "painted", "paired", "palatial", "pallid",
+    "paltry", "panicked", "panoramic", "panting", "paper", "parabolic", "parallel", "paramount",
+    "paranoid", "parched", "partial", "particular", "passing", "passionate", "passive", "patched",
+    "paternal", "pathetic", "patient", "patriotic", "patterned", "peaceful", "peculiar", "peeved",
+    "penal", "pending", "pensive", "peppery", "perched", "perennial", "perfect", "perfumed",
+    "perilous", "periodic", "perky", "perplexed", "persistent", "personable", "persuasive", "pert",
+    "pervasive", "pesky", "pessimistic", "petite", "phantom", "phased", "phenomenal", "philanthropic",
+    "philosophic", "phobic", "phony", "physical", "piercing", "piggish", "piggy", "piked",
+    "piloted", "pious", "piping", "pithy", "pitted", "pivotal", "placid", "plagued",
+    "plastered", "plastic", "platonic", "plausible", "playful", "pleasant", "pleased", "pleasing",
+    "plucky", "plumed", "plump", "plush", "poetic", "poignant", "pointed", "pointless",
+    "poised", "polar", "polished", "polite", "polluted", "pompous", "ponderous", "poor",
+    "popular", "populated", "porous", "portable", "portly", "positive", "possible", "potent",
+    "powdered", "powerful", "practical", "pragmatic", "praiseworthy", "prancing", "prankish", "prayerful",
+    "precarious", "precious", "precise", "precocious", "predatory", "pregnant", "prehistoric", "prejudiced",
+    "premature", "premium", "prepared", "prepossessing", "prescient", "present", "pressing", "prestigious",
+    "presumed", "pretty", "prevailing", "prevalent", "prickly", "primal", "primary", "primeval",
+    "primitive", "princely", "principal", "prior", "pristine", "private", "prized", "probable",
+    "problematic", "profane", "profound", "profuse", "prolific", "prominent", "prompt", "prone",
+    "pronounced", "proper", "prophetic", "propitious", "prospective", "protective", "proverbial", "provincial",
+    "prudent", "psychic", "public", "puckish", "pudgy", "puffy", "puissant", "pulchritudinous",
+    "punctual", "pungent", "punitive", "puny", "puritanical", "purple", "purposeful", "pushy",
+    "quack", "quaggy", "quaint", "qualified", "quarrelsome", "quavering", "queasy", "queenly",
+    "querulous", "questionable", "quintessential", "quirky", "quixotic", "quizzical", "rabid", "racing",
+    "radiant", "radical", "raffish", "ragged", "raging", "rakish", "rambling", "rampant",
+    "rancid", "rancorous", "random", "ranged", "ranging", "rapid", "rarefied", "rascal",
+    "rash", "rasping", "rational", "rattling", "ravenous", "ravishing", "ready", "rear",
+    "reassured", "rebel", "rebellious", "rebuilt", "recluse", "recondite", "recurrent", "recycled",
+    "redemptive", "refined", "reflective", "reformed", "regal", "regional", "registered", "regretful",
+    "regular", "rehabilitated", "rehearsed", "reigning", "related", "relaxed", "relentless", "relevant",
+    "reliable", "relieved", "religious", "reluctant", "remaining", "remarkable", "remedial", "remorseful",
+    "remote", "renowned", "repentant", "replete", "reported", "repressed", "repulsive", "reputed",
+    "rescued", "resentful", "reserved", "resident", "resigned", "resilient", "resolute", "resolved",
+    "resonant", "resourceful", "respected", "respective", "responsive", "restful", "restless", "restored",
+    "restrained", "resulting", "reticent", "retired", "returning", "revealing", "reverent", "reversed",
+    "revived", "rewarded", "rhapsodic", "rhetorical", "richer", "righteous", "rightful", "rigid",
+    "rigorous", "ringed", "riotous", "rippling", "risky", "ritual", "rival", "roasted",
+    "robust", "roguish", "rolling", "romantic", "roomy", "ropy", "rotten", "rotund",
+    "rounded", "rousing", "routine", "rowdy", "royal", "rude", "rueful", "rugged",
+    "ruling", "rumpled", "runic", "runny", "rural", "rushed", "rustic", "rustling",
+    "rusty", "sacred", "saddened", "saggy", "saintly", "salient", "salty",
+    "salutary", "sanctified", "sandy", "sane", "sanguine", "sanitary", "sardonic", "sassy",
+    "sated", "satin", "satirical", "satisfied", "satisfying", "saucy", "savage", "savory",
+    "savvy", "scalding", "scandalous", "scant", "scarce", "scared", "scarred", "scary",
+    "scattered", "scenic", "scented", "scholarly", "scientific", "scintillating", "scorching", "scornful",
+    "scrappy", "scratched", "scrawny", "screaming", "screeching", "scribbled", "scrubbed", "scrupulous",
+    "sculpted", "seaborne", "sealed", "seamless", "searing", "seasoned", "secluded", "secret",
+    "secretive", "secure", "sedate", "sedentary", "seedy", "seeming", "seething", "seismic",
+    "select", "selfish", "selfless", "senior", "sensational", "senseless", "sensible", "sensitive",
+    "sensual", "sentient", "sentimental", "separate", "seraphic", "serene", "serious", "serrated",
+    "serviceable", "settled", "severe", "shabby", "shaded", "shadowy", "shaking", "shaky",
+    "shallow", "shamed", "shameless", "shapely", "sharper", "shattered", "shaven", "sheer",
+    "sheltered", "shifted", "shimmering", "shining", "shivery", "shocking", "shoddy", "shopworn",
+    "shouted", "showy", "shrewd", "shrieking", "shrill", "shrunken", "shuddering", "shuffling",
+    "shunned", "shut", "sick", "sickly", "sidelong", "sighing", "sightless", "significant",
+    "silent", "silken", "silly", "silvery", "similar", "simmering", "simple", "simplified",
+    "sincere", "sinister", "sinking", "sinuous", "sisterly", "sizable", "sizzling", "skeletal",
+    "skeptical", "sketched", "skillful", "skimmed", "skinny", "skittish", "slack", "slain",
+    "slanted", "slashing", "sleazy", "sleek", "sleepy", "slender", "slick", "slight",
+    "slimmer", "slimy", "slippery", "sloping", "sloppy", "slothful", "slouching", "slovenly",
+    "slugged", "slumbering", "slurred", "sly", "smacking", "smashed", "smelly", "smiling",
+    "smitten", "smoggy", "smoked", "smoky", "smoldering", "smooth", "smudged", "smug",
+    "snappy", "snazzy", "sneaky", "sneering", "snoring", "snowy", "snug", "soaked",
+    "soaking", "soaring", "sober", "sociable", "social", "sodden", "softened", "soggy",
+    "soiled", "solar", "soldierly", "solemn", "solicitous", "solitary", "somber", "somnolent",
+    "sonorous", "soothed", "sophisticated", "sordid", "sore", "sorrowful", "soulful", "sound",
+    "soupy", "southern", "spacious", "spangled", "sparkling", "sparse", "spasmodic", "spatial",
+    "spawning", "special", "specific", "speckled", "spectral", "speechless", "speedy", "spellbound",
+    "spherical", "spicy", "spidery", "spiky", "spinal", "spindly", "spirited", "spiritual",
+    "spiteful", "splendid", "spoiled", "spoken", "spongy", "sponsor", "spontaneous", "spooky",
+    "sporadic", "sportive", "spotless", "spotted", "spotty", "sprawling", "sprightly", "sprouting",
+    "spruce", "spunky", "squalid", "square", "squashed", "squat", "squiggly", "squinty",
+    "stable", "stained", "stainless", "stale", "stalwart", "stamped", "standard", "standing",
+    "stark", "startled", "starving", "stated", "static", "stationary", "statuesque", "staunch",
+    "steadfast", "steady", "stealthy", "steamed", "steamy", "steel", "stellar", "sterile",
+    "sterling", "stern", "sticky", "stiff", "stifling", "stilted", "stinging", "stirred",
+    "stirring", "stocked", "stocky", "stoic", "stolid", "stony", "stooped", "stormy",
+    "stout", "straggling", "straight", "strained", "strange", "strategic", "stressed", "striking",
+    "stringent", "stringy", "striving", "stubborn", "stubby", "studied", "stuffed", "stunning",
+    "sturdy", "stuttering", "stylish", "suave", "subdued", "sublime", "submerged", "subordinate",
+    "subsequent", "subsidiary", "substantial", "subtle", "subversive", "successful", "succinct", "succulent",
+    "sudden", "suffering", "sufficient", "sugary", "suitable", "sulky", "sullen", "sultry",
+    "summary", "sunken", "sunlit", "sunny", "superb", "supercilious", "superficial", "superior",
+    "supernatural", "supple", "supportive", "supreme", "surly", "surplus", "surprised", "surrounded",
+    "surviving", "suspect", "suspended", "suspicious", "svelte", "swanky", "swarming", "sweating",
+    "sweaty", "sweeping", "swift", "swollen", "swooping", "sword", "sycophantic", "symmetric",
+    "sympathetic", "symphonic", "symptomatic", "synergistic", "synthetic", "syrupy", "systematic", "tacit",
+    "taciturn", "tacky", "tactical", "tactile", "tainted", "talented", "talkative", "tangled",
+    "tangy", "tantalizing", "tapered", "tardy", "targeted", "tarnished", "tarry", "tattered",
+    "taut", "taxing", "tearful", "teasing", "technical", "tectonic", "tedious", "telling",
+    "tempered", "tempestuous", "temporal", "temporary", "tempted", "tenacious", "tender", "tense",
+    "tentative", "tenuous", "tepid", "terminal", "territorial", "terse", "tested", "thankful",
+    "thankless", "theatrical", "thematic", "theoretical", "therapeutic", "thermal", "thickset", "thieving",
+    "thirsty", "thorny", "thoughtful", "threatened", "thriving", "throbbing", "thumping", "thunderous",
+    "thwarted", "ticklish", "tidal", "tidy", "tightened", "tilting", "timbered", "timely",
+    "timid", "timorous", "tingly", "tinkling", "tinny", "tinted", "tipsy", "tired",
+    "tireless", "tiresome", "tiring", "titled", "toady", "tolerant", "tonic", "toothsome",
+    "topical", "topping", "torchlit", "torpid", "torrential", "torrid", "tortuous", "tortured",
+    "total", "tottering", "touched", "touching", "towering", "toxic", "traditional", "tragic",
+    "trailing", "trained", "traitorous", "trance", "tranquil", "transcendent", "transient", "transparent",
+    "trapped", "trashy", "traveled", "treacherous", "treasonous", "treasured", "tremendous", "tremulous",
+    "trenchant", "trendy", "tricky", "trifling", "trim", "triumphant", "trivial", "tropical",
+    "troubled", "troublesome", "truculent", "trusted", "trusting", "trustworthy", "truthful", "trying",
+    "tubby", "tucked", "tufted", "tumbling", "tuneful", "turbulent", "turgid", "turning",
+    "tuscan", "tusked", "tussling", "twinkling", "twisted", "twitching", "typical", "tyrannical",
+    "ubiquitous", "ugly", "ultimate", "umbrageous", "unable", "unabridged", "unadorned", "unafraid",
+    "unaided", "unaltered", "unanimous", "unarmed", "unasked", "unaware", "unbending", "unbiased",
+    "unborn", "unbroken", "uncanny", "uncaring", "unceasing", "uncertain", "unchanged", "uncharted",
+    "unchecked", "uncivil", "unclean", "unclear", "uncomfortable", "uncommon", "unconcerned", "uncooked",
+    "uncouth", "undaunted", "undeclared", "undefeated", "undeniable", "underfoot", "undermined", "undersea",
+    "undeserved", "undetected", "undivided", "undoing", "undone", "undoubted", "undue", "undying",
+    "uneasy", "unending", "unequal", "unequaled", "unequivocal", "unerring", "unethical", "uneven",
+    "unfair", "unfamiliar", "unfavorable", "unfeeling", "unfinished", "unfit", "unfixed", "unfolded",
+    "unforeseen", "unforgivable", "unfortunate", "unfounded", "unfriendly", "unfurl", "ungainly", "ungovernable",
+    "ungracious", "ungrateful", "unguarded", "unhappy", "unharmed", "unhealthy", "unheard", "unhelpful",
+    "unholy", "unhurried", "unhurt", "unified", "unimaginative", "unimpaired", "unintended", "uninterested",
+    "unique", "united", "universal", "unjust", "unkind", "unknown", "unlawful", "unlined",
+    "unlucky", "unmade", "unmarked", "unmarried", "unmatched", "unmistakable", "unmoved", "unnamed",
+    "unnatural", "unnecessary", "unnoticed", "unopened", "unopposed", "unpaid", "unplanned", "unpleasant",
+    "unpopular", "unprecedented", "unprepared", "unprincipled", "unprofitable", "unprompted", "unqualified", "unquenchable",
+    "unquestionable", "unraveled", "unreal", "unreasonable", "unrecognized", "unregulated", "unrelenting", "unreliable",
+    "unresolved", "unrest", "unripe", "unrivaled", "unrolled", "unruffled", "unruly", "unsafe",
+    "unsalted", "unsanitary", "unsatisfactory", "unsatisfied", "unscented", "unsealed", "unseen", "unselfish",
+    "unsettled", "unshakable", "unshapen", "unsigned", "unsinkable", "unskilled", "unsold", "unsolicited",
+    "unsolved", "unsophisticated", "unsound", "unsparing", "unspeakable", "unspoiled", "unspoken", "unstable",
+    "unstated", "unsteady", "unstoppable", "unsuccessful", "unsuitable", "unsung", "unsupported", "unsure",
+    "unsurpassed", "unsuspecting", "unsweetened", "untamed", "untapped", "untarnished", "untenable", "untested",
+    "unthinkable", "untidy", "untied", "until", "untimely", "untitled", "untold", "untouched",
+    "untoward", "untrained", "untried", "untrue", "untrustworthy", "unturned", "unusual", "unwanted",
+    "unwary", "unwashed", "unwavering", "unwelcome", "unwell", "unwieldy", "unwilling", "unwind",
+    "unwise", "unwitting", "unwonted", "unworkable", "unworthy", "unwrap", "unwritten", "unyielding",
+    "upbeat", "upcoming", "upgraded", "uphill", "upright", "uprising", "uproar", "uprooted",
+    "upset", "upside", "upstage", "upstairs", "upstart", "uptight", "uptown", "upward",
+    "urbane", "urgent", "usable", "useful", "useless", "usual", "utilitarian", "utopian",
+    "utter", "vacant", "vacuous", "vagabond", "vagrant", "vague", "vain", "valiant",
+    "valid", "valorous", "valuable", "vanishing", "vapid", "vaporous", "variable", "varied",
+    "various", "varnished", "varying", "vaulted", "vegetal", "vehement", "veiled", "venal",
+    "venerable", "vengeful", "venomous", "ventured", "venturesome", "veracious", "verbal", "verdant",
+    "verified", "veritable", "vernal", "versatile", "versed", "vertical", "vexed", "viable",
+    "vibrant", "vicarial", "vicarious", "vicious", "victorious", "vigilant", "vigorous", "vile",
+    "villainous", "vindicated", "vindictive", "vinegary", "violent", "violet", "virgin", "virile",
+    "virtual", "virtuous", "virulent", "viscous", "visible", "visionary", "vital", "vivacious",
+    "vivid", "vocal", "vocational", "vociferous", "voiced", "void", "volatile", "volcanic",
+    "voluble", "voluminous", "voluntary", "voluptuous", "voracious", "votive", "vulgar", "vulnerable",
+    "wacky", "wailing", "waking", "wandering", "wanted", "wanton", "warlike", "warning",
+    "warped", "wary", "washed", "waspish", "wasted", "watchful", "watered", "watery",
+    "wavering", "wavy", "waxen", "waxy", "weakened", "wealthy", "weary", "weathered",
+    "weaving", "webbed", "weekly", "weighty", "weird", "welcoming", "western", "wet",
+    "whaling", "whimsical", "whirling", "whispering", "whistling", "white", "whole", "whopping",
+    "wicked", "widened", "widespread", "wiggly", "willful", "willing", "wily", "winding",
+    "windowed", "windswept", "winking", "winning", "winsome", "wintery", "wiry", "wispy",
+    "wistful", "withdrawn", "withered", "witless", "witting", "wizardly", "wobbly", "wondrous",
+    "wooded", "wooden", "woolly", "wordy", "working", "worldly", "worn", "worried",
+    "worrying", "worsening", "worshipful", "worst", "worthless", "worthy", "wounded", "wrapped",
+    "wrenching", "wretched", "wriggling", "wrinkled", "written", "wrong", "wry", "yearning",
+    "yeasty", "yellow", "yielding", "yonder", "youthful", "zealous", "zestful", "zigzag",
+    "zippy", "zodiacal",
 ];
+
+
 
 static NOUNS: &[&str] = &[
     "arch", "badge", "barn", "beam", "bell", "bird", "blade", "bloom",
@@ -98,8 +353,103 @@ static NOUNS: &[&str] = &[
     "sage", "seed", "shade", "shell", "shore", "slate", "slope", "spark",
     "spire", "star", "stone", "storm", "sun", "surf", "swan", "thorn",
     "tide", "tower", "trail", "tree", "vale", "vine", "wave", "well",
-    "wind", "wing", "wolf", "wood", "wren",
+    "wind", "wing", "wolf", "wood", "wren", "acorn", "albatross", "alcove",
+    "amber", "anchor", "anvil", "apex", "apple", "archway", "arena", "armadillo",
+    "arrow", "aspen", "atlas", "attic", "aurora", "avalon", "aviary", "axe",
+    "azalea", "badger", "balcony", "bank", "banner", "banyan", "barbican", "barley",
+    "barrel", "basalt", "basin", "basket", "bastion", "battlement", "bay", "bayou",
+    "beacon", "beagle", "bean", "bear", "beard", "beaver", "bee", "beech",
+    "behemoth", "berry", "birch", "biscuit", "bishop", "bison", "bivouac", "blaze",
+    "blizzard", "blossom", "bluebell", "bluebird", "boar", "bolete", "bonsai", "bough",
+    "boulder", "bramble", "brand", "brass", "brazil", "brazier", "brindle", "bronco",
+    "bronze", "brooch", "buck", "buckle", "bud", "buffalo", "bugle", "bulwark",
+    "bunny", "burrow", "butte", "buttercup", "buzzard", "cable", "cactus", "calico",
+    "cameo", "candle", "canyon", "caravan", "cardinal", "caribou", "carpet",
+    "cashew", "castle", "catacomb", "catbird", "cauldron", "cedar", "chalice", "chapel",
+    "chariot", "chasm", "cherry", "chestnut", "chime", "chimpanzee", "chirp", "chisel",
+    "chord", "citadel", "citron", "clam", "clapper", "clasp", "clef", "cleft",
+    "cloak", "clover", "cobra", "cobweb", "cocoon", "comet", "compass", "conch",
+    "cookie", "corgi", "corncob", "cottage", "cougar", "courage", "court", "cove",
+    "coyote", "cradle", "crag", "cranny", "crest", "cricket", "crimson", "crocus",
+    "crone", "crow", "crumb", "crust", "crystal", "cudgel", "cup", "cymbal",
+    "cypress", "dagger", "dale", "dam", "dandy", "dapple", "dauphin", "delta",
+    "den", "desert", "dew", "diamond", "dinghy", "disk", "djinn", "dock",
+    "dolphin", "dominion", "door", "dragon", "drake", "drape", "drifter", "driftwood",
+    "drizzle", "drop", "drumlin", "duck", "dugong", "dungeon", "eagle", "eel",
+    "egret", "elk", "engine", "epic", "errand", "estuary", "exodus", "eyrie",
+    "falcon", "fang", "fawn", "feather", "fennel", "ferret", "festival", "fife",
+    "finch", "fir", "firefly", "fjord", "flagon", "flask", "fleck", "fleece",
+    "flintlock", "flora", "flounder", "flute", "foil", "ford", "forest", "fortress",
+    "fountain", "freesia", "fresco", "fuchsia", "funnel", "gale", "galleon", "galley",
+    "gander", "garland", "gateway", "gauntlet", "gazelle", "geyser", "gibbet", "ginger",
+    "glacier", "glade", "glyph", "gnome", "goat", "goblet", "goldfinch", "goose",
+    "gorge", "goshawk", "gourd", "gown", "granite", "grapefruit", "grouse", "gum",
+    "gyre", "gyroscope", "hag", "halo", "hamlet", "hamster", "hardtack", "hare",
+    "harp", "harrier", "harvest", "hawthorn", "hazel", "hearth", "heather", "hedgehog",
+    "helmet", "hemlock", "hemp", "hen", "herald", "hermit", "hexagon", "hibiscus",
+    "hickory", "hippo", "hive", "hobby", "holly", "honeysuckle", "hood", "hoof",
+    "horizon", "hornbeam", "hornet", "horse", "hound", "huckleberry", "hulk", "hummingbird",
+    "husk", "hyacinth", "hydrant", "hyena", "hymn", "ibex", "ibis", "iguana",
+    "impala", "ingot", "insect", "iris", "ironwood", "ivory", "ivy", "jackal",
+    "jackdaw", "jaguar", "jasper", "jaunt", "jaw", "jewel", "juniper", "kale",
+    "kangaroo", "kelp", "kestrel", "kettle", "key", "kiln", "kingfisher", "kinkajou",
+    "kiosk", "kirk", "kitten", "kiwi", "knoll", "kraken", "laguna", "lantern",
+    "larch", "larynx", "laurel", "lava", "lavender", "lawn", "leek", "lemon",
+    "lemur", "leopard", "lettuce", "lichen", "lighthouse", "lilac", "lily", "lime",
+    "lion", "lizard", "llama", "loam", "lobby", "locket", "lodge", "lotus",
+    "lullaby", "lynx", "lyre", "macaw", "magnet", "magpie", "mallard", "manatee",
+    "manor", "maple", "marble", "marigold", "marlin", "marmot", "marquee",
+    "marshland", "mast", "meadow", "melody", "meadowlark", "menace", "meridian", "midnight",
+    "mill", "mink", "minnow", "mirage", "mire", "mockingbird", "mole", "monarch",
+    "mongoose", "monsoon", "moorhen", "morning", "morrow", "mosaic", "mote", "moth",
+    "mountain", "mouse", "mousse", "mule", "mural", "mushroom", "mustang", "mustard",
+    "myrtle", "nadir", "nautilus", "nebula", "needle", "neon", "nettle", "niche",
+    "nightingale", "nimbus", "nimrod", "nomad", "noodle", "north", "nymph", "oasis",
+    "ocean", "octopus", "olive", "omelet", "onyx", "opal", "oracle", "orchard",
+    "oriole", "osprey", "ostrich", "oven", "oxbow", "oxen", "oyster", "paddle",
+    "palace", "panda", "pansy", "panther", "papyrus", "parakeet", "parchment", "parrot",
+    "partridge", "pavilion", "peacock", "pebble", "pelican", "penguin", "perch", "persimmon",
+    "petal", "pheasant", "phoenix", "pickaxe", "pickle", "pier", "pigeon", "pike",
+    "pillar", "pinecone", "pinion", "pip", "pipit", "pistol", "pith", "plaid",
+    "planet", "plank", "plateau", "platypus", "plaza", "pocket", "polaris",
+    "poppy", "porcupine", "portal", "possum", "potato", "pottage", "pouch", "prairie",
+    "prism", "propeller", "prow", "puffin", "puma", "pumpkin", "pupa", "pyramid",
+    "quail", "quarry", "quartz", "quiver", "rabbit", "raccoon", "radish", "raft",
+    "rafter", "rail", "rainbow", "rampart", "raspberry", "raven", "realm", "regalia",
+    "relic", "rhino", "rhinestone", "ribbon", "ringlet", "ripple", "roan", "roebuck",
+    "rook", "rooster", "root", "rope", "rover", "ruby", "runnel", "saber",
+    "sable", "saffron", "sail", "salamander", "salmon", "salt", "sapling", "sapphire",
+    "sash", "satellite", "savanna", "scabbard", "scallop", "scarab", "scarf", "scholar",
+    "scimitar", "scorpion", "scout", "screech", "scribe", "scrub", "scuttle", "seabird",
+    "sealant", "sentry", "sequoia", "serpent", "shack", "shale", "shark", "shawl",
+    "shrew", "shroud", "shrub", "shuttle", "sickle", "silo", "silverfish", "siskin",
+    "sizzle", "skate", "skeleton", "skiff", "slab", "sleigh", "slime",
+    "slip", "sloth", "slug", "smelt", "smithy", "smoke", "snail", "snare",
+    "snowdrop", "snowflake", "snuff", "soapstone", "soda", "soil", "solstice", "sonar",
+    "songbird", "sorbet", "sorrel", "spade", "sparrow", "spear", "sphinx", "spice",
+    "spike", "spindle", "splash", "spool", "sprig", "spring", "sprout", "spume",
+    "spur", "squire", "stag", "stair", "stamp", "stanza", "staple", "statue",
+    "stave", "steam", "stingray", "stitch", "stockade", "stoke", "stork", "strait",
+    "strand", "stream", "stud", "stylus", "suede", "sugar", "sundial", "swallow",
+    "swath", "sycamore", "syringa", "talon", "tambour", "tangent", "tangle", "tapir",
+    "tassel", "teacup", "temple", "tepee", "tern", "thicket", "thimble", "thistle",
+    "thrasher", "thrush", "thrum", "tiara", "tickle", "tier", "tiger", "tile",
+    "timber", "tinsel", "tipi", "titan", "toad", "toffee", "token", "tomb",
+    "tone", "torch", "tornado", "torrent", "toucan", "track", "trapeze", "tray",
+    "tread", "trellis", "trench", "tribe", "trident", "trinket", "troll", "trolley",
+    "trove", "trowel", "trumpet", "trunk", "tsunami", "tuber", "tulip", "tumble",
+    "tunic", "turban", "turf", "turnip", "turret", "tusk", "twig", "twine",
+    "twirl", "typhoon", "tyrant", "urn", "valley", "vampire", "vanguard", "vapor",
+    "vase", "vault", "velvet", "venison", "vermilion", "verse", "viper", "visor",
+    "vista", "vortex", "vulture", "wade", "wagon", "walnut", "walrus", "warbler",
+    "warden", "warren", "wasp", "waterfall", "weasel", "weave", "wedge", "whale",
+    "wheat", "wheel", "whetstone", "whim", "whip", "whirl", "whisper", "whistle",
+    "wick", "willow", "windmill", "wine", "winter", "wishbone", "wisp", "witch",
+    "wolverine", "woodland", "wraith", "wreath", "yard", "yarn", "yawn", "yew",
+    "zephyr", "zinnia", "zircon",
 ];
+
+
 
 // ---------------------------------------------------------------------------
 // Per-node naming state — one entry per node, one lock
@@ -880,6 +1230,110 @@ mod tests {
     fn is_default_name_positive() {
         assert!(is_default_name("bold-keen-brook"));
         assert!(is_default_name("calm-deep-oak"));
+    }
+
+    // --- Seed pool sizes (collision-rate guard) ---
+
+    /// Pins the minimum size of the ADJECTIVES and NOUNS lists. Together they
+    /// produce `ADJECTIVES.len()² × NOUNS.len()` total possible names — with
+    /// the birthday paradox, the 50%-collision threshold is around
+    /// `sqrt(2 × 0.5 × combos)` nodes. We hit collisions in production when
+    /// the pools were ~105 × ~125 (~1.4M combos, ~1.2k-node threshold), so any
+    /// future regression that shrinks them below 400 / 400 (≈64M combos,
+    /// ~11k-node threshold) trips this test.
+    ///
+    /// Note the asymmetric leverage: combos scale quadratically with the
+    /// adjective count and only linearly with nouns, so when in doubt grow
+    /// ADJECTIVES first. The 400 / 400 floor is the *minimum-safe* threshold
+    /// matching the original production incident; the actual current pools
+    /// are an order of magnitude larger.
+    ///
+    /// Bumping these floors is the primary collision-mitigation lever; adding
+    /// more words is a one-line change to the `ADJECTIVES` / `NOUNS` arrays
+    /// at the top of this file. No code logic needs to move.
+    #[test]
+    fn seed_pools_meet_minimum_size_for_low_collision_rate() {
+        const MIN_ADJECTIVES: usize = 400;
+        const MIN_NOUNS: usize = 400;
+        assert!(
+            ADJECTIVES.len() >= MIN_ADJECTIVES,
+            "ADJECTIVES has {} entries; need >= {} for low collision rate",
+            ADJECTIVES.len(),
+            MIN_ADJECTIVES
+        );
+        assert!(
+            NOUNS.len() >= MIN_NOUNS,
+            "NOUNS has {} entries; need >= {} for low collision rate",
+            NOUNS.len(),
+            MIN_NOUNS
+        );
+    }
+
+    /// Generated names must be unique enough that 500 fresh `on_spawn()` calls
+    /// have effectively no chance of collision. With the current pools
+    /// (≈3.9B combos), P(any collision in 500 picks) ≈ 0.003% — about 1 in
+    /// 30,000. Even with the floor pools (≈64M combos), P ≈ 0.2% — well under
+    /// the conventional 1% flake threshold.
+    ///
+    /// If this test ever fails, the `ADJECTIVES` / `NOUNS` arrays have shrunk
+    /// (the size-pin test above should have caught that first) or a duplicate
+    /// entry was introduced; either way, the seed-word contract is broken.
+    #[test]
+    fn on_spawn_500_samples_have_no_collisions() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::with_capacity(500);
+        for _ in 0..500 {
+            let name = on_spawn();
+            assert!(
+                seen.insert(name.clone()),
+                "duplicate name generated within 500 samples: {}",
+                name
+            );
+        }
+    }
+
+    /// Deterministic guards on the seed-word lists. Two failure modes are
+    /// checked, both of which silently degrade the collision rate without
+    /// tripping the size-pin test above (which counts rows, not distinct
+    /// entries or position-specific membership):
+    ///
+    /// 1. Internal duplicates within a single list. A dup entry makes
+    ///    `ADJECTIVES.choose()` and `NOUNS.choose()` non-uniform, lowering
+    ///    the effective pool size.
+    /// 2. Cross-list overlap. A word appearing in BOTH lists lets
+    ///    `is_default_name("X-Y-Z")` return true for non-default names where
+    ///    every part is in either list — defeating `user_renamed_mid_flight`'s
+    ///    guard, which then lets the LLM rename overwrite a user-typed slug.
+    ///    The fix is position-strict: `parts[2]` must not also be in ADJECTIVES.
+    #[test]
+    fn seed_pools_have_no_duplicates() {
+        use std::collections::HashSet;
+        let mut seen_adj: HashSet<&str> = HashSet::new();
+        for word in ADJECTIVES {
+            assert!(
+                seen_adj.insert(word),
+                "ADJECTIVES contains internal duplicate: {:?}",
+                word
+            );
+        }
+        let mut seen_noun: HashSet<&str> = HashSet::new();
+        for word in NOUNS {
+            assert!(
+                seen_noun.insert(word),
+                "NOUNS contains internal duplicate: {:?}",
+                word
+            );
+        }
+        // Cross-list overlap is the silent one — it doesn't change len(),
+        // but it makes `is_default_name` ambiguous between adj-slot and
+        // noun-slot membership. Reject any word that lives in both lists.
+        let overlap: Vec<&&str> = seen_adj.intersection(&seen_noun).collect();
+        assert!(
+            overlap.is_empty(),
+            "ADJECTIVES and NOUNS share entries (breaks is_default_name's \
+             position-strict assumption): {:?}",
+            overlap
+        );
     }
 
     // --- issue_node_name (gh{N}- prefix) ---
