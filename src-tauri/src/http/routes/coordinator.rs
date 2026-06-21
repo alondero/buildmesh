@@ -8,8 +8,8 @@
 //! #319), which writes a prompt to a live node's PTY and returns an honest
 //! verdict. Auth (the off-by-default master switch + the read- or drive-scoped
 //! token) is enforced by the dispatcher in `http::mod` via
-//! `coordinator::authenticate_read` / `authenticate_drive` before any handler is
-//! reached.
+//! `auth::guard(.., CoordinatorRead | CoordinatorWrite)` (issue #500) before any
+//! handler is reached.
 
 use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
@@ -64,8 +64,8 @@ struct PromptRequest {
 
 /// `POST /nodes/{id}/prompt` — drive a live node by writing `prompt` to its PTY
 /// (ADR-0008 §5, issue #319). Auth (the drive-scoped token + drive kill-switch)
-/// is enforced by the dispatcher via `coordinator::authenticate_drive` before
-/// this is reached.
+/// is enforced by the dispatcher via `auth::guard(.., CoordinatorWrite)` (issue
+/// #500) before this is reached.
 ///
 /// Outcomes:
 /// - unknown node id → `404`

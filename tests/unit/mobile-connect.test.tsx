@@ -1,9 +1,9 @@
 /**
- * Connect screen: token validation before the ?token= reload.
+ * Connect screen: token → cookie login (issue #500).
  *
- * Navigating straight to /?token=BAD lands on the embedded server's raw 401
- * page with no way back to the form, so Connect must probe the token via
- * /api/meshes first and show an inline error instead.
+ * The token is exchanged for an HttpOnly bm_session cookie via POST
+ * /api/session (Authorization: Bearer) — never a ?token= URL. A bad token
+ * reports inline; a successful login stores the token and calls onConnected.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
@@ -42,9 +42,15 @@ describe("Connect", () => {
         /invalid token/i,
       );
     });
+    // Login posts the token in the Authorization header to /api/session —
+    // never as a ?token= query param (issue #500).
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/meshes?token=deadbeef",
-      expect.objectContaining({ credentials: "include" }),
+      "/api/session",
+      expect.objectContaining({
+        method: "POST",
+        credentials: "include",
+        headers: { Authorization: "Bearer deadbeef" },
+      }),
     );
     expect(localStorage.getItem("buildmesh_token")).toBeNull();
     expect(onConnected).not.toHaveBeenCalled();
@@ -64,9 +70,10 @@ describe("Connect", () => {
     });
   });
 
-  it("stores a valid token before navigating", async () => {
+  it("stores a valid token and connects after login", async () => {
     mockFetchStatus(200);
-    render(<Connect onConnected={vi.fn()} />);
+    const onConnected = vi.fn();
+    render(<Connect onConnected={onConnected} />);
 
     await userEvent.type(screen.getByTestId("token-input"), "cafef00d");
     await userEvent.click(screen.getByTestId("connect-submit"));
@@ -74,6 +81,7 @@ describe("Connect", () => {
     await waitFor(() => {
       expect(localStorage.getItem("buildmesh_token")).toBe("cafef00d");
     });
+    expect(onConnected).toHaveBeenCalled();
   });
 
   it("requires a token before submitting", async () => {

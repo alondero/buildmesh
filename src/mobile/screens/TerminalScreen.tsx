@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { AgentNode, terminalWsUrl } from "../api";
+import { AgentNode, isAuthError, terminalWsUrl } from "../api";
 import { attachTouchPan } from "./attachTouchPan";
 import { QUICK_KEYS } from "./quickKeys";
 import { AppBar } from "../ui";
@@ -15,9 +15,17 @@ type Props = {
   node: AgentNode;
   onBack: () => void;
   onOpenChanges?: () => void;
+  /// Called when the WS ticket mint fails auth (cookie gone/expired) — bounces
+  /// to the Connect screen, since the terminal has no other re-auth path.
+  onAuthFailed?: () => void;
 };
 
-export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
+export default function TerminalScreen({
+  node,
+  onBack,
+  onOpenChanges,
+  onAuthFailed,
+}: Props) {
   const termHostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -204,8 +212,24 @@ export default function TerminalScreen({ node, onBack, onOpenChanges }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [node.id]);
 
-  function connect() {
-    const url = terminalWsUrl(node.id);
+  async function connect() {
+    // Mint a fresh single-use WS ticket (issue #500) before opening the socket.
+    let url: string;
+    try {
+      url = await terminalWsUrl(node.id);
+    } catch (e) {
+      // A 401/403 from the mint means the session cookie is gone — reconnecting
+      // would just re-mint and re-fail forever, so bounce to Connect instead.
+      // Any other failure is a transient connect error → normal backoff.
+      if (isAuthError(e)) {
+        onAuthFailed?.();
+        return;
+      }
+      scheduleReconnect();
+      return;
+    }
+    // The component may have unmounted while awaiting the ticket.
+    if (closedByUserRef.current) return;
     let ws: WebSocket;
     try {
       ws = new WebSocket(url);

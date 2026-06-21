@@ -4,10 +4,12 @@
 //! for remote access from a phone on the same network.
 
 pub mod assets;
+pub mod auth;
 pub mod events;
 pub mod request;
 pub mod routes;
 pub mod ws;
+pub mod ws_ticket;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -327,8 +329,6 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     let method = parts[0].as_str();
     let path_with_query = parts[1].clone();
 
-    let token = request::extract_token_from_path(&path_with_query);
-
     let mut headers = String::new();
     while headers.lines().count() == 0 || !headers.ends_with("\r\n\r\n") {
         if lines.read_line(&mut headers).await.is_err() {
@@ -349,11 +349,15 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         return;
     }
 
-    // WebSocket upgrade: GET /ws/events?token=xxx — mobile event push.
+    // WebSocket upgrade: GET /ws/events?ticket=xxx — mobile event push.
+    // Authenticated by a single-use ticket (issue #500 AC4) minted via the
+    // cookie/header-protected POST /api/ws-ticket: a raw `?token=` is no longer
+    // honoured here, and the cookie alone is not trusted on the upgrade.
     if method == "GET"
         && (path_with_query == "/ws/events" || path_with_query.starts_with("/ws/events?"))
     {
-        if !request::authenticate(&headers, token) {
+        let ticket = query_param(&path_with_query, "ticket").unwrap_or_default();
+        if !ws_ticket::consume(&ticket) {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
         }
@@ -383,10 +387,11 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         return;
     }
 
-    // WebSocket upgrade: GET /ws/terminal/{nodeId}?token=xxx
-    // Accepts either the bm_session cookie or the ?token= URL param —
-    // some proxies strip cookies on the WS handshake, so URL tokens stay
-    // a supported fallback even after stage 3's cookie migration.
+    // WebSocket upgrade: GET /ws/terminal/{nodeId}?ticket=xxx
+    // Same single-use ticket handshake as /ws/events (issue #500 AC4) — the
+    // long-lived token never rides the URL, and the ticket can only be obtained
+    // through the authenticated POST /api/ws-ticket, so a cross-site page cannot
+    // forge this upgrade.
     if method == "GET" && path_with_query.starts_with("/ws/terminal/") {
         let node_id: Option<i64> = path_with_query
             .split('/')
@@ -398,7 +403,8 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             return;
         };
 
-        if !request::authenticate(&headers, token) {
+        let ticket = query_param(&path_with_query, "ticket").unwrap_or_default();
+        if !ws_ticket::consume(&ticket) {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
         }
@@ -438,14 +444,75 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         .unwrap_or(&path_with_query)
         .to_string();
 
+    // Reserved administrative namespace (issue #500 AC1/AC2). No remote admin
+    // operations are mounted yet; this guard exists to *prove* the two-tier
+    // separation: a coordinator-scoped token is strictly Forbidden (403) here, a
+    // request with no/invalid credentials is Unauthorized (401), and the Admin
+    // (root) token reaches a 404 because nothing is mounted. Placed before all
+    // other routing so `/admin/*` can never fall through to another handler.
+    if path_without_query == "/admin" || path_without_query.starts_with("/admin/") {
+        match auth::authorize(&headers, auth::RequiredScope::Admin) {
+            auth::AuthOutcome::Ok(_) => {
+                let _ = request::write_status_only(&mut lines, "404 Not Found").await;
+            }
+            auth::AuthOutcome::Unauthorized => {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            }
+            auth::AuthOutcome::Forbidden => {
+                let _ = request::write_status_only(&mut lines, "403 Forbidden").await;
+            }
+        }
+        return;
+    }
+
+    // POST /api/session — the login handoff (issue #500). The mobile client
+    // POSTs the root token as `Authorization: Bearer <token>`; on success we set
+    // the HttpOnly bm_session cookie and return 200. This replaces the old
+    // `/?token=` URL bootstrap: the token never appears in a URL the server
+    // validates. No cookie is accepted here — this is how a client *gets* one.
+    if method == "POST" && path_without_query == "/api/session" {
+        match request::bearer_token(&headers) {
+            Some(t) if request::validate_token(Some(t.clone())) => {
+                let cookie = request::session_cookie_header(&t);
+                let response =
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n{}\r\n\r\n", cookie);
+                let _ = lines.get_mut().write_all(response.as_bytes()).await;
+            }
+            _ => {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            }
+        }
+        return;
+    }
+
+    // POST /api/ws-ticket — mint a single-use WebSocket handshake ticket (issue
+    // #500 AC4). Authenticated as an Admin request (cookie or bearer root
+    // token); the returned ticket is then passed as `?ticket=` on the WS upgrade.
+    if method == "POST" && path_without_query == "/api/ws-ticket" {
+        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+            .await
+            .is_none()
+        {
+            return;
+        }
+        let body = serde_json::to_string(&ws_ticket::WsTicket {
+            ticket: ws_ticket::mint(),
+        })
+        .unwrap_or_else(|_| r#"{"ticket":""}"#.to_string());
+        let _ = request::write_json(&mut lines, "200 OK", &body).await;
+        return;
+    }
+
     // Coordinator read API (ADR-0008): GET /nodes — spine-only Node Digests.
     // Distinct from the mobile `/api/nodes`: it authenticates with the
     // off-by-default, read-scoped coordinator token (NOT the root token), so a
     // disabled API or a missing/wrong token is rejected here. Loopback/LAN
     // binding is inherited from the embedded server; no internet port is opened.
     if method == "GET" && path_without_query == "/nodes" {
-        if !crate::coordinator::authenticate_read(&headers, token.clone()) {
-            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+        if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorRead)
+            .await
+            .is_none()
+        {
             return;
         }
         let body = routes::coordinator::list_nodes_json();
@@ -460,8 +527,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     // typed unavailable envelope, so a Coordinator never sees a bare error.
     if method == "GET" {
         if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/log") {
-            if !crate::coordinator::authenticate_read(&headers, token.clone()) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorRead)
+                .await
+                .is_none()
+            {
                 return;
             }
             let tail = tail_param(&path_with_query);
@@ -484,8 +553,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     // switch, so disabling the surface disables drive too.
     if method == "POST" {
         if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/prompt") {
-            if !crate::coordinator::authenticate_drive(&headers, token.clone()) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorWrite)
+                .await
+                .is_none()
+            {
                 return;
             }
             let content_length: usize = request::extract_header_value(&headers, "Content-Length")
@@ -507,8 +578,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
 
     // POST /api/nodes/create
     if method == "POST" && path_without_query == "/api/nodes/create" {
-        if !request::authenticate(&headers, token) {
-            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+            .await
+            .is_none()
+        {
             return;
         }
         let content_length: usize = request::extract_header_value(&headers, "Content-Length")
@@ -521,8 +594,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     // POST /api/meshes/{id}/pr — create a GitHub PR for the mesh's branch.
     if method == "POST" {
         if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pr") {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             let content_length: usize = request::extract_header_value(&headers, "Content-Length")
@@ -541,8 +616,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             "/pulls/",
             "/merge",
         ) {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             let content_length: usize = request::extract_header_value(&headers, "Content-Length")
@@ -557,8 +634,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             "/api/meshes/",
             "/agent-nodes/import-and-resume",
         ) {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             let content_length: usize = request::extract_header_value(&headers, "Content-Length")
@@ -574,8 +653,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             "/issues/",
             "/spawn",
         ) {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             let content_length: usize = request::extract_header_value(&headers, "Content-Length")
@@ -590,8 +671,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
     if method == "GET" {
         if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/status")
         {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             routes::git::status(&mut lines, agent_id).await;
@@ -599,8 +682,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         }
         if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/summary")
         {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             routes::git::summary(&mut lines, agent_id).await;
@@ -608,16 +693,20 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         }
         if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/branch")
         {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             routes::git::branch(&mut lines, agent_id).await;
             return;
         }
         if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/diff") {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             let file_path = query_param(&path_with_query, "path").unwrap_or_default();
@@ -625,8 +714,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             return;
         }
         if path_without_query == "/api/gh/auth" {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             routes::git::gh_auth(&mut lines).await;
@@ -638,8 +729,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             "/api/meshes/",
             "/agent-nodes/discover",
         ) {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             routes::agent_nodes::discover(&mut lines, mesh_id).await;
@@ -647,8 +740,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         }
         // GET /api/meshes/{id}/issues
         if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/issues") {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             routes::issues::list(&mut lines, mesh_id).await;
@@ -658,8 +753,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         // Mirrors the issues route above; the `state` query param defaults
         // to "open" inside the handler.
         if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pulls") {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             let state = query_param(&path_with_query, "state").unwrap_or_default();
@@ -679,8 +776,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
             "/pulls/",
             "/mergeability",
         ) {
-            if !request::authenticate(&headers, token) {
-                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
                 return;
             }
             routes::pr::get_mergeability(&mut lines, mesh_id, pr_number).await;
@@ -688,17 +787,16 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         }
     }
 
-    // GET /assets/* — bundled mobile assets (JS/CSS/etc). Same auth as
-    // the shell; legacy `/v2/assets/*` paths still work for any cached
-    // mobile bundle that referenced them before the stage 7 flip.
+    // GET /assets/* — bundled mobile assets (JS/CSS/etc). Public, like the SPA
+    // shell (issue #500): the static bundle holds no secrets and is identical
+    // for every install. The browser must be able to load these before any JS
+    // can run POST /api/session to authenticate; all data APIs stay gated, and
+    // the DNS-rebinding Host guard above still runs on every request. Legacy
+    // `/v2/assets/*` paths still resolve for any cached mobile bundle.
     if method == "GET"
         && (path_without_query.starts_with("/assets/")
             || path_without_query.starts_with("/v2/assets/"))
     {
-        if !request::authenticate(&headers, token) {
-            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
-            return;
-        }
         let normalized = path_without_query
             .strip_prefix("/v2")
             .unwrap_or(&path_without_query);
@@ -724,8 +822,10 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
 
     // GET /api/*
     if method == "GET" && path_without_query.starts_with("/api/") {
-        if !request::authenticate(&headers, token) {
-            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+            .await
+            .is_none()
+        {
             return;
         }
         let body = match path_without_query.as_str() {
@@ -738,23 +838,12 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
         return;
     }
 
-    // Default: serve the mobile SPA shell at `/`. On the initial load with
-    // a valid `?token=`, issue an HttpOnly bm_session cookie so subsequent
-    // fetches and the WebSocket upgrade authenticate without keeping the
-    // token in URLs.
-    let cookie_valid = request::validate_token(request::extract_token_from_cookies(&headers));
-    let url_token_valid = request::validate_token(token.clone());
-    if !cookie_valid && !url_token_valid {
-        let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
-        return;
-    }
-    let set_cookie = if url_token_valid && !cookie_valid {
-        token.as_deref().map(request::session_cookie_header)
-    } else {
-        None
-    };
-    let extra = set_cookie.as_ref().map(|h| format!("{}\r\n", h));
-    let _ = assets::serve_spa_shell(&mut lines, extra.as_deref()).await;
+    // Default: serve the mobile SPA shell at `/`. Public (issue #500) — the
+    // shell carries no secrets and must load so its JS can POST the root token
+    // to /api/session, which is what mints the bm_session cookie. Authentication
+    // moved entirely to that endpoint; the old `/?token=` URL→cookie handoff is
+    // gone.
+    let _ = assets::serve_spa_shell(&mut lines, None).await;
 }
 
 #[cfg(test)]
@@ -858,15 +947,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_returns_401_without_token() {
-        // Post-flip: / serves the SPA shell and requires auth like
-        // everything else.
-        assert_eq!(get_request("/").await, 401);
+    async fn root_serves_shell_without_credentials() {
+        // Post-#500: the SPA shell is public so its JS can load and POST the
+        // token to /api/session. No credentials → still 200 (not 401); the
+        // embedded index.html is present once `dist/mobile` is built.
+        assert_eq!(get_request("/").await, 200);
     }
 
     #[tokio::test]
-    async fn asset_returns_401_without_token() {
-        assert_eq!(get_request("/assets/index.js").await, 401);
+    async fn asset_is_public_not_401() {
+        // Assets are public too (issue #500). `/assets/index.js` isn't a real
+        // built filename (the bundle is content-hashed), so it 404s — the point
+        // is that it is NOT gated behind 401 anymore.
+        assert_eq!(get_request("/assets/index.js").await, 404);
     }
 
     #[tokio::test]
@@ -877,10 +970,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v2_asset_returns_401_without_token() {
-        // Legacy /v2/assets/* paths still resolve to the same files so
-        // any mid-flip cached HTML doesn't 404 on its scripts.
-        assert_eq!(get_request("/v2/assets/index.js").await, 401);
+    async fn v2_asset_is_public_not_401() {
+        // Legacy /v2/assets/* paths still resolve (strip /v2 → /assets/*) and
+        // are public like the rest of the static bundle (issue #500).
+        assert_eq!(get_request("/v2/assets/index.js").await, 404);
     }
 
     #[tokio::test]
@@ -1134,8 +1227,9 @@ mod tests {
         .is_none());
     }
 
-    #[tokio::test]
-    async fn ws_upgrade_does_not_hang() {
+    /// Send a WebSocket upgrade for `path` and return its HTTP status code.
+    /// Asserts the handler responds within 2s (a hung upgrade is a regression).
+    async fn ws_status(path: &str) -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1145,23 +1239,58 @@ mod tests {
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        let request = "GET /ws/terminal/123?token=invalid HTTP/1.1\r\n\
+        let request = format!(
+            "GET {} HTTP/1.1\r\n\
              Host: localhost\r\n\
              Connection: Upgrade\r\n\
              Upgrade: websocket\r\n\
              Sec-WebSocket-Version: 13\r\n\
              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
-             \r\n";
+             \r\n",
+            path
+        );
         stream.write_all(request.as_bytes()).await.unwrap();
 
         let mut buf = vec![0u8; 1024];
-        let result = tokio::time::timeout(
+        let n = tokio::time::timeout(
             std::time::Duration::from_secs(2),
             stream.read(&mut buf),
         )
-        .await;
+        .await
+        .expect("handle_connection hung on WebSocket upgrade (regression)")
+        .expect("read failed");
 
-        assert!(result.is_ok(), "handle_connection hung on WebSocket upgrade (regression)");
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn ws_terminal_rejects_raw_url_token() {
+        // Issue #500 AC4: a raw `?token=` on the WS upgrade is no longer a
+        // credential — only a single-use `?ticket=` is. So it's rejected (401)
+        // and the handler doesn't hang.
+        assert_eq!(ws_status("/ws/terminal/123?token=anything").await, 401);
+    }
+
+    #[tokio::test]
+    async fn ws_events_rejects_without_ticket() {
+        assert_eq!(ws_status("/ws/events").await, 401);
+        assert_eq!(ws_status("/ws/events?ticket=bogus").await, 401);
+    }
+
+    #[tokio::test]
+    async fn ws_terminal_accepts_a_valid_ticket() {
+        // A ticket minted via the in-memory store (no DB needed) lets the
+        // upgrade through to the 101 switch. Single-use is covered in
+        // ws_ticket's own tests.
+        let ticket = ws_ticket::mint();
+        let path = format!("/ws/terminal/123?ticket={}", ticket);
+        assert_eq!(ws_status(&path).await, 101);
     }
 
     #[test]
@@ -1277,5 +1406,65 @@ mod tests {
         // APP_HANDLE is unset in tests), proving the gate is peer-specific.
         let local: SocketAddr = "127.0.0.1:54321".parse().unwrap();
         assert_eq!(attention_post_with_peer("/api/attention/42", local).await, 503);
+    }
+
+    // --- RBAC dispatcher gates (issue #500) ---
+    //
+    // These exercise the credential-free paths, which short-circuit before any
+    // DB lookup (the test binary has no initialized global DB). The token→role
+    // and coordinator-token→403-on-admin logic lives in `auth`'s unit tests,
+    // which seed an in-memory DB.
+
+    async fn post_status(path: &str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(stream, peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            path
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("request hung")
+            .expect("read failed");
+
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn admin_namespace_rejects_without_credentials() {
+        // AC1/AC2: the reserved /admin surface is gated. No credentials → 401
+        // (a *coordinator* token would be 403 — see auth::tests).
+        assert_eq!(get_request("/admin").await, 401);
+        assert_eq!(get_request("/admin/keys").await, 401);
+    }
+
+    #[tokio::test]
+    async fn session_endpoint_rejects_without_bearer() {
+        // POST /api/session is the login handoff; with no Authorization header
+        // there is nothing to validate → 401 (and no cookie is set).
+        assert_eq!(post_status("/api/session").await, 401);
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_endpoint_requires_admin_credentials() {
+        // Minting a WS ticket requires an authenticated Admin request; with no
+        // credentials the guard returns 401 before any ticket is minted.
+        assert_eq!(post_status("/api/ws-ticket").await, 401);
     }
 }

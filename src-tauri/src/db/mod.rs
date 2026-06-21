@@ -632,7 +632,9 @@ fn migrate_gemini_to_agy(conn: &Connection) -> SqlResult<()> {
 }
 
 /// Generate a random 32-character hex token (16 bytes of random data).
-fn generate_token() -> String {
+/// `pub(crate)` so the WS ticket store (`http::ws_ticket`, issue #500) can reuse
+/// the same 128-bit entropy source for its short-lived handshake tickets.
+pub(crate) fn generate_token() -> String {
     use rand::Rng;
     let mut rng = rand::rng();
     let bytes: [u8; 16] = rng.random();
@@ -654,12 +656,19 @@ pub(crate) fn hash_token(raw: &str) -> String {
 /// Get or create the root remote access token (stored in app_settings).
 pub fn get_or_create_root_token() -> SqlResult<String> {
     let db = get().lock().unwrap();
+    get_or_create_root_token_inner(&db)
+}
 
-    let existing: Option<String> = db.query_row(
-        "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
-        [],
-        |row| row.get(0),
-    ).ok();
+/// Lock-free core, so the HTTP auth layer's tests (`http::auth`, issue #500) can
+/// seed a root token on an in-memory connection.
+pub fn get_or_create_root_token_inner(conn: &Connection) -> SqlResult<String> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
 
     if let Some(token) = existing {
         if !token.is_empty() {
@@ -668,23 +677,36 @@ pub fn get_or_create_root_token() -> SqlResult<String> {
     }
 
     let token = generate_token();
-    db.execute(
-        "INSERT INTO app_settings (key, value) VALUES ('remote_access_token', ?1)",
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('remote_access_token', ?1)",
         params![&token],
     )?;
     Ok(token)
 }
 
-/// Validate the root remote access token.
+/// Validate the root remote access token (the Admin-role credential, issue #500).
 pub fn validate_root_token(token: &str) -> SqlResult<bool> {
     let db = get().lock().unwrap();
-    let stored: Option<String> = db.query_row(
-        "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
-        [],
-        |row| row.get(0),
-    ).ok();
+    validate_root_token_inner(&db, token)
+}
 
-    Ok(stored.as_deref().unwrap_or("") == token)
+/// Lock-free core so the HTTP auth layer (`http::auth`, issue #500) and the
+/// `/api/session` login endpoint can be unit-tested against an in-memory
+/// connection — mirroring the coordinator validators' `_inner` pattern. The
+/// root token is still stored cleartext (hashing deferred to the Keychain slice,
+/// #495); an empty presented token never matches an absent stored value.
+pub fn validate_root_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
+    if token.is_empty() {
+        return Ok(false);
+    }
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'remote_access_token'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(stored.as_deref() == Some(token))
 }
 
 // --- Coordinator read API auth (ADR-0008) ---
@@ -815,11 +837,9 @@ pub fn coordinator_read_token_inner(conn: &Connection) -> SqlResult<Option<Strin
 /// Validate a presented token for READ access. Rejects unless the API is
 /// enabled AND the token matches the minted read token — so disabling the
 /// master switch instantly cuts off all read access even with a valid token.
-pub fn validate_coordinator_read_token(token: &str) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
-    validate_coordinator_read_token_inner(&db, token)
-}
-
+/// Only the `_inner` form exists: the HTTP auth layer (`http::auth::resolve_role`,
+/// issue #500) locks the DB once and calls it, so a separate self-locking
+/// wrapper would only invite a nested-lock deadlock.
 pub fn validate_coordinator_read_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
     if token.is_empty() || !coordinator_api_enabled_inner(conn)? {
         return Ok(false);
@@ -900,12 +920,8 @@ pub fn coordinator_drive_token_inner(conn: &Connection) -> SqlResult<Option<Stri
 /// Validate a presented token for DRIVE access. Rejects unless the coordinator
 /// master switch is on AND the drive kill-switch is on AND the token matches the
 /// minted drive token. Because the drive token is stored under its own key, a
-/// read-scoped token never validates here — drive is its own capability.
-pub fn validate_coordinator_drive_token(token: &str) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
-    validate_coordinator_drive_token_inner(&db, token)
-}
-
+/// read-scoped token never validates here — drive is its own capability. Only the
+/// `_inner` form exists (locked once by `http::auth::resolve_role`, issue #500).
 pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
     if token.is_empty()
         || !coordinator_api_enabled_inner(conn)?

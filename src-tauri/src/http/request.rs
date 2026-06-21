@@ -7,15 +7,16 @@ use tokio::net::TcpStream;
 
 use crate::db;
 
-pub fn extract_token_from_path(path: &str) -> Option<String> {
-    path.split('?')
-        .nth(1)
-        .and_then(|query| {
-            query
-                .split('&')
-                .find(|pair| pair.starts_with("token="))
-                .map(|pair| pair[6..].to_string())
-        })
+/// Pull a bearer token out of an `Authorization: Bearer <token>` header. This is
+/// the only header-carried credential shape the server accepts post-#500 (URL
+/// `?token=` is gone) — both the Admin/root path and the coordinator path read
+/// it. Empty after the scheme is treated as absent.
+pub fn bearer_token(headers: &str) -> Option<String> {
+    let value = extract_header_value(headers, "Authorization")?;
+    value
+        .strip_prefix("Bearer ")
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
 }
 
 pub fn validate_token(token: Option<String>) -> bool {
@@ -39,23 +40,14 @@ pub fn extract_token_from_cookies(headers: &str) -> Option<String> {
     None
 }
 
-/// Authenticate a request via either the `bm_session` cookie or the
-/// `?token=` URL parameter. The cookie wins when both are present so a
-/// stale URL token can't override a fresh session.
-pub fn authenticate(headers: &str, url_token: Option<String>) -> bool {
-    if validate_token(extract_token_from_cookies(headers)) {
-        return true;
-    }
-    validate_token(url_token)
-}
-
-/// Header value attached to the initial `/v2` response after a successful
-/// `?token=` validation. HttpOnly so JS can't read it; SameSite=Lax for the
-/// cross-origin POSTs we don't make. Path=/ so it travels with API calls and
-/// the WebSocket upgrade.
+/// `Set-Cookie` line attached to a successful `POST /api/session` login (issue
+/// #500), which is the sole place the session cookie is now minted. HttpOnly so
+/// JS can't read it; SameSite=Lax for the cross-origin POSTs we don't make;
+/// Path=/ so it travels with API calls and the WebSocket-ticket request.
 pub fn session_cookie_header(token: &str) -> String {
-    // Cookie value is just the raw token — the server validates it the same
-    // way as a `?token=` URL param. No `Secure` flag: this is HTTP only.
+    // Cookie value is the raw root token — validated the same way as the bearer
+    // token on the login request. No `Secure` flag: the loopback/LAN server is
+    // plain HTTP (TLS for the LAN path is a separate #494 slice).
     format!(
         "Set-Cookie: bm_session={}; HttpOnly; SameSite=Lax; Path=/",
         token
@@ -146,39 +138,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extract_token_from_simple_path() {
-        let token = extract_token_from_path("/?token=abc123");
-        assert_eq!(token, Some("abc123".to_string()));
+    fn bearer_token_extracts_and_trims() {
+        let headers = "Host: localhost\r\nAuthorization: Bearer deadbeef\r\n";
+        assert_eq!(bearer_token(headers), Some("deadbeef".to_string()));
     }
 
     #[test]
-    fn extract_token_from_path_with_multiple_params() {
-        let token = extract_token_from_path("/api/nodes?foo=bar&token=secret&baz=1");
-        assert_eq!(token, Some("secret".to_string()));
-    }
-
-    #[test]
-    fn extract_token_returns_none_without_token_param() {
-        let token = extract_token_from_path("/api/nodes?foo=bar");
-        assert_eq!(token, None);
-    }
-
-    #[test]
-    fn extract_token_returns_none_for_bare_path() {
-        let token = extract_token_from_path("/api/nodes");
-        assert_eq!(token, None);
-    }
-
-    #[test]
-    fn extract_token_from_ws_path() {
-        let token = extract_token_from_path("/ws/terminal/306?token=deadbeef");
-        assert_eq!(token, Some("deadbeef".to_string()));
-    }
-
-    #[test]
-    fn extract_token_empty_value() {
-        let token = extract_token_from_path("/?token=");
-        assert_eq!(token, Some("".to_string()));
+    fn bearer_token_none_without_header_or_scheme() {
+        assert_eq!(bearer_token("Host: localhost\r\n"), None);
+        // A non-Bearer scheme is not a token we honour.
+        assert_eq!(bearer_token("Authorization: Basic abc\r\n"), None);
+        // Empty after the scheme is rejected.
+        assert_eq!(bearer_token("Authorization: Bearer \r\n"), None);
     }
 
     #[test]
