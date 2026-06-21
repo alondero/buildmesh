@@ -1,4 +1,5 @@
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::models::EnvType;
 
 pub struct CodexAdapter;
 pub static CODEX: CodexAdapter = CodexAdapter;
@@ -32,7 +33,7 @@ impl AgentProvider for CodexAdapter {
         }
     }
 
-    fn spawn_recipe(&self, platform: Platform) -> SpawnRecipe {
+    fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: "codex",
             base_args: base_flags(),

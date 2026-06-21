@@ -7,6 +7,8 @@
 pub mod adapters;
 pub mod provider_conf;
 
+use crate::models::EnvType;
+
 /// Build host (compile-time constant via `cfg!(target_os)`).
 ///
 /// Distinct from `EnvType` (Windows vs WSL) which is the *runtime* spawn target.
@@ -133,8 +135,13 @@ pub trait AgentProvider: Send + Sync {
     /// of this — it comes from `id()` to avoid stringly-typed duplication.
     fn ui(&self) -> UiMeta;
 
-    /// How to invoke this provider on the given host platform.
-    fn spawn_recipe(&self, platform: Platform) -> SpawnRecipe;
+    /// How to invoke this provider on the given host platform, for a node
+    /// running in the given runtime environment. The `env_type` parameter
+    /// lets adapters customise their spawn for WSL meshes — the Terminal
+    /// adapter uses it to pick up the user's WSL login shell (e.g. zsh)
+    /// instead of the system `sh`. The Claude-Code family ignores it; the
+    /// `claude` / `claude.exe` binary is the same regardless of env.
+    fn spawn_recipe(&self, platform: Platform, env_type: EnvType) -> SpawnRecipe;
 
     /// Whether to accept `--session-id <uuid>` (fresh) / `--resume <uuid>` (resume) args.
     fn supports_resume(&self) -> bool;

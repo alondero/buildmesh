@@ -14,6 +14,7 @@
 //! "Terminal in worktree" option, so user expectations align.
 
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::models::EnvType;
 
 pub struct TerminalAdapter;
 pub static TERMINAL: TerminalAdapter = TerminalAdapter;
@@ -31,19 +32,17 @@ impl AgentProvider for TerminalAdapter {
         }
     }
 
-    fn spawn_recipe(&self, platform: Platform) -> SpawnRecipe {
-        match platform {
-            Platform::Windows => SpawnRecipe {
-                binary: "powershell.exe",
-                base_args: vec![],
-                windows_shell: WindowsShell::Direct,
-            },
-            Platform::Macos | Platform::Linux => SpawnRecipe {
-                binary: "sh",
-                base_args: vec![],
-                windows_shell: WindowsShell::Direct,
-            },
-        }
+    fn spawn_recipe(&self, platform: Platform, env_type: EnvType) -> SpawnRecipe {
+        // WSL login-shell lookup (issue #548) — for a WSL mesh, prefer the
+        // user's `getent passwd` login shell (zsh, fish, bash) over the
+        // system `sh` (dash on Ubuntu). Falls back to `sh` when the lookup
+        // is unavailable. The lookup itself lives in `crate::env`.
+        let wsl_shell = if env_type == EnvType::Wsl {
+            crate::env::wsl_login_shell()
+        } else {
+            None
+        };
+        terminal_recipe(platform, env_type, wsl_shell)
     }
 
     fn supports_resume(&self) -> bool {
@@ -75,6 +74,46 @@ impl AgentProvider for TerminalAdapter {
     }
 }
 
+/// Pure helper for the Terminal adapter's spawn recipe. Pulled out of
+/// `spawn_recipe` so it can be unit-tested without depending on the cached
+/// `wsl_login_shell()` state — on a Windows+WSL dev machine the cache holds
+/// `Some("/usr/bin/zsh")` and would make the "Linux returns sh" tests
+/// environment-dependent.
+///
+/// Decision table:
+/// - `Platform::Windows` → `powershell.exe` (any `env_type`)
+/// - `Platform::Linux` + `EnvType::Wsl` + `Some(shell)` → shell (e.g. `/usr/bin/zsh`)
+/// - `Platform::Linux` + `EnvType::Wsl` + `None` → `sh` fallback
+/// - `Platform::Linux` + `EnvType::Windows` → `sh` (native Linux mesh)
+/// - `Platform::Macos` + `EnvType::Windows` → `sh` (the only realistic
+///   macOS input — `env_for_path` on macOS always returns
+///   `EnvType::Windows`, so the WSL branch is unreachable in practice)
+fn terminal_recipe(
+    platform: Platform,
+    env_type: EnvType,
+    wsl_shell: Option<&'static str>,
+) -> SpawnRecipe {
+    if platform == Platform::Windows {
+        return SpawnRecipe {
+            binary: "powershell.exe",
+            base_args: vec![],
+            windows_shell: WindowsShell::Direct,
+        };
+    }
+    // macOS or Linux. For WSL meshes, prefer the user's login shell from
+    // `getent passwd` (see `crate::env::wsl_login_shell`); otherwise `sh`.
+    let binary = if env_type == EnvType::Wsl {
+        wsl_shell.unwrap_or("sh")
+    } else {
+        "sh"
+    };
+    SpawnRecipe {
+        binary,
+        base_args: vec![],
+        windows_shell: WindowsShell::Direct,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,7 +125,7 @@ mod tests {
     /// the symmetry with the Build/Run "Terminal in worktree" path.
     #[test]
     fn terminal_spawn_recipe_powershell_direct_on_windows() {
-        let recipe = TERMINAL.spawn_recipe(Platform::Windows);
+        let recipe = terminal_recipe(Platform::Windows, EnvType::Windows, None);
         assert_eq!(recipe.binary, "powershell.exe");
         assert!(recipe.base_args.is_empty(), "terminal must spawn PowerShell with no extra args");
         assert!(matches!(recipe.windows_shell, WindowsShell::Direct));
@@ -96,18 +135,20 @@ mod tests {
     /// depending on the user's login shell (zsh, fish, etc.).
     #[test]
     fn terminal_spawn_recipe_sh_direct_on_macos() {
-        let recipe = TERMINAL.spawn_recipe(Platform::Macos);
+        let recipe = terminal_recipe(Platform::Macos, EnvType::Windows, None);
         assert_eq!(recipe.binary, "sh");
         assert!(recipe.base_args.is_empty());
         assert!(matches!(recipe.windows_shell, WindowsShell::Direct));
     }
 
-    /// Same as macOS — `sh` is universally available on Linux and
+    /// Native Linux (env_type is `Windows` because the path doesn't start
+    /// with `/home/` or `/mnt/`) uses `sh` — universally available and
     /// matches the choice the existing Build/Run "Terminal in worktree"
-    /// option makes.
+    /// option makes. WSL meshes are a separate case (`terminal_recipe`
+    /// with `EnvType::Wsl`) and live in their own tests below.
     #[test]
     fn terminal_spawn_recipe_sh_direct_on_linux() {
-        let recipe = TERMINAL.spawn_recipe(Platform::Linux);
+        let recipe = terminal_recipe(Platform::Linux, EnvType::Windows, None);
         assert_eq!(recipe.binary, "sh");
         assert!(recipe.base_args.is_empty());
         assert!(matches!(recipe.windows_shell, WindowsShell::Direct));
@@ -149,5 +190,60 @@ mod tests {
         assert_eq!(ui.label, "Terminal");
         assert_eq!(ui.color, "#9ca3af");
         assert_eq!(ui.icon, "terminal-prompt");
+    }
+
+    // ----- WSL login-shell path (issue #548) -----
+    //
+    // The pure helper `terminal_recipe` is the surface tested here, not
+    // `TERMINAL.spawn_recipe` — the latter wires `env::wsl_login_shell()`
+    // into the helper, and the cache lives in a `Lazy` that's hard to
+    // reset from tests without a dedicated seam. The pure helper tests
+    // pin the decision table; the cache→helper wiring is a one-liner
+    // reviewed alongside the helper.
+
+    /// The headline case: an ohmyzsh user spawns a Terminal node on a WSL
+    /// mesh and the recipe picks up zsh as the binary instead of `sh`
+    /// (dash on Ubuntu). `Platform::Linux` is what `spawn.rs` routes a
+    /// WSL mesh to; `EnvType::Wsl` is the path-derived env type.
+    ///
+    /// Note: launching zsh via `wsl.exe --cd <path> -- /usr/bin/zsh` is
+    /// non-interactive — zsh won't source `~/.zshrc` and the user will
+    /// see a plain `$` prompt, not their ohmyzsh prompt. Adding `-i` or
+    /// `-l` here would source rc files; deliberately deferred per issue
+    /// #548 v1 to keep the diff zero-behaviour-change for users who
+    /// don't chsh (today's Terminal node launches `sh` non-interactively).
+    #[test]
+    fn terminal_recipe_wsl_zsh_login_shell_uses_zsh() {
+        let recipe = terminal_recipe(Platform::Linux, EnvType::Wsl, Some("/usr/bin/zsh"));
+        assert_eq!(recipe.binary, "/usr/bin/zsh");
+        assert!(recipe.base_args.is_empty(), "no -i/-l in v1 — see issue #548 for the follow-up");
+        assert!(matches!(recipe.windows_shell, WindowsShell::Direct));
+    }
+
+    /// Same as zsh but with bash — pins that the helper passes the path
+    /// through verbatim rather than special-casing zsh.
+    #[test]
+    fn terminal_recipe_wsl_bash_login_shell_uses_bash() {
+        let recipe = terminal_recipe(Platform::Linux, EnvType::Wsl, Some("/bin/bash"));
+        assert_eq!(recipe.binary, "/bin/bash");
+    }
+
+    /// Same with fish — covers a non-bash non-zsh login shell so the
+    /// helper isn't accidentally hardcoded to the two most common shells.
+    #[test]
+    fn terminal_recipe_wsl_fish_login_shell_uses_fish() {
+        let recipe = terminal_recipe(Platform::Linux, EnvType::Wsl, Some("/usr/bin/fish"));
+        assert_eq!(recipe.binary, "/usr/bin/fish");
+    }
+
+    /// When the cached lookup returns `None` — WSL not installed, the
+    /// `wsl.exe` call failed, or the passwd entry points at `nologin` /
+    /// `/bin/false` — fall back to the existing `sh` default rather
+    /// than panicking or spawning a shell that exits immediately.
+    #[test]
+    fn terminal_recipe_wsl_no_login_shell_falls_back_to_sh() {
+        let recipe = terminal_recipe(Platform::Linux, EnvType::Wsl, None);
+        assert_eq!(recipe.binary, "sh");
+        assert!(matches!(recipe.windows_shell, WindowsShell::Direct));
     }
 }

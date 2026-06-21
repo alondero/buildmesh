@@ -46,6 +46,56 @@ fn get_default_wsl_distro() -> Option<String> {
     DETECTED_DISTRO.clone()
 }
 
+/// Parse the login shell (field 7) out of a `getent passwd <user>` line.
+///
+/// `getent passwd` formats a line as `name:pw:uid:gid:gecos:home:shell` —
+/// colons in any field are not escaped by glibc's NSS, so plain `split(':')`
+/// is correct in practice (a GECOS field containing `:` is a malformed
+/// entry by spec). Returns `None` for the no-login shells
+/// (`/usr/sbin/nologin`, `/bin/false`) and any line with fewer than 7
+/// fields, so the cached lookup can fall through to a plain `sh` default
+/// rather than launching a shell that exits immediately.
+fn parse_login_shell_from_passwd(line: &str) -> Option<String> {
+    let shell = line.split(':').nth(6)?.trim();
+    if shell.is_empty() || shell == "/usr/sbin/nologin" || shell == "/bin/false" {
+        return None;
+    }
+    Some(shell.to_string())
+}
+
+/// Resolve the WSL user's login shell by running `getent passwd $(whoami)`
+/// inside the default distro. Returns `None` if WSL is unavailable, the
+/// passwd entry can't be read, or the entry points at a no-login shell —
+/// the caller is expected to fall back to a POSIX-`sh` default in that case.
+///
+/// The returned `&'static str` is leaked from a one-shot `String`; the leak
+/// happens at most once per Buildmesh session (the result is cached in
+/// [`DETECTED_WSL_LOGIN_SHELL`]). The same one-shot leak pattern is used
+/// for the tracing `_guard` in `lib.rs`.
+fn get_default_wsl_login_shell_impl() -> Option<&'static str> {
+    let distro = get_default_wsl_distro().unwrap_or_else(|| "Ubuntu".to_string());
+    let output = command_no_window("wsl.exe")
+        .args(["-d", &distro, "--", "sh", "-c", "getent passwd $(whoami)"])
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().next()?;
+    parse_login_shell_from_passwd(line).map(|s| Box::leak(s.into_boxed_str()) as &'static str)
+}
+
+/// The user's WSL login shell (e.g. `/usr/bin/zsh`), cached after first
+/// detection. `None` when WSL isn't available or the login shell isn't
+/// usable as an interactive terminal.
+static DETECTED_WSL_LOGIN_SHELL: Lazy<Option<&'static str>> =
+    Lazy::new(get_default_wsl_login_shell_impl);
+
+/// Get the cached WSL login shell, if any. `SpawnRecipe::binary` needs
+/// `&'static str`, so the cached value is leaked once at first detection
+/// (see [`get_default_wsl_login_shell_impl`]).
+pub fn wsl_login_shell() -> Option<&'static str> {
+    *DETECTED_WSL_LOGIN_SHELL
+}
+
 /// Get the Windows username (used for path construction)
 #[allow(dead_code)]
 fn get_windows_username_impl() -> Option<String> {
@@ -681,5 +731,92 @@ mod tests {
         let n = node(true, Some("gentle-fox"));
         let resolved = node_working_path(&n);
         assert_eq!(resolved.raw_path, "/home/user/my-repo/.claude/worktrees/gentle-fox");
+    }
+
+    // ----- wsl_login_shell helper (issue #548) -----
+    //
+    // `parse_login_shell_from_passwd` is the pure function behind
+    // `wsl_login_shell()`. The impure wrapper runs `wsl.exe` once per session
+    // (cached via `Lazy`); on a Linux CI host it always returns `None`
+    // because `wsl.exe` doesn't exist. These tests pin the parsing rules so
+    // a regression in the helper can't silently hand the Terminal adapter
+    // `/usr/sbin/nologin` and crash the spawn.
+
+    /// Real-world `getent passwd` line for an ohmyzsh user. Field 7 is the
+    /// absolute path to the login shell; everything before it must be ignored.
+    #[test]
+    fn parse_login_shell_extracts_field_7_with_gecos() {
+        assert_eq!(
+            parse_login_shell_from_passwd("alice:x:1000:1000:Alice Smith:/home/alice:/usr/bin/zsh"),
+            Some("/usr/bin/zsh".to_string())
+        );
+    }
+
+    /// `getent passwd` line without a GECOS field (the 5th field is empty).
+    /// Some distros / NSS backends omit GECOS for system accounts; the parser
+    /// must not require it.
+    #[test]
+    fn parse_login_shell_extracts_field_7_without_gecos() {
+        assert_eq!(
+            parse_login_shell_from_passwd("user:x:1000:1000::/home/user:/bin/bash"),
+            Some("/bin/bash".to_string())
+        );
+    }
+
+    /// Trailing newline (and any other trailing whitespace) must be trimmed.
+    #[test]
+    fn parse_login_shell_trims_trailing_whitespace() {
+        assert_eq!(
+            parse_login_shell_from_passwd("user:x:1000:1000::/home/user:/usr/bin/fish\n"),
+            Some("/usr/bin/fish".to_string())
+        );
+    }
+
+    /// Service accounts whose login shell is `/usr/sbin/nologin` must
+    /// collapse to `None` — spawning that would exit immediately.
+    #[test]
+    fn parse_login_shell_rejects_nologin() {
+        assert_eq!(
+            parse_login_shell_from_passwd("ftp:x:114:120:ftp daemon:/srv/ftp:/usr/sbin/nologin"),
+            None
+        );
+    }
+
+    /// `nobody` is conventionally `/bin/false` and must also collapse to `None`.
+    #[test]
+    fn parse_login_shell_rejects_false() {
+        assert_eq!(
+            parse_login_shell_from_passwd("nobody:x:65534:65534::/:/bin/false"),
+            None
+        );
+    }
+
+    /// An empty 7th field (a malformed passwd entry) must collapse to `None`,
+    /// not the empty string.
+    #[test]
+    fn parse_login_shell_rejects_empty_shell() {
+        assert_eq!(
+            parse_login_shell_from_passwd("user:x:1000:1000::/home/user:"),
+            None
+        );
+    }
+
+    /// Lines with fewer than 7 fields are malformed — return `None` rather
+    /// than panic on the missing `nth(6)`.
+    #[test]
+    fn parse_login_shell_rejects_too_few_fields() {
+        assert_eq!(parse_login_shell_from_passwd(""), None);
+        assert_eq!(parse_login_shell_from_passwd("user"), None);
+        assert_eq!(parse_login_shell_from_passwd("user:x:1000:1000::/home/user"), None);
+    }
+
+    /// The cached lookup must be safe to call and must return an `Option<&'static str>`
+    /// (not panic) — on a host where WSL is unavailable it is `None`, on a
+    /// Windows+WSL host it is `Some("/usr/bin/zsh")`. We only assert the type
+    /// and that it doesn't panic; behavioural pinning lives in the
+    /// `parse_login_shell_from_passwd` tests above.
+    #[test]
+    fn wsl_login_shell_returns_option_without_panicking() {
+        let _ = wsl_login_shell();
     }
 }
