@@ -632,6 +632,94 @@ mod tests {
         );
     }
 
+    // ─── get_mesh_git_static single-open refactor (issue #431) ─────────────
+
+    /// Create a repo whose `refs/remotes/origin/HEAD` symbolic ref points at
+    /// `refs/remotes/origin/<branch>`. Mirrors the setup pattern used in
+    /// `agent/spawn.rs::tests::resolve_base_ref_*`.
+    fn make_repo_with_origin_head(path: &Path, branch: &str) -> git2::Repository {
+        let repo = init_git_repo(path);
+        let oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference(
+            &format!("refs/remotes/origin/{branch}"),
+            oid,
+            true,
+            "test setup",
+        )
+        .unwrap();
+        let branch_ref = format!("refs/remotes/origin/{branch}");
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            &branch_ref,
+            true,
+            "test setup",
+        )
+        .unwrap();
+        repo
+    }
+
+    /// `default_branch_from_repo` returns the branch the origin/HEAD
+    /// symbolic ref points at, with the `refs/remotes/origin/` prefix
+    /// stripped.
+    #[test]
+    fn default_branch_from_repo_returns_origin_head_target() {
+        let _repo = TempGitRepo::new();
+        let repo = make_repo_with_origin_head(_repo.path(), "master");
+
+        let branch = crate::commands::git::default_branch_from_repo(&repo);
+        assert_eq!(branch, "master");
+    }
+
+    /// `default_branch_from_repo` falls back to `"main"` when the repo has
+    /// no origin/HEAD symbolic ref (e.g. freshly initialised, no fetch).
+    #[test]
+    fn default_branch_from_repo_falls_back_to_main_without_origin_head() {
+        let _repo = TempGitRepo::new();
+        let repo = init_git_repo(_repo.path());
+
+        let branch = crate::commands::git::default_branch_from_repo(&repo);
+        assert_eq!(branch, "main");
+    }
+
+    /// Trio must reuse the repo handle opened for `is_git_repo` to resolve
+    /// `default_branch` — not open the repo a second time (#431).
+    #[test]
+    fn get_mesh_git_static_reports_origin_head_branch_for_valid_repo() {
+        let _repo = TempGitRepo::new();
+        let _ = make_repo_with_origin_head(_repo.path(), "develop");
+
+        let snapshot =
+            crate::commands::git::get_mesh_git_static(_repo.path().to_string_lossy().into_owned())
+                .expect("snapshot should succeed for a valid repo");
+
+        assert!(
+            snapshot.is_git_repo,
+            "valid repo must report is_git_repo = true"
+        );
+        assert_eq!(
+            snapshot.default_branch, "develop",
+            "refactored trio must read default_branch from the same handle it used for is_git_repo"
+        );
+    }
+
+    /// Non-git directory must not panic and must report the documented
+    /// non-repo contract (`is_git_repo = false`, `default_branch = "main"`).
+    #[test]
+    fn get_mesh_git_static_reports_main_fallback_for_non_repo() {
+        let dir = TempGitRepo::new();
+        fs::create_dir_all(dir.path()).unwrap();
+
+        let snapshot =
+            crate::commands::git::get_mesh_git_static(dir.path().to_string_lossy().into_owned())
+                .expect("non-repo path must not error");
+
+        assert!(!snapshot.is_git_repo);
+        assert_eq!(
+            snapshot.default_branch, "main",
+            "non-repo path falls back to main, mirroring get_default_branch's open-failed branch"
+        );
+    }
+
     #[test]
     fn test_count_status_main_repo_vs_worktree() {
         let _repo = TempGitRepo::new();
