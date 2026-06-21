@@ -117,7 +117,7 @@ pub fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, String> 
     }
 
     // Open the PR against the repo's default branch (guaranteed to exist on the remote).
-    let base = default_branch(&repo);
+    let base = crate::commands::git::default_branch_from_repo(&repo);
     let remote_url = repo
         .find_remote("origin")
         .ok()
@@ -233,19 +233,6 @@ fn build_portability_commit(
     .map_err(|e| format!("failed to create commit: {}", e))?;
 
     Ok(added)
-}
-
-/// The repo's default branch, read from the local `origin/HEAD` symbolic ref to
-/// avoid a network round-trip. Falls back to "main". Mirrors `git::get_default_branch`.
-fn default_branch(repo: &Repository) -> String {
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(target) = reference.symbolic_target() {
-            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
-                return branch.to_string();
-            }
-        }
-    }
-    "main".to_string()
 }
 
 fn pr_body(added: &[String]) -> String {

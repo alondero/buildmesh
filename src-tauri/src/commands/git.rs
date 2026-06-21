@@ -262,6 +262,24 @@ pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
     })
 }
 
+/// Read the default branch name from an already-open repository.
+///
+/// Extracted from [`get_default_branch`] in #431 so call sites that
+/// already have a `Repository` handle open (e.g. `get_mesh_git_static`'s
+/// trio, `commands::ai_context`'s portability-PR helper) can reuse it
+/// without paying for a second `Repository::open` + refdb lookup. Callers
+/// with only a path still go through [`get_default_branch`].
+pub(crate) fn default_branch_from_repo(repo: &Repository) -> String {
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Some(target) = reference.symbolic_target() {
+            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
+                return branch.to_string();
+            }
+        }
+    }
+    "main".to_string()
+}
+
 /// Get the default branch name for the remote named "origin".
 /// Reads the local symbolic ref (populated by clone/fetch) to avoid a network round-trip.
 /// Falls back to "main" if no remote is configured or HEAD ref is missing.
@@ -271,17 +289,7 @@ pub fn get_default_branch(path: String) -> String {
         Ok(r) => r,
         Err(_) => return "main".to_string(),
     };
-
-    // Try the local symbolic ref first (no network needed)
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
-        if let Some(target) = reference.symbolic_target() {
-            if let Some(branch) = target.strip_prefix("refs/remotes/origin/") {
-                return branch.to_string();
-            }
-        }
-    }
-
-    "main".to_string()
+    default_branch_from_repo(&repo)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -597,15 +605,14 @@ pub struct MeshGitStatic {
 /// UI contract identical.
 #[command(async)]
 pub fn get_mesh_git_static(mesh_path: String) -> Result<MeshGitStatic, String> {
-    let is_git_repo = git2::Repository::open(&mesh_path).is_ok();
+    // Open once and reuse the handle for both `is_git_repo` and
+    // `default_branch` (#431 — eliminates the pre-refactor double-open).
+    let repo = git2::Repository::open(&mesh_path).ok();
+    let is_git_repo = repo.is_some();
     let is_gh_authenticated = check_gh_auth_cached();
-    let default_branch = if is_git_repo {
-        get_default_branch(mesh_path)
-    } else {
-        // Mirror `get_default_branch`'s "open failed" fallback so a
-        // non-repo path never produces a "checking repo…" hang waiting
-        // for a ref that won't exist.
-        "main".to_string()
+    let default_branch = match &repo {
+        Some(r) => default_branch_from_repo(r),
+        None => "main".to_string(),
     };
 
     Ok(MeshGitStatic {
