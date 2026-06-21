@@ -114,6 +114,14 @@ impl SpawnTimer {
             self.start.elapsed().as_millis()
         );
     }
+
+    /// Original start instant — exposed `pub(crate)` so `register_agent`
+    /// can clone it onto `AgentProcess.spawn_start`, giving the
+    /// `first_user_input` log line the same reference as every other
+    /// `spawn_timing:` checkpoint.
+    pub(crate) fn start(&self) -> std::time::Instant {
+        self.start
+    }
 }
 
 /// Options for spawning or resuming an agent process.
@@ -415,6 +423,11 @@ pub fn is_agent_already_running(session_id: &i64) -> bool {
 }
 
 /// Register the agent process in the registry.
+///
+/// `spawn_start` is the original `SpawnTimer.start` clone — used by
+/// `record_first_input_if_first` (via `AgentProcess.spawn_start`) to
+/// timestamp the `first_user_input` log line against the same reference
+/// as every other `spawn_timing:` checkpoint.
 fn register_agent(
     session_id: i64,
     child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -422,6 +435,7 @@ fn register_agent(
     master: Box<dyn portable_pty::MasterPty + Send>,
     reader_alive: Arc<AtomicBool>,
     job: Option<crate::process_util::JobHandle>,
+    spawn_start: std::time::Instant,
 ) {
     PROCESS_REGISTRY.insert(
         session_id,
@@ -438,6 +452,14 @@ fn register_agent(
             // concurrent `is_agent_already_running` sees the entry; the
             // window between insert and setter is benign (see process.rs).
             reader_handle: Mutex::new(None),
+            spawn_start,
+            // First-write gate: starts false, flipped true exactly once
+            // by `record_first_input_if_first` on the first successful
+            // `write_bytes` call for this session. Plain `AtomicBool` —
+            // the field lives inside `Arc<AgentProcess>` already, so no
+            // inner Arc is needed (the reader thread doesn't share this
+            // flag).
+            first_user_input_logged: AtomicBool::new(false),
         },
     );
 }
@@ -473,6 +495,21 @@ pub fn pump_pty_output(
 /// Start the PTY reader thread. Returns the `JoinHandle` so the caller
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
+///
+/// Two time references are passed in, with distinct semantics — keep
+/// them separate:
+///
+/// * `spawned_at` — process-creation time (`Instant::now()` right after
+///   `spawn_child` returns). Used by the 3-second early-exit heuristic
+///   to detect a likely-failed `--resume`. **Must NOT be unified with
+///   `spawn_start`**: a slow 14s spawn pipeline followed by an agent
+///   dying 1s after process creation must still trigger `resume-failed`,
+///   and the original "3s after process creation" semantic preserves
+///   that detection.
+/// * `spawn_start` — the original `SpawnTimer.start` from the top of
+///   `spawn_agent_inner`. Used by the `first_pty_output` checkpoint log
+///   so it lines up with every other `spawn_timing:` line (all
+///   measured against the same "user clicked Spawn" instant).
 fn start_reader(
     app: tauri::AppHandle,
     session_id: i64,
@@ -481,6 +518,7 @@ fn start_reader(
     spawned_at: std::time::Instant,
     reader_alive: Arc<AtomicBool>,
     is_plain_terminal: bool,
+    spawn_start: std::time::Instant,
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -492,15 +530,17 @@ fn start_reader(
         // to it. Log the gap from spawn to the first byte of PTY output here —
         // that first byte is the earliest signal the agent process is actually
         // alive and producing a UI. Same `spawn_timing:` prefix so it sits
-        // alongside the other checkpoints.
+        // alongside the other checkpoints. Measured against `spawn_start` (not
+        // `spawned_at`) so this elapsed time is comparable to every other
+        // checkpoint in the log.
         let mut first_chunk = true;
         pump_pty_output(reader, |data| {
             if first_chunk {
                 first_chunk = false;
                 tracing::info!(
-                    "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (process spawn → first output; agent CLI boot tail)",
+                    "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (spawn start → first output; agent CLI boot tail)",
                     session_id,
-                    spawned_at.elapsed().as_millis()
+                    spawn_start.elapsed().as_millis()
                 );
             }
             let text = String::from_utf8_lossy(data);
@@ -537,7 +577,15 @@ fn start_reader(
             // signal; emitting one would confuse the frontend.
             let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
         } else {
-            // Detect early exit (likely a failed --resume)
+            // Detect early exit (likely a failed --resume). Uses
+            // `spawned_at` (process-creation time), NOT `spawn_start`,
+            // because the heuristic answers "did the process die
+            // almost immediately after it was created?" — a slow
+            // spawn pipeline followed by a 1s-later death should
+            // still trigger `resume-failed`. Switching the reference
+            // to `spawn_start` here would add the entire pipeline
+            // duration (often 2-14s) to the threshold and miss
+            // legitimate early-exit detections on slow spawns.
             let elapsed = spawned_at.elapsed();
             if elapsed < std::time::Duration::from_secs(3) {
                 tracing::warn!(
@@ -1017,11 +1065,17 @@ pub async fn spawn_agent_inner(
     //     arriving then sees `reader_handle = None` and skips the join,
     //     matching the natural-exit test path).
     tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
-    register_agent(session_id, child, writer, master, reader_alive.clone(), job);
+    register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start());
     tracing::info!("spawn_agent_inner: stored agent process");
 
     // 13. Start reader thread
     let spawned_at = std::time::Instant::now();
+    // `spawn_start` is the original SpawnTimer reference, used by the
+    // reader-thread `first_pty_output` checkpoint log for timeline
+    // alignment with every other `spawn_timing:` line. Distinct from
+    // `spawned_at` (process-creation time) which the early-exit
+    // heuristic needs — see `start_reader` doc comment.
+    let spawn_start = timer.start();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     crate::http_server::ensure_pty_channel(session_id);
     let needs_session_capture = adapter.self_assigns_session_id() && node.cli_session_id.is_none();
@@ -1033,6 +1087,7 @@ pub async fn spawn_agent_inner(
         spawned_at,
         reader_alive,
         adapter.is_plain_terminal(),
+        spawn_start,
     );
 
     // 13b. Start natural-exit watcher (issue #287). On Windows ConPTY

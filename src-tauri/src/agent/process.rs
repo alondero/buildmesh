@@ -28,6 +28,28 @@ pub struct AgentProcess {
     /// `read()` after a kill, leaving `agent-output` events from a dead
     /// session interleaving with new ones (issue #300).
     pub reader_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Original `SpawnTimer.start` clone, set at process-registration time.
+    /// Used to log `first_user_input` elapsed against the same reference
+    /// as every other `spawn_timing:` checkpoint. Without this, the
+    /// "user typed first key" measurement would be timestamped against
+    /// "process spawned" (the existing `spawned_at`) and the gap from
+    /// "click Spawn" to "first key" would be off by the entire spawn
+    /// pipeline duration.
+    pub spawn_start: std::time::Instant,
+    /// First-write gate. Set to `true` by `record_first_input_if_first`
+    /// (called from `write_bytes`) after the first successful PTY write.
+    /// Flipped exactly once per session via compare-exchange, so a burst
+    /// of keypresses only emits one `spawn_timing:` log line. Reset only
+    /// when the session is removed from the registry.
+    ///
+    /// Plain `AtomicBool` (not `Arc<AtomicBool>`): the field is already
+    /// inside an `Arc<AgentProcess>` in the registry, so reachability
+    /// through `&agent.first_user_input_logged` is one indirection. The
+    /// `reader_alive: Arc<AtomicBool>` field above needs the inner Arc
+    /// because it's cloned into the reader thread — this flag has no such
+    /// consumer, so the inner Arc would be one needless heap alloc per
+    /// session.
+    pub first_user_input_logged: AtomicBool,
 }
 
 impl AgentProcess {
@@ -75,7 +97,15 @@ impl AgentProcessRegistry {
         let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
         let mut writer = agent.writer.lock().unwrap();
         writer.write_all(data).map_err(|e| e.to_string())?;
-        writer.flush().map_err(|e| e.to_string())
+        writer.flush().map_err(|e| e.to_string())?;
+        // Emit the `first_user_input` checkpoint exactly once per session.
+        // We do this AFTER a successful write+flush so a failed PTY write
+        // (broken pipe, etc.) does NOT claim "user input accepted". The
+        // helper is the only place the flag flips and the log line fires —
+        // see its doc comment for the atomic contract and the
+        // coordinator-drive caveat.
+        record_first_input_if_first(&agent.first_user_input_logged, agent.spawn_start, session_id);
+        Ok(())
     }
 
     pub fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
@@ -225,6 +255,54 @@ impl Default for AgentProcessRegistry {
     }
 }
 
+/// Emit the `spawn_timing: first_user_input` checkpoint exactly once per
+/// session. Called by `AgentProcessRegistry::write_bytes` after a
+/// successful PTY write — covers every PTY-writer path that funnels
+/// through `write_bytes`:
+///
+/// 1. Desktop xterm `onData` → `write_to_agent` (`commands/agent.rs`)
+/// 2. Frontend paste / submit → `send_to_agent` → `write_to_agent`
+/// 3. Mobile WebSocket → `forward_mobile_input` (`http/ws.rs:149`)
+/// 4. Coordinator drive → `RegistryTarget::write_prompt` (`coordinator/drive.rs:141`,
+///    NOT user input — see caveat below)
+///
+/// Atomicity: compare-exchange from `false → true` flips the flag on
+/// the first successful call and returns `true`; subsequent calls see
+/// `true → true` (CAS fails) and return `false`. `Relaxed` ordering is
+/// sufficient because no other state depends on this flag — it's a pure
+/// "log this exactly once" gate.
+///
+/// Caveat: path (4) is the coordinator's `RegistryTarget::write_prompt`
+/// (#319 AgentDriver feature). A coordinator-driven prompt on a node the
+/// user hasn't yet typed into would log a misleading `first_user_input`.
+/// This is the trade-off for hooking at the single chokepoint that
+/// covers desktop + mobile + paste in one place — coordinator-first is
+/// rare in practice (the coordinator feature is opt-in and typically
+/// operates on already-interactive nodes).
+///
+/// Extracted as a standalone helper so it can be unit-tested without
+/// standing up a real PTY: tests just pass an `AtomicBool` and an
+/// `Instant` directly.
+pub(crate) fn record_first_input_if_first(
+    flag: &AtomicBool,
+    spawn_start: std::time::Instant,
+    session_id: i64,
+) -> bool {
+    if flag
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        tracing::info!(
+            "spawn_timing: session={} checkpoint=first_user_input elapsed={}ms",
+            session_id,
+            spawn_start.elapsed().as_millis()
+        );
+        true
+    } else {
+        false
+    }
+}
+
 impl ProcessRegistryApi for AgentProcessRegistry {
     fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
         AgentProcessRegistry::write_bytes(self, session_id, data)
@@ -364,6 +442,63 @@ mod tests {
     fn is_alive_false_for_missing() {
         let registry = AgentProcessRegistry::new();
         assert!(!registry.is_alive(&999));
+    }
+
+    // -----------------------------------------------------------------------
+    // first_user_input timing-gate tests (spawn-latency investigation)
+    //
+    // `record_first_input_if_first` is the pure helper that `write_bytes`
+    // calls after a successful PTY write. It does the compare-exchange,
+    // emits the `spawn_timing:` log line on the false→true transition,
+    // and returns whether it logged. Tests pin the one-shot contract.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn record_first_input_flips_flag_on_first_call() {
+        let flag = AtomicBool::new(false);
+        let spawn_start = std::time::Instant::now();
+
+        let logged = record_first_input_if_first(&flag, spawn_start, 42);
+
+        assert!(logged, "first call must return true (the log line was emitted)");
+        assert!(flag.load(Ordering::SeqCst), "first call must flip the flag to true");
+    }
+
+    #[test]
+    fn record_first_input_skips_on_subsequent_calls() {
+        let flag = AtomicBool::new(false);
+        let spawn_start = std::time::Instant::now();
+
+        // First call: the log line is emitted.
+        assert!(record_first_input_if_first(&flag, spawn_start, 42));
+
+        // Second call: CAS sees true→false, returns Err, helper returns false.
+        // No log line is emitted — the `spawn_timing: first_user_input`
+        // checkpoint fires exactly once per session, no matter how many
+        // keypresses follow.
+        assert!(!record_first_input_if_first(&flag, spawn_start, 42));
+        assert!(!record_first_input_if_first(&flag, spawn_start, 42));
+
+        // Flag is still true (we never reset it).
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn record_first_input_has_no_data_dependency() {
+        // The helper takes no `data` argument — its contract is purely
+        // "flip the flag once on the first invocation, never again".
+        // The empty-write behavior (a zero-byte focus event still
+        // tripping the gate) lives at the `write_bytes` call site: the
+        // helper runs unconditionally after a successful write+flush.
+        // This test pins the helper's data-independence so a future
+        // refactor that adds a `data.is_empty()` guard to the helper
+        // would surface as a test failure here, not as a silently-lost
+        // checkpoint log in production.
+        let flag = AtomicBool::new(false);
+        let spawn_start = std::time::Instant::now();
+
+        assert!(record_first_input_if_first(&flag, spawn_start, 42));
+        assert!(flag.load(Ordering::SeqCst));
     }
 
     /// Regression guard for issue #287: when the agent CLI exits

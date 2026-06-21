@@ -96,6 +96,12 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
             // `PROCESS_REGISTRY.remove` and joins the local `reader_handle`
             // below; we never give the registry the real handle.
             reader_handle: Mutex::new(None),
+            // Spawn-timing instrumentation (#spawn-latency investigation):
+            // production code populates these from `SpawnTimer.start` /
+            // a fresh `AtomicBool`. Tests don't exercise the timing path,
+            // so any Instant + any fresh AtomicBool is correct here.
+            spawn_start: std::time::Instant::now(),
+            first_user_input_logged: AtomicBool::new(false),
         },
     );
 
@@ -312,6 +318,12 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
             reader_alive: reader_alive.clone(),
             job: None,
             reader_handle: Mutex::new(Some(reader_handle)),
+            // Spawn-timing instrumentation (#spawn-latency investigation):
+            // production code populates these from `SpawnTimer.start` /
+            // a fresh `AtomicBool`. Tests don't exercise the timing path,
+            // so any Instant + any fresh AtomicBool is correct here.
+            spawn_start: std::time::Instant::now(),
+            first_user_input_logged: AtomicBool::new(false),
         },
     );
 
@@ -395,6 +407,12 @@ fn windows_kill_session_closes_master() {
             reader_alive: reader_alive.clone(),
             job: None,
             reader_handle: Mutex::new(Some(reader_handle)),
+            // Spawn-timing instrumentation (#spawn-latency investigation):
+            // production code populates these from `SpawnTimer.start` /
+            // a fresh `AtomicBool`. Tests don't exercise the timing path,
+            // so any Instant + any fresh AtomicBool is correct here.
+            spawn_start: std::time::Instant::now(),
+            first_user_input_logged: AtomicBool::new(false),
         },
     );
 
