@@ -37,10 +37,6 @@ use tauri::{AppHandle, Emitter};
 
 use crate::models::AgentNode;
 
-// `MinimaxAdapter::provider_env` is a trait method on `AgentProvider`; the
-// trait must be in scope to call it.
-use crate::agent::provider::AgentProvider;
-
 // ---------------------------------------------------------------------------
 // Repository trait — abstracts DB calls for testability
 // ---------------------------------------------------------------------------
@@ -593,11 +589,14 @@ async fn summarize_and_rename_with(
     // model routing) so `claude` talks to the MiniMax endpoint instead of the
     // built-in Anthropic subscription. Replaces the env `cwrap --minimax` would
     // have sourced from `~/.claude/providers.conf` — same source of truth,
-    // rebuilt in-process by `MinimaxAdapter::provider_env`.
+    // rebuilt in-process by `provider_conf::minimax_backend_env`. (This naming
+    // helper always uses the cheap MiniMax model regardless of the node's own
+    // provider, so it keeps its own hardcoded routing even though node spawns
+    // now resolve backend env per-profile from the configured provider account.)
     for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
         cmd.env_remove(k);
     }
-    for (k, v) in crate::agent::provider::adapters::MINIMAX.provider_env() {
+    for (k, v) in crate::agent::provider::provider_conf::minimax_backend_env() {
         cmd.env(k, v);
     }
 

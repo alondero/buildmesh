@@ -56,11 +56,9 @@ impl EnvType {
 pub enum Provider {
     #[default]
     Anthropic,
-    Minimax,
     Agy,
     OpenCode,
     Codex,
-    Kimi,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -72,11 +70,9 @@ impl Provider {
     pub fn all() -> &'static [Provider] {
         &[
             Provider::Anthropic,
-            Provider::Minimax,
             Provider::Agy,
             Provider::OpenCode,
             Provider::Codex,
-            Provider::Kimi,
             Provider::Terminal,
         ]
     }
@@ -94,12 +90,16 @@ impl Provider {
         let normalized = s.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "" | "anthropic" => Provider::Anthropic,
-            "minimax" => Provider::Minimax,
             "agy" => Provider::Agy,
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
-            "kimi" => Provider::Kimi,
             "terminal" => Provider::Terminal,
+            // "minimax" / "kimi" are no longer first-class executors: they're
+            // Claude Code with a swapped backend, configured as harness profiles
+            // whose paired provider account injects the endpoint at spawn (#538).
+            // A bare legacy id with no configured profile falls through to the
+            // Anthropic executor here (resolve_harness_provider checks profiles
+            // first, so a configured "minimax" account resolves cleanly).
             _ => {
                 tracing::warn!(
                     "Provider::from_db_str: unrecognized provider {:?}, falling back to Anthropic",
@@ -116,11 +116,9 @@ impl Provider {
         use crate::agent::provider::adapters;
         match self {
             Provider::Anthropic => &adapters::ANTHROPIC,
-            Provider::Minimax => &adapters::MINIMAX,
             Provider::Agy => &adapters::AGY,
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
-            Provider::Kimi => &adapters::KIMI,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -130,11 +128,9 @@ impl std::fmt::Display for Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Provider::Anthropic => write!(f, "anthropic"),
-            Provider::Minimax => write!(f, "minimax"),
             Provider::Agy => write!(f, "agy"),
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
-            Provider::Kimi => write!(f, "kimi"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }
@@ -820,8 +816,6 @@ mod tests {
     fn provider_adapter_recipe_windows() {
         use crate::agent::provider::Platform;
         assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows).binary, "claude.exe");
-        assert_eq!(Provider::Minimax.adapter().spawn_recipe(Platform::Windows).binary, "claude.exe");
-        assert_eq!(Provider::Kimi.adapter().spawn_recipe(Platform::Windows).binary, "claude.exe");
         assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows).binary, "agy");
         assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
         assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows).binary, "codex");
@@ -839,22 +833,19 @@ mod tests {
     #[test]
     fn provider_capabilities_split_correctly() {
         assert!(Provider::Anthropic.adapter().supports_resume());
-        assert!(Provider::Minimax.adapter().supports_resume());
-        assert!(Provider::Kimi.adapter().supports_resume());
         assert!(Provider::Agy.adapter().supports_resume());
         assert!(!Provider::OpenCode.adapter().supports_resume());
         assert!(Provider::Codex.adapter().supports_resume());
     }
 
-    /// The "produces a readable transcript" capability (#317) — only the three
-    /// claude-backed providers (Anthropic, MiniMax, Kimi) write a transcript
-    /// the coordinator read API can drill into. Everything else degrades to a
-    /// spine-only digest flagged `unsupported`, so this matrix is load-bearing.
+    /// The "produces a readable transcript" capability (#317) — the Claude-backed
+    /// `anthropic` adapter (which also runs custom MiniMax/Kimi/DeepSeek profiles)
+    /// writes a transcript the coordinator read API can drill into. Everything
+    /// else degrades to a spine-only digest flagged `unsupported`, so this matrix
+    /// is load-bearing.
     #[test]
     fn only_claude_backed_providers_produce_a_readable_transcript() {
         assert!(Provider::Anthropic.adapter().produces_readable_transcript());
-        assert!(Provider::Minimax.adapter().produces_readable_transcript());
-        assert!(Provider::Kimi.adapter().produces_readable_transcript());
         // Codex has its own (non-Claude-Code) transcript format; the rest have none.
         assert!(!Provider::Codex.adapter().produces_readable_transcript());
         assert!(!Provider::Agy.adapter().produces_readable_transcript());
@@ -892,11 +883,20 @@ mod tests {
         assert_eq!(Provider::from_db_str("TERMINAL"), Provider::Terminal);
         assert_eq!(Provider::from_db_str("TeRmInAl"), Provider::Terminal);
         assert_eq!(Provider::from_db_str("ANTHROPIC"), Provider::Anthropic);
-        assert_eq!(Provider::from_db_str("Minimax"), Provider::Minimax);
         assert_eq!(Provider::from_db_str("AGY"), Provider::Agy);
         assert_eq!(Provider::from_db_str("OpenCode"), Provider::OpenCode);
         assert_eq!(Provider::from_db_str("Codex"), Provider::Codex);
-        assert_eq!(Provider::from_db_str("Kimi"), Provider::Kimi);
+    }
+
+    /// Hard cutover (issue #538): "minimax"/"kimi" are no longer first-class
+    /// executors. With no configured harness profile they fall through to the
+    /// Anthropic default — `resolve_harness_provider` checks profiles first, so a
+    /// configured custom account still resolves to the right backend env.
+    #[test]
+    fn provider_from_db_str_legacy_minimax_kimi_fall_back_to_anthropic() {
+        assert_eq!(Provider::from_db_str("minimax"), Provider::Anthropic);
+        assert_eq!(Provider::from_db_str("kimi"), Provider::Anthropic);
+        assert_eq!(Provider::from_db_str("Minimax"), Provider::Anthropic);
     }
 
     /// Whitespace around the value shouldn't break matching either — a
@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn provider_from_db_str_trims_whitespace() {
         assert_eq!(Provider::from_db_str("  terminal  "), Provider::Terminal);
-        assert_eq!(Provider::from_db_str("\tminimax\n"), Provider::Minimax);
+        assert_eq!(Provider::from_db_str("\tcodex\n"), Provider::Codex);
     }
 
     /// Capture-target for tracing events emitted inside `from_db_str`.
@@ -976,7 +976,7 @@ mod tests {
         let captured = capture_warnings(|| {
             assert_eq!(Provider::from_db_str("Terminal"), Provider::Terminal);
             assert_eq!(Provider::from_db_str("ANTHROPIC"), Provider::Anthropic);
-            assert_eq!(Provider::from_db_str("  kimi  "), Provider::Kimi);
+            assert_eq!(Provider::from_db_str("  codex  "), Provider::Codex);
         });
         assert!(
             !captured.contains("unrecognized provider"),
@@ -988,11 +988,9 @@ mod tests {
     #[test]
     fn provider_display_lowercase() {
         assert_eq!(format!("{}", Provider::Anthropic), "anthropic");
-        assert_eq!(format!("{}", Provider::Minimax), "minimax");
         assert_eq!(format!("{}", Provider::Agy), "agy");
         assert_eq!(format!("{}", Provider::OpenCode), "opencode");
         assert_eq!(format!("{}", Provider::Codex), "codex");
-        assert_eq!(format!("{}", Provider::Kimi), "kimi");
         assert_eq!(format!("{}", Provider::Terminal), "terminal");
     }
 
@@ -1019,8 +1017,8 @@ mod tests {
     #[test]
     fn other_providers_do_not_self_assign() {
         assert!(!Provider::Anthropic.adapter().self_assigns_session_id());
-        assert!(!Provider::Minimax.adapter().self_assigns_session_id());
-        assert!(!Provider::Kimi.adapter().self_assigns_session_id());
+        assert!(!Provider::OpenCode.adapter().self_assigns_session_id());
+        assert!(!Provider::Terminal.adapter().self_assigns_session_id());
     }
 
     /// `is_plain_terminal` is the single trait method that switches the
@@ -1034,11 +1032,9 @@ mod tests {
     fn is_plain_terminal_only_for_terminal() {
         assert!(Provider::Terminal.adapter().is_plain_terminal());
         assert!(!Provider::Anthropic.adapter().is_plain_terminal());
-        assert!(!Provider::Minimax.adapter().is_plain_terminal());
         assert!(!Provider::Agy.adapter().is_plain_terminal());
         assert!(!Provider::OpenCode.adapter().is_plain_terminal());
         assert!(!Provider::Codex.adapter().is_plain_terminal());
-        assert!(!Provider::Kimi.adapter().is_plain_terminal());
     }
 
     #[test]

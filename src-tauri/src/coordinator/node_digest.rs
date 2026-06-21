@@ -220,10 +220,10 @@ mod tests {
     #[test]
     fn running_node_is_not_waiting() {
         let changed = Utc::now();
-        let digest = spine(&node(SessionStatus::Running, Provider::Minimax), "core", changed);
+        let digest = spine(&node(SessionStatus::Running, Provider::Codex), "core", changed);
 
         assert_eq!(digest.status, "running");
-        assert_eq!(digest.provider, "minimax");
+        assert_eq!(digest.provider, "codex");
         assert!(!digest.needs_feedback);
         assert_eq!(digest.waiting_since, None, "a running node has no waiting_since");
         assert_eq!(digest.last_activity, changed);

@@ -79,12 +79,30 @@ mod tests {
         v
     }
 
+    /// `build_spawn_command` with no per-profile backend env — the default for
+    /// argv / recipe / session-id assertions, which don't depend on backend
+    /// selection. The `ANTHROPIC_*` injection from a custom provider account has
+    /// its own focused tests (`*_injects_backend_env`). Keeps the bulk of the
+    /// suite terse while still exercising the real composition function.
+    fn cmd_for(
+        resolved: &ResolvedPath,
+        provider: Provider,
+        mode: &SessionIdMode,
+        session_id: i64,
+        model: Option<&str>,
+        effort: Option<&str>,
+        prefill: Option<&str>,
+        sandbox: bool,
+    ) -> portable_pty::CommandBuilder {
+        build_spawn_command(resolved, provider, &[], mode, session_id, model, effort, prefill, sandbox)
+    }
+
     /// Assigning a fresh session id appends `--session-id <uuid>` after the
     /// provider's base flag, and the whole thing is wrapped for WSL.
     #[test]
     fn anthropic_assign_builds_full_wsl_command() {
         let (binary, flag) = anthropic_recipe();
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid-assign".to_string()),
@@ -109,7 +127,7 @@ mod tests {
     #[test]
     fn sandbox_flag_is_ignored_on_wsl_path() {
         let (binary, flag) = anthropic_recipe();
-        let sandboxed = build_spawn_command(
+        let sandboxed = cmd_for(
             &wsl_resolved(),
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid-assign".to_string()),
@@ -130,7 +148,7 @@ mod tests {
     #[test]
     fn anthropic_resume_appends_resume_args() {
         let (binary, flag) = anthropic_recipe();
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
             Provider::Anthropic,
             &SessionIdMode::Resume("uuid-resume".to_string()),
@@ -150,13 +168,21 @@ mod tests {
         );
     }
 
-    /// Minimax is a claude-backed provider on every host, so it builds a direct
-    /// claude command.
+    /// A custom Claude-compatible profile (MiniMax/Kimi/DeepSeek) resolves to the
+    /// `anthropic` executor and injects its account's backend env. This is the
+    /// AC for issue #538: `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` reach
+    /// the spawned `claude`. The recipe is otherwise the plain claude command.
     #[test]
-    fn minimax_assign_builds_claude_command() {
+    fn custom_profile_injects_backend_env() {
+        let backend_env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), "https://api.minimax.io/anthropic".to_string()),
+            ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-custom-123".to_string()),
+            ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
+        ];
         let cmd = build_spawn_command(
             &wsl_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
+            &backend_env,
             &SessionIdMode::Assign("mm-1".to_string()),
             SESSION_ID,
             None,
@@ -165,40 +191,55 @@ mod tests {
             false,
         );
 
+        // Plain claude recipe — the backend is selected via env, not argv.
         assert_eq!(
             argv(&cmd),
             expected_wsl("claude", &["--dangerously-skip-permissions", "--session-id", "mm-1"])
         );
+        assert_eq!(
+            env_of(&cmd, "ANTHROPIC_BASE_URL").as_deref(),
+            Some("https://api.minimax.io/anthropic"),
+            "custom profile base URL must be injected"
+        );
+        assert_eq!(
+            env_of(&cmd, "ANTHROPIC_AUTH_TOKEN").as_deref(),
+            Some("sk-custom-123"),
+            "custom profile auth token must be injected"
+        );
+        // WSL bridges the injected keys via WSLENV so they cross the boundary.
+        let wslenv = env_of(&cmd, "WSLENV").unwrap_or_default();
+        assert!(
+            wslenv.contains("ANTHROPIC_BASE_URL") && wslenv.contains("ANTHROPIC_AUTH_TOKEN"),
+            "backend env keys must be appended to WSLENV: {wslenv:?}"
+        );
     }
 
-    /// Kimi is a claude-backed provider on every host, so it builds a direct
-    /// claude command.
+    /// An empty backend env (built-in Anthropic subscription) sets no
+    /// `ANTHROPIC_*` overrides and leaves WSLENV untouched — vanilla claude.
     #[test]
-    fn kimi_assign_builds_claude_command() {
+    fn empty_backend_env_injects_nothing() {
         let cmd = build_spawn_command(
             &wsl_resolved(),
-            Provider::Kimi,
-            &SessionIdMode::Assign("ki-1".to_string()),
+            Provider::Anthropic,
+            &[],
+            &SessionIdMode::None,
             SESSION_ID,
             None,
             None,
             None,
             false,
         );
-
-        assert_eq!(
-            argv(&cmd),
-            expected_wsl("claude", &["--dangerously-skip-permissions", "--session-id", "ki-1"])
-        );
+        assert!(env_of(&cmd, "ANTHROPIC_BASE_URL").is_none());
+        assert!(env_of(&cmd, "ANTHROPIC_AUTH_TOKEN").is_none());
     }
 
     /// Model + effort overrides are appended (in that order) for a provider that
     /// declares `supports_model_override()`.
     #[test]
     fn model_and_effort_overrides_appended_for_supporting_provider() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
             &SessionIdMode::Assign("mm-2".to_string()),
             SESSION_ID,
             Some("opus"),
@@ -227,9 +268,9 @@ mod tests {
     /// Prefill text is appended as `--prefill <text>` for a supporting provider.
     #[test]
     fn prefill_appended_for_supporting_provider() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
             None,
@@ -247,9 +288,9 @@ mod tests {
     /// Prefill CRLF (and bare CR) are normalised to LF before reaching the provider.
     #[test]
     fn prefill_crlf_normalised_to_lf() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
             None,
@@ -278,7 +319,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn anthropic_spawns_claude_exe_directly() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &windows_resolved(),
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid-assign".to_string()),
@@ -313,7 +354,7 @@ mod tests {
     fn anthropic_prefill_goes_argv_not_env() {
         unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
 
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &windows_resolved(),
             Provider::Anthropic,
             &SessionIdMode::None,
@@ -340,14 +381,21 @@ mod tests {
         assert_eq!(args.first().map(String::as_str), Some("claude.exe"));
     }
 
-    /// MiniMax spawns claude.exe directly and injects the backend env
-    /// cwrap would have exported.
+    /// A custom Claude-compatible profile spawns claude.exe directly on the
+    /// Windows-native path and injects its account's backend env (issue #538) —
+    /// the dynamic replacement for the deleted MiniMax adapter's hardcoded env.
     #[cfg(target_os = "windows")]
     #[test]
-    fn minimax_spawns_claude_directly_with_backend_env() {
+    fn custom_profile_injects_backend_env_on_windows_native() {
+        let backend_env = vec![
+            ("ANTHROPIC_BASE_URL".to_string(), "https://api.minimax.io/anthropic".to_string()),
+            ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-custom-123".to_string()),
+            ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
+        ];
         let cmd = build_spawn_command(
             &windows_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
+            &backend_env,
             &SessionIdMode::None,
             SESSION_ID,
             None,
@@ -361,11 +409,17 @@ mod tests {
         assert_eq!(
             env_of(&cmd, "ANTHROPIC_MODEL").as_deref(),
             Some("MiniMax-M3[1m]"),
-            "MiniMax backend model env must be injected for the bash-free path"
+            "custom profile backend model env must be injected"
         );
-        assert!(
-            env_of(&cmd, "ANTHROPIC_BASE_URL").is_some(),
-            "MiniMax backend base URL env must be injected"
+        assert_eq!(
+            env_of(&cmd, "ANTHROPIC_BASE_URL").as_deref(),
+            Some("https://api.minimax.io/anthropic"),
+            "custom profile backend base URL env must be injected"
+        );
+        assert_eq!(
+            env_of(&cmd, "ANTHROPIC_AUTH_TOKEN").as_deref(),
+            Some("sk-custom-123"),
+            "custom profile backend auth token env must be injected"
         );
     }
 
@@ -374,7 +428,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn anthropic_unsandboxed_windows_spawns_claude_exe_directly() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &windows_resolved(),
             Provider::Anthropic,
             &SessionIdMode::Assign("uuid".to_string()),
@@ -408,7 +462,7 @@ mod tests {
         // provider override (e.g. a developer who ran `cwrap --minimax` in the
         // same terminal before starting the app).
         unsafe { std::env::set_var("ANTHROPIC_BASE_URL", "https://leaked.example/anthropic"); }
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &windows_resolved(),
             Provider::Anthropic,
             &SessionIdMode::None,
@@ -430,14 +484,16 @@ mod tests {
     /// WSL keeps the `--prefill` CLI arg: `wsl.exe` passes a multi-line argv
     /// through intact (no cmd.exe in the chain), and a Windows env var does not
     /// cross into the WSL environment without `WSLENV`. So the env transport must
-    /// NOT engage for WSL spawns.
+    /// NOT engage for WSL spawns. With no per-profile backend env, WSLENV stays
+    /// unset (nothing to bridge) — the injection case is covered by
+    /// `custom_profile_injects_backend_env`.
     #[test]
     fn prefill_stays_argv_for_wsl() {
         unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
 
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
             None,
@@ -454,19 +510,14 @@ mod tests {
             env_of(&cmd, "BUILDMESH_PREFILL").is_none(),
             "the WSL path must not set the prefill env var"
         );
-        // MiniMax env keys must be propagated to WSLENV
-        assert!(
-            env_of(&cmd, "WSLENV").is_some(),
-            "WSLENV must be set to propagate MiniMax environment variables"
-        );
     }
 
     /// Empty override/prefill strings are treated as absent — no flags emitted.
     #[test]
     fn empty_overrides_are_ignored() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
             &SessionIdMode::None,
             SESSION_ID,
             Some(""),
@@ -481,7 +532,7 @@ mod tests {
     /// Agy applies model and prefill overrides when passed.
     #[test]
     fn agy_applies_model_override_and_prefill() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
             Provider::Agy,
             &SessionIdMode::None,
@@ -513,7 +564,7 @@ mod tests {
     /// Agy self-assigns session IDs — Assign mode must NOT inject `--session-id`.
     #[test]
     fn agy_assign_omits_session_flag() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
             Provider::Agy,
             &SessionIdMode::Assign("ignored".to_string()),
@@ -538,7 +589,7 @@ mod tests {
     /// instead of the default `spawn_recipe` + `--resume`.
     #[test]
     fn codex_resume_uses_resume_recipe() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
             Provider::Codex,
             &SessionIdMode::Resume("codex-sess".to_string()),
@@ -569,7 +620,7 @@ mod tests {
     /// Assign mode must NOT inject `--session-id`.
     #[test]
     fn codex_assign_omits_session_flag() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
             Provider::Codex,
             &SessionIdMode::Assign("ignored".to_string()),
@@ -715,7 +766,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn windows_powershell_launcher_uses_no_profile() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &windows_resolved(),
             Provider::Codex,
             &SessionIdMode::Resume("ps-1".to_string()),
@@ -745,9 +796,9 @@ mod tests {
     /// env vars that the agent and its hooks rely on.
     #[test]
     fn sets_cwd_and_buildmesh_env() {
-        let cmd = build_spawn_command(
+        let cmd = cmd_for(
             &wsl_resolved(),
-            Provider::Minimax,
+            Provider::Anthropic,
             &SessionIdMode::Assign("mm-env".to_string()),
             SESSION_ID,
             None,

@@ -335,7 +335,7 @@ export function GitPullRequestsTab() {
       .then((backendProviders) => {
         if (signal.aborted) return;
         setProviderList(
-          backendProviders.map((p) => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id), legacy: p.legacy })),
+          backendProviders.map((p) => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
         );
       })
       .catch((err) => console.error('listProviders failed:', err));

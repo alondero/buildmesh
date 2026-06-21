@@ -16,10 +16,14 @@
  * The primary "Resume" button uses the mesh's resolved default provider
  * (explicit > per-mesh > app-wide > "anthropic" fallback, enforced
  * server-side). The `▾` half of the split button opens a provider
- * picker filtered to Claude Code-backed providers — currently
- * `anthropic`, `minimax`, `kimi` — because the other backends don't
- * (yet) read their session transcripts from disk and therefore can't
- * resume a discovered session in-place.
+ * picker filtered to Claude-Code-backed ids by `isResumableProvider`
+ * (`anthropic` plus the legacy `minimax`/`kimi` ids that archived nodes
+ * may still carry) — the other backends don't (yet) read their session
+ * transcripts from disk and so can't resume a discovered session in-place.
+ * NOTE: this id allow-list predates dynamic harness profiles (#536/#537);
+ * a custom Claude-compatible profile carries a user-chosen id and so is
+ * not matched here. Resuming into custom profiles needs a backend-supplied
+ * resumability flag on `ProviderInfo` — tracked as a follow-up, not #538.
  *
  * After a successful import we:
  *   1. `setActiveNode(node.id)` — focus the freshly-imported card.

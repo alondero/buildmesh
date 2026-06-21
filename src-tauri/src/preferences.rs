@@ -399,6 +399,81 @@ pub fn remove_provider_account(prefs: &mut AppPreferences, id: &str) {
     }
 }
 
+/// Build the backend-selecting `ANTHROPIC_*` environment for a claude-backed
+/// harness profile from its paired model-provider account (issue #538).
+///
+/// A custom provider account pairs a [`HarnessProfile`] by **shared `id`** (see
+/// [`upsert_provider_account`]), so the node's stored profile id is also the
+/// account id. We look the account up and translate its `base_url` / `api_key` /
+/// first `models` entry into the `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
+/// `ANTHROPIC_MODEL` vars the `claude` binary reads to target a Claude-compatible
+/// endpoint (MiniMax, Kimi, DeepSeek, …). This is the dynamic replacement for the
+/// deleted `minimax.rs` / `kimi.rs` adapters' hardcoded `provider_env()`.
+///
+/// Returns empty when no account matches or it carries no custom endpoint — the
+/// built-in Anthropic subscription needs no overrides, so it spawns vanilla
+/// `claude`. The spawn path still resets the inherited backend env first (see
+/// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so an empty
+/// result means a clean slate, not a leaked override.
+pub fn resolve_provider_env(profile_id: &str) -> Vec<(String, String)> {
+    provider_account_env(provider_accounts().iter().find(|a| a.id == profile_id))
+}
+
+/// Pure translation of an optional account into `ANTHROPIC_*` env pairs — the
+/// disk-free half of [`resolve_provider_env`], unit-tested directly. Only
+/// non-empty fields emit a var, so a partially-filled account never injects a
+/// blank `ANTHROPIC_BASE_URL` (which `claude` would treat as a real, broken URL).
+///
+/// For a **custom endpoint** (non-empty `base_url`) this pins the full model
+/// routing and a long timeout, reproducing what the deleted MiniMax/Kimi
+/// adapters did: Claude Code asks for several model *aliases* — a primary, a
+/// cheap "small/fast" model for background work (titles, etc.), and the
+/// sonnet/opus/haiku defaults — and its built-in `claude-*` slugs would 404
+/// against a third-party endpoint, so every alias is mapped onto a configured
+/// model (the second `models` entry, if any, is the cheap small/fast one). On
+/// the default Anthropic endpoint the slugs are valid, so only `ANTHROPIC_MODEL`
+/// is pinned and Claude Code keeps its own alias routing.
+fn provider_account_env(account: Option<&ProviderAccount>) -> Vec<(String, String)> {
+    let Some(account) = account else {
+        return Vec::new();
+    };
+    let base_url = account.base_url.as_deref().filter(|s| !s.is_empty());
+    let mut env = Vec::new();
+    if let Some(base) = base_url {
+        env.push(("ANTHROPIC_BASE_URL".to_string(), base.to_string()));
+    }
+    if let Some(key) = account.api_key.as_deref().filter(|s| !s.is_empty()) {
+        env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), key.to_string()));
+    }
+    let models: Vec<&str> = account.models.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+    if let Some(&primary) = models.first() {
+        env.push(("ANTHROPIC_MODEL".to_string(), primary.to_string()));
+        if base_url.is_some() {
+            let fast = models.get(1).copied().unwrap_or(primary);
+            for (k, v) in [
+                ("ANTHROPIC_SMALL_FAST_MODEL", fast),
+                ("ANTHROPIC_DEFAULT_SONNET_MODEL", primary),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", primary),
+                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", fast),
+            ] {
+                env.push((k.to_string(), v.to_string()));
+            }
+        }
+    } else if base_url.is_some() {
+        tracing::warn!(
+            "provider account '{}' sets a custom base_url but no models — claude will send its default model id to the custom endpoint and likely be rejected",
+            account.id
+        );
+    }
+    // Third-party models can stream slowly; give a custom endpoint the long
+    // timeout the absorbed cwrap MiniMax/Kimi arms used instead of Claude Code's
+    // short default.
+    if base_url.is_some() {
+        env.push(("API_TIMEOUT_MS".to_string(), "3000000".to_string()));
+    }
+    env
+}
+
 /// Pure precedence resolver — kept separate from `load()` so it can be
 /// unit-tested without touching disk. The order is:
 ///   1. `explicit` (e.g. caller-passed argument)
@@ -560,10 +635,12 @@ mod tests {
     #[test]
     fn harness_profiles_round_trips_a_stored_user_profile() {
         with_temp_dir(|_| {
+            // Post-#538 shape: a "Kimi via Claude" profile is the `anthropic`
+            // executor with a custom provider account supplying the endpoint.
             let custom = HarnessProfile {
                 id: "kimi-via-claude".to_string(),
                 name: "Kimi (via Claude)".to_string(),
-                harness: "kimi".to_string(),
+                harness: "anthropic".to_string(),
             };
             save(AppPreferences {
                 harness_profiles: vec![custom.clone()],
@@ -648,9 +725,11 @@ mod tests {
     #[test]
     fn resolve_harness_provider_falls_back_through_from_db_str() {
         with_temp_dir(|_| {
-            // A legacy id with no matching profile resolves directly.
-            assert_eq!(resolve_harness_provider("minimax"), Provider::Minimax);
-            // An unknown id falls through to the Anthropic default.
+            // A legacy enum id with no matching profile resolves directly.
+            assert_eq!(resolve_harness_provider("codex"), Provider::Codex);
+            // A retired legacy id ("minimax"/"kimi") and any unknown id fall
+            // through to the Anthropic executor default (issue #538 cutover).
+            assert_eq!(resolve_harness_provider("minimax"), Provider::Anthropic);
             assert_eq!(resolve_harness_provider("totally-unknown"), Provider::Anthropic);
         });
     }
@@ -905,5 +984,123 @@ mod tests {
         remove_provider_account(&mut prefs, "deepseek");
         assert!(!prefs.provider_accounts.iter().any(|a| a.id == "deepseek"));
         assert!(!prefs.harness_profiles.iter().any(|p| p.id == "deepseek"));
+    }
+
+    // ─── Spawn-time backend env injection (issue #538) ───────────────────────
+
+    #[test]
+    fn provider_account_env_injects_base_url_token_and_model_for_custom_account() {
+        // custom_account: base_url=Some(.../v1), api_key=Some(sk-test), models=[model-a].
+        let account = custom_account("deepseek");
+        let env = provider_account_env(Some(&account));
+        assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://example.com/v1".to_string())));
+        assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-test".to_string())));
+        assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "model-a".to_string())));
+    }
+
+    #[test]
+    fn provider_account_env_pins_alias_models_and_timeout_for_custom_endpoint() {
+        // A custom endpoint must map every claude model alias onto a configured
+        // model (else Claude Code's built-in claude-* slugs 404 there) and use the
+        // long timeout — the routing the deleted MiniMax/Kimi adapters provided.
+        // With one model, the cheap "small/fast" alias maps to that same model.
+        let account = custom_account("deepseek");
+        let env = provider_account_env(Some(&account));
+        for k in [
+            "ANTHROPIC_SMALL_FAST_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        ] {
+            assert_eq!(
+                env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str()),
+                Some("model-a"),
+                "{k} must be pinned to the configured model for a custom endpoint"
+            );
+        }
+        assert!(env.contains(&("API_TIMEOUT_MS".to_string(), "3000000".to_string())));
+    }
+
+    #[test]
+    fn provider_account_env_uses_second_model_as_small_fast_when_present() {
+        let mut account = custom_account("glm");
+        account.models = vec!["GLM-Big".to_string(), "GLM-Mini".to_string()];
+        let env = provider_account_env(Some(&account));
+        assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "GLM-Big".to_string())));
+        assert!(env.contains(&("ANTHROPIC_SMALL_FAST_MODEL".to_string(), "GLM-Mini".to_string())));
+        // The heavyweight aliases keep the primary model.
+        assert!(env.contains(&("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), "GLM-Big".to_string())));
+    }
+
+    #[test]
+    fn provider_account_env_no_alias_overrides_on_default_anthropic_endpoint() {
+        // A custom account with a model but NO base_url targets the default
+        // Anthropic endpoint, where claude-* slugs are valid — pin only the
+        // primary model and leave Claude Code's own alias routing and timeout.
+        let account = ProviderAccount {
+            id: "my-claude".to_string(),
+            name: "My Claude".to_string(),
+            enabled: true,
+            billing_mode: BillingMode::Plan,
+            api_key: Some("sk-ant".to_string()),
+            base_url: None,
+            models: vec!["claude-opus-4-8".to_string()],
+        };
+        let env = provider_account_env(Some(&account));
+        assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "claude-opus-4-8".to_string())));
+        assert!(!env.iter().any(|(k, _)| k == "ANTHROPIC_SMALL_FAST_MODEL"));
+        assert!(!env.iter().any(|(k, _)| k == "API_TIMEOUT_MS"));
+    }
+
+    #[test]
+    fn provider_account_env_empty_for_builtin_without_endpoint_or_absent() {
+        // The built-in anthropic account carries no base_url/api_key → no overrides.
+        let anthropic = default_provider_accounts().into_iter().find(|a| a.id == "anthropic").unwrap();
+        assert!(provider_account_env(Some(&anthropic)).is_empty());
+        // No matching account at all → empty.
+        assert!(provider_account_env(None).is_empty());
+    }
+
+    #[test]
+    fn provider_account_env_skips_blank_fields() {
+        // A partially-filled account must not emit a blank ANTHROPIC_BASE_URL —
+        // claude would treat "" as a real (broken) endpoint.
+        let account = ProviderAccount {
+            id: "x".to_string(),
+            name: "X".to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            api_key: Some(String::new()),
+            base_url: Some(String::new()),
+            models: vec![String::new()],
+        };
+        assert!(provider_account_env(Some(&account)).is_empty());
+    }
+
+    #[test]
+    fn resolve_provider_env_reads_the_paired_account_by_profile_id() {
+        // AC: ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN are injected for a
+        // custom compatible profile. A custom account pairs a harness profile by
+        // shared id, so resolving by that id finds the account's endpoint.
+        with_temp_dir(|_| {
+            let mut prefs = AppPreferences::default();
+            upsert_provider_account(&mut prefs, custom_account("deepseek"));
+            save(prefs).unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            let env = resolve_provider_env("deepseek");
+            assert!(env.contains(&("ANTHROPIC_BASE_URL".to_string(), "https://example.com/v1".to_string())));
+            assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-test".to_string())));
+        });
+    }
+
+    #[test]
+    fn resolve_provider_env_empty_for_anthropic_default_and_unknown() {
+        with_temp_dir(|_| {
+            // Built-in Anthropic subscription → no overrides → vanilla claude.
+            assert!(resolve_provider_env("anthropic").is_empty());
+            // An id with no account → empty (clean slate after the env reset).
+            assert!(resolve_provider_env("totally-unknown").is_empty());
+        });
     }
 }

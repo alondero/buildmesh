@@ -35,7 +35,8 @@ impl Platform {
 /// Shell to use when wrapping a Windows-native spawn.
 /// Codex spawns under PowerShell so ANSI escape sequences propagate
 /// correctly through ConPTY; node-shim providers (`.cmd` batch files like
-/// OpenCode) use cmd.exe. The Claude Code family (Anthropic, MiniMax, Kimi)
+/// OpenCode) use cmd.exe. The Claude-backed `anthropic` adapter (which runs
+/// every Claude-compatible endpoint, including MiniMax/Kimi/custom profiles)
 /// uses `Direct` now that cwrap is absorbed — see `claude_direct_recipe`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsShell {
@@ -54,9 +55,11 @@ pub struct SpawnRecipe {
     pub windows_shell: WindowsShell,
 }
 
-/// The direct `claude` / `claude.exe` invocation used by every claude-backed
-/// provider (Anthropic, MiniMax, Kimi) on every platform — cwrap's launcher
-/// role is absorbed into buildmesh. On Windows we target `claude.exe`
+/// The direct `claude` / `claude.exe` invocation used by the Claude-backed
+/// `anthropic` adapter on every platform — the one executor behind every
+/// Claude-compatible endpoint (the built-in subscription plus custom MiniMax/
+/// Kimi/DeepSeek profiles, whose account env is injected separately). cwrap's
+/// launcher role is absorbed into buildmesh. On Windows we target `claude.exe`
 /// explicitly (the bare `claude` is a bash shim); on macOS/Linux we use the
 /// `claude` shell script on PATH. Spawned directly via `spawn_environment::
 /// wrap`'s `WindowsShell::Direct` branch — no PowerShell, cmd.exe, or bash
@@ -103,7 +106,8 @@ pub struct UiMeta {
 }
 
 /// Frontend-facing provider listing. Composed by `commands::agent::available_providers`
-/// from each adapter's `id()` + `ui()`.
+/// purely from the user's dynamic harness profiles (issue #538 retired the
+/// legacy enum-backed rows and the `legacy` grouping flag).
 ///
 /// Generated to src/types/generated/ProviderInfo.ts (issue #404). `Deserialize`
 /// is added so the type participates in the ts-rs `export` derive (the project
@@ -115,11 +119,6 @@ pub struct ProviderInfo {
     pub label: String,
     pub color: String,
     pub icon: String,
-    /// True for the hardcoded legacy [`crate::models::Provider`] enum entries,
-    /// false for dynamic harness profiles (issue #536). The launch menu and the
-    /// default-provider dropdown group the two: dynamic profiles first, then a
-    /// "Legacy" header over the enum-backed rows.
-    pub legacy: bool,
 }
 
 /// Behaviour an agent provider must declare.
@@ -149,9 +148,9 @@ pub trait AgentProvider: Send + Sync {
     fn requires_attention_hook(&self) -> bool;
 
     /// Whether this provider writes a transcript the coordinator read API can
-    /// parse into a Node Digest's rich layer (ADR-0008). The Claude Code family
-    /// (Anthropic, MiniMax, Kimi) runs real Claude Code with a swapped backend,
-    /// so it writes Claude Code's
+    /// parse into a Node Digest's rich layer (ADR-0008). The Claude-backed
+    /// `anthropic` adapter runs real Claude Code (with a swapped backend for
+    /// custom MiniMax/Kimi/DeepSeek profiles), so it writes Claude Code's
     /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
     /// `services::transcript_reader` knows how to read. Providers with their own
     /// transcript format (Codex) or none (OpenCode, Agy, Terminal) return
@@ -222,26 +221,17 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
-    /// Backend-selecting environment for this provider — the `ANTHROPIC_*`
-    /// variables that select which upstream API/model the Claude Code binary
-    /// talks to. Empty for Anthropic (the built-in subscription needs no
-    /// overrides) and for the non-Claude providers (Codex, OpenCode, Agy,
-    /// Terminal) which use their own binaries. MiniMax/Kimi read their API
-    /// keys from `~/.claude/providers.conf` via
-    /// [`provider_conf::read_providers_conf`] and emit the corresponding
-    /// `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_MODEL` here.
-    fn provider_env(&self) -> Vec<(String, String)> {
-        Vec::new()
-    }
-
     /// Whether this provider's launcher resets [`CLAUDE_BACKEND_ENV_VARS`] before
-    /// applying [`provider_env`](Self::provider_env). True for the claude-backed
-    /// family (Anthropic, MiniMax, Kimi): cwrap `unset` those vars before
-    /// `exec claude`, so any value inherited from buildmesh's environment is
-    /// cleared first to give the agent the same clean slate. Anthropic exports
-    /// nothing of its own, so the reset is its whole contribution. False for
-    /// native-binary providers (Codex, OpenCode, Agy) that never went through
-    /// cwrap and don't read these vars.
+    /// the spawn path applies the per-profile backend env
+    /// ([`crate::preferences::resolve_provider_env`]). True for the Claude-backed
+    /// `anthropic` adapter (the executor for every Claude-compatible endpoint):
+    /// cwrap `unset` those vars before `exec claude`, so any value inherited from
+    /// buildmesh's environment is cleared first to give the agent the same clean
+    /// slate. The built-in Anthropic subscription exports nothing of its own, so
+    /// the reset alone keeps it on the default endpoint; a custom profile's
+    /// account env is then layered on top. False for native-binary providers
+    /// (Codex, OpenCode, Agy) that never went through cwrap and don't read these
+    /// vars.
     fn resets_backend_env(&self) -> bool {
         false
     }

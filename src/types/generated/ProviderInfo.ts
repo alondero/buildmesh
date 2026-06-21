@@ -2,17 +2,11 @@
 
 /**
  * Frontend-facing provider listing. Composed by `commands::agent::available_providers`
- * from each adapter's `id()` + `ui()`.
+ * purely from the user's dynamic harness profiles (issue #538 retired the
+ * legacy enum-backed rows and the `legacy` grouping flag).
  *
  * Generated to src/types/generated/ProviderInfo.ts (issue #404). `Deserialize`
  * is added so the type participates in the ts-rs `export` derive (the project
  * pattern is `Serialize + Deserialize + TS` for every generated wire type).
  */
-export type ProviderInfo = { id: string, label: string, color: string, icon: string, 
-/**
- * True for the hardcoded legacy [`crate::models::Provider`] enum entries,
- * false for dynamic harness profiles (issue #536). The launch menu and the
- * default-provider dropdown group the two: dynamic profiles first, then a
- * "Legacy" header over the enum-backed rows.
- */
-legacy: boolean, };
+export type ProviderInfo = { id: string, label: string, color: string, icon: string, };

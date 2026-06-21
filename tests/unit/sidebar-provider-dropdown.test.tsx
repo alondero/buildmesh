@@ -65,44 +65,17 @@ await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
     expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
 
-  it('groups legacy providers under a "Legacy" header below the dynamic ones (#536)', () => {
-    const mixed: ProviderEntry[] = [
-      { id: 'claude', label: 'Claude Code', color: 'bg-blue-500', legacy: false },
-      { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500', legacy: true },
-      { id: 'codex', label: 'Codex', color: 'bg-gray-500', legacy: true },
+  it('renders a flat list with no "Legacy" header (#538)', () => {
+    // The transitional dynamic/legacy split was retired: every entry is a
+    // harness profile, rendered as a single flat list, no grouping header.
+    const profiles: ProviderEntry[] = [
+      { id: 'claude', label: 'Claude Code', color: 'bg-blue-500' },
+      { id: 'codex', label: 'Codex', color: 'bg-gray-500' },
+      { id: 'terminal', label: 'Terminal', color: 'bg-gray-500' },
     ];
-    const { container } = render(<ProviderDropdown meshId={1} providers={mixed} onSelect={() => {}} />);
-
-    // The header is present once.
-    expect(screen.getByText('Legacy')).toBeTruthy();
-
-    // The dynamic profile renders before the Legacy header; the legacy ones after.
-    const text = container.textContent ?? '';
-    expect(text.indexOf('Claude Code')).toBeLessThan(text.indexOf('Legacy'));
-    expect(text.indexOf('Legacy')).toBeLessThan(text.indexOf('Anthropic'));
-  });
-
-  it('shows no "Legacy" header when every entry is dynamic', () => {
-    const dynamicOnly: ProviderEntry[] = [
-      { id: 'claude', label: 'Claude Code', color: 'bg-blue-500', legacy: false },
-      { id: 'terminal', label: 'Terminal', color: 'bg-gray-500', legacy: false },
-    ];
-    render(<ProviderDropdown meshId={1} providers={dynamicOnly} onSelect={() => {}} />);
+    render(<ProviderDropdown meshId={1} providers={profiles} onSelect={() => {}} />);
     expect(screen.queryByText('Legacy')).toBeNull();
-    expect(screen.getAllByRole('button')).toHaveLength(2);
-  });
-
-  it('keeps both same-id rows actionable across the dynamic/legacy split', async () => {
-    // A detected "terminal" profile and the legacy "terminal" enum share an id;
-    // namespaced React keys must let both render as separate buttons.
-    const onSelect = vi.fn();
-    const sameId: ProviderEntry[] = [
-      { id: 'terminal', label: 'Terminal (profile)', color: 'bg-gray-500', legacy: false },
-      { id: 'terminal', label: 'Terminal (legacy)', color: 'bg-gray-500', legacy: true },
-    ];
-    render(<ProviderDropdown meshId={1} providers={sameId} onSelect={onSelect} />);
-    expect(screen.getByRole('button', { name: 'Terminal (profile)' })).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: 'Terminal (legacy)' }));
-    expect(onSelect).toHaveBeenCalledWith('terminal', false);
+    expect(screen.getAllByRole('button')).toHaveLength(3);
+    expect(screen.getByRole('button', { name: 'Claude Code' })).toBeTruthy();
   });
 });
