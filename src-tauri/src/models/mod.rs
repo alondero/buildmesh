@@ -830,19 +830,22 @@ mod tests {
     #[test]
     fn provider_adapter_recipe_windows() {
         use crate::agent::provider::Platform;
-        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows).binary, "claude.exe");
-        assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows).binary, "agy");
-        assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows).binary, "opencode");
-        assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows).binary, "codex");
+        // MiniMax and Kimi were retired from the legacy enum (#538) — Claude-compatible
+        // endpoints are now harness profiles whose per-account env is injected separately
+        // by the unified `anthropic` adapter via `claude_direct_recipe`.
+        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "claude.exe");
+        assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "agy");
+        assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "opencode");
+        assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "codex");
         // Plain terminal spawns the OS-preferred shell directly — powershell.exe on Windows
         // host, routed through wsl.exe by spawn_environment::wrap when env_type is WSL.
-        assert_eq!(Provider::Terminal.adapter().spawn_recipe(Platform::Windows).binary, "powershell.exe");
+        assert_eq!(Provider::Terminal.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "powershell.exe");
     }
 
     #[test]
     fn provider_adapter_recipe_macos_anthropic_uses_claude() {
         use crate::agent::provider::Platform;
-        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Macos).binary, "claude");
+        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Macos, EnvType::Windows).binary, "claude");
     }
 
     #[test]

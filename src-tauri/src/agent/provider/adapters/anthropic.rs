@@ -1,6 +1,7 @@
 use crate::agent::provider::{
     claude_direct_recipe, AgentProvider, Platform, SpawnRecipe, UiMeta,
 };
+use crate::models::EnvType;
 
 pub struct AnthropicAdapter;
 pub static ANTHROPIC: AnthropicAdapter = AnthropicAdapter;
@@ -18,7 +19,7 @@ impl AgentProvider for AnthropicAdapter {
         }
     }
 
-    fn spawn_recipe(&self, platform: Platform) -> SpawnRecipe {
+    fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         claude_direct_recipe(platform)
     }
 

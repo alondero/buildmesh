@@ -1,4 +1,5 @@
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::models::EnvType;
 
 pub struct OpenCodeAdapter;
 pub static OPENCODE: OpenCodeAdapter = OpenCodeAdapter;
@@ -16,7 +17,7 @@ impl AgentProvider for OpenCodeAdapter {
         }
     }
 
-    fn spawn_recipe(&self, _platform: Platform) -> SpawnRecipe {
+    fn spawn_recipe(&self, _platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: "opencode",
             base_args: vec![],

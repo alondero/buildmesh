@@ -1,4 +1,5 @@
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::models::EnvType;
 
 pub struct AgyAdapter;
 pub static AGY: AgyAdapter = AgyAdapter;
@@ -16,7 +17,7 @@ impl AgentProvider for AgyAdapter {
         }
     }
 
-    fn spawn_recipe(&self, _platform: Platform) -> SpawnRecipe {
+    fn spawn_recipe(&self, _platform: Platform, _env_type: EnvType) -> SpawnRecipe {
         SpawnRecipe {
             binary: "agy",
             base_args: vec!["--dangerously-skip-permissions".into()],

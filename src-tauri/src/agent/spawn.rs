@@ -190,7 +190,7 @@ pub fn build_spawn_command(
     };
 
     // The base recipe before session-id / override / prefill args are layered on.
-    let base_recipe = || adapter.spawn_recipe(platform);
+    let base_recipe = || adapter.spawn_recipe(platform, resolved.env_type);
 
     let mut recipe = match session_id_mode {
         SessionIdMode::Resume(id) => {
