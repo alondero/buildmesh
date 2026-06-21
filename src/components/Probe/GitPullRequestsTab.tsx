@@ -52,7 +52,7 @@
  * either boundary).
  */
 
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import {
   getRepoPulls,
   getPrsMergeability,
@@ -68,6 +68,7 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { useUIStore } from '../../stores/uiStore';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 import { ProbeRow } from './ProbeRow';
@@ -381,18 +382,22 @@ export function GitPullRequestsTab() {
 
   // Fetch the provider list once at mount (issue #420, mirrors
   // `GitIssuesTab`). Platform filtering is enforced server-side via
-  // `AgentProvider::available_on()`. Re-fetching on every render would be
-  // wasteful, and the list is stable for the lifetime of a session.
-  useAsyncEffect((signal) => {
+  // `AgentProvider::available_on()`. The list can change during a session
+  // when the user adds or removes a custom provider in App Settings — the
+  // hook below re-fires this fetch on the `provider-list-changed` event so
+  // the PR-spawn picker drops stale accounts without an app restart.
+  const refreshProviderList = useCallback(() => {
     listProviders()
       .then((backendProviders) => {
-        if (signal.aborted) return;
         setProviderList(
           backendProviders.map((p) => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
         );
       })
       .catch((err) => console.error('listProviders failed:', err));
   }, []);
+
+  useAsyncEffect(() => { refreshProviderList(); }, [refreshProviderList]);
+  useProviderListInvalidation(refreshProviderList);
 
   // Close the provider dropdown when clicking outside it. The dropdown
   // container carries a `data-dropdown-for` attribute set to the PR number,

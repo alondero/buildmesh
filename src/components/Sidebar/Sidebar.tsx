@@ -4,6 +4,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import type { Mesh } from '../../stores/meshStore';
 import { listProviders } from '../../lib/tauri';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
@@ -21,8 +22,9 @@ export function Sidebar() {
   // Fetch available providers from the backend. Platform filtering (e.g. macOS-only
   // Anthropic) is decided server-side via AgentProvider::available_on().
   // Refetchable so the spawn menu picks up providers added in App Settings
-  // without an app restart — the settings modal busts the listProviders cache
-  // on upsert/remove, so this re-read returns the updated catalogue (#534).
+  // without an app restart — the settings modal emits `provider-list-changed`
+  // on upsert/remove (the tauri.ts cache bust alone doesn't reach us, since
+  // we hold our own local snapshot), and this hook re-fetches on the signal.
   const refreshProviders = useCallback(() => {
     listProviders()
       .then(backendProviders => setProviderData(
@@ -32,6 +34,7 @@ export function Sidebar() {
   }, []);
 
   useEffect(() => { refreshProviders(); }, [refreshProviders]);
+  useProviderListInvalidation(refreshProviders);
 
   const meshes = useMeshStore(state => state.meshes);
   const addMesh = useMeshStore(state => state.addMesh);

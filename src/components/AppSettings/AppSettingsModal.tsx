@@ -90,9 +90,14 @@ export function AccountCard({
   const [draft, setDraft] = useState<ProviderAccount>(account);
   const [showCreds, setShowCreds] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Two-step remove: first click flips to a confirm pair, second click fires.
+  // Reset whenever the card re-renders for a different account so a stale
+  // confirm doesn't survive a save-and-reload.
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
 
   // Re-sync the editable draft when the parent reloads accounts (e.g. after save).
   useEffect(() => setDraft(account), [account]);
+  useEffect(() => setConfirmingRemove(false), [account.id]);
 
   const isCustom = !BUILTIN_PROVIDER_IDS.includes(account.id);
   // Self-authenticating harnesses (Anthropic/Codex/Antigravity) hold no creds in
@@ -117,6 +122,30 @@ export function AccountCard({
     setBusy(true);
     try {
       await onSave(draft);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Two-step remove: the Yes click must gate on `busy` for the full duration
+  // of the async onRemove, otherwise a fast double-click on Remove fires two
+  // concurrent IPCs and races on setAccounts (the parent's handleRemoveAccount
+  // never sets busy itself — keeping it card-local is simpler than threading
+  // a "removing id" prop through from the modal). Awaiting the parent's
+  // promise also means a failed remove flips the card back to its idle state
+  // instead of leaving the confirming pair stuck open. The catch is a no-op
+  // for state but necessary: without it, the async function's returned
+  // promise rejects, which user.click does NOT rethrow, leaving an
+  // unhandled-rejection warning in the console for every failure path.
+  const confirmRemove = async () => {
+    if (busy) return;
+    setBusy(true);
+    setConfirmingRemove(false);
+    try {
+      await onRemove?.(account.id);
+    } catch {
+      // The parent (handleRemoveAccount) shows the error toast via its own
+      // catch — we only own busy-state here.
     } finally {
       setBusy(false);
     }
@@ -159,20 +188,53 @@ export function AccountCard({
       <div className="flex items-center gap-3 mb-3">
         <ProviderIcon providerId={account.id} className="h-6 w-6" />
         <span className="text-lg font-medium text-text-primary">{account.name}</span>
-        {usageLoading && account.enabled && (
-          <span className="ml-auto text-base text-text-muted">Loading...</span>
-        )}
-        <label className={`flex items-center gap-2 text-base text-text-secondary cursor-pointer ${usageLoading && account.enabled ? '' : 'ml-auto'}`}>
-          <input
-            type="checkbox"
-            checked={account.enabled}
-            disabled={busy}
-            onChange={e => toggleEnabled(e.target.checked)}
-            className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
-            aria-label={`Enable ${account.name}`}
-          />
-          <span>Enabled</span>
-        </label>
+        <div className="ml-auto flex items-center gap-3">
+          {usageLoading && account.enabled && (
+            <span className="text-base text-text-muted">Loading...</span>
+          )}
+          <label className="flex items-center gap-2 text-base text-text-secondary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={account.enabled}
+              disabled={busy}
+              onChange={e => toggleEnabled(e.target.checked)}
+              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+              aria-label={`Enable ${account.name}`}
+            />
+            <span>Enabled</span>
+          </label>
+          {isCustom && onRemove && (confirmingRemove ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-status-error">Remove {account.name}?</span>
+              <button
+                onClick={confirmRemove}
+                disabled={busy}
+                className="px-3 py-1 bg-status-error text-white text-sm rounded hover:bg-status-error/90 disabled:opacity-50"
+                aria-label={`Confirm remove ${account.name}`}
+              >
+                Yes
+              </button>
+              <button
+                onClick={() => setConfirmingRemove(false)}
+                disabled={busy}
+                className="px-3 py-1 bg-bg-card text-text-secondary text-sm rounded hover:bg-bg-card/70 disabled:opacity-50"
+                aria-label={`Cancel remove ${account.name}`}
+              >
+                No
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmingRemove(true)}
+              disabled={busy}
+              className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded hover:bg-status-error/25 disabled:opacity-50"
+              aria-label={`Remove ${account.name}`}
+              title={`Remove ${account.name}`}
+            >
+              Remove
+            </button>
+          ))}
+        </div>
       </div>
 
       {renderUsage()}
@@ -251,15 +313,6 @@ export function AccountCard({
             >
               {busy ? 'Saving...' : 'Save'}
             </button>
-            {isCustom && onRemove && (
-              <button
-                onClick={() => onRemove(account.id)}
-                disabled={busy}
-                className="px-5 py-2 bg-status-error/15 text-status-error text-base rounded hover:bg-status-error/25 disabled:opacity-50"
-              >
-                Remove
-              </button>
-            )}
           </div>
         </div>
       )}

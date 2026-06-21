@@ -45,7 +45,7 @@
  *     only handles the former.
  */
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 // `openUrl` is intentionally imported here even though the title + ↗
 // links now route through `<SafeLink>`. The blocked-by button (further
 // down in this file) is a `<button>`, not an `<a>`, so SafeLink
@@ -66,6 +66,7 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
 import { ProbeRow } from './ProbeRow';
 
@@ -168,17 +169,22 @@ export function GitIssuesTab() {
   // Fetch the provider list once at mount. Platform filtering (e.g.
   // macOS-only Anthropic) is enforced server-side via
   // AgentProvider::available_on(). Re-fetching on every render would
-  // be wasteful, and the list is stable for the lifetime of a session.
-  useAsyncEffect((signal) => {
+  // be wasteful, but the list can change during a session when the user
+  // adds or removes a custom provider in App Settings — the hook below
+  // re-fires this fetch on the `provider-list-changed` event so the spawn
+  // picker drops stale accounts without an app restart.
+  const refreshProviderList = useCallback(() => {
     listProviders()
       .then(backendProviders => {
-        if (signal.aborted) return;
         setProviderList(
           backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
         );
       })
       .catch(err => console.error('listProviders failed:', err));
   }, []);
+
+  useAsyncEffect(() => { refreshProviderList(); }, [refreshProviderList]);
+  useProviderListInvalidation(refreshProviderList);
 
   // Close the provider dropdown when clicking outside of it. The dropdown
   // container carries a `data-dropdown-for` attribute set to the issue number.
