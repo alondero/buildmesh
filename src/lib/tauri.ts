@@ -29,6 +29,7 @@ import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
+import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
 import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
@@ -418,17 +419,30 @@ export const getRepoIssues = (meshId: number) =>
 // src/types/generated/; see top import. Re-exported here so the PR probe tab
 // can `import { GitHubPullRequest } from '../lib/tauri'` alongside the issue
 // types. Issue #359.
-export type { GitHubPullRequest, PrMergeability, PrFileEntry };
+export type { GitHubPullRequest, PrMergeability, PrMergeabilityEntry, PrFileEntry };
 
 /** List PRs for a mesh's repo, filtered by `state` (`'open'` or `'closed'`). */
 export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
   _invoke<GitHubPullRequest[]>('get_repo_pulls', { meshId, state });
 
-/// Per-PR mergeability enrichment — the `/pulls` list endpoint omits it, so the
-/// panel fetches this once per open PR. `mergeable` is `null` while GitHub is
-/// still computing the merge.
+/// Per-PR mergeability enrichment — the `/pulls` list endpoint omits it, so
+/// the panel fetches this once per open PR. `mergeable` is `null` while
+/// GitHub is still computing the merge. **Deprecated on desktop** — use
+/// [`getPrsMergeability`] for the batched call (issue #418); the per-PR
+/// shape survives for the mobile HTTP route at
+/// `GET /api/meshes/{id}/pulls/{n}/mergeability`.
 export const getPrMergeability = (meshId: number, prNumber: number) =>
   _invoke<PrMergeability>('get_pr_mergeability', { meshId, prNumber });
+
+/// Batched PR mergeability (issue #418). One IPC round-trip resolves the
+/// GitHub token once and loops over the requested PR numbers — replacing
+/// the per-PR fan-out the panel used to fire. Each entry carries the PR
+/// `number` so the frontend can key results back onto the listed PRs.
+/// `mergeable: null` is either "GitHub still computing" or "this PR's
+/// individual probe failed" — both render as "Checking…" in the panel
+/// (see [`get_prs_mergeability`] in `commands/pr.rs` for the rationale).
+export const getPrsMergeability = (meshId: number, prNumbers: number[]) =>
+  _invoke<PrMergeabilityEntry[]>('get_prs_mergeability', { meshId, prNumbers });
 
 /// List the files changed in a single PR (issue #421). Backed by GitHub's
 /// `/pulls/{n}/files` endpoint; one call returns the whole PR with each

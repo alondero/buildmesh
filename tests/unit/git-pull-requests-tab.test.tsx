@@ -28,6 +28,7 @@ import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import type { GitHubPullRequest } from '../../src/types/generated/GitHubPullRequest';
 import type { PrMergeability } from '../../src/types/generated/PrMergeability';
+import type { PrMergeabilityEntry } from '../../src/types/generated/PrMergeabilityEntry';
 
 // `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
 // external URL. Tauri 2's WebView silently drops `target="_blank"` without
@@ -74,6 +75,19 @@ const MERGEABILITY: Record<number, PrMergeability> = {
   204: { mergeable: null, mergeable_state: 'unknown' },
 };
 
+/**
+ * Convert the per-PR `MERGEABILITY` map into the batched-entry wire shape
+ * (`get_prs_mergeability` returns `Vec<PrMergeabilityEntry>`, one per
+ * requested PR number). Issue #418 — the panel now makes one batched
+ * call instead of N per-PR calls.
+ */
+function mergeabilityEntriesFor(numbers: number[]): PrMergeabilityEntry[] {
+  return numbers.map((n) => {
+    const m = MERGEABILITY[n] ?? { mergeable: null, mergeable_state: 'unknown' };
+    return { number: n, mergeable: m.mergeable, mergeable_state: m.mergeable_state };
+  });
+}
+
 const PROVIDERS = [
   { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '' },
   { id: 'minimax', label: 'Minimax', color: '#000', icon: '' },
@@ -113,6 +127,10 @@ const PR_DRAFT = {
 /**
  * Wire the mocked `invoke` to answer each command the tab calls. `get_repo_pulls`
  * branches on the `state` arg so the toggle test can assert per-filter results.
+ * `get_prs_mergeability` (issue #418) takes a `prNumbers: number[]` and returns
+ * one entry per requested number; the legacy `get_pr_mergeability` is no longer
+ * called from the desktop panel — keeping it in the mock just in case is not
+ * necessary because the panel doesn't issue it anymore.
  */
 function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequest[] } = {}) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
@@ -121,9 +139,9 @@ function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequ
         const state = (args as { state?: string })?.state;
         return Promise.resolve(state === 'closed' ? (opts.closed ?? CLOSED_PRS) : (opts.open ?? OPEN_PRS));
       }
-      case 'get_pr_mergeability': {
-        const n = (args as { prNumber?: number })?.prNumber ?? -1;
-        return Promise.resolve(MERGEABILITY[n] ?? { mergeable: null, mergeable_state: 'unknown' });
+      case 'get_prs_mergeability': {
+        const nums = (args as { prNumbers?: number[] })?.prNumbers ?? [];
+        return Promise.resolve(mergeabilityEntriesFor(nums));
       }
       case 'list_providers':
         return Promise.resolve(PROVIDERS);
@@ -260,17 +278,28 @@ describe('GitPullRequestsTab', () => {
     expect(await screen.findByText('Conflicts')).toBeTruthy();
   });
 
-  it('flags a draft PR as Draft without a mergeability call', async () => {
+  it('flags a draft PR as Draft without including it in the batched mergeability call', async () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
     await screen.findByText('WIP spike');
     expect(await screen.findByText('Draft')).toBeTruthy();
-    // Draft is derived from the list flag — no detail probe for PR 203.
+    // Draft is derived from the list flag — it's filtered out of the
+    // batched mergeability call (issue #418). The batched call carries
+    // 201/202/204 (the non-draft open PRs); 203 must not appear.
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('get_pr_mergeability', { meshId: 42, prNumber: 201 });
+      const batchCalls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([c]) => c === 'get_prs_mergeability');
+      expect(batchCalls.length).toBeGreaterThan(0);
+      // The last batched call (post-list) carries every non-draft PR.
+      const lastNumbers = (batchCalls[batchCalls.length - 1][1] as { prNumbers: number[] }).prNumbers;
+      expect(lastNumbers).toEqual(expect.arrayContaining([201, 202, 204]));
+      expect(lastNumbers).not.toContain(203);
     });
-    expect(invoke).not.toHaveBeenCalledWith('get_pr_mergeability', { meshId: 42, prNumber: 203 });
+    // The legacy per-PR command is NOT called from the desktop panel
+    // anymore — the panel goes through the batched endpoint only.
+    expect(invoke).not.toHaveBeenCalledWith('get_pr_mergeability', expect.anything());
   });
 
   it('shows "Checking…" while GitHub computes mergeability (mergeable: null)', async () => {
@@ -283,35 +312,48 @@ describe('GitPullRequestsTab', () => {
     expect(await screen.findByText('Checking…')).toBeTruthy();
   });
 
-  /// Regression for issue #419: when GitHub's detail endpoint returns
-  /// `mergeable: null` (still computing), the panel must re-poll the
-  /// detail endpoint — not leave the row stuck on "Checking…" forever.
-  /// We use fake timers so the retry `setTimeout` is deterministic. With
-  /// fake timers on, RTL's async finders (which use setTimeout polling)
-  /// can't advance, so we wrap render + timer advances in `act(async …)` —
-  /// that flushes React's state updates AND lets vitest's microtask
-  /// runner drain the Promise resolutions triggered by the fake clock.
-  it('re-polls mergeability when the first response is mergeable: null', async () => {
+  /// Regression for issue #419: when GitHub's batched mergeability returns
+  /// `mergeable: null` for a PR (still computing), the panel must re-poll
+  /// — not leave the row stuck on "Checking…" forever. Issue #418 changed
+  /// the wire from per-PR fan-out to a single batched IPC, but the retry
+  /// semantics are unchanged: a single batched call carries only the
+  /// still-null PRs, so the retry path is itself a batched call. We use
+  /// fake timers so the retry `setTimeout` is deterministic. With fake
+  /// timers on, RTL's async finders (which use setTimeout polling) can't
+  /// advance, so we wrap render + timer advances in `act(async …)` — that
+  /// flushes React's state updates AND lets vitest's microtask runner
+  /// drain the Promise resolutions triggered by the fake clock.
+  it('re-polls mergeability when the first batch returns mergeable: null for a PR', async () => {
     vi.useFakeTimers();
     try {
-      // PR 204's first probe returns null; the second returns a real value.
-      // The rest of the PRs use the standard fixture map.
-      const calls204: number[] = [];
+      // PR 204's first probe returns null; the second returns a real
+      // value. The rest of the PRs use the standard fixture map.
+      // `callsByNumber` tracks the batched-call sequence so we can pin
+      // BOTH "retry happened" AND "retry was a batched call carrying
+      // only PR 204" (issue #418 — auth cost amortises per-stuck-PR).
+      const callsByNumber: number[][] = [];
       vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
         switch (cmd) {
           case 'get_repo_pulls':
             return Promise.resolve(OPEN_PRS);
-          case 'get_pr_mergeability': {
-            const n = (args as { prNumber?: number })?.prNumber ?? -1;
-            if (n === 204) {
-              calls204.push(calls204.length + 1);
-              return Promise.resolve(
-                calls204.length === 1
-                  ? { mergeable: null, mergeable_state: 'unknown' }
-                  : { mergeable: true, mergeable_state: 'clean' },
-              );
-            }
-            return Promise.resolve(MERGEABILITY[n] ?? { mergeable: null, mergeable_state: 'unknown' });
+          case 'get_prs_mergeability': {
+            const nums = (args as { prNumbers?: number[] })?.prNumbers ?? [];
+            callsByNumber.push([...nums]);
+            return Promise.resolve(
+              nums.map((n) => {
+                if (n === 204) {
+                  // First call for PR 204 → null; second → real.
+                  const prior = callsByNumber.flat().filter((x) => x === 204).length;
+                  return {
+                    number: 204,
+                    mergeable: prior === 1 ? null : true,
+                    mergeable_state: prior === 1 ? 'unknown' : 'clean',
+                  };
+                }
+                const m = MERGEABILITY[n] ?? { mergeable: null, mergeable_state: 'unknown' };
+                return { number: n, mergeable: m.mergeable, mergeable_state: m.mergeable_state };
+              }),
+            );
           }
           case 'merge_pr':
             return Promise.resolve('Merged (squash) via abc123 — done');
@@ -330,7 +372,8 @@ describe('GitPullRequestsTab', () => {
       // so the test stays robust if more than one row is in the checking
       // state from the fixture map.)
       expect(screen.getAllByText('Checking…').length).toBeGreaterThanOrEqual(1);
-      expect(calls204).toHaveLength(1);
+      // Initial batch carried all 3 non-draft open PRs (201, 202, 204).
+      expect(callsByNumber[0]).toEqual(expect.arrayContaining([201, 202, 204]));
 
       // Advance past the first retry delay (1.5s base × 1 attempt = 1.5s).
       // The timer's callback re-issues the probe; the second response is
@@ -345,7 +388,14 @@ describe('GitPullRequestsTab', () => {
       const mergeButtons = screen.getAllByRole('button', { name: /merge pull request #/i });
       expect(mergeButtons.length).toBeGreaterThanOrEqual(2);
       expect(screen.queryByText('Checking…')).toBeNull();
-      expect(calls204.length).toBeGreaterThanOrEqual(2);
+      // Issue #418 — the retry is itself a batched call carrying ONLY
+      // PR 204, not the full list. Pin both: ≥2 calls total (initial +
+      // retry), AND the retry's numbers are exactly [204] (not the
+      // full list). If a future refactor reverts to per-PR retries or
+      // re-batches the whole list, this assertion catches it.
+      expect(callsByNumber.length).toBeGreaterThanOrEqual(2);
+      const retryCall = callsByNumber[callsByNumber.length - 1];
+      expect(retryCall).toEqual([204]);
     } finally {
       vi.useRealTimers();
     }
@@ -354,31 +404,33 @@ describe('GitPullRequestsTab', () => {
   /// Counterpart to the re-poll test: when the effect tears down (unmount,
   /// filter toggle, or mesh change — all share the same cleanup), pending
   /// retry timers must be cleared. Unmount is the most direct test: cleanup
-  /// unmounts the component, no new renders happen, so any further probe call
-  /// would be a leaked timer. The mock tracks call count for PR 204 so a
-  /// leaked retry shows up as a second call.
+  /// unmounts the component, no new renders happen, so any further probe
+  /// call would be a leaked timer. The mock tracks the batched-call
+  /// sequence so a leaked retry shows up as a second batched call for
+  /// PR 204.
   it('cancels pending mergeability retries when the component unmounts', async () => {
     vi.useFakeTimers();
     try {
-      const calls204: number[] = [];
+      const callsByNumber: number[][] = [];
       vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
         switch (cmd) {
           case 'get_repo_pulls':
             return Promise.resolve(OPEN_PRS);
-          case 'get_pr_mergeability': {
-            const n = (args as { prNumber?: number })?.prNumber ?? -1;
-            if (n === 204) {
-              calls204.push(n);
-              // First call: null (schedules retry). Second call: would
-              // return a real value — if cleanup doesn't clear the timer,
-              // the retry would fire and we'd see length 2.
-              return Promise.resolve(
-                calls204.length === 1
-                  ? { mergeable: null, mergeable_state: 'unknown' }
-                  : { mergeable: true, mergeable_state: 'clean' },
-              );
-            }
-            return Promise.resolve({ mergeable: null, mergeable_state: 'unknown' });
+          case 'get_prs_mergeability': {
+            const nums = (args as { prNumbers?: number[] })?.prNumbers ?? [];
+            callsByNumber.push([...nums]);
+            return Promise.resolve(
+              nums.map((n) => ({
+                number: n,
+                // First call for any PR: null (schedules retry). Any
+                // second call: would return a real value — if cleanup
+                // doesn't clear the timer, the retry would fire.
+                mergeable: callsByNumber.flat().filter((x) => x === n).length === 1
+                  ? null
+                  : true,
+                mergeable_state: 'clean',
+              })),
+            );
           }
           default:
             return Promise.resolve({});
@@ -390,18 +442,18 @@ describe('GitPullRequestsTab', () => {
         render(<GitPullRequestsTab />);
         await vi.advanceTimersByTimeAsync(0);
       });
-      // Initial probe landed; retry is now scheduled for PR 204.
-      expect(calls204).toHaveLength(1);
+      // Initial batch landed; retries are scheduled for each null entry.
+      expect(callsByNumber.length).toBe(1);
 
-      // Unmount BEFORE the retry timer fires. The effect's cleanup must
-      // clear the pending timer — no second call.
+      // Unmount BEFORE any retry timer fires. The effect's cleanup must
+      // clear every pending timer — no second batched call.
       await act(async () => {
         cleanup();
         await vi.advanceTimersByTimeAsync(2000);
       });
 
-      // The retry was cancelled by the cleanup: call count is still 1.
-      expect(calls204).toHaveLength(1);
+      // No retry fired after unmount: still exactly one batched call.
+      expect(callsByNumber).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
@@ -411,6 +463,187 @@ describe('GitPullRequestsTab', () => {
     useMeshStore.setState({ meshesById: new Map(), selectedMeshId: null });
     mockBackend();
     expect(() => render(<GitPullRequestsTab />)).not.toThrow();
+  });
+
+  // ----- Batched mergeability (issue #418) --------------------------------
+  //
+  // The whole point of the batched endpoint is one IPC round-trip per
+  // panel render (was N per-PR calls, each costing a fresh GitHubClient
+  // construction + token resolution). These tests pin the perf contract:
+  // a list of N open PRs triggers exactly ONE `get_prs_mergeability` call
+  // carrying all N PR numbers, never N individual `get_pr_mergeability`
+  // calls (the legacy per-PR shape). A future refactor that reverts to
+  // the per-PR fan-out breaks both tests below.
+
+  /// With N non-draft open PRs, the panel makes exactly ONE batched call
+  /// carrying all N numbers — not N individual calls. The fixture has
+  /// 3 non-draft PRs (201, 202, 204); draft PR 203 is filtered out
+  /// before the call. Pin the exact prNumbers array so a future refactor
+  /// that re-introduces per-PR fan-out (or that drops the draft filter)
+  /// is caught here.
+  it('makes one batched mergeability call for all non-draft PRs (issue #418)', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // Wait for the list to load + the enrichment effect to fire.
+    await screen.findByText('Add widget');
+    await waitFor(() => {
+      const calls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([c]) => c === 'get_prs_mergeability');
+      expect(calls.length).toBe(1);
+    });
+
+    const batchCall = vi
+      .mocked(invoke)
+      .mock.calls.find(([c]) => c === 'get_prs_mergeability')!;
+    const args = batchCall[1] as { meshId: number; prNumbers: number[] };
+    expect(args.meshId).toBe(42);
+    // All 3 non-draft open PRs; draft PR 203 filtered out.
+    expect(args.prNumbers).toEqual([201, 202, 204]);
+
+    // The legacy per-PR command must NOT be called from the desktop
+    // panel at all (issue #418). If a future refactor leaves both
+    // commands wired up, this catches the redundant per-PR fan-out.
+    expect(invoke).not.toHaveBeenCalledWith('get_pr_mergeability', expect.anything());
+  });
+
+  /// A list with zero non-draft PRs (all drafts, or empty list) must
+  /// skip the IPC entirely — the backend also short-circuits, but the
+  /// panel doesn't even open the wire call. Pin the no-IPC behaviour so
+  /// a future refactor that always fires the batched call (with an
+  /// empty array) is caught here. Empty-prNumbers is a degenerate
+  /// invariant — useful to keep the wire off the slow path.
+  it('skips the mergeability batch when there are no non-draft PRs (issue #418)', async () => {
+    mockBackend({
+      // One draft PR, no non-draft entries → nothing to enrich.
+      open: [
+        { number: 203, title: 'WIP spike', body: '', url: 'https://github.com/acme/demo/pull/203', state: 'open', draft: true, head_ref: 'wip/203-spike', head_sha: 'c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3' },
+      ],
+    });
+    render(<GitPullRequestsTab />);
+
+    await screen.findByText('WIP spike');
+    // Give the enrichment effect a tick to (NOT) fire — `waitFor` polls
+    // microtasks and finds that nothing arrived. The panel's
+    // `candidates.length === 0` short-circuit must skip the IPC
+    // entirely; if a future refactor fires the call with an empty
+    // array, this assertion catches it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(invoke).not.toHaveBeenCalledWith('get_prs_mergeability', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('get_pr_mergeability', expect.anything());
+  });
+
+  /// The closed-PR filter must NOT fire the enrichment effect — closed
+  /// PRs are read-only on the panel, so the per-PR HTTP cost is pure
+  /// waste. The early-return on `stateFilter !== 'open'` (line 291) is
+  /// load-bearing for the perf fix's value proposition; if a future
+  /// refactor drops it, the Closed view fires one batched call per
+  /// render that the panel ignores. Pin the negative so the guard is
+  /// not silently removed.
+  it('does not fire get_prs_mergeability on the Closed filter (issue #418)', async () => {
+    mockBackend();
+    render(<GitPullRequestsTab />);
+
+    // Wait for the Open list to load + enrichment to fire (so we know
+    // the IPC seam is open).
+    await screen.findByText('Add widget');
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('get_prs_mergeability', expect.anything());
+    });
+
+    // Reset the call history so the Closed-toggle's call to
+    // `get_prs_mergeability` (which we expect to be absent) is what we
+    // assert on, not the Open render's call.
+    vi.mocked(invoke).mockClear();
+
+    // Toggle to Closed.
+    await userEvent.click(screen.getByRole('button', { name: 'closed' }));
+    expect(await screen.findByText('Old change')).toBeTruthy();
+
+    // Give the enrichment effect a tick to (NOT) fire.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // The Closed view only calls `get_repo_pulls`; no enrichment.
+    const enrichmentCalls = vi
+      .mocked(invoke)
+      .mock.calls.filter(([c]) => c === 'get_prs_mergeability');
+    expect(enrichmentCalls).toHaveLength(0);
+  });
+
+  /// Per-PR error sentinel exhausts the bounded retry budget and leaves
+  /// the row in "Checking…" (no early bailout, no false conflict). Pin
+  /// the path because the batched endpoint's value proposition is "one
+  /// failed probe doesn't fail the batch" — the retry path then has to
+  /// also gracefully handle repeated failures without entering a tight
+  /// loop. The mock returns the error sentinel for all 4 attempts; we
+  /// advance fake timers past the full retry budget and assert no
+  /// further probes fire AND no extra row text is rendered.
+  it('exhausts the bounded retry budget when every attempt returns the error sentinel', async () => {
+    vi.useFakeTimers();
+    try {
+      const batchedCalls: number[][] = [];
+      vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+        switch (cmd) {
+          case 'get_repo_pulls':
+            return Promise.resolve(OPEN_PRS);
+          case 'get_prs_mergeability': {
+            const nums = (args as { prNumbers?: number[] })?.prNumbers ?? [];
+            batchedCalls.push([...nums]);
+            // Every attempt returns the error sentinel for every PR.
+            // PRs not in the fixture map (e.g. 201's standard clean
+            // result) also fail in this scenario to exercise the retry
+            // budget for ALL three non-draft PRs (201, 202, 204).
+            return Promise.resolve(
+              nums.map((n) => ({
+                number: n,
+                mergeable: null,
+                mergeable_state: 'error: GitHub API error (503): Service Unavailable',
+              })),
+            );
+          }
+          default:
+            return Promise.resolve({});
+        }
+      });
+
+      // Initial render + initial probe promise resolution.
+      await act(async () => {
+        render(<GitPullRequestsTab />);
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      // Initial batch landed with all 3 non-draft PRs.
+      expect(batchedCalls.length).toBe(1);
+      expect(batchedCalls[0]).toEqual([201, 202, 204]);
+
+      // Advance past every retry budget window: 1.5s + 3s + 4.5s = 9s.
+      // After all 3 retries, the row stays in "Checking…" — no 4th call.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+
+      // Initial + 3 retries = 4 batched calls. No 5th. The 5th would
+      // mean the retry path failed to honour MAX_MERGEABILITY_ATTEMPTS.
+      expect(batchedCalls.length).toBe(4);
+
+      // Every retry is a single batched call carrying ALL still-null PRs
+      // (the issue #418 perf contract holds on the retry path too —
+      // confirms the shared-timer rewrite).
+      expect(batchedCalls[1]).toEqual([201, 202, 204]);
+      expect(batchedCalls[2]).toEqual([201, 202, 204]);
+      expect(batchedCalls[3]).toEqual([201, 202, 204]);
+
+      // The rows stayed in "Checking…" — no false "Conflicts" labelling.
+      // PRs 202 (dirty in the standard fixture) and 204 (null in the
+      // standard fixture) both render "Checking…" because every entry
+      // carried the error sentinel, NOT the standard fixture result.
+      const checkingLabels = screen.getAllByText('Checking…');
+      expect(checkingLabels.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ----- "View changes" button (issue #421) ------------------------------
@@ -574,11 +807,17 @@ describe('GitPullRequestsTab', () => {
     // whatever `origin/<head_ref>` is currently at.
     mockBackend();
     // Override the PR list to omit head_sha for PR 201 (the first row).
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === 'get_repo_pulls') {
         return Promise.resolve(OPEN_PRS.map((pr) =>
           pr.number === 201 ? { ...pr, head_sha: '' } : pr,
         ));
+      }
+      if (cmd === 'get_prs_mergeability') {
+        // Issue #418 — the panel now fires a batched mergeability call.
+        // Reuse the fixture's standard per-PR map.
+        const nums = (args as { prNumbers?: number[] })?.prNumbers ?? [];
+        return Promise.resolve(mergeabilityEntriesFor(nums));
       }
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_pr_node') return Promise.resolve(PR_DRAFT);
@@ -607,10 +846,15 @@ describe('GitPullRequestsTab', () => {
     // dock, the user needs to be able to retry (e.g. transient `gh` hiccup,
     // a fork PR that the backend refuses, etc.). The error surfaces inline
     // on the row, the spawning label clears.
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_prs_mergeability') {
+        // Issue #418 — reuse the standard per-PR fixture map.
+        const nums = (args as { prNumbers?: number[] })?.prNumbers ?? [];
+        return Promise.resolve(mergeabilityEntriesFor(nums));
+      }
       if (cmd === 'create_pr_node') return Promise.reject(new Error("PR's fork info is incomplete (head_repo_owner and head_repo_clone_url must both be present, or both absent). Reload the PR list and retry."));
       return Promise.resolve({});
     });
@@ -634,10 +878,15 @@ describe('GitPullRequestsTab', () => {
 
   it('disables the split button while a spawn is in flight to block double-clicks', async () => {
     let resolveCreate!: (v: typeof PR_DRAFT) => void;
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_prs_mergeability') {
+        // Issue #418 — reuse the standard per-PR fixture map.
+        const nums = (args as { prNumbers?: number[] })?.prNumbers ?? [];
+        return Promise.resolve(mergeabilityEntriesFor(nums));
+      }
       if (cmd === 'create_pr_node') return new Promise((res) => { resolveCreate = res; });
       return Promise.resolve({});
     });

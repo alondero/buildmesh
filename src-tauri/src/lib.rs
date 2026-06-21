@@ -261,6 +261,7 @@ pub fn run() {
             commands::pr::get_open_pr_for_node,
             commands::pr::get_repo_pulls,
             commands::pr::get_pr_mergeability,
+            commands::pr::get_prs_mergeability,
             commands::pr::get_pr_files,
             // AI context portability
             commands::ai_context::detect_ai_context,
