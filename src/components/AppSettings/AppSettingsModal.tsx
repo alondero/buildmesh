@@ -18,7 +18,17 @@ const NO_OVERRIDE = '__no_override__';
 // Built-ins can only be disabled, never removed (a "remove" just reverts them to
 // the code default), so we hide the Remove action for these ids. Kept in sync with
 // `preferences::default_provider_accounts`.
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax'];
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax', 'kimi'];
+
+// The five Claude model aliases a Claude-compatible provider can pin (issue #567).
+// `key` is the ProviderAccount.model_tiers field; `label` is the UI caption.
+const MODEL_TIER_FIELDS: { key: keyof ProviderAccount['model_tiers']; label: string }[] = [
+  { key: 'default', label: 'Default model' },
+  { key: 'opus', label: 'Opus' },
+  { key: 'sonnet', label: 'Sonnet' },
+  { key: 'haiku', label: 'Haiku' },
+  { key: 'small_fast', label: 'Small / fast' },
+];
 
 export function UsageBar({ window }: { window: UsageWindow }) {
   const percent = window.usedPercent ?? 0;
@@ -85,7 +95,14 @@ export function AccountCard({
   useEffect(() => setDraft(account), [account]);
 
   const isCustom = !BUILTIN_PROVIDER_IDS.includes(account.id);
+  // Self-authenticating harnesses (Anthropic/Codex/Antigravity) hold no creds in
+  // Buildmesh, so they show no credential or model-tier fields (#568a). Only
+  // Claude-compatible keyed providers (MiniMax/Kimi/custom) do.
+  const showCredentials = account.claude_compatible;
   const payg = account.billing_mode === 'pay_as_you_go';
+
+  const setTier = (key: keyof ProviderAccount['model_tiers'], value: string) =>
+    setDraft({ ...draft, model_tiers: { ...draft.model_tiers, [key]: value || null } });
 
   const toggleEnabled = async (enabled: boolean) => {
     setBusy(true);
@@ -160,14 +177,16 @@ export function AccountCard({
 
       {renderUsage()}
 
-      <button
-        onClick={() => setShowCreds(v => !v)}
-        className="mt-3 text-sm text-accent-cyan hover:text-accent-cyan/80"
-      >
-        {showCreds ? 'Hide credentials' : 'Edit credentials'}
-      </button>
+      {showCredentials && (
+        <button
+          onClick={() => setShowCreds(v => !v)}
+          className="mt-3 text-sm text-accent-cyan hover:text-accent-cyan/80"
+        >
+          {showCreds ? 'Hide credentials' : 'Edit credentials'}
+        </button>
+      )}
 
-      {showCreds && (
+      {showCredentials && showCreds && (
         <div className="mt-3 space-y-3">
           <div>
             <label className="block text-sm text-text-muted mb-1">API key</label>
@@ -186,26 +205,31 @@ export function AccountCard({
               type="text"
               value={draft.base_url ?? ''}
               onChange={e => setDraft({ ...draft, base_url: e.target.value || null })}
-              placeholder="https://api.example.com/v1"
+              placeholder="https://api.example.com/anthropic"
               className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} base URL`}
             />
           </div>
           <div>
-            <label className="block text-sm text-text-muted mb-1">Custom models (comma-separated)</label>
-            <input
-              type="text"
-              value={draft.models.join(', ')}
-              onChange={e =>
-                setDraft({
-                  ...draft,
-                  models: e.target.value.split(',').map(s => s.trim()).filter(Boolean),
-                })
-              }
-              placeholder="model-a, model-b"
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
-              aria-label={`${account.name} custom models`}
-            />
+            <label className="block text-sm text-text-muted mb-1">Models</label>
+            <p className="text-sm text-text-muted mb-2">
+              Which model backs each Claude tier. Background tasks use small / fast.
+            </p>
+            <div className="space-y-2">
+              {MODEL_TIER_FIELDS.map(({ key, label }) => (
+                <div key={key} className="flex items-center gap-3">
+                  <span className="w-28 shrink-0 text-sm text-text-muted">{label}</span>
+                  <input
+                    type="text"
+                    value={draft.model_tiers[key] ?? ''}
+                    onChange={e => setTier(key, e.target.value)}
+                    placeholder="model id"
+                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                    aria-label={`${account.name} ${label} model`}
+                  />
+                </div>
+              ))}
+            </div>
           </div>
           <div>
             <label className="block text-sm text-text-muted mb-1">Billing</label>
@@ -298,7 +322,10 @@ export function AddCustomProviderForm({
       <div className="flex gap-3">
         <button
           onClick={submit}
-          disabled={busy || !name.trim()}
+          // A custom Claude-compatible provider needs all three: without a base
+          // URL + key it can't reach its endpoint, and the spawn menu only shows
+          // keyed providers — a keyless add would save a row that never appears.
+          disabled={busy || !name.trim() || !baseUrl.trim() || !apiKey.trim()}
           className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
         >
           {busy ? 'Adding...' : 'Add provider'}
@@ -448,9 +475,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       id,
       name: name.trim(),
       enabled: true,
+      // Backend re-derives this from the id; set it so the optimistic local row
+      // shows credential + model-tier fields before the reload lands.
+      claude_compatible: true,
       billing_mode: 'pay_as_you_go',
       api_key: apiKey.trim() || null,
       base_url: baseUrl.trim() || null,
+      model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, haiku: null },
       models: [],
     });
     // Keep the form open (with the user's entries) if the backend rejected it.

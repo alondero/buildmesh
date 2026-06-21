@@ -95,8 +95,10 @@ mod tests {
             name: id.to_string(),
             enabled,
             billing_mode: BillingMode::Plan,
+            claude_compatible: crate::preferences::is_claude_compatible_id(id),
             api_key: None,
             base_url: None,
+            model_tiers: crate::preferences::ModelTiers::default(),
             models: Vec::new(),
         }
     }

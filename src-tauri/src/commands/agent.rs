@@ -57,20 +57,72 @@ fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platfor
     })
 }
 
+/// Compose the `ProviderInfo` row for a configured Claude-compatible provider
+/// account (MiniMax, Kimi, or a custom endpoint). These spawn via the Claude Code
+/// (`anthropic`) executor with the account's endpoint + per-tier models injected
+/// at spawn ([`crate::preferences::resolve_provider_env`]), so the row borrows the
+/// Anthropic adapter's UI and resume capability. The frontend `ProviderIcon` keys
+/// off the row `id`, so a "minimax"/"kimi"/custom id renders its own brand mark.
+/// Returns None if the Claude executor isn't available on this host.
+fn provider_info_for_account(
+    account: &crate::preferences::ProviderAccount,
+    host: Platform,
+) -> Option<ProviderInfo> {
+    let adapter = crate::models::Provider::Anthropic.adapter();
+    if !adapter.available_on().contains(&host) {
+        return None;
+    }
+    let ui = adapter.ui();
+    Some(ProviderInfo {
+        id: account.id.clone(),
+        label: account.name.clone(),
+        color: ui.color,
+        icon: ui.icon,
+        resumable: adapter.supports_resume() && adapter.produces_readable_transcript(),
+    })
+}
+
+/// Build the spawn menu from the two configuration lists. Pure (no disk/globals)
+/// so the derivation is the unit-test seam.
+///
+/// Harness profiles (Terminal + startup-detected Claude/Codex/Antigravity/OpenCode)
+/// come first, then every **configured** Claude-compatible provider account —
+/// enabled, with a non-empty API key — is appended as a Claude-Code-backed row
+/// (deduped by id). This is what surfaces a keyed built-in MiniMax/Kimi or a custom
+/// endpoint in the menu without a second stored list to keep in sync; clearing the
+/// key or disabling the account drops the row automatically (issue #568).
+fn compose_provider_menu(
+    profiles: Vec<crate::preferences::HarnessProfile>,
+    accounts: Vec<crate::preferences::ProviderAccount>,
+    host: Platform,
+) -> Vec<ProviderInfo> {
+    let mut rows: Vec<ProviderInfo> = profiles
+        .iter()
+        .filter_map(|profile| provider_info_for(profile, host))
+        .collect();
+    for account in accounts {
+        let keyed = account.api_key.as_deref().is_some_and(|k| !k.is_empty());
+        if account.claude_compatible
+            && account.enabled
+            && keyed
+            && !rows.iter().any(|r| r.id == account.id)
+        {
+            if let Some(info) = provider_info_for_account(&account, host) {
+                rows.push(info);
+            }
+        }
+    }
+    order_providers(rows)
+}
+
 /// Returns the list of agent providers available on this host platform.
 /// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
-    let host = Platform::current();
-    // Only the user's dynamic harness profiles are offered (issue #538 retired
-    // the hardcoded legacy [`Provider`] enum rows and the "Legacy" grouping).
-    // `id`/`label` come from the profile; `color`/`icon` borrow the backing
-    // executor's UI so a profile row looks like its harness. Profiles whose
-    // backing executor isn't available on this host are filtered out.
-    let providers = crate::preferences::harness_profiles()
-        .into_iter()
-        .filter_map(|profile| provider_info_for(&profile, host))
-        .collect();
-    order_providers(providers)
+    compose_provider_menu(
+        crate::preferences::harness_profiles(),
+        crate::preferences::provider_accounts(),
+        Platform::current(),
+    )
 }
 
 /// Order the provider menu: every real harness first (keeping their existing
@@ -964,6 +1016,78 @@ mod tests {
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         // Terminal last; the two real harnesses keep their input order.
         assert_eq!(ids, vec!["claude", "codex", "terminal"]);
+    }
+
+    // ----- compose_provider_menu (issue #568) ----------------------------
+    //
+    // The spawn menu is derived: harness profiles + configured Claude-compatible
+    // accounts. `compose_provider_menu` is the pure seam so account-inclusion can
+    // be pinned without driving `provider_accounts()` (disk + globals).
+
+    fn profile(id: &str, harness: &str) -> crate::preferences::HarnessProfile {
+        crate::preferences::HarnessProfile {
+            id: id.to_string(),
+            name: id.to_string(),
+            harness: harness.to_string(),
+        }
+    }
+
+    fn acct(id: &str, enabled: bool, key: Option<&str>) -> crate::preferences::ProviderAccount {
+        crate::preferences::ProviderAccount {
+            id: id.to_string(),
+            name: format!("{id} acct"),
+            enabled,
+            billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+            claude_compatible: crate::preferences::is_claude_compatible_id(id),
+            api_key: key.map(str::to_string),
+            base_url: Some("https://api.example.com/anthropic".to_string()),
+            model_tiers: crate::preferences::ModelTiers::default(),
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn compose_menu_adds_enabled_keyed_claude_compatible_accounts() {
+        let menu = compose_provider_menu(
+            vec![profile("terminal", "terminal")],
+            vec![acct("minimax", true, Some("sk-mm")), acct("kimi", true, Some("sk-moon"))],
+            Platform::Windows,
+        );
+        let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
+        assert!(ids.contains(&"minimax"), "keyed MiniMax must appear in the menu");
+        assert!(ids.contains(&"kimi"), "keyed Kimi must appear in the menu");
+        // The MiniMax row carries its own id so the frontend renders the brand icon.
+        let mm = menu.iter().find(|p| p.id == "minimax").unwrap();
+        assert_eq!(mm.label, "minimax acct");
+        // Terminal still sorts last.
+        assert_eq!(ids.last(), Some(&"terminal"));
+    }
+
+    #[test]
+    fn compose_menu_excludes_unconfigured_or_disabled_accounts() {
+        let menu = compose_provider_menu(
+            vec![profile("terminal", "terminal")],
+            vec![
+                acct("minimax", true, None),          // enabled but no key
+                acct("kimi", false, Some("sk-moon")), // keyed but disabled
+                acct("anthropic", true, Some("x")),   // self-auth → not claude_compatible
+            ],
+            Platform::Windows,
+        );
+        let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["terminal"], "none of these should reach the menu");
+    }
+
+    #[test]
+    fn compose_menu_does_not_duplicate_a_detected_profile() {
+        // A detected "claude" harness profile and a (hypothetical) same-id account
+        // must not both appear — the profile wins, no duplicate row.
+        let menu = compose_provider_menu(
+            vec![profile("claude", "anthropic")],
+            vec![acct("claude", true, Some("k"))],
+            Platform::Windows,
+        );
+        assert_eq!(menu.iter().filter(|p| p.id == "claude").count(), 1);
     }
 
     // ----- create_pr_node_impl seams (issue #445) -----------------------
