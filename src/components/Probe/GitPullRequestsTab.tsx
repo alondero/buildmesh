@@ -10,13 +10,15 @@
  * ----------------------------------
  * GitHub's `/pulls` list endpoint does NOT return `mergeable` — only the
  * single-PR detail endpoint does, and even there it's `null` while GitHub
- * computes the merge asynchronously. So the list loads fast, then each open,
- * non-draft PR is enriched in parallel via `getPrMergeability`. Until that
- * resolves the row shows "Checking…"; a draft PR is flagged without any
- * detail call. If GitHub returns `null` (still computing) the enrichment
- * effect schedules a bounded retry so the row doesn't get stuck on
- * "Checking…" forever — see issue #419 and the inline note above the
- * enrichment useEffect.
+ * computes the merge asynchronously. So the list loads fast, then every
+ * open, non-draft PR is enriched in ONE batched `getPrsMergeability` call
+ * (issue #418 — replaced the per-PR fan-out that cost N× token
+ * resolutions). Until that resolves each row shows "Checking…"; a draft
+ * PR is flagged without any detail call. If GitHub returns `null` (still
+ * computing) the enrichment effect schedules a bounded retry so the row
+ * doesn't get stuck on "Checking…" forever — see issue #419 and the
+ * inline note above the enrichment useEffect. The retry path is itself
+ * a single batched call carrying every still-null PR.
  *
  * Merge is squash + delete branch (the existing `merge_pr`), gated behind an
  * inline confirm because it's an irreversible outward action. On success the
@@ -53,7 +55,7 @@
 import { useState } from 'react';
 import {
   getRepoPulls,
-  getPrMergeability,
+  getPrsMergeability,
   mergePr,
   createPrNode,
   startNodeBackground,
@@ -259,70 +261,121 @@ export function GitPullRequestsTab() {
     })();
   }, [activeMeshId, stateFilter, reloadKey]);
 
-  // Enrich each open, non-draft PR with its mergeability in parallel. Closed
-  // PRs can't be merged, and drafts are flagged without a call, so both skip.
-  // Keyed on the list (not the `mergeability` map) so it runs exactly once per
-  // load — depending on the map would let the first probe's setState cancel the
-  // siblings' in-flight callbacks and force needless refetches. `load` already
-  // clears the map, so there's nothing stale to guard against here.
+  // Enrich each open, non-draft PR with its mergeability via ONE batched
+  // IPC call (issue #418). The previous implementation fired N parallel
+  // `getPrMergeability` calls; each one constructed a fresh `GitHubClient::new()`
+  // → `resolve_token()`, and when the token resolves only via the
+  // `gh auth token` subprocess fallback (no `GITHUB_TOKEN`/`GH_TOKEN` env
+  // var and no `oauth_token` in `hosts.yml` — the keyring case), every
+  // call spawned `gh` (~200–300ms on Windows). Batching N PRs behind one
+  // token resolution cuts auth cost by N× per panel render.
+  //
+  // Closed PRs can't be merged, and drafts are flagged without a call,
+  // so both skip. Keyed on the list (not the `mergeability` map) so it
+  // runs exactly once per load — depending on the map would let the first
+  // batch's setState cancel the siblings' in-flight callbacks and force
+  // needless refetches. `load` already clears the map, so there's nothing
+  // stale to guard against here.
   //
   // Re-poll on `mergeable: null` (issue #419)
   // ----------------------------------------
-  // GitHub computes the merge asynchronously, so the detail endpoint can return
-  // `mergeable: null` for a few seconds. We schedule a bounded retry — first
-  // retry after 1.5s, then 3s, 4.5s — and give up after `MAX_MERGEABILITY_ATTEMPTS`
-  // total (1 initial + 3 retries, ~9s). Past that, "Checking…" is the best we
-  // can do without spamming GitHub; the next list reload retries from scratch.
-  // Cleanup clears every pending retry timer so a filter toggle / mesh change /
-  // unmount tears down the whole chain at once.
+  // GitHub computes the merge asynchronously, so the detail endpoint can
+  // return `mergeable: null` for a few seconds. We schedule a bounded retry
+  // — first retry after 1.5s, then 3s, 4.5s — and give up after
+  // `MAX_MERGEABILITY_ATTEMPTS` total (1 initial + 3 retries, ~9s). Past
+  // that, "Checking…" is the best we can do without spamming GitHub; the
+  // next list reload retries from scratch.
+  //
+  // Crucially, the retry path is itself a SINGLE batched call carrying
+  // every still-null PR number from the previous attempt — not one
+  // per-stuck-PR retry timer. The auth cost amortises across the
+  // still-unresolved PRs at every attempt boundary, mirroring the initial
+  // call's contract (issue #418). One `setTimeout` per attempt fires once
+  // after `BASE_RETRY_DELAY_MS * currentAttempt`; if it finds no PRs are
+  // still-null, it doesn't fire a follow-up.
   useAsyncEffect((signal) => {
     if (activeMeshId === null || stateFilter !== 'open') return;
-    // Per-PR retry timers + attempt counts. Maps are owned by this effect
-    // instance; cleanup discards them and clears the timers.
-    const retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
-    const attempts = new Map<number, number>();
     const MAX_MERGEABILITY_ATTEMPTS = 4;
     const BASE_RETRY_DELAY_MS = 1500;
+    // Per-PR attempt count + the shared retry timer (one per attempt
+    // boundary). Owned by this effect instance; cleanup clears the timer
+    // and discards the maps.
+    const attempts = new Map<number, number>();
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const probe = (pr: GitHubPullRequest) => {
-      getPrMergeability(activeMeshId, pr.number)
-        .then((info) => {
+    const probeNumbers = (numbers: number[], attemptBoundary: number) => {
+      getPrsMergeability(activeMeshId, numbers)
+        .then((entries) => {
           if (signal.aborted) return;
-          setMergeability((prev) => ({ ...prev, [pr.number]: info }));
-          // Still computing — schedule a bounded retry.
-          if (info.mergeable === null) {
-            const attempt = (attempts.get(pr.number) ?? 0) + 1;
-            if (attempt < MAX_MERGEABILITY_ATTEMPTS) {
-              attempts.set(pr.number, attempt);
-              const delay = BASE_RETRY_DELAY_MS * attempt;
-              const timer = setTimeout(() => {
-                retryTimers.delete(pr.number);
-                if (signal.aborted) return;
-                probe(pr);
-              }, delay);
-              retryTimers.set(pr.number, timer);
+          // Visible PR numbers as a Set for O(1) stale-entry filtering —
+          // a mid-flight mesh/filter change can deliver entries for PRs
+          // no longer in the rendered list. Entries outside the visible
+          // set are dropped from the state map (their rows aren't
+          // rendered, and storing them risks stale-mergeability reads on
+          // subsequent renders of the same PR number).
+          const visible = new Set(
+            prs.filter((pr) => !pr.draft).map((pr) => pr.number),
+          );
+          setMergeability((prev) => {
+            const next = { ...prev };
+            for (const entry of entries) {
+              if (!visible.has(entry.number)) continue;
+              next[entry.number] = {
+                mergeable: entry.mergeable,
+                mergeable_state: entry.mergeable_state,
+              };
             }
-            // else: exhausted retries; row stays in "Checking…" (matches
-            // pre-fix behaviour and avoids spamming GitHub).
+            return next;
+          });
+          // Collect every entry that's still-null AND has budget left.
+          // Both "GitHub still computing" and the per-PR error sentinel
+          // (`mergeable: None, mergeable_state: "error: ..."`) leave the
+          // row in "Checking…" and need a follow-up.
+          const stillNull: number[] = [];
+          for (const entry of entries) {
+            if (entry.mergeable !== null) continue;
+            const attempt = (attempts.get(entry.number) ?? 0) + 1;
+            if (attempt < MAX_MERGEABILITY_ATTEMPTS) {
+              attempts.set(entry.number, attempt);
+              stillNull.push(entry.number);
+            }
+            // else: exhausted retries; row stays in "Checking…" until
+            // the next list reload retries from scratch.
           }
+          if (stillNull.length === 0 || attemptBoundary + 1 >= MAX_MERGEABILITY_ATTEMPTS) return;
+          // ONE timer for the next attempt boundary, regardless of how
+          // many PRs are still stuck. Firing once at t+1.5s/3s/4.5s and
+          // probing the still-null set as one batched call keeps the
+          // auth cost amortised per-attempt, not per-PR.
+          const nextAttempt = attemptBoundary + 1;
+          const delay = BASE_RETRY_DELAY_MS * nextAttempt;
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            if (signal.aborted) return;
+            probeNumbers(stillNull, nextAttempt);
+          }, delay);
         })
         .catch((e) => {
-          // A failed mergeability probe leaves the row in "Checking…" rather
-          // than falsely claiming conflicts; the next list reload retries.
-          console.error(`mergeability probe failed for PR #${pr.number}:`, e);
+          // The whole batch failed (e.g. auth-missing → `GitHubClient::new()`
+          // errored at the command boundary). Per-PR failures inside the
+          // batch surface as `mergeable: null` entries above, not as a
+          // thrown rejection here — so a reject is the rare "couldn't even
+          // start" case. Leave every row in "Checking…" rather than
+          // falsely claiming conflicts; the next list reload retries.
+          console.error('mergeability batch probe failed:', e);
         });
     };
 
-    prs
-      .filter((pr) => !pr.draft)
-      .forEach((pr) => {
-        attempts.set(pr.number, 0);
-        probe(pr);
-      });
+    const candidates = prs.filter((pr) => !pr.draft).map((pr) => pr.number);
+    // Empty list short-circuits the IPC; the backend would too, but
+    // skipping the wire call here keeps the `activeMeshId === null` /
+    // no-PR rows path off the IPC seam entirely.
+    if (candidates.length === 0) return;
+    for (const n of candidates) attempts.set(n, 0);
+    probeNumbers(candidates, 0);
 
     return () => {
-      for (const timer of retryTimers.values()) clearTimeout(timer);
-      retryTimers.clear();
+      if (retryTimer !== null) clearTimeout(retryTimer);
     };
   }, [prs, stateFilter, activeMeshId]);
 

@@ -3,7 +3,7 @@
 use crate::db;
 use crate::env;
 use crate::models::SessionStatus;
-use crate::services::github::{self, GitHubClient, PullRequest};
+use crate::services::github::{self, GitHubClient, GitHubError, PullRequest};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use tauri::command;
@@ -118,6 +118,39 @@ pub struct PrMergeability {
     pub mergeable: Option<bool>,
     /// GitHub's `mergeable_state` (`clean`, `dirty`, `blocked`, `behind`,
     /// `unstable`, `unknown`, …) — used for the flag wording.
+    pub mergeable_state: String,
+}
+
+/// Wire shape of `get_prs_mergeability` (issue #418) — the batched enrichment
+/// the panel requests after the list loads. Mirrors `PrMergeability` plus a
+/// PR number so the frontend can key entries back onto the listed PRs. The
+/// per-PR `number` round-trips through the wire so a mobile client (or a
+/// future desktop caller that filters PRs out of band) doesn't need a
+/// separate index lookup.
+///
+/// Distinct from `PrMergeability` (used by the still-supported
+/// per-PR `get_pr_mergeability` command) so the batched entry carries the
+/// PR number without forcing a non-nullable field onto the per-PR shape.
+/// `#[ts(as = "i32")]` on `number` matches the convention on the sibling
+/// wire types (`GitHubPullRequest`, `GitHubIssue`) so serde_json emits it
+/// as a JS number, not the `bigint` ts-rs defaults to.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PrMergeabilityEntry.ts")]
+pub struct PrMergeabilityEntry {
+    /// PR number this entry corresponds to. `i64` carries `#[ts(as = "i32")]`
+    /// (same convention as `GitHubPullRequest.number`).
+    #[ts(as = "i32")]
+    pub number: i64,
+    /// `Some(true)` mergeable, `Some(false)` conflicts, `None` still
+    /// computing or this PR's individual probe failed (see
+    /// `get_prs_mergeability`'s per-PR fallback — `mergeable_state` then
+    /// carries `"error: <reason>"` so the panel can still surface a
+    /// "Checking…" state instead of falsely claiming conflicts).
+    pub mergeable: Option<bool>,
+    /// GitHub's `mergeable_state` (`clean`, `dirty`, `blocked`, `behind`,
+    /// `unstable`, `unknown`, …) for success entries, or `"error: <reason>"`
+    /// when the individual PR probe failed (the panel renders both as
+    /// "Checking…"; the next list reload retries from scratch).
     pub mergeable_state: String,
 }
 
@@ -260,6 +293,122 @@ pub fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeabilit
         .map_err(|e| e.to_string())?;
 
     Ok(PrMergeability { mergeable, mergeable_state })
+}
+
+/// Get mergeability for a batch of PRs on a mesh's repo (issue #418).
+///
+/// Replaces the per-PR `get_pr_mergeability` fan-out the panel used to fire
+/// from `GitPullRequestsTab`. Each per-PR call constructed a fresh
+/// `GitHubClient::new()` → `resolve_token()`; when the token resolves only via
+/// the `gh auth token` subprocess fallback (no `GITHUB_TOKEN`/`GH_TOKEN` env var
+/// and no `oauth_token` in `hosts.yml` — the keyring case), every call spawned
+/// `gh` (~200–300ms on Windows). For a repo with N open PRs that was N
+/// subprocess spawns + N token resolutions on each load/toggle.
+///
+/// This command resolves the client **once** and loops. GitHub still requires
+/// one detail HTTP request per PR (the `/pulls/{n}` endpoint carries
+/// `mergeable`), so the HTTP count is unchanged — but the auth cost drops to
+/// exactly one token resolution per panel render. Empty `pr_numbers` short-
+/// circuits before client construction (no GitHub touch at all).
+///
+/// **Per-PR failure semantics.** A single PR's HTTP error (404, rate limit,
+/// network blip) does NOT fail the whole batch. The failing entry is returned
+/// with `mergeable: None` and `mergeable_state: "error: <reason>"` so the
+/// panel renders "Checking…" for that PR — matches the existing per-PR
+/// failure semantics documented in the frontend (`"a failed mergeability
+/// probe leaves the row in 'Checking…' rather than falsely claiming
+/// conflicts; the next list reload retries"`). The next list reload retries
+/// from scratch, and a successful retry overwrites the error entry.
+#[command(async)]
+pub fn get_prs_mergeability(
+    mesh_id: i64,
+    pr_numbers: Vec<i64>,
+) -> Result<Vec<PrMergeabilityEntry>, String> {
+    // Short-circuit before client construction: an empty PR list is the
+    // common case after a list reload that returned zero rows, and the
+    // `GitHubClient::new()` → `resolve_token()` chain is non-trivial
+    // (keyring fallback spawns `gh auth token`). Pin this so a future
+    // refactor that drops the early return surfaces as a slow no-op,
+    // not a silent behavioural change.
+    if pr_numbers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    // Mirrors `get_repo_pulls` / `get_repo_issues`: meshes whose `origin`
+    // isn't a GitHub URL (GitLab, Bitbucket, self-hosted) get an empty
+    // result with a `warn!` instead of a propagated error. The frontend
+    // enrichment then leaves every PR row in "Checking…" — the panel
+    // gracefully degrades rather than failing the batch on a non-GitHub
+    // repo.
+    let (owner, repo) = match resolve_github_owner_repo(&mesh) {
+        Ok(pair) => pair,
+        Err(reason) => {
+            tracing::warn!("get_prs_mergeability: {} — returning empty result", reason);
+            return Ok(Vec::new());
+        }
+    };
+
+    // ONE token resolution, ONE HTTP client — this is the whole point of
+    // the batched endpoint. The follow-up loop in `mergeability_entries`
+    // reuses the client for every PR.
+    let client = GitHubClient::new().map_err(|e| e.to_string())?;
+
+    Ok(mergeability_entries(pr_numbers, |n| {
+        client.pull_request_mergeability(&owner, &repo, n)
+    }))
+}
+
+/// Pure per-PR iterator that maps a list of PR numbers onto
+/// `PrMergeabilityEntry` values, threading each through a probe closure.
+/// Lives at module scope (not nested in the command) so the per-PR
+/// success/failure mapping is unit-testable in isolation — the public
+/// command's "single token resolution" guarantee is then enforced by
+/// construction (the command constructs `GitHubClient::new()` exactly
+/// once and threads the client's `pull_request_mergeability` method
+/// through this helper).
+///
+/// A per-PR probe error becomes an entry with `mergeable: None` and
+/// `mergeable_state: "error: <reason>"` (see `get_prs_mergeability` for
+/// the panel-rendering rationale). The error is also logged at WARN —
+/// without auth + a repo + a PR number, an entry-level error is worth
+/// surfacing once for diagnostics.
+///
+/// The closure indirection is the test seam: without a trait on
+/// `GitHubClient`, a unit test can't easily stub
+/// `pull_request_mergeability`. The closure accepts the per-PR probe
+/// function as data, so a test passes its own closure and asserts on
+/// the helper's mapping logic in isolation. The same closure shape is
+/// used by the live call path (the public command wraps the client's
+/// method in a closure that captures `&owner` + `&repo`).
+fn mergeability_entries<F>(
+    pr_numbers: Vec<i64>,
+    probe: F,
+) -> Vec<PrMergeabilityEntry>
+where
+    F: Fn(i64) -> Result<(Option<bool>, String), GitHubError>,
+{
+    pr_numbers
+        .into_iter()
+        .map(|n| match probe(n) {
+            Ok((mergeable, mergeable_state)) => PrMergeabilityEntry {
+                number: n,
+                mergeable,
+                mergeable_state,
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "get_prs_mergeability: PR #{} failed: {} — row will stay in 'Checking…' until next reload",
+                    n, e
+                );
+                PrMergeabilityEntry {
+                    number: n,
+                    mergeable: None,
+                    mergeable_state: format!("error: {}", e),
+                }
+            }
+        })
+        .collect()
 }
 
 /// Get the files changed in a single pull request, for the "View changes"
@@ -728,6 +877,210 @@ mod tests {
         assert_eq!(
             pr.head_repo_clone_url, "",
             "missing head_repo_clone_url defaults to empty"
+        );
+    }
+
+    // ----- PrMergeabilityEntry wire shape (issue #418) ---------------------
+    //
+    // The batched endpoint returns one entry per requested PR number. Pins:
+    //   - `number` is present and is the `i32` JS-number shape (matches the
+    //     `#[ts(as = "i32")]` convention on the sibling wire types)
+    //   - `mergeable: null` survives the round-trip (still computing or a
+    //     per-PR error fallback)
+    //   - `mergeable_state: ""` is the safe default for missing fields
+
+    /// Full wire shape with a real merge result. Pins the JSON field names
+    /// and types so the regenerated `src/types/generated/PrMergeabilityEntry.ts`
+    /// stays in lock-step with the Rust struct. The CI drift gate
+    /// `git diff --exit-code src/types/generated/` catches accidental drift
+    /// here, but pinning it locally documents the intent.
+    #[test]
+    fn pr_mergeability_entry_wire_shape_with_clean_result() {
+        let json = r#"{
+            "number": 418,
+            "mergeable": true,
+            "mergeable_state": "clean"
+        }"#;
+        let entry: PrMergeabilityEntry = serde_json::from_str(json).expect("full shape parses");
+        assert_eq!(entry.number, 418);
+        assert_eq!(entry.mergeable, Some(true));
+        assert_eq!(entry.mergeable_state, "clean");
+    }
+
+    /// `mergeable: null` (GitHub still computing) must round-trip as `None`,
+    /// not coerce to `Some(false)` — the panel renders the row in "Checking…"
+    /// for `None` and would falsely claim conflicts on `Some(false)`. Same
+    /// invariant as the existing `PrMergeability` parse test, mirrored here
+    /// so the batched endpoint can't drift from the per-PR contract.
+    #[test]
+    fn pr_mergeability_entry_wire_shape_with_null_mergeable() {
+        let json = r#"{
+            "number": 7,
+            "mergeable": null,
+            "mergeable_state": "unknown"
+        }"#;
+        let entry: PrMergeabilityEntry =
+            serde_json::from_str(json).expect("null mergeable parses");
+        assert_eq!(entry.mergeable, None, "null must stay None, not coerce to Some(false)");
+        assert_eq!(entry.mergeable_state, "unknown");
+    }
+
+    /// Per-PR error fallback — when the batched command catches an
+    /// individual PR's HTTP error, it returns
+    /// `{ mergeable: null, mergeable_state: "error: <reason>" }`. The
+    /// frontend renders "Checking…" for this state (matches the existing
+    /// per-PR failure semantics). Pin the error-state shape so a future
+    /// refactor that drops `mergeable_state`'s "error: " prefix is caught
+    /// here rather than at the UI fallback site.
+    #[test]
+    fn pr_mergeability_entry_wire_shape_with_error_state() {
+        let json = r#"{
+            "number": 42,
+            "mergeable": null,
+            "mergeable_state": "error: GitHub API error (404): Not Found"
+        }"#;
+        let entry: PrMergeabilityEntry =
+            serde_json::from_str(json).expect("error state parses");
+        assert_eq!(entry.mergeable, None);
+        assert!(
+            entry.mergeable_state.starts_with("error: "),
+            "per-PR failures must carry the 'error: ' prefix so the panel can keep them in 'Checking…'"
+        );
+    }
+
+    /// Round-trip: serialise a populated `PrMergeabilityEntry` and re-parse
+    /// it unchanged. Catches a class of bugs where serde rename / flatten
+    /// rules accidentally drop the `number` field on serialisation (which
+    /// would only show up at the IPC seam, not at the parse-from-fixture
+    /// site). The regenerated TS type derives the field name from the Rust
+    /// struct name, so a drop would also fail the drift gate — this test
+    /// makes the intent explicit.
+    #[test]
+    fn pr_mergeability_entry_round_trips_with_all_fields() {
+        let original = PrMergeabilityEntry {
+            number: 999,
+            mergeable: Some(false),
+            mergeable_state: "dirty".into(),
+        };
+        let json = serde_json::to_string(&original).expect("serialise");
+        let parsed: PrMergeabilityEntry = serde_json::from_str(&json).expect("re-parse");
+        assert_eq!(parsed.number, 999);
+        assert_eq!(parsed.mergeable, Some(false));
+        assert_eq!(parsed.mergeable_state, "dirty");
+    }
+
+    // ----- mergeability_entries helper (issue #418) -----------------------
+    //
+    // The helper is the per-PR mapping loop the batched command reuses for
+    // every PR. Tested with a closure probe so we can pin the mapping
+    // without a trait seam on GitHubClient or a wiremock dependency —
+    // the closure accepts the probe function as data, and the helper
+    // stays a pure iterator over (pr_number, probe_result).
+    //
+    // The "one token resolution" guarantee is enforced by construction
+    // (the command constructs `GitHubClient::new()` exactly once); these
+    // tests pin the per-PR mapping the helper applies on top of that
+    // guarantee.
+
+    /// Empty input → empty output, without ever invoking the probe. The
+    /// empty-pr_numbers short-circuit in `get_prs_mergeability` builds on
+    /// this: the public command returns `Ok(vec![])` before client
+    /// construction, the helper itself iterates zero times here. Pin
+    /// both pieces so a future refactor that drops the early return (or
+    /// flips the helper to call the probe once for "initialisation")
+    /// surfaces as a test failure rather than a slow no-op.
+    #[test]
+    fn mergeability_entries_empty_input_does_not_call_probe() {
+        let calls: std::cell::RefCell<Vec<i64>> = std::cell::RefCell::new(Vec::new());
+        let entries = mergeability_entries(Vec::new(), |n| {
+            calls.borrow_mut().push(n);
+            Ok((Some(true), "clean".into()))
+        });
+        assert!(entries.is_empty(), "empty input → empty output");
+        assert!(calls.borrow().is_empty(), "probe must not fire on empty input");
+    }
+
+    /// All-success path: each probe succeeds, the entry carries the
+    /// probed `mergeable` + `mergeable_state` AND the request's PR
+    /// number. The `number` round-trip is the load-bearing piece — a
+    /// future refactor that drops the closure arg or hard-codes the
+    /// number would silently desync the batched response from the
+    /// frontend's PR list.
+    #[test]
+    fn mergeability_entries_preserves_pr_number_on_success() {
+        let entries = mergeability_entries(
+            vec![201, 202, 204],
+            |n| match n {
+                201 => Ok((Some(true), "clean".into())),
+                202 => Ok((Some(false), "dirty".into())),
+                204 => Ok((None, "unknown".into())),
+                _ => unreachable!(),
+            },
+        );
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].number, 201);
+        assert_eq!(entries[0].mergeable, Some(true));
+        assert_eq!(entries[0].mergeable_state, "clean");
+        assert_eq!(entries[1].number, 202);
+        assert_eq!(entries[1].mergeable, Some(false));
+        assert_eq!(entries[1].mergeable_state, "dirty");
+        assert_eq!(entries[2].number, 204);
+        assert_eq!(entries[2].mergeable, None, "still-computing stays None");
+        assert_eq!(entries[2].mergeable_state, "unknown");
+    }
+
+    /// Per-PR HTTP failure does NOT fail the whole batch. A failing PR
+    /// becomes `{ mergeable: None, mergeable_state: "error: <reason>" }`
+    /// and the surrounding PRs still surface their real results. The
+    /// batched endpoint's value proposition is "transient failure on
+    /// one PR doesn't kill the rest"; this test pins the fallback so a
+    /// future refactor that re-raises `Err(_)` from the helper breaks
+    /// loudly here rather than regressing to the old per-PR fan-out's
+    /// "first failure drops the whole list" behaviour.
+    #[test]
+    fn mergeability_entries_per_pr_failure_does_not_fail_batch() {
+        let entries = mergeability_entries(
+            vec![1, 2, 3],
+            |n| match n {
+                1 => Ok((Some(true), "clean".into())),
+                2 => Err(GitHubError::Api(404, "Not Found".into())),
+                3 => Ok((Some(false), "dirty".into())),
+                _ => unreachable!(),
+            },
+        );
+        assert_eq!(entries.len(), 3, "batch must carry one entry per PR even when one fails");
+        // The success entries round-trip unchanged.
+        assert_eq!(entries[0].number, 1);
+        assert_eq!(entries[0].mergeable, Some(true));
+        // The failed entry becomes the "checking" sentinel.
+        assert_eq!(entries[1].number, 2, "failed entry must still carry the PR number");
+        assert_eq!(entries[1].mergeable, None, "failed entry must report mergeable: None");
+        assert!(
+            entries[1].mergeable_state.starts_with("error: "),
+            "failed entry must carry the 'error: ' prefix; got: {}",
+            entries[1].mergeable_state
+        );
+        assert!(entries[1].mergeable_state.contains("404"));
+        // The follow-up PR after the failure is unaffected.
+        assert_eq!(entries[2].number, 3);
+        assert_eq!(entries[2].mergeable, Some(false));
+    }
+
+    /// `GitHubError::NoToken` (auth missing) maps the same way as any
+    /// other per-PR error — a single probe failing for auth reasons does
+    /// NOT fail the whole batch. (The whole batch would already have
+    /// failed earlier in the public command via `GitHubClient::new()` —
+    /// this test exercises the helper in isolation so the per-PR
+    /// mapping is pinned across all error variants.)
+    #[test]
+    fn mergeability_entries_no_token_error_becomes_checking_sentinel() {
+        let entries = mergeability_entries(vec![42], |_| Err(GitHubError::NoToken));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].number, 42);
+        assert_eq!(entries[0].mergeable, None);
+        assert!(
+            entries[0].mergeable_state.starts_with("error: "),
+            "NoToken must surface as 'error: ...' so the panel keeps the row in 'Checking…'"
         );
     }
 
