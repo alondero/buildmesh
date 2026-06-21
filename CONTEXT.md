@@ -5,11 +5,45 @@ Buildmesh is an orchestration platform for AI coding agents that work in paralle
 ## Language
 
 **Agent Harness**:
-The configured execution environment, binary recipe, and credentials (such as API keys or base URLs) required to launch and communicate with a specific AI coding agent. Only the `Terminal` harness is always available; all other harnesses must be explicitly enabled and configured by the user.
-_Avoid_: Provider (use when referring to the raw service provider, but canonicalize on Agent Harness for the configuration/execution context).
+The executor binary recipe (e.g. `claude` / `claude.exe`, `codex`, `agy`, `opencode`, `terminal`) that launches and communicates with an AI coding agent. Only the `Terminal` harness is always available; all others must be installed on the host and enabled by the user. A harness is distinct from the **Model Provider** whose models it runs (ADR-0014).
+_Avoid_: Executor, runtime, provider (a harness is *not* a provider — see **Model Provider**).
 
-**Claude Code (Compatible API)**:
-A type of Agent Harness that executes the standard `claude` / `claude.exe` binary, but redirects it to a third-party or compatible LLM provider by overriding environment variables (e.g. `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`) at spawn time.
+**Model Provider**:
+The credentials and endpoint a model request is served by (e.g. Anthropic, OpenAI, MiniMax, Kimi, DeepSeek, or a custom base-URL + key). Independent of the **Agent Harness** that runs it; one provider may expose more than one **Compatible API surface**.
+_Avoid_: Backend, service, vendor; account (reserve "account" for the stored `ProviderAccount` config row).
+
+**Compatible API surface**:
+The wire protocol a harness expects of its backend — Anthropic-compatible or OpenAI-compatible. A **Proxied Provider** is reachable by a harness only over a surface that harness speaks.
+_Avoid_: Compatible provider (compatibility is a property of the connection, not the provider).
+
+**Proxied Provider**:
+A **Model Provider** that Buildmesh wires into a harness by injecting an API-compatibility shim at spawn — base URL + auth token + a model-tier remap — so a harness built for backend A serves models from provider B over a **Compatible API surface**. Buildmesh owns the glue and the credentials. This is the harness↔provider pairing Buildmesh's spawn menu enumerates. _Example_: *MiniMax via Claude Code* points `claude.exe` at MiniMax's Anthropic-compatible endpoint via `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`. (Generalises the former *Claude Code (Compatible API)* term.)
+_Avoid_: Gateway, bridge, redirect.
+
+**Native Provider**:
+A **Model Provider** selected and authenticated *inside* a harness's own login (e.g. MiniMax configured within OpenCode). Buildmesh launches the harness and does **not** manage the credentials or surface the provider choice — provider selection stays in the harness, never in Buildmesh's spawn menu.
+_Avoid_: direct provider; "built-in" (ambiguous — see Flagged ambiguities).
+Buildmesh manages no native creds for *spawning*, but a **First-class Model Provider**'s fetcher may still read a harness-native subscription's **Usage Meter** transparently (e.g. the Claude Code subscription quota) when the harness is installed.
+
+**First-class Model Provider**:
+A **Model Provider** Buildmesh ships built-in knowledge of — brand identity (icon, accent colour), billing model, and a **Usage Meter** fetcher (Anthropic, MiniMax, Kimi). Renders its own brand mark and live usage on the Providers page. (issue #566)
+_Avoid_: "built-in" (ambiguous — see Flagged ambiguities), supported provider.
+
+**Generic Model Provider**:
+A user-defined **Model Provider** — a name, a **Compatible API surface** + base URL, an API key, and a model-tier map, with no registry entry. Spawns fine, but has no brand icon (neutral fallback) and **no usage integration** (Buildmesh can't know its billing API), so its Providers-page card shows a "usage not tracked" state rather than an empty gauge.
+_Avoid_: Custom provider (acceptable synonym), unsupported provider.
+
+**Usage Meter**:
+One distinct usage reading of a **Model Provider** — either a subscription plan's rolling window (quota %) or a pay-as-you-go wallet (credit balance). A provider may have **more than one** (e.g. an Anthropic Claude subscription *and* an Anthropic API wallet). The wire shape is `ProviderUsage` (`UsageWindow` for a plan, `BillingBalance` for a wallet). Shown on the Providers page only when its harness is detected or its key is configured.
+_Avoid_: Balance (wallet-only sense), billing identity, quota (plan-only sense).
+
+**Spawn Option**:
+A single launchable entry in the **Spawn Menu** — either an **Agent Harness** on its own (launched natively) or an Agent Harness paired with a **Proxied Provider**. The unit a user picks to start an **Agent Node**, and the identity recorded on the node.
+_Avoid_: Provider row, launch option, harness profile (the existing `HarnessProfile` struct is harness-only — don't reuse).
+
+**Spawn Menu**:
+The single, backend-derived, **Agent Harness**-grouped, user-ordered list of **Spawn Options**. Every spawn surface renders this one menu as-is.
+_Avoid_: Provider menu, launch dropdown.
 
 
 **Mesh**:
@@ -95,6 +129,13 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 
 ## Relationships
 
+- An **Agent Harness** runs models from a **Model Provider** either natively (a **Native Provider**, owned by the harness) or as a **Proxied Provider** (Buildmesh injects the compatibility shim)
+- A **Proxied Provider** is reachable by a harness only over a **Compatible API surface** both share
+- A **Generic Model Provider** declares exactly **one Compatible API surface**; a **First-class Model Provider** may declare several and so attach across surfaces (e.g. MiniMax to both Claude Code and Codex)
+- A **Model Provider** can be proxied through **zero or more Agent Harnesses** (one spawn-menu entry per pairing). Usage follows the **credential**, not the pairing: proxying *one* credential through several harnesses is still **one Usage Meter**, but a provider may have **several Usage Meters** (e.g. an Anthropic subscription *and* an API wallet)
+- The Providers page shows a **Usage Meter** only when it's relevant to the host: a harness-native subscription meter appears when that **Agent Harness** is **detected/installed** (no API key needed); a keyed provider's meter appears when its key is configured; an uninstalled harness's native meter is never shown
+- Every spawn surface (sidebar, Issues/PRs probes, archived-resume, mobile) renders the one **Spawn Menu** as-is — none re-orders or re-derives it; harness order is user-set (Terminal pinned last) and **Proxied Provider** options nest under their **Agent Harness**
+- A **Proxied Provider**'s configuration splits by scope: the **credential (API key)** is **global to the Model Provider** (entered once, reused across pairings), while the chosen **Compatible API surface + endpoint URL + model-tier remap** are **per harness×provider pairing** (one provider may expose several surfaces; each harness speaks only one). A first-class provider publishes its surface→URL map so a pairing only names the surface; a custom provider's URL is typed per pairing.
 - A **Mesh** can have one or more **Agent Nodes**
 - A **Mesh** can have **Autopilot** enabled, governed by its **Autopilot Policy**
 - **Autopilot** automatically spawns **Agent Nodes** for matching issues or PRs, enforcing branched worktree mode
@@ -121,3 +162,5 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 
 - "session" and "node" were used interchangeably. Resolved: we canonicalize on **Agent Node** for the user interface and domain model, while database/backend can use "session" for process lifecycle records.
 - "state pollution" in worktrees. Resolved: Git worktrees are fully isolated, so parent Mesh cleanliness is not required when spawning new Agent Nodes.
+- "Provider" was an avoided alias for **Agent Harness**. Resolved (ADR-0014): **Model Provider** and **Agent Harness** are distinct first-class concepts. "Compatible" moved off the provider onto the connection (**Compatible API surface**); a provider may expose more than one. The old **Claude Code (Compatible API)** term is now just a **Proxied Provider** instance.
+- "built-in" was used for both *harness-native* providers (chosen inside the harness, e.g. OpenCode's own login) and *Buildmesh-shipped* providers (the #566 registry). Opposite concepts — resolved: say **Native Provider** for the former and **First-class Model Provider** for the latter; never the bare word "built-in".
