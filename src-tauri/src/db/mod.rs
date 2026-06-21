@@ -107,7 +107,18 @@ ensure_mesh_sandbox(&conn)?;
     // left as cleartext. Idempotent, so it's safe to run on every init.
     ensure_coordinator_tokens_hashed(&conn)?;
 
-    DB.set(Mutex::new(conn)).map_err(|_| rusqlite::Error::InvalidParameterName("db already initialized".to_string()))?;
+    // Silently treat "already initialized" as success: production calls
+    // `init` exactly once at startup (the new `Connection` is dropped
+    // here, so the existing one stays), and test files that share a
+    // single `cargo test` process can each call `init` to set up
+    // their own temp DB without coordinating order. The
+    // `InvalidParameterName` error variant was originally intended to
+    // surface a production double-init bug, but it was strictly
+    // overzealous in tests where multiple files legitimately need to
+    // share the global `DB` once it's set. See
+    // `commands::agent::tests::ensure_pr_db` and `db::mesh_tests` for
+    // the two consumer call sites that this unblocks.
+    let _ = DB.set(Mutex::new(conn));
     Ok(())
 }
 
@@ -992,6 +1003,22 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
 
 pub fn get() -> &'static Mutex<Connection> {
     DB.get().expect("database not initialized")
+}
+
+/// Whether the global DB has been initialised. Tests across the lib
+/// binary share the same `DB` OnceCell, so the first one to call
+/// `init` wins; later ones can use this to skip their own init and
+/// share the existing connection. Production callers should still
+/// `init` exactly once at startup and treat the error from a
+/// double-init as a bug — this is purely a test-orchestration
+/// affordance, not a permission to call `init` from production more
+/// than once.
+#[allow(dead_code)] // Test-only consumer (`commands::agent::tests`); clippy's
+                    // lib-build dead-code check doesn't see across the test
+                    // boundary, so we have to opt out. Same pattern as
+                    // `set_lan_exposure_enabled` above.
+pub fn is_initialized() -> bool {
+    DB.get().is_some()
 }
 
 // --- Internal Helpers (no locking) ---
