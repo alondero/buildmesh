@@ -12,7 +12,18 @@ import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import type { ProviderInfo } from '../../src/lib/tauri';
 
 function provider(id: string, label: string): ProviderInfo {
-  return { id, label, color: '#fff', icon: id, resumable: false };
+  // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape.
+  return {
+    id,
+    label,
+    color: '#fff',
+    icon: id,
+    resumable: false,
+    harness_id: id,
+    provider_id: null,
+    is_proxied: false,
+    group_key: id,
+  };
 }
 
 function mockBackend(providers: ProviderInfo[]) {
@@ -24,6 +35,10 @@ function mockBackend(providers: ProviderInfo[]) {
         return Promise.resolve(providers);
       case 'get_provider_accounts':
         return Promise.resolve([]);
+      // Issue #574 renamed `get_all_provider_usage` → `get_provider_meters`;
+      // mock the live command (and accept the legacy one as an alias
+      // for any code path that hasn't migrated yet).
+      case 'get_provider_meters':
       case 'get_all_provider_usage':
         return Promise.resolve([]);
       case 'get_coordinator_status':
@@ -60,8 +75,9 @@ describe('Settings — spawn menu order (issue #573)', () => {
     render(<AppSettingsModal onClose={() => {}} />);
 
     // Wait for the modal to settle on a deterministic element before asserting
-    // the absence of the section.
-    await screen.findByText('Accounts & Usage');
+    // the absence of the section. Issue #574 renamed "Accounts & Usage" to
+    // "Providers" — the modal is now organised around a Providers page.
+    await screen.findByText('Providers');
     await waitFor(() => expect(screen.queryByText('Spawn menu order')).toBeNull());
   });
 });

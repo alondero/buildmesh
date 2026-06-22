@@ -86,6 +86,28 @@ const COLORED_IMAGES: Record<string, string> = {
   agy: antigravityLogo,
 };
 
+/** Split a Spawn Option id into the *icon-lookup* key.
+ *
+ * Issue #575 / ADR-0016: a Proxied Provider row's id is `<harness>:<provider>`
+ * (e.g. `claude:minimax`). The harness half (`claude`) and the provider
+ * half (`minimax`) name the same row, but the brand mark lives under
+ * the provider half — `INLINE_ICONS` and `COLORED_IMAGES` are keyed on
+ * the *provider* (e.g. `minimax` → `minimaxLogo`), not on the harness.
+ * Splitting here so a Proxied row's icon resolves to the user's brand
+ * identity, not the gray-dot fallback for the unknown composite id.
+ *
+ * Bare ids (no `:`) — native harness rows, or pre-#575 legacy proxied
+ * rows — pass through unchanged. The harness half of a composite id
+ * (`claude`) hits the ClaudeCodeIcon map directly, so a hypothetical
+ * native row carrying the proxied id `claude:claude` would still
+ * render correctly (rare edge case but symmetric).
+ */
+function iconLookupKey(id: string): string {
+  const idx = id.indexOf(':');
+  if (idx === -1) return id;
+  return id.slice(idx + 1);
+}
+
 // Single source of truth for the avatar-chip background colour. Mirrors
 // the backend's `UiMeta::color` field in src-tauri/.../adapters/*.rs#ui().
 // Used by the mobile `NodeRow` (via the `withBackground` prop) and by
@@ -130,13 +152,18 @@ export function ProviderIcon({
   chipTestId,
 }: ProviderIconProps) {
   const label = title ?? providerId;
+  // Issue #575: a Proxied row's id is `<harness>:<provider>` (e.g.
+  // `claude:minimax`); the brand mark is keyed on the *provider* half,
+  // so split on `:` before looking up. The `label` (hover tooltip) keeps
+  // the full id so the user can read the composite form on hover.
+  const lookup = iconLookupKey(providerId);
 
-  const InlineIcon = INLINE_ICONS[providerId];
+  const InlineIcon = INLINE_ICONS[lookup];
   const inner = (() => {
     if (InlineIcon) {
       return <InlineIcon className={className} title={label} />;
     }
-    const src = COLORED_IMAGES[providerId];
+    const src = COLORED_IMAGES[lookup];
     if (src) {
       return (
         <img
@@ -161,7 +188,10 @@ export function ProviderIcon({
         width: 34,
         height: 34,
         borderRadius: 8,
-        background: PROVIDER_CHIP_COLORS[providerId] ?? '#555',
+        // Chip background keyed on the same lookup so a Proxied row
+        // (`claude:minimax`) gets the MiniMax brand colour, not the
+        // Claude Code blue.
+        background: PROVIDER_CHIP_COLORS[lookup] ?? '#555',
         color: '#fff',
         display: 'flex',
         alignItems: 'center',

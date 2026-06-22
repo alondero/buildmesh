@@ -38,7 +38,32 @@ pub fn run() {
             db::init(&db_path)?;
 
             // Wire the preferences module to the same on-disk location as the DB.
+            // This MUST run before the v19 custom-account migration below —
+            // `db::init`'s first-class migration block is preferences-independent
+            // (it only rewrites the hardcoded 'minimax'/'kimi' ids), but the
+            // custom-account block reads the user's stored `ProviderAccount`
+            // list, which requires `APP_DATA_DIR` to be set. See
+            // `db::migrate_agent_node_provider_id_custom_accounts` (issue #575).
             preferences::init(app_dir.clone());
+
+            // v19 Spawn Option composite-id migration, custom-account block
+            // (issue #575). The first-class block ('minimax'/'kimi') already
+            // ran inside `db::init`; this call only handles user-stored
+            // custom accounts (e.g. a user-typed "deepseek" account).
+            // Idempotent — the underlying UPDATE has a `provider NOT LIKE
+            // '%:%'` guard, so re-running on a v19+ DB is a no-op.
+            if let Ok(conn) = db::get().lock() {
+                if let Err(e) = db::ensure_agent_node_provider_id_custom_accounts_migrated(
+                    &conn,
+                    &preferences::provider_accounts(),
+                ) {
+                    tracing::warn!(
+                        "v19 custom-account migration failed (non-fatal, archived nodes \
+                         will keep legacy bare ids until the next launch): {}",
+                        e
+                    );
+                }
+            }
 
             // Auto-detect installed agent harnesses and populate dynamic profiles
             // (PRD #534 / issue #536). A dep-free in-process PATH scan — a few

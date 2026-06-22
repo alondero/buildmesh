@@ -386,11 +386,23 @@ export function GitPullRequestsTab() {
   // when the user adds or removes a custom provider in App Settings — the
   // hook below re-fires this fetch on the `provider-list-changed` event so
   // the PR-spawn picker drops stale accounts without an app restart.
+  // Issue #575 / ADR-0016 — preserve the Spawn Option shape so the
+  // `ProviderDropdown` can render the harness-grouped, always-expanded
+  // menu (harness header + indented Proxied children).
   const refreshProviderList = useCallback(() => {
     listProviders()
       .then((backendProviders) => {
         setProviderList(
-          backendProviders.map((p) => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
+          backendProviders.map((p) => ({
+            id: p.id,
+            label: p.label,
+            color: colorClassForProvider(p.id),
+            icon: p.icon,
+            harness_id: p.harness_id,
+            provider_id: p.provider_id,
+            is_proxied: p.is_proxied,
+            group_key: p.group_key,
+          })),
         );
       })
       .catch((err) => console.error('listProviders failed:', err));

@@ -1,6 +1,17 @@
-import { ProviderIcon } from '../Providers/ProviderIcon';
+import type { ProviderInfo } from '../../types/generated/ProviderInfo';
+import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 
-export type ProviderEntry = { id: string; label: string; color: string };
+/**
+ * Backwards-compatible subset of the full [`ProviderInfo`] wire shape. Kept
+ * exported because the Sidebar, MeshItem, and NodeCreationForm consume it
+ * for typed `providerList` plumbing — they need the `id` for the click
+ * handler and the `label` / `color` for the row UI. The new grouped render
+ * also uses `group_key` / `is_proxied` (passed through by the alias below).
+ */
+export type ProviderEntry = Pick<
+  ProviderInfo,
+  'id' | 'label' | 'color' | 'icon' | 'harness_id' | 'provider_id' | 'is_proxied' | 'group_key'
+>;
 
 // Tailwind class map for provider badges. Stays in the frontend because Tailwind's
 // purge tool needs static class strings — backend can't emit these dynamically.
@@ -26,23 +37,22 @@ interface ProviderDropdownProps {
 }
 
 export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdownProps) {
-  // The list is purely the user's dynamic harness profiles (issue #538 retired
-  // the hardcoded legacy enum rows and the "Legacy" header).
+  // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
+  // Spawn Menu. The single backend-derived list (issue #538 retired the
+  // legacy enum-backed rows) is now grouped by `group_key` (== `harness_id`):
+  // each harness's native row lands as a clickable header, every Proxied
+  // child renders indented below it. Terminal is pinned last by the
+  // backend's `order_providers` sort, so the visual order is identical
+  // to the stored harness order.
   return (
     <div
       data-dropdown-for={meshId}
-      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[140px]"
+      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg min-w-[200px] max-h-[400px] overflow-y-auto"
     >
-      {providers.map((p) => (
-        <button
-          key={p.id}
-          onClick={(e) => { e.stopPropagation(); onSelect(p.id, e.altKey); }}
-          className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-        >
-          <ProviderIcon providerId={p.id} className="h-3.5 w-3.5" />
-          {p.label}
-        </button>
-      ))}
+      <GroupedProviderMenu
+        providers={providers as ProviderInfo[]}
+        onSelect={onSelect}
+      />
     </div>
   );
 }

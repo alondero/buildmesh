@@ -107,30 +107,106 @@ pub struct UiMeta {
     pub icon: String,
 }
 
-/// Frontend-facing provider listing. Composed by `commands::agent::available_providers`
-/// purely from the user's dynamic harness profiles (issue #538 retired the
-/// legacy enum-backed rows and the `legacy` grouping flag).
+/// Split a Spawn Option id into `(harness_id, Option<provider_id>)`.
 ///
-/// `resumable` is the backend-derived answer to "can this provider resume an
+/// The composite id is `<harness>` for a native option and
+/// `<harness>:<provider>` for a Proxied Provider option (ADR-0016 §6,
+/// issue #575). The separator is the first `:` so a provider id
+/// containing `:` (theoretical today, but the id is the user-chosen
+/// `ProviderAccount.id`) is preserved intact on the right side.
+///
+/// A bare id (no `:`) yields `(id, None)` — a native Spawn Option that
+/// launches its harness directly. A composite id yields
+/// `(before_colon, Some(after_colon))` — the executor comes from the
+/// harness part, the credentials + endpoint from the provider part.
+///
+/// Pure (no globals / no I/O) — the canonical place to ask "is this a
+/// native or proxied spawn, and what's the executor vs the creds?". All
+/// spawn-resolver call sites route through here so the parsing rule
+/// lives in one place.
+pub fn parse_spawn_option_id(id: &str) -> (&str, Option<&str>) {
+    match id.split_once(':') {
+        Some((harness, provider)) => (harness, Some(provider)),
+        None => (id, None),
+    }
+}
+
+/// Frontend-facing **Spawn Option** wire type (ADR-0016, issue #575). One row
+/// per clickable entry in the Spawn Menu — either a bare **Agent Harness** (a
+/// native launch, e.g. clicking "Claude Code" boots Claude Code with its
+/// own subscription) or an Agent Harness paired with a **Proxied Provider**
+/// (a Claude-Code-backed row like "MiniMax via Claude Code"). The single
+/// backend-derived list (`commands::agent::available_providers`) is rendered
+/// as-is on every spawn surface (sidebar, Issues/PRs probes, archived-resume,
+/// mobile).
+///
+/// Composition (issue #538 retired the legacy enum-backed rows; the list is
+/// purely the user's dynamic harness profiles + configured Claude-compatible
+/// accounts):
+///
+/// * `harness_id` is the executor that runs the spawn — the harness profile
+///   id for native rows (`"claude"`, `"codex"`, `"agy"`, `"opencode"`,
+///   `"terminal"`) and the harness the proxied pair attaches to for
+///   proxied rows (always `"claude"` today, but the field is generic so
+///   the future multi-harness attach works without a wire change).
+/// * `provider_id` is `None` for native rows and `Some("minimax")` (or a
+///   custom account id) for proxied rows. The credential lookup
+///   (`preferences::resolve_provider_env`) keys off this.
+/// * `is_proxied` mirrors `provider_id.is_some()` for the frontend
+///   convenience (avoids the `?? null` check on every render).
+/// * `group_key == harness_id` so the UI's `groupBy` is a one-liner and the
+///   ordering logic can cluster children under their header (a stable
+///   `(is_terminal, rank_of(group_key))` sort keeps each harness's native
+///   row first).
+///
+/// `id` is the composite spawn-option identifier, encoded as `<harness_id>`
+/// for native and `<harness_id>:<provider_id>` for proxied (ADR-0016 §6).
+/// The frontend hands it back to `spawn_agent` / `create_issue_node` /
+/// `create_pr_node` unchanged; the backend's resolver splits on the first
+/// `:` via `parse_spawn_option_id` to get `(executor, creds)`.
+///
+/// `resumable` is the backend-derived answer to "can this option resume an
 /// archived/discovered session in-place?" — derived from the resolved
-/// adapter's `supports_resume() && produces_readable_transcript()`. The frontend
-/// uses it to populate the archived-node resume picker (issue #550 follow-up);
-/// a custom Claude-compatible harness profile (e.g. "DeepSeek via Claude")
-/// shares the `anthropic` adapter, so it advertises itself correctly without
-/// the old hardcoded `['anthropic','minimax','kimi']` allow-list that
-/// silently filtered those profiles out.
+/// adapter's `supports_resume() && produces_readable_transcript()`. The
+/// frontend uses it to populate the archived-node resume picker (issue
+/// #550 follow-up); a custom Claude-compatible harness profile (e.g.
+/// "DeepSeek via Claude") shares the `anthropic` adapter, so it
+/// advertises itself correctly without the old hardcoded
+/// `['anthropic','minimax','kimi']` allow-list that silently filtered
+/// those profiles out.
 ///
-/// Generated to src/types/generated/ProviderInfo.ts (issue #404). `Deserialize`
-/// is added so the type participates in the ts-rs `export` derive (the project
-/// pattern is `Serialize + Deserialize + TS` for every generated wire type).
+/// Generated to src/types/generated/ProviderInfo.ts (issue #404).
+/// `Deserialize` is added so the type participates in the ts-rs `export`
+/// derive (the project pattern is `Serialize + Deserialize + TS` for
+/// every generated wire type).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "ProviderInfo.ts")]
 pub struct ProviderInfo {
+    /// Composite spawn-option id: `<harness_id>` (native) or
+    /// `<harness_id>:<provider_id>` (proxied). Round-tripped to
+    /// `spawn_agent` / `create_issue_node` / `create_pr_node`.
     pub id: String,
+    /// Display label for the row (harness profile name or proxied account
+    /// name).
     pub label: String,
+    /// Hex colour for the row dot/icon (from the adapter's `UiMeta`).
     pub color: String,
+    /// Icon identifier (a single character or name) for the row.
     pub icon: String,
+    /// See struct doc — backend-derived "can this resume in place?".
     pub resumable: bool,
+    /// Executor that runs the spawn (harness profile id).
+    pub harness_id: String,
+    /// Credential/endpoint id when this is a Proxied Provider pairing
+    /// (`None` for native rows).
+    pub provider_id: Option<String>,
+    /// `true` iff this row is a Proxied Provider pairing (i.e. has a
+    /// `provider_id`); the frontend uses this to render the indented
+    /// child style.
+    pub is_proxied: bool,
+    /// `harness_id` duplicated as a grouping key so the UI can
+    /// `Array.groupBy(row => row.group_key)` without a derived field.
+    pub group_key: String,
 }
 
 /// Behaviour an agent provider must declare.

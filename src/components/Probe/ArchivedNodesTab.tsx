@@ -58,7 +58,7 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import { ProviderIcon } from '../Providers/ProviderIcon';
+import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { colorClassForProvider } from '../Sidebar/ProviderDropdown';
 
 function timeAgo(isoString: string): string {
@@ -76,12 +76,23 @@ function timeAgo(isoString: string): string {
 }
 
 // Mirror the ProviderInfo wire shape with only the columns the picker
-// needs (id/label/color for the row UI; resumable drives the filter).
-// The legacy `isResumableProvider(['anthropic','minimax','kimi'])` allow-
-// list was removed in #550 follow-up — custom Claude-compatible profiles
-// (e.g. "DeepSeek via Claude") share the `anthropic` adapter and now
-// advertise `resumable: true` themselves.
-type ResumableProvider = { id: string; label: string; color: string; resumable: boolean };
+// needs (id/label/color for the row UI; resumable drives the filter;
+// group_key / harness_id / is_proxied drive the harness-grouped render —
+// issue #575). The legacy `isResumableProvider(['anthropic','minimax','kimi'])`
+// allow-list was removed in #550 follow-up — custom Claude-compatible
+// profiles (e.g. "DeepSeek via Claude") share the `anthropic` adapter
+// and now advertise `resumable: true` themselves.
+type ResumableProvider = {
+  id: string;
+  label: string;
+  color: string;
+  icon: string;
+  harness_id: string;
+  provider_id: string | null;
+  is_proxied: boolean;
+  group_key: string;
+  resumable: boolean;
+};
 
 export function ArchivedNodesTab() {
   const { activeMeshId, activeMeshPath } = useProbeContext();
@@ -115,6 +126,12 @@ export function ArchivedNodesTab() {
   // same fetch on the `provider-list-changed` event when the user adds or
   // removes an account in App Settings — without that, our local list goes
   // stale and the picker keeps showing accounts that no longer exist.
+  // Issue #575 / ADR-0016 — preserve the Spawn Option shape so the
+  // `GroupedProviderMenu` can render the harness-grouped, always-expanded
+  // picker (harness header + indented Proxied children). The picker is
+  // filtered to `resumable: true` rows so a non-resumable harness header
+  // (e.g. Terminal) collapses to nothing rather than offering a useless
+  // "click to spawn fresh" entry on a resume flow.
   const refreshProviderList = useCallback(() => {
     listProviders()
       .then(backendProviders => {
@@ -123,6 +140,11 @@ export function ArchivedNodesTab() {
             id: p.id,
             label: p.label,
             color: colorClassForProvider(p.id),
+            icon: p.icon,
+            harness_id: p.harness_id,
+            provider_id: p.provider_id,
+            is_proxied: p.is_proxied,
+            group_key: p.group_key,
             resumable: p.resumable,
           })),
         );
@@ -305,18 +327,12 @@ export function ArchivedNodesTab() {
                   {openDropdown === session.session_id && (
                     <div
                       data-dropdown-for={session.session_id}
-                      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg py-1 min-w-[120px]"
+                      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg min-w-[200px] max-h-[320px] overflow-y-auto"
                     >
-                      {resumableProviders.map(p => (
-                        <button
-                          key={p.id}
-                          onClick={() => handleResume(session, p.id)}
-                          className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
-                        >
-                          <ProviderIcon providerId={p.id} className="h-3.5 w-3.5" />
-                          {p.label}
-                        </button>
-                      ))}
+                      <GroupedProviderMenu
+                        providers={resumableProviders}
+                        onSelect={(providerId) => handleResume(session, providerId)}
+                      />
                     </div>
                   )}
                 </div>
