@@ -189,6 +189,13 @@ pub struct AppPreferences {
     /// empty. Custom (non-built-in) entries are appended (issue #537).
     #[serde(default)]
     pub provider_accounts: Vec<ProviderAccount>,
+    /// User-chosen order of the spawn-menu harness rows, as a list of row ids
+    /// (issue #573 / ADR-0016). `Terminal` is excluded — it's always forced to
+    /// the bottom by `commands::agent::order_providers`. A row whose id isn't
+    /// listed (a newly-detected harness) appends after the listed ones; an
+    /// uninstalled harness keeps its saved slot here until it reappears.
+    #[serde(default)]
+    pub harness_order: Vec<String>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -306,6 +313,76 @@ pub fn harness_profiles() -> Vec<HarnessProfile> {
         }
     }
     profiles
+}
+
+/// The user's stored spawn-menu harness order — a list of row ids applied by
+/// `commands::agent::order_providers` (issue #573). Empty when never set, in
+/// which case the menu keeps its natural derivation order (Terminal still last).
+/// A load failure is logged and treated as "no stored order".
+pub fn harness_order() -> Vec<String> {
+    match load() {
+        Ok(prefs) => prefs.harness_order,
+        Err(e) => {
+            tracing::warn!("preferences::harness_order load failed, using natural order: {}", e);
+            Vec::new()
+        }
+    }
+}
+
+/// Persist the spawn-menu harness order (issue #573). `Terminal` is filtered out
+/// before storing — it's always forced last by the ordering logic, so keeping it
+/// out of the stored list avoids a redundant (and potentially misleading) slot.
+///
+/// `order` only covers the harnesses installed *right now* (the UI can't render a
+/// row for an uninstalled one), so a plain overwrite would silently evict the
+/// saved slot of any harness that happens to be uninstalled while the user
+/// reorders — breaking the "uninstalled keeps its slot" promise. We instead merge
+/// the new order into the stored one via `merge_harness_order`, which keeps each
+/// dormant id pinned at its stored slot. Duplicate ids are dropped (first wins).
+pub fn set_harness_order(order: Vec<String>) -> Result<(), String> {
+    let mut prefs = load()?;
+    let incoming = dedupe_keeping_first(order.into_iter().filter(|id| id != "terminal"));
+    prefs.harness_order = merge_harness_order(&prefs.harness_order, incoming);
+    save(prefs)
+}
+
+/// Dedupe an id sequence keeping the first occurrence of each id, preserving
+/// order. A malformed caller (or hand-edited prefs) sending `[claude, claude]`
+/// would otherwise persist a duplicate that shifts every later harness's index.
+fn dedupe_keeping_first(ids: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    ids.filter(|id| seen.insert(id.clone())).collect()
+}
+
+/// Merge a user-supplied harness order (which only covers currently-installed
+/// harnesses) into the stored order, preserving the saved slot of every *dormant*
+/// id — a harness uninstalled right now and so absent from `incoming` (issue
+/// #573). Each dormant id holds its stored index; the present ids refill the
+/// remaining slots in the user's new order; any brand-new id in `incoming` (never
+/// stored before) appends at the end. `incoming` is assumed already deduped and
+/// Terminal-free.
+fn merge_harness_order(stored: &[String], incoming: Vec<String>) -> Vec<String> {
+    let is_dormant = |id: &String| !incoming.iter().any(|x| x == id);
+    // Reserve each stored slot: dormant ids keep their place, present ids leave a
+    // `None` gap to be refilled by `incoming` below.
+    let mut slots: Vec<Option<String>> = stored
+        .iter()
+        .map(|id| is_dormant(id).then(|| id.clone()))
+        .collect();
+    let mut gaps = slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.is_none())
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>()
+        .into_iter();
+    for id in incoming {
+        match gaps.next() {
+            Some(i) => slots[i] = Some(id),
+            None => slots.push(Some(id)), // brand-new id beyond the stored slots
+        }
+    }
+    slots.into_iter().flatten().collect()
 }
 
 /// Merge startup-detected harness profiles into stored preferences (issue #536).
@@ -932,6 +1009,78 @@ mod tests {
         // with an empty Vec rather than failing.
         let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(prefs.harness_profiles, Vec::new());
+    }
+
+    // ─── Harness order (issue #573) ──────────────────────────────────────────
+
+    #[test]
+    fn app_preferences_defaults_harness_order_to_empty_when_key_absent() {
+        let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.harness_order, Vec::<String>::new());
+    }
+
+    #[test]
+    fn harness_order_round_trips_through_set_and_read() {
+        with_temp_dir(|_| {
+            assert_eq!(harness_order(), Vec::<String>::new());
+            set_harness_order(vec!["codex".into(), "claude".into()]).unwrap();
+            *CACHE.lock().unwrap() = None; // force a disk read
+            assert_eq!(harness_order(), vec!["codex".to_string(), "claude".to_string()]);
+        });
+    }
+
+    /// Issue #573 regression: reordering while a harness is uninstalled must NOT
+    /// evict its saved slot. The frontend only sends installed ids, so a plain
+    /// overwrite would drop the absent one; the merge keeps it pinned.
+    #[test]
+    fn set_harness_order_preserves_uninstalled_harness_slot() {
+        with_temp_dir(|_| {
+            // Saved order had minimax between claude and codex.
+            set_harness_order(vec!["claude".into(), "minimax".into(), "codex".into()]).unwrap();
+            // minimax gets uninstalled; the user drags codex above claude. The UI
+            // can only send the installed harnesses, so minimax is absent here.
+            set_harness_order(vec!["codex".into(), "claude".into()]).unwrap();
+            *CACHE.lock().unwrap() = None;
+            // minimax keeps its middle slot; codex/claude swap around it.
+            assert_eq!(
+                harness_order(),
+                vec!["codex".to_string(), "minimax".to_string(), "claude".to_string()],
+            );
+        });
+    }
+
+    #[test]
+    fn merge_harness_order_refills_present_slots_keeps_dormant() {
+        let stored = vec!["claude".to_string(), "minimax".to_string(), "codex".to_string()];
+        let merged = merge_harness_order(&stored, vec!["codex".into(), "claude".into()]);
+        assert_eq!(merged, vec!["codex", "minimax", "claude"]);
+    }
+
+    #[test]
+    fn merge_harness_order_appends_brand_new_ids() {
+        let stored = vec!["claude".to_string(), "codex".to_string()];
+        let merged =
+            merge_harness_order(&stored, vec!["codex".into(), "claude".into(), "newbie".into()]);
+        assert_eq!(merged, vec!["codex", "claude", "newbie"]);
+    }
+
+    #[test]
+    fn set_harness_order_drops_duplicate_ids() {
+        with_temp_dir(|_| {
+            set_harness_order(vec!["claude".into(), "claude".into(), "codex".into()]).unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(harness_order(), vec!["claude".to_string(), "codex".to_string()]);
+        });
+    }
+
+    #[test]
+    fn set_harness_order_filters_out_terminal() {
+        with_temp_dir(|_| {
+            // Terminal is forced last by the ordering logic, so it's never stored.
+            set_harness_order(vec!["claude".into(), "terminal".into(), "codex".into()]).unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(harness_order(), vec!["claude".to_string(), "codex".to_string()]);
+        });
     }
 
     // ─── Provider accounts (issue #537) ──────────────────────────────────────
