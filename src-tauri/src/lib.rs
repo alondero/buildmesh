@@ -205,6 +205,9 @@ pub fn run() {
             commands::coordinator::generate_coordinator_read_token,
             commands::coordinator::set_coordinator_drive_enabled,
             commands::coordinator::generate_coordinator_drive_token,
+            // Authorized devices (issue #502)
+            commands::devices::list_device_sessions,
+            commands::devices::revoke_device_session,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

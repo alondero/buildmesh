@@ -9,6 +9,7 @@ import type { BillingBalance } from '../types/generated/BillingBalance';
 import type { BillingMode } from '../types/generated/BillingMode';
 import type { BranchInfo } from '../types/generated/BranchInfo';
 import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
+import type { DeviceSession } from '../types/generated/DeviceSession';
 import type { DiffHunk } from '../types/generated/DiffHunk';
 import type { DiffLine } from '../types/generated/DiffLine';
 import type { DiffResult } from '../types/generated/DiffResult';
@@ -734,6 +735,19 @@ export const setCoordinatorApiEnabled = (enabled: boolean) =>
  *  Replacing invalidates the previously issued token; the value is shown once. */
 export const generateCoordinatorReadToken = () =>
   _invoke<string>('generate_coordinator_read_token');
+
+// ── Authorized devices (issue #502) ────────────────────────────────────────
+//
+// Per-device session tokens minted at mobile pairing. The list omits the token
+// hash (the secret never crosses IPC); revoking deletes the device and kicks any
+// live socket it holds, so revocation takes effect immediately.
+export type { DeviceSession };
+
+export const listDeviceSessions = () =>
+  _invoke<DeviceSession[]>('list_device_sessions');
+
+export const revokeDeviceSession = (id: number) =>
+  _invoke('revoke_device_session', { id });
 
 // ── Remote access (mobile QR) ──────────────────────────────────────────────
 export const getLocalIp = () =>

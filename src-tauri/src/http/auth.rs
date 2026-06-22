@@ -81,14 +81,26 @@ fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
     let bearer = request::bearer_token(headers);
 
     // Admin: the root token, presented as either the bm_session cookie or a
-    // bearer header (the latter is how POST /api/session mints the cookie).
+    // bearer header (the latter is how POST /api/session mints the cookie); OR a
+    // per-device session token (issue #502), which is also an Admin-surface
+    // credential. Device tokens are what a paired phone holds after pairing —
+    // distinct per device, so revoking one (deleting its row) drops *its* Admin
+    // access without touching the root token or other devices.
     if let Some(t) = cookie.as_deref() {
-        if db::validate_root_token_inner(conn, t).unwrap_or(false) {
+        if db::validate_root_token_inner(conn, t).unwrap_or(false)
+            || db::validate_device_token_inner(conn, t)
+                .unwrap_or(None)
+                .is_some()
+        {
             return Some(Role::Admin);
         }
     }
     if let Some(t) = bearer.as_deref() {
-        if db::validate_root_token_inner(conn, t).unwrap_or(false) {
+        if db::validate_root_token_inner(conn, t).unwrap_or(false)
+            || db::validate_device_token_inner(conn, t)
+                .unwrap_or(None)
+                .is_some()
+        {
             return Some(Role::Admin);
         }
         // Coordinator surface: bearer only. Check drive before read so the
@@ -99,6 +111,36 @@ fn resolve_role_inner(conn: &Connection, headers: &str) -> Option<Role> {
         }
         if db::validate_coordinator_read_token_inner(conn, t).unwrap_or(false) {
             return Some(Role::CoordinatorRead);
+        }
+    }
+    None
+}
+
+/// Recover the device-session id a request authenticates as, if any (issue
+/// #502). Returns `None` for the root token (which has no device row and is
+/// unrevocable) and for every coordinator credential. The dispatcher uses this
+/// to stamp `last_active` and to bind a minted WS ticket to the device, so a
+/// later revocation can find and kick that device's live socket. Mirrors
+/// [`resolve_role`]'s DB-free fast path for unauthenticated probes.
+pub fn resolve_device_session(headers: &str) -> Option<i64> {
+    if request::extract_token_from_cookies(headers).is_none()
+        && request::bearer_token(headers).is_none()
+    {
+        return None;
+    }
+    let conn = db::get().lock().unwrap();
+    resolve_device_session_inner(&conn, headers)
+}
+
+fn resolve_device_session_inner(conn: &Connection, headers: &str) -> Option<i64> {
+    if let Some(t) = request::extract_token_from_cookies(headers) {
+        if let Some(id) = db::validate_device_token_inner(conn, &t).unwrap_or(None) {
+            return Some(id);
+        }
+    }
+    if let Some(t) = request::bearer_token(headers) {
+        if let Some(id) = db::validate_device_token_inner(conn, &t).unwrap_or(None) {
+            return Some(id);
         }
     }
     None
@@ -163,7 +205,15 @@ mod tests {
     fn seeded_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE device_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash TEXT NOT NULL UNIQUE,
+                label TEXT,
+                last_ip TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
         )
         .unwrap();
         conn
@@ -195,6 +245,46 @@ mod tests {
             resolve_role_inner(&conn, &cookie(&root)),
             Some(Role::Admin)
         );
+    }
+
+    #[test]
+    fn device_token_bearer_resolves_admin() {
+        // A paired device's token is an Admin-surface credential (issue #502).
+        let conn = seeded_db();
+        let (_, token) = db::pair_device_session_inner(&conn, Some("iPhone"), None).unwrap();
+        assert_eq!(resolve_role_inner(&conn, &bearer(&token)), Some(Role::Admin));
+    }
+
+    #[test]
+    fn device_token_cookie_resolves_admin() {
+        let conn = seeded_db();
+        let (_, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
+        assert_eq!(resolve_role_inner(&conn, &cookie(&token)), Some(Role::Admin));
+    }
+
+    #[test]
+    fn revoked_device_token_is_unauthorized() {
+        // The hard AC: once revoked, the token must stop authenticating — a
+        // later HTTP request resolves to no role at all (→ 401).
+        let conn = seeded_db();
+        let (id, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
+        db::revoke_device_session_inner(&conn, id).unwrap();
+        assert_eq!(resolve_role_inner(&conn, &bearer(&token)), None);
+        assert_eq!(
+            outcome(resolve_role_inner(&conn, &bearer(&token)), RequiredScope::Admin),
+            AuthOutcome::Unauthorized
+        );
+    }
+
+    #[test]
+    fn resolve_device_session_recovers_the_id_for_a_device_but_not_the_root_token() {
+        let conn = seeded_db();
+        let (id, token) = db::pair_device_session_inner(&conn, None, None).unwrap();
+        assert_eq!(resolve_device_session_inner(&conn, &bearer(&token)), Some(id));
+        assert_eq!(resolve_device_session_inner(&conn, &cookie(&token)), Some(id));
+        // The root token authenticates as Admin but owns no device row.
+        let root = db::get_or_create_root_token_inner(&conn).unwrap();
+        assert_eq!(resolve_device_session_inner(&conn, &bearer(&root)), None);
     }
 
     #[test]

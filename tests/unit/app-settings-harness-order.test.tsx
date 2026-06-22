@@ -43,6 +43,8 @@ function mockBackend(providers: ProviderInfo[]) {
         return Promise.resolve([]);
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
+      case 'list_device_sessions':
+        return Promise.resolve([]);
       default:
         return Promise.resolve({});
     }

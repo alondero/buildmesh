@@ -1,5 +1,6 @@
 //! HTTP route handlers grouped by feature area.
 
+pub mod admin;
 pub mod agent_nodes;
 pub mod attention;
 pub mod coordinator;

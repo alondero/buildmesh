@@ -5,8 +5,6 @@ use std::net::IpAddr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-use crate::db;
-
 /// Pull a bearer token out of an `Authorization: Bearer <token>` header. This is
 /// the only header-carried credential shape the server accepts post-#500 (URL
 /// `?token=` is gone) — both the Admin/root path and the coordinator path read
@@ -17,13 +15,6 @@ pub fn bearer_token(headers: &str) -> Option<String> {
         .strip_prefix("Bearer ")
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
-}
-
-pub fn validate_token(token: Option<String>) -> bool {
-    match token {
-        Some(t) => db::validate_root_token(&t).unwrap_or(false),
-        None => false,
-    }
 }
 
 /// Extract `bm_session=<token>` from the `Cookie:` header. The cookie is
@@ -150,11 +141,6 @@ mod tests {
         assert_eq!(bearer_token("Authorization: Basic abc\r\n"), None);
         // Empty after the scheme is rejected.
         assert_eq!(bearer_token("Authorization: Bearer \r\n"), None);
-    }
-
-    #[test]
-    fn validate_token_rejects_none() {
-        assert!(!validate_token(None));
     }
 
     #[test]

@@ -1,11 +1,16 @@
 // Shared types and HTTP client for the mobile SPA.
 //
-// Authentication (issue #500): the QR/pasted root token is POSTed to
-// `/api/session` (Authorization: Bearer) by `login()`, which sets an HttpOnly
-// bm_session cookie. Subsequent fetches send it automatically via
-// `credentials: "include"` — the token never rides a URL. WebSocket upgrades
-// use a single-use `?ticket=` minted by `mintWsTicket()`. The raw token stays
-// in localStorage so the browser can re-`login()` after the cookie expires.
+// Authentication (issue #500, extended by #502): the QR/pasted root token is
+// POSTed to `/api/session` (Authorization: Bearer) by `login()`, which pairs
+// this device — minting a persistent *per-device* token — sets an HttpOnly
+// bm_session cookie, and returns that device token. We persist the device token
+// (not the root token) in localStorage, so this phone is revocable on its own
+// and re-`login()`s as itself after the cookie expires. Subsequent fetches send
+// the cookie automatically via `credentials: "include"` — the token never rides
+// a URL. WebSocket upgrades use a single-use `?ticket=` minted by
+// `mintWsTicket()`. localStorage is the only "keystore" a browser SPA has; a
+// per-device token there is strictly better than the shared root token it
+// replaces (its leak exposes only this device, and the user can revoke it).
 
 const TOKEN_STORAGE_KEY = "buildmesh_token";
 
@@ -99,12 +104,14 @@ export function isAuthError(e: unknown): boolean {
   return e instanceof ApiError && (e.status === 401 || e.status === 403);
 }
 
-/// Exchange the root token for an HttpOnly bm_session cookie (issue #500). The
-/// token is sent in the `Authorization: Bearer` header — never the URL — to
-/// `POST /api/session`, which validates it and sets the cookie on success.
-/// Returns `false` for a bad token (so the connect form can recover) and throws
-/// only when the desktop app is unreachable.
-export async function login(token: string): Promise<boolean> {
+/// Pair this device / log in (issue #500, extended by #502). The token (root
+/// token on first pair, or this device's own token on a refresh) is sent in the
+/// `Authorization: Bearer` header — never the URL — to `POST /api/session`,
+/// which sets the bm_session cookie and returns the effective *device* token.
+/// Returns that device token (which the caller persists in place of whatever it
+/// presented), `null` for a bad token (so the connect form can recover), and
+/// throws only when the desktop app is unreachable.
+export async function login(token: string): Promise<string | null> {
   let resp: Response;
   try {
     resp = await fetch("/api/session", {
@@ -118,9 +125,21 @@ export async function login(token: string): Promise<boolean> {
     // "can't reach the desktop app" message.
     throw new ApiError(0, fallbackMessage(0));
   }
-  if (resp.status === 401 || resp.status === 403) return false;
+  if (resp.status === 401 || resp.status === 403) return null;
   if (!resp.ok) throw new ApiError(resp.status, fallbackMessage(resp.status));
-  return true;
+  // The server returns the persistent device token to store going forward. We
+  // must NOT fall back to the token we presented: on a first pair that's the
+  // root token, and persisting it would re-introduce the shared, unrevocable
+  // credential #502 exists to remove. A 200 with no token is a server-contract
+  // violation, so treat it as a failed login (null) rather than silently
+  // downgrading to the root token.
+  try {
+    const j = (await resp.json()) as { token?: unknown };
+    if (typeof j?.token === "string" && j.token.length > 0) return j.token;
+  } catch {
+    /* non-JSON / empty body — fall through to the null failure below */
+  }
+  return null;
 }
 
 export async function listNodes(): Promise<AgentNode[]> {

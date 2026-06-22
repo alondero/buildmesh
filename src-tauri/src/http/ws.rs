@@ -18,12 +18,38 @@ use tokio_tungstenite::{tungstenite, WebSocketStream};
 use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
 use crate::db;
 
+/// Should this socket close in response to a revocation signal (issue #502)? A
+/// root-token socket (`device_id == None`) owns no device row and is never
+/// revocable. On `Lagged` we conservatively close any *device* socket — a
+/// still-valid device just reconnects and re-authenticates seamlessly, while a
+/// revoked one is correctly dropped even if its exact id scrolled past the
+/// buffer. Pulled out as a pure function so the decision is unit-testable
+/// without standing up a real WebSocket.
+fn revocation_terminates(
+    signal: Result<i64, broadcast::error::RecvError>,
+    device_id: Option<i64>,
+) -> bool {
+    let Some(my_id) = device_id else {
+        return false;
+    };
+    match signal {
+        Ok(revoked) => revoked == my_id,
+        Err(broadcast::error::RecvError::Lagged(_)) => true,
+        Err(broadcast::error::RecvError::Closed) => false,
+    }
+}
+
 /// Server-pushes [`super::events::EventMsg`] JSON to a connected mobile
 /// client. The client never sends anything; we ignore inbound frames
-/// other than Close.
-pub(crate) async fn handle_events_ws_connection(ws_stream: WebSocketStream<TcpStream>) {
+/// other than Close. `device_id` is the paired device this socket belongs to
+/// (issue #502; `None` for the root token) — revoking it closes the socket.
+pub(crate) async fn handle_events_ws_connection(
+    ws_stream: WebSocketStream<TcpStream>,
+    device_id: Option<i64>,
+) {
     let (mut write, mut read) = ws_stream.split();
     let mut rx = super::events::subscribe();
+    let mut revocations = super::revocation::subscribe();
 
     let push_task = tauri::async_runtime::spawn(async move {
         loop {
@@ -50,10 +76,20 @@ pub(crate) async fn handle_events_ws_connection(ws_stream: WebSocketStream<TcpSt
         }
     });
 
-    while let Some(msg) = read.next().await {
-        match msg {
-            Ok(tungstenite::Message::Close(_)) | Err(_) => break,
-            _ => {}
+    loop {
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
+                }
+            }
+            signal = revocations.recv() => {
+                if revocation_terminates(signal, device_id) {
+                    tracing::info!("/ws/events terminated by revocation of device {:?}", device_id);
+                    break;
+                }
+            }
         }
     }
     push_task.abort();
@@ -63,8 +99,16 @@ pub(crate) async fn handle_events_ws_connection(ws_stream: WebSocketStream<TcpSt
 pub(crate) async fn handle_ws_connection(
     ws_stream: WebSocketStream<TcpStream>,
     node_id: i64,
+    device_id: Option<i64>,
 ) {
     let (mut write, mut read) = ws_stream.split();
+
+    // Subscribe to revocations FIRST — before the (possibly slow, large-scrollback)
+    // initial snapshot send below (issue #502). A broadcast only reaches receivers
+    // present at send time and buffers per-receiver, so subscribing up front means a
+    // revoke fired *during* the snapshot await is retained and seen at the first
+    // `recv()` in the loop, rather than silently lost while we're busy sending.
+    let mut revocations = super::revocation::subscribe();
 
     // Subscribe before sending initial state to avoid missing output in the gap.
     // IMPORTANT: call ensure_pty_channel first so we don't accidentally create a new
@@ -122,22 +166,37 @@ pub(crate) async fn handle_ws_connection(
         }
     });
 
-    while let Some(msg) = read.next().await {
-        match msg {
-            Ok(tungstenite::Message::Text(text)) => {
-                if let Some(resize) = parse_resize_message(&text) {
-                    handle_mobile_resize(node_id, resize.0, resize.1);
-                } else {
-                    forward_mobile_input(node_id, &text);
+    // `revocations` was subscribed before the snapshot send above so a revoke
+    // landing mid-stream closes this socket immediately (issue #502).
+    loop {
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(tungstenite::Message::Text(text))) => {
+                        if let Some(resize) = parse_resize_message(&text) {
+                            handle_mobile_resize(node_id, resize.0, resize.1);
+                        } else {
+                            forward_mobile_input(node_id, &text);
+                        }
+                    }
+                    Some(Ok(tungstenite::Message::Binary(data))) => {
+                        let text = String::from_utf8_lossy(&data);
+                        forward_mobile_input(node_id, &text);
+                    }
+                    Some(Ok(tungstenite::Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => {}
                 }
             }
-            Ok(tungstenite::Message::Binary(data)) => {
-                let text = String::from_utf8_lossy(&data);
-                forward_mobile_input(node_id, &text);
+            signal = revocations.recv() => {
+                if revocation_terminates(signal, device_id) {
+                    tracing::info!(
+                        "WS for node {} terminated by revocation of device {:?}",
+                        node_id,
+                        device_id
+                    );
+                    break;
+                }
             }
-            Ok(tungstenite::Message::Close(_)) => break,
-            Err(_) => break,
-            _ => {}
         }
     }
 
@@ -283,6 +342,60 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, connect_async};
 
+    #[test]
+    fn revocation_terminates_only_the_matching_device() {
+        use broadcast::error::RecvError;
+        // A root-token socket (None) is never revocable.
+        assert!(!revocation_terminates(Ok(5), None));
+        // A device socket closes on its own id, ignores others.
+        assert!(revocation_terminates(Ok(5), Some(5)));
+        assert!(!revocation_terminates(Ok(6), Some(5)));
+        // Lagged → conservatively close any device socket (it just reconnects).
+        assert!(revocation_terminates(Err(RecvError::Lagged(3)), Some(5)));
+        assert!(!revocation_terminates(Err(RecvError::Lagged(3)), None));
+        // A closed channel never forces a termination.
+        assert!(!revocation_terminates(Err(RecvError::Closed), Some(5)));
+    }
+
+    #[tokio::test]
+    async fn revoking_the_device_closes_its_live_terminal_ws() {
+        // The hard AC: a revoke must drop an already-open socket, not just the
+        // next request. A node with no history sends nothing on connect, so the
+        // only thing that ends the stream is the revocation signal.
+        let node_id = 20055_i64;
+        let device_id = 7777_i64;
+        ensure_pty_channel(node_id);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let ws = accept_async(stream).await.unwrap();
+            handle_ws_connection(ws, node_id, Some(device_id)).await;
+        });
+
+        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        // Let the handler reach its `revocation::subscribe()` before we fire —
+        // a broadcast only reaches receivers present at send time.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        super::super::revocation::revoke(device_id);
+
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break true,
+                    Some(Ok(m)) if m.is_close() => break true,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(closed, "revoking the device must terminate its live WS");
+    }
+
     #[tokio::test]
     async fn ws_replays_history_on_connect() {
         let node_id = 20001_i64;
@@ -295,7 +408,7 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = accept_async(stream).await.unwrap();
-            handle_ws_connection(ws, node_id).await;
+            handle_ws_connection(ws, node_id, None).await;
         });
 
         let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
@@ -316,7 +429,7 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = accept_async(stream).await.unwrap();
-            handle_ws_connection(ws, node_id).await;
+            handle_ws_connection(ws, node_id, None).await;
         });
 
         let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
@@ -342,7 +455,7 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = accept_async(stream).await.unwrap();
-            handle_ws_connection(ws, node_id).await;
+            handle_ws_connection(ws, node_id, None).await;
         });
 
         let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
@@ -371,7 +484,7 @@ mod tests {
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let ws = accept_async(stream).await.unwrap();
-            handle_ws_connection(ws, node_id).await;
+            handle_ws_connection(ws, node_id, None).await;
         });
 
         let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
