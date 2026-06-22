@@ -29,6 +29,7 @@ import { GitIssuesTab } from './GitIssuesTab';
 import { GitPullRequestsTab } from './GitPullRequestsTab';
 import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ScratchpadTab } from './ScratchpadTab';
+import { UsageTab } from './UsageTab';
 
 interface ProbeTabDef {
   tab: ProbeTab;
@@ -46,9 +47,14 @@ interface ProbeTabDef {
 
 // Display order follows the PRD's activity-bar order (issue #374), which is
 // deliberately different from the `ProbeTab` union's declaration order.
+// Issue #601 — `usage` is the dedicated glanceable surface for Usage Meters
+// (subscription quota + cash balance). Placed early so the always-visible
+// activity bar makes it a one-click glance: the bar stays visible even when
+// the panel body is collapsed, so the user can always reopen the Usage tab.
 const PROBE_TABS: ProbeTabDef[] = [
   { tab: 'files', icon: '📁', label: 'Project Files', short: 'Files' },
   { tab: 'review', icon: '🔍', label: 'Agent Changes', short: 'Changes' },
+  { tab: 'usage', icon: '⏱', label: 'Usage', tooltip: 'Provider usage meters', short: 'Usage' },
   { tab: 'worktrees', icon: '🌳', label: 'Worktree Manager', short: 'Worktrees' },
   { tab: 'properties', icon: '⚙️', label: 'Mesh Properties', short: 'Properties' },
   { tab: 'issues', icon: '🐙', label: 'Git Issues', short: 'Issues' },
@@ -186,6 +192,12 @@ export function ProbePanel() {
 function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   const { activeMeshId, activeNodeId } = useProbeContext();
 
+  // Host-scoped tabs render without a mesh selection. Today that's only
+  // the Usage tab (issue #601) — it shows every detected harness and
+  // keyed provider regardless of which mesh (if any) is focused. Adding
+  // a new host-scoped tab means a new branch here.
+  if (tab === 'usage') return <UsageTab />;
+
   if (activeMeshId === null) {
     return (
       <ProbeEmptyState
@@ -212,7 +224,9 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   // the placeholder so the empty-state guards above (no mesh selected,
   // no node focused) still apply uniformly. The 🐙, 🔀 and 🕒 tabs are
   // mesh-scoped but don't require an active node, so they fall through
-  // to the "no project selected" guard only.
+  // to the "no project selected" guard only. The ⏱ Usage tab is
+  // host-scoped and is short-circuited above so it renders even with
+  // no mesh selected.
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <MeshPropertiesTab />;

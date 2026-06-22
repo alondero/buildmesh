@@ -2,8 +2,10 @@ import { create } from 'zustand';
 
 // Tabs the Probe Panel can show. Kept as a string-literal union (not a
 // generated wire enum) because it's a pure UI concern — no backend serialises
-// it.
-export type ProbeTab = 'files' | 'review' | 'properties' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
+// it. `usage` was added in issue #601 as the dedicated glanceable surface
+// for Usage Meters (subscription quota + cash balance), reached from a
+// meter icon in the sidebar header.
+export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
 
 // Which baseline a single-file diff is taken against:
 //   'head' — uncommitted working-tree changes vs HEAD (Project Files tab,

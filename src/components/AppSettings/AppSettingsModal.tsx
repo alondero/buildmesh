@@ -5,12 +5,8 @@ import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
-  ProviderUsage,
-  ProviderMeters,
-  UsageWindow,
   ProviderAccount,
   ProviderPairing,
-  BillingBalance,
   DeviceSession,
   RealizedBind,
 } from '../../lib/tauri';
@@ -36,67 +32,12 @@ const MODEL_TIER_FIELDS: { key: keyof ProviderAccount['model_tiers']; label: str
   { key: 'small_fast', label: 'Small / fast' },
 ];
 
-export function UsageBar({ window }: { window: UsageWindow }) {
-  const percent = window.usedPercent ?? 0;
-  const color = percent > 80 ? 'bg-status-error' : percent > 60 ? 'bg-status-warning' : 'bg-accent-cyan';
-  // Show the figure whenever it's known — 0% (full quota remaining) is a real
-  // value, not missing data. Only a null usedPercent is "N/A".
-  const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'N/A';
-  return (
-    <div className="mt-2">
-      <div className="flex justify-between text-base text-text-muted mb-1">
-        <span>{window.label}</span>
-        <span>{display}</span>
-      </div>
-      <div className="h-3 bg-bg-card rounded-full overflow-hidden">
-        <div className={`h-full ${color} rounded-full`} style={{ width: `${Math.min(percent, 100)}%` }} />
-      </div>
-      {window.resetsAt && (
-        <p className="text-sm text-text-muted mt-1">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
-      )}
-    </div>
-  );
-}
-
-/** Cash-balance view for a pay-as-you-go account (issue #537) — shown instead of
- *  percentage bars. */
-export function BalanceCard({ balance }: { balance: BillingBalance }) {
-  const fmt = (n: number) => `${balance.currency} ${n.toFixed(2)}`;
-  return (
-    <div className="mt-2 space-y-1">
-      <div className="flex justify-between text-base">
-        <span className="text-text-muted">Balance remaining</span>
-        <span className="font-medium text-text-primary">{fmt(balance.remaining)}</span>
-      </div>
-      {balance.monthlySpend != null && (
-        <div className="flex justify-between text-base">
-          <span className="text-text-muted">Spent this month</span>
-          <span className="text-text-primary">{fmt(balance.monthlySpend)}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One Model Provider on the Providers page: enable toggle, collapsible
- *  credential editor, and its Usage Meters. A provider may expose several meters
- *  at once (quota windows AND a cash balance), so all present meters render — not
- *  one-or-the-other by billing mode (issue #574, AC3). `usageTracked === false`
- *  marks a Generic provider Buildmesh can't fetch usage for (AC4). */
 export function AccountCard({
   account,
-  usage,
-  usageTracked = true,
-  usageLoading,
   onSave,
   onRemove,
 }: {
   account: ProviderAccount;
-  usage?: ProviderUsage;
-  /** Whether Buildmesh has a usage fetcher for this provider; false → Generic
-   *  provider, shown as an explicit "usage not tracked" state. Defaults true. */
-  usageTracked?: boolean;
-  usageLoading: boolean;
   onSave: (account: ProviderAccount) => Promise<boolean>;
   onRemove?: (id: string) => Promise<void>;
 }) {
@@ -117,10 +58,6 @@ export function AccountCard({
   // Buildmesh, so they show no credential or model-tier fields (#568a). Only
   // Claude-compatible keyed providers (MiniMax/Kimi/custom) do.
   const showCredentials = account.claude_compatible;
-  // Keyed providers (MiniMax/Kimi/custom) authenticate with an API key entered
-  // here; native providers (Anthropic/Codex/Antigravity) self-authenticate via
-  // their own CLI. That split — not billing mode — drives the logged-out copy.
-  const keyed = account.claude_compatible;
 
   const setTier = (key: keyof ProviderAccount['model_tiers'], value: string) =>
     setDraft({ ...draft, model_tiers: { ...draft.model_tiers, [key]: value || null } });
@@ -167,60 +104,12 @@ export function AccountCard({
     }
   };
 
-  const renderUsage = () => {
-    if (!account.enabled) return <p className="text-base text-text-muted">Disabled</p>;
-    // Generic providers have no usage integration — say so explicitly rather than
-    // showing an empty gauge or a misleading error (AC4).
-    if (!usageTracked) {
-      return (
-        <div>
-          <p className="text-base text-text-muted">Usage not tracked</p>
-          <p className="text-sm text-text-muted mt-1">
-            Buildmesh has no usage integration for {account.name}.
-          </p>
-        </div>
-      );
-    }
-    if (!usage && !usageLoading) return <p className="text-base text-text-muted">Unable to load usage data</p>;
-    if (!usage) return null;
-    if (!usage.loggedIn) {
-      return (
-        <div>
-          <p className="text-base text-status-warning">{keyed ? 'No API key' : 'Not logged in'}</p>
-          <p className="text-sm text-text-muted mt-1">
-            {keyed ? `Enter an API key for ${account.name} above` : `Run the ${account.name} CLI login first`}
-          </p>
-        </div>
-      );
-    }
-    if (usage.error) return <p className="text-base text-status-error">{usage.error}</p>;
-    // Render every Usage Meter the provider exposes — quota windows AND a cash
-    // balance can both be present, so show all rather than choosing one by
-    // billing mode (AC3). This also unhides MiniMax's quota bars, which the old
-    // billing-mode XOR suppressed because its account is pay-as-you-go but its
-    // fetcher returns percentage windows.
-    const hasMeters = usage.windows.length > 0 || usage.balance != null;
-    return (
-      <div>
-        {usage.windows.map(w => (
-          <UsageBar key={w.label} window={w} />
-        ))}
-        {usage.balance && <BalanceCard balance={usage.balance} />}
-        {!hasMeters && <p className="text-sm text-text-muted">No usage data</p>}
-        {usage.detail && <p className="text-sm text-accent-cyan mt-2">{usage.detail}</p>}
-      </div>
-    );
-  };
-
   return (
     <div className="border border-border-subtle rounded-lg p-5">
       <div className="flex items-center gap-3 mb-3">
         <ProviderIcon providerId={account.id} className="h-6 w-6" />
         <span className="text-lg font-medium text-text-primary">{account.name}</span>
         <div className="ml-auto flex items-center gap-3">
-          {usageLoading && account.enabled && (
-            <span className="text-base text-text-muted">Loading...</span>
-          )}
           <label className="flex items-center gap-2 text-base text-text-secondary cursor-pointer">
             <input
               type="checkbox"
@@ -265,8 +154,6 @@ export function AccountCard({
           ))}
         </div>
       </div>
-
-      {renderUsage()}
 
       {showCredentials && (
         <button
@@ -430,8 +317,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [meters, setMeters] = useState<ProviderMeters[]>([]);
-  const [usageLoading, setUsageLoading] = useState(false);
+  // Note (issue #601): Usage Meters moved off the Settings modal to the
+  // Probe Panel's "Usage" tab. The Settings surface is now credentials +
+  // harness config + LAN/Coordinator/Device toggles only. The meters
+  // fetch, the meter-section JSX, and the meters-only Refresh button are
+  // gone from here.
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
   const [addingCustom, setAddingCustom] = useState(false);
   // Proxied Provider pairings (issue #576). `pairings` is the effective set
@@ -505,7 +395,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         setTlsActive(network.tls_active);
         setExposedInterfaces(network.exposed_interfaces);
         setLoaded(true);
-        fetchUsage();
       } catch (e) {
         setError(String(e));
         setLoaded(true);
@@ -532,20 +421,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setRevokingId(null);
     }
   };
-
-  const fetchUsage = async (force = false) => {
-    setUsageLoading(true);
-    try {
-      const data = await api.getProviderMeters(force);
-      setMeters(data);
-    } catch (e) {
-      console.error('Failed to fetch usage:', e);
-    } finally {
-      setUsageLoading(false);
-    }
-  };
-
-  const handleRefresh = () => fetchUsage(true);
 
   // Load the Proxied Provider pairing data (issue #576): the effective pairings
   // (derived + stored), the stored-key set (detachable vs derived), and the
@@ -653,11 +528,16 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  // Persist an account, then reload the merged list + usage so the card reflects
-  // the new enabled/billing state. Rolls the local list back on failure so the
+  // Persist an account, then reload the merged list so the card reflects the
+  // new enabled/billing state. Rolls the local list back on failure so the
   // toggle never lies about what the backend stored.
   // Returns whether the save succeeded so callers (e.g. the add-custom form) can
   // keep their UI open on failure instead of dismissing over the error.
+  //
+  // Issue #601: previously also re-fetched `get_provider_meters` here so the
+  // card's bars updated after a toggle. The meters no longer live on this
+  // surface — they live on the Probe Panel's "Usage" tab — so this function
+  // is purely an account catalogue refresh now.
   const handleSaveAccount = async (account: ProviderAccount): Promise<boolean> => {
     const previous = accounts;
     setAccounts(prev => prev.map(a => (a.id === account.id ? account : a)));
@@ -673,7 +553,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       ]);
       setAccounts(accountList);
       setProviders(providerList);
-      fetchUsage(true);
       return true;
     } catch (e) {
       setAccounts(previous);
@@ -692,7 +571,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       ]);
       setAccounts(accountList);
       setProviders(providerList);
-      fetchUsage(true);
     } catch (e) {
       setError(String(e));
     }
@@ -796,8 +674,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  const accountById = (id: string) => accounts.find(a => a.id === id);
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-black/70" />
@@ -875,41 +751,30 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         </div>
 
         <div className="mt-8 pt-5 border-t border-border-subtle">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xl font-semibold text-text-primary">Providers</h3>
-            <button
-              onClick={handleRefresh}
-              disabled={usageLoading}
-              className="text-base text-accent-cyan hover:text-accent-cyan/80 disabled:opacity-50"
-            >
-              Refresh
-            </button>
-          </div>
-
+          <h3 className="text-xl font-semibold text-text-primary mb-2">Providers</h3>
           <p className="text-base text-text-muted mb-4">
-            Usage Meters appear for installed harnesses and providers with a key configured.
+            Enable / disable each model provider and edit its credentials.
+            Usage Meters live on the <span className="font-medium">Usage</span> tab
+            in the side panel — open it from the meter icon in the sidebar header.
             Keys and URLs are stored locally in <span className="font-mono">preferences.json</span>.
           </p>
 
-          {/* Render only the detection-gated rows the backend returns: a native
-              harness's card appears only when it's installed, a keyed provider's
-              only when enabled (AC1). Join the editable account by id. */}
+          {/* Every configured account renders a card here so the user can edit
+              credentials / toggle enable / remove a custom one. The card is a
+              pure config surface — the read-only meters moved to the Usage
+              tab (issue #601). Detection gating (issue #574) only applies to
+              the meters, NOT to the card list: a user must be able to see +
+              configure an undetectable native harness's card before they
+              install it. */}
           <div className="space-y-4">
-            {meters.map(meter => {
-              const account = accountById(meter.provider);
-              if (!account) return null;
-              return (
-                <AccountCard
-                  key={account.id}
-                  account={account}
-                  usage={meter.usage ?? undefined}
-                  usageTracked={meter.usageTracked}
-                  usageLoading={usageLoading}
-                  onSave={handleSaveAccount}
-                  onRemove={handleRemoveAccount}
-                />
-              );
-            })}
+            {accounts.map(account => (
+              <AccountCard
+                key={account.id}
+                account={account}
+                onSave={handleSaveAccount}
+                onRemove={handleRemoveAccount}
+              />
+            ))}
           </div>
 
           {addingCustom ? (

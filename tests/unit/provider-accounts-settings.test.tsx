@@ -27,11 +27,36 @@ function mockBackend() {
       case 'get_provider_accounts':
         return Promise.resolve(accounts);
       case 'get_provider_meters':
-        // Detection-gated rows drive which cards render. Both built-ins are
-        // visible here (Claude Code "detected", MiniMax enabled) so both cards show.
+        // The meters endpoint is still called (to keep cache warm) but the
+        // meters are no longer RENDERED in the Settings modal — they live on
+        // the Probe Panel's "Usage" tab (issue #601). This regression pins
+        // that contract by serving rich meters and asserting nothing in the
+        // modal surface renders them.
         return Promise.resolve([
-          { provider: 'anthropic', usageTracked: true, usage: null },
-          { provider: 'minimax', usageTracked: true, usage: null },
+          {
+            provider: 'anthropic',
+            usageTracked: true,
+            usage: {
+              provider: 'anthropic',
+              loggedIn: true,
+              windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }],
+              balance: null,
+              detail: null,
+              error: null,
+            },
+          },
+          {
+            provider: 'minimax',
+            usageTracked: true,
+            usage: {
+              provider: 'minimax',
+              loggedIn: true,
+              windows: [],
+              balance: { remaining: 12.34, monthlySpend: 1.5, currency: 'USD' },
+              detail: null,
+              error: null,
+            },
+          },
         ]);
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
@@ -86,5 +111,32 @@ describe('Accounts & Usage settings (issue #537)', () => {
       base_url: 'https://api.deepseek.com/anthropic',
       api_key: 'sk-deep',
     });
+  });
+
+  // Issue #601 — Usage Meters moved off the Settings modal and onto the
+  // Probe Panel's "Usage" tab. The Settings modal now owns credentials
+  // only; it must NOT render the bars or balances, even when the backend
+  // returns fully populated meters. This pins the split — if a future
+  // refactor accidentally re-mounts the meter section inside Settings,
+  // these assertions go loud.
+  it('does NOT render Usage Meters (issue #601 — meters moved off the Settings modal)', async () => {
+    mockBackend();
+    render(<AppSettingsModal onClose={() => {}} />);
+    await screen.findByText('Anthropic / Claude');
+    // Bars from the Anthropic 5-hour window must not appear in the modal.
+    expect(screen.queryByText('42.0%')).toBeNull();
+    // The MiniMax balance must not appear either.
+    expect(screen.queryByText('USD 12.34')).toBeNull();
+    expect(screen.queryByText('Balance remaining')).toBeNull();
+  });
+
+  it('does NOT render the meters-only Refresh button (issue #601 — refresh lives on the Usage tab)', async () => {
+    mockBackend();
+    render(<AppSettingsModal onClose={() => {}} />);
+    await screen.findByText('Anthropic / Claude');
+    // The Refresh button used to sit next to the "Providers" header; it
+    // only existed to re-fetch usage. Without meters, there's nothing to
+    // refresh here — the affordance moves to the Usage tab.
+    expect(screen.queryByRole('button', { name: /^refresh$/i })).toBeNull();
   });
 });

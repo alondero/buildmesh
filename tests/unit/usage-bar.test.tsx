@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { UsageBar } from '../../src/components/AppSettings/AppSettingsModal';
+import { UsageBar } from '../../src/components/AppSettings/UsageRender';
 
 describe('UsageBar', () => {
   it('renders 0% used (full quota remaining) as a real figure, not N/A', () => {
