@@ -37,6 +37,7 @@ import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
 import type { ProviderMeters } from '../types/generated/ProviderMeters';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
+import type { RealizedBind } from '../types/generated/RealizedBind';
 import type { RestoreResult } from '../types/generated/RestoreResult';
 import type { UsageWindow } from '../types/generated/UsageWindow';
 import type { WorktreeInfo } from '../types/generated/WorktreeInfo';
@@ -754,8 +755,10 @@ export const revokeDeviceSession = (id: number) =>
 //
 // Off by default: the server binds loopback only. Enabling exposure binds the
 // machine's LAN interfaces over self-signed TLS (HTTPS/WSS) and rebinds live —
-// no app restart. `getNetworkStatus` reports the switch and the bound port.
-export type { NetworkStatus };
+// no app restart. `getNetworkStatus` reports the switch and the bound port;
+// `RealizedBind` (issue #586) is one element of its realized-listener list,
+// used by the Settings UI to show *actual* exposure rather than just DB intent.
+export type { NetworkStatus, RealizedBind };
 
 export const getNetworkStatus = () =>
   _invoke<NetworkStatus>('get_network_status');
