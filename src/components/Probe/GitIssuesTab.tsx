@@ -67,7 +67,7 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import { colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 
@@ -115,7 +115,7 @@ export function GitIssuesTab() {
   // of the tab. Re-fetching on each open would be wasteful, and the list is
   // stable for the duration of a session (adding a new provider requires
   // an app restart).
-  const [providerList, setProviderList] = useState<ProviderEntry[]>([]);
+  const [providerList, setProviderList] = useState<SpawnOption[]>([]);
   // Per-row expand state for the issue body. Set keyed by issue number
   // (not a single boolean) so cross-referencing two long issues stays
   // possible — the dock is 360px wide, but a user can scroll it freely.
@@ -176,23 +176,11 @@ export function GitIssuesTab() {
   // picker drops stale accounts without an app restart.
   // Issue #575 / ADR-0016 — preserve the Spawn Option shape so the
   // `ProviderDropdown` can render the harness-grouped, always-expanded
-  // menu (harness header + indented Proxied children).
+  // menu (harness header + indented Proxied children). The 8-field
+  // projection lives in `mapBackendProviders` (issue #583 cleanup).
   const refreshProviderList = useCallback(() => {
     listProviders()
-      .then(backendProviders => {
-        setProviderList(
-          backendProviders.map(p => ({
-            id: p.id,
-            label: p.label,
-            color: colorClassForProvider(p.id),
-            icon: p.icon,
-            harness_id: p.harness_id,
-            provider_id: p.provider_id,
-            is_proxied: p.is_proxied,
-            group_key: p.group_key,
-          })),
-        );
-      })
+      .then(backendProviders => setProviderList(mapBackendProviders(backendProviders)))
       .catch(err => console.error('listProviders failed:', err));
   }, []);
 

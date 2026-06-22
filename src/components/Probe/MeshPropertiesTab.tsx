@@ -32,6 +32,7 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
+import { groupByHarness } from '../../lib/groups';
 import {
   checkGhAuth,
   detectMeshProject,
@@ -371,27 +372,22 @@ sandbox: config.sandbox,
             >
               <option value="">&lt;Default&gt; (Anthropic)</option>
               {/* Issue #575 / ADR-0016 — group the Spawn Options by their
-                  `harness_id` so the dropdown matches the harness-grouped
-                  Spawn Menu shape on every other surface. The native row
-                  in each bucket is the clickable harness header; subsequent
-                  rows are Proxied children. We collapse a bucket to a plain
-                  <option> when the harness has no children so the
-                  one-harness config still looks clean.
+                  `group_key` (== `harness_id`) so the dropdown matches the
+                  harness-grouped Spawn Menu shape on every other surface.
+                  The native row in each bucket is the clickable harness
+                  header; subsequent rows are Proxied children. We collapse
+                  a bucket to a plain <option> when the harness has no
+                  children so the one-harness config still looks clean.
 
                   The optgroup label is the native row's `label` (e.g.
                   "Claude Code"), NOT the raw `harness_id` (e.g. "claude")
                   — the harness profile name is the user-facing string.
                   The native row's label is the harness profile's friendly
                   name from `HarnessProfile.name`, populated by
-                  `provider_info_for` on the backend. */}
-              {Array.from(
-                providers.reduce((map, p) => {
-                  const list = map.get(p.harness_id) ?? [];
-                  list.push(p);
-                  map.set(p.harness_id, list);
-                  return map;
-                }, new Map<string, typeof providers>()).entries(),
-              ).map(([harnessId, group]) => {
+                  `provider_info_for` on the backend. The bucketing is
+                  shared with `GroupedProviderMenu` and the mobile
+                  `ProviderPicker` via `groupByHarness` (issue #583). */}
+              {groupByHarness(providers).map(([harnessId, group]) => {
                 if (group.length === 1) {
                   return (
                     <option key={group[0].id} value={group[0].id}>

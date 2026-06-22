@@ -1,11 +1,11 @@
 import type { Mesh } from '../../stores/meshStore';
-import { type ProviderEntry } from './ProviderDropdown';
+import { type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from './SpawnButtonCluster';
 
 interface NodeCreationFormProps {
   mesh: Mesh;
   isDropdownOpen: boolean;
-  providers: ProviderEntry[];
+  providers: SpawnOption[];
   onToggleDropdown: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;

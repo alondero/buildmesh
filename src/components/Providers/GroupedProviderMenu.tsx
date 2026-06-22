@@ -1,17 +1,20 @@
 import { useMemo } from 'react';
-import type { ProviderInfo } from '../../types/generated/ProviderInfo';
+import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from './ProviderIcon';
+import { groupByHarness } from '../../lib/groups';
 
 export interface GroupedProviderMenuProps {
-  /** Backend-derived Spawn Menu (ADR-0016). Already in harness order;
-   *  rows with the same `group_key` cluster under their harness header. */
-  providers: ProviderInfo[];
+  /** Frontend view of the Spawn Menu (ADR-0016). Already in harness
+   *  order; rows with the same `group_key` cluster under their harness
+   *  header. `SpawnOption` (issue #583) is the post-`mapBackendProviders`
+   *  shape — same fields `ProviderDropdown`/`SpawnButtonCluster` pass in. */
+  providers: SpawnOption[];
   /** Called with `(providerId, altKey)` when the user picks a row. */
   onSelect: (providerId: string, altKey: boolean) => void;
   /** Optional filter (e.g. the archived-resume picker filters to
    *  `resumable: true`). Applied before grouping so the harness header
    *  is hidden when *all* its rows are filtered out. */
-  filter?: (provider: ProviderInfo) => boolean;
+  filter?: (provider: SpawnOption) => boolean;
   /** Optional CSS class merged onto the root container. */
   className?: string;
 }
@@ -43,19 +46,12 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className }: 
   // listed order). The filter is applied per-row BEFORE bucketing so a
   // filter-out row is dropped — and if it was the harness header, the
   // bucket collapses to just children (a valid grouped render).
-  const groups = useMemo(() => {
-    const filtered = filter ? providers.filter(filter) : providers;
-    const map = new Map<string, ProviderInfo[]>();
-    for (const p of filtered) {
-      const list = map.get(p.group_key);
-      if (list) {
-        list.push(p);
-      } else {
-        map.set(p.group_key, [p]);
-      }
-    }
-    return Array.from(map.entries());
-  }, [providers, filter]);
+  // The bucketing is shared with `MeshPropertiesTab` and the mobile
+  // `ProviderPicker` via `groupByHarness` (issue #583 cleanup).
+  const groups = useMemo(
+    () => groupByHarness(providers, { filter }),
+    [providers, filter],
+  );
 
   return (
     <div className={className}>

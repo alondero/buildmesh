@@ -1,13 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../../src/components/Sidebar/ProviderDropdown';
+import { ProviderDropdown } from '../../src/components/Sidebar/ProviderDropdown';
+import { colorClassForProvider, type SpawnOption } from '../../src/lib/groups';
 
 // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape. Test
 // fixtures here stand in for the backend's grouped, harness-ordered list;
 // a fixture row that's the only one in its bucket is a native harness
 // header (the only clickable row in a one-harness group).
-const PROVIDERS: ProviderEntry[] = [
+const PROVIDERS: SpawnOption[] = [
   { id: 'claude', label: 'Anthropic', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
   { id: 'agy', label: 'Agy', color: 'bg-emerald-500', icon: 'G', harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },
 ];
@@ -78,7 +79,7 @@ describe('ProviderDropdown', () => {
     // Menu: each harness gets a clickable header (`<button
     // data-spawn-harness=...>`), and Proxied children render indented
     // inside the same group.
-    const profiles: ProviderEntry[] = [
+    const profiles: SpawnOption[] = [
       { id: 'claude', label: 'Claude Code', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
       { id: 'claude:minimax', label: 'MiniMax', color: 'bg-indigo-500', icon: 'M', harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
       { id: 'codex', label: 'Codex', color: 'bg-gray-500', icon: 'C', harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },

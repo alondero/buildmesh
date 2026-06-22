@@ -1,38 +1,15 @@
-import type { ProviderInfo } from '../../types/generated/ProviderInfo';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
+import type { SpawnOption } from '../../lib/groups';
 
-/**
- * Backwards-compatible subset of the full [`ProviderInfo`] wire shape. Kept
- * exported because the Sidebar, MeshItem, and NodeCreationForm consume it
- * for typed `providerList` plumbing — they need the `id` for the click
- * handler and the `label` / `color` for the row UI. The new grouped render
- * also uses `group_key` / `is_proxied` (passed through by the alias below).
- */
-export type ProviderEntry = Pick<
-  ProviderInfo,
-  'id' | 'label' | 'color' | 'icon' | 'harness_id' | 'provider_id' | 'is_proxied' | 'group_key'
->;
-
-// Tailwind class map for provider badges. Stays in the frontend because Tailwind's
-// purge tool needs static class strings — backend can't emit these dynamically.
-// Backend ProviderInfo.color (hex) is not used here for the same reason.
-// Kept exported for any external consumer that still wants the coloured dot.
-export function colorClassForProvider(providerId: string): string {
-  const map: Record<string, string> = {
-    anthropic: 'bg-blue-500',
-    claude: 'bg-blue-500', // Detected Claude Code profile id (#534).
-    minimax: 'bg-indigo-500',
-    kimi: 'bg-cyan-500',
-    agy: 'bg-emerald-500',
-    opencode: 'bg-amber-500',
-    terminal: 'bg-gray-500',
-  };
-  return map[providerId] ?? 'bg-gray-500';
-}
+// `SpawnOption` is the frontend view of the Spawn Option wire shape
+// (issue #583) — produced by `mapBackendProviders` and consumed by the
+// harness-grouped render. `GroupedProviderMenu` now consumes `SpawnOption`
+// directly (not `ProviderInfo`) so the four desktop spawn surfaces
+// share one frontend view and the boundary no longer needs a cast.
 
 interface ProviderDropdownProps {
   meshId: number;
-  providers: ProviderEntry[];
+  providers: SpawnOption[];
   onSelect: (providerId: string, altKey: boolean) => void;
 }
 
@@ -49,10 +26,7 @@ export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdo
       data-dropdown-for={meshId}
       className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg min-w-[200px] max-h-[400px] overflow-y-auto"
     >
-      <GroupedProviderMenu
-        providers={providers as ProviderInfo[]}
-        onSelect={onSelect}
-      />
+      <GroupedProviderMenu providers={providers} onSelect={onSelect} />
     </div>
   );
 }
