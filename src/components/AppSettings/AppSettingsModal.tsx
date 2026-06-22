@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
+import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
@@ -8,6 +9,7 @@ import type {
   ProviderMeters,
   UsageWindow,
   ProviderAccount,
+  ProviderPairing,
   BillingBalance,
   DeviceSession,
   RealizedBind,
@@ -432,6 +434,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [usageLoading, setUsageLoading] = useState(false);
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
   const [addingCustom, setAddingCustom] = useState(false);
+  // Proxied Provider pairings (issue #576). `pairings` is the effective set
+  // (derived defaults + stored extras) shown per harness; `storedPairingKeys`
+  // marks which are user-stored (detachable) vs derived (managed on Providers
+  // page). `compatibleByHarness` drives the surface-matched attach picker.
+  const [pairings, setPairings] = useState<ProviderPairing[]>([]);
+  const [storedPairingKeys, setStoredPairingKeys] = useState<Set<string>>(new Set());
+  const [compatibleByHarness, setCompatibleByHarness] = useState<Record<string, ProviderAccount[]>>({});
   const [coordEnabled, setCoordEnabled] = useState(false);
   const [coordHasToken, setCoordHasToken] = useState(false);
   const [coordToken, setCoordToken] = useState<string | null>(null);
@@ -485,6 +494,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         ]);
         setProviders(providerList);
         setAccounts(accountList);
+        loadPairingData(providerList);
         const stored = prefs.default_provider;
         setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
         setCoordEnabled(coord.enabled);
@@ -536,6 +546,74 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   };
 
   const handleRefresh = () => fetchUsage(true);
+
+  // Load the Proxied Provider pairing data (issue #576): the effective pairings
+  // (derived + stored), the stored-key set (detachable vs derived), and the
+  // surface-matched compatible-provider lists per native harness. Takes the
+  // provider list explicitly so it can run from `init` before `providers` state
+  // settles, and re-run after an attach/detach.
+  const loadPairingData = async (providerList: ProviderInfo[]) => {
+    try {
+      const [effective, prefs] = await Promise.all([
+        api.getProviderPairings(),
+        api.getAppPreferences(),
+      ]);
+      // Defensive: the real backend always returns arrays, but a malformed
+      // response shouldn't crash the settings modal.
+      setPairings(Array.isArray(effective) ? effective : []);
+      const stored = prefs.provider_pairings ?? [];
+      setStoredPairingKeys(new Set(stored.map((p) => `${p.harness_id}:${p.provider_id}`)));
+      const nativeHarnesses = providerList.filter((p) => !p.is_proxied && p.id !== 'terminal');
+      const entries = await Promise.all(
+        nativeHarnesses.map(async (h) => {
+          const list = await api.compatibleProvidersForHarness(h.id);
+          return [h.id, Array.isArray(list) ? list : []] as const;
+        }),
+      );
+      setCompatibleByHarness(Object.fromEntries(entries));
+    } catch (e) {
+      console.error('Failed to load pairing data:', e);
+    }
+  };
+
+  // Attach a provider to a harness (issue #576). The backend derives the
+  // endpoint from the harness's surface and seeds the global key set-if-absent;
+  // we then reload pairings + the merged accounts/providers so the new row and
+  // any seeded key are reflected. Errors propagate to the card (which keeps its
+  // form open) AND surface a toast here.
+  const handleAttachProvider = async (
+    harnessId: string,
+    providerId: string,
+    apiKey: string | null,
+  ) => {
+    setError(null);
+    try {
+      await api.attachProxiedProvider(harnessId, providerId, apiKey);
+      const [providerList, accountList] = await Promise.all([
+        api.listProviders(),
+        api.getProviderAccounts(),
+      ]);
+      setProviders(providerList);
+      setAccounts(accountList);
+      await loadPairingData(providerList);
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    }
+  };
+
+  const handleDetachProvider = async (harnessId: string, providerId: string) => {
+    setError(null);
+    try {
+      await api.removeProviderPairing(harnessId, providerId);
+      const providerList = await api.listProviders();
+      setProviders(providerList);
+      await loadPairingData(providerList);
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    }
+  };
 
   // Persist a new spawn-menu harness order (issue #573). Optimistically reorder
   // the local `providers` list to match — keeping any non-listed rows (Terminal)
@@ -773,6 +851,28 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <HarnessOrderList providers={providers} onReorder={handleReorderHarnesses} />
           </div>
         )}
+
+        <div className="mt-8 pt-5 border-t border-border-subtle">
+          <h3 className="text-xl font-semibold text-text-primary mb-2">Harnesses & proxied providers</h3>
+          <p className="text-base text-text-muted mb-4">
+            Proxy a model provider through a harness over a compatible API surface
+            (e.g. MiniMax via Claude Code over Anthropic, or via Codex over OpenAI).
+            The provider's API key is global — set it once on the Providers page below.
+          </p>
+          <HarnessConfigList
+            harnesses={
+              providers
+                .filter((p) => !p.is_proxied && p.id !== 'terminal')
+                .map((p) => ({ id: p.id, label: p.label })) as ProxyHarness[]
+            }
+            compatibleByHarness={compatibleByHarness}
+            pairings={pairings}
+            storedKeys={storedPairingKeys}
+            accounts={accounts}
+            onAttach={handleAttachProvider}
+            onDetach={handleDetachProvider}
+          />
+        </div>
 
         <div className="mt-8 pt-5 border-t border-border-subtle">
           <div className="flex items-center justify-between mb-4">

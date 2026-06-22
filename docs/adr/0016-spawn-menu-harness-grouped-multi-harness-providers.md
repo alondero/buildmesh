@@ -41,3 +41,9 @@ The domain terms this introduces (Proxied/Native Provider, Compatible API surfac
 - `resolve_provider_env` becomes pairing-scoped/surface-aware (it must pick the right base URL + model-tier map for the harness's surface, not a single per-account base URL).
 - Subsumes the menu/usage portions of PRD #566 (first-class providers) and extends #567 (per-tier model map) to be pairing-scoped.
 - The "Accounts & Usage" modal splits into the Providers page + harness config page.
+
+### Implementation notes (issue #576)
+
+- The per-pairing split is realised by `preferences::ProviderPairing { harness_id, provider_id, surface, base_url, model_tiers }` and an `ApiSurface { Anthropic, OpenAI }` enum. Only **user-added** pairings are persisted (`AppPreferences::provider_pairings`); the default Anthropic pairing for a keyed account is **derived** at read time (`effective_pairings`), so pre-#576 MiniMax-via-Claude setups keep working with **no migration** — a stored pairing for the same `(harness_id, provider_id)` overrides the derived default.
+- First-class providers publish their surface→URL(+default model) map in `preferences::first_class_surfaces` (the "publishes its surface→URL map" mechanism); a Generic provider declares its single Anthropic surface+URL on the account. `resolve_provider_env` dispatches by surface: `anthropic_surface_env` (`ANTHROPIC_*` + per-tier aliases) vs `openai_surface_env` (`OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`).
+- **The OpenAI/Codex surface is wired best-effort and not yet runtime-verified** (no `codex` binary + provider OpenAI key on the dev host). The Anthropic surface is exercised end-to-end. Live Codex verification — including whether Codex honours `OPENAI_*` env vs a `~/.codex/config.toml` `model_providers` entry — is tracked in **#599**.
