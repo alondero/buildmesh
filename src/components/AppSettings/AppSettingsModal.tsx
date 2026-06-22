@@ -9,6 +9,7 @@ import type {
   UsageWindow,
   ProviderAccount,
   BillingBalance,
+  DeviceSession,
   RealizedBind,
 } from '../../lib/tauri';
 
@@ -436,6 +437,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [coordToken, setCoordToken] = useState<string | null>(null);
   const [coordBusy, setCoordBusy] = useState(false);
   const [coordCopied, setCoordCopied] = useState(false);
+  const [devices, setDevices] = useState<DeviceSession[]>([]);
+  const [confirmingRevokeId, setConfirmingRevokeId] = useState<number | null>(null);
+  const [revokingId, setRevokingId] = useState<number | null>(null);
   const [lanEnabled, setLanEnabled] = useState(false);
   const [lanBusy, setLanBusy] = useState(false);
   // Realized exposure (issue #586). Mirrors `lanEnabled` (DB intent) until a
@@ -471,11 +475,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   useEffect(() => {
     const init = async () => {
       try {
-        const [prefs, providerList, accountList, coord, network] = await Promise.all([
+        const [prefs, providerList, accountList, coord, deviceList, network] = await Promise.all([
           api.getAppPreferences(),
           api.listProviders(),
           api.getProviderAccounts(),
           api.getCoordinatorStatus(),
+          api.listDeviceSessions(),
           api.getNetworkStatus(),
         ]);
         setProviders(providerList);
@@ -484,6 +489,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
+        setDevices(deviceList);
         setLanEnabled(network.lan_exposure_enabled);
         // Realized bind state from the live ServerListeners (issue #586).
         setTlsActive(network.tls_active);
@@ -497,6 +503,25 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     };
     init();
   }, []);
+
+  // Revoke a paired device: optimistically drop it from the list, then call the
+  // backend (which deletes the row and force-closes any live socket it holds).
+  // Roll back on failure so the list never lies about what's still authorized.
+  const handleRevokeDevice = async (id: number) => {
+    const previous = devices;
+    setConfirmingRevokeId(null);
+    setRevokingId(id);
+    setError(null);
+    setDevices(prev => prev.filter(d => d.id !== id));
+    try {
+      await api.revokeDeviceSession(id);
+    } catch (e) {
+      setDevices(previous);
+      setError(String(e));
+    } finally {
+      setRevokingId(null);
+    }
+  };
 
   const fetchUsage = async (force = false) => {
     setUsageLoading(true);
@@ -933,10 +958,70 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         </div>
 
         <div className="mt-8 pt-5 border-t border-border-subtle">
+          <h3 className="text-xl font-semibold text-text-primary mb-2">Authorized Devices</h3>
+          <p className="text-base text-text-muted mb-4">
+            Phones you've paired keep their own session token, so they stay
+            connected as their network (and IP) changes. Revoke any device to cut
+            it off immediately — its open connections drop and it must pair again
+            with a fresh QR code.
+          </p>
+
+          {!loaded ? (
+            <p className="text-base text-text-muted">Loading…</p>
+          ) : devices.length === 0 ? (
+            <p className="text-base text-text-muted italic">
+              No paired devices yet. Scan the Remote Access QR code from a phone to pair one.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {devices.map(device => (
+                <li
+                  key={device.id}
+                  className="flex items-center gap-4 border border-border-subtle rounded-lg px-4 py-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-base text-text-primary truncate">
+                      {device.label ?? 'Unknown device'}
+                    </div>
+                    <div className="text-sm text-text-muted truncate">
+                      {device.last_ip ?? 'IP unknown'} · last active {device.last_active_at}
+                    </div>
+                  </div>
+                  {confirmingRevokeId === device.id ? (
+                    <div className="flex gap-2 whitespace-nowrap">
+                      <button
+                        onClick={() => handleRevokeDevice(device.id)}
+                        disabled={revokingId === device.id}
+                        className="px-4 py-2 bg-status-error text-white text-base rounded hover:bg-status-error/90 disabled:opacity-50"
+                      >
+                        {revokingId === device.id ? 'Revoking…' : 'Confirm revoke'}
+                      </button>
+                      <button
+                        onClick={() => setConfirmingRevokeId(null)}
+                        className="px-4 py-2 bg-bg-card text-text-secondary text-base rounded hover:bg-border-subtle"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmingRevokeId(device.id)}
+                      className="px-4 py-2 bg-status-error/15 text-status-error text-base rounded hover:bg-status-error/25 whitespace-nowrap"
+                    >
+                      Revoke
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className="mt-8 pt-5 border-t border-border-subtle">
           <p className="text-base text-text-muted">
             Provider defaults are stored in your app data directory at{' '}
-            <span className="font-mono">preferences.json</span>; coordinator settings live in
-            the app database.
+            <span className="font-mono">preferences.json</span>; coordinator settings and
+            authorized devices live in the app database.
           </p>
         </div>
       </div>

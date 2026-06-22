@@ -42,13 +42,15 @@ export default function Connect({ onConnected, notice }: Props) {
     setBusy(true);
     setError(null);
     try {
-      const ok = await login(token);
-      if (!ok) {
+      const deviceToken = await login(token);
+      if (!deviceToken) {
         setError("Invalid token — re-scan the QR code from the desktop app.");
         setBusy(false);
         return;
       }
-      rememberToken(token);
+      // Persist the per-device token the server returned (issue #502), not the
+      // root token we may have pasted — this device is now revocable on its own.
+      rememberToken(deviceToken);
       onConnected();
     } catch {
       setError(

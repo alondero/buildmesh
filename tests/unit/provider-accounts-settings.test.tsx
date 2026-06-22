@@ -45,6 +45,8 @@ function mockBackend() {
       case 'upsert_provider_account':
         accounts.push((args as { account: ProviderAccount }).account);
         return Promise.resolve(undefined);
+      case 'list_device_sessions':
+        return Promise.resolve([]);
       default:
         return Promise.resolve({});
     }

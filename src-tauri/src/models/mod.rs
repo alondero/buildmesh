@@ -242,6 +242,33 @@ pub struct Mesh {
     pub sandbox: bool,
 }
 
+/// A paired mobile/admin client identified by a persistent per-device token
+/// (issue #502, PRD #494). Generated to `src/types/generated/DeviceSession.ts`
+/// (issue #359). This is the panel/wire view — it deliberately omits the
+/// `token_hash` column so the secret never crosses the IPC/HTTP boundary.
+///
+/// Timestamps are the raw SQLite `datetime('now')` text (`YYYY-MM-DD HH:MM:SS`),
+/// surfaced as opaque `String`s the UI renders directly — not `DateTime<Utc>`,
+/// which would only force an RFC3339 parse-or-fall-back-to-epoch round-trip for
+/// a value the backend never does date math on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "DeviceSession.ts")]
+pub struct DeviceSession {
+    #[ts(as = "i32")]
+    pub id: i64,
+    /// Human-friendly name derived from the client's `User-Agent` at pairing
+    /// (e.g. "Safari on iPhone"). `None` when no usable header was present.
+    pub label: Option<String>,
+    /// Last IP the device was seen from. Demoted from an auth factor (the
+    /// device token now identifies the client, supporting roaming) to a
+    /// displayed attribute. `None` until the first activity touch records one.
+    pub last_ip: Option<String>,
+    /// When the device first paired.
+    pub created_at: String,
+    /// When the device last authenticated (login refresh or WS-ticket mint).
+    pub last_active_at: String,
+}
+
 /// An agent node — isolated agent working directory.
 ///
 /// Generated to src/types/generated/AgentNode.ts (issue #359); references the
