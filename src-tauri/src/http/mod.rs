@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 use tauri::{Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, watch};
 use tokio_rustls::TlsAcceptor;
@@ -709,10 +709,23 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     {
         let ticket = query_param(&path_with_query, "ticket").unwrap_or_default();
         // The ticket carries the device that minted it (issue #502), so a later
-        // revocation can kick this socket; `None` for the root token.
-        let Some(device_id) = ws_ticket::consume(&ticket) else {
-            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
-            return;
+        // revocation can kick this socket; `None` for the root token. It must
+        // also be bound to the `events` surface (issue #551) — a ticket minted
+        // for a node's terminal can't be replayed here.
+        let requested = ws_ticket::WsTarget {
+            surface: ws_ticket::SURFACE_EVENTS.to_string(),
+            node_id: None,
+        };
+        let device_id = match ws_ticket::consume(&ticket, &requested) {
+            ws_ticket::ConsumeOutcome::Ok(device_id) => device_id,
+            ws_ticket::ConsumeOutcome::TargetMismatch => {
+                let _ = request::write_status_only(&mut lines, "403 Forbidden").await;
+                return;
+            }
+            ws_ticket::ConsumeOutcome::Invalid => {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
         };
         let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
             let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
@@ -758,10 +771,24 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
 
         let ticket = query_param(&path_with_query, "ticket").unwrap_or_default();
         // Recover the device that minted this ticket so a revocation can kick
-        // the socket mid-stream (issue #502); `None` for the root token.
-        let Some(device_id) = ws_ticket::consume(&ticket) else {
-            let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
-            return;
+        // the socket mid-stream (issue #502); `None` for the root token. The
+        // ticket must be bound to *this* node's terminal (issue #551): a ticket
+        // minted for another node — or for the events push — is rejected, and a
+        // node mismatch leaves the ticket valid so the real client can retry.
+        let requested = ws_ticket::WsTarget {
+            surface: ws_ticket::SURFACE_TERMINAL.to_string(),
+            node_id: Some(node_id),
+        };
+        let device_id = match ws_ticket::consume(&ticket, &requested) {
+            ws_ticket::ConsumeOutcome::Ok(device_id) => device_id,
+            ws_ticket::ConsumeOutcome::TargetMismatch => {
+                let _ = request::write_status_only(&mut lines, "403 Forbidden").await;
+                return;
+            }
+            ws_ticket::ConsumeOutcome::Invalid => {
+                let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                return;
+            }
         };
 
         let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
@@ -909,6 +936,29 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         {
             return;
         }
+        // The ticket is bound to the target the caller will open (issue #551):
+        // its `{ surface, node_id }` arrives in the request body. A missing or
+        // malformed target is a 400 — we never mint a ticket that could never
+        // match an upgrade.
+        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if content_length > 8 * 1024 {
+            let _ = request::write_status_only(&mut lines, "413 Content Too Large").await;
+            return;
+        }
+        let mut body_bytes = vec![0u8; content_length];
+        if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
+            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+            return;
+        }
+        let target = match ws_ticket::parse_mint_target(&body_bytes) {
+            Ok(t) => t,
+            Err(()) => {
+                let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+                return;
+            }
+        };
         // Bind the ticket to the requesting device (issue #502) so the WebSocket
         // it opens can be force-closed on revocation; `None` for the root token.
         // Opening a terminal is also a natural "last active" signal, so refresh
@@ -919,7 +969,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
             let _ = crate::db::touch_device_session(id, Some(&peer_ip));
         }
         let body = serde_json::to_string(&ws_ticket::WsTicket {
-            ticket: ws_ticket::mint(device_id),
+            ticket: ws_ticket::mint(device_id, target),
         })
         .unwrap_or_else(|_| r#"{"ticket":""}"#.to_string());
         let _ = request::write_json(&mut lines, "200 OK", &body).await;
@@ -1748,9 +1798,52 @@ mod tests {
         // A ticket minted via the in-memory store (no DB needed) lets the
         // upgrade through to the 101 switch. Single-use is covered in
         // ws_ticket's own tests.
-        let ticket = ws_ticket::mint(None);
+        let ticket = ws_ticket::mint(
+            None,
+            ws_ticket::WsTarget {
+                surface: ws_ticket::SURFACE_TERMINAL.to_string(),
+                node_id: Some(123),
+            },
+        );
         let path = format!("/ws/terminal/123?ticket={}", ticket);
         assert_eq!(ws_status(&path).await, 101);
+    }
+
+    #[tokio::test]
+    async fn ws_terminal_rejects_ticket_bound_to_other_node_and_keeps_it_valid() {
+        // Issue #551: a ticket minted for node 123, presented on node 999, is a
+        // 403 — and is NOT consumed, so the legitimate client can still upgrade
+        // node 123 within the TTL.
+        let ticket = ws_ticket::mint(
+            None,
+            ws_ticket::WsTarget {
+                surface: ws_ticket::SURFACE_TERMINAL.to_string(),
+                node_id: Some(123),
+            },
+        );
+        let wrong = format!("/ws/terminal/999?ticket={}", ticket);
+        assert_eq!(ws_status(&wrong).await, 403, "wrong node must be Forbidden");
+        let right = format!("/ws/terminal/123?ticket={}", ticket);
+        assert_eq!(
+            ws_status(&right).await,
+            101,
+            "the rejected upgrade must not have consumed the ticket"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_events_rejects_terminal_bound_ticket() {
+        // Issue #551: surface is part of the binding — a terminal ticket can't
+        // open the events push.
+        let ticket = ws_ticket::mint(
+            None,
+            ws_ticket::WsTarget {
+                surface: ws_ticket::SURFACE_TERMINAL.to_string(),
+                node_id: Some(123),
+            },
+        );
+        let path = format!("/ws/events?ticket={}", ticket);
+        assert_eq!(ws_status(&path).await, 403);
     }
 
     #[test]
