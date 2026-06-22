@@ -43,6 +43,8 @@ function mockBackend(providers: ProviderInfo[]) {
         return Promise.resolve([]);
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
+      case 'get_network_status':
+        return Promise.resolve({ lan_exposure_enabled: false, port: 1992 });
       default:
         return Promise.resolve({});
     }

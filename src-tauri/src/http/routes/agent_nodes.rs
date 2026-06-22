@@ -13,13 +13,13 @@
 //! with a `Deprecation: true` response header.
 
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 use crate::db;
 use crate::http::request;
 
 pub async fn discover(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
 ) {
     let mesh = match db::get_mesh_by_id(mesh_id) {
@@ -59,7 +59,7 @@ fn default_cols() -> u16 {
 }
 
 pub async fn import_and_resume(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
     content_length: usize,
 ) {

@@ -205,6 +205,9 @@ pub fn run() {
             commands::coordinator::generate_coordinator_read_token,
             commands::coordinator::set_coordinator_drive_enabled,
             commands::coordinator::generate_coordinator_drive_token,
+            // Network exposure (issue #501)
+            commands::network::get_network_status,
+            commands::network::set_lan_exposure_enabled,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

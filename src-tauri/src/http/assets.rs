@@ -7,7 +7,7 @@
 //! keeps working unchanged.
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 #[derive(rust_embed::Embed)]
 #[folder = "../dist/mobile"]
@@ -17,7 +17,7 @@ struct MobileAssets;
 /// `extra_header` lets the dispatcher inject a `Set-Cookie` line on the
 /// initial token-bearing request; each extra line MUST end with `\r\n`.
 pub async fn serve_spa_shell(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     extra_header: Option<&str>,
 ) -> std::io::Result<()> {
     let Some(file) = MobileAssets::get("index.html") else {
@@ -44,7 +44,7 @@ pub async fn serve_spa_shell(
 /// the full path like `/assets/index-abc.js`; we strip the leading slash
 /// and look it up in the embedded asset list.
 pub async fn serve_asset(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     path_without_query: &str,
 ) -> std::io::Result<()> {
     let relative = path_without_query.trim_start_matches('/');

@@ -65,6 +65,19 @@ Buildmesh exposes a **read-only HTTP surface** for an external **Coordinator** (
 - **Tunnels are the user's job.** Buildmesh never opens an internet port — the threat model for the coordinator surface is "coordinating agent on a machine I control, reached over my own tunnel", not "autonomous agent on a public VPS reachable from the open internet". Reaching the read surface from outside the LAN is a deliberate user choice, not a Buildmesh feature.
 - **Auth is two-tier and header-only (#500, ADR-0015).** Every request resolves to a [Role](../CONTEXT.md) — **Admin** (root token, the mobile `/api/*` surface) or **Coordinator** (read/drive tokens, `/nodes*`) — as **disjoint surfaces**: a token works only on its own surface (wrong-surface valid token → 403, no creds → 401). Role resolution lives in `src-tauri/src/http/auth.rs` (`authorize`/`guard`); the dispatcher calls `auth::guard(.., scope)` per route, and `/admin/*` is reserved Admin-only. Credentials travel only in `Authorization: Bearer` or the `bm_session` cookie — never `?token=`. The mobile shell/assets are public; the client logs in via `POST /api/session` (sets the cookie) and mints a single-use `?ticket=` per WebSocket via `POST /api/ws-ticket` (`src-tauri/src/http/ws_ticket.rs`).
 
+## LAN/VPN Exposure & Self-Signed TLS
+
+The embedded server binds **loopback only by default** (#496). An off-by-default
+**LAN / VPN Exposure** toggle (App Settings → `set_lan_exposure_enabled`, stored in
+`app_settings.lan_exposure_enabled`) exposes it on the machine's interfaces; issue
+#501, [`docs/adr/0017-opt-in-lan-exposure-and-self-signed-tls.md`](adr/0017-opt-in-lan-exposure-and-self-signed-tls.md).
+
+- **Loopback stays plain HTTP; only non-loopback interface IPs get TLS** (`http::bind_specs`). This is deliberate: the attention webhook posts plain `http://localhost/api/attention/...`, so forcing TLS on loopback would silently break every agent's "awaiting input" signal. Do **not** "simplify" this to a single `0.0.0.0` TLS bind.
+- **Self-signed cert** is generated with `rcgen` (ring backend), SANs cover `localhost` + loopback + interface IPs, and persisted as DER under `<app-data>/tls/` (delete that dir to rotate). `http::tls`.
+- **The toggle rebinds live** — no app restart. `http::apply_binding`/`reapply_binding` signal a `watch` shutdown channel, await the accept-loop tasks (so the port frees), then bind afresh.
+- **`MaybeTls`** (`http::stream`) is the single concrete stream type (`Plain(TcpStream)` | `Tls(Box<TlsStream<TcpStream>>)`) so route handlers stay non-generic; WSS rides the same enum. Route handlers take `&mut BufStream<MaybeTls>` — never re-introduce `BufStream<TcpStream>`.
+- **Crypto provider is `ring`, selected explicitly** via `builder_with_provider` (no process-default; aws-lc-rs is not in the tree).
+
 ## Attention System
 
 ### How It Works

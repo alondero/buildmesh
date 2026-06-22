@@ -2,7 +2,7 @@
 
 use tauri::Emitter;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 use crate::db;
 use crate::http::request;
@@ -15,7 +15,7 @@ pub fn list_json() -> String {
 }
 
 pub async fn create(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     content_length: usize,
 ) {
     if content_length > 64 * 1024 {
