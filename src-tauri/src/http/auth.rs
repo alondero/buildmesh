@@ -15,7 +15,7 @@
 //!   `401 Unauthorized` returned when no valid credential is presented at all.
 
 use rusqlite::Connection;
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 use crate::db;
 use crate::http::request;
@@ -136,7 +136,7 @@ fn outcome(role: Option<Role>, required: RequiredScope) -> AuthOutcome {
 /// line and return `None` so the caller can `return` immediately. On success
 /// returns `Some(role)` and writes nothing.
 pub async fn guard(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     headers: &str,
     required: RequiredScope,
 ) -> Option<Role> {

@@ -11,9 +11,10 @@ use std::sync::OnceLock;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use tauri::Emitter;
-use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
+
+use crate::http::MaybeTls;
 
 use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
 use crate::db;
@@ -21,7 +22,7 @@ use crate::db;
 /// Server-pushes [`super::events::EventMsg`] JSON to a connected mobile
 /// client. The client never sends anything; we ignore inbound frames
 /// other than Close.
-pub(crate) async fn handle_events_ws_connection(ws_stream: WebSocketStream<TcpStream>) {
+pub(crate) async fn handle_events_ws_connection(ws_stream: WebSocketStream<MaybeTls>) {
     let (mut write, mut read) = ws_stream.split();
     let mut rx = super::events::subscribe();
 
@@ -61,7 +62,7 @@ pub(crate) async fn handle_events_ws_connection(ws_stream: WebSocketStream<TcpSt
 }
 
 pub(crate) async fn handle_ws_connection(
-    ws_stream: WebSocketStream<TcpStream>,
+    ws_stream: WebSocketStream<MaybeTls>,
     node_id: i64,
 ) {
     let (mut write, mut read) = ws_stream.split();
@@ -294,7 +295,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(stream).await.unwrap();
+            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
             handle_ws_connection(ws, node_id).await;
         });
 
@@ -315,7 +316,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(stream).await.unwrap();
+            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
             handle_ws_connection(ws, node_id).await;
         });
 
@@ -341,7 +342,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(stream).await.unwrap();
+            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
             handle_ws_connection(ws, node_id).await;
         });
 
@@ -370,7 +371,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(stream).await.unwrap();
+            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
             handle_ws_connection(ws, node_id).await;
         });
 

@@ -19,6 +19,7 @@ pub mod git;
 pub mod git_tests;
 pub mod mesh;
 pub mod mesh_properties;
+pub mod network;
 pub mod preferences;
 pub mod pr;
 pub mod project_detect;

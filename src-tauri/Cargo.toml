@@ -46,6 +46,17 @@ base64 = "0.22"
 tiny_http = "0.12"
 tokio-tungstenite = "0.26"
 futures-util = "0.3"
+# Opt-in LAN exposure & self-signed TLS (issue #501). `rustls`/`tokio-rustls`/
+# `ring` already ride in via reqwest's `hyper-rustls`, but with no crypto
+# provider compiled in (the tree has no aws-lc-rs). We enable the `ring`
+# provider explicitly — both here and in `http::tls`'s `builder_with_provider`
+# — so the embedded server's TLS never depends on a process-default provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# Self-signed certificate generation for the LAN/VPN HTTPS path. `ring` backend
+# (not the default aws_lc_rs) to match the rest of the tree and avoid a second
+# crypto crate.
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 parking_lot = "0.12"
 local-ip-address = "0.6"
 reqwest = { version = "0.12", features = ["json", "blocking"] }

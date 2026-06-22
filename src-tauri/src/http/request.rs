@@ -3,9 +3,9 @@
 use std::net::IpAddr;
 
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 
 use crate::db;
+use crate::http::MaybeTls;
 
 /// Pull a bearer token out of an `Authorization: Bearer <token>` header. This is
 /// the only header-carried credential shape the server accepts post-#500 (URL
@@ -46,8 +46,10 @@ pub fn extract_token_from_cookies(headers: &str) -> Option<String> {
 /// Path=/ so it travels with API calls and the WebSocket-ticket request.
 pub fn session_cookie_header(token: &str) -> String {
     // Cookie value is the raw root token — validated the same way as the bearer
-    // token on the login request. No `Secure` flag: the loopback/LAN server is
-    // plain HTTP (TLS for the LAN path is a separate #494 slice).
+    // token on the login request. No `Secure` flag yet: the loopback listener is
+    // always plain HTTP (only the LAN interfaces are HTTPS, issue #501), so a
+    // blanket `Secure` would break the loopback path. Gating it on the request
+    // scheme is a follow-up (#553).
     format!(
         "Set-Cookie: bm_session={}; HttpOnly; SameSite=Lax; Path=/",
         token
@@ -103,7 +105,7 @@ pub fn extract_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str>
 }
 
 pub async fn write_status_only(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
 ) -> std::io::Result<()> {
     let response = format!("HTTP/1.1 {}\r\nContent-Length: 0\r\n\r\n", status);
@@ -111,7 +113,7 @@ pub async fn write_status_only(
 }
 
 pub async fn write_json(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
     body: &str,
 ) -> std::io::Result<()> {
@@ -125,7 +127,7 @@ pub async fn write_json(
 }
 
 pub async fn send_json_error(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
     msg: &str,
 ) {

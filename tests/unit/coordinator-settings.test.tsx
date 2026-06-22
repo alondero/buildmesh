@@ -36,6 +36,8 @@ function mockBackend(coordinator: CoordinatorState = { enabled: false, hasToken:
         return Promise.resolve([]);
       case 'get_provider_meters':
         return Promise.resolve([]);
+      case 'get_network_status':
+        return Promise.resolve({ lan_exposure_enabled: false, port: 1992 });
       default:
         return Promise.resolve({});
     }
@@ -61,7 +63,10 @@ describe('Coordinator Read API settings section', () => {
     render(<AppSettingsModal onClose={() => {}} />);
 
     await screen.findByRole('checkbox', { name: /coordinator read api/i });
-    expect(screen.getByText(/loopback/i)).toBeTruthy();
+    // "loopback" now also appears in the LAN/VPN exposure section (issue #501),
+    // so match presence rather than a single occurrence; "tunnel" stays unique
+    // to the coordinator copy.
+    expect(screen.getAllByText(/loopback/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/tunnel/i)).toBeTruthy();
   });
 
