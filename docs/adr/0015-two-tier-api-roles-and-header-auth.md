@@ -63,6 +63,22 @@ protected fetch, a cross-site page cannot mint one — closing the cross-site
 WebSocket hijacking hole a raw cookie-on-WS would leave open. A raw `?token=` on
 the upgrade is no longer honoured.
 
+The ticket is **bound at mint time to the target** the caller will open (issue
+#551): the `POST /api/ws-ticket` body names a surface (`terminal` or `events`)
+and, for `terminal`, the node `id`. The upgrade reconstructs the requested target
+from its URL and rejects a ticket whose binding doesn't match with `403
+Forbidden` — and crucially does **not** consume it, so a misrouted legitimate
+client can retry against its real target within the 30s window. The **binding**,
+not the TTL, is the trust boundary here: a 30-second single-use window still lets
+a leaked-but-unbound ticket open any node the minting role could read; binding
+narrows the blast radius to the one target the caller asked for, and makes a leak
+observable (the attacker's parallel upgrade consuming the ticket surfaces as an
+error on the legitimate client's own attempt). A browser WebSocket cannot read
+the upgrade's HTTP status, so the `401`/`403` distinction is for the server and
+its logs; the client's *actionable* failures come from the cookie-authenticated
+mint fetch (`400` for a malformed target, `401`/`403` for a stale cookie → bounce
+to Connect).
+
 ## Consequences
 
 - The mobile client (`src/mobile/`) logs in via `POST /api/session` and mints a

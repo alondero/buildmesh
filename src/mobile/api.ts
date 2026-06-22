@@ -331,33 +331,44 @@ export async function spawnFromIssue(
   return resp.json();
 }
 
-// Generated from the Rust `WsTicket` struct (issue #500) — the body of
-// POST /api/ws-ticket. No hand-declared interface, no drift.
+// Generated from the Rust `WsTicket` / `WsTarget` structs — the body of, and the
+// request to, POST /api/ws-ticket (issues #500, #551). No hand-declared
+// interface, no drift.
 import type { WsTicket } from "../types/generated/WsTicket";
+import type { WsTarget } from "../types/generated/WsTarget";
 
 /// Mint a single-use WebSocket handshake ticket (issue #500). The long-lived
 /// token never rides the WS URL; instead this cookie-authenticated POST returns
-/// a short-lived ticket the upgrade carries as `?ticket=`.
-export async function mintWsTicket(): Promise<string> {
-  const resp = await apiFetch("/api/ws-ticket", { method: "POST" });
+/// a short-lived ticket the upgrade carries as `?ticket=`. The ticket is bound
+/// at mint time to the `target` surface/node the caller will open (issue #551),
+/// so a leaked ticket can only unlock that one target — the upgrade rejects any
+/// other. A malformed/absent target is a 400; a bad cookie a 401/403, which
+/// `isAuthError` turns into a bounce back to Connect.
+export async function mintWsTicket(target: WsTarget): Promise<string> {
+  const resp = await apiFetch("/api/ws-ticket", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(target),
+  });
   const j = (await resp.json()) as WsTicket;
   return j.ticket;
 }
 
 /// Build the WS URL for a given node id. Mints a fresh ticket per connection
-/// (single-use), and prefers the page's own host:port so the SPA works
-/// regardless of which fallback port (1992/1993/1994) the server bound to.
+/// (single-use), bound to this node's terminal surface (issue #551), and prefers
+/// the page's own host:port so the SPA works regardless of which fallback port
+/// (1992/1993/1994) the server bound to.
 export async function terminalWsUrl(nodeId: number): Promise<string> {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host; // includes :port
-  const ticket = await mintWsTicket();
+  const ticket = await mintWsTicket({ surface: "terminal", node_id: nodeId });
   return `${proto}//${host}/ws/terminal/${nodeId}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 export async function eventsWsUrl(): Promise<string> {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  const ticket = await mintWsTicket();
+  const ticket = await mintWsTicket({ surface: "events", node_id: null });
   return `${proto}//${host}/ws/events?ticket=${encodeURIComponent(ticket)}`;
 }
 
