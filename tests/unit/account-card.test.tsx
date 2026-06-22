@@ -55,7 +55,7 @@ describe('AccountCard (issue #537)', () => {
     expect(screen.queryByText(/%$/)).toBeNull();
   });
 
-  it('shows a placeholder for a pay-as-you-go account with no balance yet', () => {
+  it('shows a placeholder when a logged-in account has no meters yet', () => {
     render(
       <AccountCard
         account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
@@ -64,7 +64,43 @@ describe('AccountCard (issue #537)', () => {
         onSave={vi.fn()}
       />,
     );
-    expect(screen.getByText('Balance unavailable')).toBeTruthy();
+    // Meters render by what's present, not by billing mode (#574): no windows and
+    // no balance → a neutral "No usage data", not a balance-specific message.
+    expect(screen.getByText('No usage data')).toBeTruthy();
+  });
+
+  it('renders both quota windows and a cash balance together (#574 AC3)', () => {
+    // A provider can expose several Usage Meters at once — show all of them
+    // rather than choosing one by billing mode.
+    render(
+      <AccountCard
+        account={account({ id: 'anthropic' })}
+        usage={usage({
+          windows: [{ label: '5-hour', usedPercent: 41, resetsAt: null }],
+          balance: { remaining: 12.34, monthlySpend: null, currency: 'USD' },
+        })}
+        usageLoading={false}
+        onSave={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('41.0%')).toBeTruthy();
+    expect(screen.getByText('USD 12.34')).toBeTruthy();
+  });
+
+  it('shows "usage not tracked" for a Generic provider (#574 AC4)', () => {
+    // A custom provider with no usage fetcher gets an explicit state, not an
+    // empty gauge or a misleading "unable to load" error.
+    render(
+      <AccountCard
+        account={account({ id: 'deepseek', name: 'DeepSeek' })}
+        usage={undefined}
+        usageTracked={false}
+        usageLoading={false}
+        onSave={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Usage not tracked')).toBeTruthy();
+    expect(screen.queryByText('Unable to load usage data')).toBeNull();
   });
 
   it('shows "Disabled" and no usage when the account is disabled', () => {

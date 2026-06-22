@@ -272,7 +272,7 @@ pub fn run() {
             commands::agent_node_discovery::discover_agent_nodes,
             commands::agent_node_discovery::import_discovered_agent_node,
             // Usage
-            commands::usage::get_all_provider_usage,
+            commands::usage::get_provider_meters,
             commands::usage::set_minimax_api_key,
         ])
         .build(tauri::generate_context!())

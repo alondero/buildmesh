@@ -4,6 +4,7 @@ import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
   ProviderUsage,
+  ProviderMeters,
   UsageWindow,
   ProviderAccount,
   BillingBalance,
@@ -72,17 +73,24 @@ export function BalanceCard({ balance }: { balance: BillingBalance }) {
   );
 }
 
-/** One model-provider account: enable toggle, collapsible credential editor, and
- *  a usage view chosen by billing mode (percentage bars vs cash balance). */
+/** One Model Provider on the Providers page: enable toggle, collapsible
+ *  credential editor, and its Usage Meters. A provider may expose several meters
+ *  at once (quota windows AND a cash balance), so all present meters render — not
+ *  one-or-the-other by billing mode (issue #574, AC3). `usageTracked === false`
+ *  marks a Generic provider Buildmesh can't fetch usage for (AC4). */
 export function AccountCard({
   account,
   usage,
+  usageTracked = true,
   usageLoading,
   onSave,
   onRemove,
 }: {
   account: ProviderAccount;
   usage?: ProviderUsage;
+  /** Whether Buildmesh has a usage fetcher for this provider; false → Generic
+   *  provider, shown as an explicit "usage not tracked" state. Defaults true. */
+  usageTracked?: boolean;
   usageLoading: boolean;
   onSave: (account: ProviderAccount) => Promise<boolean>;
   onRemove?: (id: string) => Promise<void>;
@@ -104,7 +112,10 @@ export function AccountCard({
   // Buildmesh, so they show no credential or model-tier fields (#568a). Only
   // Claude-compatible keyed providers (MiniMax/Kimi/custom) do.
   const showCredentials = account.claude_compatible;
-  const payg = account.billing_mode === 'pay_as_you_go';
+  // Keyed providers (MiniMax/Kimi/custom) authenticate with an API key entered
+  // here; native providers (Anthropic/Codex/Antigravity) self-authenticate via
+  // their own CLI. That split — not billing mode — drives the logged-out copy.
+  const keyed = account.claude_compatible;
 
   const setTier = (key: keyof ProviderAccount['model_tiers'], value: string) =>
     setDraft({ ...draft, model_tiers: { ...draft.model_tiers, [key]: value || null } });
@@ -153,31 +164,44 @@ export function AccountCard({
 
   const renderUsage = () => {
     if (!account.enabled) return <p className="text-base text-text-muted">Disabled</p>;
+    // Generic providers have no usage integration — say so explicitly rather than
+    // showing an empty gauge or a misleading error (AC4).
+    if (!usageTracked) {
+      return (
+        <div>
+          <p className="text-base text-text-muted">Usage not tracked</p>
+          <p className="text-sm text-text-muted mt-1">
+            Buildmesh has no usage integration for {account.name}.
+          </p>
+        </div>
+      );
+    }
     if (!usage && !usageLoading) return <p className="text-base text-text-muted">Unable to load usage data</p>;
     if (!usage) return null;
     if (!usage.loggedIn) {
       return (
         <div>
-          <p className="text-base text-status-warning">{payg ? 'No API key' : 'Not logged in'}</p>
+          <p className="text-base text-status-warning">{keyed ? 'No API key' : 'Not logged in'}</p>
           <p className="text-sm text-text-muted mt-1">
-            {payg ? `Enter an API key for ${account.name} above` : `Run the ${account.name} CLI login first`}
+            {keyed ? `Enter an API key for ${account.name} above` : `Run the ${account.name} CLI login first`}
           </p>
         </div>
       );
     }
     if (usage.error) return <p className="text-base text-status-error">{usage.error}</p>;
-    if (payg) {
-      return usage.balance ? (
-        <BalanceCard balance={usage.balance} />
-      ) : (
-        <p className="text-sm text-text-muted">Balance unavailable</p>
-      );
-    }
+    // Render every Usage Meter the provider exposes — quota windows AND a cash
+    // balance can both be present, so show all rather than choosing one by
+    // billing mode (AC3). This also unhides MiniMax's quota bars, which the old
+    // billing-mode XOR suppressed because its account is pay-as-you-go but its
+    // fetcher returns percentage windows.
+    const hasMeters = usage.windows.length > 0 || usage.balance != null;
     return (
       <div>
         {usage.windows.map(w => (
           <UsageBar key={w.label} window={w} />
         ))}
+        {usage.balance && <BalanceCard balance={usage.balance} />}
+        {!hasMeters && <p className="text-sm text-text-muted">No usage data</p>}
         {usage.detail && <p className="text-sm text-accent-cyan mt-2">{usage.detail}</p>}
       </div>
     );
@@ -401,7 +425,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [usageData, setUsageData] = useState<ProviderUsage[]>([]);
+  const [meters, setMeters] = useState<ProviderMeters[]>([]);
   const [usageLoading, setUsageLoading] = useState(false);
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
   const [addingCustom, setAddingCustom] = useState(false);
@@ -439,8 +463,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const fetchUsage = async (force = false) => {
     setUsageLoading(true);
     try {
-      const data = await api.getAllProviderUsage(force);
-      setUsageData(data);
+      const data = await api.getProviderMeters(force);
+      setMeters(data);
     } catch (e) {
       console.error('Failed to fetch usage:', e);
     } finally {
@@ -587,7 +611,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  const usageFor = (providerId: string) => usageData.find(u => u.provider === providerId);
+  const accountById = (id: string) => accounts.find(a => a.id === id);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
@@ -635,7 +659,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         <div className="mt-8 pt-5 border-t border-border-subtle">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-xl font-semibold text-text-primary">Accounts & Usage</h3>
+            <h3 className="text-xl font-semibold text-text-primary">Providers</h3>
             <button
               onClick={handleRefresh}
               disabled={usageLoading}
@@ -646,21 +670,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           </div>
 
           <p className="text-base text-text-muted mb-4">
-            Enable the accounts you use; only enabled providers are polled. Keys and URLs are
-            stored locally in <span className="font-mono">preferences.json</span>.
+            Usage Meters appear for installed harnesses and providers with a key configured.
+            Keys and URLs are stored locally in <span className="font-mono">preferences.json</span>.
           </p>
 
+          {/* Render only the detection-gated rows the backend returns: a native
+              harness's card appears only when it's installed, a keyed provider's
+              only when enabled (AC1). Join the editable account by id. */}
           <div className="space-y-4">
-            {accounts.map(account => (
-              <AccountCard
-                key={account.id}
-                account={account}
-                usage={usageFor(account.id)}
-                usageLoading={usageLoading}
-                onSave={handleSaveAccount}
-                onRemove={handleRemoveAccount}
-              />
-            ))}
+            {meters.map(meter => {
+              const account = accountById(meter.provider);
+              if (!account) return null;
+              return (
+                <AccountCard
+                  key={account.id}
+                  account={account}
+                  usage={meter.usage ?? undefined}
+                  usageTracked={meter.usageTracked}
+                  usageLoading={usageLoading}
+                  onSave={handleSaveAccount}
+                  onRemove={handleRemoveAccount}
+                />
+              );
+            })}
           </div>
 
           {addingCustom ? (

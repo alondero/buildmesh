@@ -33,6 +33,7 @@ import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
 import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
+import type { ProviderMeters } from '../types/generated/ProviderMeters';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RestoreResult } from '../types/generated/RestoreResult';
 import type { UsageWindow } from '../types/generated/UsageWindow';
@@ -695,10 +696,13 @@ export const removeProviderAccount = async (id: string) => {
 // `#[ts(rename = "...")]` on some fields, so the camelCase / snake_case
 // mix is exact — `usedPercent` / `resetsAt` / `loggedIn` are camelCase on
 // the wire, the rest are snake_case.
-export type { UsageWindow, ProviderUsage, BillingBalance };
+export type { UsageWindow, ProviderUsage, BillingBalance, ProviderMeters };
 
-export const getAllProviderUsage = (forceRefresh: boolean) =>
-  _invoke<ProviderUsage[]>('get_all_provider_usage', { forceRefresh });
+/** The detection-gated Providers page rows: one entry per provider relevant to
+ *  this host, each carrying its Usage Meters (or a "usage not tracked" marker).
+ *  Reuses the `ProviderUsage` wire shape (issue #574). */
+export const getProviderMeters = (forceRefresh: boolean) =>
+  _invoke<ProviderMeters[]>('get_provider_meters', { forceRefresh });
 
 // ── Coordinator read API control (ADR-0008) ────────────────────────────────
 //
