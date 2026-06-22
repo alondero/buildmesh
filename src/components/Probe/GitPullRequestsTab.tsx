@@ -70,7 +70,8 @@ import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { useUIStore } from '../../stores/uiStore';
-import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 
 type StateFilter = 'open' | 'closed';
@@ -706,54 +707,34 @@ export function GitPullRequestsTab() {
                         </div>
                       )}
 
-                      {/* Split spawn button (issue #420) — open PRs only;
-                          closed PRs are read-only. Mirrors the issue-tab
-                          pattern: primary "Spawn" uses the mesh's default
-                          provider, the `▾` half opens a picker that
-                          bypasses the default. The row is disabled while
+                      {/* Canonical `+ ▾` Spawn Menu cluster (ADR-0016 §2) —
+                          the same cluster the sidebar's `NodeCreationForm`
+                          and the issues-probe row use. Open PRs only;
+                          closed PRs are read-only. The row is disabled while
                           any spawn is in flight (busy state shared across
-                          rows). The `data-dropdown-for` attribute feeds
-                          the click-outside handler in the spawn-effects
-                          block above. */}
+                          rows); `isSpawning` flips the `+` to "Spawning…"
+                          while THIS row's stage-2 IPC is in flight. The
+                          outer `flex shrink-0` wrapper carries
+                          `onMouseDown` stopPropagation so a click on the
+                          spawn cluster doesn't toggle the row's expand
+                          state (mirrors the issue-tab wrapper). */}
                       {stateFilter === 'open' && (
                         <div
-                          className="relative flex shrink-0"
-                          data-dropdown-for={pr.number}
+                          className="flex shrink-0"
                           onMouseDown={(e) => e.stopPropagation()}
                         >
-                          {isSpawning ? (
-                            <button
-                              disabled
-                              className="px-2.5 py-1 text-xs font-medium rounded bg-accent-cyan/10 text-text-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                            >
-                              Spawning...
-                            </button>
-                          ) : (
-                            <>
-                              <button
-                                onClick={() => handleDefaultSpawn(pr)}
-                                disabled={spawning !== null}
-                                className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                              >
-                                Spawn
-                              </button>
-                              <button
-                                onClick={() => setOpenDropdown(isDropdownOpen ? null : pr.number)}
-                                disabled={spawning !== null}
-                                className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                                title="Choose provider"
-                              >
-                                ▾
-                              </button>
-                              {isDropdownOpen && (
-                                <ProviderDropdown
-                                  meshId={pr.number}
-                                  providers={providerList}
-                                  onSelect={(providerId) => handleSpawn(pr, providerId)}
-                                />
-                              )}
-                            </>
-                          )}
+                          <SpawnButtonCluster
+                            providers={providerList}
+                            meshId={pr.number}
+                            isOpen={isDropdownOpen}
+                            onToggleDropdown={() =>
+                              setOpenDropdown(isDropdownOpen ? null : pr.number)
+                            }
+                            onSpawnDefault={() => handleDefaultSpawn(pr)}
+                            onSelectProvider={(providerId) => handleSpawn(pr, providerId)}
+                            disabled={spawning !== null}
+                            isSpawning={isSpawning}
+                          />
                         </div>
                       )}
 

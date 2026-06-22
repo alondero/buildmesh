@@ -165,9 +165,10 @@ describe('GitIssuesTab (#378)', () => {
     mockBackend();
     render(<GitIssuesTab />);
 
-    // `findAllByText` because each issue row renders its own "Spawn"
-    // button — the two-stage-spawn test wants the first row's button.
-    const spawns = await screen.findAllByText('Spawn');
+    // Each issue row renders its own `SpawnButtonCluster` whose `+` button
+    // carries `data-testid="spawn-default"` — the two-stage-spawn test
+    // wants the first row's button.
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     await waitFor(() => {
@@ -195,21 +196,24 @@ describe('GitIssuesTab (#378)', () => {
     });
     render(<GitIssuesTab />);
 
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     // The in-flight `create_issue_node` leaves the spawning flag set, so
-    // both halves of every split button disable. The second click would
-    // be a no-op even if it landed — assert the guard rather than the
-    // backend idempotency.
-    const allSpawning = await screen.findAllByText('Spawning...');
-    expect(allSpawning.length).toBeGreaterThan(0);
-    expect((allSpawning[0] as HTMLButtonElement).disabled).toBe(true);
+    // the row's `SpawnButtonCluster` rewrites the `+` label to "Spawning..."
+    // and disables both halves. The second click would be a no-op even if
+    // it landed — assert the guard rather than the backend idempotency.
+    const spawnButtons = await screen.findAllByTestId('spawn-default');
+    const spawningRow = spawnButtons.find((b) => b.textContent === 'Spawning...');
+    expect(spawningRow).toBeTruthy();
+    expect((spawningRow as HTMLButtonElement).disabled).toBe(true);
 
     // Resolve the in-flight IPC and confirm the label flips back.
     resolveCreate(DRAFT);
     await waitFor(() => {
-      expect(screen.queryByText('Spawning...')).toBeNull();
+      const stillSpawning = (screen.queryAllByTestId('spawn-default') as HTMLButtonElement[])
+        .find((b) => b.textContent === 'Spawning...');
+      expect(stillSpawning).toBeUndefined();
     });
   });
 
@@ -226,7 +230,7 @@ describe('GitIssuesTab (#378)', () => {
     render(<GitIssuesTab />);
 
     expect(useUIStore.getState().probeOpen).toBe(true);
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     // Stage 2 fires; the dock must NOT have closed.
@@ -251,12 +255,15 @@ describe('GitIssuesTab (#378)', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'issues' });
     render(<GitIssuesTab />);
 
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     await waitFor(() => {
-      // The spawning label clears on failure.
-      expect(screen.queryByText('Spawning...')).toBeNull();
+      // The spawning label clears on failure — no row should still show
+      // "Spawning..." after the rejected IPC resolves.
+      const stillSpawning = (screen.queryAllByTestId('spawn-default') as HTMLButtonElement[])
+        .find((b) => b.textContent === 'Spawning...');
+      expect(stillSpawning).toBeUndefined();
     });
     // The dock stays open so the user can try again.
     expect(useUIStore.getState().probeOpen).toBe(true);

@@ -1,6 +1,6 @@
-import { useState } from 'react';
 import type { Mesh } from '../../stores/meshStore';
-import { ProviderDropdown, type ProviderEntry } from './ProviderDropdown';
+import { type ProviderEntry } from './ProviderDropdown';
+import { SpawnButtonCluster } from './SpawnButtonCluster';
 
 interface NodeCreationFormProps {
   mesh: Mesh;
@@ -11,6 +11,13 @@ interface NodeCreationFormProps {
   getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
+/**
+ * Sidebar mesh-row wrapper around the canonical `SpawnButtonCluster`
+ * (ADR-0016 §2). Keeps the mesh-specific surface here — `Mesh` prop,
+ * alt-click-to-spawn-in-mesh-root override, the `getDefaultProvider`
+ * mesh-scope — and delegates the visual + dropdown wiring to the cluster
+ * so the Issues / PRs probe rows can render the same `+ ▾` pair.
+ */
 export function NodeCreationForm({
   mesh,
   isDropdownOpen,
@@ -19,59 +26,26 @@ export function NodeCreationForm({
   onSelectProvider,
   getDefaultProvider,
 }: NodeCreationFormProps) {
-  const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
-
-  const refreshDefaultProvider = async () => {
-    try {
-      setDefaultProviderId(await getDefaultProvider(mesh.id));
-    } catch {
-      // Tooltip falls back to the generic label below if this fails.
-    }
-  };
-
-  const defaultProviderLabel =
-    providers.find(p => p.id === defaultProviderId)?.label ?? defaultProviderId;
-  const addNodeTitle = defaultProviderLabel
-    ? `Add agent node (${defaultProviderLabel})`
-    : 'Add agent node';
-
-  const handleAddNode = async (altKey: boolean) => {
+  // Pass `undefined` on a normal click so the backend falls back to
+  // mesh.use_worktree (the authoritative DB column on the mesh row).
+  // Alt-click is the explicit override to spawn the node in the mesh root,
+  // regardless of the mesh default.
+  const handleSpawnDefault = async (altKey: boolean) => {
     const defaultProvider = await getDefaultProvider(mesh.id);
-    // Pass undefined on a normal click so the backend falls back to
-    // mesh.use_worktree (the authoritative DB column on the mesh row).
-    // Alt-click is the explicit override to spawn the node in the mesh root,
-    // regardless of the mesh default.
     onSelectProvider(mesh, defaultProvider, altKey ? false : undefined);
   };
 
   return (
-    <div className="relative">
-      <div className="flex items-center rounded border border-accent-cyan/30 overflow-hidden">
-        <button
-          onClick={(e) => { e.stopPropagation(); handleAddNode(e.altKey); }}
-          onMouseEnter={refreshDefaultProvider}
-          onFocus={refreshDefaultProvider}
-          className="flex items-center px-1.5 h-5 text-[12px] font-medium text-accent-cyan hover:bg-accent-cyan/15 transition-colors"
-          title={addNodeTitle}
-        >
-          +
-        </button>
-        <span className="w-px h-3 bg-accent-cyan/30" />
-        <button
-          onClick={(e) => { e.stopPropagation(); onToggleDropdown(mesh); }}
-          className={`flex items-center px-1 h-5 text-[11px] hover:bg-accent-cyan/15 transition-colors ${isDropdownOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
-          title="Choose provider"
-        >
-          ▾
-        </button>
-      </div>
-      {isDropdownOpen && (
-        <ProviderDropdown
-          meshId={mesh.id}
-          providers={providers}
-          onSelect={(providerId, altKey) => onSelectProvider(mesh, providerId, altKey ? false : undefined)}
-        />
-      )}
-    </div>
+    <SpawnButtonCluster
+      providers={providers}
+      meshId={mesh.id}
+      isOpen={isDropdownOpen}
+      onToggleDropdown={() => onToggleDropdown(mesh)}
+      onSpawnDefault={handleSpawnDefault}
+      onSelectProvider={(providerId, altKey) =>
+        onSelectProvider(mesh, providerId, altKey ? false : undefined)
+      }
+      getDefaultProvider={() => getDefaultProvider(mesh.id)}
+    />
   );
 }

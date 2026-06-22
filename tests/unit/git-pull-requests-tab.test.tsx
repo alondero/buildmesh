@@ -720,9 +720,10 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    // findAllByText because every open PR row renders its own "Spawn"
-    // button — the first row (PR 201) is what the test exercises.
-    const spawns = await screen.findAllByText('Spawn');
+    // Every open PR row renders its own `SpawnButtonCluster` whose `+`
+    // button carries `data-testid="spawn-default"` — the first row
+    // (PR 201) is what the test exercises.
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     // Stage 1 — `create_pr_node` carries the head ref from the fixture,
@@ -757,7 +758,7 @@ describe('GitPullRequestsTab', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'pulls' });
     render(<GitPullRequestsTab />);
 
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     await waitFor(() => {
@@ -777,7 +778,7 @@ describe('GitPullRequestsTab', () => {
     mockBackend();
     render(<GitPullRequestsTab />);
 
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     await waitFor(() => {
@@ -826,7 +827,7 @@ describe('GitPullRequestsTab', () => {
     });
     render(<GitPullRequestsTab />);
 
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     await waitFor(() => {
@@ -861,12 +862,14 @@ describe('GitPullRequestsTab', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'pulls' });
     render(<GitPullRequestsTab />);
 
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
     // The spawning label clears once the rejected promise resolves.
     await waitFor(() => {
-      expect(screen.queryByText('Spawning...')).toBeNull();
+      const stillSpawning = (screen.queryAllByTestId('spawn-default') as HTMLButtonElement[])
+        .find((b) => b.textContent === 'Spawning...');
+      expect(stillSpawning).toBeUndefined();
     });
     // The error message surfaces inline on the row.
     expect(
@@ -892,21 +895,24 @@ describe('GitPullRequestsTab', () => {
     });
     render(<GitPullRequestsTab />);
 
-    const spawns = await screen.findAllByText('Spawn');
+    const spawns = await screen.findAllByTestId('spawn-default');
     await userEvent.click(spawns[0]);
 
-    // The in-flight `create_pr_node` leaves the spawning flag set, so both
-    // halves of every split button disable. A second click would be a
-    // no-op even if it landed — assert the guard rather than the backend
-    // idempotency.
-    const allSpawning = await screen.findAllByText('Spawning...');
-    expect(allSpawning.length).toBeGreaterThan(0);
-    expect((allSpawning[0] as HTMLButtonElement).disabled).toBe(true);
+    // The in-flight `create_pr_node` leaves the spawning flag set, so the
+    // row's `SpawnButtonCluster` rewrites the `+` label to "Spawning..." and
+    // disables both halves. A second click would be a no-op even if it
+    // landed — assert the guard rather than the backend idempotency.
+    const spawnButtons = await screen.findAllByTestId('spawn-default');
+    const spawningRow = spawnButtons.find((b) => b.textContent === 'Spawning...');
+    expect(spawningRow).toBeTruthy();
+    expect((spawningRow as HTMLButtonElement).disabled).toBe(true);
 
     // Resolve the in-flight IPC and confirm the label flips back.
     resolveCreate(PR_DRAFT);
     await waitFor(() => {
-      expect(screen.queryByText('Spawning...')).toBeNull();
+      const stillSpawning = (screen.queryAllByTestId('spawn-default') as HTMLButtonElement[])
+        .find((b) => b.textContent === 'Spawning...');
+      expect(stillSpawning).toBeUndefined();
     });
   });
 
