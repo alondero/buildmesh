@@ -15,6 +15,7 @@ import {
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
+import { groupByHarness } from "../../lib/groups";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
@@ -488,16 +489,10 @@ function ProviderPicker({
   // (clickable = native launch); subsequent rows are Proxied children
   // rendered indented. Mobile is read-only (no reorder), so this is
   // the same shape the desktop sidebar/probes render, just sized for
-  // a touch sheet.
-  const groups = (() => {
-    const map = new Map<string, Provider[]>();
-    for (const p of providers) {
-      const list = map.get(p.group_key) ?? [];
-      list.push(p);
-      map.set(p.group_key, list);
-    }
-    return Array.from(map.entries());
-  })();
+  // a touch sheet. The bucketing is shared with the desktop
+  // `GroupedProviderMenu` and `MeshPropertiesTab` via `groupByHarness`
+  // (issue #583 cleanup).
+  const groups = groupByHarness(providers);
 
   return (
     <Sheet onClose={onCancel} testId="provider-picker">

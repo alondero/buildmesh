@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { ProviderDropdown, type ProviderEntry } from './ProviderDropdown';
+import { ProviderDropdown } from './ProviderDropdown';
+import type { SpawnOption } from '../../lib/groups';
 
 /**
  * Canonical `+ ▾` Spawn Menu cluster (ADR-0016 §2 — "Sidebar, Issues probe,
@@ -19,7 +20,7 @@ import { ProviderDropdown, type ProviderEntry } from './ProviderDropdown';
 interface SpawnButtonClusterProps {
   /** Provider list — already filtered/sorted by the parent (per ADR-0016 §2
    *  the parent must NOT re-derive the order/grouping). */
-  providers: ProviderEntry[];
+  providers: SpawnOption[];
   /** Stable key for this cluster — passed through to `ProviderDropdown`'s
    *  `data-dropdown-for` attribute so click-outside handlers can scope to
    *  a single cluster when many rows share the same page. For meshes this

@@ -11,13 +11,13 @@ import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { MeshItem } from './MeshItem';
-import { colorClassForProvider, type ProviderEntry } from './ProviderDropdown';
+import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
 
 export function Sidebar() {
   const { width, isResizing, handleMouseDown } = useSidebarResize();
-  const [providerData, setProviderData] = useState<ProviderEntry[]>([]);
+  const [providerData, setProviderData] = useState<SpawnOption[]>([]);
 
   // Fetch available providers from the backend. Platform filtering (e.g. macOS-only
   // Anthropic) is decided server-side via AgentProvider::available_on().
@@ -32,19 +32,9 @@ export function Sidebar() {
       // harness header vs Proxied child rows. The backend already orders
       // rows by `(is_terminal, rank_of(harness_id))`, so the flat list
       // carries both the order and the grouping data — the frontend is
-      // a pure render.
-      .then(backendProviders => setProviderData(
-        backendProviders.map(p => ({
-          id: p.id,
-          label: p.label,
-          color: colorClassForProvider(p.id),
-          icon: p.icon,
-          harness_id: p.harness_id,
-          provider_id: p.provider_id,
-          is_proxied: p.is_proxied,
-          group_key: p.group_key,
-        })),
-      ))
+      // a pure render. The 8-field projection lives in
+      // `mapBackendProviders` (issue #583 cleanup).
+      .then(backendProviders => setProviderData(mapBackendProviders(backendProviders)))
       .catch(err => console.error('listProviders failed:', err));
   }, []);
 

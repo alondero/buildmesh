@@ -13,12 +13,12 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { SpawnButtonCluster } from '../../src/components/Sidebar/SpawnButtonCluster';
-import type { ProviderEntry } from '../../src/components/Sidebar/ProviderDropdown';
+import type { SpawnOption } from '../../src/lib/groups';
 
 // Minimal harness-grouped fixture — two harnesses, one proxied child.
 // Mirrors the wire shape `compose_provider_menu` returns so the cluster
 // behaves the same as it does against a real `listProviders` response.
-const PROVIDERS: ProviderEntry[] = [
+const PROVIDERS: SpawnOption[] = [
   { id: 'claude', label: 'Anthropic', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
   { id: 'claude:minimax', label: 'Minimax', color: 'bg-indigo-500', icon: 'M', harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
   { id: 'agy', label: 'Agy', color: 'bg-emerald-500', icon: 'G', harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },

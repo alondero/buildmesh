@@ -3,7 +3,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NodeCreationForm } from '../../src/components/Sidebar/NodeCreationForm';
 import type { Mesh } from '../../src/stores/meshStore';
-import type { ProviderEntry } from '../../src/components/Sidebar/ProviderDropdown';
+import type { SpawnOption } from '../../src/lib/groups';
 
 const MESH: Mesh = {
   id: 7,
@@ -16,7 +16,7 @@ const MESH: Mesh = {
   sandbox: false,
 };
 
-const PROVIDERS: ProviderEntry[] = [
+const PROVIDERS: SpawnOption[] = [
   // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape.
   { id: 'claude', label: 'Anthropic', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
   { id: 'agy', label: 'Agy', color: 'bg-emerald-500', icon: 'G', harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },

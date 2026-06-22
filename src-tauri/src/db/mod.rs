@@ -763,6 +763,19 @@ fn migrate_gemini_to_agy(conn: &Connection) -> SqlResult<()> {
 /// different solution (resolver shim or user-driven remap) is needed —
 /// issue #575 closes before that work begins.
 ///
+/// v19 Spawn Option composite-id migration — **first-class block**
+/// (issue #575 / ADR-0016 §6, issue #583 scope-clarification).
+///
+/// Rewrites legacy bare ids for the two first-class Proxied Providers
+/// (`minimax`, `kimi` — issue #566) to the composite form `claude:<id>`.
+/// Custom-account rewrites live in a sibling function — see
+/// [`migrate_agent_node_provider_id_custom_accounts`].
+///
+/// **Scope**: only the first-class block. The function name does NOT
+/// cover the custom-account rewrite even though both are part of the
+/// v19 Spawn Option migration. Splitting the two is mandatory, not
+/// stylistic — see *Two-step init order* below.
+///
 /// **Idempotent**: rows whose `provider` already contains `:` are skipped
 /// (the `provider NOT LIKE '%:%'` guard in the UPDATE).
 ///
@@ -877,16 +890,30 @@ pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
         .collect();
     if !custom_ids.is_empty() {
         let placeholders = custom_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        // The `NOT IN` whitelist of built-in harness ids uses the shared
+        // `BUILTIN_HARNESS_IDS` const so the SQL guard and the wire-shape
+        // doc in `agent::provider::ProviderInfo` can't drift apart
+        // (issue #583 cleanup — the previous hardcoded list of six
+        // literals had no single source of truth).
+        let builtin_placeholders = crate::agent::provider::BUILTIN_HARNESS_IDS
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "UPDATE agent_nodes \
                 SET provider = 'claude:' || provider \
               WHERE provider NOT LIKE '%:%' \
-                AND provider NOT IN ('claude', 'codex', 'agy', 'opencode', 'terminal', 'anthropic') \
-                AND provider IN ({})",
-            placeholders
+                AND provider NOT IN ({builtin_placeholders}) \
+                AND provider IN ({placeholders})",
         );
-        let params_vec: Vec<&dyn rusqlite::ToSql> =
-            custom_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        // Bind the whitelist literals first, then the custom account ids —
+        // the placeholders appear in the SQL in that order.
+        let mut params_vec: Vec<&dyn rusqlite::ToSql> = crate::agent::provider::BUILTIN_HARNESS_IDS
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+        params_vec.extend(custom_ids.iter().map(|s| s as &dyn rusqlite::ToSql));
         let rows_custom = conn.execute(&sql, params_vec.as_slice())?;
         if rows_custom > 0 {
             tracing::info!(

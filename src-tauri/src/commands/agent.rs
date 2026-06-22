@@ -1065,28 +1065,37 @@ mod tests {
         );
     }
 
+    /// Native Spawn Option fixture for `order_providers` tests (issue #583
+    /// cleanup — replaces four inline `|id| ProviderInfo { ... }` closures
+    /// with one helper). A native row is the clickable harness header:
+    /// `harness_id` mirrors the row id, no `provider_id`, `group_key`
+    /// follows the harness (issue #575 / ADR-0016 §6).
+    fn row_native(id: &str) -> ProviderInfo {
+        ProviderInfo {
+            id: id.to_string(),
+            label: id.to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+            harness_id: id.to_string(),
+            provider_id: None,
+            is_proxied: false,
+            group_key: id.to_string(),
+        }
+    }
+
     /// Issue #534: Terminal is the least-common pick, so it must sort to the
     /// bottom of the provider menu while every real harness keeps its relative
     /// order. `order_providers` is the pure seam (no disk / globals) so the
     /// ordering can be pinned without driving `harness_profiles()`.
     #[test]
     fn order_providers_sorts_terminal_to_the_bottom() {
-        let row = |id: &str| ProviderInfo {
-            id: id.to_string(),
-            label: id.to_string(),
-            color: String::new(),
-            icon: String::new(),
-            resumable: false,
-            // Native Spawn Option: harness_id mirrors the row id, no
-            // provider, group_key follows the harness (issue #575).
-            harness_id: id.to_string(),
-            provider_id: None,
-            is_proxied: false,
-            group_key: id.to_string(),
-        };
         // With no stored order, the two real harnesses keep their input order
         // and Terminal sorts last.
-        let ordered = order_providers(vec![row("terminal"), row("claude"), row("codex")], &[]);
+        let ordered = order_providers(
+            vec![row_native("terminal"), row_native("claude"), row_native("codex")],
+            &[],
+        );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["claude", "codex", "terminal"]);
     }
@@ -1095,21 +1104,11 @@ mod tests {
     /// pinned last even if it appears mid-list in the stored order.
     #[test]
     fn order_providers_applies_stored_order() {
-        let row = |id: &str| ProviderInfo {
-            id: id.to_string(),
-            label: id.to_string(),
-            color: String::new(),
-            icon: String::new(),
-            resumable: false,
-            // Native Spawn Option: harness_id mirrors the row id, no
-            // provider, group_key follows the harness (issue #575).
-            harness_id: id.to_string(),
-            provider_id: None,
-            is_proxied: false,
-            group_key: id.to_string(),
-        };
         let order = vec!["codex".to_string(), "terminal".to_string(), "claude".to_string()];
-        let ordered = order_providers(vec![row("claude"), row("terminal"), row("codex")], &order);
+        let ordered = order_providers(
+            vec![row_native("claude"), row_native("terminal"), row_native("codex")],
+            &order,
+        );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         // codex before claude per the stored order; terminal forced last
         // despite sitting in the middle of `order`.
@@ -1120,23 +1119,15 @@ mod tests {
     /// appends at the end of the real harnesses, above Terminal.
     #[test]
     fn order_providers_new_harness_appends_above_terminal() {
-        let row = |id: &str| ProviderInfo {
-            id: id.to_string(),
-            label: id.to_string(),
-            color: String::new(),
-            icon: String::new(),
-            resumable: false,
-            // Native Spawn Option: harness_id mirrors the row id, no
-            // provider, group_key follows the harness (issue #575).
-            harness_id: id.to_string(),
-            provider_id: None,
-            is_proxied: false,
-            group_key: id.to_string(),
-        };
         let order = vec!["claude".to_string(), "codex".to_string()];
         // "newbie" was just detected and isn't in the saved order.
         let ordered = order_providers(
-            vec![row("terminal"), row("newbie"), row("codex"), row("claude")],
+            vec![
+                row_native("terminal"),
+                row_native("newbie"),
+                row_native("codex"),
+                row_native("claude"),
+            ],
             &order,
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
@@ -1148,19 +1139,6 @@ mod tests {
     /// being appended.
     #[test]
     fn order_providers_uninstalled_keeps_slot() {
-        let row = |id: &str| ProviderInfo {
-            id: id.to_string(),
-            label: id.to_string(),
-            color: String::new(),
-            icon: String::new(),
-            resumable: false,
-            // Native Spawn Option: harness_id mirrors the row id, no
-            // provider, group_key follows the harness (issue #575).
-            harness_id: id.to_string(),
-            provider_id: None,
-            is_proxied: false,
-            group_key: id.to_string(),
-        };
         // Saved order had minimax between claude and codex; it was uninstalled
         // (absent from rows) for a while, now it's back.
         let order = vec![
@@ -1169,7 +1147,12 @@ mod tests {
             "codex".to_string(),
         ];
         let ordered = order_providers(
-            vec![row("codex"), row("claude"), row("minimax"), row("terminal")],
+            vec![
+                row_native("codex"),
+                row_native("claude"),
+                row_native("minimax"),
+                row_native("terminal"),
+            ],
             &order,
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
@@ -1324,26 +1307,13 @@ mod tests {
         assert_eq!(info.id, "claude:minimax");
     }
 
-    /// A Proxied Provider row clusters under its harness header
-    /// (`harness_id` rank), not under its composite `id` (which isn't in
-    /// the stored order). A naive `position(p.id)` would push the child
-    /// to `usize::MAX - 1`; ranking by `harness_id` keeps it next to
-    /// its native header so the frontend's `groupBy` groups them
-    /// together.
-    #[test]
-    fn order_providers_ranks_proxied_rows_by_harness_id_not_composite_id() {
-        let native = |harness_id: &str| ProviderInfo {
-            id: harness_id.to_string(),
-            label: harness_id.to_string(),
-            color: String::new(),
-            icon: String::new(),
-            resumable: false,
-            harness_id: harness_id.to_string(),
-            provider_id: None,
-            is_proxied: false,
-            group_key: harness_id.to_string(),
-        };
-        let proxied = |harness_id: &str, provider_id: &str| ProviderInfo {
+    /// Proxied Spawn Option fixture paired with `row_native` (issue #583
+    /// cleanup — replaces an inline `|harness_id, provider_id|` closure with
+    /// a named helper). A Proxied row carries the composite id
+    /// `<harness>:<provider>` but `harness_id` / `group_key` follow the
+    /// harness so the stable sort clusters the child under its native header.
+    fn row_proxied(harness_id: &str, provider_id: &str) -> ProviderInfo {
+        ProviderInfo {
             id: format!("{}:{}", harness_id, provider_id),
             label: provider_id.to_string(),
             color: String::new(),
@@ -1353,13 +1323,23 @@ mod tests {
             provider_id: Some(provider_id.to_string()),
             is_proxied: true,
             group_key: harness_id.to_string(),
-        };
+        }
+    }
+
+    /// A Proxied Provider row clusters under its harness header
+    /// (`harness_id` rank), not under its composite `id` (which isn't in
+    /// the stored order). A naive `position(p.id)` would push the child
+    /// to `usize::MAX - 1`; ranking by `harness_id` keeps it next to
+    /// its native header so the frontend's `groupBy` groups them
+    /// together.
+    #[test]
+    fn order_providers_ranks_proxied_rows_by_harness_id_not_composite_id() {
         let order = vec!["claude".to_string(), "codex".to_string()];
         let rows = vec![
-            proxied("claude", "minimax"),
-            native("terminal"),
-            native("codex"),
-            native("claude"),
+            row_proxied("claude", "minimax"),
+            row_native("terminal"),
+            row_native("codex"),
+            row_native("claude"),
         ];
         let ordered = order_providers(rows, &order);
         // All four rows have the same `harness_id` group ("claude",

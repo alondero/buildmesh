@@ -7,7 +7,7 @@ import { SortableContext } from '@dnd-kit/sortable';
 import { MeshItem } from '../../src/components/Sidebar/MeshItem';
 import type { Mesh } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
-import type { ProviderEntry } from '../../src/components/Sidebar/ProviderDropdown';
+import type { SpawnOption } from '../../src/lib/groups';
 
 const MESH: Mesh = {
   id: 3,
@@ -20,8 +20,8 @@ const MESH: Mesh = {
   sandbox: false,
 };
 
-const PROVIDERS: ProviderEntry[] = [
-  { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
+const PROVIDERS: SpawnOption[] = [
+  { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500', icon: 'A', harness_id: 'anthropic', provider_id: null, is_proxied: false, group_key: 'anthropic' },
 ];
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {

@@ -70,7 +70,7 @@ import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { useUIStore } from '../../stores/uiStore';
-import { colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 
@@ -224,7 +224,7 @@ export function GitPullRequestsTab() {
   const [spawning, setSpawning] = useState<number | null>(null);
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   const [spawnError, setSpawnError] = useState<Record<number, string>>({});
-  const [providerList, setProviderList] = useState<ProviderEntry[]>([]);
+  const [providerList, setProviderList] = useState<SpawnOption[]>([]);
   // Per-row expand state (issue #461) — Set keyed by PR number so two
   // long PRs can stay expanded side-by-side. Reset on every load
   // below (mesh + open/closed filter both change the visible set of
@@ -389,23 +389,11 @@ export function GitPullRequestsTab() {
   // the PR-spawn picker drops stale accounts without an app restart.
   // Issue #575 / ADR-0016 — preserve the Spawn Option shape so the
   // `ProviderDropdown` can render the harness-grouped, always-expanded
-  // menu (harness header + indented Proxied children).
+  // menu (harness header + indented Proxied children). The 8-field
+  // projection lives in `mapBackendProviders` (issue #583 cleanup).
   const refreshProviderList = useCallback(() => {
     listProviders()
-      .then((backendProviders) => {
-        setProviderList(
-          backendProviders.map((p) => ({
-            id: p.id,
-            label: p.label,
-            color: colorClassForProvider(p.id),
-            icon: p.icon,
-            harness_id: p.harness_id,
-            provider_id: p.provider_id,
-            is_proxied: p.is_proxied,
-            group_key: p.group_key,
-          })),
-        );
-      })
+      .then((backendProviders) => setProviderList(mapBackendProviders(backendProviders)))
       .catch((err) => console.error('listProviders failed:', err));
   }, []);
 

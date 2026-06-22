@@ -59,7 +59,7 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
-import { colorClassForProvider } from '../Sidebar/ProviderDropdown';
+import { mapBackendProviders } from '../../lib/groups';
 
 function timeAgo(isoString: string): string {
   const now = Date.now();
@@ -132,20 +132,17 @@ export function ArchivedNodesTab() {
   // filtered to `resumable: true` rows so a non-resumable harness header
   // (e.g. Terminal) collapses to nothing rather than offering a useless
   // "click to spawn fresh" entry on a resume flow.
+  // The 8-field projection lives in `mapBackendProviders`; `resumable`
+  // is the one field this picker alone needs, so it's merged in here
+  // rather than widening the shared `SpawnOption` shape (issue #583).
   const refreshProviderList = useCallback(() => {
     listProviders()
       .then(backendProviders => {
+        const resumableById = new Map(backendProviders.map(p => [p.id, p.resumable]));
         setProviderList(
-          backendProviders.map(p => ({
-            id: p.id,
-            label: p.label,
-            color: colorClassForProvider(p.id),
-            icon: p.icon,
-            harness_id: p.harness_id,
-            provider_id: p.provider_id,
-            is_proxied: p.is_proxied,
-            group_key: p.group_key,
-            resumable: p.resumable,
+          mapBackendProviders(backendProviders).map(o => ({
+            ...o,
+            resumable: resumableById.get(o.id) ?? false,
           })),
         );
       })

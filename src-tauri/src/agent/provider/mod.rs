@@ -9,6 +9,32 @@ pub mod provider_conf;
 
 use crate::models::EnvType;
 
+/// Built-in **Harness Profile** ids that detection populates (`claude`,
+/// `codex`, `agy`, `opencode`) plus the code-defined `terminal` default
+/// (issue #536) and the legacy `anthropic` executor id.
+///
+/// Used by the v19 Spawn Option composite-id migration's
+/// `provider NOT IN (...)` guard
+/// (`db::migrate_agent_node_provider_id_custom_accounts`) to refuse
+/// rewriting a `HarnessProfile` row whose id happens to collide with a
+/// user-added custom account. Without this guard the resolver shim
+/// could silently re-attach a `claude` harness profile as a Proxied
+/// `claude:claude` row — a wire-shape collision that's impossible today
+/// (custom account ids are user-chosen and don't normally match a
+/// harness id) but cheap to defend against.
+///
+/// Kept here next to the wire type that documents these ids
+/// (see `ProviderInfo` doc comment) so the SQL whitelist and the wire
+/// doc can't drift apart.
+pub const BUILTIN_HARNESS_IDS: &[&str] = &[
+    "claude",
+    "codex",
+    "agy",
+    "opencode",
+    "terminal",
+    "anthropic",
+];
+
 /// Build host (compile-time constant via `cfg!(target_os)`).
 ///
 /// Distinct from `EnvType` (Windows vs WSL) which is the *runtime* spawn target.

@@ -10,7 +10,7 @@ import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
-import type { ProviderEntry } from './ProviderDropdown';
+import type { SpawnOption } from '../../lib/groups';
 
 /// Build the tooltip text for the sidebar drift `!` badge. Lists the
 /// reasons in priority order — hostage first (it blocks a restore), then
@@ -39,7 +39,7 @@ interface MeshItemProps {
   mesh: Mesh;
   isSelected: boolean;
   isDropdownOpen: boolean;
-  providerList: ProviderEntry[];
+  providerList: SpawnOption[];
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
