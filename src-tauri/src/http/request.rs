@@ -36,15 +36,19 @@ pub fn extract_token_from_cookies(headers: &str) -> Option<String> {
 /// #500), which is the sole place the session cookie is now minted. HttpOnly so
 /// JS can't read it; SameSite=Lax for the cross-origin POSTs we don't make;
 /// Path=/ so it travels with API calls and the WebSocket-ticket request.
-pub fn session_cookie_header(token: &str) -> String {
-    // Cookie value is the raw root token — validated the same way as the bearer
-    // token on the login request. No `Secure` flag yet: the loopback listener is
-    // always plain HTTP (only the LAN interfaces are HTTPS, issue #501), so a
-    // blanket `Secure` would break the loopback path. Gating it on the request
-    // scheme is a follow-up (#553).
+///
+/// `secure` adds the `Secure` attribute (issue #553) so the device-token cookie
+/// is never replayed over plaintext. It is gated on the *connection*, not a
+/// blanket flag: the loopback listener is always plain HTTP (the local
+/// attention webhook posts plain `http://localhost`, issue #501), where a
+/// `Secure` cookie would be silently dropped and break login. The caller passes
+/// `MaybeTls::is_tls()` — ground truth, since the server terminates TLS itself
+/// (loopback → `Plain`, LAN interfaces → `Tls`).
+pub fn session_cookie_header(token: &str, secure: bool) -> String {
     format!(
-        "Set-Cookie: bm_session={}; HttpOnly; SameSite=Lax; Path=/",
-        token
+        "Set-Cookie: bm_session={}; HttpOnly; SameSite=Lax; Path=/{}",
+        token,
+        if secure { "; Secure" } else { "" }
     )
 }
 
@@ -173,8 +177,29 @@ mod tests {
 
     #[test]
     fn session_cookie_header_is_set_cookie() {
-        let header = session_cookie_header("deadbeef");
+        let header = session_cookie_header("deadbeef", false);
         assert!(header.starts_with("Set-Cookie: bm_session=deadbeef"));
+        assert!(header.contains("HttpOnly"));
+        assert!(header.contains("SameSite=Lax"));
+        assert!(header.contains("Path=/"));
+    }
+
+    #[test]
+    fn session_cookie_omits_secure_on_plain_loopback() {
+        // The loopback listener is always plain HTTP (issue #501); a `Secure`
+        // cookie there would be silently dropped by the browser, breaking the
+        // local login. So a non-TLS request must NOT get `Secure`.
+        let header = session_cookie_header("deadbeef", false);
+        assert!(!header.contains("Secure"), "got: {header}");
+    }
+
+    #[test]
+    fn session_cookie_sets_secure_over_tls() {
+        // Over the LAN HTTPS path the device-token cookie must be `Secure` so it
+        // can never be replayed over plaintext (issue #553).
+        let header = session_cookie_header("deadbeef", true);
+        assert!(header.contains("; Secure"), "got: {header}");
+        // The other hardening attributes survive alongside it.
         assert!(header.contains("HttpOnly"));
         assert!(header.contains("SameSite=Lax"));
         assert!(header.contains("Path=/"));
