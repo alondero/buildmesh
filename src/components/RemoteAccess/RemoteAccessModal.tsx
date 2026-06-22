@@ -1,30 +1,79 @@
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import * as api from '../../lib/tauri';
+import type { NetworkStatus } from '../../types/generated/NetworkStatus';
 
 interface RemoteAccessModalProps {
   onClose: () => void;
 }
 
+/**
+ * Build the URL the phone should hit from the server's *realized* network
+ * exposure, not a hardcoded scheme/port. When LAN exposure is enabled the
+ * non-loopback interfaces serve self-signed TLS (issue #501), so the QR must
+ * say `https://` — a phone sending plain HTTP to a TLS listener gets the
+ * browser's "sent an invalid response" dead-end. We match the scheme to the
+ * realized bind (`tls`) and take both host and port from its `address`
+ * (`ip:port`), which already accounts for the 1992→1994 fallback.
+ *
+ * Falls back to the discovered IP + reported port over plain HTTP only when no
+ * non-loopback listener is bound (exposure off / loopback only); `reachable`
+ * is false in that case so the modal warns instead of handing out a dead URL.
+ */
+export function buildRemoteAccessUrl(
+  status: NetworkStatus,
+  fallbackIp: string,
+  rootToken: string,
+): { url: string; host: string; reachable: boolean } {
+  // Prefer a TLS listener (what the phone should hit over HTTPS); fall back to
+  // any realized bind so an unexpected plain LAN listener still gets the right
+  // scheme rather than a mismatched one.
+  const bind =
+    status.exposed_interfaces.find(b => b.tls) ?? status.exposed_interfaces[0];
+  if (bind) {
+    const scheme = bind.tls ? 'https' : 'http';
+    return {
+      url: `${scheme}://${bind.address}/?token=${rootToken}`,
+      host: bind.address,
+      reachable: true,
+    };
+  }
+  const host = `${fallbackIp}:${status.port}`;
+  return {
+    url: `http://${host}/?token=${rootToken}`,
+    host,
+    reachable: false,
+  };
+}
+
 export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
-  const [ip, setIp] = useState<string>('discovering...');
+  const [host, setHost] = useState<string>('discovering...');
   const [error, setError] = useState<string | null>(null);
-  // Port 1992 is the default; if the server falls back to 1993/1994, the
-  // QR will be stale but the URL in the log will show the correct port.
-  const PORT = 1992;
+  const [unreachable, setUnreachable] = useState(false);
 
   useEffect(() => {
     const init = async () => {
       try {
-        const rootToken = await api.getRootToken();
-        // The fallback string is a UX placeholder, not a typed contract — a
-        // failure here leaves the QR pointing at a bogus IP, which is fine
-        // because the outer catch surfaces the real error to the user.
-        const localIp = await api.getLocalIp().catch(() => '192.168.1.x');
-        setIp(localIp);
+        // These three reads are independent — dispatch them together rather than
+        // serially so the modal opens in one round-trip. The `getLocalIp`
+        // fallback string is a UX placeholder, not a typed contract: it is only
+        // used when no LAN listener is bound, in which case `reachable` is false
+        // and we warn rather than rely on it.
+        const [rootToken, status, localIp] = await Promise.all([
+          api.getRootToken(),
+          api.getNetworkStatus(),
+          api.getLocalIp().catch(() => '192.168.1.x'),
+        ]);
 
-        const url = `http://${localIp}:${PORT}/?token=${rootToken}`;
+        const { url, host: displayHost, reachable } = buildRemoteAccessUrl(
+          status,
+          localIp,
+          rootToken,
+        );
+        setHost(displayHost);
+        setUnreachable(!reachable);
+
         const dataUrl = await QRCode.toDataURL(url, {
           width: 240,
           margin: 2,
@@ -62,6 +111,17 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
 
         {error ? (
           <div className="text-status-error text-xs">{error}</div>
+        ) : unreachable ? (
+          <div
+            data-testid="remote-access-warning"
+            role="alert"
+            className="text-status-error text-xs"
+          >
+            LAN exposure is on, but no network interface is actually exposed —
+            your phone can't reach this computer. Check the "Expose to LAN"
+            status in Settings (TLS may have failed to start, or no LAN
+            interface is available).
+          </div>
         ) : qrDataUrl ? (
           <div className="flex flex-col items-center">
             <img
@@ -70,7 +130,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
               className="w-48 h-48 rounded border border-border-subtle mb-3"
             />
             <div className="text-xs text-text-muted font-mono text-center">
-              <div>{ip}:{PORT}</div>
+              <div>{host}</div>
             </div>
           </div>
         ) : (
