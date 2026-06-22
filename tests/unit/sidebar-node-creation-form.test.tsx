@@ -17,14 +17,20 @@ const MESH: Mesh = {
 };
 
 const PROVIDERS: ProviderEntry[] = [
-  { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
-  { id: 'agy', label: 'Agy', color: 'bg-emerald-500' },
+  // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape.
+  { id: 'claude', label: 'Anthropic', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+  { id: 'agy', label: 'Agy', color: 'bg-emerald-500', icon: 'G', harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },
 ];
 
 function setup(overrides: Partial<React.ComponentProps<typeof NodeCreationForm>> = {}) {
   const onToggleDropdown = vi.fn();
   const onSelectProvider = vi.fn();
-  const getDefaultProvider = vi.fn().mockResolvedValue('anthropic');
+  // Issue #575 — the default-provider id is now the *composite* Spawn
+  // Option id (or a bare harness id for native). The first fixture
+  // row carries the bare `claude` harness id with label "Anthropic"
+  // (post-#538 the Claude Code profile IS the Anthropic subscription),
+  // so 'claude' is the right default here.
+  const getDefaultProvider = vi.fn().mockResolvedValue('claude');
   render(
     <NodeCreationForm
       mesh={MESH}
@@ -50,7 +56,10 @@ describe('NodeCreationForm', () => {
     await userEvent.click(screen.getByTitle('Add agent node'));
 
     expect(getDefaultProvider).toHaveBeenCalledWith(7);
-    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'anthropic', undefined));
+    // Issue #575 — the default is now the bare harness id `claude` (not
+    // the legacy `anthropic` enum value, which is the same executor but
+    // a separate wire id).
+    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'claude', undefined));
   });
 
   it('adds a node in the mesh root when + is alt-clicked', async () => {
@@ -59,7 +68,7 @@ describe('NodeCreationForm', () => {
     fireEvent.click(screen.getByTitle('Add agent node'), { altKey: true });
 
     expect(getDefaultProvider).toHaveBeenCalledWith(7);
-    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'anthropic', false));
+    await waitFor(() => expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'claude', false));
   });
 
   it('toggles the dropdown when the chevron is clicked', async () => {
@@ -73,19 +82,22 @@ describe('NodeCreationForm', () => {
 
   it('hides the provider dropdown while closed', () => {
     setup({ isDropdownOpen: false });
-    expect(screen.queryByRole('button', { name: 'Agy' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Agy/ })).toBeNull();
   });
 
   it('shows the provider dropdown when open', () => {
     setup({ isDropdownOpen: true });
-    expect(screen.getByRole('button', { name: 'Anthropic' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Agy' })).toBeTruthy();
+    // Issue #575 — the harness header carries a "harness" badge, so
+    // the accessible name is "<label> harness" rather than just the
+    // label. Regex matchers keep the test robust to that suffix.
+    expect(screen.getByRole('button', { name: /Anthropic/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Agy/ })).toBeTruthy();
   });
 
   it('selects a specific provider from the open dropdown, deferring use_worktree to the mesh default', async () => {
     const { onSelectProvider } = setup({ isDropdownOpen: true });
 
-    await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
+    await userEvent.click(screen.getByRole('button', { name: /Agy/ }));
 
     expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', undefined);
   });
@@ -93,7 +105,7 @@ describe('NodeCreationForm', () => {
   it('selects a specific provider in the mesh root from the open dropdown when alt-clicked', async () => {
     const { onSelectProvider } = setup({ isDropdownOpen: true });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Agy' }), { altKey: true });
+    fireEvent.click(screen.getByRole('button', { name: /Agy/ }), { altKey: true });
 
     expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', false);
   });

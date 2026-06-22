@@ -140,6 +140,7 @@ _Avoid_: container (when meaning OS-level confinement), jail, restricted shell
 - A **Mesh** can have **Autopilot** enabled, governed by its **Autopilot Policy**
 - **Autopilot** automatically spawns **Agent Nodes** for matching issues or PRs, enforcing branched worktree mode
 - An **Agent Node** operates on a child worktree or branch of its parent **Mesh**
+- An **Agent Node** runs inside a configured **Sandbox Mode** to isolate execution from the host OS
 - An **Agent Node** emits a **Node Turn** each time its agent yields control back to the user; attention-marking and session naming react to it independently
 - A **File Explorer Panel** shows context for either a **Mesh** or an **Agent Node**
 - A **Mesh** can have a **drifted root** if its root HEAD is not on the Base Ref's branch

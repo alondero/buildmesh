@@ -286,3 +286,190 @@ fn test_migrate_if_needed_is_idempotent() {
     ).unwrap();
     assert_eq!(count, 0, "no meshes should exist after double migration");
 }
+
+// ----- v19 Spawn Option composite-id migration (issue #575) ----------
+//
+// The migration is split into two blocks: a first-class block
+// (hardcoded SQL for 'minimax'/'kimi') that runs from `db::init` and
+// is preferences-independent, and a custom-account block that needs
+// the live `Vec<ProviderAccount>` and runs from `lib.rs::setup` after
+// `preferences::init`. The tests below pin both blocks against an
+// in-memory schema, and the order-of-operations invariant (custom
+// account rows that exist *before* the migration must be rewritten
+// to `claude:<id>`).
+
+/// Helper: build a v18 schema with `agent_nodes` populated by rows
+/// the v19 migration should rewrite. Returns the connection so each
+/// test can verify the post-migration state.
+fn v19_setup_with_legacy_rows() -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS meshes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            layout TEXT NOT NULL DEFAULT 'grid',
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO meshes (name, path) VALUES ('m', '/tmp/m');
+
+        CREATE TABLE IF NOT EXISTS agent_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id),
+            name TEXT NOT NULL,
+            path TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            env TEXT NOT NULL DEFAULT 'windows',
+            provider TEXT NOT NULL DEFAULT 'anthropic',
+            status TEXT NOT NULL DEFAULT 'idle',
+            cli_session_id TEXT,
+            worktree_name TEXT,
+            use_worktree INTEGER NOT NULL DEFAULT 1,
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+            source_pr INTEGER,
+            head_repo_owner TEXT,
+            head_repo_clone_url TEXT,
+            source_pr_pinned_sha TEXT
+        );
+        -- Legacy bare ids the v19 migration should rewrite.
+        INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'minimax');
+        INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'kimi');
+        -- Custom bare account id (e.g. user-typed 'deepseek') — rewritten by the
+        -- custom-account block when the live preferences list includes it.
+        INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'deepseek');
+        -- Native harness ids — left alone by the migration.
+        INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'claude');
+        INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'codex');
+        INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'terminal');
+        -- Already-migrated composite id — should be left alone.
+        INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'claude:minimax');
+        ",
+    ).unwrap();
+    conn
+}
+
+/// Helper: read the `provider` column of every `agent_nodes` row in id order.
+fn v19_read_providers(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare("SELECT provider FROM agent_nodes ORDER BY id ASC")
+        .unwrap();
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+/// Pin the first-class rewrite block: `minimax` / `kimi` bare ids
+/// are rewritten to `claude:minimax` / `claude:kimi`; native harness
+/// ids (`claude`, `codex`, `terminal`) and already-migrated
+/// composite ids are left untouched. This block is
+/// preferences-independent and safe to run from `db::init`.
+#[test]
+fn v19_first_class_migration_rewrites_minimax_and_kimi() {
+    let conn = v19_setup_with_legacy_rows();
+    crate::db::migrate_agent_node_provider_id_to_composite(&conn).unwrap();
+
+    let providers = v19_read_providers(&conn);
+    // 7 rows: minimax, kimi, deepseek, claude, codex, terminal, claude:minimax
+    // After first-class block: claude:minimax, claude:kimi, deepseek, claude, codex, terminal, claude:minimax
+    assert_eq!(
+        providers,
+        vec![
+            "claude:minimax", // minimax → claude:minimax
+            "claude:kimi",     // kimi → claude:kimi
+            "deepseek",        // custom — NOT rewritten by the first-class block
+            "claude",          // native — left alone
+            "codex",           // native — left alone
+            "terminal",        // native — left alone
+            "claude:minimax",  // already composite — left alone
+        ]
+    );
+}
+
+/// Pin the custom-account rewrite block: a bare `claude_compatible`
+/// custom account id is rewritten to `claude:<id>`, but only when
+/// the live account list includes it AND `enabled == true`.
+/// Disabled custom accounts are left bare (intentional — see the
+/// migration doc-comment).
+#[test]
+fn v19_custom_account_migration_rewrites_enabled_custom_ids() {
+    use crate::preferences::{BillingMode, ModelTiers, ProviderAccount};
+
+    let conn = v19_setup_with_legacy_rows();
+    let accounts = vec![
+        ProviderAccount {
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-test".to_string()),
+            base_url: Some("https://api.deepseek.com/anthropic".to_string()),
+            model_tiers: ModelTiers::default(),
+            models: Vec::new(),
+        },
+        // A disabled custom account: NOT rewritten.
+        ProviderAccount {
+            id: "disabled-bot".to_string(),
+            name: "Disabled Bot".to_string(),
+            enabled: false,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-test".to_string()),
+            base_url: None,
+            model_tiers: ModelTiers::default(),
+            models: Vec::new(),
+        },
+    ];
+    // Add a row for the disabled custom account to test the filter.
+    conn.execute(
+        "INSERT INTO agent_nodes (mesh_id, name, path, provider) VALUES (1, 'm', '/tmp/m', 'disabled-bot')",
+        [],
+    ).unwrap();
+
+    crate::db::migrate_agent_node_provider_id_custom_accounts(&conn, &accounts).unwrap();
+
+    let providers = v19_read_providers(&conn);
+    // After custom-account block: the deepseek row is rewritten;
+    // disabled-bot stays bare (filtered out by `a.enabled`).
+    let deepseek = providers.iter().find(|p| p.contains("deepseek")).unwrap();
+    assert_eq!(deepseek, "claude:deepseek");
+    let disabled = providers.iter().find(|p| p.contains("disabled")).unwrap();
+    assert_eq!(disabled, "disabled-bot", "disabled custom account must stay bare");
+}
+
+/// Idempotency: re-running the custom-account block on a v19+ DB
+/// is a no-op (the `NOT LIKE '%:%'` guard skips already-migrated
+/// rows). This is the contract `lib.rs::setup` relies on when it
+/// re-runs the safety net on every launch.
+#[test]
+fn v19_custom_account_migration_is_idempotent() {
+    use crate::preferences::{BillingMode, ModelTiers, ProviderAccount};
+
+    let conn = v19_setup_with_legacy_rows();
+    let accounts = vec![ProviderAccount {
+        id: "deepseek".to_string(),
+        name: "DeepSeek".to_string(),
+        enabled: true,
+        billing_mode: BillingMode::PayAsYouGo,
+        claude_compatible: true,
+        api_key: Some("sk-test".to_string()),
+        base_url: None,
+        model_tiers: ModelTiers::default(),
+        models: Vec::new(),
+    }];
+
+    crate::db::migrate_agent_node_provider_id_custom_accounts(&conn, &accounts).unwrap();
+    let after_first = v19_read_providers(&conn);
+    crate::db::migrate_agent_node_provider_id_custom_accounts(&conn, &accounts).unwrap();
+    let after_second = v19_read_providers(&conn);
+
+    assert_eq!(
+        after_first, after_second,
+        "re-running the migration must not change the providers column"
+    );
+}

@@ -417,10 +417,22 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
 /// the "alongside-legacy" path, so existing enum ids (`"anthropic"`, etc.)
 /// still resolve without a matching profile. Unknown ids fall through
 /// `Provider::from_db_str`'s Anthropic default (preserving prior behaviour).
+///
+/// **Composite Spawn Option ids** (issue #575 / ADR-0016): a Proxied
+/// Provider id has the shape `<harness>:<provider>` (e.g. `claude:minimax`).
+/// Only the *harness* part drives the executor choice — the provider part
+/// is just a credential key. We split on the first `:` via
+/// [`crate::agent::provider::parse_spawn_option_id`] so the legacy bare
+/// ids (`"minimax"`, `"kimi"`, custom account ids) still resolve through
+/// the same path during the post-#575 migration window, and the post-
+/// migration composite ids (`"claude:minimax"`) resolve to the same
+/// Anthropic executor as the bare form did.
 pub fn resolve_harness_provider(profile_id: &str) -> Provider {
-    match harness_profiles().into_iter().find(|p| p.id == profile_id) {
+    let (harness_id, _provider_id) =
+        crate::agent::provider::parse_spawn_option_id(profile_id);
+    match harness_profiles().into_iter().find(|p| p.id == harness_id) {
         Some(profile) => Provider::from_db_str(&profile.harness),
-        None => Provider::from_db_str(profile_id),
+        None => Provider::from_db_str(harness_id),
     }
 }
 
@@ -592,13 +604,25 @@ pub fn remove_provider_account(prefs: &mut AppPreferences, id: &str) {
 /// endpoint (MiniMax, Kimi, DeepSeek, …). This is the dynamic replacement for the
 /// deleted `minimax.rs` / `kimi.rs` adapters' hardcoded `provider_env()`.
 ///
+/// **Composite Spawn Option ids** (issue #575 / ADR-0016): for a Proxied
+/// Provider id like `claude:minimax` the *account id* is the part after
+/// the first `:` (here `minimax`). We split via
+/// [`crate::agent::provider::parse_spawn_option_id`] so the post-migration
+/// composite ids find the same `ProviderAccount` row the legacy bare id
+/// did. A bare id (native Spawn Option) just looks itself up — the
+/// built-in Anthropic subscription returns an empty env, which is
+/// correct (clean slate, vanilla `claude`).
+///
 /// Returns empty when no account matches or it carries no custom endpoint — the
 /// built-in Anthropic subscription needs no overrides, so it spawns vanilla
 /// `claude`. The spawn path still resets the inherited backend env first (see
 /// [`crate::agent::provider::AgentProvider::resets_backend_env`]), so an empty
 /// result means a clean slate, not a leaked override.
 pub fn resolve_provider_env(profile_id: &str) -> Vec<(String, String)> {
-    provider_account_env(provider_accounts().iter().find(|a| a.id == profile_id))
+    let (_harness_id, provider_id) =
+        crate::agent::provider::parse_spawn_option_id(profile_id);
+    let account_id = provider_id.unwrap_or(profile_id);
+    provider_account_env(provider_accounts().iter().find(|a| a.id == account_id))
 }
 
 /// Resolve an account's effective per-tier models: its [`ModelTiers`] if set,

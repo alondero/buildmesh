@@ -63,11 +63,15 @@ function mockBackend() {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'list_providers':
-        // Post-#538 the list is purely dynamic harness profiles (no `legacy`).
+        // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape
+        // (harness_id, provider_id, is_proxied, group_key). The mock
+        // returns three native harnesses, each its own group, so the
+        // selector renders three plain `<option>` rows (no optgroups
+        // for a single-row group).
         return Promise.resolve([
-          { id: 'claude', label: 'Claude Code', color: '#000', icon: '' },
-          { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '' },
-          { id: 'codex', label: 'Codex', color: '#000', icon: '' },
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+          { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: 'anthropic', is_proxied: true, group_key: 'claude' },
+          { id: 'codex', label: 'Codex', color: '#000', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
         ]);
       case 'get_mesh_properties':
         return Promise.resolve(MESH_CONFIG);
@@ -193,13 +197,20 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(provider.value).toBe('anthropic');
   });
 
-  it('lists the default-provider options as a flat list with no optgroups (#538)', async () => {
+  it('groups the default-provider options by harness (issue #575) with no "Legacy" header', async () => {
     await openPropertiesTab();
 
     const provider = (await screen.findByLabelText('Default provider')) as HTMLSelectElement;
-    // The "Profiles"/"Legacy" optgroups were retired — every harness profile is
-    // a flat option (plus the leading "<Default>" entry).
-    expect(provider.querySelectorAll('optgroup')).toHaveLength(0);
+    // Issue #575 / ADR-0016 — the Spawn Menu is harness-grouped. A group
+    // with more than one row becomes a native `<optgroup>`; a single-row
+    // group stays a plain `<option>` (the common case for one-harness
+    // configs). The optgroup label is the native row's friendly
+    // `label` (the harness profile's user-facing name, e.g. "Claude
+    // Code"), NOT the raw `harness_id` — code-review finding B3.
+    const optgroups = provider.querySelectorAll('optgroup');
+    expect(optgroups).toHaveLength(1);
+    expect(optgroups[0].getAttribute('label')).toBe('Claude Code');
+    // The Codex harness is a single-row group, so it stays a plain option.
     expect(provider.querySelector('option[value="claude"]')).toBeTruthy();
     expect(provider.querySelector('option[value="anthropic"]')).toBeTruthy();
     expect(provider.querySelector('option[value="codex"]')).toBeTruthy();

@@ -18,7 +18,7 @@ use ts_rs::TS;
 // Provider listing
 // ---------------------------------------------------------------------------
 
-/// Compose the `ProviderInfo` row for a single harness profile on the
+/// Compose the `ProviderInfo` (Spawn Option) row for a single harness profile on the
 /// current host platform. Pure (no disk / DB / globals) so unit tests can
 /// exercise the per-profile derivation — including the `resumable` flag —
 /// without touching the preferences module's `APP_DATA_DIR` / `CACHE`
@@ -34,6 +34,11 @@ use ts_rs::TS;
 /// defeat the test isolation. For the `available_providers` call site
 /// the two paths are equivalent (every profile iterated here comes from
 /// `harness_profiles()` and so its id→harness lookup is a no-op).
+///
+/// The row is a **native Spawn Option**: `id == profile.id` (no `:`), no
+/// `provider_id`, `is_proxied = false`. `harness_id == profile.id` is the
+/// grouping key the frontend uses to bucket rows under their harness header
+/// (issue #575 / ADR-0016).
 fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platform) -> Option<ProviderInfo> {
     let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
     if !adapter.available_on().contains(&host) {
@@ -54,18 +59,37 @@ fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platfor
         color: ui.color,
         icon: ui.icon,
         resumable,
+        harness_id: profile.id.clone(),
+        provider_id: None,
+        is_proxied: false,
+        group_key: profile.id.clone(),
     })
 }
 
-/// Compose the `ProviderInfo` row for a configured Claude-compatible provider
-/// account (MiniMax, Kimi, or a custom endpoint). These spawn via the Claude Code
-/// (`anthropic`) executor with the account's endpoint + per-tier models injected
-/// at spawn ([`crate::preferences::resolve_provider_env`]), so the row borrows the
-/// Anthropic adapter's UI and resume capability. The frontend `ProviderIcon` keys
-/// off the row `id`, so a "minimax"/"kimi"/custom id renders its own brand mark.
-/// Returns None if the Claude executor isn't available on this host.
+/// Compose the `ProviderInfo` (Spawn Option) row for a configured Claude-compatible
+/// provider account (MiniMax, Kimi, or a custom endpoint). These spawn via the
+/// Claude Code (`anthropic`) executor with the account's endpoint + per-tier
+/// models injected at spawn ([`crate::preferences::resolve_provider_env`]), so
+/// the row borrows the Anthropic adapter's UI and resume capability.
+///
+/// The row is a **Proxied Provider** Spawn Option (issue #575 / ADR-0016): the
+/// composite `id` is `<harness>:<provider>` (always `claude:<account.id>`
+/// today, while the multi-harness attach is deferred), and `harness_id`
+/// groups it under the Claude Code header in the rendered Spawn Menu. The
+/// frontend `ProviderIcon` keys off the row `id`, so a "minimax"/"kimi"/
+/// custom id renders its own brand mark.
+///
+/// `harness_id` defaults to `"claude"` (the detected Claude Code profile id
+/// from the harness profile list) and falls back to the literal string
+/// `"claude"` if no such profile is present (e.g. a bare test env or a host
+/// that hasn't auto-detected the binary). The fallback is safe: `claude`
+/// still resolves to the Anthropic executor through
+/// `preferences::resolve_harness_provider` thanks to the existing
+/// `Provider::from_db_str` and profile-lookup fallbacks. Returns `None`
+/// only if the Claude executor isn't available on this host.
 fn provider_info_for_account(
     account: &crate::preferences::ProviderAccount,
+    profiles: &[crate::preferences::HarnessProfile],
     host: Platform,
 ) -> Option<ProviderInfo> {
     let adapter = crate::models::Provider::Anthropic.adapter();
@@ -73,12 +97,28 @@ fn provider_info_for_account(
         return None;
     }
     let ui = adapter.ui();
+    // The Claude Code harness header this row groups under. We pick the
+    // first detected profile whose backing executor is the Anthropic
+    // adapter (i.e. a Claude Code profile) — that's the row the user
+    // clicks to launch Claude Code natively, and the proxied children
+    // must cluster under it. If none is present, "claude" is a safe
+    // fallback: the resolver still maps it to the Anthropic executor.
+    let harness_id = profiles
+        .iter()
+        .find(|p| p.harness == "anthropic")
+        .map(|p| p.id.clone())
+        .unwrap_or_else(|| "claude".to_string());
+    let id = format!("{}:{}", harness_id, account.id);
     Some(ProviderInfo {
-        id: account.id.clone(),
+        id,
         label: account.name.clone(),
         color: ui.color,
         icon: ui.icon,
         resumable: adapter.supports_resume() && adapter.produces_readable_transcript(),
+        harness_id: harness_id.clone(),
+        provider_id: Some(account.id.clone()),
+        is_proxied: true,
+        group_key: harness_id,
     })
 }
 
@@ -88,9 +128,23 @@ fn provider_info_for_account(
 /// Harness profiles (Terminal + startup-detected Claude/Codex/Antigravity/OpenCode)
 /// come first, then every **configured** Claude-compatible provider account —
 /// enabled, with a non-empty API key — is appended as a Claude-Code-backed row
-/// (deduped by id). This is what surfaces a keyed built-in MiniMax/Kimi or a custom
-/// endpoint in the menu without a second stored list to keep in sync; clearing the
-/// key or disabling the account drops the row automatically (issue #568).
+/// (deduped by composite id). This is what surfaces a keyed built-in MiniMax/Kimi
+/// or a custom endpoint in the menu without a second stored list to keep in sync;
+/// clearing the key or disabling the account drops the row automatically
+/// (issue #568).
+///
+/// **Dedup semantics** (issue #575 / ADR-0016): the composite id
+/// `<harness>:<provider>` is unique per (harness profile id, account id)
+/// pair, so a duplicate-row check by `info.id` only fires when the same
+/// (harness, account) pair was added twice. The pre-#575 dedup by bare
+/// `account.id` — which suppressed a user-typed "claude" custom account
+/// in favour of the native "claude" harness row — is **no longer
+/// applicable** under the composite id format: a "claude" custom account
+/// produces a `claude:claude` row, distinct from the native `claude`
+/// harness row. The `compose_menu_does_not_duplicate_a_detected_profile`
+/// test (pre-#575) is the regression case the new format sidesteps —
+/// `provider_info_for` already filters non-Anthropic harnesses, and the
+/// account's harness_id is independent of any profile id.
 fn compose_provider_menu(
     profiles: Vec<crate::preferences::HarnessProfile>,
     accounts: Vec<crate::preferences::ProviderAccount>,
@@ -106,10 +160,16 @@ fn compose_provider_menu(
         if account.claude_compatible
             && account.enabled
             && keyed
-            && !rows.iter().any(|r| r.id == account.id)
         {
-            if let Some(info) = provider_info_for_account(&account, host) {
-                rows.push(info);
+            if let Some(info) = provider_info_for_account(&account, &profiles, host) {
+                // Composite id dedup — guards against accidentally
+                // appending the same (harness, account) pair twice if
+                // a future change passes the same account through this
+                // loop twice. The pre-#575 bare-id suppression is no
+                // longer needed; see the doc-comment above.
+                if !rows.iter().any(|r| r.id == info.id) {
+                    rows.push(info);
+                }
             }
         }
     }
@@ -127,26 +187,30 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     )
 }
 
-/// Order the provider menu by the user's stored harness order, with the plain
+/// Order the Spawn Menu by the user's stored harness order, with the plain
 /// `terminal` row always pinned to the bottom (issue #534 / #573).
 ///
-/// `order` is the persisted list of harness-row ids (Terminal excluded — it's
-/// forced last regardless of where it appears). Each row's rank is its index in
-/// `order`; a row whose id isn't in the list (a newly-detected harness) ranks
-/// just below `usize::MAX` so it appends at the end *above* Terminal. An
-/// uninstalled harness simply isn't among `providers`, so its id sits dormant in
-/// `order` and its slot is restored verbatim when it reappears.
+/// `order` is the persisted list of **harness profile ids** (Terminal excluded
+/// — it's forced last regardless of where it appears). Each row's rank is
+/// derived from its `harness_id` (the grouping key) — not its composite `id`
+/// — so a Proxied Provider row like `claude:minimax` clusters under its
+/// `claude` harness header instead of ranking at the bottom. A row whose
+/// `harness_id` isn't in the list (a newly-detected harness) ranks just below
+/// `usize::MAX` so it appends at the end *above* Terminal. An uninstalled
+/// harness simply isn't among `providers`, so its id sits dormant in `order`
+/// and its slot is restored verbatim when it reappears.
 ///
 /// Pure and stable (no disk / globals) so the ordering is the unit-test seam:
 /// the `(is_terminal, rank)` tuple key sorts Terminal last via the bool, ranks
-/// the rest by stored order, and the stable sort keeps equal-rank newcomers in
-/// their input order.
+/// the rest by stored harness order, and the stable sort keeps equal-rank
+/// rows in their input order (a harness's native row is built first in
+/// `compose_provider_menu`, so it lands first in each group).
 fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]) -> Vec<ProviderInfo> {
     providers.sort_by_key(|p| {
-        let is_terminal = p.id == "terminal";
+        let is_terminal = p.harness_id == "terminal";
         let rank = order
             .iter()
-            .position(|id| *id == p.id)
+            .position(|id| *id == p.harness_id)
             .unwrap_or(usize::MAX - 1);
         (is_terminal, rank)
     });
@@ -1027,6 +1091,12 @@ mod tests {
             color: String::new(),
             icon: String::new(),
             resumable: false,
+            // Native Spawn Option: harness_id mirrors the row id, no
+            // provider, group_key follows the harness (issue #575).
+            harness_id: id.to_string(),
+            provider_id: None,
+            is_proxied: false,
+            group_key: id.to_string(),
         };
         // With no stored order, the two real harnesses keep their input order
         // and Terminal sorts last.
@@ -1045,6 +1115,12 @@ mod tests {
             color: String::new(),
             icon: String::new(),
             resumable: false,
+            // Native Spawn Option: harness_id mirrors the row id, no
+            // provider, group_key follows the harness (issue #575).
+            harness_id: id.to_string(),
+            provider_id: None,
+            is_proxied: false,
+            group_key: id.to_string(),
         };
         let order = vec!["codex".to_string(), "terminal".to_string(), "claude".to_string()];
         let ordered = order_providers(vec![row("claude"), row("terminal"), row("codex")], &order);
@@ -1064,6 +1140,12 @@ mod tests {
             color: String::new(),
             icon: String::new(),
             resumable: false,
+            // Native Spawn Option: harness_id mirrors the row id, no
+            // provider, group_key follows the harness (issue #575).
+            harness_id: id.to_string(),
+            provider_id: None,
+            is_proxied: false,
+            group_key: id.to_string(),
         };
         let order = vec!["claude".to_string(), "codex".to_string()];
         // "newbie" was just detected and isn't in the saved order.
@@ -1086,6 +1168,12 @@ mod tests {
             color: String::new(),
             icon: String::new(),
             resumable: false,
+            // Native Spawn Option: harness_id mirrors the row id, no
+            // provider, group_key follows the harness (issue #575).
+            harness_id: id.to_string(),
+            provider_id: None,
+            is_proxied: false,
+            group_key: id.to_string(),
         };
         // Saved order had minimax between claude and codex; it was uninstalled
         // (absent from rows) for a while, now it's back.
@@ -1100,6 +1188,248 @@ mod tests {
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["claude", "minimax", "codex", "terminal"]);
+    }
+
+    // ----- Spawn Option wire shape (issue #575 / ADR-0016) ---------------
+    //
+    // `compose_provider_menu` is the pure seam for the Spawn Menu derivation.
+    // The grouped render (harness header + Proxied children) needs three
+    // things to be true:
+    //
+    // 1. Each row carries `harness_id`, `provider_id`, `is_proxied`, and
+    //    `group_key` (the frontend `groupBy(opt => opt.group_key)`).
+    // 2. `order_providers` ranks by `harness_id` so a Proxied child
+    //    clusters under its native harness header, not at the bottom of
+    //    the stored order.
+    // 3. `parse_spawn_option_id` splits a composite id on the first `:`
+    //    so the resolver chain can pick the executor from the harness
+    //    part and the credentials from the provider part.
+
+    /// The native row for a harness profile has `provider_id = None`,
+    /// `is_proxied = false`, and `group_key == harness_id == id`. A
+    /// detected Claude Code profile is the canonical "clickable harness
+    /// header" row.
+    #[test]
+    fn provider_info_for_marks_native_row_with_no_provider_id() {
+        let claude = crate::preferences::HarnessProfile {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            harness: "anthropic".to_string(),
+        };
+        let info = provider_info_for(&claude, Platform::Windows)
+            .expect("claude profile is available on Windows");
+        assert_eq!(info.id, "claude");
+        assert_eq!(info.harness_id, "claude");
+        assert!(info.provider_id.is_none(), "native row must have no provider_id");
+        assert!(!info.is_proxied);
+        assert_eq!(info.group_key, "claude");
+    }
+
+    /// A configured Claude-compatible account surfaces as a Proxied
+    /// Provider row with the composite id `<harness>:<provider>`, and
+    /// `harness_id` / `group_key` follow the Claude Code profile (the
+    /// only Proxied-attached harness today). The frontend uses these to
+    /// bucket the row under the right harness header.
+    #[test]
+    fn provider_info_for_account_marks_proxied_row_with_composite_id() {
+        let profiles = vec![crate::preferences::HarnessProfile {
+            id: "claude".to_string(),
+            name: "Claude Code".to_string(),
+            harness: "anthropic".to_string(),
+        }];
+        let mm = crate::preferences::ProviderAccount {
+            id: "minimax".to_string(),
+            name: "MiniMax".to_string(),
+            enabled: true,
+            billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-mm".to_string()),
+            base_url: Some("https://api.minimax.io/anthropic".to_string()),
+            model_tiers: crate::preferences::ModelTiers::default(),
+            models: Vec::new(),
+        };
+        let info = provider_info_for_account(&mm, &profiles, Platform::Windows)
+            .expect("claude executor is available on Windows");
+        assert_eq!(info.id, "claude:minimax");
+        assert_eq!(info.harness_id, "claude");
+        assert_eq!(info.provider_id.as_deref(), Some("minimax"));
+        assert!(info.is_proxied);
+        assert_eq!(info.group_key, "claude");
+    }
+
+    /// A configured account that has no detected Claude Code profile on
+    /// this host falls back to the literal harness id `"claude"` for
+    /// `harness_id` and `group_key`. The resolver still maps the
+    /// bare `"claude"` to the Anthropic executor, so the grouped render
+    /// stays correct.
+    #[test]
+    fn provider_info_for_account_falls_back_to_claude_harness_id() {
+        let profiles: Vec<crate::preferences::HarnessProfile> = vec![];
+        let mm = crate::preferences::ProviderAccount {
+            id: "minimax".to_string(),
+            name: "MiniMax".to_string(),
+            enabled: true,
+            billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-mm".to_string()),
+            base_url: None,
+            model_tiers: crate::preferences::ModelTiers::default(),
+            models: Vec::new(),
+        };
+        let info = provider_info_for_account(&mm, &profiles, Platform::Windows).unwrap();
+        assert_eq!(info.harness_id, "claude");
+        assert_eq!(info.group_key, "claude");
+        assert_eq!(info.id, "claude:minimax");
+    }
+
+    /// A Proxied Provider row clusters under its harness header
+    /// (`harness_id` rank), not under its composite `id` (which isn't in
+    /// the stored order). A naive `position(p.id)` would push the child
+    /// to `usize::MAX - 1`; ranking by `harness_id` keeps it next to
+    /// its native header so the frontend's `groupBy` groups them
+    /// together.
+    #[test]
+    fn order_providers_ranks_proxied_rows_by_harness_id_not_composite_id() {
+        let native = |harness_id: &str| ProviderInfo {
+            id: harness_id.to_string(),
+            label: harness_id.to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+            harness_id: harness_id.to_string(),
+            provider_id: None,
+            is_proxied: false,
+            group_key: harness_id.to_string(),
+        };
+        let proxied = |harness_id: &str, provider_id: &str| ProviderInfo {
+            id: format!("{}:{}", harness_id, provider_id),
+            label: provider_id.to_string(),
+            color: String::new(),
+            icon: String::new(),
+            resumable: false,
+            harness_id: harness_id.to_string(),
+            provider_id: Some(provider_id.to_string()),
+            is_proxied: true,
+            group_key: harness_id.to_string(),
+        };
+        let order = vec!["claude".to_string(), "codex".to_string()];
+        let rows = vec![
+            proxied("claude", "minimax"),
+            native("terminal"),
+            native("codex"),
+            native("claude"),
+        ];
+        let ordered = order_providers(rows, &order);
+        // All four rows have the same `harness_id` group ("claude",
+        // "codex", or "terminal"), so the rank sort is by harness_id:
+        // rank 0 = claude, rank 1 = codex, terminal = usize::MAX
+        // (last). Within the same rank, the stable sort preserves the
+        // input order, so the Proxied child (first input row, rank 0)
+        // stays ahead of the native claude row. The frontend's
+        // `groupBy(group_key)` then buckets them into the same
+        // "Claude Code" group regardless of which row is first.
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["claude:minimax", "claude", "codex", "terminal"],
+            "Proxied child must cluster under its harness header (stable sort keeps equal-rank input order)"
+        );
+    }
+
+    // ----- parse_spawn_option_id resolver (issue #575) ------------------
+    //
+    // The composite id format `<harness>` (native) or `<harness>:<provider>`
+    // (proxied) is split on the first `:` by the resolver chain
+    // (`preferences::resolve_harness_provider` and
+    // `preferences::resolve_provider_env`). A provider id containing `:`
+    // (a theoretical edge case — the id is user-chosen) is preserved
+    // intact on the right side.
+
+    #[test]
+    fn parse_spawn_option_id_splits_bare_into_native() {
+        let (harness, provider) =
+            crate::agent::provider::parse_spawn_option_id("claude");
+        assert_eq!(harness, "claude");
+        assert!(provider.is_none());
+    }
+
+    #[test]
+    fn parse_spawn_option_id_splits_composite_into_harness_and_provider() {
+        let (harness, provider) =
+            crate::agent::provider::parse_spawn_option_id("claude:minimax");
+        assert_eq!(harness, "claude");
+        assert_eq!(provider, Some("minimax"));
+    }
+
+    #[test]
+    fn parse_spawn_option_id_keeps_provider_part_intact_on_duplicate_colons() {
+        // A provider id with its own `:` (theoretical today, but the
+        // id is user-chosen so we can't rule it out) lands entirely in
+        // the provider slot. The first `:` is the split, not the last.
+        let (harness, provider) =
+            crate::agent::provider::parse_spawn_option_id("claude:weird:id");
+        assert_eq!(harness, "claude");
+        assert_eq!(provider, Some("weird:id"));
+    }
+
+    /// The resolver chain (`resolve_harness_provider`) splits a composite
+    /// id on the first `:` and uses only the harness part to pick the
+    /// executor. `claude:minimax` resolves to the Anthropic executor
+    /// (Claude Code), not to a nonexistent `claude:minimax` Provider.
+    /// The composite-id path is exercised through
+    /// `Provider::from_db_str` in `models::tests`; the split logic
+    /// itself is the `parse_spawn_option_id` test above. Here we pin
+    /// the post-#538 legacy fallback for a bare `minimax` id so a
+    /// pre-migration archived node still resolves correctly.
+    #[test]
+    fn resolve_harness_provider_legacy_minimax_id_falls_through_to_anthropic() {
+        // `Provider::from_db_str("minimax")` is a static lookup —
+        // doesn't touch the preferences cache or APP_DATA_DIR. So we
+        // can verify the legacy fallback (issue #538 cutover) here
+        // without driving the temp-dir helper.
+        use crate::models::Provider;
+        assert_eq!(Provider::from_db_str("minimax"), Provider::Anthropic);
+        assert_eq!(Provider::from_db_str("kimi"), Provider::Anthropic);
+    }
+
+    // ----- v19 migration (issue #575) -----------------------------------
+    //
+    // The `migrate_agent_node_provider_id_to_composite` rewrite
+    // (src-tauri/src/db/mod.rs) is exercised by the integration tests
+    // in `db::migration_tests`. The unit tests below pin the pure
+    // helpers (id format + the first-class/custom id classification
+    // rule) so a refactor that drops a category surfaces here.
+
+    /// The legacy `minimax` / `kimi` ids are always Proxied Provider
+    /// rows — they're the two first-class built-ins (issue #566) and
+    /// always pair with Claude Code. The migration always rewrites
+    /// them. (Pin the static list so adding a new first-class provider
+    /// in the future requires a paired test update.)
+    #[test]
+    fn first_class_legacy_ids_are_known_proxied() {
+        // The migration's first block rewrites exactly these two ids.
+        for id in ["minimax", "kimi"] {
+            assert!(
+                crate::preferences::is_claude_compatible_id(id),
+                "{id} must be classified as claude_compatible so the migration picks it up"
+            );
+        }
+    }
+
+    /// A user-typed custom account id (e.g. "deepseek") is also
+    /// Proxied — the migration's second block catches it as long as
+    /// the live `provider_accounts()` read surfaces it as
+    /// `claude_compatible`. A disabled or non-claude_compatible
+    /// account is left alone (its nodes fall through to the
+    /// Anthropic default at spawn time, which is the legacy
+    /// behaviour).
+    #[test]
+    fn custom_claude_compatible_accounts_are_known_proxied() {
+        // `is_claude_compatible_id` is the public classification — a
+        // custom id is Proxied iff it isn't in the self-auth set.
+        assert!(crate::preferences::is_claude_compatible_id("deepseek"));
+        assert!(!crate::preferences::is_claude_compatible_id("anthropic"));
+        assert!(!crate::preferences::is_claude_compatible_id("codex"));
     }
 
     // ----- compose_provider_menu (issue #568) ----------------------------
@@ -1132,18 +1462,34 @@ mod tests {
 
     #[test]
     fn compose_menu_adds_enabled_keyed_claude_compatible_accounts() {
+        // Issue #575 / ADR-0016: a configured claude_compatible account
+        // surfaces as a Proxied Provider row with the composite id
+        // `<harness>:<provider>`, grouping under the detected Claude
+        // Code harness profile (here `claude`).
         let menu = compose_provider_menu(
-            vec![profile("terminal", "terminal")],
+            vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
             vec![acct("minimax", true, Some("sk-mm")), acct("kimi", true, Some("sk-moon"))],
             Platform::Windows,
             &[],
         );
         let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
-        assert!(ids.contains(&"minimax"), "keyed MiniMax must appear in the menu");
-        assert!(ids.contains(&"kimi"), "keyed Kimi must appear in the menu");
-        // The MiniMax row carries its own id so the frontend renders the brand icon.
-        let mm = menu.iter().find(|p| p.id == "minimax").unwrap();
+        // Composite ids — resolver splits on ':' to get (executor, creds).
+        assert!(
+            ids.contains(&"claude:minimax"),
+            "keyed MiniMax must appear in the menu as `claude:minimax` (Proxied Provider), got {ids:?}"
+        );
+        assert!(
+            ids.contains(&"claude:kimi"),
+            "keyed Kimi must appear in the menu as `claude:kimi` (Proxied Provider), got {ids:?}"
+        );
+        // The MiniMax row carries its own composite id (and brand label) so
+        // the frontend renders the brand icon keyed off the provider half.
+        let mm = menu.iter().find(|p| p.id == "claude:minimax").unwrap();
         assert_eq!(mm.label, "minimax acct");
+        assert_eq!(mm.harness_id, "claude");
+        assert_eq!(mm.provider_id.as_deref(), Some("minimax"));
+        assert!(mm.is_proxied);
+        assert_eq!(mm.group_key, "claude");
         // Terminal still sorts last.
         assert_eq!(ids.last(), Some(&"terminal"));
     }

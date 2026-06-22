@@ -370,13 +370,51 @@ sandbox: config.sandbox,
               className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               <option value="">&lt;Default&gt; (Anthropic)</option>
-              {/* The user's dynamic harness profiles — the legacy enum rows and
-                  their "Legacy" optgroup were retired in issue #538. */}
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
+              {/* Issue #575 / ADR-0016 — group the Spawn Options by their
+                  `harness_id` so the dropdown matches the harness-grouped
+                  Spawn Menu shape on every other surface. The native row
+                  in each bucket is the clickable harness header; subsequent
+                  rows are Proxied children. We collapse a bucket to a plain
+                  <option> when the harness has no children so the
+                  one-harness config still looks clean.
+
+                  The optgroup label is the native row's `label` (e.g.
+                  "Claude Code"), NOT the raw `harness_id` (e.g. "claude")
+                  — the harness profile name is the user-facing string.
+                  The native row's label is the harness profile's friendly
+                  name from `HarnessProfile.name`, populated by
+                  `provider_info_for` on the backend. */}
+              {Array.from(
+                providers.reduce((map, p) => {
+                  const list = map.get(p.harness_id) ?? [];
+                  list.push(p);
+                  map.set(p.harness_id, list);
+                  return map;
+                }, new Map<string, typeof providers>()).entries(),
+              ).map(([harnessId, group]) => {
+                if (group.length === 1) {
+                  return (
+                    <option key={group[0].id} value={group[0].id}>
+                      {group[0].label}
+                    </option>
+                  );
+                }
+                // Find the native row to use its friendly name as the
+                // optgroup label. If the bucket has no native row (e.g.
+                // a filter removed it — see code-review finding B2),
+                // fall back to the raw `harness_id` rather than the
+                // first child's proxied label.
+                const native = group.find((p) => !p.is_proxied) ?? group[0];
+                return (
+                  <optgroup key={harnessId} label={native.label}>
+                    {group.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.is_proxied ? `  ${p.label} (via ${native.label})` : p.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </select>
           </Field>
 

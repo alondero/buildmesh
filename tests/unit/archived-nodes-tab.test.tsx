@@ -58,27 +58,40 @@ const SESSIONS: ArchivedAgentNode[] = [
   },
 ];
 
-const PROVIDERS = [
-  // `resumable: true` mirrors the backend derivation
-  // `supports_resume() && produces_readable_transcript()` for the Claude-
-  // backed executor (which includes the legacy "minimax"/"kimi" ids that
-  // resolve to the Anthropic adapter per #538).
-  { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', resumable: true },
-  { id: 'minimax', label: 'Minimax', color: '#000', icon: '', resumable: true },
-  { id: 'kimi', label: 'Kimi', color: '#000', icon: '', resumable: true },
+// Issue #575 / ADR-0016 — Spawn Options carry the full wire shape
+// (harness_id, provider_id, is_proxied, group_key). The fixture here
+// stands in for the post-#575 backend: every Proxied Provider row
+// uses the composite id `claude:<account>`, and `resumable: true` is
+// the derivation from `supports_resume() && produces_readable_transcript()`.
+type ProviderFixture = {
+  id: string;
+  label: string;
+  color: string;
+  icon: string;
+  resumable: boolean;
+  harness_id: string;
+  provider_id: string | null;
+  is_proxied: boolean;
+  group_key: string;
+};
+
+const PROVIDERS: ProviderFixture[] = [
+  { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+  { id: 'claude:minimax', label: 'Minimax', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
+  { id: 'claude:kimi', label: 'Kimi', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: 'kimi', is_proxied: true, group_key: 'claude' },
   // OpenCode / Antigravity write transcripts the coordinator read API
   // doesn't parse, so resume would corrupt the session — backend sets
   // `resumable: false` and the picker hides them.
-  { id: 'opencode', label: 'OpenCode', color: '#000', icon: '', resumable: false },
-  { id: 'antigravity', label: 'Antigravity', color: '#000', icon: '', resumable: false },
+  { id: 'opencode', label: 'OpenCode', color: '#000', icon: '', resumable: false, harness_id: 'opencode', provider_id: null, is_proxied: false, group_key: 'opencode' },
+  { id: 'antigravity', label: 'Antigravity', color: '#000', icon: '', resumable: false, harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },
 ];
 
 // Custom Claude-compatible profile — the exact case the old id allow-list
 // silently hid. A user-defined id + name; the `resumable` flag is what
 // matters for picker inclusion.
-const CUSTOM_PROVIDERS = [
+const CUSTOM_PROVIDERS: ProviderFixture[] = [
   ...PROVIDERS,
-  { id: 'deepseek-via-claude', label: 'DeepSeek (via Claude)', color: '#000', icon: '', resumable: true },
+  { id: 'claude:deepseek', label: 'DeepSeek (via Claude)', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: 'deepseek', is_proxied: true, group_key: 'claude' },
 ];
 
 const RESUMED_NODE = {
@@ -268,7 +281,7 @@ describe('ArchivedNodesTab (#378)', () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
-        provider: 'minimax',
+        provider: 'claude:minimax',
       }));
     });
   });
@@ -285,7 +298,7 @@ describe('ArchivedNodesTab (#378)', () => {
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
 
-    expect(await screen.findByText('Anthropic')).toBeTruthy();
+    expect(await screen.findByText('Claude Code')).toBeTruthy();
     expect(screen.getByText('Minimax')).toBeTruthy();
     expect(screen.getByText('Kimi')).toBeTruthy();
     expect(screen.queryByText('OpenCode')).toBeNull();
@@ -310,17 +323,18 @@ describe('ArchivedNodesTab (#378)', () => {
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
-    await screen.findByText('Anthropic');
+    await screen.findByText('Claude Code');
 
     // The user-chosen label must appear — the picker no longer cares
     // about the underlying id, only the `resumable` flag.
     expect(screen.getByText('DeepSeek (via Claude)')).toBeTruthy();
-    // Picking it should round-trip to the backend with that exact id.
+    // Picking it should round-trip to the backend with that exact
+    // composite id (issue #575 / ADR-0016).
     const deepseekOption = screen.getByText('DeepSeek (via Claude)');
     await userEvent.click(deepseekOption);
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
-        provider: 'deepseek-via-claude',
+        provider: 'claude:deepseek',
       }));
     });
   });
@@ -348,9 +362,10 @@ describe('ArchivedNodesTab (#378)', () => {
     await userEvent.click(minimaxOption);
 
     // The resume call landed, so the click event reached its handler.
+    // Issue #575 — composite id `claude:minimax`, not the legacy bare id.
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('import_discovered_agent_node', expect.objectContaining({
-        provider: 'minimax',
+        provider: 'claude:minimax',
       }));
     });
   });

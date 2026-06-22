@@ -27,8 +27,23 @@ export function Sidebar() {
   // we hold our own local snapshot), and this hook re-fetches on the signal.
   const refreshProviders = useCallback(() => {
     listProviders()
+      // Issue #575 / ADR-0016 — preserve the full Spawn Option shape so
+      // `ProviderDropdown` can group by `group_key` and render the
+      // harness header vs Proxied child rows. The backend already orders
+      // rows by `(is_terminal, rank_of(harness_id))`, so the flat list
+      // carries both the order and the grouping data — the frontend is
+      // a pure render.
       .then(backendProviders => setProviderData(
-        backendProviders.map(p => ({ id: p.id, label: p.label, color: colorClassForProvider(p.id) })),
+        backendProviders.map(p => ({
+          id: p.id,
+          label: p.label,
+          color: colorClassForProvider(p.id),
+          icon: p.icon,
+          harness_id: p.harness_id,
+          provider_id: p.provider_id,
+          is_proxied: p.is_proxied,
+          group_key: p.group_key,
+        })),
       ))
       .catch(err => console.error('listProviders failed:', err));
   }, []);

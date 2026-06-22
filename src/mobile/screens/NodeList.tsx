@@ -45,10 +45,14 @@ export const STATUS_META: Record<NodeStatus, { color: string; label: string }> =
 // the only fallback row the resume picker (issue #550) should surface. Keeping
 // the flag honest here matters: if /providers 401s and we fall back, the user
 // still won't see ghost rows they can't actually resume.
+// Issue #575 — every fallback row also populates the Spawn Option wire
+// shape (harness_id, provider_id, is_proxied, group_key) so the
+// `ProviderPicker` group render doesn't have to special-case the
+// offline fallback.
 const FALLBACK_PROVIDERS: Provider[] = [
-  { id: "anthropic", label: "Anthropic (Claude)", color: "#1d7cfc", icon: "A", resumable: true },
-  { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G", resumable: false },
-  { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O", resumable: false },
+  { id: "claude", label: "Claude Code", color: "#1d7cfc", icon: "A", resumable: true, harness_id: "claude", provider_id: null, is_proxied: false, group_key: "claude" },
+  { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G", resumable: false, harness_id: "agy", provider_id: null, is_proxied: false, group_key: "agy" },
+  { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O", resumable: false, harness_id: "opencode", provider_id: null, is_proxied: false, group_key: "opencode" },
 ];
 
 export default function NodeList({
@@ -477,6 +481,24 @@ function ProviderPicker({
   onPick: (p: Provider) => void;
   onCancel: () => void;
 }) {
+  // Issue #575 / ADR-0016 — group the Spawn Options by `harness_id`
+  // (== `group_key` on the wire). The backend already orders rows by
+  // `(is_terminal, rank_of(harness_id))` so the order is preserved
+  // here. The first row in each bucket is the native harness header
+  // (clickable = native launch); subsequent rows are Proxied children
+  // rendered indented. Mobile is read-only (no reorder), so this is
+  // the same shape the desktop sidebar/probes render, just sized for
+  // a touch sheet.
+  const groups = (() => {
+    const map = new Map<string, Provider[]>();
+    for (const p of providers) {
+      const list = map.get(p.group_key) ?? [];
+      list.push(p);
+      map.set(p.group_key, list);
+    }
+    return Array.from(map.entries());
+  })();
+
   return (
     <Sheet onClose={onCancel} testId="provider-picker">
       <h3
@@ -490,34 +512,70 @@ function ProviderPicker({
       >
         New Agent Node
       </h3>
-      {providers.map((p) => (
-        <button
-          key={p.id}
-          onClick={() => onPick(p)}
-          data-testid={`provider-${p.id}`}
-          className="card"
-          style={{ background: "var(--surface-2)" }}
-        >
-          <div
-            style={{
-              width: 34,
-              height: 34,
-              borderRadius: 8,
-              background: p.color,
-              color: "#fff",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontSize: 14,
-              fontWeight: 700,
-              flexShrink: 0,
-            }}
-          >
-            {p.icon}
+      {groups.map(([harnessId, group]) => {
+        const native = group[0];
+        const children = group.slice(1);
+        return (
+          <div key={harnessId} data-testid={`spawn-group-${harnessId}`} style={{ marginBottom: 8 }}>
+            <button
+              type="button"
+              onClick={() => onPick(native)}
+              data-testid={`provider-${native.id}`}
+              className="card"
+              style={{ background: "var(--surface-2)" }}
+            >
+              <div
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 8,
+                  background: native.color,
+                  color: "#fff",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 14,
+                  fontWeight: 700,
+                  flexShrink: 0,
+                }}
+              >
+                {native.icon}
+              </div>
+              <span style={{ flex: 1, fontSize: 15, color: "var(--text)" }}>{native.label}</span>
+              <span style={{ fontSize: 9, color: "var(--text-faint)", textTransform: "uppercase", letterSpacing: 1 }}>harness</span>
+            </button>
+            {children.map((child) => (
+              <button
+                type="button"
+                key={child.id}
+                onClick={() => onPick(child)}
+                data-testid={`provider-${child.id}`}
+                className="card"
+                style={{ background: "var(--surface-2)", marginLeft: 18 }}
+              >
+                <div
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: 6,
+                    background: child.color,
+                    color: "#fff",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: 12,
+                    fontWeight: 700,
+                    flexShrink: 0,
+                  }}
+                >
+                  {child.icon}
+                </div>
+                <span style={{ fontSize: 14, color: "var(--text)" }}>{child.label}</span>
+              </button>
+            ))}
           </div>
-          <span style={{ fontSize: 15, color: "var(--text)" }}>{p.label}</span>
-        </button>
-      ))}
+        );
+      })}
     </Sheet>
   );
 }

@@ -25,8 +25,15 @@ use crate::models::*;
 
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
-/// Current schema version
-const SCHEMA_VERSION: i32 = 18;
+/// Current schema version.
+///
+/// v19 — Spawn Option composite ids (issue #575 / ADR-0016): rewrite
+/// legacy `agent_nodes.provider` ids (`minimax`/`kimi`/custom bare account
+/// id → `claude:<id>`) so archived nodes resolve under the new grouped
+/// Spawn Menu without a permanent resolver shim. The rewrite is
+/// unambiguous today because every Proxied Provider currently pairs with
+/// Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
+const SCHEMA_VERSION: i32 = 19;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -106,6 +113,18 @@ ensure_mesh_sandbox(&conn)?;
     // Data migration (#495): rehash any coordinator token a pre-hashing build
     // left as cleartext. Idempotent, so it's safe to run on every init.
     ensure_coordinator_tokens_hashed(&conn)?;
+    // v19 Spawn Option composite-id migration, **first-class block**
+    // (issue #575 / ADR-0016). The `migrate_*` function called from
+    // `migrate_if_needed` covers the version-bump path; this safety net
+    // covers DBs that already passed the v18→v19 boundary but had no
+    // `agent_nodes` rows at the time (the migration only rewrites
+    // *existing* rows, so a row inserted by a code path that bypassed
+    // the migration — e.g. a custom test helper — keeps the legacy id).
+    // The wrapper is idempotent: `WHERE provider NOT LIKE '%:%'` skips
+    // already-migrated rows. The **custom-account** block is split out
+    // and called from `lib.rs::setup` *after* `preferences::init` so
+    // it can read the user's stored `ProviderAccount` list.
+    ensure_agent_node_provider_id_migrated(&conn)?;
 
     // Silently treat "already initialized" as success: production calls
     // `init` exactly once at startup (the new `Connection` is dropped
@@ -168,6 +187,15 @@ fn migrate_if_needed(conn: &Connection) -> SqlResult<()> {
             }
             if current_version < 11 {
                 migrate_agent_node_use_worktree(conn)?;
+            }
+            if current_version < 19 {
+                // v19 Spawn Option composite-id migration (issue #575). Runs
+                // for pre-v6 DBs too — the table-guard above only blocks the
+                // early `migrate_projects_*` helpers, not the post-v6 path.
+                // `migrate_agent_node_provider_id_to_composite` is idempotent
+                // (skip rows already containing `:`) so the table-guard
+                // placement is safe.
+                migrate_agent_node_provider_id_to_composite(conn)?;
             }
         }
 
@@ -445,6 +473,61 @@ pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+/// Safety net (v19): re-apply the **first-class** Spawn Option
+/// composite-id migration to any `agent_nodes` row the version-bump
+/// path missed (issue #575). The first-class block is
+/// preferences-independent (it's a hardcoded SQL `IN ('minimax',
+/// 'kimi')` rewrite), so it can run from `db::init` and is
+/// idempotent. The custom-account block is split into
+/// [`ensure_agent_node_provider_id_custom_accounts_migrated`],
+/// called from `lib.rs::setup` after `preferences::init`.
+///
+/// A node inserted by a code path that didn't go through
+/// `migrate_if_needed` (e.g. a hand-written test fixture) would
+/// keep a legacy bare id for the first-class providers; this
+/// safety net catches it on every subsequent init.
+///
+/// Idempotent: the rewrite's `WHERE provider NOT LIKE '%:%'`
+/// guard skips rows already in the composite form, so the safety
+/// net is a no-op on healthy v19+ DBs. See
+/// [`migrate_agent_node_provider_id_to_composite`] for the full
+/// migration semantics.
+pub(crate) fn ensure_agent_node_provider_id_migrated(conn: &Connection) -> SqlResult<()> {
+    // Table-exists guard mirrors the other safety nets: a fresh DB
+    // creates the table above, so this is a no-op there. The NOT LIKE
+    // guard turns it into a no-op once v19+ data is present.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+    migrate_agent_node_provider_id_to_composite(conn)
+}
+
+/// Safety net (v19): re-apply the **custom-account** Spawn Option
+/// composite-id migration. Called from `lib.rs::setup` after
+/// `preferences::init` (because it needs the live
+/// `Vec<ProviderAccount>`). The companion to
+/// [`ensure_agent_node_provider_id_migrated`] — together they
+/// guarantee a v19+ DB never has a bare proxied-provider id in
+/// `agent_nodes.provider` that should have been rewritten.
+///
+/// **Idempotent**: the underlying migration's `WHERE provider NOT
+/// LIKE '%:%'` guard skips rows already in composite form, and the
+/// `provider NOT IN (...)` whitelist protects bare
+/// `HarnessProfile` ids from being rewritten.
+pub(crate) fn ensure_agent_node_provider_id_custom_accounts_migrated(
+    conn: &Connection,
+    accounts: &[crate::preferences::ProviderAccount],
+) -> SqlResult<()> {
+    migrate_agent_node_provider_id_custom_accounts(conn, accounts)
+}
+
 fn migrate_projects_layout(conn: &Connection) -> SqlResult<()> {
     let has_layout: bool = conn
         .query_row(
@@ -639,6 +722,162 @@ fn migrate_gemini_to_agy(conn: &Connection) -> SqlResult<()> {
     if rows_meshes > 0 {
         tracing::info!("Migrated {} meshes default_provider from gemini to agy", rows_meshes);
     }
+    Ok(())
+}
+
+/// v19 — Spawn Option composite-id migration (issue #575 / ADR-0016 §6).
+///
+/// Rewrites legacy `agent_nodes.provider` ids into the new composite
+/// `<harness>:<provider>` form so archived nodes resolve under the
+/// grouped Spawn Menu without a permanent resolver shim:
+///
+/// * `minimax` → `claude:minimax` (first-class provider, #566)
+/// * `kimi` → `claude:kimi` (first-class provider, #566)
+/// * Any other bare id that names a `claude_compatible` `ProviderAccount`
+///   in the current `preferences.json` → `claude:<id>` (custom accounts)
+/// * Everything else (`claude`, `codex`, `agy`, `opencode`, `terminal`,
+///   `anthropic`, unknown harness profile ids) is left untouched — those
+///   are already valid native Spawn Option ids.
+///
+/// The mapping is **unambiguous today** because every Proxied Provider
+/// currently pairs with the Claude Code harness only (ADR-0016 §6). When
+/// multi-harness attach ships, this rewrite is no longer sound and a
+/// different solution (resolver shim or user-driven remap) is needed —
+/// issue #575 closes before that work begins.
+///
+/// **Idempotent**: rows whose `provider` already contains `:` are skipped
+/// (the `provider NOT LIKE '%:%'` guard in the UPDATE).
+///
+/// **Two-step init order** (code-review finding): `db::init` runs
+/// *before* `preferences::init` in `lib.rs::setup`, so when this
+/// migration first runs the `APP_DATA_DIR` OnceLock is unset and
+/// `preferences::provider_accounts()` would only return the
+/// code-defined defaults (no user-stored custom accounts). To avoid
+/// silently dropping the custom-account rewrite on the very first
+/// v19 launch, this function only does the **first-class** block
+/// (always-safe SQL with no preferences dependency). The
+/// **custom-account** block is split into
+/// [`migrate_agent_node_provider_id_custom_accounts`], which is
+/// called from `lib.rs::setup` *after* `preferences::init` with the
+/// live `Vec<ProviderAccount>`. The safety-net
+/// `ensure_agent_node_provider_id_migrated` re-runs the first-class
+/// block on every init (idempotent) and is paired with
+/// `ensure_agent_node_provider_id_custom_accounts_migrated` in
+/// `lib.rs::setup` for the custom-account block.
+pub(crate) fn migrate_agent_node_provider_id_to_composite(conn: &Connection) -> SqlResult<()> {
+    // Table-exists guard: the version-bump path runs `migrate_if_needed`
+    // against every DB the user has, including pre-v6 DBs (test fixtures
+    // use these) where the `agent_nodes` table was only created later
+    // in `init()`. A bare `UPDATE agent_nodes` against those DBs would
+    // `SqliteFailure: no such table`, breaking the idempotency test and
+    // any pre-v6 production upgrade path. Skipping is correct: there's
+    // nothing to rewrite on a DB that never recorded an agent node.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+    // The two first-class Proxied Providers (issue #566). Always
+    // present in `default_provider_accounts()`; rewriting them here
+    // is independent of the user's `preferences.json` so a fresh
+    // install or a cleared file still upgrades correctly.
+    let rows_first_class = conn.execute(
+        "UPDATE agent_nodes
+            SET provider = 'claude:' || provider
+          WHERE provider IN ('minimax', 'kimi')",
+        [],
+    )?;
+    if rows_first_class > 0 {
+        tracing::info!(
+            "migrate_agent_node_provider_id_to_composite: rewrote {} agent_nodes from first-class bare ids",
+            rows_first_class
+        );
+    }
+
+    Ok(())
+}
+
+/// v19 Spawn Option composite-id migration, **custom-account block**
+/// (issue #575 / ADR-0016 §6). Rewrites any bare id that names a
+/// `claude_compatible` `ProviderAccount` (a user-configured custom
+/// endpoint) to `claude:<id>`. Split from
+/// [`migrate_agent_node_provider_id_to_composite`] so it can be
+/// called from `lib.rs::setup` *after* `preferences::init` — the
+/// first-class block has no preferences dependency and is therefore
+/// safe to run from `db::init`, but the custom-account block needs
+/// the live `Vec<ProviderAccount>` (the user's stored
+/// `preferences.json` merged with the code-defined defaults).
+///
+/// **Idempotent**: `WHERE provider NOT LIKE '%:%'` skips already-
+/// migrated rows. The `provider NOT IN (...)` whitelist of built-in
+/// harness ids protects against accidentally rewriting a custom
+/// `HarnessProfile` row whose `id` happens to match a proxied
+/// provider id (the two lists are separate, but the SQL guard
+/// guarantees the rewrite only fires for rows that look like bare
+/// `ProviderAccount` ids, never bare `HarnessProfile` ids).
+///
+/// **Filter on `enabled`**: a disabled custom account is left bare
+/// so the resolver falls through to the Anthropic default at spawn
+/// time. This is intentional — the user's archived node "remembers"
+/// they disabled the account, and silently re-enabling it on the
+/// node would be surprising. Re-enabling the account + restart
+/// triggers another migration run via
+/// `ensure_agent_node_provider_id_custom_accounts_migrated`.
+pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
+    conn: &Connection,
+    accounts: &[crate::preferences::ProviderAccount],
+) -> SqlResult<()> {
+    // Same table-exists guard as the main migration.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='agent_nodes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+    // Collect first — `UPDATE ... WHERE provider IN (...)` with
+    // a Rust-built IN list keeps the migration a single SQL
+    // statement and the bound parameters are bound, not
+    // string-interpolated.
+    let custom_ids: Vec<String> = accounts
+        .iter()
+        .filter(|a| {
+            a.claude_compatible
+                && a.enabled
+                && !a.id.is_empty()
+                && !a.id.contains(':')
+        })
+        .map(|a| a.id.clone())
+        .collect();
+    if !custom_ids.is_empty() {
+        let placeholders = custom_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE agent_nodes \
+                SET provider = 'claude:' || provider \
+              WHERE provider NOT LIKE '%:%' \
+                AND provider NOT IN ('claude', 'codex', 'agy', 'opencode', 'terminal', 'anthropic') \
+                AND provider IN ({})",
+            placeholders
+        );
+        let params_vec: Vec<&dyn rusqlite::ToSql> =
+            custom_ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows_custom = conn.execute(&sql, params_vec.as_slice())?;
+        if rows_custom > 0 {
+            tracing::info!(
+                "migrate_agent_node_provider_id_custom_accounts: rewrote {} agent_nodes from custom bare account ids",
+                rows_custom
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -1008,6 +1247,9 @@ pub(crate) fn test_migrate_if_needed(conn: &Connection) -> SqlResult<()> {
         }
         if current_version < 9 {
             migrate_agent_node_source_issue(conn)?;
+        }
+        if current_version < 19 {
+            migrate_agent_node_provider_id_to_composite(conn)?;
         }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",

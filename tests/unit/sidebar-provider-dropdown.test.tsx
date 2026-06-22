@@ -3,9 +3,13 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../../src/components/Sidebar/ProviderDropdown';
 
+// Issue #575 / ADR-0016 — Spawn Options carry the full wire shape. Test
+// fixtures here stand in for the backend's grouped, harness-ordered list;
+// a fixture row that's the only one in its bucket is a native harness
+// header (the only clickable row in a one-harness group).
 const PROVIDERS: ProviderEntry[] = [
-  { id: 'anthropic', label: 'Anthropic', color: 'bg-blue-500' },
-  { id: 'agy', label: 'Agy', color: 'bg-emerald-500' },
+  { id: 'claude', label: 'Anthropic', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+  { id: 'agy', label: 'Agy', color: 'bg-emerald-500', icon: 'G', harness_id: 'agy', provider_id: null, is_proxied: false, group_key: 'agy' },
 ];
 
 describe('colorClassForProvider', () => {
@@ -29,8 +33,11 @@ describe('colorClassForProvider', () => {
 describe('ProviderDropdown', () => {
   it('renders a button for every provider', () => {
     render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
-    expect(screen.getByRole('button', { name: 'Anthropic' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Agy' })).toBeTruthy();
+    // The harness header carries a "harness" badge label, so the
+    // accessible name is "<label> harness" — the regex matcher keeps
+    // the test robust to that suffix.
+    expect(screen.getByRole('button', { name: /Anthropic/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Agy/ })).toBeTruthy();
   });
 
   it('tags the container with the mesh id for click-outside detection', () => {
@@ -42,7 +49,7 @@ describe('ProviderDropdown', () => {
     const onSelect = vi.fn();
     render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={onSelect} />);
 
-await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
+    await userEvent.click(screen.getByRole('button', { name: /Agy/ }));
 
     expect(onSelect).toHaveBeenCalledWith('agy', false);
   });
@@ -55,7 +62,7 @@ await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
       </div>,
     );
 
-    await userEvent.click(screen.getByRole('button', { name: 'Anthropic' }));
+    await userEvent.click(screen.getByRole('button', { name: /Anthropic/ }));
 
     expect(onParentClick).not.toHaveBeenCalled();
   });
@@ -65,17 +72,27 @@ await userEvent.click(screen.getByRole('button', { name: 'Agy' }));
     expect(screen.queryAllByRole('button')).toHaveLength(0);
   });
 
-  it('renders a flat list with no "Legacy" header (#538)', () => {
-    // The transitional dynamic/legacy split was retired: every entry is a
-    // harness profile, rendered as a single flat list, no grouping header.
+  it('renders a harness-grouped menu (issue #575) with no "Legacy" header', () => {
+    // The legacy enum rows and their "Legacy" header were retired in
+    // #538. Issue #575 reframes the list as a harness-grouped Spawn
+    // Menu: each harness gets a clickable header (`<button
+    // data-spawn-harness=...>`), and Proxied children render indented
+    // inside the same group.
     const profiles: ProviderEntry[] = [
-      { id: 'claude', label: 'Claude Code', color: 'bg-blue-500' },
-      { id: 'codex', label: 'Codex', color: 'bg-gray-500' },
-      { id: 'terminal', label: 'Terminal', color: 'bg-gray-500' },
+      { id: 'claude', label: 'Claude Code', color: 'bg-blue-500', icon: 'A', harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+      { id: 'claude:minimax', label: 'MiniMax', color: 'bg-indigo-500', icon: 'M', harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
+      { id: 'codex', label: 'Codex', color: 'bg-gray-500', icon: 'C', harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
+      { id: 'terminal', label: 'Terminal', color: 'bg-gray-500', icon: 'T', harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal' },
     ];
     render(<ProviderDropdown meshId={1} providers={profiles} onSelect={() => {}} />);
     expect(screen.queryByText('Legacy')).toBeNull();
-    expect(screen.getAllByRole('button')).toHaveLength(3);
-    expect(screen.getByRole('button', { name: 'Claude Code' })).toBeTruthy();
+    // 4 clickable rows: 3 native headers + 1 proxied child.
+    expect(screen.getAllByRole('button')).toHaveLength(4);
+    expect(screen.getByRole('button', { name: /Claude Code/ })).toBeTruthy();
+    // The harness headers carry the `data-spawn-harness` attribute so a
+    // future test (or e2e) can target them directly.
+    expect(screen.getByRole('button', { name: /Claude Code/ }).getAttribute('data-spawn-harness')).toBe('claude');
+    // The Proxied child renders the label, not a "harness" badge.
+    expect(screen.getByRole('button', { name: /^MiniMax$/ })).toBeTruthy();
   });
 });
