@@ -66,88 +66,76 @@ fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platfor
     })
 }
 
-/// Compose the `ProviderInfo` (Spawn Option) row for a configured Claude-compatible
-/// provider account (MiniMax, Kimi, or a custom endpoint). These spawn via the
-/// Claude Code (`anthropic`) executor with the account's endpoint + per-tier
-/// models injected at spawn ([`crate::preferences::resolve_provider_env`]), so
-/// the row borrows the Anthropic adapter's UI and resume capability.
+/// Compose the `ProviderInfo` (Spawn Option) row for one **Proxied Provider**
+/// pairing — a [`crate::preferences::ProviderPairing`] attaching an account to a
+/// harness over a chosen **Compatible API surface** (issue #576, generalises the
+/// #575 account-only row). The endpoint URL + model map travel with the pairing
+/// (resolved at spawn by [`crate::preferences::resolve_provider_env`]); the brand
+/// label comes from the account and the row's colour/icon from the *executor*
+/// adapter, so a MiniMax-via-Codex row reads as a Codex-family row while the
+/// frontend `ProviderIcon` (keyed off the composite `id`) still renders the
+/// MiniMax brand mark.
 ///
-/// The row is a **Proxied Provider** Spawn Option (issue #575 / ADR-0016): the
-/// composite `id` is `<harness>:<provider>` (always `claude:<account.id>`
-/// today, while the multi-harness attach is deferred), and `harness_id`
-/// groups it under the Claude Code header in the rendered Spawn Menu. The
-/// frontend `ProviderIcon` keys off the row `id`, so a "minimax"/"kimi"/
-/// custom id renders its own brand mark.
-///
-/// `harness_id` defaults to `"claude"` (the detected Claude Code profile id
-/// from the harness profile list) and falls back to the literal string
-/// `"claude"` if no such profile is present (e.g. a bare test env or a host
-/// that hasn't auto-detected the binary). The fallback is safe: `claude`
-/// still resolves to the Anthropic executor through
-/// `preferences::resolve_harness_provider` thanks to the existing
-/// `Provider::from_db_str` and profile-lookup fallbacks. Returns `None`
-/// only if the Claude executor isn't available on this host.
-fn provider_info_for_account(
+/// The composite `id` is `<harness_id>:<provider_id>` (e.g. `claude:minimax`,
+/// `codex:minimax`) and `harness_id`/`group_key` cluster the row under its
+/// harness header in the rendered Spawn Menu. The executor is resolved from the
+/// pairing's harness *profile* (its `harness` field), falling back to parsing the
+/// `harness_id` directly when no matching profile is present (a stored pairing
+/// for an undetected harness, or a bare test env) — the same fallback chain the
+/// resolver uses. Returns `None` only if that executor isn't available on this
+/// host.
+fn provider_info_for_pairing(
+    pairing: &crate::preferences::ProviderPairing,
     account: &crate::preferences::ProviderAccount,
     profiles: &[crate::preferences::HarnessProfile],
     host: Platform,
 ) -> Option<ProviderInfo> {
-    let adapter = crate::models::Provider::Anthropic.adapter();
+    let executor = profiles
+        .iter()
+        .find(|p| p.id == pairing.harness_id)
+        .map(|p| crate::models::Provider::from_db_str(&p.harness))
+        .unwrap_or_else(|| crate::models::Provider::from_db_str(&pairing.harness_id));
+    let adapter = executor.adapter();
     if !adapter.available_on().contains(&host) {
         return None;
     }
     let ui = adapter.ui();
-    // The Claude Code harness header this row groups under. We pick the
-    // first detected profile whose backing executor is the Anthropic
-    // adapter (i.e. a Claude Code profile) — that's the row the user
-    // clicks to launch Claude Code natively, and the proxied children
-    // must cluster under it. If none is present, "claude" is a safe
-    // fallback: the resolver still maps it to the Anthropic executor.
-    let harness_id = profiles
-        .iter()
-        .find(|p| p.harness == "anthropic")
-        .map(|p| p.id.clone())
-        .unwrap_or_else(|| "claude".to_string());
-    let id = format!("{}:{}", harness_id, account.id);
     Some(ProviderInfo {
-        id,
+        id: format!("{}:{}", pairing.harness_id, pairing.provider_id),
         label: account.name.clone(),
         color: ui.color,
         icon: ui.icon,
         resumable: adapter.supports_resume() && adapter.produces_readable_transcript(),
-        harness_id: harness_id.clone(),
-        provider_id: Some(account.id.clone()),
+        harness_id: pairing.harness_id.clone(),
+        provider_id: Some(pairing.provider_id.clone()),
         is_proxied: true,
-        group_key: harness_id,
+        group_key: pairing.harness_id.clone(),
     })
 }
 
-/// Build the spawn menu from the two configuration lists. Pure (no disk/globals)
-/// so the derivation is the unit-test seam.
+/// Build the spawn menu from the configuration lists. Pure (no disk/globals) so
+/// the derivation is the unit-test seam.
 ///
 /// Harness profiles (Terminal + startup-detected Claude/Codex/Antigravity/OpenCode)
-/// come first, then every **configured** Claude-compatible provider account —
-/// enabled, with a non-empty API key — is appended as a Claude-Code-backed row
-/// (deduped by composite id). This is what surfaces a keyed built-in MiniMax/Kimi
-/// or a custom endpoint in the menu without a second stored list to keep in sync;
-/// clearing the key or disabling the account drops the row automatically
-/// (issue #568).
+/// come first as native rows, then one **Proxied Provider** row per *effective
+/// pairing* — the derived default Anthropic pairing for every keyed account,
+/// overlaid with the user's stored cross-surface/cross-harness pairings (issue
+/// #576, [`crate::preferences::effective_pairings`]). This is what surfaces a
+/// keyed built-in MiniMax/Kimi or a custom endpoint *and* an explicitly-attached
+/// MiniMax-via-Codex without a second list to keep in sync; clearing the key or
+/// disabling the account drops every derived/stored row that depends on it.
 ///
 /// **Dedup semantics** (issue #575 / ADR-0016): the composite id
-/// `<harness>:<provider>` is unique per (harness profile id, account id)
-/// pair, so a duplicate-row check by `info.id` only fires when the same
-/// (harness, account) pair was added twice. The pre-#575 dedup by bare
-/// `account.id` — which suppressed a user-typed "claude" custom account
-/// in favour of the native "claude" harness row — is **no longer
-/// applicable** under the composite id format: a "claude" custom account
-/// produces a `claude:claude` row, distinct from the native `claude`
-/// harness row. The `compose_menu_does_not_duplicate_a_detected_profile`
-/// test (pre-#575) is the regression case the new format sidesteps —
-/// `provider_info_for` already filters non-Anthropic harnesses, and the
-/// account's harness_id is independent of any profile id.
+/// `<harness>:<provider>` is unique per (harness profile id, account id) pair, so
+/// the duplicate-row check by `info.id` only fires when the same (harness,
+/// account) pair was produced twice. `effective_pairings` already dedups by
+/// `(harness_id, provider_id)`, so this guard is a belt-and-braces on the native
+/// rows (a `claude:claude` custom account stays distinct from the native
+/// `claude` harness row).
 fn compose_provider_menu(
     profiles: Vec<crate::preferences::HarnessProfile>,
     accounts: Vec<crate::preferences::ProviderAccount>,
+    pairings: Vec<crate::preferences::ProviderPairing>,
     host: Platform,
     order: &[String],
 ) -> Vec<ProviderInfo> {
@@ -155,21 +143,18 @@ fn compose_provider_menu(
         .iter()
         .filter_map(|profile| provider_info_for(profile, host))
         .collect();
-    for account in accounts {
-        let keyed = account.api_key.as_deref().is_some_and(|k| !k.is_empty());
-        if account.claude_compatible
-            && account.enabled
-            && keyed
-        {
-            if let Some(info) = provider_info_for_account(&account, &profiles, host) {
-                // Composite id dedup — guards against accidentally
-                // appending the same (harness, account) pair twice if
-                // a future change passes the same account through this
-                // loop twice. The pre-#575 bare-id suppression is no
-                // longer needed; see the doc-comment above.
-                if !rows.iter().any(|r| r.id == info.id) {
-                    rows.push(info);
-                }
+    // The Claude Code harness header the derived default pairings group under
+    // (shared rule — see `preferences::claude_harness_id_from`).
+    let claude_harness_id = crate::preferences::claude_harness_id_from(&profiles);
+    let effective =
+        crate::preferences::effective_pairings(&accounts, &pairings, &claude_harness_id);
+    for pairing in &effective {
+        let Some(account) = accounts.iter().find(|a| a.id == pairing.provider_id) else {
+            continue;
+        };
+        if let Some(info) = provider_info_for_pairing(pairing, account, &profiles, host) {
+            if !rows.iter().any(|r| r.id == info.id) {
+                rows.push(info);
             }
         }
     }
@@ -182,6 +167,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     compose_provider_menu(
         crate::preferences::harness_profiles(),
         crate::preferences::provider_accounts(),
+        crate::preferences::provider_pairings(),
         Platform::current(),
         &crate::preferences::harness_order(),
     )
@@ -1225,13 +1211,12 @@ mod tests {
         assert_eq!(info.group_key, "claude");
     }
 
-    /// A configured Claude-compatible account surfaces as a Proxied
-    /// Provider row with the composite id `<harness>:<provider>`, and
-    /// `harness_id` / `group_key` follow the Claude Code profile (the
-    /// only Proxied-attached harness today). The frontend uses these to
-    /// bucket the row under the right harness header.
+    /// A pairing surfaces as a Proxied Provider row with the composite id
+    /// `<harness>:<provider>`, and `harness_id` / `group_key` follow the
+    /// pairing's harness. The frontend uses these to bucket the row under the
+    /// right harness header.
     #[test]
-    fn provider_info_for_account_marks_proxied_row_with_composite_id() {
+    fn provider_info_for_pairing_marks_proxied_row_with_composite_id() {
         let profiles = vec![crate::preferences::HarnessProfile {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
@@ -1248,7 +1233,14 @@ mod tests {
             model_tiers: crate::preferences::ModelTiers::default(),
             models: Vec::new(),
         };
-        let info = provider_info_for_account(&mm, &profiles, Platform::Windows)
+        let pairing = crate::preferences::ProviderPairing {
+            harness_id: "claude".to_string(),
+            provider_id: "minimax".to_string(),
+            surface: crate::preferences::ApiSurface::Anthropic,
+            base_url: Some("https://api.minimax.io/anthropic".to_string()),
+            model_tiers: crate::preferences::ModelTiers::default(),
+        };
+        let info = provider_info_for_pairing(&pairing, &mm, &profiles, Platform::Windows)
             .expect("claude executor is available on Windows");
         assert_eq!(info.id, "claude:minimax");
         assert_eq!(info.harness_id, "claude");
@@ -1257,13 +1249,56 @@ mod tests {
         assert_eq!(info.group_key, "claude");
     }
 
-    /// A configured account that has no detected Claude Code profile on
-    /// this host falls back to the literal harness id `"claude"` for
-    /// `harness_id` and `group_key`. The resolver still maps the
-    /// bare `"claude"` to the Anthropic executor, so the grouped render
-    /// stays correct.
+    /// A second pairing of the same provider under a different harness/surface
+    /// (MiniMax via Codex over OpenAI) yields a distinct composite id grouped
+    /// under the Codex header — the multi-harness attach the issue is about
+    /// (AC#1). The executor resolves from the codex profile, so the row is not
+    /// resumable (Codex writes no Claude-readable transcript).
     #[test]
-    fn provider_info_for_account_falls_back_to_claude_harness_id() {
+    fn provider_info_for_pairing_supports_a_second_harness() {
+        let profiles = vec![
+            crate::preferences::HarnessProfile {
+                id: "claude".to_string(),
+                name: "Claude Code".to_string(),
+                harness: "anthropic".to_string(),
+            },
+            crate::preferences::HarnessProfile {
+                id: "codex".to_string(),
+                name: "OpenAI Codex".to_string(),
+                harness: "codex".to_string(),
+            },
+        ];
+        let mm = crate::preferences::ProviderAccount {
+            id: "minimax".to_string(),
+            name: "MiniMax".to_string(),
+            enabled: true,
+            billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-mm".to_string()),
+            base_url: None,
+            model_tiers: crate::preferences::ModelTiers::default(),
+            models: Vec::new(),
+        };
+        let pairing = crate::preferences::ProviderPairing {
+            harness_id: "codex".to_string(),
+            provider_id: "minimax".to_string(),
+            surface: crate::preferences::ApiSurface::OpenAI,
+            base_url: Some("https://api.minimax.io/v1".to_string()),
+            model_tiers: crate::preferences::ModelTiers::default(),
+        };
+        let info = provider_info_for_pairing(&pairing, &mm, &profiles, Platform::Windows).unwrap();
+        assert_eq!(info.id, "codex:minimax");
+        assert_eq!(info.harness_id, "codex");
+        assert_eq!(info.group_key, "codex");
+        assert!(info.is_proxied);
+        assert!(!info.resumable, "Codex writes no Claude-readable transcript");
+    }
+
+    /// A pairing whose harness has no detected profile falls back to parsing the
+    /// `harness_id` directly. The resolver still maps a bare `"claude"` to the
+    /// Anthropic executor, so the grouped render stays correct.
+    #[test]
+    fn provider_info_for_pairing_falls_back_to_parsing_harness_id() {
         let profiles: Vec<crate::preferences::HarnessProfile> = vec![];
         let mm = crate::preferences::ProviderAccount {
             id: "minimax".to_string(),
@@ -1276,7 +1311,14 @@ mod tests {
             model_tiers: crate::preferences::ModelTiers::default(),
             models: Vec::new(),
         };
-        let info = provider_info_for_account(&mm, &profiles, Platform::Windows).unwrap();
+        let pairing = crate::preferences::ProviderPairing {
+            harness_id: "claude".to_string(),
+            provider_id: "minimax".to_string(),
+            surface: crate::preferences::ApiSurface::Anthropic,
+            base_url: None,
+            model_tiers: crate::preferences::ModelTiers::default(),
+        };
+        let info = provider_info_for_pairing(&pairing, &mm, &profiles, Platform::Windows).unwrap();
         assert_eq!(info.harness_id, "claude");
         assert_eq!(info.group_key, "claude");
         assert_eq!(info.id, "claude:minimax");
@@ -1469,6 +1511,7 @@ mod tests {
         let menu = compose_provider_menu(
             vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
             vec![acct("minimax", true, Some("sk-mm")), acct("kimi", true, Some("sk-moon"))],
+            vec![],
             Platform::Windows,
             &[],
         );
@@ -1503,6 +1546,7 @@ mod tests {
                 acct("kimi", false, Some("sk-moon")), // keyed but disabled
                 acct("anthropic", true, Some("x")),   // self-auth → not claude_compatible
             ],
+            vec![],
             Platform::Windows,
             &[],
         );
@@ -1517,6 +1561,7 @@ mod tests {
         let menu = compose_provider_menu(
             vec![profile("claude", "anthropic")],
             vec![acct("claude", true, Some("k"))],
+            vec![],
             Platform::Windows,
             &[],
         );

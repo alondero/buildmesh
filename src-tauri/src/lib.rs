@@ -199,6 +199,10 @@ pub fn run() {
             commands::preferences::get_provider_accounts,
             commands::preferences::upsert_provider_account,
             commands::preferences::remove_provider_account,
+            commands::preferences::get_provider_pairings,
+            commands::preferences::compatible_providers_for_harness,
+            commands::preferences::attach_proxied_provider,
+            commands::preferences::remove_provider_pairing,
             // Coordinator read API (ADR-0008)
             commands::coordinator::get_coordinator_status,
             commands::coordinator::set_coordinator_api_enabled,

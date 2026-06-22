@@ -33,8 +33,10 @@ import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
+import type { ApiSurface } from '../types/generated/ApiSurface';
 import type { ProviderAccount } from '../types/generated/ProviderAccount';
 import type { ProviderInfo } from '../types/generated/ProviderInfo';
+import type { ProviderPairing } from '../types/generated/ProviderPairing';
 import type { ProviderMeters } from '../types/generated/ProviderMeters';
 import type { ProviderUsage } from '../types/generated/ProviderUsage';
 import type { RealizedBind } from '../types/generated/RealizedBind';
@@ -701,6 +703,54 @@ export const removeProviderAccount = async (id: string) => {
   } finally {
     // Removing a custom account drops its paired harness profile — same
     // bust-after-resolve reasoning as the upsert above (#534).
+    providerListPromise = null;
+  }
+};
+
+// ── Proxied Provider pairings (ADR-0016 §4, issue #576) ────────────────────
+//
+// The per-pairing half of the harness↔provider config split: a pairing attaches
+// a global-keyed `ProviderAccount` to a harness over a chosen `ApiSurface`, with
+// its own endpoint URL + model-tier remap. The harness-config page reads the
+// effective pairings (derived defaults + stored extras) and offers surface-matched
+// providers to attach. The default Anthropic pairing is derived backend-side, so
+// only user-added cross-surface/cross-harness pairings are persisted.
+export type { ApiSurface, ProviderPairing };
+
+/** The effective pairing set (derived default Anthropic pairings + stored
+ *  extras) used to render what's attached under each harness. */
+export const getProviderPairings = () =>
+  _invoke<ProviderPairing[]>('get_provider_pairings');
+
+/** Providers offered by "Add proxied provider" for `harnessId`, surface-matched
+ *  to what that harness speaks. Empty for a native-only harness. */
+export const compatibleProvidersForHarness = (harnessId: string) =>
+  _invoke<ProviderAccount[]>('compatible_providers_for_harness', { harnessId });
+
+/** Attach a provider to a harness over the harness's surface. The backend
+ *  derives the endpoint (published first-class map / Generic declaration), so the
+ *  client only names the (harness, provider). `apiKey` seeds the global key
+ *  set-if-absent. Busts the cached provider list after the write. */
+export const attachProxiedProvider = async (
+  harnessId: string,
+  providerId: string,
+  apiKey: string | null,
+) => {
+  try {
+    return await _invoke('attach_proxied_provider', { harnessId, providerId, apiKey });
+  } finally {
+    providerListPromise = null;
+  }
+};
+
+/** Detach a stored Proxied Provider pairing (no-op for a derived default). */
+export const removeProviderPairing = async (
+  harnessId: string,
+  providerId: string,
+) => {
+  try {
+    return await _invoke('remove_provider_pairing', { harnessId, providerId });
+  } finally {
     providerListPromise = null;
   }
 };

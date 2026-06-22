@@ -2,7 +2,7 @@
 //!
 //! See `crate::preferences` for the persistence layer.
 
-use crate::preferences::{self, AppPreferences, ProviderAccount};
+use crate::preferences::{self, AppPreferences, ProviderAccount, ProviderPairing};
 use tauri::{command, AppHandle, Emitter};
 
 /// Read the persisted buildmesh-wide preferences. Always returns a value —
@@ -75,6 +75,73 @@ pub async fn remove_provider_account(app: AppHandle, id: String) -> Result<(), S
     preferences::remove_provider_account(&mut prefs, &id);
     preferences::save(prefs)?;
     crate::services::usage::invalidate_cache();
+    let _ = app.emit("provider-list-changed", ());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Proxied Provider pairings (ADR-0016 §4, issue #576)
+// ---------------------------------------------------------------------------
+
+/// The full effective set of **Proxied Provider** pairings — the derived default
+/// Anthropic pairing for every keyed account plus the user's stored
+/// cross-surface/cross-harness pairings. The harness-config page renders this to
+/// show what's attached under each harness (issue #576).
+#[command]
+pub async fn get_provider_pairings() -> Result<Vec<ProviderPairing>, String> {
+    Ok(preferences::effective_provider_pairings())
+}
+
+/// The **Model Providers** offered by "Add proxied provider" under `harness_id`,
+/// surface-matched: only providers whose **Compatible API surface** that harness
+/// speaks (issue #576). Empty for a native-only harness (Terminal, etc.).
+#[command]
+pub async fn compatible_providers_for_harness(
+    harness_id: String,
+) -> Result<Vec<ProviderAccount>, String> {
+    Ok(preferences::compatible_providers_for_harness(&harness_id))
+}
+
+/// Attach a **Model Provider** to a harness over the harness's surface — the
+/// "Add proxied provider" action (issue #576). The backend derives the pairing
+/// (published first-class endpoint, or the Generic provider's declared one) so
+/// the client never needs the surface→URL map; `api_key`, when present, seeds
+/// the provider's **global** key only if it has none (set-if-absent). Rejects an
+/// incompatible (harness, provider) pair — the same gate the picker enforces.
+#[command]
+pub async fn attach_proxied_provider(
+    app: AppHandle,
+    harness_id: String,
+    provider_id: String,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    let pairing = preferences::pairing_for(&harness_id, &provider_id).ok_or_else(|| {
+        format!("provider '{provider_id}' is not compatible with harness '{harness_id}'")
+    })?;
+    let mut prefs = preferences::load()?;
+    if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
+        preferences::set_account_key_if_absent(&mut prefs, &provider_id, key);
+    }
+    preferences::upsert_provider_pairing(&mut prefs, pairing);
+    preferences::save(prefs)?;
+    crate::services::usage::invalidate_cache();
+    let _ = app.emit("provider-list-changed", ());
+    Ok(())
+}
+
+/// Detach a stored **Proxied Provider** pairing (issue #576). A no-op for a
+/// derived default pairing — the default Claude/Anthropic row is governed by the
+/// account's enabled/keyed state on the Providers page, not here. Emits
+/// `provider-list-changed` so the spawn menu drops the detached row.
+#[command]
+pub async fn remove_provider_pairing(
+    app: AppHandle,
+    harness_id: String,
+    provider_id: String,
+) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    preferences::remove_provider_pairing(&mut prefs, &harness_id, &provider_id);
+    preferences::save(prefs)?;
     let _ = app.emit("provider-list-changed", ());
     Ok(())
 }
