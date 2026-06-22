@@ -36,7 +36,12 @@ function mockBackend() {
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
       case 'get_network_status':
-        return Promise.resolve({ lan_exposure_enabled: false, port: 1992 });
+        return Promise.resolve({
+          lan_exposure_enabled: false,
+          port: 1992,
+          tls_active: false,
+          exposed_interfaces: [],
+        });
       case 'upsert_provider_account':
         accounts.push((args as { account: ProviderAccount }).account);
         return Promise.resolve(undefined);

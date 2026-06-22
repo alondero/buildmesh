@@ -10,6 +10,7 @@ import type {
   ProviderAccount,
   BillingBalance,
   DeviceSession,
+  RealizedBind,
 } from '../../lib/tauri';
 
 interface AppSettingsModalProps {
@@ -441,6 +442,35 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [revokingId, setRevokingId] = useState<number | null>(null);
   const [lanEnabled, setLanEnabled] = useState(false);
   const [lanBusy, setLanBusy] = useState(false);
+  // Realized exposure (issue #586). Mirrors `lanEnabled` (DB intent) until a
+  // mismatch is detected — `lanEnabled=true` with no interfaces means the
+  // toggle is on but the server is still loopback-only (TLS init failure, no
+  // interface, per-interface bind error). The UI renders a warning so the
+  // user knows their phone URL won't actually connect.
+  const [tlsActive, setTlsActive] = useState(false);
+  const [exposedInterfaces, setExposedInterfaces] = useState<RealizedBind[]>(
+    [],
+  );
+
+  // Re-read network status after a toggle completes so the realized state
+  // reflects the post-rebind listeners. Without this the user flips the
+  // switch, the optimistic `lanEnabled` flips, but the realized fields stay
+  // stale until the next modal open. We deliberately do NOT re-write
+  // `lanEnabled` here — the optimistic value is the source of truth between
+  // writes; clobbering it from a possibly-stale read would let a rapid
+  // double-toggle race (toggle A's refresh can land after toggle B's
+  // optimistic flip and revert B).
+  const refreshNetworkStatus = async () => {
+    try {
+      const network = await api.getNetworkStatus();
+      setTlsActive(network.tls_active);
+      setExposedInterfaces(network.exposed_interfaces);
+    } catch (e) {
+      // Non-fatal — the toggle still reflects the optimistic value. Just log
+      // so a future debugging session can correlate the gap.
+      console.error('Failed to refresh network status:', e);
+    }
+  };
 
   useEffect(() => {
     const init = async () => {
@@ -461,6 +491,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         setCoordHasToken(coord.has_token);
         setDevices(deviceList);
         setLanEnabled(network.lan_exposure_enabled);
+        // Realized bind state from the live ServerListeners (issue #586).
+        setTlsActive(network.tls_active);
+        setExposedInterfaces(network.exposed_interfaces);
         setLoaded(true);
         fetchUsage();
       } catch (e) {
@@ -637,7 +670,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // Flip LAN/VPN exposure. The backend rebinds the listeners live (loopback
   // plain HTTP ⇄ LAN interfaces over self-signed TLS), so we await the call and
   // roll back the toggle if it fails. `user.click` swallows a rejected async
-  // onClick, so the try/catch/finally must live inside the handler.
+  // onClick, so the try/catch/finally must live inside the handler. On success
+  // we re-read the network status so the realized-state UI (`tls_active`,
+  // `exposed_interfaces`) reflects the new bind (issue #586).
   const handleToggleLanExposure = async (enabled: boolean) => {
     const previous = lanEnabled;
     setLanEnabled(enabled);
@@ -645,6 +680,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setError(null);
     try {
       await api.setLanExposureEnabled(enabled);
+      await refreshNetworkStatus();
     } catch (e) {
       setLanEnabled(previous);
       setError(String(e));
@@ -809,6 +845,59 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             />
             <span>Expose to LAN / VPN over self-signed TLS</span>
           </label>
+
+          {/* Realized exposure (issue #586). When the toggle is on but the
+              server is still loopback-only (TLS init failed, no interface,
+              or per-interface bind failed), warn so the user doesn't hand
+              their phone a dead URL. When exposure is working, list the
+              actually-bound addresses so the user knows what to type. */}
+          {lanEnabled && loaded && (
+            <div className="mt-4" data-testid="lan-realized-status">
+              {exposedInterfaces.length === 0 ? (
+                <div
+                  className="flex items-start gap-2 bg-bg-card border border-yellow-500/40 rounded px-3 py-2"
+                  data-testid="lan-exposure-warning"
+                  role="alert"
+                >
+                  <span className="text-base text-yellow-200">
+                    <span className="font-medium">No interfaces are actually exposed.</span>{' '}
+                    The toggle is on, but the server didn’t bind any LAN address —
+                    either this machine has no non-loopback interface, or the
+                    self-signed certificate couldn’t be initialized. Check the
+                    application log for details. The loopback listener is still
+                    serving plain HTTP for this machine.
+                  </span>
+                </div>
+              ) : (
+                <div className="border border-border-subtle rounded-lg p-4">
+                  <div className="text-base text-text-secondary mb-2">
+                    Reach the hub from a phone on the same network at:
+                  </div>
+                  <ul className="font-mono text-base text-text-primary space-y-1">
+                    {exposedInterfaces.map((bind) => (
+                      <li key={bind.address} data-testid="lan-exposed-interface">
+                        <span className="font-medium">{bind.address}</span>
+                        <span className="ml-2 text-text-muted">
+                          ({bind.tls ? 'HTTPS/WSS' : 'plain'})
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  {!tlsActive && (
+                    <div
+                      className="mt-3 text-base text-yellow-200"
+                      data-testid="lan-tls-warning"
+                      role="alert"
+                    >
+                      TLS is not active on any exposed interface — connections
+                      from your phone will not be encrypted. Check the
+                      application log for the certificate initialization error.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="mt-8 pt-5 border-t border-border-subtle">

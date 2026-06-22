@@ -32,6 +32,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
+use ts_rs::TS;
 
 // --- App handle for emitting Tauri events from HTTP handlers ---
 
@@ -214,7 +215,10 @@ async fn apply_binding(port_offset: u16) {
 
     // Build the TLS acceptor only when we will actually serve TLS (LAN on AND a
     // non-loopback interface exists). If TLS init fails we serve nothing on the
-    // exposed interfaces rather than silently falling back to plaintext.
+    // exposed interfaces rather than silently falling back to plaintext — the
+    // bind loop will skip every TLS spec, the realized-binds snapshot will
+    // contain only loopback, and the Settings UI surfaces that as "enabled but
+    // nothing is exposed" (issue #586).
     let needs_tls = lan_enabled && interface_ips.iter().any(|ip| !ip.is_loopback());
     let acceptor = if needs_tls {
         match tls_acceptor(&interface_ips) {
@@ -230,7 +234,7 @@ async fn apply_binding(port_offset: u16) {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut handles = Vec::new();
-    let port = bind_listeners(
+    let bind = bind_listeners(
         start,
         end,
         lan_enabled,
@@ -241,8 +245,15 @@ async fn apply_binding(port_offset: u16) {
     )
     .await;
 
-    if let Some(port) = port {
+    if let Some((port, realized)) = bind {
         RESOLVED_HTTP_PORT.store(port, Ordering::SeqCst);
+        // Publish the realized bind snapshot for `get_network_status` to read.
+        // When DB intent says "enabled" but the bind loop bound nothing past
+        // loopback, this is the single source of truth the Settings UI uses to
+        // surface "no interfaces are actually exposed" (issue #586). The
+        // `realized` Vec is moved into the store — no clone needed since we
+        // drop the local binding after.
+        *realized_binds_store().write() = realized;
         let scope = if needs_tls {
             "loopback (HTTP) + LAN interfaces (HTTPS)"
         } else if lan_enabled {
@@ -258,8 +269,9 @@ async fn apply_binding(port_offset: u16) {
         state.handles = handles;
     } else {
         // The old listeners were already torn down above; nothing new bound, so
-        // `state` stays drained. The DB flag may still say "enabled" — surfacing
-        // that mismatch to the UI is a separate follow-up.
+        // `state` stays drained. Clear the realized snapshot so the UI doesn't
+        // report stale exposure state from the previous bind (issue #586).
+        realized_binds_store().write().clear();
         tracing::error!("Failed to bind HTTP server on any port {}–{}", start, end);
     }
 }
@@ -272,6 +284,53 @@ pub struct BindSpec {
     /// attention webhook posts plain `http://localhost`); only the
     /// externally-reachable interfaces get TLS when LAN exposure is on.
     pub tls: bool,
+}
+
+/// One listener the server actually opened, exposed to the Settings UI so the
+/// toggle can reflect *realized* exposure rather than just DB intent (issue
+/// #586). When the DB says LAN exposure is on but `tls_active` is false or
+/// `exposed_interfaces` is empty, the UI shows a "no interfaces are actually
+/// exposed" warning instead of letting the user hand their phone a dead URL.
+///
+/// Generated to `src/types/generated/RealizedBind.ts` (issue #359).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export, export_to = "RealizedBind.ts")]
+pub struct RealizedBind {
+    /// `ip:port` form (e.g. `192.168.1.5:1992`) — the frontend uses it to
+    /// construct both the HTTPS and HTTP URL the user types into their phone.
+    pub address: String,
+    /// True iff this listener is serving HTTPS/WSS. Loopback listeners are
+    /// always plain (the local attention webhook posts plain `http://localhost`).
+    pub tls: bool,
+}
+
+/// Live listeners currently bound, tracked so `get_network_status` can report
+/// realized exposure instead of DB intent (issue #586). Updated by
+/// `apply_binding` on every rebind; cleared when no port bound. Accessed via
+/// `realized_binds()` which clones the snapshot for the IPC response.
+static REALIZED_BINDS: OnceLock<parking_lot::RwLock<Vec<RealizedBind>>> = OnceLock::new();
+
+fn realized_binds_store() -> &'static parking_lot::RwLock<Vec<RealizedBind>> {
+    REALIZED_BINDS.get_or_init(|| parking_lot::RwLock::new(Vec::new()))
+}
+
+/// Snapshot of the currently bound non-loopback listeners (issue #586).
+pub fn realized_binds() -> Vec<RealizedBind> {
+    realized_binds_store().read().clone()
+}
+
+/// Pure: convert a planned spec set + the indices that bound into the wire
+/// shape the UI consumes. Kept as a free function so the conversion is unit-
+/// testable without actually opening sockets — the bind loop is the only thing
+/// that should call this, after attempting every spec in order.
+fn realized_binds_from_specs(specs: &[BindSpec], bound_indices: &[usize]) -> Vec<RealizedBind> {
+    bound_indices
+        .iter()
+        .map(|&i| RealizedBind {
+            address: specs[i].addr.to_string(),
+            tls: specs[i].tls,
+        })
+        .collect()
 }
 
 /// The listeners to open for `port`. The first entry is load-bearing: it must
@@ -369,20 +428,24 @@ async fn bind_listeners(
     acceptor: Option<TlsAcceptor>,
     shutdown_rx: &watch::Receiver<bool>,
     handles: &mut Vec<tauri::async_runtime::JoinHandle<()>>,
-) -> Option<u16> {
+) -> Option<(u16, Vec<RealizedBind>)> {
     for port in start..=end {
-        let mut specs = bind_specs(port, lan_enabled, interface_ips).into_iter();
+        // Build the plan and remember each spec's index so the realized-binds
+        // snapshot the Settings UI consumes can refer back to it (issue #586).
+        let planned = bind_specs(port, lan_enabled, interface_ips);
+        let mut specs = planned.iter().copied().enumerate();
         // The primary (loopback plain) listener must bind. If it's taken, the
         // port is in use, so move to the next one. Everything after it is
         // best-effort: a host with IPv6 disabled still serves over 127.0.0.1.
-        let primary = specs.next().expect("bind_specs is never empty");
+        let (primary_idx, primary) = specs.next().expect("bind_specs is never empty");
         let Ok(listener) = TcpListener::bind(&primary.addr).await else {
             tracing::debug!("Port {} already in use ({}), trying next", port, primary.addr);
             continue;
         };
         handles.push(spawn_accept_loop(listener, None, shutdown_rx.clone()));
+        let mut bound_indices = vec![primary_idx];
 
-        for spec in specs {
+        for (idx, spec) in specs {
             let acceptor = if spec.tls {
                 // A TLS-intended listener with no acceptor must NOT fall back to
                 // plaintext — skip it so the exposed interface is never plain.
@@ -396,12 +459,19 @@ async fn bind_listeners(
             };
             match TcpListener::bind(&spec.addr).await {
                 Ok(listener) => {
-                    handles.push(spawn_accept_loop(listener, acceptor, shutdown_rx.clone()))
+                    handles.push(spawn_accept_loop(listener, acceptor, shutdown_rx.clone()));
+                    bound_indices.push(idx);
                 }
-                Err(e) => tracing::debug!("Secondary bind on {} failed: {}", spec.addr, e),
+                // Per-interface bind failure is the user-visible "exposure is
+                // on but the LAN IP didn't actually bind" signal. Was debug,
+                // now warn so the cause surfaces in user logs (issue #586).
+                Err(e) => tracing::warn!(
+                    "Interface bind on {} failed (LAN exposure will skip this address): {}",
+                    spec.addr, e
+                ),
             }
         }
-        return Some(port);
+        return Some((port, realized_binds_from_specs(&planned, &bound_indices)));
     }
     None
 }
@@ -1722,6 +1792,70 @@ mod tests {
         let specs = bind_specs(1992, true, &[]);
         assert_eq!(specs.len(), 2);
         assert!(specs.iter().all(|s| s.addr.ip().is_loopback() && !s.tls));
+    }
+
+    // Realized-bind tracking (issue #586). `bind_specs` describes the *plan*;
+    // `realized_binds_from_specs` translates which of those specs actually
+    // bound into the wire shape the Settings UI consumes. Pure function so the
+    // outcome mapping is testable without a real listener.
+    #[test]
+    fn realized_binds_loopback_only_when_all_secondaries_skipped() {
+        // Default case: both loopback listeners bind, no interface specs.
+        let specs = bind_specs(1992, false, &[]);
+        let realized = realized_binds_from_specs(&specs, &[0, 1]);
+        assert_eq!(realized.len(), 2);
+        assert!(realized.iter().all(|b| !b.tls));
+        assert!(realized.iter().all(|b| b.address.ends_with(":1992")));
+    }
+
+    #[test]
+    fn realized_binds_drop_unbound_specs() {
+        // TLS init failed → `acceptor` is None → every secondary TLS spec is
+        // skipped (recorded as "not in `bound_indices`"). Only loopback binds
+        // surface, and they are plain.
+        let lan_ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let specs = bind_specs(1992, true, &[lan_ip]);
+        // Only the two loopback specs bound; the interface spec was skipped.
+        let realized = realized_binds_from_specs(&specs, &[0, 1]);
+        assert_eq!(realized.len(), 2, "interface listener must NOT appear when acceptor is missing");
+        assert!(realized.iter().all(|b| !b.tls),
+            "skipped TLS specs leave no TLS realized bind");
+        assert!(realized.iter().all(|b| b.address.parse::<SocketAddr>().unwrap().ip().is_loopback()),
+            "only loopback listeners survived");
+    }
+
+    #[test]
+    fn realized_binds_marks_tls_when_interface_binds() {
+        // Happy path: loopback plain + interface TLS, all bound.
+        let lan_ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let specs = bind_specs(1992, true, &[lan_ip]);
+        let realized = realized_binds_from_specs(&specs, &[0, 1, 2]);
+        assert_eq!(realized.len(), 3);
+        let tls: Vec<_> = realized.iter().filter(|b| b.tls).collect();
+        assert_eq!(tls.len(), 1, "exactly one TLS listener (the interface)");
+        assert!(tls[0].address.contains("192.168.1.5"),
+            "TLS listener address must carry the interface IP");
+        assert!(tls[0].address.ends_with(":1992"));
+        let plain: Vec<_> = realized.iter().filter(|b| !b.tls).collect();
+        assert_eq!(plain.len(), 2, "both loopback listeners stay plain");
+    }
+
+    #[test]
+    fn realized_binds_partial_when_some_interfaces_fail() {
+        // Per-interface bind can fail (address in use, IPv6 disabled on a
+        // specific iface, etc.). Realized binds = those that succeeded.
+        let lan1: IpAddr = "192.168.1.5".parse().unwrap();
+        let lan2: IpAddr = "10.0.0.2".parse().unwrap();
+        let specs = bind_specs(1992, true, &[lan1, lan2]);
+        // Indices 0,1 = loopback pair, 2 = lan1 (bound), 3 = lan2 (failed)
+        let realized = realized_binds_from_specs(&specs, &[0, 1, 2]);
+        assert_eq!(realized.len(), 3);
+        let ips: Vec<&str> = realized
+            .iter()
+            .filter(|b| b.tls)
+            .map(|b| b.address.split(':').next().unwrap())
+            .collect();
+        assert_eq!(ips, vec!["192.168.1.5"], "only lan1 bound; lan2 dropped");
     }
 
     async fn get_request_with_host(path: &str, host: &str) -> u16 {
