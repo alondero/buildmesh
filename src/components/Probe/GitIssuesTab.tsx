@@ -67,7 +67,8 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import { ProviderDropdown, colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { colorClassForProvider, type ProviderEntry } from '../Sidebar/ProviderDropdown';
+import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 
 /**
@@ -306,9 +307,17 @@ export function GitIssuesTab() {
                   onToggle={() => expanded.toggle(issue.number)}
                   body={issue.body}
                   rightSlot={
-                    // Split spawn button — primary uses default provider, ▾
-                    // opens picker. Wrapped in flex-col so the blocked-by
-                    // flag can stack directly under it (issue #481 follow-up).
+                    // Canonical `+ ▾` Spawn Menu cluster (ADR-0016 §2). The
+                    // sidebar's `NodeCreationForm` renders the same cluster;
+                    // rendering it here keeps the issue probe visually
+                    // consistent with the rest of the app and saves row
+                    // width (single `+` instead of a "Spawn" label). The
+                    // `+` auto-spawns via `handleDefaultSpawn`; the `▾`
+                    // opens the same `ProviderDropdown` → `GroupedProviderMenu`
+                    // ladder the sidebar uses, with `isSpawning` flipping the
+                    // `+` to "Spawning…" while this row's stage-2 IPC is in
+                    // flight. Wrapped in flex-col so the blocked-by flag can
+                    // stack directly under it (issue #481 follow-up).
                     // shrink-0 keeps the right column from being squeezed
                     // by long titles in the left column. `onMouseDown` stop
                     // propagates the click so the row's expand-toggle on
@@ -320,30 +329,18 @@ export function GitIssuesTab() {
                       className="flex flex-col items-end shrink-0"
                       onMouseDown={e => e.stopPropagation()}
                     >
-                      <div className="relative flex">
-                        <button
-                          onClick={() => handleDefaultSpawn(issue)}
-                          disabled={spawning !== null}
-                          className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                        >
-                          {spawning === issue.number ? 'Spawning...' : 'Spawn'}
-                        </button>
-                        <button
-                          onClick={() => setOpenDropdown(openDropdown === issue.number ? null : issue.number)}
-                          disabled={spawning !== null}
-                          className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                          title="Choose provider"
-                        >
-                          ▾
-                        </button>
-                        {openDropdown === issue.number && (
-                          <ProviderDropdown
-                            meshId={issue.number}
-                            providers={providerList}
-                            onSelect={(providerId) => handleSpawn(issue, providerId)}
-                          />
-                        )}
-                      </div>
+                      <SpawnButtonCluster
+                        providers={providerList}
+                        meshId={issue.number}
+                        isOpen={openDropdown === issue.number}
+                        onToggleDropdown={() =>
+                          setOpenDropdown(openDropdown === issue.number ? null : issue.number)
+                        }
+                        onSpawnDefault={() => handleDefaultSpawn(issue)}
+                        onSelectProvider={(providerId) => handleSpawn(issue, providerId)}
+                        disabled={spawning !== null}
+                        isSpawning={spawning === issue.number}
+                      />
                       {(() => {
                         // Cross-reference the parsed blocked_by list against
                         // the loaded open-issues set. If at least one blocker
