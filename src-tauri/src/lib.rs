@@ -208,6 +208,9 @@ pub fn run() {
             // Authorized devices (issue #502)
             commands::devices::list_device_sessions,
             commands::devices::revoke_device_session,
+            // Network exposure (issue #501)
+            commands::network::get_network_status,
+            commands::network::set_lan_exposure_enabled,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

@@ -11,12 +11,12 @@
 
 use std::net::SocketAddr;
 
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 use crate::http::request;
 
 pub async fn handle_post(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     path_without_query: &str,
     peer: SocketAddr,
 ) {

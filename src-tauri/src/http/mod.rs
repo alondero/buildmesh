@@ -9,20 +9,26 @@ pub mod events;
 pub mod request;
 pub mod revocation;
 pub mod routes;
+pub mod stream;
+pub mod tls;
 pub mod ws;
 pub mod ws_ticket;
 
+pub use stream::MaybeTls;
+
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::net::TcpListener;
+use tokio::sync::{oneshot, watch};
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
@@ -118,87 +124,277 @@ pub(crate) async fn request_terminal_snapshot(
     }
 }
 
+/// The most recently applied port offset, so a live rebind (LAN toggle) reuses
+/// the same range the server first started on (stable → 0, dev → 1000).
+static PORT_OFFSET: AtomicU16 = AtomicU16::new(0);
+
+/// The live listeners' shutdown switch plus their accept-loop handles. Held
+/// behind an async mutex so concurrent toggles serialize. A rebind signals
+/// `shutdown`, awaits the handles (so the old listeners' sockets are dropped
+/// and the port is freed), then binds afresh.
+struct ServerListeners {
+    shutdown: Option<watch::Sender<bool>>,
+    handles: Vec<tauri::async_runtime::JoinHandle<()>>,
+}
+
+static SERVER_LISTENERS: OnceLock<tokio::sync::Mutex<ServerListeners>> = OnceLock::new();
+
+fn server_listeners() -> &'static tokio::sync::Mutex<ServerListeners> {
+    SERVER_LISTENERS.get_or_init(|| {
+        tokio::sync::Mutex::new(ServerListeners {
+            shutdown: None,
+            handles: Vec::new(),
+        })
+    })
+}
+
 /// Start the HTTP server, trying ports 1992→1993→1994 until one binds.
 /// Emits a `remote-access-port` event with the actual port used so the
 /// QR code modal can update without recompiling.
 pub fn start_http_server(app: tauri::AppHandle, port_offset: u16) {
-    let _ = APP_HANDLE.set(app.clone());
-
+    let _ = APP_HANDLE.set(app);
+    // Publish the offset synchronously, before spawning the initial bind, so a
+    // `reapply_binding` fired by an early LAN toggle rebinds on the right range.
+    // This matters for the dev profile (+1000): a toggle that raced the startup
+    // task would otherwise read the default offset 0 and land on the stable
+    // hub's ports (1992–1994 instead of 2992–2994).
+    PORT_OFFSET.store(port_offset, Ordering::SeqCst);
     tauri::async_runtime::spawn(async move {
-        let start = HTTP_PORT_START + port_offset;
-        let end = HTTP_PORT_END + port_offset;
-
-        // Secure default (issue #496 / ADR-0012): bind loopback only. Exposing
-        // the server to the LAN is an explicit opt-in stored in the DB; until
-        // then external machines cannot reach the hub.
-        let lan_enabled = crate::db::lan_exposure_enabled().unwrap_or(false);
-        let port = try_bind_ports(start, end, lan_enabled).await;
-
-        if let Some(port) = port {
-            RESOLVED_HTTP_PORT.store(port, Ordering::SeqCst);
-            let scope = if lan_enabled { "LAN (0.0.0.0)" } else { "loopback only" };
-            tracing::info!("HTTP server listening on port {} ({})", port, scope);
-            let _ = app.emit("remote-access-port", serde_json::json!({ "port": port }));
-        } else {
-            tracing::error!(
-                "Failed to bind HTTP server on any port {}–{}",
-                start,
-                end
-            );
-        }
+        apply_binding(port_offset).await;
     });
 }
 
-/// The addresses the server binds for `port`. The secure default is loopback
-/// only: IPv4 first (the attention hook posts to `127.0.0.1`) then IPv6
-/// loopback. With LAN exposure enabled we bind the IPv4 wildcard so phones on
-/// the LAN can reach the hub. The first entry is load-bearing; later ones are
-/// best-effort (see `try_bind_ports`).
-fn bind_addrs(port: u16, lan_enabled: bool) -> Vec<SocketAddr> {
-    if lan_enabled {
-        vec![SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))]
+/// Re-evaluate the LAN-exposure setting and rebind the listeners live. Called by
+/// `set_lan_exposure_enabled` so flipping the toggle takes effect immediately —
+/// switching between loopback-only plain HTTP and loopback-plus-interface TLS —
+/// without restarting the app.
+pub async fn reapply_binding() {
+    let port_offset = PORT_OFFSET.load(Ordering::SeqCst);
+    apply_binding(port_offset).await;
+}
+
+/// Tear down any existing listeners and bind fresh ones for the current
+/// `lan_exposure_enabled` setting. Idempotent and safe to call repeatedly.
+async fn apply_binding(port_offset: u16) {
+    PORT_OFFSET.store(port_offset, Ordering::SeqCst);
+    let start = HTTP_PORT_START + port_offset;
+    let end = HTTP_PORT_END + port_offset;
+
+    // Secure default (issue #496 / ADR-0012): bind loopback only. Exposing the
+    // server to the LAN is an explicit opt-in stored in the DB (issue #501);
+    // until then external machines cannot reach the hub.
+    let lan_enabled = crate::db::lan_exposure_enabled().unwrap_or(false);
+    let interface_ips: Vec<IpAddr> = if lan_enabled {
+        local_interface_ips().to_vec()
     } else {
-        vec![
-            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
-            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
-        ]
+        Vec::new()
+    };
+
+    // Hold the listeners lock for the whole teardown→bind→store cycle so two
+    // rapid toggles (or a toggle racing the startup bind) serialize fully.
+    // Releasing it across the bind await let a second call tear down + bind the
+    // same port and then overwrite the first call's stored handles, leaking the
+    // first call's accept loops (never signalled to stop) and leaving
+    // RESOLVED_HTTP_PORT out of sync with the surviving listeners.
+    let mut state = server_listeners().lock().await;
+
+    // Stop the previous listeners first and wait for their tasks to finish, so
+    // their sockets are dropped and the port is free to rebind. This keeps the
+    // same port across a loopback↔LAN toggle.
+    if let Some(tx) = state.shutdown.take() {
+        let _ = tx.send(true);
+    }
+    for handle in state.handles.drain(..) {
+        let _ = handle.await;
+    }
+
+    // Build the TLS acceptor only when we will actually serve TLS (LAN on AND a
+    // non-loopback interface exists). If TLS init fails we serve nothing on the
+    // exposed interfaces rather than silently falling back to plaintext.
+    let needs_tls = lan_enabled && interface_ips.iter().any(|ip| !ip.is_loopback());
+    let acceptor = if needs_tls {
+        match tls_acceptor(&interface_ips) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::error!("TLS init failed; LAN interfaces will not be exposed: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut handles = Vec::new();
+    let port = bind_listeners(
+        start,
+        end,
+        lan_enabled,
+        &interface_ips,
+        acceptor,
+        &shutdown_rx,
+        &mut handles,
+    )
+    .await;
+
+    if let Some(port) = port {
+        RESOLVED_HTTP_PORT.store(port, Ordering::SeqCst);
+        let scope = if needs_tls {
+            "loopback (HTTP) + LAN interfaces (HTTPS)"
+        } else if lan_enabled {
+            "loopback only (no non-loopback interface to expose)"
+        } else {
+            "loopback only"
+        };
+        tracing::info!("HTTP server listening on port {} ({})", port, scope);
+        if let Some(app) = app_handle() {
+            let _ = app.emit("remote-access-port", serde_json::json!({ "port": port }));
+        }
+        state.shutdown = Some(shutdown_tx);
+        state.handles = handles;
+    } else {
+        // The old listeners were already torn down above; nothing new bound, so
+        // `state` stays drained. The DB flag may still say "enabled" — surfacing
+        // that mismatch to the UI is a separate follow-up.
+        tracing::error!("Failed to bind HTTP server on any port {}–{}", start, end);
     }
 }
 
-/// Spawn the accept loop for one bound listener, handing each connection to
-/// `handle_connection`.
-fn spawn_accept_loop(listener: TcpListener) {
+/// One listener the server should open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BindSpec {
+    pub addr: SocketAddr,
+    /// Serve TLS on this listener. Loopback is always plain HTTP (the local
+    /// attention webhook posts plain `http://localhost`); only the
+    /// externally-reachable interfaces get TLS when LAN exposure is on.
+    pub tls: bool,
+}
+
+/// The listeners to open for `port`. The first entry is load-bearing: it must
+/// bind for the port to count as taken, and it is always loopback plain HTTP so
+/// the attention hook and the 1992→1994 port resolution keep working. Later
+/// entries are best-effort. With LAN exposure on, each non-loopback interface IP
+/// is added as a TLS listener (issue #501) — the same reachability as binding
+/// `0.0.0.0`, but loopback stays plain.
+pub fn bind_specs(port: u16, lan_enabled: bool, interface_ips: &[IpAddr]) -> Vec<BindSpec> {
+    let mut specs = vec![
+        BindSpec {
+            addr: SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            tls: false,
+        },
+        BindSpec {
+            addr: SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+            tls: false,
+        },
+    ];
+    if lan_enabled {
+        for ip in interface_ips {
+            if !ip.is_loopback() {
+                specs.push(BindSpec {
+                    addr: SocketAddr::new(*ip, port),
+                    tls: true,
+                });
+            }
+        }
+    }
+    specs
+}
+
+/// Resolve the cert directory under app-data and build a TLS acceptor whose
+/// self-signed cert covers `interface_ips`.
+fn tls_acceptor(interface_ips: &[IpAddr]) -> std::io::Result<TlsAcceptor> {
+    let app = app_handle()
+        .ok_or_else(|| std::io::Error::other("app handle not set; cannot locate cert dir"))?;
+    let dir: PathBuf = app
+        .path()
+        .app_data_dir()
+        .map_err(std::io::Error::other)?
+        .join("tls");
+    tls::acceptor(&dir, interface_ips)
+}
+
+/// Spawn the accept loop for one bound listener. `tls` wraps each accepted
+/// connection in a TLS handshake before dispatch; `None` serves plain HTTP. The
+/// loop exits when `shutdown` flips to `true` (or its sender drops), dropping
+/// the listener so the port frees for a rebind.
+fn spawn_accept_loop(
+    listener: TcpListener,
+    tls: Option<TlsAcceptor>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tauri::async_runtime::JoinHandle<()> {
     tauri::async_runtime::spawn(async move {
         loop {
-            match listener.accept().await {
-                Ok((stream, addr)) => {
-                    tracing::debug!("HTTP connection from {}", addr);
-                    tauri::async_runtime::spawn(handle_connection(stream, addr));
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    // Sender signalled (true) or dropped → stop accepting.
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("HTTP accept error: {}", e);
+                res = listener.accept() => match res {
+                    Ok((tcp, addr)) => {
+                        tracing::debug!("HTTP connection from {}", addr);
+                        let tls = tls.clone();
+                        tauri::async_runtime::spawn(async move {
+                            match tls {
+                                Some(acceptor) => match acceptor.accept(tcp).await {
+                                    Ok(s) => {
+                                        handle_connection(MaybeTls::Tls(Box::new(s)), addr).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("TLS handshake from {} failed: {}", addr, e);
+                                    }
+                                },
+                                None => handle_connection(MaybeTls::Plain(tcp), addr).await,
+                            }
+                        });
+                    }
+                    Err(e) => tracing::error!("HTTP accept error: {}", e),
                 }
             }
         }
-    });
+    })
 }
 
-async fn try_bind_ports(start: u16, end: u16, lan_enabled: bool) -> Option<u16> {
+#[allow(clippy::too_many_arguments)]
+async fn bind_listeners(
+    start: u16,
+    end: u16,
+    lan_enabled: bool,
+    interface_ips: &[IpAddr],
+    acceptor: Option<TlsAcceptor>,
+    shutdown_rx: &watch::Receiver<bool>,
+    handles: &mut Vec<tauri::async_runtime::JoinHandle<()>>,
+) -> Option<u16> {
     for port in start..=end {
-        let mut addrs = bind_addrs(port, lan_enabled).into_iter();
-        // The primary address must bind. If it's taken, the port is in use, so
-        // move to the next one. Secondary addresses (IPv6 loopback) are
+        let mut specs = bind_specs(port, lan_enabled, interface_ips).into_iter();
+        // The primary (loopback plain) listener must bind. If it's taken, the
+        // port is in use, so move to the next one. Everything after it is
         // best-effort: a host with IPv6 disabled still serves over 127.0.0.1.
-        let primary = addrs.next().expect("bind_addrs is never empty");
-        let Ok(listener) = TcpListener::bind(&primary).await else {
-            tracing::debug!("Port {} already in use ({}), trying next", port, primary);
+        let primary = specs.next().expect("bind_specs is never empty");
+        let Ok(listener) = TcpListener::bind(&primary.addr).await else {
+            tracing::debug!("Port {} already in use ({}), trying next", port, primary.addr);
             continue;
         };
-        spawn_accept_loop(listener);
-        for addr in addrs {
-            match TcpListener::bind(&addr).await {
-                Ok(listener) => spawn_accept_loop(listener),
-                Err(e) => tracing::debug!("Secondary bind on {} failed: {}", addr, e),
+        handles.push(spawn_accept_loop(listener, None, shutdown_rx.clone()));
+
+        for spec in specs {
+            let acceptor = if spec.tls {
+                // A TLS-intended listener with no acceptor must NOT fall back to
+                // plaintext — skip it so the exposed interface is never plain.
+                let Some(acceptor) = acceptor.clone() else {
+                    tracing::warn!("Skipping TLS listener on {} (no acceptor)", spec.addr);
+                    continue;
+                };
+                Some(acceptor)
+            } else {
+                None
+            };
+            match TcpListener::bind(&spec.addr).await {
+                Ok(listener) => {
+                    handles.push(spawn_accept_loop(listener, acceptor, shutdown_rx.clone()))
+                }
+                Err(e) => tracing::debug!("Secondary bind on {} failed: {}", spec.addr, e),
             }
         }
         return Some(port);
@@ -312,7 +508,7 @@ fn host_header_allowed(host_header: &str) -> bool {
     }
 }
 
-async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
+async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     let mut lines = tokio::io::BufStream::new(stream);
     let mut request_line = String::new();
     if lines.read_line(&mut request_line).await.is_err() {
@@ -923,6 +1119,7 @@ async fn handle_connection(stream: TcpStream, addr: SocketAddr) {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+    use tokio::net::TcpStream;
 
     #[test]
     fn port_offset_is_zero_for_stable_and_1000_for_dev() {
@@ -939,7 +1136,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            handle_connection(stream, peer).await;
+            handle_connection(MaybeTls::Plain(stream), peer).await;
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -991,7 +1188,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            handle_connection(stream, peer).await;
+            handle_connection(MaybeTls::Plain(stream), peer).await;
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -1308,7 +1505,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            handle_connection(stream, peer).await;
+            handle_connection(MaybeTls::Plain(stream), peer).await;
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -1350,7 +1547,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            handle_connection(stream, peer).await;
+            handle_connection(MaybeTls::Plain(stream), peer).await;
         });
         let mut stream = TcpStream::connect(addr).await.unwrap();
         let request = format!("{} {} HTTP/1.1\r\nHost: localhost\r\n\r\n", method, path);
@@ -1403,21 +1600,48 @@ mod tests {
     }
 
     #[test]
-    fn bind_addrs_loopback_by_default() {
-        let addrs = bind_addrs(1992, false);
-        assert_eq!(addrs.len(), 2, "default binds IPv4 + IPv6 loopback");
-        assert!(addrs[0].is_ipv4() && addrs[0].ip().is_loopback(),
+    fn bind_specs_loopback_only_and_plain_by_default() {
+        // The default (LAN off) binds IPv4 + IPv6 loopback, both plain HTTP, and
+        // never reaches beyond loopback regardless of what interfaces exist.
+        let lan_ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let specs = bind_specs(1992, false, &[lan_ip]);
+        assert_eq!(specs.len(), 2, "default binds IPv4 + IPv6 loopback");
+        assert!(specs[0].addr.is_ipv4() && specs[0].addr.ip().is_loopback(),
             "IPv4 loopback must be primary (the attention hook posts to 127.0.0.1)");
-        assert!(addrs[1].is_ipv6() && addrs[1].ip().is_loopback());
-        assert!(addrs.iter().all(|a| a.ip().is_loopback()),
+        assert!(specs[1].addr.is_ipv6() && specs[1].addr.ip().is_loopback());
+        assert!(specs.iter().all(|s| s.addr.ip().is_loopback()),
             "the default must never expose beyond loopback");
+        assert!(specs.iter().all(|s| !s.tls), "the default is plain HTTP");
     }
 
     #[test]
-    fn bind_addrs_lan_uses_ipv4_wildcard() {
-        let addrs = bind_addrs(1992, true);
-        assert_eq!(addrs.len(), 1);
-        assert!(addrs[0].ip().is_unspecified(), "LAN opt-in binds 0.0.0.0");
+    fn bind_specs_lan_keeps_loopback_plain_and_adds_interface_tls() {
+        // LAN on: loopback stays plain (so the loopback attention hook still
+        // works), and every non-loopback interface IP is added as a TLS
+        // listener (issue #501). Loopback IPs in the interface list are not
+        // re-bound as TLS.
+        let lan_ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let specs = bind_specs(1992, true, &[IpAddr::V4(Ipv4Addr::LOCALHOST), lan_ip]);
+        // 2 loopback (plain) + 1 interface (TLS).
+        assert_eq!(specs.len(), 3);
+        let loopback_plain = specs
+            .iter()
+            .filter(|s| s.addr.ip().is_loopback() && !s.tls)
+            .count();
+        assert_eq!(loopback_plain, 2, "both loopback listeners stay plain HTTP");
+        let tls_iface: Vec<_> = specs.iter().filter(|s| s.tls).collect();
+        assert_eq!(tls_iface.len(), 1, "exactly the one non-loopback interface gets TLS");
+        assert_eq!(tls_iface[0].addr.ip(), lan_ip);
+        assert!(!tls_iface[0].addr.ip().is_loopback());
+    }
+
+    #[test]
+    fn bind_specs_lan_without_interfaces_stays_loopback_only() {
+        // LAN on but no non-loopback interface (e.g. offline) → nothing is
+        // exposed and no TLS listener is created. Safe degrade.
+        let specs = bind_specs(1992, true, &[]);
+        assert_eq!(specs.len(), 2);
+        assert!(specs.iter().all(|s| s.addr.ip().is_loopback() && !s.tls));
     }
 
     async fn get_request_with_host(path: &str, host: &str) -> u16 {
@@ -1426,7 +1650,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            handle_connection(stream, peer).await;
+            handle_connection(MaybeTls::Plain(stream), peer).await;
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -1478,7 +1702,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, _real_peer) = listener.accept().await.unwrap();
-            let mut lines = tokio::io::BufStream::new(stream);
+            let mut lines = tokio::io::BufStream::new(MaybeTls::Plain(stream));
             routes::attention::handle_post(&mut lines, &path, peer).await;
         });
 
@@ -1530,7 +1754,7 @@ mod tests {
 
         tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            handle_connection(stream, peer).await;
+            handle_connection(MaybeTls::Plain(stream), peer).await;
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();

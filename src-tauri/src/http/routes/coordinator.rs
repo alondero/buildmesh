@@ -15,7 +15,7 @@ use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
 use crate::http::request;
 use tokio::io::{AsyncReadExt, BufStream};
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 /// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each
 /// digest is the always-available spine plus a transcript-derived rich layer;
@@ -73,7 +73,7 @@ struct PromptRequest {
 /// - node not live (no agent process to write to) → `409` with a clear error
 /// - written → `200 {"verdict":"delivered"|"unverified"}` (honest verdict)
 pub async fn prompt(
-    lines: &mut BufStream<TcpStream>,
+    lines: &mut BufStream<MaybeTls>,
     node_id: i64,
     content_length: usize,
 ) {

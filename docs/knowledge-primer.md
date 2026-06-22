@@ -66,6 +66,19 @@ Buildmesh exposes a **read-only HTTP surface** for an external **Coordinator** (
 - **Auth is two-tier and header-only (#500, ADR-0015).** Every request resolves to a [Role](../CONTEXT.md) — **Admin** (root token, the mobile `/api/*` surface) or **Coordinator** (read/drive tokens, `/nodes*`) — as **disjoint surfaces**: a token works only on its own surface (wrong-surface valid token → 403, no creds → 401). Role resolution lives in `src-tauri/src/http/auth.rs` (`authorize`/`guard`); the dispatcher calls `auth::guard(.., scope)` per route, and `/admin/*` is reserved Admin-only. Credentials travel only in `Authorization: Bearer` or the `bm_session` cookie — never `?token=`. The mobile shell/assets are public; the client logs in via `POST /api/session` (sets the cookie) and mints a single-use `?ticket=` per WebSocket via `POST /api/ws-ticket` (`src-tauri/src/http/ws_ticket.rs`).
 - **Device Sessions are the per-phone Admin credential (#502, ADR-0018).** `POST /api/session` no longer echoes the root token into the cookie: presented the root token it *pairs* (mints a `device_sessions` row, returns a new per-device token in the JSON body); presented a known device token it *refreshes*. The phone persists the returned device token (web SPA → `localStorage`). `resolve_role` accepts a valid device token as `Role::Admin` and **never consults the IP** (roaming). Revocation deletes the row (blocks the next request) *and* fires the device id onto `http::revocation`'s broadcast channel; every live WS subscribes and force-closes on a matching id — the WS ticket carries its minting device id (`Option<i64>`; `None` = root token, unrevocable). Surfaced via desktop `commands::devices` ("Authorized Devices" panel) and remote `GET /admin/devices` + `POST /admin/devices/{id}/revoke` (`http/routes/admin.rs`), both over the shared `db` + `revocation` layer. The DB helpers are `_inner`-only (callers already hold the lock).
 
+## LAN/VPN Exposure & Self-Signed TLS
+
+The embedded server binds **loopback only by default** (#496). An off-by-default
+**LAN / VPN Exposure** toggle (App Settings → `set_lan_exposure_enabled`, stored in
+`app_settings.lan_exposure_enabled`) exposes it on the machine's interfaces; issue
+#501, [`docs/adr/0017-opt-in-lan-exposure-and-self-signed-tls.md`](adr/0017-opt-in-lan-exposure-and-self-signed-tls.md).
+
+- **Loopback stays plain HTTP; only non-loopback interface IPs get TLS** (`http::bind_specs`). This is deliberate: the attention webhook posts plain `http://localhost/api/attention/...`, so forcing TLS on loopback would silently break every agent's "awaiting input" signal. Do **not** "simplify" this to a single `0.0.0.0` TLS bind.
+- **Self-signed cert** is generated with `rcgen` (ring backend), SANs cover `localhost` + loopback + interface IPs, and persisted as DER under `<app-data>/tls/` (delete that dir to rotate). `http::tls`.
+- **The toggle rebinds live** — no app restart. `http::apply_binding`/`reapply_binding` signal a `watch` shutdown channel, await the accept-loop tasks (so the port frees), then bind afresh.
+- **`MaybeTls`** (`http::stream`) is the single concrete stream type (`Plain(TcpStream)` | `Tls(Box<TlsStream<TcpStream>>)`) so route handlers stay non-generic; WSS rides the same enum. Route handlers take `&mut BufStream<MaybeTls>` — never re-introduce `BufStream<TcpStream>`.
+- **Crypto provider is `ring`, selected explicitly** via `builder_with_provider` (no process-default; aws-lc-rs is not in the tree).
+
 ## Attention System
 
 ### How It Works

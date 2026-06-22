@@ -28,6 +28,7 @@ import type { IssueNodeDraft } from '../types/generated/IssueNodeDraft';
 import type { MeshRow } from '../types/generated/MeshRow';
 import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
+import type { NetworkStatus } from '../types/generated/NetworkStatus';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
@@ -748,6 +749,19 @@ export const listDeviceSessions = () =>
 
 export const revokeDeviceSession = (id: number) =>
   _invoke('revoke_device_session', { id });
+
+// ── LAN/VPN exposure & self-signed TLS (issue #501) ────────────────────────
+//
+// Off by default: the server binds loopback only. Enabling exposure binds the
+// machine's LAN interfaces over self-signed TLS (HTTPS/WSS) and rebinds live —
+// no app restart. `getNetworkStatus` reports the switch and the bound port.
+export type { NetworkStatus };
+
+export const getNetworkStatus = () =>
+  _invoke<NetworkStatus>('get_network_status');
+
+export const setLanExposureEnabled = (enabled: boolean) =>
+  _invoke('set_lan_exposure_enabled', { enabled });
 
 // ── Remote access (mobile QR) ──────────────────────────────────────────────
 export const getLocalIp = () =>

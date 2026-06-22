@@ -7,7 +7,7 @@
 //! (create-PR) endpoint already lives in this module and is unchanged.
 
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 use crate::db;
 use crate::http::request;
@@ -18,7 +18,7 @@ use crate::http::request;
 /// value (including empty/absent) to `"open"` — so this handler does
 /// no pre-processing of its own.
 pub async fn list_pulls(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
     state: &str,
 ) {
@@ -38,7 +38,7 @@ pub async fn list_pulls(
 /// this once per PR after the list loads; `mergeable` is `null` while
 /// GitHub is still computing (mirrors the desktop wire shape).
 pub async fn get_mergeability(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
     pr_number: i64,
 ) {
@@ -70,7 +70,7 @@ struct MergeRequest {
 /// `url` in the body is the authoritative argument — `merge_pr` only
 /// understands full PR URLs.
 pub async fn merge(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     _mesh_id: i64,
     pr_number: i64,
     content_length: usize,
@@ -123,7 +123,7 @@ struct CreatePrRequest {
 }
 
 pub async fn create(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
     content_length: usize,
 ) {

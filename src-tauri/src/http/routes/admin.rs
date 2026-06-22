@@ -12,9 +12,8 @@
 //! (`commands::devices`); both back onto the shared `db` + `revocation` layer.
 
 use crate::db;
-use crate::http::{request, revocation};
+use crate::http::{request, revocation, MaybeTls};
 use tokio::io::BufStream;
-use tokio::net::TcpStream;
 
 /// Best-effort human label for a paired device, derived from its `User-Agent`
 /// at pairing (e.g. "Safari on iPhone"). Pure so it's unit-testable without a
@@ -80,7 +79,7 @@ pub fn list_devices_json() -> String {
 /// kick any live WebSocket it holds. `204 No Content` when a device was revoked,
 /// `404 Not Found` when the id was already gone (idempotent-ish: a double-revoke
 /// is a clear 404, not a silent 204).
-pub async fn revoke(lines: &mut BufStream<TcpStream>, device_id: i64) {
+pub async fn revoke(lines: &mut BufStream<MaybeTls>, device_id: i64) {
     match db::revoke_device_session(device_id) {
         Ok(true) => {
             // Row gone (blocks future requests); now drop any open socket.

@@ -7,12 +7,12 @@
 
 use crate::db;
 use crate::http::request;
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 /// `GET /api/agents/{id}/git/status` — full file-by-file status. Empty list
 /// for a clean tree.
 pub async fn status(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
     let Ok(node) = db::get_agent_node_by_id(agent_id) else {
@@ -32,7 +32,7 @@ pub async fn status(
 
 /// `GET /api/agents/{id}/git/summary` — `{added, modified, deleted}` counts.
 pub async fn summary(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
     let Ok(node) = db::get_agent_node_by_id(agent_id) else {
@@ -52,7 +52,7 @@ pub async fn summary(
 
 /// `GET /api/agents/{id}/git/branch` — current branch name.
 pub async fn branch(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
     match crate::commands::pr::get_current_branch(agent_id) {
@@ -73,7 +73,7 @@ pub async fn branch(
 /// `commands::diff::diff_node_file_against_base` so the mobile UI gets
 /// pre-highlighted hunks ready to display.
 pub async fn diff(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
     file_path: &str,
 ) {
@@ -108,7 +108,7 @@ pub async fn diff(
 
 /// `GET /api/gh/auth` — whether `gh auth status` is happy on this host.
 /// Used to gate the mobile "Create PR" button.
-pub async fn gh_auth(lines: &mut tokio::io::BufStream<TcpStream>) {
+pub async fn gh_auth(lines: &mut tokio::io::BufStream<MaybeTls>) {
     let ok = crate::commands::pr::check_gh_auth();
     let body = serde_json::to_string(&serde_json::json!({ "ok": ok }))
         .unwrap_or_else(|_| "{}".to_string());

@@ -439,16 +439,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [devices, setDevices] = useState<DeviceSession[]>([]);
   const [confirmingRevokeId, setConfirmingRevokeId] = useState<number | null>(null);
   const [revokingId, setRevokingId] = useState<number | null>(null);
+  const [lanEnabled, setLanEnabled] = useState(false);
+  const [lanBusy, setLanBusy] = useState(false);
 
   useEffect(() => {
     const init = async () => {
       try {
-        const [prefs, providerList, accountList, coord, deviceList] = await Promise.all([
+        const [prefs, providerList, accountList, coord, deviceList, network] = await Promise.all([
           api.getAppPreferences(),
           api.listProviders(),
           api.getProviderAccounts(),
           api.getCoordinatorStatus(),
           api.listDeviceSessions(),
+          api.getNetworkStatus(),
         ]);
         setProviders(providerList);
         setAccounts(accountList);
@@ -457,6 +460,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
         setDevices(deviceList);
+        setLanEnabled(network.lan_exposure_enabled);
         setLoaded(true);
         fetchUsage();
       } catch (e) {
@@ -630,6 +634,25 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
+  // Flip LAN/VPN exposure. The backend rebinds the listeners live (loopback
+  // plain HTTP ⇄ LAN interfaces over self-signed TLS), so we await the call and
+  // roll back the toggle if it fails. `user.click` swallows a rejected async
+  // onClick, so the try/catch/finally must live inside the handler.
+  const handleToggleLanExposure = async (enabled: boolean) => {
+    const previous = lanEnabled;
+    setLanEnabled(enabled);
+    setLanBusy(true);
+    setError(null);
+    try {
+      await api.setLanExposureEnabled(enabled);
+    } catch (e) {
+      setLanEnabled(previous);
+      setError(String(e));
+    } finally {
+      setLanBusy(false);
+    }
+  };
+
   // Mint (or replace) the read token. The value is returned exactly once, here —
   // get_coordinator_status only ever reports whether one exists, never its value.
   const handleGenerateToken = async () => {
@@ -763,6 +786,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               + Add custom provider
             </button>
           )}
+        </div>
+
+        <div className="mt-8 pt-5 border-t border-border-subtle">
+          <h3 className="text-xl font-semibold text-text-primary mb-2">LAN / VPN Exposure</h3>
+          <p className="text-base text-text-muted mb-4">
+            Off by default — the server is reachable only from this machine
+            (loopback). Enable to let a phone on your LAN or VPN connect. Exposed
+            interfaces are served over HTTPS/WSS with a <span className="font-medium">self-signed
+            certificate</span>, so your browser will warn the first time you connect;
+            loopback stays plain HTTP. The change applies immediately — any
+            currently-connected LAN device must reconnect over HTTPS.
+          </p>
+
+          <label className="flex items-center gap-3 text-lg text-text-primary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={lanEnabled}
+              disabled={!loaded || lanBusy}
+              onChange={e => handleToggleLanExposure(e.target.checked)}
+              className="accent-accent-cyan h-4 w-4 disabled:opacity-50"
+            />
+            <span>Expose to LAN / VPN over self-signed TLS</span>
+          </label>
         </div>
 
         <div className="mt-8 pt-5 border-t border-border-subtle">

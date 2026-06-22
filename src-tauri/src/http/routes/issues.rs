@@ -1,12 +1,12 @@
 //! GitHub issue browsing + issue-driven agent spawning.
 
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use crate::http::MaybeTls;
 
 use crate::http::request;
 
 pub async fn list(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
 ) {
     match crate::commands::pr::get_repo_issues(mesh_id) {
@@ -34,7 +34,7 @@ struct SpawnRequest {
 }
 
 pub async fn spawn(
-    lines: &mut tokio::io::BufStream<TcpStream>,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
     issue_number: i64,
     content_length: usize,
