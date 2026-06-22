@@ -17,6 +17,14 @@ import type { ProviderInfo } from '../../lib/tauri';
  * reordering here reorders the menu everywhere (the backend `order_providers`
  * applies the persisted id order). `Terminal` is excluded — it's pinned last by
  * the backend and isn't user-orderable.
+ *
+ * **Issue #575 fix** (user-reported): Proxied Provider rows (`claude:minimax`,
+ * `claude:kimi`) are NOT orderable harnesses — they're a credential pairing
+ * attached to a harness, not the executor itself. The previous filter
+ * (`p.id !== 'terminal'`) accidentally included them after the composite-id
+ * rename. The corrected filter is `!p.is_proxied && p.id !== 'terminal'`,
+ * so only the native Agent Harnesses (Claude Code, Codex, Antigravity,
+ * OpenCode, plus any user-defined custom harness profile) appear here.
  */
 
 /** Pure: move `activeId` to where `overId` sits, returning the new id order.
@@ -65,9 +73,13 @@ export function HarnessOrderList({
   providers: ProviderInfo[];
   onReorder: (order: string[]) => void;
 }) {
-  // Terminal is pinned last by the backend, so it's never part of the orderable
-  // rows.
-  const rows = providers.filter(p => p.id !== 'terminal');
+  // Issue #575: only native Agent Harnesses are orderable. Proxied
+  // Providers (`is_proxied: true`, ids like `claude:minimax`) cluster
+  // under their harness header in the rendered Spawn Menu but aren't
+  // harnesses themselves — reordering them would re-order the *provider
+  // half* of an arbitrary pairing, which is meaningless. Terminal is
+  // pinned last by the backend and isn't user-orderable.
+  const rows = providers.filter(p => !p.is_proxied && p.id !== 'terminal');
   // Nothing meaningful to drag with fewer than two rows.
   if (rows.length < 2) return null;
 
