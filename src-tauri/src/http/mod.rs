@@ -659,6 +659,10 @@ fn host_header_allowed(host_header: &str) -> bool {
 }
 
 async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
+    // Capture the scheme before the stream is consumed by the buffered reader.
+    // This is the authoritative request scheme (the server terminates TLS), used
+    // to gate the `Secure` session cookie below (issue #553).
+    let secure = stream.is_tls();
     let mut lines = tokio::io::BufStream::new(stream);
     let mut request_line = String::new();
     if lines.read_line(&mut request_line).await.is_err() {
@@ -868,7 +872,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                 let peer_ip = addr.ip().to_string();
                 match crate::db::login_device_session(&t, label.as_deref(), Some(&peer_ip)) {
                     Ok(Some((_, device_token))) => {
-                        let cookie = request::session_cookie_header(&device_token);
+                        let cookie = request::session_cookie_header(&device_token, secure);
                         let body = serde_json::json!({ "token": device_token }).to_string();
                         // `Cache-Control: no-store` — the body carries a long-lived
                         // device token (issue #502); never let a proxy or bfcache

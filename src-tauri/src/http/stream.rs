@@ -24,6 +24,16 @@ pub enum MaybeTls {
     Tls(Box<TlsStream<TcpStream>>),
 }
 
+impl MaybeTls {
+    /// Whether this connection is encrypted. Since the server terminates TLS
+    /// itself (loopback arrives `Plain`, externally-reachable interfaces arrive
+    /// `Tls`, issue #501), this is the authoritative request scheme — used to
+    /// gate the `Secure` cookie attribute (issue #553).
+    pub fn is_tls(&self) -> bool {
+        matches!(self, MaybeTls::Tls(_))
+    }
+}
+
 impl AsyncRead for MaybeTls {
     fn poll_read(
         self: Pin<&mut Self>,
