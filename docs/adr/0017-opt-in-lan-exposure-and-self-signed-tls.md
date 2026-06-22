@@ -66,6 +66,18 @@ provider compiled in and no aws-lc-rs in the tree. We enable the `ring` provider
 and build every `ServerConfig`/`ClientConfig` with `builder_with_provider(ring)`
 so TLS never depends on a process-default provider.
 
+**7. The interface snapshot refreshes on each bind (issue #585).** The bind path
+calls `refresh_local_interface_ips` (which re-runs `local_ip_address::
+list_afinet_netifas` and replaces a `parking_lot::RwLock<Vec<IpAddr>>` cache)
+before constructing `bind_specs` and the TLS cert. A VPN or Wi-Fi adapter that
+connects **after** the first enumeration is therefore picked up on the next
+LAN-toggle rebind — no app restart. The per-request Host guard still reads the
+cached snapshot via a shared-lock + `Vec::clone`; it never pays for enumeration,
+which can stall for seconds behind a VPN/Docker stack on Windows. The old
+`0.0.0.0` wildcard bind (replaced in #501) had this for free — every interface
+the box held at the moment of `accept` was reachable — so the refresh is the
+smallest change that restores that reachability for per-interface TLS binds.
+
 ## Consequences
 
 - The mobile client connects to `https://<lan-ip>:<port>` (WSS for terminals)
@@ -85,16 +97,18 @@ so TLS never depends on a process-default provider.
   SAN/IP mismatch; a shrunk set keeps the cert (a stale extra SAN is harmless).
 - The DNS-rebinding `Host` guard (ADR-0012/#496) and the two-tier header auth
   (ADR-0015/#500) are unchanged and still run on every request, TLS or not.
+- **Refresh is on user action, not on OS events.** The bind path re-enumerates
+  interfaces only when triggered (`set_lan_exposure_enabled` toggling the LAN
+  switch, or the initial startup). An interface that appears **without** a
+  user toggle — a VPN connecting mid-session, a DHCP lease change, a Wi-Fi
+  reconnect — is not picked up until the user re-toggles LAN exposure (off→on)
+  or restarts the app. The TLS cert is missing the new IP from its SAN list,
+  and the per-request Host guard rejects it. Listening for OS-level interface
+  events (Windows `NotifyAddrChange`, `netlink` on Linux) and forcing a rebind
+  on change is a follow-up.
 
 ### Known limitations (tracked follow-ups)
 
-- **Interface set is captured at bind time.** `apply_binding` reads the
-  interface list from the process-lifetime `LOCAL_IPS` cache (`local_interface_ips`,
-  shared with the Host-validation guard). An interface that appears *after* first
-  enumeration (a VPN connecting later in the session) is not picked up until an
-  app restart re-seeds the cache — a re-toggle alone won't, because the cache is
-  a `OnceLock`. Refreshing that snapshot on each `apply_binding` (without slowing
-  the per-request Host guard) is a follow-up.
 - **Realized exposure is not reported.** `get_network_status` returns the DB
   intent (`lan_exposure_enabled`), not whether interface listeners actually bound.
   If TLS init fails or there is no non-loopback interface, the UI still shows
