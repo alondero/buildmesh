@@ -10,11 +10,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import Connect from "../../src/mobile/screens/Connect";
 
-function mockFetchStatus(status: number) {
+// A 2xx login returns the persistent device token in the body (issue #502); the
+// client stores THAT, not the token it presented.
+function mockFetchStatus(status: number, body: unknown = { token: "device-tok" }) {
   const fn = vi.fn().mockResolvedValue({
     ok: status >= 200 && status < 300,
     status,
-    json: async () => [],
+    json: async () => body,
   });
   vi.stubGlobal("fetch", fn);
   return fn;
@@ -70,8 +72,8 @@ describe("Connect", () => {
     });
   });
 
-  it("stores a valid token and connects after login", async () => {
-    mockFetchStatus(200);
+  it("stores the device token from the server and connects after login", async () => {
+    mockFetchStatus(200, { token: "device-tok" });
     const onConnected = vi.fn();
     render(<Connect onConnected={onConnected} />);
 
@@ -79,7 +81,46 @@ describe("Connect", () => {
     await userEvent.click(screen.getByTestId("connect-submit"));
 
     await waitFor(() => {
-      expect(localStorage.getItem("buildmesh_token")).toBe("cafef00d");
+      // The server-issued device token is persisted, not the pasted token.
+      expect(localStorage.getItem("buildmesh_token")).toBe("device-tok");
+    });
+    expect(onConnected).toHaveBeenCalled();
+  });
+
+  it("treats a 200 with no token in the body as a failed login (never stores the pasted token)", async () => {
+    // Guards the #502 regression: a body without a token must NOT downgrade to
+    // persisting the presented (possibly root) token.
+    mockFetchStatus(200, {});
+    const onConnected = vi.fn();
+    render(<Connect onConnected={onConnected} />);
+
+    await userEvent.type(screen.getByTestId("token-input"), "root-paste");
+    await userEvent.click(screen.getByTestId("connect-submit"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("connect-error").textContent).toMatch(/invalid token/i);
+    });
+    expect(localStorage.getItem("buildmesh_token")).toBeNull();
+    expect(onConnected).not.toHaveBeenCalled();
+  });
+
+  it("persists the device token the server returns, not the pasted token", async () => {
+    // Issue #502: pairing returns a per-device token; the phone stores that
+    // (revocable on its own) in place of the root token it pasted.
+    const fn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: "dev-tok-123" }),
+    });
+    vi.stubGlobal("fetch", fn);
+    const onConnected = vi.fn();
+    render(<Connect onConnected={onConnected} />);
+
+    await userEvent.type(screen.getByTestId("token-input"), "root-paste");
+    await userEvent.click(screen.getByTestId("connect-submit"));
+
+    await waitFor(() => {
+      expect(localStorage.getItem("buildmesh_token")).toBe("dev-tok-123");
     });
     expect(onConnected).toHaveBeenCalled();
   });

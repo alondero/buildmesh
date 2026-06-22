@@ -36,6 +36,8 @@ function mockBackend(coordinator: CoordinatorState = { enabled: false, hasToken:
         return Promise.resolve([]);
       case 'get_provider_meters':
         return Promise.resolve([]);
+      case 'list_device_sessions':
+        return Promise.resolve([]);
       case 'get_network_status':
         return Promise.resolve({ lan_exposure_enabled: false, port: 1992 });
       default:

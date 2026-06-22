@@ -15,6 +15,9 @@ mod scratchpad_tests;
 #[cfg(test)]
 mod sandbox_tests;
 
+#[cfg(test)]
+mod device_session_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -27,13 +30,19 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version.
 ///
+/// v20 — Persistent device sessions (issue #502 / PRD #494): add the
+/// `device_sessions` table backing per-device mobile tokens + the
+/// "Authorized Devices" revocation panel. A brand-new table needs no data
+/// migration — `CREATE TABLE IF NOT EXISTS` in `init` materializes it for
+/// every DB; the version bump just records that the shape moved forward.
+///
 /// v19 — Spawn Option composite ids (issue #575 / ADR-0016): rewrite
 /// legacy `agent_nodes.provider` ids (`minimax`/`kimi`/custom bare account
 /// id → `claude:<id>`) so archived nodes resolve under the new grouped
 /// Spawn Menu without a permanent resolver shim. The rewrite is
 /// unambiguous today because every Proxied Provider currently pairs with
 /// Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 19;
+const SCHEMA_VERSION: i32 = 20;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -91,6 +100,15 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             worktree_path TEXT NOT NULL UNIQUE,
             node_name TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS device_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT NOT NULL UNIQUE,
+            label TEXT,
+            last_ip TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
@@ -935,16 +953,13 @@ pub fn get_or_create_root_token_inner(conn: &Connection) -> SqlResult<String> {
 }
 
 /// Validate the root remote access token (the Admin-role credential, issue #500).
-pub fn validate_root_token(token: &str) -> SqlResult<bool> {
-    let db = get().lock().unwrap();
-    validate_root_token_inner(&db, token)
-}
-
 /// Lock-free core so the HTTP auth layer (`http::auth`, issue #500) and the
 /// `/api/session` login endpoint can be unit-tested against an in-memory
-/// connection — mirroring the coordinator validators' `_inner` pattern. The
-/// root token is still stored cleartext (hashing deferred to the Keychain slice,
-/// #495); an empty presented token never matches an absent stored value.
+/// connection — mirroring the coordinator validators' `_inner` pattern. Only the
+/// `_inner` form exists: every caller (`resolve_role`, `login_device_session`)
+/// already holds the DB lock. The root token is still stored cleartext (hashing
+/// deferred to the Keychain slice, #495); an empty presented token never matches
+/// an absent stored value.
 pub fn validate_root_token_inner(conn: &Connection, token: &str) -> SqlResult<bool> {
     if token.is_empty() {
         return Ok(false);
@@ -1184,6 +1199,149 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
         Some(stored) => Ok(stored == hash_token(token)),
         None => Ok(false),
     }
+}
+
+// --- Persistent device sessions (issue #502, PRD #494) ---
+//
+// A paired phone is identified by its own token, minted at pairing and stored
+// here as a SHA-256 hash (never the raw value, mirroring the coordinator
+// tokens). Because each device holds a *distinct* token, the IP is no longer an
+// auth factor — that's what lets a phone roam across networks — and revoking one
+// device (deleting its row) leaves every other device untouched. All functions
+// follow the lock-once + `_inner(&Connection)` pattern so the HTTP auth layer
+// can validate against an in-memory connection in tests (issue #500).
+
+/// Pair a new device: mint a token, persist only its hash + metadata, and return
+/// the row id with the *raw* token (handed to the client exactly once, then only
+/// ever re-presented by the client). `label` is a human-friendly name derived
+/// from the client's `User-Agent`; `ip` is the peer address at pairing. Only the
+/// `_inner` form exists — pairing always happens inside `login_device_session`,
+/// which already holds the lock.
+pub fn pair_device_session_inner(
+    conn: &Connection,
+    label: Option<&str>,
+    ip: Option<&str>,
+) -> SqlResult<(i64, String)> {
+    let token = generate_token();
+    conn.execute(
+        "INSERT INTO device_sessions (token_hash, label, last_ip) VALUES (?1, ?2, ?3)",
+        params![hash_token(&token), label, ip],
+    )?;
+    Ok((conn.last_insert_rowid(), token))
+}
+
+/// Resolve a presented token to its device id, or `None` if no live device holds
+/// it. A revoked device's row is deleted, so a revoked token resolves to `None`
+/// here — which is exactly what makes the next request fail auth. An empty token
+/// never matches. Only the `_inner` form exists: the auth layer
+/// (`http::auth::resolve_role`) already locks the DB once and passes the
+/// connection through, and `login_device_session` calls it under its own lock.
+pub fn validate_device_token_inner(conn: &Connection, token: &str) -> SqlResult<Option<i64>> {
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM device_sessions WHERE token_hash = ?1",
+            params![hash_token(token)],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(id)
+}
+
+/// Record activity for a device: bump `last_active_at` to now and refresh the
+/// last-seen IP. Called on login refresh and WS-ticket mint, not per request, so
+/// a polling client doesn't write the DB on every poll. A no-op for an unknown
+/// id (the row may have just been revoked).
+pub fn touch_device_session(id: i64, ip: Option<&str>) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    touch_device_session_inner(&db, id, ip)
+}
+
+pub fn touch_device_session_inner(conn: &Connection, id: i64, ip: Option<&str>) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE device_sessions SET last_active_at = datetime('now'), last_ip = ?2 WHERE id = ?1",
+        params![id, ip],
+    )?;
+    Ok(())
+}
+
+/// List all paired devices, newest first, for the "Authorized Devices" panel.
+/// Returns the wire view (`DeviceSession`) — never the `token_hash`.
+pub fn list_device_sessions() -> SqlResult<Vec<DeviceSession>> {
+    let db = get().lock().unwrap();
+    list_device_sessions_inner(&db)
+}
+
+pub fn list_device_sessions_inner(conn: &Connection) -> SqlResult<Vec<DeviceSession>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, last_ip, created_at, last_active_at \
+         FROM device_sessions ORDER BY last_active_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DeviceSession {
+            id: row.get(0)?,
+            label: row.get(1)?,
+            last_ip: row.get(2)?,
+            created_at: row.get(3)?,
+            last_active_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Revoke a device by deleting its row. Returns `true` if a row was removed
+/// (`false` if the id was already gone). The caller is responsible for kicking
+/// any live WebSocket the device holds (`http::revocation::revoke`); deleting the
+/// row alone only blocks the *next* request, not an already-open socket.
+pub fn revoke_device_session(id: i64) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    revoke_device_session_inner(&db, id)
+}
+
+pub fn revoke_device_session_inner(conn: &Connection, id: i64) -> SqlResult<bool> {
+    let affected = conn.execute("DELETE FROM device_sessions WHERE id = ?1", params![id])?;
+    Ok(affected > 0)
+}
+
+/// The `POST /api/session` decision (issue #502), resolving what cookie to set:
+///
+/// - presented token is an **existing device token** → *refresh*: bump the
+///   device's activity (new IP for roaming) and hand the same token back, so a
+///   re-launching phone keeps its identity instead of accumulating a new device
+///   row on every load;
+/// - presented token is the **root token** (the pairing secret from the desktop
+///   QR) → *pair*: mint a brand-new device session and return its token, which
+///   the client then persists in place of the root token;
+/// - anything else → `None` (the caller answers 401).
+///
+/// Returns the effective `(device_id, raw_token)` to set as the `bm_session`
+/// cookie. Checking the device token first means a paired client re-presenting
+/// its device token never spuriously mints a second device.
+pub fn login_device_session(
+    presented: &str,
+    label: Option<&str>,
+    ip: Option<&str>,
+) -> SqlResult<Option<(i64, String)>> {
+    let db = get().lock().unwrap();
+    login_device_session_inner(&db, presented, label, ip)
+}
+
+pub fn login_device_session_inner(
+    conn: &Connection,
+    presented: &str,
+    label: Option<&str>,
+    ip: Option<&str>,
+) -> SqlResult<Option<(i64, String)>> {
+    if let Some(id) = validate_device_token_inner(conn, presented)? {
+        touch_device_session_inner(conn, id, ip)?;
+        return Ok(Some((id, presented.to_string())));
+    }
+    if validate_root_token_inner(conn, presented)? {
+        return Ok(Some(pair_device_session_inner(conn, label, ip)?));
+    }
+    Ok(None)
 }
 
 /// Safety net (issue #495): rehash any coordinator token still stored as

@@ -7,6 +7,7 @@ pub mod assets;
 pub mod auth;
 pub mod events;
 pub mod request;
+pub mod revocation;
 pub mod routes;
 pub mod stream;
 pub mod tls;
@@ -553,10 +554,12 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         && (path_with_query == "/ws/events" || path_with_query.starts_with("/ws/events?"))
     {
         let ticket = query_param(&path_with_query, "ticket").unwrap_or_default();
-        if !ws_ticket::consume(&ticket) {
+        // The ticket carries the device that minted it (issue #502), so a later
+        // revocation can kick this socket; `None` for the root token.
+        let Some(device_id) = ws_ticket::consume(&ticket) else {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
-        }
+        };
         let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
             let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
             return;
@@ -579,7 +582,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         }
         let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
         tracing::info!("/ws/events client connected");
-        tauri::async_runtime::spawn(ws::handle_events_ws_connection(ws_stream));
+        tauri::async_runtime::spawn(ws::handle_events_ws_connection(ws_stream, device_id));
         return;
     }
 
@@ -600,10 +603,12 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         };
 
         let ticket = query_param(&path_with_query, "ticket").unwrap_or_default();
-        if !ws_ticket::consume(&ticket) {
+        // Recover the device that minted this ticket so a revocation can kick
+        // the socket mid-stream (issue #502); `None` for the root token.
+        let Some(device_id) = ws_ticket::consume(&ticket) else {
             let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             return;
-        }
+        };
 
         let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
             let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
@@ -630,7 +635,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
 
         let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
         tracing::info!("WebSocket connected for node {}", node_id);
-        tauri::async_runtime::spawn(ws::handle_ws_connection(ws_stream, node_id));
+        tauri::async_runtime::spawn(ws::handle_ws_connection(ws_stream, node_id, device_id));
         return;
     }
 
@@ -640,12 +645,44 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         .unwrap_or(&path_with_query)
         .to_string();
 
-    // Reserved administrative namespace (issue #500 AC1/AC2). No remote admin
-    // operations are mounted yet; this guard exists to *prove* the two-tier
-    // separation: a coordinator-scoped token is strictly Forbidden (403) here, a
-    // request with no/invalid credentials is Unauthorized (401), and the Admin
-    // (root) token reaches a 404 because nothing is mounted. Placed before all
-    // other routing so `/admin/*` can never fall through to another handler.
+    // GET /admin/devices — list paired devices for the "Authorized Devices"
+    // panel (issue #502). Admin-only; the first real operation in the namespace
+    // #500 reserved. Matched before the `/admin/*` catch-all below.
+    if method == "GET" && path_without_query == "/admin/devices" {
+        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+            .await
+            .is_none()
+        {
+            return;
+        }
+        let _ = request::write_json(&mut lines, "200 OK", &routes::admin::list_devices_json()).await;
+        return;
+    }
+
+    // POST /admin/devices/{id}/revoke — revoke a device and kick its live socket
+    // (issue #502). Admin-only.
+    if method == "POST" {
+        if let Some(device_id) =
+            path_segment_id(&path_without_query, "/admin/devices/", "/revoke")
+        {
+            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
+                .await
+                .is_none()
+            {
+                return;
+            }
+            routes::admin::revoke(&mut lines, device_id).await;
+            return;
+        }
+    }
+
+    // Reserved administrative namespace (issue #500 AC1/AC2). The device routes
+    // above are the first real operations mounted here; anything else under
+    // `/admin/*` still proves the two-tier separation: a coordinator-scoped token
+    // is strictly Forbidden (403), a request with no/invalid credentials is
+    // Unauthorized (401), and the Admin (root) token reaches a 404 because
+    // nothing else is mounted. Placed before all other routing so `/admin/*` can
+    // never fall through to another handler.
     if path_without_query == "/admin" || path_without_query.starts_with("/admin/") {
         match auth::authorize(&headers, auth::RequiredScope::Admin) {
             auth::AuthOutcome::Ok(_) => {
@@ -661,20 +698,47 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // POST /api/session — the login handoff (issue #500). The mobile client
-    // POSTs the root token as `Authorization: Bearer <token>`; on success we set
-    // the HttpOnly bm_session cookie and return 200. This replaces the old
-    // `/?token=` URL bootstrap: the token never appears in a URL the server
-    // validates. No cookie is accepted here — this is how a client *gets* one.
+    // POST /api/session — the pairing/login handoff (issue #500, extended by
+    // #502). The client POSTs a token as `Authorization: Bearer <token>`:
+    //   - the **root token** (the desktop QR's pairing secret) mints a new
+    //     persistent *device session* and returns its token;
+    //   - an existing **device token** refreshes that device (roaming IP) and
+    //     returns the same token.
+    // Either way we set the HttpOnly bm_session cookie to the effective device
+    // token AND return it in the JSON body, so the client persists its own
+    // per-device token (revocable independently) instead of the shared root
+    // token. The token never appears in a URL the server validates. No cookie is
+    // accepted here — this is how a client *gets* one.
     if method == "POST" && path_without_query == "/api/session" {
         match request::bearer_token(&headers) {
-            Some(t) if request::validate_token(Some(t.clone())) => {
-                let cookie = request::session_cookie_header(&t);
-                let response =
-                    format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n{}\r\n\r\n", cookie);
-                let _ = lines.get_mut().write_all(response.as_bytes()).await;
+            Some(t) => {
+                let label = routes::admin::device_label_from_user_agent(
+                    request::extract_header_value(&headers, "User-Agent"),
+                );
+                let peer_ip = addr.ip().to_string();
+                match crate::db::login_device_session(&t, label.as_deref(), Some(&peer_ip)) {
+                    Ok(Some((_, device_token))) => {
+                        let cookie = request::session_cookie_header(&device_token);
+                        let body = serde_json::json!({ "token": device_token }).to_string();
+                        // `Cache-Control: no-store` — the body carries a long-lived
+                        // device token (issue #502); never let a proxy or bfcache
+                        // retain this response.
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Cache-Control: no-store\r\n\
+                             Content-Length: {}\r\n{}\r\n\r\n{}",
+                            body.len(),
+                            cookie,
+                            body
+                        );
+                        let _ = lines.get_mut().write_all(response.as_bytes()).await;
+                    }
+                    _ => {
+                        let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
+                    }
+                }
             }
-            _ => {
+            None => {
                 let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
             }
         }
@@ -691,8 +755,17 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         {
             return;
         }
+        // Bind the ticket to the requesting device (issue #502) so the WebSocket
+        // it opens can be force-closed on revocation; `None` for the root token.
+        // Opening a terminal is also a natural "last active" signal, so refresh
+        // the device here too (cheaper than touching on every poll).
+        let device_id = auth::resolve_device_session(&headers);
+        if let Some(id) = device_id {
+            let peer_ip = addr.ip().to_string();
+            let _ = crate::db::touch_device_session(id, Some(&peer_ip));
+        }
         let body = serde_json::to_string(&ws_ticket::WsTicket {
-            ticket: ws_ticket::mint(),
+            ticket: ws_ticket::mint(device_id),
         })
         .unwrap_or_else(|_| r#"{"ticket":""}"#.to_string());
         let _ = request::write_json(&mut lines, "200 OK", &body).await;
@@ -1466,6 +1539,42 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// Send a plain HTTP request for `path` and return its status code. DB-free:
+    /// an unauthenticated request resolves to no role without a DB lookup, so
+    /// this exercises route mounting + the auth guard without an initialized DB.
+    async fn http_status(method: &str, path: &str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!("{} {} HTTP/1.1\r\nHost: localhost\r\n\r\n", method, path);
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("handle_connection hung")
+            .expect("read failed");
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn admin_device_routes_are_mounted_and_guarded() {
+        // Issue #502: both device routes are Admin-guarded. With no credential
+        // they must be 401 — proving they're mounted (not a 404 fall-through)
+        // and never public. Wrong-role → 403 is covered in `http::auth::tests`.
+        assert_eq!(http_status("GET", "/admin/devices").await, 401);
+        assert_eq!(http_status("POST", "/admin/devices/5/revoke").await, 401);
+    }
+
     #[tokio::test]
     async fn ws_terminal_rejects_raw_url_token() {
         // Issue #500 AC4: a raw `?token=` on the WS upgrade is no longer a
@@ -1485,7 +1594,7 @@ mod tests {
         // A ticket minted via the in-memory store (no DB needed) lets the
         // upgrade through to the 101 switch. Single-use is covered in
         // ws_ticket's own tests.
-        let ticket = ws_ticket::mint();
+        let ticket = ws_ticket::mint(None);
         let path = format!("/ws/terminal/123?ticket={}", ticket);
         assert_eq!(ws_status(&path).await, 101);
     }

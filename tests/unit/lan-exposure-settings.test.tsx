@@ -30,6 +30,8 @@ function mockBackend(lanEnabled = false) {
         return Promise.resolve([]);
       case 'get_provider_meters':
         return Promise.resolve([]);
+      case 'list_device_sessions':
+        return Promise.resolve([]);
       default:
         return Promise.resolve({});
     }
@@ -104,6 +106,7 @@ describe('LAN / VPN exposure settings section (issue #501)', () => {
         case 'list_providers':
         case 'get_provider_accounts':
         case 'get_provider_meters':
+        case 'list_device_sessions':
           return Promise.resolve([]);
         default:
           return Promise.resolve({});

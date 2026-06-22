@@ -33,38 +33,50 @@ pub struct WsTicket {
 /// latency; a short window keeps the replay surface tiny.
 const TICKET_TTL: Duration = Duration::from_secs(30);
 
-static TICKETS: OnceLock<RwLock<HashMap<String, Instant>>> = OnceLock::new();
+/// Each ticket remembers when it was issued and which device session minted it
+/// (`None` for the root token, which owns no device row and can't be revoked).
+/// The device binding is what lets a later revocation find and kick the live
+/// WebSocket the device opened with this ticket (issue #502).
+type TicketEntry = (Instant, Option<i64>);
 
-fn store() -> &'static RwLock<HashMap<String, Instant>> {
+static TICKETS: OnceLock<RwLock<HashMap<String, TicketEntry>>> = OnceLock::new();
+
+fn store() -> &'static RwLock<HashMap<String, TicketEntry>> {
     TICKETS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
-/// Mint a fresh single-use ticket for an already-authenticated request. Returns
-/// the opaque value the client passes as `?ticket=`. Prunes expired entries on
-/// the way in, so the table stays bounded by (mint rate × TTL) without a
-/// background sweep.
-pub fn mint() -> String {
-    mint_at(Instant::now())
+/// Mint a fresh single-use ticket for an already-authenticated request, bound to
+/// the minting `device_id` (issue #502; `None` for the root token). Returns the
+/// opaque value the client passes as `?ticket=`. Prunes expired entries on the
+/// way in, so the table stays bounded by (mint rate × TTL) without a background
+/// sweep.
+pub fn mint(device_id: Option<i64>) -> String {
+    mint_at(Instant::now(), device_id)
 }
 
-fn mint_at(now: Instant) -> String {
+fn mint_at(now: Instant, device_id: Option<i64>) -> String {
     let ticket = crate::db::generate_token();
     let mut tickets = store().write();
-    tickets.retain(|_, &mut issued| now.duration_since(issued) < TICKET_TTL);
-    tickets.insert(ticket.clone(), now);
+    tickets.retain(|_, &mut (issued, _)| now.duration_since(issued) < TICKET_TTL);
+    tickets.insert(ticket.clone(), (now, device_id));
     ticket
 }
 
-/// Consume a ticket: present, unexpired, and removed (single-use) → `true`. A
-/// missing, empty, expired, or already-used ticket → `false`.
-pub fn consume(ticket: &str) -> bool {
+/// Consume a ticket: present, unexpired, and removed (single-use) → `Some(device
+/// id)` (the bound device, or `None` for a root-token ticket). A missing, empty,
+/// expired, or already-used ticket → `None`. The outer `Option` is validity; the
+/// inner is the device binding — so a valid root-token ticket reads as
+/// `Some(None)`.
+pub fn consume(ticket: &str) -> Option<Option<i64>> {
     if ticket.is_empty() {
-        return false;
+        return None;
     }
     let mut tickets = store().write();
     match tickets.remove(ticket) {
-        Some(issued) => Instant::now().duration_since(issued) < TICKET_TTL,
-        None => false,
+        Some((issued, device_id)) if Instant::now().duration_since(issued) < TICKET_TTL => {
+            Some(device_id)
+        }
+        _ => None,
     }
 }
 
@@ -74,15 +86,23 @@ mod tests {
 
     #[test]
     fn minted_ticket_consumes_exactly_once() {
-        let t = mint();
-        assert!(consume(&t), "a freshly minted ticket must validate");
-        assert!(!consume(&t), "a ticket is single-use — the second consume fails");
+        let t = mint(None);
+        assert_eq!(consume(&t), Some(None), "a freshly minted ticket must validate");
+        assert_eq!(consume(&t), None, "a ticket is single-use — the second consume fails");
+    }
+
+    #[test]
+    fn ticket_carries_its_minting_device_id() {
+        // The device binding is what a revocation later matches against to kick
+        // the right live WebSocket (issue #502).
+        let t = mint(Some(42));
+        assert_eq!(consume(&t), Some(Some(42)));
     }
 
     #[test]
     fn unknown_and_empty_tickets_are_rejected() {
-        assert!(!consume("never-minted"));
-        assert!(!consume(""));
+        assert_eq!(consume("never-minted"), None);
+        assert_eq!(consume(""), None);
     }
 
     #[test]
@@ -92,8 +112,8 @@ mod tests {
         let past = Instant::now()
             .checked_sub(TICKET_TTL * 2)
             .expect("test clock underflow");
-        let t = mint_at(past);
-        assert!(!consume(&t), "an expired ticket must not validate");
+        let t = mint_at(past, None);
+        assert_eq!(consume(&t), None, "an expired ticket must not validate");
     }
 
     #[test]
@@ -101,9 +121,9 @@ mod tests {
         let past = Instant::now()
             .checked_sub(TICKET_TTL * 2)
             .expect("test clock underflow");
-        let stale = mint_at(past);
+        let stale = mint_at(past, None);
         // Minting fresh prunes the stale entry, so it is no longer even present.
-        let _fresh = mint();
+        let _fresh = mint(None);
         assert!(
             !store().read().contains_key(&stale),
             "mint() should prune expired tickets"
