@@ -26,8 +26,13 @@ function mockBackend() {
         return Promise.resolve([]);
       case 'get_provider_accounts':
         return Promise.resolve(accounts);
-      case 'get_all_provider_usage':
-        return Promise.resolve([]);
+      case 'get_provider_meters':
+        // Detection-gated rows drive which cards render. Both built-ins are
+        // visible here (Claude Code "detected", MiniMax enabled) so both cards show.
+        return Promise.resolve([
+          { provider: 'anthropic', usageTracked: true, usage: null },
+          { provider: 'minimax', usageTracked: true, usage: null },
+        ]);
       case 'get_coordinator_status':
         return Promise.resolve({ enabled: false, has_token: false });
       case 'upsert_provider_account':

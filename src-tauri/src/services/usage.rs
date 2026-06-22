@@ -63,6 +63,35 @@ pub struct ProviderUsage {
     pub error: Option<String>,
 }
 
+/// One **Model Provider**'s entry on the Providers page (issue #574): its
+/// identity plus the **Usage Meters** it exposes on this host, if any.
+///
+/// The meters themselves reuse the [`ProviderUsage`] shape — its `windows`
+/// (subscription quotas) and `balance` (pay-as-you-go wallet) *are* the meters,
+/// and a provider may carry several at once. `usage` is `Some` only for a
+/// provider Buildmesh has a fetcher for; `usage_tracked` is `false` for a
+/// **Generic Model Provider** (no registry entry / no fetcher), which the UI
+/// renders as an explicit "usage not tracked" state rather than an empty gauge.
+///
+/// Only providers relevant to the host appear in the list this wraps
+/// (detection-gated): a native harness's subscription meter only when that
+/// harness is installed, a keyed provider only when the user has enabled it.
+///
+/// Generated to src/types/generated/ProviderMeters.ts (issue #574).
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "ProviderMeters.ts")]
+pub struct ProviderMeters {
+    /// Provider account id ("anthropic", "minimax", a custom slug, …).
+    pub provider: String,
+    /// Whether Buildmesh ships a usage fetcher for this provider. `false` →
+    /// the UI shows "usage not tracked" (camelCase on the wire).
+    #[serde(rename = "usageTracked")]
+    #[ts(rename = "usageTracked")]
+    pub usage_tracked: bool,
+    /// The fetched meters; `None` when usage isn't tracked.
+    pub usage: Option<ProviderUsage>,
+}
+
 /// Failures that happen before we ever reach an endpoint: no credential on disk,
 /// or a credential/response body that doesn't deserialize. Transport- and
 /// status-level failures are handled inline in [`fetch_usage`].
