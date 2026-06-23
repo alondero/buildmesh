@@ -1,4 +1,4 @@
-//! Mobile HTTP routes for the PR Probe panel — list, mergeability, and merge.
+//! Mobile HTTP routes for the PR Probe panel - list, mergeability, and merge.
 //!
 //! The backing Tauri commands live in `commands::pr` (issue #417). These
 //! routes expose them over the mobile HTTP transport so a future mobile
@@ -6,16 +6,15 @@
 //! through the desktop UI. The desktop `POST /api/meshes/{id}/pr`
 //! (create-PR) endpoint already lives in this module and is unchanged.
 
-use tokio::io::AsyncReadExt;
 use crate::http::MaybeTls;
 
 use crate::db;
 use crate::http::request;
 
-/// `GET /api/meshes/{id}/pulls?state=open|closed` — list PRs for the
+/// `GET /api/meshes/{id}/pulls?state=open|closed` - list PRs for the
 /// mesh's GitHub repo. The `state` query param is forwarded verbatim to
 /// `commands::pr::get_repo_pulls`, which normalises any non-`"closed"`
-/// value (including empty/absent) to `"open"` — so this handler does
+/// value (including empty/absent) to `"open"` - so this handler does
 /// no pre-processing of its own.
 pub async fn list_pulls(
     lines: &mut tokio::io::BufStream<MaybeTls>,
@@ -33,7 +32,7 @@ pub async fn list_pulls(
     }
 }
 
-/// `GET /api/meshes/{id}/pulls/{n}/mergeability` — per-PR mergeability
+/// `GET /api/meshes/{id}/pulls/{n}/mergeability` - per-PR mergeability
 /// enrichment. The list endpoint omits `mergeable`, so the panel calls
 /// this once per PR after the list loads; `mergeable` is `null` while
 /// GitHub is still computing (mirrors the desktop wire shape).
@@ -56,7 +55,7 @@ pub async fn get_mergeability(
 /// Body shape for `POST /api/meshes/{id}/pulls/{n}/merge`. The mobile
 /// client already has the PR's `url` (returned in the list payload), so
 /// the handler accepts the full URL rather than re-deriving it from the
-/// path's PR number — that's the only shape `commands::pr::merge_pr`
+/// path's PR number - that's the only shape `commands::pr::merge_pr`
 /// understands.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,10 +63,10 @@ struct MergeRequest {
     url: String,
 }
 
-/// `POST /api/meshes/{id}/pulls/{n}/merge` — merge a PR (squash +
+/// `POST /api/meshes/{id}/pulls/{n}/merge` - merge a PR (squash +
 /// delete branch, matching the desktop panel). The `pr_number` from the
 /// path is echoed back in the response for client convenience, but the
-/// `url` in the body is the authoritative argument — `merge_pr` only
+/// `url` in the body is the authoritative argument - `merge_pr` only
 /// understands full PR URLs.
 pub async fn merge(
     lines: &mut tokio::io::BufStream<MaybeTls>,
@@ -75,25 +74,10 @@ pub async fn merge(
     pr_number: i64,
     content_length: usize,
 ) {
-    if content_length > 8 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
-        return;
-    }
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
-
-    let req: MergeRequest = match serde_json::from_slice(&body_bytes) {
+    let req: MergeRequest = match request::read_json_body(lines, content_length, 8 * 1024).await {
         Ok(r) => r,
-        Err(e) => {
-            request::send_json_error(
-                lines,
-                "400 Bad Request",
-                &format!("Invalid JSON: {}", e),
-            )
-            .await;
+        Err(status) => {
+            request::send_json_error(lines, &status, "Bad request").await;
             return;
         }
     };
@@ -113,7 +97,7 @@ pub async fn merge(
     }
 }
 
-/// `POST /api/meshes/{id}/pr` — create a GitHub PR for the mesh's current branch.
+/// `POST /api/meshes/{id}/pr` - create a GitHub PR for the mesh's current branch.
 
 #[derive(serde::Deserialize)]
 struct CreatePrRequest {
@@ -127,22 +111,10 @@ pub async fn create(
     mesh_id: i64,
     content_length: usize,
 ) {
-    if content_length > 64 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
-        return;
-    }
-
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
-
-    let req: CreatePrRequest = match serde_json::from_slice(&body_bytes) {
+    let req: CreatePrRequest = match request::read_json_body(lines, content_length, 64 * 1024).await {
         Ok(r) => r,
-        Err(e) => {
-            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
-                .await;
+        Err(status) => {
+            request::send_json_error(lines, &status, "Bad request").await;
             return;
         }
     };

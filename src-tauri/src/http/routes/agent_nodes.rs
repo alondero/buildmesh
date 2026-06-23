@@ -2,8 +2,8 @@
 //!
 //! "Discovered nodes" are external CLI runs (Claude Code, Gemini, ...)
 //! that buildmesh found on disk but doesn't yet track. The mobile flow:
-//!   1. GET /api/meshes/{id}/agent-nodes/discover → list them
-//!   2. POST /api/meshes/{id}/agent-nodes/import-and-resume → create the
+//!   1. GET /api/meshes/{id}/agent-nodes/discover -> list them
+//!   2. POST /api/meshes/{id}/agent-nodes/import-and-resume -> create the
 //!      agent node, store the cli_session_id, and immediately spawn the
 //!      agent with `--resume` so the user lands on a live terminal.
 //!
@@ -12,7 +12,6 @@
 //! the dispatcher (src/http/mod.rs) for one release as a deprecation shim
 //! with a `Deprecation: true` response header.
 
-use tokio::io::AsyncReadExt;
 use crate::http::MaybeTls;
 
 use crate::db;
@@ -63,21 +62,10 @@ pub async fn import_and_resume(
     mesh_id: i64,
     content_length: usize,
 ) {
-    if content_length > 64 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
-        return;
-    }
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
-
-    let req: ImportAndResumeRequest = match serde_json::from_slice(&body_bytes) {
+    let req: ImportAndResumeRequest = match request::read_json_body(lines, content_length, 64 * 1024).await {
         Ok(r) => r,
-        Err(e) => {
-            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
-                .await;
+        Err(status) => {
+            request::send_json_error(lines, &status, "Bad request").await;
             return;
         }
     };
@@ -108,7 +96,7 @@ pub async fn import_and_resume(
         req.worktree_name.as_deref(),
         None,
         None,
-        None, // source_pr_pinned_sha — HTTP route doesn't accept a pinned SHA
+        None, // source_pr_pinned_sha - HTTP route doesn't accept a pinned SHA
         use_worktree,
         None,
         None,
@@ -154,7 +142,7 @@ pub async fn import_and_resume(
     )
     .await
     {
-        // Don't surface as 500 — the node row exists and could still be
+        // Don't surface as 500 - the node row exists and could still be
         // used; instead return the node + the spawn error in one payload
         // so the mobile UI can decide.
         let body = serde_json::to_string(&serde_json::json!({

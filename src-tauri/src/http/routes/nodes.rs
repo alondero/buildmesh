@@ -1,11 +1,26 @@
 //! `GET /api/nodes` and `POST /api/nodes/create`.
 
 use tauri::Emitter;
-use tokio::io::AsyncReadExt;
 use crate::http::MaybeTls;
 
 use crate::db;
 use crate::http::request;
+
+#[derive(serde::Deserialize)]
+struct CreateNodeRequest {
+    mesh_id: i64,
+    provider: String,
+    #[serde(default = "default_rows")]
+    rows: u16,
+    #[serde(default = "default_cols")]
+    cols: u16,
+}
+fn default_rows() -> u16 {
+    24
+}
+fn default_cols() -> u16 {
+    80
+}
 
 pub fn list_json() -> String {
     match db::list_agent_nodes() {
@@ -18,38 +33,10 @@ pub async fn create(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     content_length: usize,
 ) {
-    if content_length > 64 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
-        return;
-    }
-
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
-
-    #[derive(serde::Deserialize)]
-    struct CreateNodeRequest {
-        mesh_id: i64,
-        provider: String,
-        #[serde(default = "default_rows")]
-        rows: u16,
-        #[serde(default = "default_cols")]
-        cols: u16,
-    }
-    fn default_rows() -> u16 {
-        24
-    }
-    fn default_cols() -> u16 {
-        80
-    }
-
-    let req: CreateNodeRequest = match serde_json::from_slice(&body_bytes) {
+    let req: CreateNodeRequest = match request::read_json_body(lines, content_length, 64 * 1024).await {
         Ok(r) => r,
-        Err(e) => {
-            let msg = format!("Invalid JSON: {}", e);
-            request::send_json_error(lines, "400 Bad Request", &msg).await;
+        Err(status) => {
+            request::send_json_error(lines, &status, "Bad request").await;
             return;
         }
     };

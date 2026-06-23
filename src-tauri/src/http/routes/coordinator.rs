@@ -1,10 +1,10 @@
 //! Coordinator read API routes (ADR-0008). Thin skins over the
-//! `coordinator::node_digest` module — all the read-model logic lives there so
+//! `coordinator::node_digest` module - all the read-model logic lives there so
 //! these handlers stay a transport adapter.
 //!
-//! This module exposes the read routes — `GET /nodes` (layered digests: spine +
+//! This module exposes the read routes - `GET /nodes` (layered digests: spine +
 //! transcript enrichment) and `GET /nodes/{id}/log?tail=N` (raw recent
-//! transcript turns) — plus the drive route `POST /nodes/{id}/prompt` (issue
+//! transcript turns) - plus the drive route `POST /nodes/{id}/prompt` (issue
 //! #319), which writes a prompt to a live node's PTY and returns an honest
 //! verdict. Auth (the off-by-default master switch + the read- or drive-scoped
 //! token) is enforced by the dispatcher in `http::mod` via
@@ -14,13 +14,13 @@
 use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
 use crate::http::request;
-use tokio::io::{AsyncReadExt, BufStream};
+use tokio::io::BufStream;
 use crate::http::MaybeTls;
 
-/// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each
+/// `GET /nodes` -> JSON array of layered Node Digests across every Mesh. Each
 /// digest is the always-available spine plus a transcript-derived rich layer;
 /// for a provider with no readable transcript the enrichment is explicitly
-/// flagged `unsupported` (degrade-and-flag, ADR-0008 §3). Returns `[]` rather
+/// flagged `unsupported` (degrade-and-flag, ADR-0008 -3). Returns `[]` rather
 /// than erroring if the DB read fails, so a Coordinator scan degrades to "no
 /// nodes" instead of a 500.
 pub fn list_nodes_json() -> String {
@@ -39,8 +39,8 @@ pub fn list_nodes_json() -> String {
     }
 }
 
-/// `GET /nodes/{id}/log?tail=N` → the raw recent transcript turns for one node.
-/// Returns `None` (→ 404 in the dispatcher) only when the node id is unknown;
+/// `GET /nodes/{id}/log?tail=N` -> the raw recent transcript turns for one node.
+/// Returns `None` (-> 404 in the dispatcher) only when the node id is unknown;
 /// every other degrade path (unsupported provider, no session,
 /// missing/unreadable/shape-changed transcript) is a `200` carrying a typed
 /// `{"status":"unavailable",...}` envelope, so the Coordinator always gets a
@@ -55,43 +55,32 @@ pub fn log_json(node_id: i64, tail: usize) -> Option<String> {
 }
 
 /// The drive request body: `{"prompt": "..."}`. Strict (no serde default) so a
-/// malformed body is a 400, not a silent no-op — see the serde-default-fragility
+/// malformed body is a 400, not a silent no-op - see the serde-default-fragility
 /// lesson the read side follows.
 #[derive(serde::Deserialize)]
 struct PromptRequest {
     prompt: String,
 }
 
-/// `POST /nodes/{id}/prompt` — drive a live node by writing `prompt` to its PTY
-/// (ADR-0008 §5, issue #319). Auth (the drive-scoped token + drive kill-switch)
+/// `POST /nodes/{id}/prompt` - drive a live node by writing `prompt` to its PTY
+/// (ADR-0008 -5, issue #319). Auth (the drive-scoped token + drive kill-switch)
 /// is enforced by the dispatcher via `auth::guard(.., CoordinatorWrite)` (issue
 /// #500) before this is reached.
 ///
 /// Outcomes:
-/// - unknown node id → `404`
-/// - empty prompt or malformed body → `400`
-/// - node not live (no agent process to write to) → `409` with a clear error
-/// - written → `200 {"verdict":"delivered"|"unverified"}` (honest verdict)
+/// - unknown node id -> `404`
+/// - empty prompt or malformed body -> `400`
+/// - node not live (no agent process to write to) -> `409` with a clear error
+/// - written -> `200 {"verdict":"delivered"|"unverified"}` (honest verdict)
 pub async fn prompt(
     lines: &mut BufStream<MaybeTls>,
     node_id: i64,
     content_length: usize,
 ) {
-    if content_length > 256 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
-        return;
-    }
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
-
-    let req: PromptRequest = match serde_json::from_slice(&body_bytes) {
+    let req: PromptRequest = match request::read_json_body(lines, content_length, 256 * 1024).await {
         Ok(r) => r,
-        Err(e) => {
-            request::send_json_error(lines, "400 Bad Request", &format!("Invalid JSON: {}", e))
-                .await;
+        Err(status) => {
+            request::send_json_error(lines, &status, "Bad request").await;
             return;
         }
     };
@@ -101,7 +90,7 @@ pub async fn prompt(
     }
 
     // Distinguish "no such node" (404) from "node exists but isn't drivable"
-    // (409) — the latter comes back from the driver as `NotLive`.
+    // (409) - the latter comes back from the driver as `NotLive`.
     if db::get_agent_node_by_id(node_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Unknown node").await;
         return;
@@ -116,7 +105,7 @@ pub async fn prompt(
             request::send_json_error(
                 lines,
                 "409 Conflict",
-                "Node is not live — only a node with a running agent can be driven",
+                "Node is not live - only a node with a running agent can be driven",
             )
             .await;
         }
@@ -125,4 +114,3 @@ pub async fn prompt(
         }
     }
 }
-
