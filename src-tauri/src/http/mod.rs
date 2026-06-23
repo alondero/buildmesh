@@ -352,7 +352,7 @@ pub fn bind_specs(port: u16, lan_enabled: bool, interface_ips: &[IpAddr]) -> Vec
     ];
     if lan_enabled {
         for ip in interface_ips {
-            if !ip.is_loopback() {
+            if !ip.is_loopback() && !is_link_local(ip) {
                 specs.push(BindSpec {
                     addr: SocketAddr::new(*ip, port),
                     tls: true,
@@ -361,6 +361,18 @@ pub fn bind_specs(port: u16, lan_enabled: bool, interface_ips: &[IpAddr]) -> Vec
         }
     }
     specs
+}
+
+/// Link-local addresses (IPv6 `fe80::/10`, IPv4 `169.254.0.0/16` APIPA) are only
+/// reachable on the originating link and need a zone/scope id the remote phone
+/// can't share. Binding/advertising them as exposed interfaces hands the QR an
+/// unreachable URL (e.g. `https://[fe80::…]:1992`), which mobile browsers reject
+/// with `ERR_INVALID_ARGUMENT`. We never expose them for LAN remote access.
+fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_unicast_link_local(),
+    }
 }
 
 /// Resolve the cert directory under app-data and build a TLS acceptor whose
@@ -1889,6 +1901,32 @@ mod tests {
         let specs = bind_specs(1992, true, &[]);
         assert_eq!(specs.len(), 2);
         assert!(specs.iter().all(|s| s.addr.ip().is_loopback() && !s.tls));
+    }
+
+    #[test]
+    fn bind_specs_skips_link_local_addresses() {
+        // The OS interface enumeration surfaces link-local addresses (IPv6
+        // `fe80::` from every NIC, IPv4 `169.254.x.x` APIPA) that are only
+        // reachable on the originating link with a zone id the phone doesn't
+        // share. Binding/advertising them hands the QR an unreachable URL
+        // (`https://[fe80::…]:1992`) → the phone's browser rejects it with
+        // ERR_INVALID_ARGUMENT. They must never become exposed interfaces.
+        let v6_link_local: IpAddr = "fe80::1".parse().unwrap();
+        let v4_link_local: IpAddr = "169.254.10.20".parse().unwrap();
+        let routable: IpAddr = "192.168.1.5".parse().unwrap();
+        let specs = bind_specs(1992, true, &[v6_link_local, v4_link_local, routable]);
+        let tls_iface: Vec<_> = specs.iter().filter(|s| s.tls).collect();
+        assert_eq!(
+            tls_iface.len(),
+            1,
+            "only the routable LAN interface should get a TLS listener"
+        );
+        assert_eq!(tls_iface[0].addr.ip(), routable);
+        assert!(
+            !specs.iter().any(|s| s.addr.ip() == v6_link_local
+                || s.addr.ip() == v4_link_local),
+            "link-local addresses must not be bound at all"
+        );
     }
 
     // Realized-bind tracking (issue #586). `bind_specs` describes the *plan*;

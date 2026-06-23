@@ -19,17 +19,29 @@ interface RemoteAccessModalProps {
  * Falls back to the discovered IP + reported port over plain HTTP only when no
  * non-loopback listener is bound (exposure off / loopback only); `reachable`
  * is false in that case so the modal warns instead of handing out a dead URL.
+ *
+ * IPv4 wins over IPv6 regardless of enumeration order: a bracketed IPv6 address
+ * (`[…]:port`) in the QR makes the phone's browser bail with
+ * ERR_INVALID_ARGUMENT, and IPv4 LAN is the canonical "phone on the same
+ * Wi-Fi" target. We only hand out an IPv6 URL when no IPv4 interface is bound.
  */
 export function buildRemoteAccessUrl(
   status: NetworkStatus,
   fallbackIp: string,
   rootToken: string,
 ): { url: string; host: string; reachable: boolean } {
-  // Prefer a TLS listener (what the phone should hit over HTTPS); fall back to
-  // any realized bind so an unexpected plain LAN listener still gets the right
-  // scheme rather than a mismatched one.
+  // A realized IPv6 bind renders bracketed (`[::1]:port`); IPv4 never does.
+  const isIpv4 = (b: { address: string }) => !b.address.includes('[');
+  // Prefer TLS over plain (HTTPS is what an exposed interface serves) and IPv4
+  // over IPv6 (reachable from the phone), in that priority order. Falling all
+  // the way through to any realized bind keeps an unexpected listener usable
+  // with the correct scheme rather than a mismatched one.
+  const ifaces = status.exposed_interfaces;
   const bind =
-    status.exposed_interfaces.find(b => b.tls) ?? status.exposed_interfaces[0];
+    ifaces.find(b => b.tls && isIpv4(b)) ??
+    ifaces.find(b => b.tls) ??
+    ifaces.find(isIpv4) ??
+    ifaces[0];
   if (bind) {
     const scheme = bind.tls ? 'https' : 'http';
     return {

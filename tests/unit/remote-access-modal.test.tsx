@@ -62,6 +62,37 @@ describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
     expect(result.url).toBe('http://192.168.1.10:1992/?token=t');
   });
 
+  it('prefers an IPv4 TLS bind over an IPv6 one so the phone gets a reachable URL', () => {
+    // The OS can enumerate an IPv6 interface ahead of the IPv4 LAN address; a
+    // bracketed IPv6 (especially link-local) in the QR makes the phone browser
+    // bail with ERR_INVALID_ARGUMENT. IPv4 LAN is the canonical "phone on the
+    // same Wi-Fi" target, so it must win regardless of enumeration order.
+    const result = buildRemoteAccessUrl(
+      status({
+        exposed_interfaces: [
+          { address: '[2001:db8::1]:1992', tls: true },
+          { address: '192.168.1.10:1992', tls: true },
+        ],
+      }),
+      '192.168.1.10',
+      't',
+    );
+    expect(result.url).toBe('https://192.168.1.10:1992/?token=t');
+    expect(result.host).toBe('192.168.1.10:1992');
+  });
+
+  it('uses an IPv6 bind only when no IPv4 interface is realized', () => {
+    const result = buildRemoteAccessUrl(
+      status({
+        exposed_interfaces: [{ address: '[2001:db8::1]:1992', tls: true }],
+      }),
+      '192.168.1.10',
+      't',
+    );
+    expect(result.url).toBe('https://[2001:db8::1]:1992/?token=t');
+    expect(result.reachable).toBe(true);
+  });
+
   it('falls back to the discovered IP + reported port over http when nothing is realized, and flags it unreachable', () => {
     const result = buildRemoteAccessUrl(
       status({ tls_active: false, exposed_interfaces: [] }),
