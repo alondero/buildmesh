@@ -66,16 +66,21 @@ pub fn minimax_backend_env() -> Vec<(String, String)> {
         .filter(|v| !v.is_empty())
         .cloned()
         .unwrap_or_else(|| "https://api.minimax.io/anthropic".to_string());
+    // Issue #571: the per-tier model map is the single source owned by
+    // `preferences::minimax_default_tiers` (consumed by both the per-account
+    // `model_tiers` and this side-channel). Renaming a MiniMax model now
+    // happens in exactly one place.
+    let tiers = crate::preferences::minimax_default_tiers();
     let mut env = vec![
         ("ANTHROPIC_BASE_URL".to_string(), base_url),
         ("API_TIMEOUT_MS".to_string(), "3000000".to_string()),
         ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(), "1".to_string()),
         ("CLAUDE_CODE_AUTO_COMPACT_WINDOW".to_string(), "512000".to_string()),
-        ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
-        ("ANTHROPIC_SMALL_FAST_MODEL".to_string(), "MiniMax-M2.7".to_string()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), "MiniMax-M2.7".to_string()),
+        ("ANTHROPIC_MODEL".to_string(), tiers.default.clone().unwrap()),
+        ("ANTHROPIC_SMALL_FAST_MODEL".to_string(), tiers.small_fast.clone().unwrap()),
+        ("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), tiers.sonnet.clone().unwrap()),
+        ("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), tiers.opus.clone().unwrap()),
+        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), tiers.haiku.clone().unwrap()),
     ];
     // Prefer the legacy `~/.claude/providers.conf` key (Adam's existing setup),
     // then fall back to the key configured via the #537 Accounts UI
@@ -110,7 +115,7 @@ fn strip_matched_quotes(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_providers_conf;
+    use super::{minimax_backend_env, parse_providers_conf};
 
     #[test]
     fn parses_keys_skips_comments_and_blanks() {
@@ -133,5 +138,27 @@ MOONSHOT_API_KEY=sk-moonshot-456
         let map = parse_providers_conf("export MOONSHOT_API_KEY=\"sk-q\"\nMINIMAX_API_KEY='sk-s'\n");
         assert_eq!(map.get("MOONSHOT_API_KEY").map(String::as_str), Some("sk-q"));
         assert_eq!(map.get("MINIMAX_API_KEY").map(String::as_str), Some("sk-s"));
+    }
+
+    /// Issue #571 tidy-up: the MiniMax model routing injected into the
+    /// session-naming side-channel is the same `ModelTiers` shipped in
+    /// `default_provider_accounts`. If a contributor re-hardcodes the strings
+    /// in `minimax_backend_env`, this test catches the drift.
+    #[test]
+    fn minimax_backend_env_model_vars_match_default_tier_map() {
+        use crate::preferences::minimax_default_tiers;
+
+        let tiers = minimax_default_tiers();
+        let env = minimax_backend_env();
+        let get = |key: &str| {
+            env.iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get("ANTHROPIC_MODEL"), tiers.default);
+        assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), tiers.small_fast);
+        assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), tiers.sonnet);
+        assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), tiers.opus);
+        assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), tiers.haiku);
     }
 }
