@@ -57,6 +57,14 @@ _Avoid_: Session, pane, terminal node
 **Worktree Node**:
 An Agent Node operating on an isolated Git worktree branch of its parent Mesh. (Used when the Mesh property use_worktree is true, unless overridden).
 
+**Pre-spawn Worktree**:
+A warm Git worktree checked out to the latest commit of a Mesh's **Base Ref** in detached HEAD state, sitting in the **Pre-spawn Pool** ready to be adopted instantly by a newly spawned **Worktree Node**.
+_Avoid_: Warm worktree, pre-warm worktree.
+
+**Pre-spawn Pool**:
+A persistent set of **Pre-spawn Worktrees** maintained on disk and tracked in SQLite to eliminate the cold checkout cost during agent spawn.
+_Avoid_: Warm pool, worktree cache.
+
 **Root Node**:
 An Agent Node operating directly on the parent Mesh's root directory, bypassing worktree isolation. (Used when the Mesh property use_worktree is false, or when overridden via Alt-click).
 
