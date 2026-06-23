@@ -1,11 +1,29 @@
+/**
+ * Tests for `<AccountCard>` — the Settings-side credential/editor card
+ * that pairs with each ProviderAccount. Usage Meters moved out in
+ * issue #601 (they live on the Probe Panel's new "Usage" tab via
+ * `<UsagePanel>`); these tests pin what the Settings card STILL does:
+ *
+ *   - Enable toggle (writes through `onSave`)
+ *   - Remove (custom accounts only; built-ins can only be disabled —
+ *     a remove would just revert to the code default)
+ *   - Two-step Remove confirmation guard, busy gate on in-flight
+ *     remove, busy recovery on rejected remove
+ *   - Per-tier model fields for Claude-compatible accounts (#567)
+ *   - No credential editor for self-authenticating harnesses (#568a)
+ *
+ * Meter rendering moved to `tests/unit/usage-panel.test.tsx`.
+ */
+
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AccountCard } from '../../src/components/AppSettings/AppSettingsModal';
-import type { ProviderAccount, ProviderUsage } from '../../src/lib/tauri';
+import type { ProviderAccount } from '../../src/lib/tauri';
 
-// Mirror the backend's derivation (preferences::is_claude_compatible_id): every
-// account except the three self-authenticating built-ins is Claude-compatible.
+// Mirror the backend's derivation (preferences::is_claude_compatible_id):
+// every account except the three self-authenticating built-ins is
+// Claude-compatible.
 const SELF_AUTH_IDS = ['anthropic', 'codex', 'agy'];
 
 function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
@@ -24,96 +42,11 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
   };
 }
 
-function usage(over: Partial<ProviderUsage> = {}): ProviderUsage {
-  return { provider: 'anthropic', loggedIn: true, windows: [], balance: null, detail: null, error: null, ...over };
-}
-
-describe('AccountCard (issue #537)', () => {
-  it('renders percentage bars for a plan account', () => {
-    render(
-      <AccountCard
-        account={account({ billing_mode: 'plan' })}
-        usage={usage({ windows: [{ label: '5-hour', usedPercent: 41, resetsAt: null }] })}
-        usageLoading={false}
-        onSave={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('41.0%')).toBeTruthy();
-    expect(screen.queryByText('Balance remaining')).toBeNull();
-  });
-
-  it('renders a cash-balance card for a pay-as-you-go account', () => {
-    render(
-      <AccountCard
-        account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
-        usage={usage({ provider: 'minimax', balance: { remaining: 12.34, monthlySpend: 1.5, currency: 'USD' } })}
-        usageLoading={false}
-        onSave={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('USD 12.34')).toBeTruthy();
-    expect(screen.queryByText(/%$/)).toBeNull();
-  });
-
-  it('shows a placeholder when a logged-in account has no meters yet', () => {
-    render(
-      <AccountCard
-        account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
-        usage={usage({ provider: 'minimax', balance: null })}
-        usageLoading={false}
-        onSave={vi.fn()}
-      />,
-    );
-    // Meters render by what's present, not by billing mode (#574): no windows and
-    // no balance → a neutral "No usage data", not a balance-specific message.
-    expect(screen.getByText('No usage data')).toBeTruthy();
-  });
-
-  it('renders both quota windows and a cash balance together (#574 AC3)', () => {
-    // A provider can expose several Usage Meters at once — show all of them
-    // rather than choosing one by billing mode.
-    render(
-      <AccountCard
-        account={account({ id: 'anthropic' })}
-        usage={usage({
-          windows: [{ label: '5-hour', usedPercent: 41, resetsAt: null }],
-          balance: { remaining: 12.34, monthlySpend: null, currency: 'USD' },
-        })}
-        usageLoading={false}
-        onSave={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('41.0%')).toBeTruthy();
-    expect(screen.getByText('USD 12.34')).toBeTruthy();
-  });
-
-  it('shows "usage not tracked" for a Generic provider (#574 AC4)', () => {
-    // A custom provider with no usage fetcher gets an explicit state, not an
-    // empty gauge or a misleading "unable to load" error.
-    render(
-      <AccountCard
-        account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={undefined}
-        usageTracked={false}
-        usageLoading={false}
-        onSave={vi.fn()}
-      />,
-    );
-    expect(screen.getByText('Usage not tracked')).toBeTruthy();
-    expect(screen.queryByText('Unable to load usage data')).toBeNull();
-  });
-
-  it('shows "Disabled" and no usage when the account is disabled', () => {
-    render(
-      <AccountCard account={account({ enabled: false })} usage={undefined} usageLoading={false} onSave={vi.fn()} />,
-    );
-    expect(screen.getByText('Disabled')).toBeTruthy();
-  });
-
+describe('AccountCard (issue #537, settings-side credential/editor)', () => {
   it('flips the enable toggle through onSave', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const user = userEvent.setup();
-    render(<AccountCard account={account({ enabled: true })} usage={usage()} usageLoading={false} onSave={onSave} />);
+    render(<AccountCard account={account({ enabled: true })} onSave={onSave} />);
 
     await user.click(screen.getByRole('checkbox', { name: /enable anthropic/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
@@ -124,8 +57,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
-        usage={usage({ provider: 'minimax' })}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={vi.fn()}
       />,
@@ -140,8 +71,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'anthropic' })}
-        usage={usage()}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={vi.fn()}
       />,
@@ -150,9 +79,7 @@ describe('AccountCard (issue #537)', () => {
   });
 
   it('shows no credential editor for a self-authenticating harness (#568a)', () => {
-    render(
-      <AccountCard account={account({ id: 'anthropic' })} usage={usage()} usageLoading={false} onSave={vi.fn()} />,
-    );
+    render(<AccountCard account={account({ id: 'anthropic' })} onSave={vi.fn()} />);
     // Anthropic/Codex/Antigravity authenticate via their own CLI — no key fields.
     expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
   });
@@ -162,8 +89,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'kimi', name: 'Kimi', billing_mode: 'pay_as_you_go' })}
-        usage={usage({ provider: 'kimi' })}
-        usageLoading={false}
         onSave={vi.fn()}
       />,
     );
@@ -179,8 +104,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'kimi', name: 'Kimi', billing_mode: 'pay_as_you_go' })}
-        usage={usage({ provider: 'kimi' })}
-        usageLoading={false}
         onSave={onSave}
       />,
     );
@@ -195,8 +118,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={usage({ provider: 'deepseek' })}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={vi.fn()}
       />,
@@ -212,8 +133,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={usage({ provider: 'deepseek' })}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={onRemove}
       />,
@@ -235,8 +154,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={usage({ provider: 'deepseek' })}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={onRemove}
       />,
@@ -254,8 +171,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={usage({ provider: 'deepseek' })}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={onRemove}
       />,
@@ -274,8 +189,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={usage({ provider: 'deepseek' })}
-        usageLoading={false}
         onSave={vi.fn()}
       />,
     );
@@ -295,8 +208,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={usage({ provider: 'deepseek' })}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={onRemove}
       />,
@@ -330,8 +241,6 @@ describe('AccountCard (issue #537)', () => {
     render(
       <AccountCard
         account={account({ id: 'deepseek', name: 'DeepSeek' })}
-        usage={usage({ provider: 'deepseek' })}
-        usageLoading={false}
         onSave={vi.fn()}
         onRemove={onRemove}
       />,

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { BalanceCard } from '../../src/components/AppSettings/AppSettingsModal';
+import { BalanceCard } from '../../src/components/AppSettings/UsageRender';
 
 describe('BalanceCard', () => {
   it('renders remaining balance and monthly spend with the currency (issue #537)', () => {
