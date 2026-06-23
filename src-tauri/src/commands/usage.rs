@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use tauri::command;
 
 /// Provider ids Buildmesh can actually fetch usage for. A visible account whose
-/// id isn't here — a **Generic Model Provider** (custom endpoint) or a
-/// first-class provider without a fetcher yet (Kimi) — is configurable but has no
-/// usage endpoint, so it renders an explicit "usage not tracked" state instead.
-const FETCHABLE: [&str; 4] = ["anthropic", "codex", "minimax", "agy"];
+/// id isn't here — a **Generic Model Provider** (custom endpoint) — is
+/// configurable but has no usage endpoint, so it renders an explicit "usage not
+/// tracked" state instead.
+const FETCHABLE: [&str; 5] = ["anthropic", "codex", "minimax", "agy", "kimi"];
 
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
@@ -52,8 +52,7 @@ fn account_visible(account: &ProviderAccount, profiles: &[HarnessProfile]) -> bo
 }
 
 /// Whether Buildmesh ships a usage fetcher for this provider id. `false` for a
-/// **Generic Model Provider** and for a first-class provider without a fetcher
-/// (Kimi) — both surface as "usage not tracked".
+/// **Generic Model Provider** — surfaces as "usage not tracked".
 fn usage_tracked(account_id: &str) -> bool {
     FETCHABLE.contains(&account_id)
 }
@@ -114,6 +113,16 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
             preferences::minimax_api_key_resolved().as_deref().unwrap_or(""),
         ),
         "agy" => usage::agy_usage(),
+        // Kimi has no legacy flat field today, but resolving through
+        // `kimi_api_key_resolved()` mirrors `minimax_api_key_resolved()` so a
+        // future legacy fallback lands in preferences.rs (single seam) rather
+        // than this dispatch file. Empty string lets `kimi_usage` surface its
+        // own "No API key configured" message.
+        "kimi" => usage::kimi_usage(
+            preferences::kimi_api_key_resolved()
+                .as_deref()
+                .unwrap_or(""),
+        ),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
     };
 
@@ -237,11 +246,11 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "minimax", "agy"] {
+        for id in ["anthropic", "codex", "minimax", "agy", "kimi"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
-        // Kimi (first-class, no fetcher yet) and any Generic provider are untracked.
-        for id in ["kimi", "deepseek", "glm"] {
+        // Any Generic provider is untracked.
+        for id in ["deepseek", "glm"] {
             assert!(!usage_tracked(id), "{id} should not be tracked");
         }
     }
@@ -253,10 +262,13 @@ mod tests {
             account("anthropic", true), // enabled + detected + tracked → in
             account("codex", true),     // tracked but harness undetected → out
             account("minimax", true),   // enabled keyed tracked → in
-            account("kimi", true),      // keyed but no fetcher → out
+            account("kimi", true),      // enabled keyed tracked → in (wallet meter)
             account("deepseek", true),  // Generic, no fetcher → out
         ];
-        assert_eq!(poll_ids(&accounts, &claude), vec!["anthropic", "minimax"]);
+        assert_eq!(
+            poll_ids(&accounts, &claude),
+            vec!["anthropic", "minimax", "kimi"]
+        );
     }
 
     #[test]
