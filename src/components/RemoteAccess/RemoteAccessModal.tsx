@@ -75,7 +75,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         setUnreachable(!reachable);
 
         const dataUrl = await QRCode.toDataURL(url, {
-          width: 240,
+          width: 384,
           margin: 2,
           color: { dark: '#e0e0e0', light: '#1a1a1a' },
         });
@@ -94,28 +94,28 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
 
       {/* Modal */}
       <div
-        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-6 max-w-sm w-full"
+        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-8 max-w-lg w-full"
         onClick={e => e.stopPropagation()}
       >
         <button
           onClick={onClose}
-          className="absolute top-3 right-3 text-text-muted hover:text-text-secondary text-lg"
+          className="absolute top-5 right-5 text-text-muted hover:text-text-secondary text-3xl"
         >
           ×
         </button>
 
-        <h2 className="text-sm font-semibold text-text-primary mb-1">Remote Access</h2>
-        <p className="text-xs text-text-muted mb-4">
+        <h2 className="text-2xl font-semibold text-text-primary mb-2">Remote Access</h2>
+        <p className="text-base text-text-muted mb-6">
           Scan with your phone camera to connect.
         </p>
 
         {error ? (
-          <div className="text-status-error text-xs">{error}</div>
+          <div className="text-status-error text-base">{error}</div>
         ) : unreachable ? (
           <div
             data-testid="remote-access-warning"
             role="alert"
-            className="text-status-error text-xs"
+            className="text-status-error text-base"
           >
             LAN exposure is on, but no network interface is actually exposed —
             your phone can't reach this computer. Check the "Expose to LAN"
@@ -127,20 +127,20 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
             <img
               src={qrDataUrl}
               alt="QR Code"
-              className="w-48 h-48 rounded border border-border-subtle mb-3"
+              className="w-96 h-96 rounded border border-border-subtle mb-4"
             />
-            <div className="text-xs text-text-muted font-mono text-center">
+            <div className="text-base text-text-muted font-mono text-center">
               <div>{host}</div>
             </div>
           </div>
         ) : (
-          <div className="flex justify-center py-8">
-            <div className="animate-spin w-5 h-5 border border-accent-cyan border-t-transparent rounded-full" />
+          <div className="flex justify-center py-12">
+            <div className="animate-spin w-8 h-8 border-2 border-accent-cyan border-t-transparent rounded-full" />
           </div>
         )}
 
-        <div className="mt-4 pt-3 border-t border-border-subtle">
-          <p className="text-[10px] text-text-muted">
+        <div className="mt-6 pt-4 border-t border-border-subtle">
+          <p className="text-sm text-text-muted">
             Make sure your phone is on the same network as this computer.
           </p>
         </div>
