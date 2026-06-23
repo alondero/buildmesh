@@ -807,6 +807,20 @@ pub fn minimax_api_key_resolved() -> Option<String> {
     non_empty(from_account).or_else(|| non_empty(prefs.minimax_api_key))
 }
 
+/// Resolve the effective Kimi API key from the merged provider-accounts list.
+/// Kimi has no legacy flat field (unlike MiniMax's `minimax_api_key`) so this
+/// is a straight lookup, but lives here as the single seam so a future legacy
+/// fallback (e.g. a pre-config.json migration) can be added in one place
+/// without touching `commands::usage::cached_or_fetch`. Empty strings are
+/// treated as absent.
+pub fn kimi_api_key_resolved() -> Option<String> {
+    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
+        .into_iter()
+        .find(|a| a.id == "kimi")
+        .and_then(|a| a.api_key)
+        .filter(|v| !v.is_empty())
+}
+
 /// Upsert a provider account into `prefs` (by `id`). Pure: mutates the passed
 /// `prefs` so the command layer stays a thin load→mutate→save.
 ///
@@ -1635,7 +1649,9 @@ mod tests {
         assert_eq!(by_id("minimax").base_url.as_deref(), Some("https://api.minimax.io/anthropic"));
         assert_eq!(by_id("kimi").base_url.as_deref(), Some("https://api.moonshot.ai/anthropic"));
         assert_eq!(by_id("minimax").model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
-        // Kimi has no usage fetcher yet, so it's the one built-in disabled by default.
+        // Kimi ships disabled by default (opt-in via the Providers page) — wallet
+        // meter fetcher is now wired up (see services::usage::kimi_usage), so the
+        // "no fetcher" rationale that pre-dates this PR no longer applies.
         assert!(!by_id("kimi").enabled);
     }
 

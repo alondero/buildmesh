@@ -179,6 +179,23 @@ fn logged_out(provider: &str, error: String) -> ProviderUsage {
     }
 }
 
+/// Builds a `ProviderUsage` for the "logged-in but couldn't fetch" state — the
+/// credential is presumed present (so this is NOT the empty-key / no-credential
+/// case [`logged_out`] handles), but the fetch failed for a transport, status,
+/// or parse reason. Mirrors the `unavailable` closure that lives inside
+/// [`fetch_usage`] so per-provider fetchers like [`kimi_usage`] can use the
+/// same constructor shape without re-defining it.
+fn unavailable(provider: &str, error: String) -> ProviderUsage {
+    ProviderUsage {
+        provider: provider.to_string(),
+        logged_in: true,
+        windows: vec![],
+        balance: None,
+        detail: None,
+        error: Some(error),
+    }
+}
+
 /// Drives the shared request → status-check → parse flow. Callers reach this
 /// only once a credential is confirmed present, so any failure here is reported
 /// as logged-in-but-unavailable. `parse` maps a 2xx body to `(windows, detail)`.
@@ -187,27 +204,22 @@ fn fetch_usage(
     build_request: impl FnOnce(&Client) -> RequestBuilder,
     parse: impl FnOnce(&str) -> Result<(Vec<UsageWindow>, Option<String>), UsageError>,
 ) -> ProviderUsage {
-    let unavailable = |error: String| ProviderUsage {
-        provider: provider.to_string(),
-        logged_in: true,
-        windows: vec![],
-        balance: None,
-        detail: None,
-        error: Some(error),
-    };
-
     let client = match Client::builder().build() {
         Ok(c) => c,
-        Err(e) => return unavailable(format!("Client error: {}", e)),
+        Err(e) => return unavailable(provider, format!("Client error: {}", e)),
     };
 
     match build_request(&client).send() {
-        Ok(r) if r.status() == 429 => {
-            unavailable("Rate limited — usage data temporarily unavailable".to_string())
-        }
+        Ok(r) if r.status() == 429 => unavailable(
+            provider,
+            "Rate limited — usage data temporarily unavailable".to_string(),
+        ),
         Ok(r) if !r.status().is_success() => {
             let code = r.status().as_u16();
-            unavailable(format!("API error {}: {}", code, r.text().unwrap_or_default()))
+            unavailable(
+                provider,
+                format!("API error {}: {}", code, r.text().unwrap_or_default()),
+            )
         }
         Ok(r) => match parse(&r.text().unwrap_or_default()) {
             Ok((windows, detail)) => ProviderUsage {
@@ -218,9 +230,9 @@ fn fetch_usage(
                 detail,
                 error: None,
             },
-            Err(e) => unavailable(format!("Failed to parse response: {}", e)),
+            Err(e) => unavailable(provider, format!("Failed to parse response: {}", e)),
         },
-        Err(e) => unavailable(format!("Request failed: {}", e)),
+        Err(e) => unavailable(provider, format!("Request failed: {}", e)),
     }
 }
 
@@ -453,6 +465,126 @@ pub fn minimax_usage(api_key: &str) -> ProviderUsage {
         },
         parse_minimax_response,
     )
+}
+
+// ─── Kimi (Moonshot) wallet meter ──────────────────────────────────────────
+//
+// Kimi exposes exactly one Bearer-authenticated public endpoint for billing:
+// `GET https://api.moonshot.ai/v1/users/me/balance` — the same auth scheme as
+// the chat API (`Authorization: Bearer <sk-…>`). It reports the user's wallet
+// total in USD as `available_balance` (cash + voucher). The richer
+// per-model/monthly spend data lives on `platform.kimi.ai/api?endpoint=consumes`
+// and siblings, but those require an OAuth session JWT (login.moonshot.ai +
+// refreshToken), NOT the API key — so `monthly_spend` stays None until a
+// dedicated Kimi OAuth flow ships in Buildmesh.
+//
+// `kimi_usage` is a direct HTTP fetch (not via the shared `fetch_usage`
+// driver) because it populates `balance` (not `windows` + `detail`). The
+// `fetch_usage` driver could be generalized to support both shapes, which
+// would also unlock the existing-but-dead `parse_minimax_balance` (issue
+// #537 follow-up) — filed as a follow-up issue.
+
+#[derive(Deserialize, Debug)]
+struct KimiData {
+    // Required (no #[serde(default)]) so a malformed body — one that lacks the
+    // balance field — fails loudly instead of silently reporting a zero wallet.
+    available_balance: f64,
+}
+
+#[derive(Deserialize, Debug)]
+struct KimiResp {
+    #[serde(default)]
+    code: Option<i64>,
+    data: KimiData,
+}
+
+/// Parses the Kimi Check Balance response into a `BillingBalance`. `monthly_spend`
+/// is unconditionally `None` (no public-auth path to the spend endpoint); a
+/// future OAuth-driven fetcher is the only way this gains a spend figure.
+///
+/// Returns `Result<BillingBalance, UsageError>` (NOT `Option`) because every
+/// well-formed response has a balance — there is no "no wallet configured"
+/// state to model. Using `Result<Option<_>>` would invite a future caller to
+/// add an `Ok(None)` that is indistinguishable from the existing "no PAYG
+/// billing_mode" `ProviderUsage.balance = None` case.
+fn parse_kimi_response(body: &str) -> Result<BillingBalance, UsageError> {
+    let resp: KimiResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+
+    // Vendor envelope: non-zero `code` is a vendor-level error, not a zero
+    // balance. Same shape as Moonshot's chat-API errors.
+    if let Some(c) = resp.code {
+        if c != 0 {
+            return Err(UsageError::Shape(format!(
+                "Kimi API returned code {}",
+                c
+            )));
+        }
+    }
+
+    Ok(BillingBalance {
+        remaining: resp.data.available_balance,
+        monthly_spend: None,
+        // The wallet is denominated in USD per the documented contract;
+        // Moonshot does not return a currency field on this endpoint.
+        currency: "USD".to_string(),
+    })
+}
+
+pub fn kimi_usage(api_key: &str) -> ProviderUsage {
+    if api_key.is_empty() {
+        return logged_out("kimi", "No API key configured".to_string());
+    }
+
+    let client = match Client::builder().build() {
+        Ok(c) => c,
+        Err(e) => return unavailable("kimi", format!("Client error: {}", e)),
+    };
+
+    let auth = format!("Bearer {}", api_key);
+    let resp = match client
+        .get("https://api.moonshot.ai/v1/users/me/balance")
+        .header("Authorization", auth)
+        .send()
+    {
+        Ok(r) if r.status() == 429 => {
+            return unavailable(
+                "kimi",
+                "Rate limited — usage data temporarily unavailable".to_string(),
+            )
+        }
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status().as_u16();
+            // 401 (Unauthorized) AND 403 (Forbidden / account revoked) both signal
+            // "the credential is bad" — surface as logged-out so the UI can prompt
+            // the user to re-enter, matching the `logged_in=false` semantics in
+            // `logged_out()`. Moonshot returns 403 for disabled accounts per their
+            // API contract; missing the branch silently degrades to a generic
+            // 'API error 403' with no re-enter affordance.
+            if code == 401 || code == 403 {
+                return logged_out("kimi", "Invalid API key".to_string());
+            }
+            return unavailable(
+                "kimi",
+                format!("API error {}: {}", code, r.text().unwrap_or_default()),
+            );
+        }
+        Ok(r) => r,
+        Err(e) => return unavailable("kimi", format!("Request failed: {}", e)),
+    };
+
+    let body = resp.text().unwrap_or_default();
+    match parse_kimi_response(&body) {
+        Ok(balance) => ProviderUsage {
+            provider: "kimi".to_string(),
+            logged_in: true,
+            windows: Vec::new(),
+            balance: Some(balance),
+            detail: None,
+            error: None,
+        },
+        Err(e) => unavailable("kimi", format!("Failed to parse response: {}", e)),
+    }
 }
 
 // ─── Google / Antigravity (`agy`) ───────────────────────────────────────────
@@ -1082,5 +1214,88 @@ mod tests {
         )
         .unwrap();
         assert_eq!(resp.cloudaicompanion_project.as_deref(), Some("sinuous-strategy-j3z18"));
+    }
+
+    // ── Kimi (Moonshot) wallet meter ────────────────────────────────────────
+    //
+    // The Kimi platform's only Bearer-authenticated public endpoint is
+    // `GET /v1/users/me/balance` — it returns the user's cash + voucher wallet
+    // total in USD. Spend/usage endpoints (consumes, organizationAccountInfo)
+    // require an OAuth session JWT, NOT the chat API key, so monthly_spend
+    // stays None until a Kimi OAuth flow lands. Fixture is the documented
+    // response shape (https://platform.kimi.ai/docs/api/balance.md).
+
+    #[test]
+    fn parse_kimi_response_extracts_available_balance_as_usd_wallet() {
+        let json = r#"{
+            "code": 0,
+            "data": {
+                "available_balance": 49.58894,
+                "voucher_balance": 46.58893,
+                "cash_balance": 3.00001
+            },
+            "scode": "0x0",
+            "status": true
+        }"#;
+        let b = parse_kimi_response(json).unwrap();
+        assert_eq!(b.remaining, 49.58894);
+        // monthly_spend has no public auth path — pin None so a future
+        // OAuth-driven fetcher is the ONLY way this becomes Some.
+        assert_eq!(b.monthly_spend, None);
+        assert_eq!(b.currency, "USD");
+    }
+
+    #[test]
+    fn parse_kimi_response_rejects_nonzero_code() {
+        // Vendor envelope: non-zero `code` is an error, not a zero balance.
+        let json = r#"{"code":401,"data":{"available_balance":0.0},"status":false}"#;
+        let err = parse_kimi_response(json).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+    }
+
+    #[test]
+    fn parse_kimi_response_rejects_missing_data() {
+        // Required field — a body without `data` is malformed, not "empty wallet".
+        let json = r#"{"code":0,"scode":"0x0","status":true}"#;
+        let err = parse_kimi_response(json).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)));
+    }
+
+    #[test]
+    fn parse_kimi_response_rejects_missing_available_balance() {
+        // Required field — the response without `available_balance` is malformed.
+        let json = r#"{"code":0,"data":{"voucher_balance":0.0,"cash_balance":0.0},"scode":"0x0","status":true}"#;
+        let err = parse_kimi_response(json).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)));
+    }
+
+    #[test]
+    fn kimi_usage_with_empty_key_returns_logged_out() {
+        // Mirrors minimax_usage("") — the upstream caller is expected to gate on
+        // the key being present; we still defend here so a misconfigured fetch
+        // surfaces as "no API key configured" rather than an HTTP 401.
+        let usage = kimi_usage("");
+        assert!(!usage.logged_in);
+        assert_eq!(usage.provider, "kimi");
+        assert!(usage.error.is_some());
+        assert!(usage.balance.is_none());
+    }
+
+    #[test]
+    fn parse_kimi_response_accepts_missing_top_level_code_envelope() {
+        // Forward-compat: some endpoints may omit the `code` field entirely on
+        // success (Moonshot's documented example includes it, but a future
+        // schema change shouldn't break parsing). The Option<i64> default
+        // expresses this; absence is NOT treated as an error.
+        let json = r#"{
+            "data": {
+                "available_balance": 12.34,
+                "voucher_balance": 0.0,
+                "cash_balance": 12.34
+            }
+        }"#;
+        let b = parse_kimi_response(json).unwrap();
+        assert_eq!(b.remaining, 12.34);
+        assert_eq!(b.currency, "USD");
     }
 }
