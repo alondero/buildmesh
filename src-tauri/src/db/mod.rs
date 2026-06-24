@@ -18,6 +18,9 @@ mod sandbox_tests;
 #[cfg(test)]
 mod device_session_tests;
 
+#[cfg(test)]
+mod warm_pool_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -30,19 +33,30 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version.
 ///
-/// v20 — Persistent device sessions (issue #502 / PRD #494): add the
-/// `device_sessions` table backing per-device mobile tokens + the
-/// "Authorized Devices" revocation panel. A brand-new table needs no data
-/// migration — `CREATE TABLE IF NOT EXISTS` in `init` materializes it for
-/// every DB; the version bump just records that the shape moved forward.
-///
-/// v19 — Spawn Option composite ids (issue #575 / ADR-0016): rewrite
-/// legacy `agent_nodes.provider` ids (`minimax`/`kimi`/custom bare account
-/// id → `claude:<id>`) so archived nodes resolve under the new grouped
-/// Spawn Menu without a permanent resolver shim. The rewrite is
-/// unambiguous today because every Proxied Provider currently pairs with
-/// Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 20;
+/// v21 — Pre-spawn Worktree Pool (issue #609, PRD #608): add the
+/// `warm_worktrees` table that tracks pre-warmed detached HEAD
+/// worktrees. A row's `path` is the absolute on-disk directory the pool
+/// pre-cut (under `{mesh.path}/.claude/worktrees/<slug>`);
+/// `preassigned_name` is the slug; `status` is `filling` (worker is
+/// still cutting the checkout), `available` (claimable), `claimed` (in
+/// flight, dropped once the node row is in place); `base_sha` records
+/// the commit the pool checked out at so a spawn can verify the entry
+/// is still on the expected tip. No data migration needed — fresh
+/// table, `CREATE TABLE IF NOT EXISTS`.
+//
+// v20 — Persistent device sessions (issue #502 / PRD #494): add the
+// `device_sessions` table backing per-device mobile tokens + the
+// "Authorized Devices" revocation panel. A brand-new table needs no data
+// migration — `CREATE TABLE IF NOT EXISTS` in `init` materializes it for
+// every DB; the version bump just records that the shape moved forward.
+//
+// v19 — Spawn Option composite ids (issue #575 / ADR-0016): rewrite
+// legacy `agent_nodes.provider` ids (`minimax`/`kimi`/custom bare account
+// id → `claude:<id>`) so archived nodes resolve under the new grouped
+// Spawn Menu without a permanent resolver shim. The rewrite is
+// unambiguous today because every Proxied Provider currently pairs with
+// Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
+const SCHEMA_VERSION: i32 = 21;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -111,6 +125,34 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        -- Pre-spawn Worktree Pool (issue #609, PRD #608). One row per
+        -- detached-HEAD worktree the background worker has pre-warmed under
+        -- `{mesh.path}/.claude/worktrees/<slug>`. The pool is
+        -- optional (the spawn path always falls back to a cold checkout
+        -- when no `available` row matches); see `services::warm_pool`.
+        CREATE TABLE IF NOT EXISTS warm_worktrees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
+            -- Absolute host-side path to the pre-warmed worktree directory.
+            -- Always lives under `{mesh.path}/.claude/worktrees/...`.
+            path TEXT NOT NULL UNIQUE,
+            -- The slug baked into the directory name. Adopted as
+            -- `agent_nodes.worktree_name` on claim, so the spawn pipeline
+            -- never has to rename the directory (zero folder-rename overhead).
+            preassigned_name TEXT NOT NULL,
+            -- `filling` (worker is mid-checkout), `available` (claimable),
+            -- `claimed` (spawned, dropped once the node row is in place).
+            status TEXT NOT NULL DEFAULT 'filling',
+            -- 40-char hex SHA the warm entry is checked out at. Spawn can
+            -- compare against the mesh's resolved base SHA; mismatch → drop
+            -- + cold spawn.
+            base_sha TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
+        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
+
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
         "
     )?;
@@ -128,6 +170,11 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
 ensure_mesh_sandbox(&conn)?;
+    // v21 — Pre-spawn Worktree Pool (issue #609). The `warm_worktrees` table
+    // is created inline above (it's a new table, not a column add), so this
+    // safety net only needs to ensure it exists on a DB whose schema_version
+    // was bumped by a build that didn't yet include the inline CREATE.
+    ensure_warm_worktables_table(&conn)?;
     // Data migration (#495): rehash any coordinator token a pre-hashing build
     // left as cleartext. Idempotent, so it's safe to run on every init.
     ensure_coordinator_tokens_hashed(&conn)?;
@@ -1773,6 +1820,11 @@ pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
     let db = get().lock().unwrap();
     db.execute("DELETE FROM agent_nodes WHERE mesh_id = ?1", params![id])?;
+    // The `warm_worktrees.mesh_id` FK declares ON DELETE CASCADE, but SQLite
+    // leaves foreign-key enforcement off by default (no `PRAGMA foreign_keys`
+    // is set), so the cascade never fires — drop the mesh's pool rows
+    // explicitly or they outlive the mesh as orphans (issue #609).
+    delete_warm_worktrees_for_mesh_inner(&db, id)?;
     db.execute("DELETE FROM meshes WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -1852,6 +1904,19 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
     db.execute(
         "UPDATE agent_nodes SET name = ?1 WHERE id = ?2",
         params![name, id],
+    )?;
+    Ok(())
+}
+
+/// Update an agent node's `worktree_name` column. Used by the warm-pool
+/// tracer bullet (issue #609) after a successful claim so the node row
+/// reflects the preassigned slug the pool baked into the directory name.
+/// Idempotent — a no-op if the column already carries the same value.
+pub fn set_agent_node_worktree_name(id: i64, worktree_name: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE agent_nodes SET worktree_name = ?1 WHERE id = ?2",
+        params![worktree_name, id],
     )?;
     Ok(())
 }
@@ -2005,5 +2070,326 @@ pub fn list_pending_worktree_removals() -> SqlResult<Vec<PendingWorktreeRemoval>
 pub fn delete_pending_worktree_removal(path: &str) -> SqlResult<()> {
     let db = get().lock().unwrap();
     delete_pending_worktree_removal_inner(&db, path)
+}
+
+// --- Pre-spawn Worktree Pool (issue #609, PRD #608) ---------------------------
+//
+// The pool is opt-in and best-effort: the spawn pipeline always falls back to a
+// cold worktree creation when no `available` row exists for the mesh, so a
+// corrupted / empty pool never blocks spawn. The DB row is just bookkeeping —
+// the actual fast-checkout benefit comes from the on-disk directory the row
+// points at. The row's only invariants are (a) `path` matches an existing
+// directory when `status = 'available'` (or `spawn` will cold-fall-back),
+// (b) `preassigned_name` is unique per mesh (so a claim never aliases an
+// existing `agent_nodes.worktree_name`), and (c) `base_sha` is what `git rev-
+// parse HEAD` returns inside the directory.
+
+/// Lifecycle states for a `warm_worktrees` row.
+///
+/// `filling` is set while the background worker is mid-checkout — a concurrent
+/// `claim_warm_entry_for_mesh` skips it and either takes the next `available`
+/// row or returns `None` (cold spawn). `claimed` is the transient in-flight
+/// marker the claim flips the row to; if `forget_after_spawn` then fails (DB
+/// error after a successful spawn), the row sits at `claimed` with a live
+/// directory — the startup reconcile prunes those (`status='claimed'` OR
+/// missing-directory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmWorktreeStatus {
+    Filling,
+    Available,
+    Claimed,
+}
+
+impl WarmWorktreeStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WarmWorktreeStatus::Filling => "filling",
+            WarmWorktreeStatus::Available => "available",
+            WarmWorktreeStatus::Claimed => "claimed",
+        }
+    }
+}
+
+/// Safety-net (v21): create the `warm_worktrees` table if it isn't there.
+/// Mirrors the `ensure_*` pattern: a DB whose schema_version was bumped past
+/// v21 by a build that didn't yet include the inline CREATE will gain the
+/// table here. Idempotent — `CREATE TABLE IF NOT EXISTS` is a no-op when the
+/// table is already present.
+pub(crate) fn ensure_warm_worktables_table(conn: &Connection) -> SqlResult<()> {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS warm_worktrees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
+            path TEXT NOT NULL UNIQUE,
+            preassigned_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'filling',
+            base_sha TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_mesh ON warm_worktrees(mesh_id);
+        CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
+        ",
+    )?;
+    Ok(())
+}
+
+/// Insert a new warm_worktrees row. The pool worker calls this AFTER cutting
+/// the on-disk worktree so a `status = 'available'` row always points at a
+/// real directory. `base_sha` is recorded for the spawn-time freshness check.
+pub fn insert_warm_worktree(
+    mesh_id: i64,
+    path: &str,
+    preassigned_name: &str,
+    base_sha: Option<&str>,
+    status: WarmWorktreeStatus,
+) -> SqlResult<i64> {
+    let db = get().lock().unwrap();
+    insert_warm_worktree_inner(&db, mesh_id, path, preassigned_name, base_sha, status)
+}
+
+pub(crate) fn insert_warm_worktree_inner(
+    conn: &Connection,
+    mesh_id: i64,
+    path: &str,
+    preassigned_name: &str,
+    base_sha: Option<&str>,
+    status: WarmWorktreeStatus,
+) -> SqlResult<i64> {
+    conn.execute(
+        "INSERT INTO warm_worktrees (mesh_id, path, preassigned_name, status, base_sha)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            mesh_id,
+            path,
+            preassigned_name,
+            status.as_str(),
+            base_sha,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Mark a fresh row as `available` once the pool worker finishes cutting the
+/// on-disk worktree. The flip is a single UPDATE — no race window where a
+/// concurrent claim sees a `filling` row that doesn't yet point at a real
+/// directory, because claimers always take the row to `claimed` BEFORE they
+/// adopt its path.
+pub fn mark_warm_worktree_available(id: i64, base_sha: Option<&str>) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    mark_warm_worktree_available_inner(&db, id, base_sha)
+}
+
+pub(crate) fn mark_warm_worktree_available_inner(
+    conn: &Connection,
+    id: i64,
+    base_sha: Option<&str>,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE warm_worktrees SET status = ?1, base_sha = ?2, updated_at = datetime('now') WHERE id = ?3",
+        params![WarmWorktreeStatus::Available.as_str(), base_sha, id],
+    )?;
+    Ok(())
+}
+
+/// Atomically claim the oldest available warm entry for `mesh_id`.
+///
+/// "Atomic" here means: a single `UPDATE ... RETURNING` flips status from
+/// `available` to `claimed` and returns the row, so two concurrent manual
+/// spawns on the same mesh can never both claim the same entry. SQLite
+/// serialises the write inside the transaction; the spawn that loses the
+/// race simply gets `None` and falls back to cold.
+///
+/// Returns `None` if no `available` row exists (empty / corrupted pool, or all
+/// entries are mid-fill) — caller is expected to cold-spawn in that case.
+pub fn claim_warm_entry_for_mesh(mesh_id: i64) -> SqlResult<Option<WarmWorktree>> {
+    let db = get().lock().unwrap();
+    claim_warm_entry_for_mesh_inner(&db, mesh_id)
+}
+
+pub(crate) fn claim_warm_entry_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Option<WarmWorktree>> {
+    // Pick the oldest available row by `created_at` so the pool drains FIFO —
+    // a long-lived warm entry is the one most likely to need a background
+    // refresh, and adopting it now evens out the freshness.
+    let mut stmt = conn.prepare(
+        "SELECT id, path, preassigned_name, base_sha
+         FROM warm_worktrees
+         WHERE mesh_id = ?1 AND status = ?2
+         ORDER BY created_at ASC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query(params![mesh_id, WarmWorktreeStatus::Available.as_str()])?;
+    let row = match rows.next()? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+    let id: i64 = row.get(0)?;
+    // Flip to `claimed` in a single statement. The transaction-scoped write
+    // means a concurrent claimer that selected the same row will either see
+    // status = 'claimed' (skipped by the WHERE filter) or be blocked behind
+    // the in-flight transaction — never both read+write 'available'.
+    let updated = conn.execute(
+        "UPDATE warm_worktrees SET status = ?1, updated_at = datetime('now') WHERE id = ?2 AND status = ?3",
+        params![
+            WarmWorktreeStatus::Claimed.as_str(),
+            id,
+            WarmWorktreeStatus::Available.as_str(),
+        ],
+    )?;
+    if updated == 0 {
+        // Lost the race to a concurrent claimer; report no row.
+        return Ok(None);
+    }
+    Ok(Some(WarmWorktree {
+        id,
+        path: row.get(1)?,
+        preassigned_name: row.get(2)?,
+        base_sha: row.get(3)?,
+    }))
+}
+
+/// Delete a warm pool row by id. Called after a successful spawn (we don't
+/// keep the row around as a 'claimed' tombstone — the directory itself
+/// becomes the node's worktree and the row's bookkeeping purpose is done).
+pub fn delete_warm_worktree(id: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute("DELETE FROM warm_worktrees WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Delete every warm pool row for a mesh. Called by `delete_mesh` (foreign-key
+/// cascade is off, so the rows must be removed explicitly). Returns the number
+/// of rows deleted. Lock-free `_inner` so `delete_mesh` can run it under the
+/// connection it already holds.
+pub(crate) fn delete_warm_worktrees_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<usize> {
+    let n = conn.execute("DELETE FROM warm_worktrees WHERE mesh_id = ?1", params![mesh_id])?;
+    Ok(n)
+}
+
+/// List every pool row whose on-disk directory is missing. Used by the
+/// startup reconcile to prune orphaned rows (the row says the directory
+/// exists, the directory says otherwise). The rows are returned so the
+/// caller can also `rm -rf` the ghost directory if it materialised in some
+/// partial state, but for the v21 tracer we only need the id list to delete.
+pub fn list_stale_warm_worktrees() -> SqlResult<Vec<i64>> {
+    let db = get().lock().unwrap();
+    list_stale_warm_worktrees_inner(&db)
+}
+
+pub(crate) fn list_stale_warm_worktrees_inner(conn: &Connection) -> SqlResult<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT id, path FROM warm_worktrees")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut stale = Vec::new();
+    for r in rows {
+        let (id, path) = r?;
+        if !std::path::Path::new(&path).exists() {
+            stale.push(id);
+        }
+    }
+    Ok(stale)
+}
+
+/// Delete rows that are stuck in `claimed` status (their directories exist
+/// — `list_stale_warm_worktrees` won't catch them). The only path that
+/// produces a `claimed` row is `claim_warm_entry_for_mesh_inner`; the only
+/// path that should remove it is `forget_after_spawn`, called from the
+/// spawn's success branch. If that DELETE fails (DB error after a
+/// successful spawn) the row sits at `claimed` forever — `claim_warm_entry`
+/// won't pick it up again (the `status='available'` filter blocks it) and
+/// the missing-dir scan won't prune it. This function closes that hole by
+/// pruning any `claimed` row older than the most-recent app launch's
+/// reconcile. Called once from `reconcile_on_startup`.
+pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    delete_orphaned_claimed_warm_worktrees_inner(&db)
+}
+
+pub(crate) fn delete_orphaned_claimed_warm_worktrees_inner(
+    conn: &Connection,
+) -> SqlResult<usize> {
+    let n = conn.execute(
+        "DELETE FROM warm_worktrees WHERE status = 'claimed'",
+        [],
+    )?;
+    Ok(n)
+}
+
+/// How many `available` warm entries a mesh currently has. The pool worker
+/// reads this before/after a fill so it knows whether to keep filling (pool
+/// below `target`) or stand down (pool at or above `target`). Target is held
+/// by the worker (hardcoded to 1 for the v21 tracer bullet) so we don't
+/// plumb a config parameter through yet.
+pub fn count_available_warm_for_mesh(mesh_id: i64) -> SqlResult<i64> {
+    let db = get().lock().unwrap();
+    count_available_warm_for_mesh_inner(&db, mesh_id)
+}
+
+pub(crate) fn count_available_warm_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM warm_worktrees WHERE mesh_id = ?1 AND status = 'available'",
+        params![mesh_id],
+        |row| row.get(0),
+    )?;
+    Ok(n)
+}
+
+/// List every worktree-enabled mesh (use_worktree = 1) along with its id,
+/// path, and base_ref. The pool worker iterates this on startup to ensure at
+/// least one warm entry per mesh. Mirrors the projection `MeshRow` already
+/// uses for the spawn-time read so the two paths can't drift.
+pub fn list_worktree_enabled_meshes_for_warm() -> SqlResult<Vec<WarmPoolMeshRow>> {
+    let db = get().lock().unwrap();
+    list_worktree_enabled_meshes_for_warm_inner(&db)
+}
+
+pub(crate) fn list_worktree_enabled_meshes_for_warm_inner(
+    conn: &Connection,
+) -> SqlResult<Vec<WarmPoolMeshRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, base_ref FROM meshes WHERE use_worktree = 1",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(WarmPoolMeshRow {
+            id: row.get(0)?,
+            path: row.get(1)?,
+            base_ref: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Lightweight projection of `meshes` for the warm pool worker — only the
+/// three columns the worker needs. Kept private to the pool (not part of the
+/// `MeshRow` typed view) so the pool worker can't accidentally widen its
+/// dependency on the broader mesh config.
+#[derive(Debug, Clone)]
+pub struct WarmPoolMeshRow {
+    pub id: i64,
+    pub path: String,
+    pub base_ref: String,
+}
+
+/// What a claim hands back to the spawn path: the four columns it actually
+/// consumes. The other `warm_worktrees` columns (`mesh_id`, `status`,
+/// `created_at`, `updated_at`) are bookkeeping the claimer doesn't read, so
+/// they're deliberately omitted rather than carried as never-read fields.
+#[derive(Debug, Clone)]
+pub struct WarmWorktree {
+    pub id: i64,
+    pub path: String,
+    pub preassigned_name: String,
+    pub base_sha: Option<String>,
 }
 

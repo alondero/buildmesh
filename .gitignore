@@ -66,3 +66,4 @@ coverage/
 # spike's test_user_buf.exe). Build output belongs under target/, never here.
 /*.exe
 /*.pdb
+.altitude-findings.json

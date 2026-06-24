@@ -6,3 +6,4 @@ pub mod github;
 pub mod mesh;
 pub mod transcript_reader;
 pub mod usage;
+pub mod warm_pool;
