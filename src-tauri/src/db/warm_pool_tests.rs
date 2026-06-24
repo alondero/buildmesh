@@ -5,8 +5,9 @@
 //!     (the case that bit `source_issue` / `sandbox` in earlier versions);
 //!   * `claim_warm_entry_for_mesh` is atomic — two concurrent claims on the
 //!     same mesh never both succeed;
-//!   * `list_stale_warm_worktrees` returns rows whose on-disk directory is
-//!     missing (so the startup reconcile can prune them);
+//!   * `list_warm_worktrees_to_reconcile` returns rows whose on-disk directory
+//!     is missing OR that a crash left stuck in `filling`/`refreshing` (so the
+//!     startup reconcile can tear down their git metadata + prune them, #610);
 //!   * `count_available_warm_for_mesh` matches the worker's target bookkeeping
 //!     (the v21 tracer bullet's target is 1, so the worker fills until the
 //!     count is at least 1, then stands down);
@@ -20,7 +21,7 @@ mod tests {
     use crate::db::{
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
         delete_warm_worktrees_for_mesh_inner, ensure_warm_worktables_table,
-        insert_warm_worktree_inner, list_stale_warm_worktrees_inner,
+        insert_warm_worktree_inner, list_warm_worktrees_to_reconcile_inner,
         list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
         WarmWorktreeStatus,
     };
@@ -205,15 +206,32 @@ mod tests {
         assert_eq!(claimed.base_sha.as_deref(), Some("deadbeef"));
     }
 
-    /// `list_stale_warm_worktrees` returns ids whose on-disk directory is
-    /// missing — the startup reconcile uses this to prune ghost rows. A
-    /// row whose path DOES exist on disk is left alone.
+    /// Threshold the reconcile tests pass: any `filling`/`refreshing` row older
+    /// than this is treated as a crash-orphan; younger ones are assumed to be a
+    /// worker filling right now and are left alone (issue #610 race guard).
+    const STALE_AFTER_MIN: i64 = 5;
+
+    /// Back-date a row's `created_at` so the age guard treats it as a
+    /// crash-orphan from a prior session rather than an in-flight fill.
+    fn age_row(conn: &Connection, id: i64) {
+        conn.execute(
+            "UPDATE warm_worktrees SET created_at = datetime('now', '-10 minutes') WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+    }
+
+    /// An `available` row whose on-disk directory is missing is reconciled
+    /// regardless of age — a settled `available` row always had its directory
+    /// created, so a missing one is unambiguously the manual-delete case (issue
+    /// #610 AC3). A healthy `available` row whose path exists is left alone.
     #[test]
-    fn list_stale_returns_rows_with_missing_directory() {
+    fn reconcile_flags_available_row_with_missing_directory() {
         let conn = v20_schema_with_mesh(true);
         ensure_warm_worktables_table(&conn).unwrap();
         // Ghost row: directory doesn't exist (path is just a fresh tempfile
-        // string; we won't create it).
+        // string; we won't create it). Deliberately left at the fresh
+        // `created_at` to prove `available` rows ignore the age guard.
         let ghost_id = insert_warm_worktree_inner(
             &conn,
             1,
@@ -235,12 +253,125 @@ mod tests {
         )
         .unwrap();
 
-        let stale = list_stale_warm_worktrees_inner(&conn).unwrap();
-        assert_eq!(stale, vec![ghost_id], "only the ghost row should be stale");
-        // Live row stays.
+        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![ghost_id], "only the ghost row should be reconciled");
+        // The entry carries the path + a `dir_present=false` flag so the
+        // reconcile skips the (pointless) git teardown and drops the row.
+        assert_eq!(entries[0].path, "/this/path/does/not/exist/anywhere");
+        assert!(!entries[0].dir_present, "a missing-dir entry must report dir_present=false");
         assert!(
-            !stale.contains(&live_id),
+            !ids.contains(&live_id),
             "row pointing at an existing directory must not be flagged stale"
+        );
+    }
+
+    /// An OLD `filling` row whose directory exists (a crash mid-`git worktree
+    /// add` in a prior session) is reconciled with `dir_present=true` so the
+    /// caller tears down the partial worktree (issue #610 AC1). The missing-dir
+    /// scan alone would miss it (its directory is present).
+    #[test]
+    fn reconcile_flags_old_filling_row_with_live_directory() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let filling_id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            tmp.path().to_str().unwrap(),
+            "pool-warm-filling",
+            None,
+            WarmWorktreeStatus::Filling,
+        )
+        .unwrap();
+        age_row(&conn, filling_id);
+
+        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+        assert_eq!(
+            ids, vec![filling_id],
+            "an aged `filling` crash-orphan must be reconciled even when its directory exists"
+        );
+        assert!(entries[0].dir_present, "a live-directory entry must report dir_present=true");
+    }
+
+    /// THE RACE GUARD: a FRESH `filling` row (a worker is mid-checkout right
+    /// now) must NOT be reconciled. Without the age guard the reconcile would
+    /// tear down a directory another thread's `create_git_worktree` is still
+    /// writing (issue #610 review). The row is young (default `created_at`), so
+    /// it stays put until it either flips to `available` or genuinely ages out.
+    #[test]
+    fn reconcile_skips_fresh_filling_row() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Inserted at `datetime('now')` — NOT aged.
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            tmp.path().to_str().unwrap(),
+            "pool-warm-inflight",
+            None,
+            WarmWorktreeStatus::Filling,
+        )
+        .unwrap();
+
+        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        assert!(
+            entries.is_empty(),
+            "a freshly-inserted `filling` row (a worker filling it right now) must NOT be reconciled"
+        );
+    }
+
+    /// An OLD `refreshing` row is reconciled like a `filling` one (issue #610
+    /// AC1). `refreshing` is now a first-class `WarmWorktreeStatus` variant;
+    /// here we set it through the enum's `as_str()` to mirror what the future
+    /// SHA-refresh worker (PRD #608 §4) will write.
+    #[test]
+    fn reconcile_flags_old_refreshing_row() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            tmp.path().to_str().unwrap(),
+            "pool-warm-refreshing",
+            Some("cccc"),
+            WarmWorktreeStatus::Refreshing,
+        )
+        .unwrap();
+        age_row(&conn, id);
+
+        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec![id], "an aged `refreshing` crash-orphan must be reconciled");
+    }
+
+    /// A `claimed` row is NEVER reconciled here — even aged, even dir-present:
+    /// its directory may already back a live agent node's worktree, so tearing
+    /// it down would destroy a running agent's work. `claimed` orphans are
+    /// pruned (row-only) by `delete_orphaned_claimed_warm_worktrees` instead.
+    #[test]
+    fn reconcile_never_flags_claimed_rows() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            tmp.path().to_str().unwrap(),
+            "pool-warm-claimed",
+            Some("dddd"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+        age_row(&conn, id);
+
+        let entries = list_warm_worktrees_to_reconcile_inner(&conn, STALE_AFTER_MIN).unwrap();
+        assert!(
+            !entries.iter().any(|e| e.id == id),
+            "a `claimed` row (its dir may back a live node) must never be torn down by reconcile"
         );
     }
 

@@ -2088,14 +2088,17 @@ pub fn delete_pending_worktree_removal(path: &str) -> SqlResult<()> {
 ///
 /// `filling` is set while the background worker is mid-checkout — a concurrent
 /// `claim_warm_entry_for_mesh` skips it and either takes the next `available`
-/// row or returns `None` (cold spawn). `claimed` is the transient in-flight
-/// marker the claim flips the row to; if `forget_after_spawn` then fails (DB
-/// error after a successful spawn), the row sits at `claimed` with a live
-/// directory — the startup reconcile prunes those (`status='claimed'` OR
-/// missing-directory).
+/// row or returns `None` (cold spawn). `refreshing` is the analogous mid-flight
+/// marker for the background SHA-refresh loop (PRD #608 §4 — declared here so
+/// the reconcile + claim filters already recognise it; its producer is a
+/// follow-up). `claimed` is the transient in-flight marker the claim flips the
+/// row to; if `forget_after_spawn` then fails (DB error after a successful
+/// spawn), the row sits at `claimed` with a live directory — the startup
+/// reconcile prunes those (`status='claimed'`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarmWorktreeStatus {
     Filling,
+    Refreshing,
     Available,
     Claimed,
 }
@@ -2104,6 +2107,7 @@ impl WarmWorktreeStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             WarmWorktreeStatus::Filling => "filling",
+            WarmWorktreeStatus::Refreshing => "refreshing",
             WarmWorktreeStatus::Available => "available",
             WarmWorktreeStatus::Claimed => "claimed",
         }
@@ -2273,33 +2277,96 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
     Ok(n)
 }
 
-/// List every pool row whose on-disk directory is missing. Used by the
-/// startup reconcile to prune orphaned rows (the row says the directory
-/// exists, the directory says otherwise). The rows are returned so the
-/// caller can also `rm -rf` the ghost directory if it materialised in some
-/// partial state, but for the v21 tracer we only need the id list to delete.
-pub fn list_stale_warm_worktrees() -> SqlResult<Vec<i64>> {
-    let db = get().lock().unwrap();
-    list_stale_warm_worktrees_inner(&db)
+/// A pool row the startup reconcile must tear down: its `id` (to delete the
+/// SQLite row), its on-disk `path`, and whether that directory is still
+/// `dir_present` (so the caller knows whether a Git worktree teardown is even
+/// needed before dropping the row). See `list_warm_worktrees_to_reconcile_inner`
+/// for which rows qualify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmReconcileEntry {
+    pub id: i64,
+    pub path: String,
+    /// `true` when `path` still exists on disk at scan time — the reconcile
+    /// must tear down the Git worktree before deleting the row. `false` ⇒ the
+    /// directory is already gone (manual delete / crash before checkout), so
+    /// there is nothing on disk to remove and the row can be dropped directly.
+    pub dir_present: bool,
 }
 
-pub(crate) fn list_stale_warm_worktrees_inner(conn: &Connection) -> SqlResult<Vec<i64>> {
-    let mut stmt = conn.prepare("SELECT id, path FROM warm_worktrees")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+/// List every pool row the startup reconcile must clean up (issue #610). A row
+/// qualifies when EITHER:
+///   * it is an `available` row whose on-disk directory is missing — the user
+///     hand-deleted `.claude/worktrees/<slug>` (an `available` row always had
+///     its directory created, so a missing one is unambiguously broken,
+///     regardless of age), OR
+///   * it is stuck `filling` / `refreshing` AND is older than
+///     `stale_after_minutes`. The age guard is load-bearing: `prewarm_one`
+///     (run by this reconcile's own fill step AND by `refill_after_claim` on a
+///     separate thread) inserts a `filling` row and then spends *seconds*
+///     inside `create_git_worktree` before flipping it to `available`. Without
+///     the age guard the reconcile could observe a row a worker is actively
+///     mid-checkout on and destroy the in-flight worktree. A genuine
+///     crash-orphan is always older than a few minutes (the app was closed and
+///     relaunched in between); an in-flight fill is seconds old. The threshold
+///     cleanly separates the two.
+///
+/// `claimed` rows are deliberately EXCLUDED: their directory may already back a
+/// live agent node's worktree, so the caller must never tear it down — those
+/// are pruned (row only) by `delete_orphaned_claimed_warm_worktrees`.
+pub fn list_warm_worktrees_to_reconcile(
+    stale_after_minutes: i64,
+) -> SqlResult<Vec<WarmReconcileEntry>> {
+    let db = get().lock().unwrap();
+    list_warm_worktrees_to_reconcile_inner(&db, stale_after_minutes)
+}
+
+pub(crate) fn list_warm_worktrees_to_reconcile_inner(
+    conn: &Connection,
+    stale_after_minutes: i64,
+) -> SqlResult<Vec<WarmReconcileEntry>> {
+    // SQLite computes the age flag (`created_at` older than the threshold); the
+    // disk-existence check can't be pushed into SQL so the final
+    // in-flight-vs-available decision is made in Rust. The modifier string is
+    // assembled with `||` so the threshold binds as a parameter rather than
+    // being interpolated into SQL.
+    let mut stmt = conn.prepare(
+        "SELECT id, path, status,
+                (created_at <= datetime('now', '-' || ?1 || ' minutes')) AS age_stale
+         FROM warm_worktrees
+         WHERE status != 'claimed'",
+    )?;
+    let rows = stmt.query_map(params![stale_after_minutes], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, i64>(3)? != 0,
+        ))
     })?;
-    let mut stale = Vec::new();
+    let mut out = Vec::new();
     for r in rows {
-        let (id, path) = r?;
-        if !std::path::Path::new(&path).exists() {
-            stale.push(id);
+        let (id, path, status, age_stale) = r?;
+        let in_flight = status == WarmWorktreeStatus::Filling.as_str()
+            || status == WarmWorktreeStatus::Refreshing.as_str();
+        let dir_present = std::path::Path::new(&path).exists();
+        // In-flight rows are reconciled only when old enough to be a
+        // crash-orphan (never a row a worker is filling right now); a settled
+        // `available` row is reconciled when its directory has vanished.
+        let qualifies = if in_flight { age_stale } else { !dir_present };
+        if qualifies {
+            out.push(WarmReconcileEntry {
+                id,
+                path,
+                dir_present,
+            });
         }
     }
-    Ok(stale)
+    Ok(out)
 }
 
 /// Delete rows that are stuck in `claimed` status (their directories exist
-/// — `list_stale_warm_worktrees` won't catch them). The only path that
+/// — `list_warm_worktrees_to_reconcile` deliberately excludes `claimed` rows
+/// because their directory may back a live node). The only path that
 /// produces a `claimed` row is `claim_warm_entry_for_mesh_inner`; the only
 /// path that should remove it is `forget_after_spawn`, called from the
 /// spawn's success branch. If that DELETE fails (DB error after a
