@@ -54,6 +54,16 @@ use crate::db::{self, WarmWorktreeStatus};
 use crate::session_naming::on_spawn;
 use std::path::Path;
 
+/// A `filling` / `refreshing` row younger than this is assumed to belong to a
+/// worker that is actively mid-checkout right now (a fresh `refill_after_claim`
+/// fill takes seconds, not minutes), so the startup reconcile leaves it alone —
+/// tearing it down would destroy in-flight work. Only older rows are treated as
+/// crash-orphans from a prior session. Generous on purpose: no legitimate fill
+/// approaches this, and a genuine orphan is always far older (the app was shut
+/// down and relaunched in between), so a slightly-delayed cleanup of a truly
+/// stuck row is a fine trade for never racing a live worker (issue #610 review).
+pub const WARM_FILL_STALE_AFTER_MINUTES: i64 = 5;
+
 /// Decide whether the spawn path should consult the pool for a given node.
 ///
 /// Eligible == a **fresh worktree spawn** — one whose own worktree directory
@@ -322,12 +332,14 @@ fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
     }
 }
 
-/// Run the startup reconcile pass: prune stale rows + fill any mesh that
-/// is below the per-mesh target.
+/// Run the startup reconcile pass (issue #610): prune crash-orphaned rows
+/// (and their Git worktree metadata) + fill any mesh that is below the
+/// per-mesh target.
 ///
-/// Called from `lib.rs::setup` once, after `db::init`. Failures are logged
-/// and swallowed — a transient git error on one mesh must not block the
-/// rest of the reconcile or the rest of app startup.
+/// Called from `lib.rs::setup` once, after `db::init`, on a background thread
+/// so it never blocks the UI / window-creation path (issue #610 AC4).
+/// Failures are logged and swallowed — a transient git error on one mesh must
+/// not block the rest of the reconcile or the rest of app startup.
 pub fn reconcile_on_startup() {
     // Step 1a: prune rows stuck in `claimed` after a previous crash (the
     // spawn path's `forget_after_spawn` failed after a successful spawn,
@@ -343,21 +355,23 @@ pub fn reconcile_on_startup() {
         Err(e) => tracing::warn!("warm_pool: claimed-row prune failed: {}", e),
     }
 
-    // Step 1b: prune rows whose directory is gone. These are crashes /
-    // user-deletes between row-insert and the spawn-time claim — the row
-    // would block a future `claim_warm_entry_for_mesh` (it'd return a
-    // stale path that the spawn path then drops), but pruning early keeps
-    // `list_worktree_enabled_meshes_for_warm`'s bookkeeping clean.
-    match db::list_stale_warm_worktrees() {
-        Ok(stale) => {
-            for id in stale {
-                if let Err(e) = db::delete_warm_worktree(id) {
-                    tracing::warn!("warm_pool: failed to prune stale row {}: {}", id, e);
-                } else {
-                    tracing::info!("warm_pool: pruned stale row {}", id);
-                }
-            }
-        }
+    // Step 1b: reconcile rows whose directory is gone (a crash / user-delete
+    // between row-insert and the spawn-time claim) OR that a prior crash left
+    // stuck `filling` / `refreshing` for longer than `WARM_FILL_STALE_AFTER`
+    // (issue #610). These rows never became a live agent node's worktree —
+    // `claimed` rows are handled by step 1a — so it's safe to tear down their
+    // Git worktree metadata. The age guard in `list_warm_worktrees_to_reconcile`
+    // keeps this pass from racing a worker that is filling a row right now.
+    match db::list_warm_worktrees_to_reconcile(WARM_FILL_STALE_AFTER_MINUTES) {
+        Ok(entries) => reconcile_warm_entries(
+            entries,
+            // Pool entries are detached (`prewarm_one` cuts them with mode
+            // `detached`), so they own no branch — use the branch-preserving
+            // remover. The branch-deleting variant would be a latent footgun
+            // if a future `refreshing` worker ever checked out a real branch.
+            crate::git::worktree::remove_one_worktree,
+            db::delete_warm_worktree,
+        ),
         Err(e) => tracing::warn!("warm_pool: stale-row scan failed: {}", e),
     }
 
@@ -391,6 +405,65 @@ pub fn reconcile_on_startup() {
                 mesh.id,
                 mesh.path,
                 e
+            );
+        }
+    }
+}
+
+/// Tear down each reconcilable pool entry, then drop its bookkeeping row —
+/// **only after** the on-disk teardown succeeds. Dependencies (`remove`,
+/// `delete_row`) are injected so the two invariants this enforces are testable
+/// without the global DB or a real filesystem:
+///
+///   1. **Teardown precedes row-delete, and the row survives a teardown
+///      failure.** Deleting the row when `remove` errored (a locked / partial
+///      worktree) would orphan the directory on disk forever — no later
+///      reconcile would ever revisit a path with no row. Keeping the row lets
+///      the next startup retry (issue #610 review).
+///   2. **A row whose directory is already gone skips the teardown entirely**
+///      and is dropped directly — there is nothing on disk to remove, and
+///      calling `remove` would just re-derive the host path to confirm the
+///      absence.
+fn reconcile_warm_entries(
+    entries: Vec<db::WarmReconcileEntry>,
+    remove: impl Fn(&str) -> Result<(), String>,
+    delete_row: impl Fn(i64) -> db::SqlResult<()>,
+) {
+    for entry in entries {
+        if entry.dir_present {
+            match remove(&entry.path) {
+                Ok(()) => match delete_row(entry.id) {
+                    Ok(()) => tracing::info!(
+                        "warm_pool: reconciled stale row {} ({})",
+                        entry.id,
+                        entry.path
+                    ),
+                    Err(e) => tracing::warn!(
+                        "warm_pool: removed worktree {} but failed to delete row {}: {}",
+                        entry.path,
+                        entry.id,
+                        e
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    "warm_pool: failed to remove git worktree {}; keeping row {} to retry next startup: {}",
+                    entry.path,
+                    entry.id,
+                    e
+                ),
+            }
+        } else if let Err(e) = delete_row(entry.id) {
+            tracing::warn!(
+                "warm_pool: failed to delete ghost row {} (dir already gone {}): {}",
+                entry.id,
+                entry.path,
+                e
+            );
+        } else {
+            tracing::info!(
+                "warm_pool: pruned ghost row {} (directory already gone: {})",
+                entry.id,
+                entry.path
             );
         }
     }
@@ -507,6 +580,98 @@ pub fn drain_excess_warm_entries(mesh: &db::WarmPoolMeshRow) -> Result<usize, St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // ---- reconcile_warm_entries (the teardown + row-delete orchestration) ----
+    //
+    // These pin the two invariants the issue #610 review flagged as untested:
+    // teardown precedes row-delete, and the row survives a teardown failure so
+    // a future startup can retry rather than orphaning the directory forever.
+
+    fn entry(id: i64, dir_present: bool) -> db::WarmReconcileEntry {
+        db::WarmReconcileEntry {
+            id,
+            path: format!("/repo/m/.claude/worktrees/slug-{}", id),
+            dir_present,
+        }
+    }
+
+    /// A live-directory entry: `remove` must be called BEFORE `delete_row`, and
+    /// the row must be deleted once teardown succeeds. The shared log proves the
+    /// ordering the doc comment promises (teardown-before-delete) — a refactor
+    /// that flipped the two calls would orphan the directory on a delete failure.
+    #[test]
+    fn reconcile_removes_worktree_before_deleting_row() {
+        let log: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        reconcile_warm_entries(
+            vec![entry(7, true)],
+            |path| {
+                log.lock().unwrap().push(format!("remove:{}", path));
+                Ok(())
+            },
+            |id| {
+                log.lock().unwrap().push(format!("delete:{}", id));
+                Ok(())
+            },
+        );
+        let log = log.lock().unwrap();
+        assert_eq!(
+            *log,
+            vec![
+                "remove:/repo/m/.claude/worktrees/slug-7".to_string(),
+                "delete:7".to_string()
+            ],
+            "git teardown must run before the row delete"
+        );
+    }
+
+    /// Teardown failure ⇒ the row is KEPT (delete_row never called) so the next
+    /// startup retries. Deleting it here would orphan the partial worktree
+    /// directory forever — the exact leak the review caught.
+    #[test]
+    fn reconcile_keeps_row_when_teardown_fails() {
+        let deleted: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+        reconcile_warm_entries(
+            vec![entry(9, true)],
+            |_path| Err("worktree locked".to_string()),
+            |id| {
+                deleted.lock().unwrap().push(id);
+                Ok(())
+            },
+        );
+        assert!(
+            deleted.lock().unwrap().is_empty(),
+            "a failed teardown must NOT delete the row (it would orphan the on-disk worktree)"
+        );
+    }
+
+    /// A row whose directory is already gone skips teardown entirely and is
+    /// dropped directly — there is nothing on disk to remove.
+    #[test]
+    fn reconcile_skips_teardown_for_missing_directory() {
+        let removed: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let deleted: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+        reconcile_warm_entries(
+            vec![entry(3, false)],
+            |path| {
+                removed.lock().unwrap().push(path.to_string());
+                Ok(())
+            },
+            |id| {
+                deleted.lock().unwrap().push(id);
+                Ok(())
+            },
+        );
+        assert!(
+            removed.lock().unwrap().is_empty(),
+            "a ghost row (directory already gone) must not invoke the git teardown"
+        );
+        assert_eq!(
+            *deleted.lock().unwrap(),
+            vec![3],
+            "a ghost row must still have its bookkeeping row dropped"
+        );
+    }
 
     /// Pin the slug format: a plain `on_spawn` adj-adj-noun slug with NO
     /// prefix. The manual-spawn fast path adopts this slug as the node's
