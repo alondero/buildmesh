@@ -727,3 +727,140 @@ fn remove_worktree_treats_missing_working_dir_as_success() {
     remove_one_worktree(&wt_dir.path_str())
         .expect("a missing working directory is nothing to remove → success");
 }
+
+// ── v22 / issue #611 — `delete_worktrees` rejects pool paths ────────────────
+
+/// Per-process scratch path for the test DB. Mirrors the
+/// `commands::agent::tests::pr_test_db_path` pattern: `db::init` is
+/// one-shot per process, so all tests in this file that touch the
+/// global DB share the same path. The `.db` suffix is required —
+/// `Connection::open(path)` expects a file, not a directory (see
+/// `commands/agent.rs:1598` for the full rationale).
+fn prune_test_db_path() -> std::path::PathBuf {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let p = std::env::temp_dir().join(format!(
+            "buildmesh_prune_pool_test_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    })
+    .clone()
+}
+
+/// `db::init` the global DB if it hasn't been already. Idempotent —
+/// the OnceCell silently keeps whichever DB another test (e.g.
+/// `db::mesh_tests`, `commands::agent::tests`) set up first. Mirrors
+/// `commands::agent::tests::ensure_pr_db` so the two test families
+/// don't trample each other.
+fn ensure_prune_db() {
+    if crate::db::is_initialized() {
+        return;
+    }
+    std::sync::Once::new().call_once(|| {
+        let _ = crate::db::init(&prune_test_db_path());
+    });
+}
+
+/// Pin the `delete_worktrees` → `remove_worktrees` pool-rejection
+/// contract (issue #611). A pool entry's directory is owned by the
+/// `services::warm_pool` background worker; deleting it from the
+/// Worktree Manager tab would either waste the warm-path latency win
+/// or leave a stale row the worker can't GC until the next
+/// reconcile. The UI disables the row's checkbox as the primary
+/// defence; this backend check is defence-in-depth — a stale UI
+/// (or a misrouted API call) must not be able to drop a pool entry.
+///
+/// The error message intentionally names the path so the user can
+/// see exactly which entry was blocked when they bulk-select.
+#[test]
+fn delete_worktrees_rejects_pool_path() {
+    ensure_prune_db();
+
+    // Set up a mesh + a single `warm_worktrees` row at a fake path.
+    // `is_warm_pool_path` only checks the DB row — it doesn't touch
+    // the filesystem — so a path that doesn't exist on disk is fine.
+    let mesh = crate::db::create_mesh("pool-test", "/tmp/buildmesh_pool_test_mesh").unwrap();
+    let pool_path = "/tmp/buildmesh_pool_test_mesh/.claude/worktrees/pool-warm-xyz";
+    crate::db::insert_warm_worktree(
+        mesh.id,
+        pool_path,
+        "pool-warm-xyz",
+        None,
+        crate::db::WarmWorktreeStatus::Available,
+    )
+    .unwrap();
+
+    // Sanity: the row exists so `is_warm_pool_path` reads true. If
+    // this fails the rest of the test is meaningless — the rejection
+    // path never runs.
+    assert!(
+        crate::db::is_warm_pool_path(pool_path).unwrap(),
+        "fixture row must read as a pool path before we exercise the guard"
+    );
+
+    let err = remove_worktrees(&[pool_path.to_string()])
+        .expect_err("remove_worktrees must reject a pool path with Err");
+
+    assert!(
+        err.contains("pre-spawn pool"),
+        "error must name the pool-entry class so the UI surfaces a clear message; got: {}",
+        err
+    );
+    assert!(
+        err.contains(pool_path),
+        "error must include the blocked path so bulk selections identify every entry; got: {}",
+        err
+    );
+
+    // Defence-in-depth check: the DB row is still there. The
+    // rejection must be a no-op on the row — we never partially
+    // delete a pool entry (no DB write, no directory removal).
+    assert!(
+        crate::db::is_warm_pool_path(pool_path).unwrap(),
+        "rejected pool row must remain intact (no partial delete)"
+    );
+}
+
+/// A non-pool path is unaffected by the new guard — `delete_worktrees`
+/// continues to attempt `git worktree remove` for any path the
+/// partition classifies as `deletable`. This test only proves the
+/// partition doesn't mis-route pool paths INTO the deletable bucket;
+/// the actual `git worktree remove` outcome for a non-existent path
+/// is covered by the existing `remove_worktree_treats_missing_working_dir_as_success`
+/// test.
+#[test]
+fn delete_worktrees_does_not_reject_non_pool_path() {
+    ensure_prune_db();
+
+    // Insert a `warm_worktrees` row that is NOT the path we're
+    // asking to delete. `is_warm_pool_path(other_path)` must read
+    // false → no rejection → proceeds to the actual remove call
+    // (which will fail because the directory doesn't exist, but
+    // that's a separate error path covered above).
+    let mesh = crate::db::create_mesh("non-pool-test", "/tmp/buildmesh_non_pool_test_mesh").unwrap();
+    let pool_path = "/tmp/buildmesh_non_pool_test_mesh/.claude/worktrees/pool-warm-abc";
+    crate::db::insert_warm_worktree(
+        mesh.id,
+        pool_path,
+        "pool-warm-abc",
+        None,
+        crate::db::WarmWorktreeStatus::Available,
+    )
+    .unwrap();
+
+    let non_pool_path = "/tmp/buildmesh_non_pool_test_mesh/.claude/worktrees/manual-branch";
+    // Should NOT be rejected — the error (if any) will be from
+    // `git worktree remove` failing on a missing directory, NOT from
+    // the pool guard.
+    let result = remove_worktrees(&[non_pool_path.to_string()]);
+    if let Err(e) = &result {
+        assert!(
+            !e.contains("pre-spawn pool"),
+            "non-pool path must not be rejected as a pool entry; got: {}",
+            e
+        );
+    }
+}

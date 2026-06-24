@@ -35,4 +35,17 @@ scratchpad: string,
  * where neither native spawn is built. Persisted as
  * `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
  */
-sandbox: boolean, };
+sandbox: boolean, 
+/**
+ * Per-mesh target for the pre-spawn Worktree Pool worker
+ * (`services::warm_pool`, issue #609 / v21). `0` disables the pool
+ * for this mesh (no warm entries created on startup, no refill
+ * after claim); `1..=5` is the target the worker fills to.
+ * Clamped at the IPC boundary (`update_mesh_pool_size`), not here
+ * — this field is the typed integer the worker reads. Off by
+ * default (`0`); opted into via the Worktrees Probe's
+ * ConfigurationCard (issue #611). Persisted as
+ * `meshes.pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0`
+ * (schema v22).
+ */
+pre_spawn_pool_size: number, };

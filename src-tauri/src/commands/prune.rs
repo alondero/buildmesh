@@ -90,14 +90,52 @@ fn delete_branches_in_repo(repo_path: &str, branch_names: &[String]) -> Result<(
 /// Remove worktrees by path. Each path is opened as a worktree of its parent
 /// repo and pruned, deleting both the admin entry and the working directory.
 /// The main worktree cannot be removed this way and surfaces as an error.
+///
+/// Pool entries are rejected up-front: a pre-spawn worktree's directory
+/// is owned by the `services::warm_pool` background worker, which will
+/// refill it on the next reconcile (or as soon as the user enables the
+/// pool again). Allowing the Worktree Manager tab to delete a pool
+/// entry would either (a) succeed in deleting the dir, leaving the
+/// worker to detect a missing dir on its next `prewarm_one` and
+/// re-cut — wasteful and confusing — or (b) leave a stale row the
+/// worker doesn't GC until the next reconcile. Either way, the user
+/// loses the warm-path latency win. The Worktree Manager UI also
+/// disables the row's checkbox as the primary defence; this backend
+/// check is defence-in-depth.
 #[tauri::command]
 pub async fn delete_worktrees(worktree_paths: Vec<String>) -> Result<(), String> {
     remove_worktrees(&worktree_paths)
 }
 
 fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
-    let mut errors: Vec<String> = Vec::new();
+    // Partition: pool paths are rejected up-front with a single combined
+    // error so the user sees the full blocked set in one toast, not
+    // multiple per-path errors mixed with successful deletes.
+    let mut pool_paths: Vec<&String> = Vec::new();
+    let mut deletable: Vec<&String> = Vec::new();
     for path in worktree_paths {
+        match db::is_warm_pool_path(path) {
+            Ok(true) => pool_paths.push(path),
+            Ok(false) => deletable.push(path),
+            // DB error: be conservative and treat as deletable — we don't
+            // want a transient DB read failure to silently swallow a
+            // legitimate prune request. The user can still retry.
+            Err(_) => deletable.push(path),
+        }
+    }
+    if !pool_paths.is_empty() {
+        return Err(format!(
+            "cannot delete pre-spawn pool entries (managed automatically): {}",
+            pool_paths
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    for path in deletable {
         if let Err(e) = crate::git::worktree::remove_one_worktree(path) {
             errors.push(format!("{}: {}", path, e));
         }
@@ -316,6 +354,12 @@ fn collect_prune_info(
         worktrees.push(WorktreeInfo {
             is_active: path_is_active(&path, active_paths),
             is_stale: branch_is_stale(&branch, &local_names),
+            // Primary (repo-root) worktree is never a pool entry — pool
+            // entries are always linked worktrees under
+            // `.claude/worktrees/<slug>`. Query is cheap (indexed UNIQUE
+            // on `path`) and keeps the field uniformly populated across
+            // both construction sites.
+            is_pool: db::is_warm_pool_path(&path).unwrap_or(false),
             branch,
             path,
         });
@@ -334,6 +378,7 @@ fn collect_prune_info(
             worktrees.push(WorktreeInfo {
                 is_active: path_is_active(&path, active_paths),
                 is_stale: branch_is_stale(&branch, &local_names),
+                is_pool: db::is_warm_pool_path(&path).unwrap_or(false),
                 branch,
                 path,
             });

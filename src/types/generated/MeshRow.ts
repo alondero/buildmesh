@@ -30,4 +30,10 @@ export type MeshRow = { name: string | null, build_command: string | null, run_c
  * #498) — see [`Mesh::sandbox`]. The column is one; the OS-specific
  * spawn policy is decided at `spawn_environment::wrap` time.
  */
-sandbox: boolean, };
+sandbox: boolean, 
+/**
+ * Per-mesh pre-spawn pool target — see [`Mesh::pre_spawn_pool_size`].
+ * `0` = pool off, `1..=5` = target the worker fills to. Surfaced in
+ * the Worktrees Probe's ConfigurationCard (issue #611).
+ */
+pre_spawn_pool_size: number, };
