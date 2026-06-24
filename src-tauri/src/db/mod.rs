@@ -2242,6 +2242,60 @@ pub(crate) fn mark_warm_worktree_available_inner(
     Ok(())
 }
 
+/// Flip a warm entry to `refreshing` so a concurrent claim skips it while a
+/// background `git reset --hard` is in flight (issue #613 ref-freshness). The
+/// claim filter only matches `available` rows, so a row parked at `refreshing`
+/// is invisible to `claim_warm_entry_for_mesh` until the freshness pass flips
+/// it back to `available` via `mark_warm_worktree_available`. Symmetric with
+/// `mark_warm_worktree_available` (which is what restores it).
+pub fn mark_warm_worktree_refreshing(id: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    mark_warm_worktree_refreshing_inner(&db, id)
+}
+
+pub(crate) fn mark_warm_worktree_refreshing_inner(conn: &Connection, id: i64) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE warm_worktrees SET status = ?1, updated_at = datetime('now') WHERE id = ?2",
+        params![WarmWorktreeStatus::Refreshing.as_str(), id],
+    )?;
+    Ok(())
+}
+
+/// List every `available` warm entry for a mesh — the candidates the
+/// ref-freshness pass (issue #613) checks against the freshly-fetched base
+/// SHA. Only `available` rows are returned: `filling` rows aren't checked out
+/// yet, `refreshing` rows are already mid-reset, and `claimed` rows belong to
+/// a live spawn. Returns the same `WarmWorktree` projection a claim hands back
+/// (`base_sha` is the field the freshness pass diffs against the new SHA).
+pub fn list_available_warm_for_mesh(mesh_id: i64) -> SqlResult<Vec<WarmWorktree>> {
+    let db = get().lock().unwrap();
+    list_available_warm_for_mesh_inner(&db, mesh_id)
+}
+
+pub(crate) fn list_available_warm_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Vec<WarmWorktree>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path, preassigned_name, base_sha
+         FROM warm_worktrees
+         WHERE mesh_id = ?1 AND status = ?2
+         ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(
+        params![mesh_id, WarmWorktreeStatus::Available.as_str()],
+        |row| {
+            Ok(WarmWorktree {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                preassigned_name: row.get(2)?,
+                base_sha: row.get(3)?,
+            })
+        },
+    )?;
+    rows.collect()
+}
+
 /// Atomically claim the oldest available warm entry for `mesh_id`.
 ///
 /// "Atomic" here means: a single `UPDATE ... RETURNING` flips status from
@@ -2457,35 +2511,43 @@ pub(crate) fn count_available_warm_for_mesh_inner(
     Ok(n)
 }
 
-/// How many warm entries a mesh has in **any** status (filling, available,
-/// claimed). Used by the downsize drain (`services::warm_pool`) — when the
-/// user shrinks `pre_spawn_pool_size` we need the total so we can compute
-/// `excess = count - new_target`. Counts `claimed` too so a stuck spawn
-/// that failed to call `forget_after_spawn` doesn't fool the drain into
-/// leaving it as "not over target".
-pub fn count_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<i64> {
+/// How many *droppable* warm entries a mesh has — every status EXCEPT
+/// `claimed`. The downsize/idle drain computes `excess = droppable - target`
+/// from this rather than from `count_warm_entries_for_mesh` (which includes
+/// `claimed`): a `claimed` row is a worktree in transition to a live agent
+/// node, NOT pool inventory, so it must neither inflate the excess nor be a
+/// drop candidate (issue #613 review — the idle worker would otherwise
+/// `git worktree remove --force` a live agent's worktree during the window
+/// between claim and `forget_after_spawn`).
+pub fn count_droppable_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<i64> {
     let db = get().lock().unwrap();
-    count_warm_entries_for_mesh_inner(&db, mesh_id)
+    count_droppable_warm_entries_for_mesh_inner(&db, mesh_id)
 }
 
-pub(crate) fn count_warm_entries_for_mesh_inner(
+pub(crate) fn count_droppable_warm_entries_for_mesh_inner(
     conn: &Connection,
     mesh_id: i64,
 ) -> SqlResult<i64> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM warm_worktrees WHERE mesh_id = ?1",
+        "SELECT COUNT(*) FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'",
         params![mesh_id],
         |row| row.get(0),
     )?;
     Ok(n)
 }
 
-/// Pick the oldest N warm entries for a mesh so the downsize drain can
-/// delete them. Ordering: `filling` first (cheapest to drop — worker's
-/// mid-checkout, will be GC'd on next reconcile anyway), then by
+/// Pick the oldest N *droppable* warm entries for a mesh so the downsize/idle
+/// drain can delete them. Ordering: `filling` first (cheapest to drop —
+/// worker's mid-checkout, will be GC'd on next reconcile anyway), then by
 /// `created_at ASC` (FIFO). The status preference uses a `CASE` so a
 /// brand-new `filling` row beats every older `available` row, but among
 /// rows of the same status creation order wins.
+///
+/// **`claimed` rows are excluded** (`status != 'claimed'`): a claimed entry's
+/// directory is being adopted as a live agent node's worktree, so force-
+/// removing it would delete the agent's working tree out from under it (issue
+/// #613 review). Claimed rows are reaped row-only by
+/// `delete_orphaned_claimed_warm_worktrees`, never by the drain.
 ///
 /// Returned tuple is `(id, path)` — the path is needed by the caller
 /// (`services::warm_pool::drain_excess_warm_entries`) to invoke
@@ -2506,7 +2568,7 @@ pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
 ) -> SqlResult<Vec<(i64, String)>> {
     let mut stmt = conn.prepare(
         "SELECT id, path FROM warm_worktrees \
-         WHERE mesh_id = ?1 \
+         WHERE mesh_id = ?1 AND status != 'claimed' \
          ORDER BY CASE WHEN status = 'filling' THEN 0 ELSE 1 END ASC, \
                   created_at ASC \
          LIMIT ?2",

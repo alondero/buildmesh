@@ -23,9 +23,14 @@
 //!   move` rename (~50ms), and the user-facing benefit is dwarfed by the
 //!   implementation cost. They're routed through the existing cold path.
 //!   The PRD scopes this to a follow-up issue.
-//! * Background refresh of stale SHAs (issue #608 §4) is NOT in this
-//!   tranche. The pool worker just cuts the worktree once and trusts the
-//!   spawn-time `git checkout -B` to bring it to the requested ref.
+//! * Background refresh of stale SHAs (issue #608 §4) lands in issue #613:
+//!   after a fetch advances a mesh's base ref, `on_fetch_completed` →
+//!   `refresh_stale_warm_worktrees` `git reset --hard`s the pool's available
+//!   worktrees onto the new commit so a claim never lands on a stale ref.
+//! * Idle background maintenance (issue #613): `maintain_all_pools`, driven by
+//!   `services::pool_worker`'s debounced worker thread, tops every mesh's pool
+//!   back to target while the app is idle — the pool self-heals without
+//!   waiting for the next claim or app restart.
 //!
 //! Module layout
 //! -------------
@@ -34,9 +39,17 @@
 //! each worktree-enabled mesh drains any excess (downsize) and fills up
 //! to the per-mesh target.
 //!
+//! `maintain_all_pools` — the idle worker's per-tick body (issue #613): drains
+//! + fills every worktree-enabled mesh to target. Serialized behind the fill
+//! lock and gated on idleness by the caller (`services::pool_worker`).
+//!
+//! `refresh_stale_warm_worktrees` / `on_fetch_completed` — the post-fetch
+//! ref-freshness pass (issue #613): hard-reset available pool worktrees onto a
+//! freshly-fetched base SHA.
+//!
 //! `refill_after_claim` — kicked off by the spawn path immediately after a
-//! successful claim so the pool is back at target by the next spawn. Runs
-//! on `tokio::task::spawn_blocking` because it shells out to `git`.
+//! successful claim so the pool is back at target by the next spawn. Runs on a
+//! dedicated thread (it shells out to `git`) and behind the fill lock.
 //!
 //! `prewarm_one` — does the actual on-disk work for one mesh. Idempotent:
 //! if a row already points at the directory, the call is a no-op. The
@@ -332,6 +345,72 @@ fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
     }
 }
 
+/// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
+/// target (issue #613). `prewarm_one` warms exactly ONE entry per call, so a
+/// pool of target N starting from empty needs N calls — this loops it until
+/// the mesh reports "at target" (`Ok(false)`) or a `git worktree add` fails.
+///
+/// The loop is bounded by `target` iterations as a belt-and-braces guard: each
+/// successful `prewarm_one` raises the `available` count by one, so the
+/// `available >= target` early-return inside `prewarm_one` is the real
+/// terminator and the bound can never actually be hit unless a row vanishes
+/// underneath us mid-loop (in which case stopping after `target` tries and
+/// letting the next pass retry is exactly the right behaviour).
+///
+/// The "single sequential `git worktree add`" cadence the issue calls for
+/// falls out naturally: this runs the cuts one after another on the calling
+/// thread, and every caller is already serialized behind the fill lock.
+fn fill_mesh_to_target(mesh: &db::WarmPoolMeshRow) {
+    if let Err(e) = drain_excess_warm_entries(mesh) {
+        tracing::warn!(
+            "warm_pool: drain failed for mesh {} ({}): {}",
+            mesh.id,
+            mesh.path,
+            e
+        );
+    }
+    let target = mesh.pre_spawn_pool_size.max(0);
+    for _ in 0..target {
+        match prewarm_one(mesh) {
+            Ok(true) => continue,
+            Ok(false) => break,
+            Err(e) => {
+                tracing::warn!(
+                    "warm_pool: fill failed for mesh {} ({}): {}",
+                    mesh.id,
+                    mesh.path,
+                    e
+                );
+                break;
+            }
+        }
+    }
+}
+
+/// Maintain EVERY worktree-enabled mesh's pool to its per-mesh target (issue
+/// #613 AC1). Driven by the idle background worker
+/// (`services::pool_worker::start_background_worker`), which only calls this
+/// after the app has been quiet for `IDLE_SILENCE` AND only under the fill
+/// lock — so this body itself does no idle/serialization checking, it just
+/// does the work.
+///
+/// Best-effort: a single mesh failing to fill is logged inside
+/// `fill_mesh_to_target` and never stops the next mesh. Infallible from the
+/// worker's perspective so the loop thread can never die on a transient git
+/// error.
+pub fn maintain_all_pools() {
+    let meshes = match db::list_worktree_enabled_meshes_for_warm() {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("warm_pool: maintain list meshes failed: {}", e);
+            return;
+        }
+    };
+    for mesh in meshes {
+        fill_mesh_to_target(&mesh);
+    }
+}
+
 /// Run the startup reconcile pass (issue #610): prune crash-orphaned rows
 /// (and their Git worktree metadata) + fill any mesh that is below the
 /// per-mesh target.
@@ -386,27 +465,13 @@ pub fn reconcile_on_startup() {
         }
     };
     for mesh in meshes {
-        // Drain BEFORE prewarm — if the user shrunk the pool size while
-        // the app was off, the downsize needs to be observed even if the
-        // subsequent prewarm can't catch up (e.g. the mesh has been
-        // reconfigured to target=0, in which case prewarm_one early-returns
-        // anyway, so the drain is the only useful work).
-        if let Err(e) = drain_excess_warm_entries(&mesh) {
-            tracing::warn!(
-                "warm_pool: drain failed for mesh {} ({}): {}",
-                mesh.id,
-                mesh.path,
-                e
-            );
-        }
-        if let Err(e) = prewarm_one(&mesh) {
-            tracing::warn!(
-                "warm_pool: prewarm failed for mesh {} ({}): {}",
-                mesh.id,
-                mesh.path,
-                e
-            );
-        }
+        // Drain-before-fill and fill-to-target (issue #613): if the user
+        // shrunk the pool size while the app was off, the downsize is
+        // observed first (even if the subsequent fill can't catch up — e.g.
+        // target=0, where the fill is a no-op and the drain is the only
+        // useful work), then the pool is filled all the way up to the
+        // per-mesh target rather than topped up by a single entry.
+        fill_mesh_to_target(&mesh);
     }
 }
 
@@ -469,61 +534,79 @@ fn reconcile_warm_entries(
     }
 }
 
-/// Background refill: re-warm a mesh after a successful claim so the pool
-/// is back at target by the next spawn. Called from the spawn path's
-/// success branch via `tokio::task::spawn_blocking`.
+/// Resolve a worktree-enabled mesh by id and run `f` against it, all under the
+/// global fill lock (issue #613 AC4). Returns without invoking `f` when the
+/// lock is already held (another background pool mutation is in flight — the
+/// winner does the mesh-global work for everyone, so skipping is correct) or
+/// when the mesh has been disabled/deleted since the caller captured its id.
 ///
-/// Also drains if the user shrunk the pool size between the previous
-/// startup and the post-claim refill — same drain-before-fill ordering
-/// as `reconcile_on_startup`.
-///
-/// Failures are non-fatal and logged — the next startup reconcile (or the
-/// next post-claim refill) will retry.
-pub fn refill_after_claim(mesh_id: i64) {
-    let mesh = match db::list_worktree_enabled_meshes_for_warm() {
-        Ok(rows) => rows.into_iter().find(|m| m.id == mesh_id),
-        Err(e) => {
-            tracing::warn!("warm_pool: refill list failed for mesh {}: {}", mesh_id, e);
+/// Collapses the identical "take the lock → list meshes → find by id →
+/// None-guard" prologue that `refill_after_claim`, `on_fetch_completed`, and
+/// `post_spawn_maintenance` would otherwise each copy (issue #613 review).
+fn with_warm_mesh(mesh_id: i64, what: &str, f: impl FnOnce(&db::WarmPoolMeshRow)) {
+    crate::services::pool_worker::try_with_fill_lock(|| {
+        let mesh = match db::list_worktree_enabled_meshes_for_warm() {
+            Ok(rows) => rows.into_iter().find(|m| m.id == mesh_id),
+            Err(e) => {
+                tracing::warn!("warm_pool: {} list failed for mesh {}: {}", what, mesh_id, e);
+                return;
+            }
+        };
+        let Some(mesh) = mesh else {
+            // Mesh was disabled or deleted between the spawn and now.
             return;
-        }
-    };
-    let Some(mesh) = mesh else {
-        // Mesh was disabled or deleted between the spawn and the refill —
-        // nothing to do.
-        return;
-    };
-    if let Err(e) = drain_excess_warm_entries(&mesh) {
-        tracing::warn!(
-            "warm_pool: post-claim drain failed for mesh {} ({}): {}",
-            mesh.id,
-            mesh.path,
-            e
-        );
-    }
-    if let Err(e) = prewarm_one(&mesh) {
-        tracing::warn!(
-            "warm_pool: refill failed for mesh {} ({}): {}",
-            mesh.id,
-            mesh.path,
-            e
-        );
-    }
+        };
+        f(&mesh);
+    });
 }
 
-/// Drop warm entries until the mesh's count is at or below the per-mesh
-/// target. Pick order: `filling` rows first (worker mid-checkout — cheapest
-/// to drop, will be GC'd on next reconcile anyway), then `available` /
-/// `claimed` ordered by `created_at ASC` (FIFO). For each drop the DB row
+/// The spawn path's single post-spawn pool task (issue #613): under ONE
+/// fill-lock acquisition, optionally refresh stale warm entries onto the new
+/// base SHA (`do_refresh`, set when the spawn-time fetch advanced the ref),
+/// then optionally refill the pool back to target (`do_refill`, set when this
+/// spawn claimed an entry). Folding both into one locked section is what stops
+/// refresh and refill from racing each other for the lock (issue #613 review).
+pub fn post_spawn_maintenance(mesh_id: i64, do_refresh: bool, do_refill: bool) {
+    with_warm_mesh(mesh_id, "post-spawn", |mesh| {
+        if do_refresh {
+            if let Err(e) = refresh_stale_warm_worktrees(mesh) {
+                tracing::warn!(
+                    "warm_pool: freshness pass failed for mesh {} ({}): {}",
+                    mesh.id,
+                    mesh.path,
+                    e
+                );
+            }
+        }
+        if do_refill {
+            fill_mesh_to_target(mesh);
+        }
+    });
+}
+
+/// Drop *droppable* warm entries until the mesh's pool is at or below the
+/// per-mesh target. Pick order: `filling` rows first (worker mid-checkout —
+/// cheapest to drop, will be GC'd on next reconcile anyway), then `available` /
+/// `refreshing` ordered by `created_at ASC` (FIFO). For each drop the DB row
 /// is removed first, then `git worktree remove --force` is attempted on
 /// the directory; a dir-remove failure is logged at WARN but does not
 /// fail the whole drain (the DB row is gone, so the orphan will be picked
 /// up by the next `list_stale_warm_worktrees` scan).
 ///
-/// Returns the number of entries dropped (0 when count ≤ target). Idempotent:
-/// safe to call from both `reconcile_on_startup` and `refill_after_claim`.
+/// **`claimed` rows are never counted or dropped** (issue #613 review): a
+/// claimed entry is a worktree in transition to a live agent node — it is not
+/// pool inventory, so it must not inflate the excess, and force-removing it
+/// would delete a live agent's working tree out from under it. The idle worker
+/// runs this drain every ~2s, which would otherwise make the claim →
+/// `forget_after_spawn` window a frequent data-loss race. Both the droppable
+/// count and the candidate scan filter `status != 'claimed'`.
+///
+/// Returns the number of entries dropped (0 when droppable ≤ target).
+/// Idempotent: safe to call from `reconcile_on_startup`, `maintain_all_pools`,
+/// and `refill_after_claim`.
 pub fn drain_excess_warm_entries(mesh: &db::WarmPoolMeshRow) -> Result<usize, String> {
     let target = mesh.pre_spawn_pool_size.max(0);
-    let count = match db::count_warm_entries_for_mesh(mesh.id) {
+    let count = match db::count_droppable_warm_entries_for_mesh(mesh.id) {
         Ok(n) => n,
         Err(e) => {
             return Err(format!("drain count failed for mesh {}: {}", mesh.id, e));
@@ -532,7 +615,7 @@ pub fn drain_excess_warm_entries(mesh: &db::WarmPoolMeshRow) -> Result<usize, St
     if count <= target {
         return Ok(0);
     }
-    let excess = (count - target) as i64;
+    let excess = count - target;
 
     let candidates = db::list_oldest_warm_entries_for_mesh(mesh.id, excess)
         .map_err(|e| format!("drain candidate scan for mesh {}: {}", mesh.id, e))?;
@@ -575,6 +658,149 @@ pub fn drain_excess_warm_entries(mesh: &db::WarmPoolMeshRow) -> Result<usize, St
         );
     }
     Ok(dropped)
+}
+
+/// Ref-freshness pass for one mesh (issue #613 AC3). Resolves the mesh's base
+/// ref to its current SHA (after a fetch has advanced the remote-tracking ref)
+/// and hard-resets every `available` warm worktree that is parked on a stale
+/// SHA onto the new one, so a subsequent claim lands on the latest commit
+/// instead of yesterday's.
+///
+/// Called from `on_fetch_completed` (which serializes it behind the fill lock).
+/// Returns the number of entries actually refreshed. Resolving the SHA can
+/// fail (non-repo path, deleted ref) — that error propagates so the caller can
+/// log it; a per-entry reset failure is non-fatal and handled inside
+/// `refresh_warm_entries` (the entry is restored to `available` at its old SHA
+/// so it stays claimable).
+pub fn refresh_stale_warm_worktrees(mesh: &db::WarmPoolMeshRow) -> Result<usize, String> {
+    // Pool disabled for this mesh: `list_worktree_enabled_meshes_for_warm`
+    // returns it (it filters only on `use_worktree=1`), but there are no warm
+    // entries to refresh. Bail before the `resolve_base_ref_sha` git2 repo-open
+    // so a "pool off" mesh pays no freshness cost on every advancing fetch
+    // (issue #613 review).
+    if mesh.pre_spawn_pool_size <= 0 {
+        return Ok(0);
+    }
+    let new_sha = crate::git::worktree::resolve_base_ref_sha(&mesh.path, &mesh.base_ref)?;
+    let entries = db::list_available_warm_for_mesh(mesh.id)
+        .map_err(|e| format!("warm_pool: freshness list for mesh {}: {}", mesh.id, e))?;
+    Ok(refresh_warm_entries(
+        &new_sha,
+        entries,
+        crate::git::worktree::reset_warm_worktree,
+        db::mark_warm_worktree_refreshing,
+        db::mark_warm_worktree_available,
+    ))
+}
+
+/// The freshness orchestration, with its three side-effecting dependencies
+/// (`reset`, `set_refreshing`, `set_available`) injected so the state-flip
+/// choreography is unit-testable without a real DB or git — the same DI shape
+/// as `reconcile_warm_entries`. The invariants it enforces:
+///
+///   1. **An entry already on `new_sha` is left untouched** — no reset, no
+///      status churn (the common case after a fetch that only moved an
+///      unrelated branch).
+///   2. **A stale entry is flipped to `refreshing` BEFORE the reset** so a
+///      concurrent claim can't grab a worktree mid-`git reset --hard` (the
+///      claim filter only matches `available`). On success it is flipped back
+///      to `available` stamped with `new_sha`.
+///   3. **A reset failure restores the entry to `available` at its OLD SHA**
+///      rather than leaving it stranded at `refreshing` (which would make it
+///      permanently unclaimable) — and does not count it as refreshed.
+///   4. **An entry is only counted as refreshed once it is back at
+///      `available`.** If the post-reset flip-back DB write fails (a transient
+///      SQLite error in the two-write window), the worktree is correct on disk
+///      but stuck at `refreshing` and therefore not yet claimable — that is a
+///      loud ERROR, not a success, and is recovered by the startup reconcile.
+fn refresh_warm_entries(
+    new_sha: &str,
+    entries: Vec<db::WarmWorktree>,
+    reset: impl Fn(&str, &str) -> Result<(), String>,
+    set_refreshing: impl Fn(i64) -> db::SqlResult<()>,
+    set_available: impl Fn(i64, Option<&str>) -> db::SqlResult<()>,
+) -> usize {
+    let mut refreshed = 0usize;
+    for entry in entries {
+        if entry.base_sha.as_deref() == Some(new_sha) {
+            // Already fresh — nothing to do.
+            continue;
+        }
+        // Park it at `refreshing` so a concurrent claim skips it while the
+        // reset is in flight. If even this flip fails, skip the entry — better
+        // to leave it claimable at its old SHA than to reset a row we couldn't
+        // mark.
+        if let Err(e) = set_refreshing(entry.id) {
+            tracing::warn!(
+                "warm_pool: failed to mark row {} refreshing (skipping): {}",
+                entry.id,
+                e
+            );
+            continue;
+        }
+        match reset(&entry.path, new_sha) {
+            Ok(()) => match set_available(entry.id, Some(new_sha)) {
+                Ok(()) => refreshed += 1,
+                Err(e) => {
+                    // Worktree is correctly reset on disk but the row is stuck
+                    // at `refreshing` and so not yet claimable — do NOT count it
+                    // as refreshed. The startup reconcile recovers it (the
+                    // 5-minute age guard means a live worker mid-refresh is
+                    // never touched). Loud because it leaves the pool one short
+                    // until then.
+                    tracing::error!(
+                        "warm_pool: reset row {} onto {} but failed to flip back to available; \
+                         row stranded at `refreshing` until startup reconcile: {}",
+                        entry.id,
+                        new_sha,
+                        e
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "warm_pool: failed to reset warm worktree {} onto {}: {}",
+                    entry.path,
+                    new_sha,
+                    e
+                );
+                // Restore to `available` at the OLD SHA so the entry stays
+                // claimable rather than being stranded at `refreshing`.
+                if let Err(e2) = set_available(entry.id, entry.base_sha.as_deref()) {
+                    tracing::warn!(
+                        "warm_pool: failed to restore row {} to available after a failed reset: {}",
+                        entry.id,
+                        e2
+                    );
+                }
+            }
+        }
+    }
+    if refreshed > 0 {
+        tracing::info!("warm_pool: refreshed {} stale warm worktree(s)", refreshed);
+    }
+    refreshed
+}
+
+/// Post-fetch hook (issue #613 AC3): after a fetch advances a mesh's base ref,
+/// bring its warm pool's worktrees forward to the new SHA. Looks the mesh up
+/// by id (so callers only need the `mesh_id` they already have) and runs the
+/// freshness pass under the global fill lock — a refresh and a fill must never
+/// hammer the same mesh's git/DB concurrently (issue #613 AC4). Best-effort
+/// and infallible from the caller's side; intended to be invoked on a
+/// background thread from the fetch paths so it never blocks a spawn or a
+/// manual sync.
+pub fn on_fetch_completed(mesh_id: i64) {
+    with_warm_mesh(mesh_id, "freshness", |mesh| {
+        if let Err(e) = refresh_stale_warm_worktrees(mesh) {
+            tracing::warn!(
+                "warm_pool: freshness pass failed for mesh {} ({}): {}",
+                mesh.id,
+                mesh.path,
+                e
+            );
+        }
+    });
 }
 
 #[cfg(test)]
@@ -734,6 +960,160 @@ mod tests {
         assert!(
             !should_claim_for_spawn(true),
             "a spawn reusing an existing on-disk worktree must NOT be claim-eligible"
+        );
+    }
+
+    // ---- refresh_warm_entries (ref-freshness orchestration, issue #613 AC3) ----
+    //
+    // The three side effects (reset, set_refreshing, set_available) are injected
+    // so the state-flip choreography is testable without git or a DB — the same
+    // DI shape as reconcile_warm_entries above. A shared log records the call
+    // order so the "refreshing-before-reset" invariant is provable.
+
+    fn warm(id: i64, base_sha: Option<&str>) -> db::WarmWorktree {
+        db::WarmWorktree {
+            id,
+            path: format!("/repo/m/.claude/worktrees/slug-{}", id),
+            preassigned_name: format!("slug-{}", id),
+            base_sha: base_sha.map(str::to_string),
+        }
+    }
+
+    /// An entry already parked on the new SHA is left completely untouched — no
+    /// reset, no status churn. This is the common case after a fetch that only
+    /// advanced an unrelated ref, so it must be a true no-op (a needless
+    /// `git reset --hard` would burn disk I/O on every fetch).
+    #[test]
+    fn refresh_skips_an_already_fresh_entry() {
+        let log: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let n = refresh_warm_entries(
+            "newsha",
+            vec![warm(1, Some("newsha"))],
+            |p, s| {
+                log.lock().unwrap().push(format!("reset:{}:{}", p, s));
+                Ok(())
+            },
+            |id| {
+                log.lock().unwrap().push(format!("refreshing:{}", id));
+                Ok(())
+            },
+            |id, sha| {
+                log.lock().unwrap().push(format!("available:{}:{:?}", id, sha));
+                Ok(())
+            },
+        );
+        assert_eq!(n, 0, "an already-fresh entry counts as 0 refreshed");
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "a fresh entry must trigger no reset and no status flips"
+        );
+    }
+
+    /// A stale entry is flipped to `refreshing` BEFORE the reset, then back to
+    /// `available` stamped with the NEW sha. The shared log proves the ordering:
+    /// flipping after the reset would let a concurrent claim grab a worktree
+    /// mid-`git reset --hard`.
+    #[test]
+    fn refresh_resets_a_stale_entry_and_stamps_new_sha() {
+        let log: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let n = refresh_warm_entries(
+            "newsha",
+            vec![warm(7, Some("oldsha"))],
+            |p, s| {
+                log.lock().unwrap().push(format!("reset:{}:{}", p, s));
+                Ok(())
+            },
+            |id| {
+                log.lock().unwrap().push(format!("refreshing:{}", id));
+                Ok(())
+            },
+            |id, sha| {
+                log.lock().unwrap().push(format!("available:{}:{:?}", id, sha));
+                Ok(())
+            },
+        );
+        assert_eq!(n, 1, "one stale entry refreshed");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "refreshing:7".to_string(),
+                "reset:/repo/m/.claude/worktrees/slug-7:newsha".to_string(),
+                "available:7:Some(\"newsha\")".to_string(),
+            ],
+            "must mark refreshing, then reset, then flip back to available at the new sha"
+        );
+    }
+
+    /// A reset failure restores the entry to `available` at its OLD sha (so it
+    /// stays claimable) and does NOT count it as refreshed. Stranding it at
+    /// `refreshing` would make it permanently unclaimable — the failure mode
+    /// this test guards against.
+    #[test]
+    fn refresh_restores_old_sha_when_reset_fails() {
+        let restored: Mutex<Vec<(i64, Option<String>)>> = Mutex::new(Vec::new());
+        let n = refresh_warm_entries(
+            "newsha",
+            vec![warm(9, Some("oldsha"))],
+            |_p, _s| Err("reset blew up".to_string()),
+            |_id| Ok(()),
+            |id, sha| {
+                restored
+                    .lock()
+                    .unwrap()
+                    .push((id, sha.map(str::to_string)));
+                Ok(())
+            },
+        );
+        assert_eq!(n, 0, "a failed reset must not count as refreshed");
+        assert_eq!(
+            *restored.lock().unwrap(),
+            vec![(9, Some("oldsha".to_string()))],
+            "a failed reset must restore the entry to available at its OLD sha"
+        );
+    }
+
+    /// A successful reset whose flip-back to `available` fails must NOT be
+    /// counted as refreshed (issue #613 review): the worktree is correct on
+    /// disk but stuck at `refreshing` and so not yet claimable, so counting it
+    /// would over-report the pool's healthy size. The startup reconcile
+    /// recovers the stranded row later.
+    #[test]
+    fn refresh_does_not_count_when_flip_back_fails() {
+        let n = refresh_warm_entries(
+            "newsha",
+            vec![warm(5, Some("oldsha"))],
+            |_p, _s| Ok(()),       // reset succeeds
+            |_id| Ok(()),          // mark refreshing succeeds
+            |_id, _sha| Err(rusqlite::Error::InvalidQuery), // flip-back fails
+        );
+        assert_eq!(
+            n, 0,
+            "a reset whose flip-back to available failed must not count as refreshed (row stranded at refreshing)"
+        );
+    }
+
+    /// An entry with NO recorded base SHA (`base_sha = NULL`, e.g. the
+    /// `read_warm_head_sha` stamp failed at fill time) is treated as stale and
+    /// reset — it can't be proven fresh, so bringing it onto the known-good new
+    /// SHA is the safe choice.
+    #[test]
+    fn refresh_treats_null_base_sha_as_stale() {
+        let reset_calls: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let n = refresh_warm_entries(
+            "newsha",
+            vec![warm(4, None)],
+            |p, _s| {
+                reset_calls.lock().unwrap().push(p.to_string());
+                Ok(())
+            },
+            |_id| Ok(()),
+            |_id, _sha| Ok(()),
+        );
+        assert_eq!(n, 1, "a NULL-sha entry must be refreshed");
+        assert_eq!(
+            *reset_calls.lock().unwrap(),
+            vec!["/repo/m/.claude/worktrees/slug-4".to_string()],
+            "a NULL-sha entry must be reset onto the new sha"
         );
     }
 }

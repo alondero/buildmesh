@@ -152,6 +152,17 @@ pub fn run() {
                 services::warm_pool::reconcile_on_startup();
             });
 
+            // Background pool maintenance worker (issue #613). A long-lived
+            // thread that, once the app has been idle (no terminal output /
+            // keypresses) for `IDLE_SILENCE`, tops every worktree-enabled
+            // mesh's pool back up to its `pre_spawn_pool_size` target — so the
+            // pool self-heals after spawns/closes without waiting for the next
+            // claim or app restart. Debounced (never competes with active
+            // agent I/O) and serialized behind the same fill lock as
+            // `refill_after_claim`, so concurrent spawns can't trigger
+            // overlapping `git worktree add` fills.
+            services::pool_worker::start_background_worker();
+
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
             let crash_log_path = app_dir.join("logs").join("panic.log");

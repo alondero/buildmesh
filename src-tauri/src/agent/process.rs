@@ -98,6 +98,11 @@ impl AgentProcessRegistry {
         let mut writer = agent.writer.lock().unwrap();
         writer.write_all(data).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
+        // Mark the app as active so the background warm-pool worker holds off
+        // its idle refills while the user is typing into a terminal (issue
+        // #613 AC2). Recorded after a successful write so a failed PTY write
+        // doesn't count as activity.
+        crate::services::pool_worker::note_activity();
         // Emit the `first_user_input` checkpoint exactly once per session.
         // We do this AFTER a successful write+flush so a failed PTY write
         // (broken pipe, etc.) does NOT claim "user input accepted". The
