@@ -205,6 +205,16 @@ export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
 export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
   _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
 
+/** Per-mesh target for the pre-spawn Worktree Pool
+ *  (`services::warm_pool`, issue #611). `0` disables the pool for the
+ *  mesh; `1..=5` is the target the worker fills to. Dedicated command
+ *  so the typed integer + `0..=5` invariant are enforced at the IPC
+ *  boundary (the catch-all `update_mesh_column` is intentionally
+ *  unvalidated). The Worktrees Probe's ConfigurationCard toggle
+ *  derives `enabled = poolSize > 0`; the size input clamps to 1..5. */
+export const updateMeshPoolSize = (meshId: number, poolSize: number) =>
+  _invoke<void>('update_mesh_pool_size', { meshId, poolSize });
+
 export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
   _invoke<void>('update_worktree_base_ref', { meshId, baseRef });
 

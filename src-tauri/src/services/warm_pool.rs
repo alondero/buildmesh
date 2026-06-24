@@ -1,4 +1,5 @@
-//! Pre-spawn Worktree Pool — the v21 tracer bullet (issue #609, PRD #608).
+//! Pre-spawn Worktree Pool — the v21 tracer bullet (issue #609, PRD #608),
+//! with per-mesh opt-in size wired in issue #611.
 //!
 //! Why this exists
 //! ---------------
@@ -10,12 +11,14 @@
 //! to flip the worktree's mode (branched vs. detached) and start the agent —
 //! no cold NTFS write cost, sub-500ms checkout in practice.
 //!
-//! Scope of the v21 tracer bullet
-//! ------------------------------
-//! * Exactly **1** warm entry per worktree-enabled mesh. Manual spawns adopt
-//!   the preassigned slug as the node name (zero rename overhead). A
-//!   successful claim triggers a background refill so the pool re-fills
-//!   before the next spawn.
+//! Scope
+//! -----
+//! * Per-mesh target: `meshes.pre_spawn_pool_size` (schema v22, issue #611).
+//!   `0` disables the pool for the mesh; `1..=5` is the target the worker
+//!   fills to. Configured via the Worktrees Probe's ConfigurationCard
+//!   (issue #611). Manual spawns adopt the preassigned slug as the node
+//!   name (zero rename overhead). A successful claim triggers a background
+//!   refill so the pool re-fills before the next spawn.
 //! * Issue / PR spawns are NOT claimed — they would need a `git worktree
 //!   move` rename (~50ms), and the user-facing benefit is dwarfed by the
 //!   implementation cost. They're routed through the existing cold path.
@@ -27,8 +30,9 @@
 //! Module layout
 //! -------------
 //! `reconcile_on_startup` — called from `lib.rs::setup`, runs after
-//! `db::init`. Prunes stale rows (their on-disk dir is gone), then walks
-//! every worktree-enabled mesh and ensures at least one `available` entry.
+//! `db::init`. Prunes stale rows (their on-disk dir is gone), then for
+//! each worktree-enabled mesh drains any excess (downsize) and fills up
+//! to the per-mesh target.
 //!
 //! `refill_after_claim` — kicked off by the spawn path immediately after a
 //! successful claim so the pool is back at target by the next spawn. Runs
@@ -39,17 +43,16 @@
 //! PR-style `git fetch` step is intentionally omitted for the v21 tracer
 //! — the spawn path's existing `git::sync::fetch_origin` keeps things fresh
 //! just before a claim lands.
+//!
+//! `drain_excess_warm_entries` — runs first in both reconcile paths so a
+//! shrink (target 3 → 1) is observed even if the subsequent fill can't
+//! catch up. Drops oldest rows in `filling` > `available` > `claimed`
+//! priority, removing both DB row + on-disk directory. Idempotent: a no-op
+//! when count ≤ target.
 
 use crate::db::{self, WarmWorktreeStatus};
 use crate::session_naming::on_spawn;
 use std::path::Path;
-
-/// Hardcoded pool target for the v21 tracer bullet. The PRD scopes per-mesh
-/// `pre_spawn_pool_size` to a later phase (the column is intentionally not
-/// added yet — see issue #608 §1.1). One warm entry per mesh is enough to
-/// prove the design; the worker fills until it hits this number, then stands
-/// down.
-pub const POOL_TARGET_PER_MESH: i64 = 1;
 
 /// A `filling` / `refreshing` row younger than this is assumed to belong to a
 /// worker that is actively mid-checkout right now (a fresh `refill_after_claim`
@@ -63,21 +66,25 @@ pub const WARM_FILL_STALE_AFTER_MINUTES: i64 = 5;
 
 /// Decide whether the spawn path should consult the pool for a given node.
 ///
-/// Eligible == a **fresh manual worktree spawn**:
-///   * no `source_pr` and no `source_issue`. Issue/PR spawns need the warm
-///     entry renamed to `gh{N}-<slug>` / `pr{N}-<slug>` (a `git worktree
-///     move`), which is out of scope for this tranche — the PRD scopes it
-///     to a follow-up. They're served by the cold path.
-///   * `existing_worktree_present == false` — the node's own worktree
-///     directory is NOT already on disk. Resume / handover / re-spawn paths
-///     re-enter `spawn_agent_inner` with a `worktree_name` whose directory
-///     the original spawn already created; claiming a pool entry for one of
-///     them would re-point the node at a *different* directory and abandon
-///     the agent's existing work. The cold path keys its own "create the
-///     worktree?" decision off the same `!host_path.exists()` check, so the
-///     two stay in lockstep: if the cold path would create a worktree, the
-///     pool is allowed to satisfy that creation; if it would reuse one, the
-///     pool stays out of the way.
+/// Eligible == a **fresh worktree spawn** — one whose own worktree directory
+/// is NOT already on disk (`existing_worktree_present == false`).
+///
+/// Manual, Issue, and PR spawns are all eligible. Manual spawns adopt the
+/// pool's plain slug as the node name; Issue/PR spawns keep their
+/// `gh{N}-`/`pr{N}-` name and `git worktree move` the pool directory to match
+/// (issue #612). The spawn path branches on `node.source_issue` /
+/// `node.source_pr` to pick which adoption mode to run; the gate itself only
+/// asks "is there a worktree to create?".
+///
+/// Resume / handover / re-spawn paths re-enter `spawn_agent_inner` with a
+/// `worktree_name` whose directory the original spawn already created
+/// (`existing_worktree_present == true`); claiming a pool entry for one of
+/// them would re-point the node at a *different* directory and abandon the
+/// agent's existing work, so they're rejected. The cold path keys its own
+/// "create the worktree?" decision off the same `!host_path.exists()` check,
+/// so the two stay in lockstep: if the cold path would create a worktree, the
+/// pool is allowed to satisfy that creation; if it would reuse one, the pool
+/// stays out of the way.
 ///
 /// `existing_worktree_present` is computed by the caller from
 /// `env::resolve_agent_path(node.path, node.worktree_name)` — the path the
@@ -86,16 +93,7 @@ pub const WARM_FILL_STALE_AFTER_MINUTES: i64 = 5;
 /// Returns `false` for any spawn the cold path must serve. The caller falls
 /// back to a cold `create_git_worktree` on `false` — exactly what it would
 /// do if the pool were empty.
-pub fn should_claim_for_spawn(
-    node: &crate::models::AgentNode,
-    existing_worktree_present: bool,
-) -> bool {
-    if node.source_pr.is_some() {
-        return false;
-    }
-    if node.source_issue.is_some() {
-        return false;
-    }
+pub fn should_claim_for_spawn(existing_worktree_present: bool) -> bool {
     !existing_worktree_present
 }
 
@@ -208,6 +206,17 @@ pub(crate) fn warm_worktree_host_path(mesh_path: &str, slug: &str) -> String {
 /// `create_git_worktree` propagate so the worker can log + skip + try the
 /// next mesh on the next reconcile pass.
 pub fn prewarm_one(mesh: &db::WarmPoolMeshRow) -> Result<bool, String> {
+    // Per-mesh target (issue #611). `0` is a hard no-op — the mesh has
+    // opted out of the pool via the Worktrees Probe toggle. We still
+    // want reconcile_on_startup and refill_after_claim to call us (so
+    // the `filling`/`available` bookkeeping is consistent if the user
+    // toggles back on), but the cheap early return avoids any
+    // slug-generation + git-worktree-cut work for disabled meshes.
+    let target = mesh.pre_spawn_pool_size;
+    if target <= 0 {
+        return Ok(false);
+    }
+
     let available = match db::count_available_warm_for_mesh(mesh.id) {
         Ok(n) => n,
         Err(e) => {
@@ -219,7 +228,7 @@ pub fn prewarm_one(mesh: &db::WarmPoolMeshRow) -> Result<bool, String> {
             return Ok(false);
         }
     };
-    if available >= POOL_TARGET_PER_MESH {
+    if available >= target {
         return Ok(false);
     }
 
@@ -377,6 +386,19 @@ pub fn reconcile_on_startup() {
         }
     };
     for mesh in meshes {
+        // Drain BEFORE prewarm — if the user shrunk the pool size while
+        // the app was off, the downsize needs to be observed even if the
+        // subsequent prewarm can't catch up (e.g. the mesh has been
+        // reconfigured to target=0, in which case prewarm_one early-returns
+        // anyway, so the drain is the only useful work).
+        if let Err(e) = drain_excess_warm_entries(&mesh) {
+            tracing::warn!(
+                "warm_pool: drain failed for mesh {} ({}): {}",
+                mesh.id,
+                mesh.path,
+                e
+            );
+        }
         if let Err(e) = prewarm_one(&mesh) {
             tracing::warn!(
                 "warm_pool: prewarm failed for mesh {} ({}): {}",
@@ -451,6 +473,10 @@ fn reconcile_warm_entries(
 /// is back at target by the next spawn. Called from the spawn path's
 /// success branch via `tokio::task::spawn_blocking`.
 ///
+/// Also drains if the user shrunk the pool size between the previous
+/// startup and the post-claim refill — same drain-before-fill ordering
+/// as `reconcile_on_startup`.
+///
 /// Failures are non-fatal and logged — the next startup reconcile (or the
 /// next post-claim refill) will retry.
 pub fn refill_after_claim(mesh_id: i64) {
@@ -466,6 +492,14 @@ pub fn refill_after_claim(mesh_id: i64) {
         // nothing to do.
         return;
     };
+    if let Err(e) = drain_excess_warm_entries(&mesh) {
+        tracing::warn!(
+            "warm_pool: post-claim drain failed for mesh {} ({}): {}",
+            mesh.id,
+            mesh.path,
+            e
+        );
+    }
     if let Err(e) = prewarm_one(&mesh) {
         tracing::warn!(
             "warm_pool: refill failed for mesh {} ({}): {}",
@@ -474,6 +508,73 @@ pub fn refill_after_claim(mesh_id: i64) {
             e
         );
     }
+}
+
+/// Drop warm entries until the mesh's count is at or below the per-mesh
+/// target. Pick order: `filling` rows first (worker mid-checkout — cheapest
+/// to drop, will be GC'd on next reconcile anyway), then `available` /
+/// `claimed` ordered by `created_at ASC` (FIFO). For each drop the DB row
+/// is removed first, then `git worktree remove --force` is attempted on
+/// the directory; a dir-remove failure is logged at WARN but does not
+/// fail the whole drain (the DB row is gone, so the orphan will be picked
+/// up by the next `list_stale_warm_worktrees` scan).
+///
+/// Returns the number of entries dropped (0 when count ≤ target). Idempotent:
+/// safe to call from both `reconcile_on_startup` and `refill_after_claim`.
+pub fn drain_excess_warm_entries(mesh: &db::WarmPoolMeshRow) -> Result<usize, String> {
+    let target = mesh.pre_spawn_pool_size.max(0);
+    let count = match db::count_warm_entries_for_mesh(mesh.id) {
+        Ok(n) => n,
+        Err(e) => {
+            return Err(format!("drain count failed for mesh {}: {}", mesh.id, e));
+        }
+    };
+    if count <= target {
+        return Ok(0);
+    }
+    let excess = (count - target) as i64;
+
+    let candidates = db::list_oldest_warm_entries_for_mesh(mesh.id, excess)
+        .map_err(|e| format!("drain candidate scan for mesh {}: {}", mesh.id, e))?;
+
+    let mut dropped: usize = 0;
+    for (id, path) in candidates {
+        // Drop DB row first so the next reconcile can't re-add or re-claim
+        // the same path while we wait on the directory removal.
+        if let Err(e) = db::delete_warm_worktree(id) {
+            tracing::warn!(
+                "warm_pool: drain failed to delete row {} ({}): {}",
+                id,
+                path,
+                e
+            );
+            continue;
+        }
+        if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {
+            // Don't fail the drain — the DB row is gone, so the orphan
+            // directory will be cleaned up by the next
+            // `list_stale_warm_worktrees` scan (which won't find a row,
+            // but `process_pending_removals`-style cleanup will). Log
+            // loudly so the user can intervene manually if it persists.
+            tracing::warn!(
+                "warm_pool: drain dropped DB row {} but failed to remove {}: {} (orphan will be GC'd on next reconcile)",
+                id,
+                path,
+                e
+            );
+        }
+        dropped += 1;
+    }
+    if dropped > 0 {
+        tracing::info!(
+            "warm_pool: drained {} excess entries for mesh {} (target={}, was {})",
+            dropped,
+            mesh.id,
+            target,
+            count
+        );
+    }
+    Ok(dropped)
 }
 
 #[cfg(test)]
@@ -610,33 +711,18 @@ mod tests {
 
     // ---- should_claim_for_spawn (the activation gate) ----
     //
-    // These pin the fix for the activation bug: the gate originally returned
-    // `node.worktree_name.is_none()`, but `agent_node::create` always assigns
-    // a slug to a worktree-enabled node, so the pool was never claimed. The
-    // gate now keys off whether the node's CURRENT worktree directory is
+    // The gate keys solely off whether the node's CURRENT worktree directory is
     // already on disk — `false` ⇒ fresh spawn (claim), `true` ⇒ resume /
-    // re-spawn reusing an existing worktree (don't claim).
-
-    fn node_with(source_pr: Option<i64>, source_issue: Option<i64>) -> crate::models::AgentNode {
-        crate::models::AgentNode {
-            path: "/repo/m".to_string(),
-            use_worktree: true,
-            // A worktree-enabled node always carries a slug (set at create
-            // time); the gate no longer cares about its value, only about
-            // whether the directory exists.
-            worktree_name: Some("gentle-amber-fox".to_string()),
-            source_pr,
-            source_issue,
-            ..Default::default()
-        }
-    }
+    // re-spawn reusing an existing worktree (don't claim). Issue/PR spawns are
+    // now claim-eligible too (issue #612): the spawn path `git worktree move`s
+    // the pool directory to their `gh{N}-`/`pr{N}-` name rather than excluding
+    // them.
 
     #[test]
-    fn claims_for_fresh_manual_spawn_when_worktree_absent() {
-        let node = node_with(None, None);
+    fn claims_for_a_fresh_spawn_when_worktree_absent() {
         assert!(
-            should_claim_for_spawn(&node, false),
-            "a fresh manual spawn (worktree dir not yet on disk) must be claim-eligible"
+            should_claim_for_spawn(false),
+            "a fresh spawn (worktree dir not yet on disk) must be claim-eligible"
         );
     }
 
@@ -645,24 +731,9 @@ mod tests {
         // Resume / handover / re-spawn: the node's worktree already exists on
         // disk. Claiming would re-point it at a different directory and
         // abandon the agent's work.
-        let node = node_with(None, None);
         assert!(
-            !should_claim_for_spawn(&node, true),
+            !should_claim_for_spawn(true),
             "a spawn reusing an existing on-disk worktree must NOT be claim-eligible"
-        );
-    }
-
-    #[test]
-    fn does_not_claim_pr_or_issue_spawns() {
-        // Issue/PR spawns need a renamed directory (out of scope for v21) —
-        // never claimed, even when their worktree dir is absent.
-        assert!(
-            !should_claim_for_spawn(&node_with(Some(420), None), false),
-            "PR spawns must route through the cold path"
-        );
-        assert!(
-            !should_claim_for_spawn(&node_with(None, Some(609)), false),
-            "issue spawns must route through the cold path"
         );
     }
 }

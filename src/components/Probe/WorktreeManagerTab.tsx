@@ -46,6 +46,7 @@ import {
   openInFileManager,
   pruneRemoteTracking,
   updateMeshColumn,
+  updateMeshPoolSize,
   updateMeshUseWorktree,
   updateWorktreeBaseRef,
   type BranchInfo,
@@ -198,6 +199,13 @@ export function WorktreeManagerTab() {
   const [useWorktree, setUseWorktree] = useState(true);
   const [baseRef, setBaseRef] = useState<BaseRefForm>('fresh');
   const [worktreeMode, setWorktreeMode] = useState<WorktreeModeForm>(DEFAULT_WORKTREE_MODE);
+  // Pre-spawn Worktree Pool size (issue #611). `0` = pool off,
+  // `1..=5` = target. The toggle's `checked` is derived from
+  // `preSpawnPoolSize > 0`; the size input clamps to 1..5 and is
+  // disabled when the toggle is off. The pool worker
+  // (`services::warm_pool`) reads this column on startup + after each
+  // claim, draining excess and filling up to this target.
+  const [preSpawnPoolSize, setPreSpawnPoolSize] = useState(0);
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Single prune-fetch body. Mount, mesh-switch, manual Refresh, and
@@ -262,6 +270,7 @@ export function WorktreeManagerTab() {
           setUseWorktree(config.use_worktree);
           setBaseRef(wireToFormBaseRef(config.base_ref));
           setWorktreeMode(wireToFormMode(config.worktree_mode));
+          setPreSpawnPoolSize(config.pre_spawn_pool_size);
         })
         .catch(() => {
           // Swallow — keep the existing form state. Mirrors the legacy
@@ -315,6 +324,28 @@ export function WorktreeManagerTab() {
         await updateMeshColumn(activeMeshId, 'worktree_mode', next);
       } catch (e) {
         setSaveError(`Failed to update worktree_mode: ${String(e)}`);
+      }
+    },
+    [activeMeshId],
+  );
+
+  // Pre-spawn pool size save (issue #611). Single handler for both the
+  // toggle (which sends 0 or 1) and the size input (which sends 1..5);
+  // the backend enforces the `0..=5` invariant and rejects otherwise.
+  // Mirrors the other save handlers' "do not revert on save failure"
+  // rule — if the user shrinks the pool to 5 and the backend rejects,
+  // the form keeps their typed value so the failure message is
+  // actionable.
+  const handleChangePoolSize = useCallback(
+    async (next: number) => {
+      if (activeMeshId === null) return;
+      const clamped = Math.max(0, Math.min(5, Math.trunc(next) || 0));
+      setPreSpawnPoolSize(clamped);
+      setSaveError(null);
+      try {
+        await updateMeshPoolSize(activeMeshId, clamped);
+      } catch (e) {
+        setSaveError(`Failed to update pool size: ${String(e)}`);
       }
     },
     [activeMeshId],
@@ -460,9 +491,11 @@ export function WorktreeManagerTab() {
         useWorktree={useWorktree}
         baseRef={baseRef}
         worktreeMode={worktreeMode}
+        preSpawnPoolSize={preSpawnPoolSize}
         onToggleUseWorktree={handleToggleUseWorktree}
         onChangeBaseRef={handleChangeBaseRef}
         onChangeWorktreeMode={handleChangeWorktreeMode}
+        onChangePoolSize={handleChangePoolSize}
       />
       {saveError && (
         <p className="text-xs text-status-error break-words">{saveError}</p>
@@ -747,25 +780,37 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) 
             {repo.worktrees.map((w) => {
               const key = worktreeKey(w.path);
               const name = w.path.split(/[/\\]/).pop() || w.path;
+              // A pool entry is also locked from delete (the worker
+              // owns the directory and will refill on next reconcile).
+              // The UI disables the checkbox; the backend
+              // `delete_worktrees` rejects pool paths as
+              // defence-in-depth.
+              const undeletable = w.is_active || w.is_pool;
               return (
                 <div
                   key={key}
-                  title={w.is_active ? 'Active — cannot delete' : w.path}
-                  className={`group flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
+                  title={
                     w.is_active
+                      ? 'Active — cannot delete'
+                      : w.is_pool
+                      ? 'Pre-spawn Pool — managed automatically'
+                      : w.path
+                  }
+                  className={`group flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
+                    undeletable
                       ? 'opacity-60'
                       : 'cursor-pointer hover:bg-bg-overlay/40'
                   }`}
                 >
                   <label
                     className={`flex items-center gap-2 flex-1 min-w-0 ${
-                      w.is_active ? 'cursor-not-allowed' : 'cursor-pointer'
+                      undeletable ? 'cursor-not-allowed' : 'cursor-pointer'
                     }`}
                   >
                     <input
                       type="checkbox"
                       checked={selected.has(key)}
-                      disabled={w.is_active}
+                      disabled={undeletable}
                       onChange={() => onToggle(key)}
                       className="accent-accent-cyan disabled:cursor-not-allowed flex-shrink-0"
                     />
@@ -785,6 +830,13 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) 
                       )}
                       {w.is_stale && (
                         <Badge color="bg-status-warning/15 text-status-warning" text="stale" />
+                      )}
+                      {w.is_pool && (
+                        <Badge
+                          color="bg-accent-cyan/15 text-accent-cyan"
+                          text="pool"
+                          title="Pre-spawn Pool — managed automatically"
+                        />
                       )}
                     </span>
                   </label>
@@ -849,25 +901,34 @@ interface ConfigurationCardProps {
   useWorktree: boolean;
   baseRef: BaseRefForm;
   worktreeMode: WorktreeModeForm;
+  /** Per-mesh pre-spawn pool target (`0` = off, `1..=5`). The toggle's
+   *  `checked` is derived from `preSpawnPoolSize > 0`. */
+  preSpawnPoolSize: number;
   onToggleUseWorktree: (next: boolean) => void;
   onChangeBaseRef: (next: BaseRefForm) => void;
   onChangeWorktreeMode: (next: WorktreeModeForm) => void;
+  onChangePoolSize: (next: number) => void;
 }
 
 /**
  * Ports the worktree-config sub-section that used to live at the top
  * of the legacy `MeshPropertiesPanel` (deleted in #380). The card
- * surfaces three controls:
+ * surfaces four controls:
  *
- *   1. **Use worktree** — checkbox. When unchecked, the two radio
- *      groups collapse (matches the legacy panel's `{form.useWorktree
- *      && <div className="pl-4 border-l …">…}` block).
- *   2. **Starting point** — `<fieldset>` with two radios that map
+ *   1. **Use worktree** — checkbox. When unchecked, the radio groups
+ *      + the pre-spawn pool block collapse (matches the legacy
+ *      panel's `{form.useWorktree && <div className="pl-4 border-l …">…}`
+ *      block).
+ *   2. **Pre-spawn warm worktrees** — checkbox + size input (issue
+ *      #611). Toggle is derived from `preSpawnPoolSize > 0`; the size
+ *      input (1..5) is disabled when the toggle is off. Toggling on
+ *      defaults the size to 1; toggling off sets it to 0.
+ *   3. **Starting point** — `<fieldset>` with two radios that map
  *      Fresh ↔ `origin/main` and Head ↔ `HEAD` on the wire. The
  *      fieldset/legend pairing gives the radios a real `radiogroup`
  *      ARIA role (the test harness resolves individual radios by
  *      their label via `getByRole('radio', { name: … })`).
- *   3. **Worktree mode** — same pattern, branched vs detached.
+ *   4. **Worktree mode** — same pattern, branched vs detached.
  *
  * All saves fire on change through the parent's typed wrappers — no
  * raw `invoke` (preserves the `tauri-ipc-seam` ratchet at
@@ -881,24 +942,37 @@ interface ConfigurationCardProps {
  * is intentional: it makes `getByLabelText('Use worktree')` resolve
  * the checkbox in the test harness without needing a separate
  * `id`/`htmlFor` wire. Radio options use the same pattern so
- * `getByRole('radio', { name: /Fresh/ })` finds them.
+ * `getByRole('radio', { name: /Fresh/ })` finds them. The pool
+ * toggle follows the same `<label>` pattern so
+ * `getByLabelText('Pre-spawn warm worktrees')` resolves it.
  */
 function ConfigurationCard({
   useWorktree,
   baseRef,
   worktreeMode,
+  preSpawnPoolSize,
   onToggleUseWorktree,
   onChangeBaseRef,
   onChangeWorktreeMode,
+  onChangePoolSize,
 }: ConfigurationCardProps) {
+  const poolEnabled = preSpawnPoolSize > 0;
+  // Display value for the size number input. When the toggle is off,
+  // show 1 (the spec's default — the user hasn't picked a size yet, but
+  // we need a placeholder that the disabled input can render). When the
+  // toggle is on, `preSpawnPoolSize` is `>= 1` by the poolEnabled guard,
+  // so the value is already a valid 1..5. The `|| 1` short-circuits the
+  // edge case where the IPC clamp rejects a write and the form keeps
+  // the stale 0 (defensive; `poolEnabled` would already be false).
+  const poolInputDisplay = preSpawnPoolSize || 1;
   return (
     <div className="rounded border border-border-subtle p-3 space-y-3">
       <p className="text-[10px] uppercase tracking-wide text-text-muted">
         Worktree configuration
       </p>
 
-      {/* Use worktree checkbox — the gate. When unchecked, the two
-          radio groups below collapse. */}
+      {/* Use worktree checkbox — the gate. When unchecked, the radio
+          groups + the pre-spawn pool block below collapse. */}
       <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
         <input
           type="checkbox"
@@ -911,6 +985,66 @@ function ConfigurationCard({
 
       {useWorktree && (
         <div className="pl-4 border-l border-border-subtle space-y-3">
+          {/* Pre-spawn pool (issue #611). The toggle is derived from
+              `preSpawnPoolSize > 0`; the size input is disabled when
+              the toggle is off. Sits ABOVE Starting point / Worktree
+              mode because it's a worktree-strategy decision — the user
+              should pick the warm-pool size before deciding where the
+              base ref sits. */}
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={poolEnabled}
+                onChange={(e) =>
+                  // Toggle off → 0 (disables the pool). Toggle on → 1
+                  // (the spec's default; the size input then lets the
+                  // user pick 2..5). The save fires immediately so the
+                  // pool worker's next reconcile sees the new target.
+                  onChangePoolSize(e.target.checked ? 1 : 0)
+                }
+                className="accent-accent-cyan"
+              />
+              <span>Pre-spawn warm worktrees</span>
+            </label>
+            <label
+              className={`flex items-center gap-2 text-xs pl-4 ${
+                poolEnabled
+                  ? 'text-text-primary cursor-pointer'
+                  : 'text-text-muted cursor-not-allowed'
+              }`}
+            >
+              <span>Pool size</span>
+              <input
+                type="number"
+                min={1}
+                max={5}
+                step={1}
+                value={poolInputDisplay}
+                disabled={!poolEnabled}
+                onChange={(e) => {
+                  // Clamp at the IPC boundary AND the input handler so
+                  // an out-of-range typed value doesn't bounce through
+                  // a save round-trip just to get rejected.
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n) && n >= 1 && n <= 5) {
+                    onChangePoolSize(Math.trunc(n));
+                  }
+                }}
+                className="w-12 px-1 py-0.5 rounded border border-border-subtle bg-bg-overlay text-text-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                title={
+                  poolEnabled
+                    ? '1 = one warm worktree pre-cut; 5 = five'
+                    : 'Toggle "Pre-spawn warm worktrees" to set a size'
+                }
+              />
+            </label>
+            <p className="text-[10px] text-text-muted pl-4">
+              Pre-warm worktree directories at startup. Manual spawns
+              land on a pre-cut directory in &lt;500ms instead of ~11s.
+            </p>
+          </div>
+
           {/* Starting point — Fresh / Head */}
           <fieldset className="border-0 p-0 m-0 space-y-2">
             <legend className="block text-xs text-text-muted mb-1">

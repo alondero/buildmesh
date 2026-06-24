@@ -240,6 +240,18 @@ pub struct Mesh {
     /// where neither native spawn is built. Persisted as
     /// `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
     pub sandbox: bool,
+    /// Per-mesh target for the pre-spawn Worktree Pool worker
+    /// (`services::warm_pool`, issue #609 / v21). `0` disables the pool
+    /// for this mesh (no warm entries created on startup, no refill
+    /// after claim); `1..=5` is the target the worker fills to.
+    /// Clamped at the IPC boundary (`update_mesh_pool_size`), not here
+    /// — this field is the typed integer the worker reads. Off by
+    /// default (`0`); opted into via the Worktrees Probe's
+    /// ConfigurationCard (issue #611). Persisted as
+    /// `meshes.pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0`
+    /// (schema v22).
+    #[ts(as = "i32")]
+    pub pre_spawn_pool_size: i32,
 }
 
 /// A paired mobile/admin client identified by a persistent per-device token
@@ -516,6 +528,14 @@ pub struct BranchInfo {
 /// A worktree (main or linked) and its prune-relevant metadata.
 ///
 /// Generated to src/types/generated/WorktreeInfo.ts (issue #404).
+///
+/// `is_pool` distinguishes a pre-spawn pool entry from a normal worktree
+/// (issue #611). Pool entries are detached-HEAD worktrees under
+/// `{mesh.path}/.claude/worktrees/<slug>` whose path matches a row in
+/// the `warm_worktrees` table; the Worktree Manager tab shows them with
+/// a "Pre-spawn Pool" badge and disables the delete action so the
+/// background worker can refill on demand. Always `false` for the
+/// primary (repo-root) worktree — pool entries are always linked.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "WorktreeInfo.ts")]
 pub struct WorktreeInfo {
@@ -523,6 +543,7 @@ pub struct WorktreeInfo {
     pub branch: Option<String>,
     pub is_active: bool,
     pub is_stale: bool,
+    pub is_pool: bool,
 }
 
 /// App settings stored in SQLite
@@ -571,6 +592,11 @@ pub struct MeshRow {
     /// #498) — see [`Mesh::sandbox`]. The column is one; the OS-specific
     /// spawn policy is decided at `spawn_environment::wrap` time.
     pub sandbox: bool,
+    /// Per-mesh pre-spawn pool target — see [`Mesh::pre_spawn_pool_size`].
+    /// `0` = pool off, `1..=5` = target the worker fills to. Surfaced in
+    /// the Worktrees Probe's ConfigurationCard (issue #611).
+    #[ts(as = "i32")]
+    pub pre_spawn_pool_size: i32,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -586,6 +612,7 @@ impl From<&Mesh> for MeshRow {
             worktree_mode: mesh.worktree_mode.clone(),
             default_provider: mesh.default_provider.clone(),
             sandbox: mesh.sandbox,
+            pre_spawn_pool_size: mesh.pre_spawn_pool_size,
         }
     }
 }
