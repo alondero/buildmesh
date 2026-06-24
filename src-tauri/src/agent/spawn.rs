@@ -705,6 +705,12 @@ pub async fn spawn_agent_inner(
     //    falls through to the cold path — the spawn never fails because of
     //    the pool, only because of an actual worktree-create error.
     let mesh_id = db::get_mesh_by_path(&node.path).map(|m| m.id).unwrap_or(-1);
+    // Issue/PR spawns adopt a warm entry differently from manual spawns: they
+    // keep their own `gh{N}-`/`pr{N}-` name and `git worktree move` the pool
+    // directory to match (issue #612), whereas a manual spawn adopts the pool's
+    // plain slug as the node name (issue #609). This flag selects between the
+    // two adoption modes at every warm-pool branch below.
+    let is_rename_spawn = node.source_issue.is_some() || node.source_pr.is_some();
     let mut warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry> = None;
     if use_worktree {
         // The path the node resolves to WITHOUT a pool claim. If it's already
@@ -714,7 +720,7 @@ pub async fn spawn_agent_inner(
         let existing = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
         let existing_present = std::path::Path::new(&existing.host_path).exists();
         if mesh_id > 0
-            && crate::services::warm_pool::should_claim_for_spawn(&node, existing_present)
+            && crate::services::warm_pool::should_claim_for_spawn(existing_present)
         {
             match crate::services::warm_pool::try_claim(mesh_id) {
                 Ok(Some(entry)) => {
@@ -743,22 +749,37 @@ pub async fn spawn_agent_inner(
         }
     }
 
-    // The effective spawn_worktree_name + path. When we claimed a warm
-    // entry, the worktree directory is already on disk — we use its
-    // preassigned slug as the node's `worktree_name` so the rest of the
-    // pipeline (which keys off `spawn_worktree_name`) treats this as just
-    // another worktree spawn. Without a claim, fall back to whatever the
-    // node row already carries (issue/PR spawns, resumes).
-    let spawn_worktree_name: Option<&str> = if let Some(ref entry) = warm_claimed {
-        Some(&entry.preassigned_name)
+    // The effective spawn_worktree_name + path.
+    //
+    //  * Manual warm claim (`!is_rename_spawn`): adopt the pool's preassigned
+    //    slug as the node's `worktree_name`, so the rest of the pipeline
+    //    resolves straight onto the already-on-disk pool directory (#609).
+    //  * Issue/PR warm claim (`is_rename_spawn`): keep the node's own
+    //    `gh{N}-`/`pr{N}-` `worktree_name`. It resolves to a path that does
+    //    NOT exist yet, so we enter the cold-create block below — where the
+    //    PR-head fetch runs — and there `git worktree move` the pool directory
+    //    onto this target instead of a cold `git worktree add` (#612).
+    //  * No claim: fall back to whatever the node row carries (resumes, or a
+    //    cold issue/PR spawn).
+    //
+    // Owned (`Option<String>`, not `Option<&str>`) on purpose: the Issue/PR
+    // path mutates `warm_claimed` (take / re-assign) inside the worktree block
+    // below, so `spawn_worktree_name` must not hold a borrow into it. The slugs
+    // are short, so the clone is negligible.
+    let spawn_worktree_name: Option<String> = if let Some(ref entry) = warm_claimed {
+        if is_rename_spawn {
+            node.worktree_name.clone()
+        } else {
+            Some(entry.preassigned_name.clone())
+        }
     } else if use_worktree {
-        node.worktree_name.as_deref()
+        node.worktree_name.clone()
     } else {
         tracing::info!("spawn_agent_inner: use_worktree=false, using repo root directly");
         None
     };
 
-    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
+    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name.as_deref());
     tracing::info!(
         "spawn_agent_inner: resolved spawn_path={}, host_path={}, env={:?}",
         resolved.spawn_path,
@@ -767,7 +788,7 @@ pub async fn spawn_agent_inner(
     );
 
     // 7. Create worktree if needed
-    if let Some(wt_name) = spawn_worktree_name {
+    if let Some(wt_name) = spawn_worktree_name.as_deref() {
         // Branched worktrees are isolated checkouts: git worktree add checks
         // out the commit, not the parent's working tree, so uncommitted
         // changes in the parent cannot leak into the new worktree. We
@@ -1002,33 +1023,119 @@ pub async fn spawn_agent_inner(
                 base_ref.to_string()
             };
 
-            tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
-            // The checkout can take seconds on a large repo; spawn_blocking keeps
-            // it off the async runtime's worker threads (same as fetch_origin above).
-            let create_args = (
-                node.path.clone(),
-                resolved.host_path.clone(),
-                wt_name.to_string(),
-                worktree_mode.to_string(),
-                worktree_base_ref,
-            );
-            timer.checkpoint("before_worktree_create");
-            let created = tokio::task::spawn_blocking(move || {
-                crate::git::worktree::create_git_worktree(
-                    &create_args.0,
-                    &create_args.1,
-                    &create_args.2,
-                    &create_args.3,
-                    &create_args.4,
-                )
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("worktree creation task panicked: {}", e)));
-            timer.checkpoint("after_worktree_create");
-            if let Err(e) = created {
-                let msg = format!("Failed to create git worktree: {}", e);
-                tracing::error!("spawn_agent_inner: {}", msg);
-                return Err(msg);
+            // Warm-pool adoption for Issue/PR spawns (issue #612). When we
+            // claimed a warm entry for a `gh{N}-`/`pr{N}-` spawn, the pool's
+            // pre-warmed directory is sitting under a plain slug at
+            // `entry.path`. Instead of a cold `git worktree add` (which writes
+            // the whole tree — the ~11s NTFS cost the pool exists to avoid), we
+            // `git worktree move` that directory onto this target name and then
+            // `git checkout` it to the ref the cold path resolved
+            // (`worktree_base_ref`: the mesh base for Issue spawns, the fetched
+            // PR head for PR spawns). On ANY failure we clean up the warm entry
+            // and fall back to the cold create so the spawn still succeeds.
+            //
+            // Only Issue/PR claims reach here: a manual warm claim resolves
+            // `spawn_worktree_name` onto the already-present pool directory, so
+            // `host_path.exists()` is true and this whole block is skipped.
+            let warm_adopt = if is_rename_spawn { warm_claimed.take() } else { None };
+            let mut adopted = false;
+            if let Some(entry) = warm_adopt {
+                let move_args = (
+                    node.path.clone(),
+                    entry.path.clone(),
+                    resolved.host_path.clone(),
+                    wt_name.to_string(),
+                    worktree_mode.to_string(),
+                    worktree_base_ref.clone(),
+                );
+                timer.checkpoint("before_warm_move");
+                let move_result = tokio::task::spawn_blocking(move || {
+                    adopt_warm_worktree_by_move(
+                        &move_args.0,
+                        &move_args.1,
+                        &move_args.2,
+                        &move_args.3,
+                        &move_args.4,
+                        &move_args.5,
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("warm worktree move task panicked: {}", e)));
+                timer.checkpoint("after_warm_move");
+                match move_result {
+                    Ok(()) => {
+                        tracing::info!(
+                            "spawn_agent_inner: adopted warm entry {} -> {} via git worktree move (base_ref={})",
+                            entry.path,
+                            resolved.host_path,
+                            worktree_base_ref,
+                        );
+                        // Keep the entry so the post-spawn housekeeping drops
+                        // the bookkeeping row and refills the pool.
+                        warm_claimed = Some(entry);
+                        adopted = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "spawn_agent_inner: warm worktree adoption failed ({}); cleaning up and falling back to cold checkout",
+                            e
+                        );
+                        // Best-effort teardown. The failure could have struck
+                        // before OR after the `git worktree move`, so the
+                        // worktree may now sit at EITHER the pool path
+                        // (`entry.path`, move not done) or the target path
+                        // (`resolved.host_path`, move done but checkout/include
+                        // failed). Remove BOTH: that (a) frees the target so the
+                        // cold `create_git_worktree` below — which no-ops if the
+                        // path already exists — actually cuts a fresh tree at the
+                        // right ref instead of leaving the agent on the pool's
+                        // stale SHA, and (b) prevents a leaked pool directory.
+                        // `remove_one_worktree` is idempotent on a missing path.
+                        let pool_path = entry.path.clone();
+                        let target_path = resolved.host_path.clone();
+                        let row_id = entry.id;
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let _ = crate::git::worktree::remove_one_worktree(&target_path);
+                            let _ = crate::git::worktree::remove_one_worktree(&pool_path);
+                        })
+                        .await;
+                        // `warm_claimed` was already taken, so the post-spawn
+                        // housekeeping won't double-free it; the next reconcile
+                        // refills the pool back to target.
+                        crate::services::warm_pool::forget_after_spawn(row_id);
+                    }
+                }
+            }
+
+            if !adopted {
+                tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
+                // The checkout can take seconds on a large repo; spawn_blocking keeps
+                // it off the async runtime's worker threads (same as fetch_origin above).
+                let create_args = (
+                    node.path.clone(),
+                    resolved.host_path.clone(),
+                    wt_name.to_string(),
+                    worktree_mode.to_string(),
+                    worktree_base_ref,
+                );
+                timer.checkpoint("before_worktree_create");
+                let created = tokio::task::spawn_blocking(move || {
+                    crate::git::worktree::create_git_worktree(
+                        &create_args.0,
+                        &create_args.1,
+                        &create_args.2,
+                        &create_args.3,
+                        &create_args.4,
+                    )
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("worktree creation task panicked: {}", e)));
+                timer.checkpoint("after_worktree_create");
+                if let Err(e) = created {
+                    let msg = format!("Failed to create git worktree: {}", e);
+                    tracing::error!("spawn_agent_inner: {}", msg);
+                    return Err(msg);
+                }
             }
         }
 
@@ -1036,15 +1143,19 @@ pub async fn spawn_agent_inner(
             tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
         }
 
-        // Warm-pool claim fast path (issue #609): when we adopted a
-        // pre-warmed detached worktree above, the directory already exists
-        // (the cold-create block above is skipped because `host_path.exists()`
-        // is true). The pool cuts every entry in `detached` mode so a
-        // future claim can `git checkout -B <branch>` to upgrade without
-        // touching the mesh's branch refs. Do the upgrade here, off the
-        // async runtime, so the spawn timer captures the warm-checkout cost
-        // as a single `spawn_timing:` checkpoint.
-        if let Some(ref entry) = warm_claimed {
+        // Warm-pool claim fast path for MANUAL spawns (issue #609): when we
+        // adopted a pre-warmed detached worktree above, the directory already
+        // exists (the cold-create block above is skipped because
+        // `host_path.exists()` is true). The pool cuts every entry in
+        // `detached` mode so a future claim can `git checkout -B <branch>` to
+        // upgrade without touching the mesh's branch refs. Do the upgrade here,
+        // off the async runtime, so the spawn timer captures the warm-checkout
+        // cost as a single `spawn_timing:` checkpoint.
+        //
+        // Issue/PR claims (`is_rename_spawn`) are already checked out to the
+        // right ref by `adopt_warm_worktree_by_move` inside the cold block, so
+        // they skip this manual-only upgrade (#612).
+        if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
             timer.checkpoint("before_warm_branch_upgrade");
             let host_path_owned = resolved.host_path.clone();
             let branch_name_owned = wt_name.to_string();
@@ -1164,7 +1275,11 @@ pub async fn spawn_agent_inner(
     // any concurrent `agent-spawned` listener fire right after registration,
     // so doing the UPDATE post-register would let them briefly observe the
     // throwaway stage-1 slug instead of the adopted pool slug.
-    if let Some(ref entry) = warm_claimed {
+    //
+    // Manual claims only: an Issue/PR claim (`is_rename_spawn`) kept its own
+    // `gh{N}-`/`pr{N}-` `worktree_name` — the pool directory was moved to
+    // match it — so there is nothing to overwrite (#612).
+    if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         if let Err(e) = db::set_agent_node_worktree_name(session_id, &entry.preassigned_name) {
             tracing::warn!(
                 "spawn_agent_inner: failed to set worktree_name={} on node {}: {}",
@@ -1234,35 +1349,41 @@ pub async fn spawn_agent_inner(
     // next reconcile pass.
     if let Some(entry) = warm_claimed.take() {
         crate::services::warm_pool::forget_after_spawn(entry.id);
-        // Full name adoption (issue #609, PRD #608 §3 "Manual Spawns"). The
-        // node takes the warm entry's slug as BOTH its `worktree_name` (so
-        // path resolution lands on the pre-warmed directory) AND its display
-        // `name` (so the on-disk directory and the node name match with zero
-        // rename). At stage-1 the node was created under a throwaway slug;
-        // here we overwrite both with the adopted slug. The slug is a plain
-        // `on_spawn` adj-adj-noun, so it's still a `is_default_name` match —
-        // the auto-LLM renamer can override it later exactly as it would the
-        // throwaway slug. The `worktree_name` UPDATE was already done above
-        // (before `register_agent`) so the reader thread sees the adopted
-        // value; only `name` needs an event here.
-        if let Err(e) = db::update_agent_node_name(session_id, &entry.preassigned_name) {
-            tracing::warn!(
-                "spawn_agent_inner: failed to adopt name={} on node {}: {}",
-                entry.preassigned_name,
-                session_id,
-                e
-            );
-        } else {
-            // Re-label the frontend's optimistic stage-1 row (created under
-            // the throwaway slug) via the same `node-renamed` channel the
-            // manual-rename command uses (agentNodeStore listens for it).
-            let _ = app.emit(
-                "node-renamed",
-                serde_json::json!({
-                    "node_id": session_id,
-                    "name": entry.preassigned_name,
-                }),
-            );
+        // Full name adoption — MANUAL spawns only (issue #609, PRD #608 §3
+        // "Manual Spawns"). The node takes the warm entry's slug as BOTH its
+        // `worktree_name` (so path resolution lands on the pre-warmed
+        // directory) AND its display `name` (so the on-disk directory and the
+        // node name match with zero rename). At stage-1 the node was created
+        // under a throwaway slug; here we overwrite both with the adopted slug.
+        // The slug is a plain `on_spawn` adj-adj-noun, so it's still a
+        // `is_default_name` match — the auto-LLM renamer can override it later
+        // exactly as it would the throwaway slug. The `worktree_name` UPDATE
+        // was already done above (before `register_agent`) so the reader thread
+        // sees the adopted value; only `name` needs an event here.
+        //
+        // Issue/PR claims (`is_rename_spawn`) keep their own `gh{N}-`/`pr{N}-`
+        // name — the pool DIRECTORY was renamed to match the node, not the
+        // reverse — so they skip the name adoption entirely (#612).
+        if !is_rename_spawn {
+            if let Err(e) = db::update_agent_node_name(session_id, &entry.preassigned_name) {
+                tracing::warn!(
+                    "spawn_agent_inner: failed to adopt name={} on node {}: {}",
+                    entry.preassigned_name,
+                    session_id,
+                    e
+                );
+            } else {
+                // Re-label the frontend's optimistic stage-1 row (created under
+                // the throwaway slug) via the same `node-renamed` channel the
+                // manual-rename command uses (agentNodeStore listens for it).
+                let _ = app.emit(
+                    "node-renamed",
+                    serde_json::json!({
+                        "node_id": session_id,
+                        "name": entry.preassigned_name,
+                    }),
+                );
+            }
         }
         // Background refill on the spawn-blocking pool so the async
         // runtime can keep making progress on the spawn caller. Reuse
@@ -1606,25 +1727,97 @@ fn fetch_fork_head(
 /// (`process_util::command_no_window`), so we don't need per-OS cfg
 /// duplication here.
 fn upgrade_warm_to_mode(host_path: &str, branch_name: &str, mode: &str) -> Result<(), String> {
-    use crate::process_util::command_no_window;
     if mode == "detached" {
         // No-op: the pool already cut the entry as detached.
         return Ok(());
     }
     // Branched mode: `git checkout -B <branch>` from the current HEAD. `-B`
-    // (uppercase) is used instead of `-b` so the call is idempotent — a
-    // second spawn that re-claims a still-detached entry reuses the
-    // existing branch instead of erroring on "branch already exists". The
-    // branch name is the agent's `worktree_name`, which the spawn path
-    // computed as the pool's preassigned slug — a plain adj-adj-noun like
-    // `bold-amber-fox`, a valid git branch name (matches `SLUG_REGEX`).
+    // (uppercase) is deliberate here — a manual spawn's branch IS the pool's
+    // preassigned slug (a random adj-adj-noun like `bold-amber-fox`), so a
+    // collision with a pre-existing branch is vanishingly unlikely and `-B`
+    // keeps the call idempotent across a re-claim of a still-detached entry.
+    // (The Issue/PR path uses `-b` instead — see `checkout_worktree_to_base` —
+    // because its branch name is deterministic and `-B` would force-reset a
+    // user's prior work.)
+    run_git_checkout(host_path, &["-B", branch_name])
+}
+
+/// Adopt a claimed warm-pool worktree for an Issue/PR spawn (issue #612): move
+/// the pre-warmed plain-slug directory to the node's `gh{N}-`/`pr{N}-` target
+/// path, then check that worktree out to `base_ref` on the node's branch (or
+/// detached), then re-apply `.worktreeinclude` so the result matches a cold
+/// spawn. Any step failing returns `Err` so the spawn path can clean up the
+/// warm entry and fall back to a cold `git worktree add`.
+///
+/// The move is the cheap part (`git worktree move`, ~tens of ms); the checkout
+/// only writes the diff between the pool's base SHA and `base_ref` — for an
+/// Issue spawn `base_ref` IS the mesh base the pool already sits on (near-zero
+/// writes), and for a PR spawn it's the freshly fetched PR head (just the PR's
+/// changed files), versus a cold spawn re-writing the entire tree.
+fn adopt_warm_worktree_by_move(
+    project_root: &str,
+    old_host_path: &str,
+    new_host_path: &str,
+    branch_name: &str,
+    mode: &str,
+    base_ref: &str,
+) -> Result<(), String> {
+    // Resolve `base_ref` to a concrete SHA up front (offline → HEAD fallback,
+    // and never a symbolic ref to `git checkout`), mirroring what the cold
+    // path's `add_worktree_impl` does via `resolve_base_commit`. Resolving
+    // BEFORE the move means a bad ref fails fast, before we disturb the pool
+    // directory.
+    let base_sha = crate::git::worktree::resolve_base_ref_sha(project_root, base_ref)?;
+    crate::git::worktree::move_git_worktree(project_root, old_host_path, new_host_path)?;
+    checkout_worktree_to_base(new_host_path, branch_name, mode, &base_sha)?;
+    crate::git::worktree::apply_worktree_include(
+        project_root,
+        std::path::Path::new(new_host_path),
+    );
+    Ok(())
+}
+
+/// `git checkout` a (just-moved) warm worktree onto a specific `base_sha`.
+/// Branched mode uses `-b <branch> <base_sha>` — like the cold path's
+/// `git worktree add -b`, it REFUSES if the branch already exists rather than
+/// clobbering it, so a re-spawn never silently force-resets a deterministic
+/// `gh{N}-`/`pr{N}-` branch and orphans the agent's earlier commits. Detached
+/// mode uses `--detach <base_sha>`.
+///
+/// Unlike [`upgrade_warm_to_mode`] (manual spawns, which stay on the warm
+/// entry's current HEAD), Issue/PR spawns must land on a *named* ref: the mesh
+/// base for Issue spawns, the PR head (`origin/<head>` / `fork-<login>/<head>`)
+/// for PR spawns. The cold-path PR-head-fetch resolves that ref, and
+/// `adopt_warm_worktree_by_move` resolves it to the `base_sha` passed here.
+fn checkout_worktree_to_base(
+    host_path: &str,
+    branch_name: &str,
+    mode: &str,
+    base_sha: &str,
+) -> Result<(), String> {
+    if mode == "branched" {
+        run_git_checkout(host_path, &["-b", branch_name, base_sha])
+    } else {
+        run_git_checkout(host_path, &["--detach", base_sha])
+    }
+}
+
+/// Shared `git -C <host_path> checkout <args…>` runner for the warm-pool
+/// checkout paths (manual mode-upgrade and Issue/PR adoption). Centralises the
+/// `command_no_window` plumbing and the stderr-surfacing error shape so a
+/// future fix (arg quoting, lock-retry) lands for both callers at once; the
+/// deliberate flag differences (`-B` vs `-b`) stay explicit at the call sites.
+fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
+    use crate::process_util::command_no_window;
     let mut cmd = command_no_window("git");
-    cmd.arg("-C").arg(host_path).arg("checkout").arg("-B").arg(branch_name);
-    let output = cmd.output().map_err(|e| format!("failed to spawn git checkout: {}", e))?;
+    cmd.arg("-C").arg(host_path).arg("checkout").args(args);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to spawn git checkout: {}", e))?;
     if !output.status.success() {
         return Err(format!(
-            "git checkout -B {} failed: {}",
-            branch_name,
+            "git checkout {} failed: {}",
+            args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
@@ -1678,6 +1871,97 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    // -----------------------------------------------------------------------
+    // Warm-pool Issue/PR adoption (issue #612): move a detached pool worktree
+    // onto the node's target name and check it out to the resolved base SHA on
+    // its own branch. These pin the code-review fixes for two confirmed bugs:
+    // resolving `base_ref` → SHA (offline resilience), and using `-b` (NOT
+    // `-B`) so a re-spawn can never force-reset a branch carrying prior work.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn adopt_warm_worktree_moves_and_branches_at_base_sha() {
+        use crate::env::test_helpers::init_repo_with_commit;
+        let td = TempDir::new().unwrap();
+        let root = td.path();
+        let repo = init_repo_with_commit(root, &[("f.txt", "a\n")]);
+        let head = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+
+        // The pool's on-disk shape: a DETACHED worktree under a plain slug.
+        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
+        crate::git::worktree::create_git_worktree(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+
+        let target = root.join(".claude").join("worktrees").join("gh123-fix");
+        adopt_warm_worktree_by_move(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            target.to_str().unwrap(),
+            "gh123-fix",
+            "branched",
+            "HEAD",
+        )
+        .expect("adoption must succeed");
+
+        assert!(!pool.exists(), "pool directory must be gone after the move");
+        assert!(target.exists(), "target directory must exist after the move");
+        let wt = git2::Repository::open(&target).unwrap();
+        assert_eq!(
+            wt.head().unwrap().shorthand().unwrap(),
+            "gh123-fix",
+            "the adopted worktree must be on the node's own branch"
+        );
+        assert_eq!(
+            wt.head().unwrap().peel_to_commit().unwrap().id().to_string(),
+            head,
+            "the branch must sit at the resolved base SHA"
+        );
+    }
+
+    #[test]
+    fn adopt_warm_worktree_refuses_to_clobber_an_existing_branch() {
+        use crate::env::test_helpers::init_repo_with_commit;
+        let td = TempDir::new().unwrap();
+        let root = td.path();
+        let repo = init_repo_with_commit(root, &[("f.txt", "a\n")]);
+        // A pre-existing deterministic branch standing in for a prior spawn's
+        // work. Force-resetting it (the old `-B` bug) would orphan its commits.
+        let head_commit = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("gh7-x", &head_commit, false).unwrap();
+
+        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
+        crate::git::worktree::create_git_worktree(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+
+        let target = root.join(".claude").join("worktrees").join("gh7-x");
+        let err = adopt_warm_worktree_by_move(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            target.to_str().unwrap(),
+            "gh7-x",
+            "branched",
+            "HEAD",
+        )
+        .expect_err("adoption must refuse to overwrite an existing branch");
+        assert!(
+            err.contains("git checkout"),
+            "the failure must come from the refusing `-b` checkout, got: {}",
+            err
+        );
     }
 
     // -----------------------------------------------------------------------

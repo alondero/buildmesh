@@ -56,21 +56,25 @@ use std::path::Path;
 
 /// Decide whether the spawn path should consult the pool for a given node.
 ///
-/// Eligible == a **fresh manual worktree spawn**:
-///   * no `source_pr` and no `source_issue`. Issue/PR spawns need the warm
-///     entry renamed to `gh{N}-<slug>` / `pr{N}-<slug>` (a `git worktree
-///     move`), which is out of scope for this tranche — the PRD scopes it
-///     to a follow-up. They're served by the cold path.
-///   * `existing_worktree_present == false` — the node's own worktree
-///     directory is NOT already on disk. Resume / handover / re-spawn paths
-///     re-enter `spawn_agent_inner` with a `worktree_name` whose directory
-///     the original spawn already created; claiming a pool entry for one of
-///     them would re-point the node at a *different* directory and abandon
-///     the agent's existing work. The cold path keys its own "create the
-///     worktree?" decision off the same `!host_path.exists()` check, so the
-///     two stay in lockstep: if the cold path would create a worktree, the
-///     pool is allowed to satisfy that creation; if it would reuse one, the
-///     pool stays out of the way.
+/// Eligible == a **fresh worktree spawn** — one whose own worktree directory
+/// is NOT already on disk (`existing_worktree_present == false`).
+///
+/// Manual, Issue, and PR spawns are all eligible. Manual spawns adopt the
+/// pool's plain slug as the node name; Issue/PR spawns keep their
+/// `gh{N}-`/`pr{N}-` name and `git worktree move` the pool directory to match
+/// (issue #612). The spawn path branches on `node.source_issue` /
+/// `node.source_pr` to pick which adoption mode to run; the gate itself only
+/// asks "is there a worktree to create?".
+///
+/// Resume / handover / re-spawn paths re-enter `spawn_agent_inner` with a
+/// `worktree_name` whose directory the original spawn already created
+/// (`existing_worktree_present == true`); claiming a pool entry for one of
+/// them would re-point the node at a *different* directory and abandon the
+/// agent's existing work, so they're rejected. The cold path keys its own
+/// "create the worktree?" decision off the same `!host_path.exists()` check,
+/// so the two stay in lockstep: if the cold path would create a worktree, the
+/// pool is allowed to satisfy that creation; if it would reuse one, the pool
+/// stays out of the way.
 ///
 /// `existing_worktree_present` is computed by the caller from
 /// `env::resolve_agent_path(node.path, node.worktree_name)` — the path the
@@ -79,16 +83,7 @@ use std::path::Path;
 /// Returns `false` for any spawn the cold path must serve. The caller falls
 /// back to a cold `create_git_worktree` on `false` — exactly what it would
 /// do if the pool were empty.
-pub fn should_claim_for_spawn(
-    node: &crate::models::AgentNode,
-    existing_worktree_present: bool,
-) -> bool {
-    if node.source_pr.is_some() {
-        return false;
-    }
-    if node.source_issue.is_some() {
-        return false;
-    }
+pub fn should_claim_for_spawn(existing_worktree_present: bool) -> bool {
     !existing_worktree_present
 }
 
@@ -551,33 +546,18 @@ mod tests {
 
     // ---- should_claim_for_spawn (the activation gate) ----
     //
-    // These pin the fix for the activation bug: the gate originally returned
-    // `node.worktree_name.is_none()`, but `agent_node::create` always assigns
-    // a slug to a worktree-enabled node, so the pool was never claimed. The
-    // gate now keys off whether the node's CURRENT worktree directory is
+    // The gate keys solely off whether the node's CURRENT worktree directory is
     // already on disk — `false` ⇒ fresh spawn (claim), `true` ⇒ resume /
-    // re-spawn reusing an existing worktree (don't claim).
-
-    fn node_with(source_pr: Option<i64>, source_issue: Option<i64>) -> crate::models::AgentNode {
-        crate::models::AgentNode {
-            path: "/repo/m".to_string(),
-            use_worktree: true,
-            // A worktree-enabled node always carries a slug (set at create
-            // time); the gate no longer cares about its value, only about
-            // whether the directory exists.
-            worktree_name: Some("gentle-amber-fox".to_string()),
-            source_pr,
-            source_issue,
-            ..Default::default()
-        }
-    }
+    // re-spawn reusing an existing worktree (don't claim). Issue/PR spawns are
+    // now claim-eligible too (issue #612): the spawn path `git worktree move`s
+    // the pool directory to their `gh{N}-`/`pr{N}-` name rather than excluding
+    // them.
 
     #[test]
-    fn claims_for_fresh_manual_spawn_when_worktree_absent() {
-        let node = node_with(None, None);
+    fn claims_for_a_fresh_spawn_when_worktree_absent() {
         assert!(
-            should_claim_for_spawn(&node, false),
-            "a fresh manual spawn (worktree dir not yet on disk) must be claim-eligible"
+            should_claim_for_spawn(false),
+            "a fresh spawn (worktree dir not yet on disk) must be claim-eligible"
         );
     }
 
@@ -586,24 +566,9 @@ mod tests {
         // Resume / handover / re-spawn: the node's worktree already exists on
         // disk. Claiming would re-point it at a different directory and
         // abandon the agent's work.
-        let node = node_with(None, None);
         assert!(
-            !should_claim_for_spawn(&node, true),
+            !should_claim_for_spawn(true),
             "a spawn reusing an existing on-disk worktree must NOT be claim-eligible"
-        );
-    }
-
-    #[test]
-    fn does_not_claim_pr_or_issue_spawns() {
-        // Issue/PR spawns need a renamed directory (out of scope for v21) —
-        // never claimed, even when their worktree dir is absent.
-        assert!(
-            !should_claim_for_spawn(&node_with(Some(420), None), false),
-            "PR spawns must route through the cold path"
-        );
-        assert!(
-            !should_claim_for_spawn(&node_with(None, Some(609)), false),
-            "issue spawns must route through the cold path"
         );
     }
 }

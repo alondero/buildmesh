@@ -168,39 +168,128 @@ pub fn create_git_worktree(
         Err(err) => return Err(err),
     }
 
-    // Honor .worktreeinclude if it exists in the project root
+    apply_worktree_include(project_root, host_path);
+
+    Ok(())
+}
+
+/// Copy the files listed in `<project_root>/.worktreeinclude` into a freshly
+/// materialised worktree. Best-effort: a missing manifest is a no-op and a
+/// failed copy is logged, never fatal — the worktree is already usable without
+/// the extras.
+///
+/// Shared by the cold `create_git_worktree` path AND the warm-pool adoption
+/// path (issue #612). The warm pool pre-copies these at prewarm time, but the
+/// referenced files (local config, env files, build artifacts) can change
+/// before an Issue/PR spawn adopts the entry, so re-applying on adoption keeps
+/// an adopted worktree byte-for-byte equivalent to a cold-spawned one.
+pub(crate) fn apply_worktree_include(project_root: &str, host_path: &std::path::Path) {
     let include_file_path = std::path::Path::new(project_root).join(".worktreeinclude");
-    if include_file_path.exists() {
-        tracing::info!("Found .worktreeinclude, copying included files...");
-        if let Ok(content) = std::fs::read_to_string(&include_file_path) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
+    if !include_file_path.exists() {
+        return;
+    }
+    tracing::info!("Found .worktreeinclude, copying included files...");
+    let Ok(content) = std::fs::read_to_string(&include_file_path) else {
+        return;
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let src = std::path::Path::new(project_root).join(trimmed);
+        let dest = host_path.join(trimmed);
+
+        if src.exists() {
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+
+            if src.is_file() {
+                if let Err(e) = std::fs::copy(&src, &dest) {
+                    tracing::warn!("Failed to copy included file {} -> {}: {}", src.display(), dest.display(), e);
+                } else {
+                    tracing::info!("Copied included file: {}", trimmed);
                 }
-
-                let src = std::path::Path::new(project_root).join(trimmed);
-                let dest = host_path.join(trimmed);
-
-                if src.exists() {
-                    if let Some(parent) = dest.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-
-                    if src.is_file() {
-                        if let Err(e) = std::fs::copy(&src, &dest) {
-                            tracing::warn!("Failed to copy included file {} -> {}: {}", src.display(), dest.display(), e);
-                        } else {
-                            tracing::info!("Copied included file: {}", trimmed);
-                        }
-                    } else if src.is_dir() {
-                        tracing::warn!(".worktreeinclude: directory copying not yet implemented: {}", trimmed);
-                    }
-                }
+            } else if src.is_dir() {
+                tracing::warn!(".worktreeinclude: directory copying not yet implemented: {}", trimmed);
             }
         }
     }
+}
 
+/// Resolve `base_ref` to a concrete 40-char commit SHA against the mesh repo,
+/// with the same offline/HEAD fallback [`add_worktree_impl`] gets from
+/// [`resolve_base_commit`]. The warm-pool adoption path (issue #612) hands the
+/// resulting SHA — never a symbolic ref like `origin/main` or `@{u}` — to
+/// `git checkout`, so it inherits both the offline resilience (an unfetched
+/// remote ref degrades to HEAD instead of hard-failing the checkout) and the
+/// Windows `Command::args` brace-strip protection the cold path relies on.
+pub fn resolve_base_ref_sha(project_root: &str, base_ref: &str) -> Result<String, String> {
+    let host_root = to_host_path(project_root);
+    let repo = git2::Repository::open(&host_root)
+        .map_err(|e| format!("Failed to open repository at {}: {}", host_root, e))?;
+    // Bind before returning so the borrowed `Commit` temporary is dropped
+    // while `repo` is still alive (the SHA itself is owned).
+    let sha = resolve_base_commit(&repo, base_ref)?.id().to_string();
+    Ok(sha)
+}
+
+/// Move (and rename) an existing worktree to a new directory via
+/// `git worktree move`. This relocates the working tree on disk AND rewrites
+/// git's internal references — the per-worktree admin `gitdir` pointer and the
+/// worktree's own `.git` file — so every git command keeps working at the new
+/// path. The warm pool (issue #612) uses it to adopt a pre-warmed plain-slug
+/// worktree under an Issue/PR node's `gh{N}-`/`pr{N}-` target name without
+/// paying the cold `git worktree add` checkout cost.
+///
+/// Shells out to the git CLI for the same reason [`add_worktree_impl`] does —
+/// libgit2 exposes no worktree-move API. `project_root` is the mesh repo; the
+/// two paths are the worktree's current and target host directories. Git
+/// refuses to overwrite an existing target and needs the target's parent to
+/// exist; both hold for the pool's sibling layout under `.claude/worktrees/`.
+pub fn move_git_worktree(
+    project_root: &str,
+    old_host_path: &str,
+    new_host_path: &str,
+) -> Result<(), String> {
+    // Normalise all three to host format before handing them to the Windows
+    // git CLI — a WSL-style path would otherwise reach git.exe unconverted.
+    // `to_host_path` is idempotent on an already-host path, so today's callers
+    // (which pass host paths) are unaffected.
+    let host_root = to_host_path(project_root);
+    let old = to_host_path(old_host_path);
+    let new = to_host_path(new_host_path);
+
+    // Guard against `git worktree move`'s `mv`-style nesting: when the target
+    // directory already exists, git moves the source *inside* it
+    // (`<target>/<src-basename>`) and exits 0 rather than refusing. The spawn
+    // path only calls this when the target is free, but refusing explicitly
+    // keeps a stray leftover from silently producing a nested worktree.
+    if std::path::Path::new(&new).exists() {
+        return Err(format!("git worktree move target already exists: {}", new));
+    }
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(&host_root)
+        .arg("worktree")
+        .arg("move")
+        .arg(&old)
+        .arg(&new);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run `git worktree move`: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git worktree move failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     Ok(())
 }
 
@@ -638,6 +727,123 @@ mod tests {
         let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
         assert_eq!(wt_readme, "# project\n");
         assert!(repo_is_dirty(parent));
+    }
+
+    // ── move (#612: warm-pool adoption rename) ───────────────────────────────
+
+    /// Create a DETACHED worktree under `<root>/.claude/worktrees/<name>`,
+    /// matching the on-disk shape the warm pool actually cuts (it pins
+    /// `detached` mode so a claim can `git checkout -b` to upgrade). Move tests
+    /// use this rather than `make_branched_worktree` for production fidelity.
+    fn make_detached_worktree(root: &Path, name: &str) -> PathBuf {
+        let wt = root.join(".claude").join("worktrees").join(name);
+        create_git_worktree(
+            root.to_str().unwrap(),
+            wt.to_str().unwrap(),
+            name,
+            "detached",
+            "HEAD",
+        )
+        .expect("detached worktree creation must succeed");
+        wt
+    }
+
+    #[test]
+    fn move_git_worktree_relocates_dir_and_keeps_git_working() {
+        let td = TestDir::new("move_wt");
+        init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        // A pre-warmed worktree under a plain slug, the pool's on-disk shape
+        // (detached, as the pool cuts it).
+        let src = make_detached_worktree(td.path(), "warm-amber-fox");
+        let dst = td
+            .path()
+            .join(".claude")
+            .join("worktrees")
+            .join("gh123-fix-this");
+        assert!(src.exists(), "precondition: warm worktree exists");
+        assert!(!dst.exists(), "precondition: target name is free");
+
+        move_git_worktree(
+            td.path().to_str().unwrap(),
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        )
+        .expect("git worktree move must succeed");
+
+        assert!(!src.exists(), "source directory must be gone after the move");
+        assert!(dst.exists(), "target directory must exist after the move");
+
+        // Git's internal references must have followed the directory: the moved
+        // worktree opens as a repo and its HEAD resolves (a `git worktree move`
+        // that didn't rewrite the gitdir pointer would break both).
+        let moved = git2::Repository::open(&dst)
+            .expect("moved worktree must still open as a git repository");
+        assert!(
+            moved.head().is_ok(),
+            "HEAD must resolve inside the moved worktree"
+        );
+        // And the root repo's admin list must point at the new path, not the old.
+        let root = git2::Repository::open(td.path()).unwrap();
+        let still_registered = root
+            .worktrees()
+            .unwrap()
+            .iter()
+            .flatten()
+            .filter_map(|n| root.find_worktree(n).ok())
+            .any(|wt| wt.path() == dst.as_path());
+        assert!(
+            still_registered,
+            "the moved worktree must be registered at its new path"
+        );
+    }
+
+    #[test]
+    fn move_git_worktree_refuses_an_occupied_target() {
+        let td = TestDir::new("move_wt_clash");
+        init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        let src = make_detached_worktree(td.path(), "warm-amber-fox");
+        // An occupied target. Bare `git worktree move` would nest the source
+        // INSIDE it (mv semantics) and exit 0; our existence guard must refuse
+        // instead so a stray leftover never produces a nested worktree.
+        let dst = make_branched_worktree(td.path(), "gh7-occupied");
+
+        let err = move_git_worktree(
+            td.path().to_str().unwrap(),
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+        )
+        .expect_err("moving onto an existing target must be refused");
+        assert!(
+            err.contains("target already exists"),
+            "error must name the occupied-target guard, got: {}",
+            err
+        );
+        assert!(src.exists(), "source must be untouched after a refused move");
+        // The target must NOT have gained a nested worktree.
+        assert!(
+            !dst.join("warm-amber-fox").exists(),
+            "the source must not have been nested inside the occupied target"
+        );
+    }
+
+    #[test]
+    fn resolve_base_ref_sha_resolves_and_falls_back_to_head() {
+        let td = TestDir::new("resolve_sha");
+        let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
+        let head = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+
+        // A resolvable ref returns its concrete SHA.
+        assert_eq!(
+            resolve_base_ref_sha(td.path().to_str().unwrap(), "HEAD").unwrap(),
+            head
+        );
+        // An unresolvable ref degrades to HEAD (offline resilience) rather than
+        // erroring — the property the warm-pool adoption path depends on.
+        assert_eq!(
+            resolve_base_ref_sha(td.path().to_str().unwrap(), "origin/does-not-exist").unwrap(),
+            head,
+            "an unfetched ref must fall back to HEAD, not hard-fail the checkout"
+        );
     }
 
     // ── resolve_base_commit + base_ref (#230) ────────────────────────────────
