@@ -6,6 +6,7 @@
 pub mod assets;
 pub mod auth;
 pub mod events;
+pub mod interface_rank;
 pub mod request;
 pub mod revocation;
 pub mod routes;
@@ -807,7 +808,12 @@ fn local_ips_lock() -> &'static parking_lot::RwLock<Vec<IpAddr>> {
 /// A VPN or Wi-Fi adapter that appears AFTER the first enumeration is picked up
 /// the next time this runs — issue #585 lifts the `OnceLock` cache limitation.
 fn refresh_local_interface_ips() -> Vec<IpAddr> {
-    let snapshot = enumerate_interfaces();
+    // Rank best-LAN-first so the realized-bind order (→ cert SANs →
+    // `exposed_interfaces`) leads with the interface the phone can actually
+    // reach. Without this the raw OS enumeration order leaks through and the QR's
+    // "first IPv4 TLS bind" pick can land on a VPN tunnel (e.g. NordLynx
+    // `10.5.0.2`) the phone has no route to. See `interface_rank`.
+    let snapshot = interface_rank::rank_interface_ips(enumerate_interfaces());
     *local_ips_lock().write() = snapshot.clone();
     snapshot
 }
