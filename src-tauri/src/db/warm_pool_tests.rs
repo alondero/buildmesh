@@ -26,7 +26,7 @@
 mod tests {
     use crate::db::{
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
-        count_warm_entries_for_mesh_inner, delete_warm_worktrees_for_mesh_inner,
+        count_droppable_warm_entries_for_mesh_inner, delete_warm_worktrees_for_mesh_inner,
         ensure_mesh_pre_spawn_pool_size, ensure_warm_worktables_table,
         insert_warm_worktree_inner, is_warm_pool_path_inner,
         list_oldest_warm_entries_for_mesh_inner,
@@ -526,15 +526,15 @@ mod tests {
         assert_eq!(rows_zero[0].pre_spawn_pool_size, 0);
     }
 
-    /// `count_warm_entries_for_mesh` counts every status (filling,
-    /// available, claimed) — distinct from `count_available_warm_for_mesh`
-    /// which only counts claimable rows. The drain logic uses this so a
-    /// stuck `claimed` row from a failed `forget_after_spawn` doesn't fool
-    /// the drain into thinking the mesh is at target.
+    /// The drain must NOT count a `claimed` row against the target (issue
+    /// #613 review): a claimed entry is a worktree in transition to a live
+    /// agent node, not pool inventory. `count_droppable_warm_entries_for_mesh`
+    /// excludes it, so the idle drain can never see "3 entries, target 2,
+    /// excess 1" and go on to force-remove the live worktree.
     #[test]
-    fn count_warm_entries_counts_all_statuses() {
+    fn count_droppable_excludes_claimed_rows() {
         let conn = v22_schema_with_mesh(3);
-        // Two available, one filling, one claimed → 4 total.
+        // Two available, one filling, one claimed.
         let tmp = tempfile::TempDir::new().unwrap();
         let p = |name: &str| tmp.path().join(name).to_str().unwrap().to_string();
         insert_warm_worktree_inner(
@@ -574,8 +574,12 @@ mod tests {
         )
         .unwrap();
 
-        let total = count_warm_entries_for_mesh_inner(&conn, 1).unwrap();
-        assert_eq!(total, 4, "all four rows (any status) must count");
+        // 2 available + 1 filling = 3 droppable; the claimed row is excluded.
+        let droppable = count_droppable_warm_entries_for_mesh_inner(&conn, 1).unwrap();
+        assert_eq!(
+            droppable, 3,
+            "droppable count must exclude the claimed row (it's a live node's worktree)"
+        );
 
         // And the available-only count still works — the v21 contract
         // the fill loop depends on.
@@ -629,6 +633,50 @@ mod tests {
         // And the path comes along — the caller needs it for
         // `git worktree remove --force`.
         assert_eq!(picks[0].1, p("new-filling"));
+    }
+
+    /// A `claimed` row must NEVER be a drain candidate (issue #613 review):
+    /// its directory is being adopted as a live agent node's worktree, so
+    /// force-removing it would delete the agent's work. Even when a claimed
+    /// row is the oldest entry and the limit would otherwise reach it, the
+    /// candidate scan must skip it and return only the droppable rows.
+    #[test]
+    fn list_oldest_warm_entries_excludes_claimed() {
+        let conn = v22_schema_with_mesh(1);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = |name: &str| tmp.path().join(name).to_str().unwrap().to_string();
+        // Claimed inserted FIRST (oldest) — must still be skipped.
+        let claimed_id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("old-claimed"),
+            "old-claimed",
+            Some("cc"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+        let avail_id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("new-available"),
+            "new-available",
+            Some("aa"),
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+
+        // Ask for up to 5 candidates: only the one available row qualifies.
+        let picks = list_oldest_warm_entries_for_mesh_inner(&conn, 1, 5).unwrap();
+        let ids: Vec<i64> = picks.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![avail_id],
+            "only the available row is a drain candidate; the claimed row must be excluded"
+        );
+        assert!(
+            !ids.contains(&claimed_id),
+            "a claimed (live-node) worktree must never be selected for force-removal"
+        );
     }
 
     /// `list_oldest_warm_entries_for_mesh_inner` obeys the LIMIT. With

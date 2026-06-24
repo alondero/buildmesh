@@ -293,6 +293,43 @@ pub fn move_git_worktree(
     Ok(())
 }
 
+/// Hard-reset a warm pool worktree onto `sha` so it tracks a freshly-fetched
+/// base ref (issue #613 ref-freshness). Runs `git -C <worktree> reset --hard
+/// <sha>` — a detached-HEAD warm worktree owns no branch and has no local work
+/// to preserve, so a hard reset is exactly right: it moves HEAD and the working
+/// tree to the new commit, discarding the (identical-up-to-the-old-base) tree.
+///
+/// Shells out to the git CLI rather than libgit2 for parity with the other
+/// worktree mutators here (`move_git_worktree`) and because the CLI's
+/// `reset --hard` is the canonical, well-understood operation. `worktree_path`
+/// is normalised to host format first so a WSL-style path never reaches
+/// git.exe unconverted.
+pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String> {
+    let host = to_host_path(worktree_path);
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(&host)
+        .arg("reset")
+        .arg("--hard")
+        .arg(sha);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run `git reset --hard`: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git reset --hard {} failed in {}: {}",
+            sha,
+            host,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Sanitize the .git file in a worktree to ensure it uses the correct path format
 /// for the target environment (Windows vs WSL).
 pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Result<(), String> {

@@ -358,6 +358,26 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     // the all-refs fetch is fine here (and matches the behaviour of
     // `git fetch` with no arguments that the pre-#274 code used).
     let outcome = crate::git::sync::do_sync(&host_path, &remote, None);
+
+    // Ref-freshness (issue #613 AC3): a manual Sync that pulled new commits
+    // moved the mesh's base ref, so its warm pool entries are now stale.
+    // Kick a background freshness pass (serialized behind the pool fill lock)
+    // to `git reset --hard` them onto the new commit. Fired only when new
+    // commits actually arrived; `UpToDate` / skipped means nothing moved.
+    let ref_advanced = matches!(
+        &outcome,
+        crate::git::sync::SyncOutcome::Synced { .. }
+            | crate::git::sync::SyncOutcome::FetchedButDiverged { .. }
+    );
+    if ref_advanced {
+        if let Ok(mesh) = crate::db::get_mesh_by_path(&path) {
+            let mesh_id = mesh.id;
+            std::thread::spawn(move || {
+                crate::services::warm_pool::on_fetch_completed(mesh_id);
+            });
+        }
+    }
+
     Ok(sync_outcome_to_git_sync_result(outcome))
 }
 

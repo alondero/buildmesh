@@ -543,6 +543,12 @@ fn start_reader(
                     spawn_start.elapsed().as_millis()
                 );
             }
+            // Mark the app as active so the background warm-pool worker holds
+            // off its idle refills while an agent is actively producing output
+            // (issue #613 AC2) — a `git worktree add` must not compete with a
+            // live agent's I/O.
+            crate::services::pool_worker::note_activity();
+
             let text = String::from_utf8_lossy(data);
             crate::session_naming::on_output(session_id, &text);
 
@@ -787,6 +793,13 @@ pub async fn spawn_agent_inner(
         resolved.env_type
     );
 
+    // Set true when the spawn-time fetch advances the mesh's base ref, so the
+    // single post-spawn pool-maintenance task at the end runs the ref-freshness
+    // pass (issue #613 AC3). Carried to the end rather than firing its own
+    // thread here so refresh + refill share ONE fill-lock acquisition and can
+    // never lose a lock race to each other (issue #613 review).
+    let mut ref_advanced_for_pool = false;
+
     // 7. Create worktree if needed
     if let Some(wt_name) = spawn_worktree_name.as_deref() {
         // Branched worktrees are isolated checkouts: git worktree add checks
@@ -827,6 +840,20 @@ pub async fn spawn_agent_inner(
                 )))
             });
             timer.checkpoint("after_fetch_origin");
+            // Ref-freshness (issue #613 AC3): if the fetch actually pulled new
+            // commits, the mesh's base ref has moved, so any OTHER warm pool
+            // entries for this mesh are now parked on a stale SHA and must be
+            // `git reset --hard`ed onto the new commit. Only `Synced` /
+            // `FetchedButDiverged` advance the ref — `UpToDate` / skipped means
+            // nothing moved. We record the fact here and let the single
+            // post-spawn maintenance task (at the end of this fn) run the
+            // freshness pass, so refresh and refill share one fill-lock
+            // acquisition instead of racing on two threads (issue #613 review).
+            ref_advanced_for_pool = matches!(
+                &sync_result,
+                Ok(crate::git::sync::FetchOutcome::Synced { .. })
+                    | Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. })
+            );
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
             // Worktree adoption for PR-spawned nodes (issue #420, extended
@@ -1347,6 +1374,7 @@ pub async fn spawn_agent_inner(
     // it up — it just sits there as harmless bookkeeping until a future
     // issue adds GC for it); a failed refill is logged and retried on the
     // next reconcile pass.
+    let did_claim_warm = warm_claimed.is_some();
     if let Some(entry) = warm_claimed.take() {
         crate::services::warm_pool::forget_after_spawn(entry.id);
         // Full name adoption — MANUAL spawns only (issue #609, PRD #608 §3
@@ -1385,16 +1413,30 @@ pub async fn spawn_agent_inner(
                 );
             }
         }
-        // Background refill on the spawn-blocking pool so the async
-        // runtime can keep making progress on the spawn caller. Reuse
-        // the mesh_id we resolved above (line ~715) instead of re-reading
-        // the meshes row + re-locking the DB.
-        if mesh_id > 0 {
-            let mesh_id_for_refill = mesh_id;
-            std::thread::spawn(move || {
-                crate::services::warm_pool::refill_after_claim(mesh_id_for_refill);
-            });
-        }
+    }
+
+    // Single post-spawn pool-maintenance task (issue #613). Runs on its own
+    // thread (it shells out to `git` and re-locks the DB) so it never delays
+    // the spawn caller, and does BOTH jobs under ONE fill-lock acquisition:
+    //   * ref-freshness — `git reset --hard` stale warm entries onto the new
+    //     base SHA, when the spawn-time fetch advanced the ref;
+    //   * refill — top the pool back up to target after this spawn claimed an
+    //     entry.
+    // Combining them means refresh and refill can never lose a fill-lock race
+    // to each other (the previous split into two threads dropped whichever
+    // lost, with no in-session retry — issue #613 review). Fired whenever
+    // either job has work to do.
+    if mesh_id > 0 && (ref_advanced_for_pool || did_claim_warm) {
+        let mesh_id_for_pool = mesh_id;
+        let do_refresh = ref_advanced_for_pool;
+        let do_refill = did_claim_warm;
+        std::thread::spawn(move || {
+            crate::services::warm_pool::post_spawn_maintenance(
+                mesh_id_for_pool,
+                do_refresh,
+                do_refill,
+            );
+        });
     }
 
     // Emit the post-spawn reconcile trigger (issue #332). Async-spawn paths
