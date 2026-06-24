@@ -385,6 +385,23 @@ pub fn node_worktree_path(node: &AgentNode) -> Option<ResolvedPath> {
     worktree_segment(node).map(|_| node_working_path(node))
 }
 
+/// The paths a node "owns" — its mesh root plus the resolved Worktree Node
+/// dir, if any. Single canonical reader of the `use_worktree` +
+/// `worktree_name` rule via `node_worktree_path`; the worktree-manager
+/// (`get_git_prune_info`, issue #607) and mesh-health
+/// (`find_base_branch_holder`, issue #621) both consume this so they
+/// can't drift apart on the worktree-dir entry.
+pub fn active_node_paths(nodes: &[AgentNode]) -> Vec<String> {
+    let mut paths = Vec::new();
+    for node in nodes {
+        paths.push(node.path.clone());
+        if let Some(resolved) = node_worktree_path(node) {
+            paths.push(resolved.host_path);
+        }
+    }
+    paths
+}
+
 /// Get the .claude directory for session storage in the correct environment
 pub fn claude_dir() -> PathBuf {
     match current_env() {
@@ -655,6 +672,65 @@ mod tests {
             node_worktree_path(&n).map(|r| r.host_path),
             Some(node_working_path(&n).host_path)
         );
+    }
+
+    // ----- active_node_paths (#607 / #621) -----
+    //
+    // `n.path` alone is the mesh root. A Worktree Node's work lives at
+    // `<mesh>/.claude/worktrees/<name>` — that subdir must also enter the
+    // active set, or `path_is_active` matches every linked worktree against
+    // the mesh root alone and flags them all `is_active: false` in both
+    // the Worktree Manager (#607) and Mesh Health (#621). Delegating to
+    // `node_worktree_path` keeps the one-rule invariant intact.
+
+    /// Regression for #607 / #621: a Worktree Node must contribute BOTH its
+    /// mesh path AND its resolved worktree dir, so the linked worktree on
+    /// disk matches against the active set instead of being flagged
+    /// inactive/stale.
+    #[test]
+    fn active_node_paths_includes_resolved_worktree_dir_for_worktree_nodes() {
+        let paths = active_node_paths(&[node(true, Some("gentle-fox"))]);
+
+        assert!(
+            paths.iter().any(|p| p == "/home/user/my-repo"),
+            "mesh path must be present so the main worktree still matches: {:?}",
+            paths
+        );
+        assert!(
+            paths.iter().any(|p| p.contains("gentle-fox")),
+            "Worktree Node must contribute its resolved worktree dir (#607 / #621): {:?}",
+            paths
+        );
+    }
+
+    /// A Root Node has no worktree dir to add — only its mesh path participates.
+    #[test]
+    fn active_node_paths_root_node_contributes_only_mesh_path() {
+        let paths = active_node_paths(&[node(false, None)]);
+
+        assert_eq!(
+            paths.len(),
+            1,
+            "root node contributes exactly one path: {:?}",
+            paths
+        );
+        assert_eq!(paths[0], "/home/user/my-repo");
+    }
+
+    /// A whitespace-only `worktree_name` collapses to "no worktree" per the
+    /// canonical rule in `node_worktree_path`, so it contributes only the
+    /// mesh path — same as a Root Node.
+    #[test]
+    fn active_node_paths_blank_worktree_name_contributes_only_mesh_path() {
+        let paths = active_node_paths(&[node(true, Some("   "))]);
+
+        assert_eq!(
+            paths.len(),
+            1,
+            "blank worktree name is treated as no worktree: {:?}",
+            paths
+        );
+        assert_eq!(paths[0], "/home/user/my-repo");
     }
 
     // ----- raw_path contract (issue #409) -----
