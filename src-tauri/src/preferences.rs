@@ -526,18 +526,43 @@ pub fn resolve_harness_provider(profile_id: &str) -> Provider {
     }
 }
 
-/// Built-in accounts that authenticate via their own CLI (`~/.claude`,
-/// `~/.codex`, …) and therefore hold no credentials in Buildmesh. Everything
-/// else — MiniMax, Kimi, and any custom account — is a Claude-compatible keyed
-/// provider (PRD #534 limits custom endpoints to Claude-compatible in V1).
-const SELF_AUTH_BUILTIN_IDS: [&str; 3] = ["anthropic", "codex", "agy"];
+/// A row in the code-defined built-in Model Provider account list (issue
+/// #571). The **single source of truth** for which built-ins exist and which
+/// are self-authenticating — [`default_provider_accounts`] materialises the
+/// full [`ProviderAccount`] from it, and [`is_claude_compatible_id`]
+/// classifies an id by looking it up here. Adding a new built-in means adding
+/// one row; the classification then follows automatically.
+#[derive(Debug, Clone, Copy)]
+struct BuiltInProviderAccount {
+    id: &'static str,
+    name: &'static str,
+    /// True for harnesses that authenticate via their own CLI (`~/.claude`,
+    /// `~/.codex`, …) and therefore hold no credentials in Buildmesh. False
+    /// for Claude-compatible keyed providers (MiniMax, Kimi) that ship a base
+    /// URL + per-tier model map (issue #568).
+    self_auth: bool,
+}
+
+const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
+    BuiltInProviderAccount { id: "anthropic", name: "Anthropic / Claude",   self_auth: true  },
+    BuiltInProviderAccount { id: "codex",     name: "OpenAI / Codex",        self_auth: true  },
+    BuiltInProviderAccount { id: "agy",       name: "Google / Antigravity",  self_auth: true  },
+    BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
+    BuiltInProviderAccount { id: "kimi",      name: "Kimi",                  self_auth: false },
+];
 
 /// Whether `id` names a Claude-compatible keyed provider — one that carries an
 /// API key/endpoint, shows credential + model-tier fields in the UI, and can
 /// appear in the spawn menu once configured. Self-authenticating built-ins are
-/// the only exceptions (issue #568).
+/// the only exceptions (issue #568). The classification is **derived from
+/// [`BUILTIN_PROVIDER_ACCOUNTS`]** so a new self-auth built-in can't drift
+/// out of sync with the account definition in `default_provider_accounts`.
 pub fn is_claude_compatible_id(id: &str) -> bool {
-    !SELF_AUTH_BUILTIN_IDS.contains(&id)
+    BUILTIN_PROVIDER_ACCOUNTS
+        .iter()
+        .find(|b| b.id == id)
+        .map(|b| !b.self_auth)
+        .unwrap_or(true) // unknown id = custom = claude_compatible
 }
 
 /// The **Compatible API surfaces** a first-class **Model Provider** publishes,
@@ -573,7 +598,7 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
             SurfaceEndpoint {
                 surface: ApiSurface::Anthropic,
                 base_url: "https://api.minimax.io/anthropic".to_string(),
-                model_tiers: anthropic_tiers("MiniMax-M3[1m]", "MiniMax-M2.7"),
+                model_tiers: minimax_default_tiers(),
             },
             SurfaceEndpoint {
                 surface: ApiSurface::OpenAI,
@@ -696,60 +721,76 @@ pub fn pairing_for(harness_id: &str, provider_id: &str) -> Option<ProviderPairin
 /// (byte-for-byte parity), so the user only needs to add an API key. Kimi has no
 /// usage fetcher yet (pragmatic scope), so it defaults to **disabled** — enabling
 /// it and adding a key is the single opt-in step before it appears in the menu.
+///
+/// Materialised from [`BUILTIN_PROVIDER_ACCOUNTS`], the single declaration
+/// site for built-ins (issue #571). Per-builtin specifics (base URL, model
+/// tiers, default-enabled) that the table can't carry (ModelTiers is not
+/// `const`-constructible) are filled in by the `match` below.
 pub fn default_provider_accounts() -> Vec<ProviderAccount> {
-    let self_auth = |id: &str, name: &str| ProviderAccount {
-        id: id.to_string(),
-        name: name.to_string(),
-        enabled: true,
-        billing_mode: BillingMode::Plan,
-        claude_compatible: false,
-        api_key: None,
-        base_url: None,
-        model_tiers: ModelTiers::default(),
-        models: Vec::new(),
-    };
-    let tiers = |default: &str, fast: &str| ModelTiers {
-        default: Some(default.to_string()),
-        small_fast: Some(fast.to_string()),
-        sonnet: Some(default.to_string()),
-        opus: Some(default.to_string()),
-        haiku: Some(fast.to_string()),
-    };
-    vec![
-        self_auth("anthropic", "Anthropic / Claude"),
-        self_auth("codex", "OpenAI / Codex"),
-        self_auth("agy", "Google / Antigravity"),
-        ProviderAccount {
-            id: "minimax".to_string(),
-            name: "MiniMax".to_string(),
-            enabled: true,
-            billing_mode: BillingMode::PayAsYouGo,
-            claude_compatible: true,
-            api_key: None,
-            base_url: Some("https://api.minimax.io/anthropic".to_string()),
-            // cwrap parity: M3 primary on Sonnet/Opus, M2.7 on small-fast/Haiku.
-            model_tiers: tiers("MiniMax-M3[1m]", "MiniMax-M2.7"),
-            models: Vec::new(),
-        },
-        ProviderAccount {
-            id: "kimi".to_string(),
-            name: "Kimi".to_string(),
-            enabled: false,
-            billing_mode: BillingMode::PayAsYouGo,
-            claude_compatible: true,
-            api_key: None,
-            base_url: Some("https://api.moonshot.ai/anthropic".to_string()),
-            // cwrap parity: k2.6 primary on Opus, k2.5 on small-fast/Sonnet/Haiku.
-            model_tiers: ModelTiers {
-                default: Some("kimi-k2.6".to_string()),
-                small_fast: Some("kimi-k2.5".to_string()),
-                sonnet: Some("kimi-k2.5".to_string()),
-                opus: Some("kimi-k2.6".to_string()),
-                haiku: Some("kimi-k2.5".to_string()),
-            },
-            models: Vec::new(),
-        },
-    ]
+    BUILTIN_PROVIDER_ACCOUNTS
+        .iter()
+        .map(|b| {
+            let (base_url, model_tiers) = match b.id {
+                "minimax" => (
+                    Some("https://api.minimax.io/anthropic".to_string()),
+                    minimax_default_tiers(),
+                ),
+                "kimi" => (
+                    Some("https://api.moonshot.ai/anthropic".to_string()),
+                    kimi_default_tiers(),
+                ),
+                _ => (None, ModelTiers::default()),
+            };
+            // Kimi is opt-in — historically because it had no usage fetcher,
+            // now kept opt-in for back-compat with installed users (the
+            // wallet meter landed in #615, but the opt-in step is part of
+            // the product contract at this point).
+            let enabled = !matches!(b.id, "kimi");
+            ProviderAccount {
+                id: b.id.to_string(),
+                name: b.name.to_string(),
+                enabled,
+                billing_mode: if b.self_auth { BillingMode::Plan } else { BillingMode::PayAsYouGo },
+                claude_compatible: !b.self_auth,
+                api_key: None,
+                base_url,
+                model_tiers,
+                models: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+/// MiniMax's cwrap-parity default tier map. **Single source** consumed by
+/// (issue #571):
+/// - [`default_provider_accounts`] — the per-account `model_tiers` field
+/// - [`first_class_surfaces`] for `"minimax"` — the Anthropic surface tier
+/// - [`crate::agent::provider::provider_conf::minimax_backend_env`] — the
+///   session-naming side-channel
+pub(crate) fn minimax_default_tiers() -> ModelTiers {
+    ModelTiers {
+        default: Some("MiniMax-M3[1m]".to_string()),
+        small_fast: Some("MiniMax-M2.7".to_string()),
+        sonnet: Some("MiniMax-M3[1m]".to_string()),
+        opus: Some("MiniMax-M3[1m]".to_string()),
+        haiku: Some("MiniMax-M2.7".to_string()),
+    }
+}
+
+/// Kimi's cwrap-parity default tier map. **Single source** consumed by
+/// [`default_provider_accounts`]. The Anthropic surface in
+/// [`first_class_surfaces`] for `"kimi"` intentionally does NOT consume this
+/// — the surface uses a different layout (k2.6 on sonnet vs the account's
+/// k2.5 on sonnet) that pre-dates this tidy-up; surfacing the account's
+/// k2.5-on-sonnet choice via new pairings is a separate behaviour change.
+pub(crate) fn kimi_default_tiers() -> ModelTiers {
+    ModelTiers {
+        default: Some("kimi-k2.6".to_string()),
+        small_fast: Some("kimi-k2.5".to_string()),
+        sonnet: Some("kimi-k2.5".to_string()),
+        opus: Some("kimi-k2.6".to_string()),
+        haiku: Some("kimi-k2.5".to_string()),
+    }
 }
 
 /// The effective account list: code-defined defaults with the user's stored
@@ -2257,5 +2298,59 @@ mod tests {
             // An empty key is always a no-op.
             assert!(!set_account_key_if_absent(&mut prefs, "kimi", ""));
         });
+    }
+
+    // ─── Issue #571 tidy-up: single source of truth for built-ins ───────────
+
+    /// The built-in table is the single declaration site for which built-in
+    /// accounts exist; `default_provider_accounts` materialises the full
+    /// `ProviderAccount` from it. If a future contributor adds a row to one but
+    /// not the other, this test fails immediately.
+    #[test]
+    fn built_in_provider_accounts_table_is_consistent_with_default_provider_accounts() {
+        let table_ids: Vec<&str> = BUILTIN_PROVIDER_ACCOUNTS.iter().map(|b| b.id).collect();
+        let default_ids: Vec<String> =
+            default_provider_accounts().into_iter().map(|a| a.id).collect();
+        assert_eq!(
+            table_ids,
+            default_ids.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    /// The `claude_compatible` classification for a built-in id is derived from
+    /// the table's `self_auth` flag — the two cannot drift.
+    #[test]
+    fn is_claude_compatible_id_matches_table_self_auth_flag() {
+        for b in BUILTIN_PROVIDER_ACCOUNTS {
+            assert_eq!(
+                is_claude_compatible_id(b.id),
+                !b.self_auth,
+                "is_claude_compatible_id({}) must equal !self_auth for the row in BUILTIN_PROVIDER_ACCOUNTS",
+                b.id
+            );
+        }
+    }
+
+    /// The MiniMax model-tier map is defined once in `minimax_default_tiers()`
+    /// and consumed by both the per-account `model_tiers` and the Anthropic
+    /// surface's `model_tiers` in `first_class_surfaces("minimax")`. If a
+    /// contributor re-hardcodes the strings in either consumer, this test
+    /// catches the drift.
+    #[test]
+    fn minimax_default_tiers_is_the_source_for_minimax_account_and_surface() {
+        let by_id = |id: &str| {
+            default_provider_accounts()
+                .into_iter()
+                .find(|a| a.id == id)
+                .unwrap()
+        };
+        assert_eq!(by_id("minimax").model_tiers, minimax_default_tiers());
+
+        let surfaces = first_class_surfaces("minimax");
+        let anthropic_surface = surfaces
+            .iter()
+            .find(|s| s.surface == ApiSurface::Anthropic)
+            .expect("minimax must publish an Anthropic surface");
+        assert_eq!(anthropic_surface.model_tiers, minimax_default_tiers());
     }
 }
