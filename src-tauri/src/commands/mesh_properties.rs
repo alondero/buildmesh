@@ -133,6 +133,48 @@ pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Resul
     Ok(())
 }
 
+/// Set the per-mesh target for the pre-spawn Worktree Pool
+/// (`services::warm_pool`, issue #611). `0` disables the pool for the
+/// mesh; `1..=5` is the target the worker fills to on startup + after
+/// each claim. Clamped at the IPC boundary so a misbehaving frontend
+/// (or a future bulk-import path) can't write a garbage value to the
+/// DB column and break the worker's count/target comparisons.
+///
+/// Dedicated command (not the generic `update_mesh_column` allowlist)
+/// so the typed integer + the `0..=5` invariant are enforced here —
+/// the catch-all is intentionally unvalidated.
+#[tauri::command]
+pub async fn update_mesh_pool_size(
+    mesh_id: i64,
+    pool_size: i32,
+) -> Result<(), String> {
+    if !(0..=5).contains(&pool_size) {
+        return Err(format!(
+            "invalid pool size {}: must be 0 (off) or 1..=5",
+            pool_size
+        ));
+    }
+    let db = db::get().lock().unwrap();
+    let rows = db
+        .execute(
+            "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = ?2",
+            rusqlite::params![pool_size, mesh_id],
+        )
+        .map_err(|e| format!("failed to update pre_spawn_pool_size: {}", e))?;
+    // An UPDATE that matches no rows silently succeeds otherwise —
+    // returning `Ok(())` would let the frontend believe the save
+    // succeeded when the mesh was deleted (or never existed) between
+    // the load and the save. Surfaces the same contract as
+    // `set_mesh_sandbox_inner`'s zero-rows guard.
+    if rows == 0 {
+        return Err(format!(
+            "mesh {} not found (no rows updated)",
+            mesh_id
+        ));
+    }
+    Ok(())
+}
+
 /// Toggle whether this mesh's agent nodes run inside an OS process sandbox
 /// (Windows AppContainer #498 / macOS Seatbelt #497). Dedicated command (not
 /// the generic `update_mesh_column` allowlist) so it takes a typed `bool` and

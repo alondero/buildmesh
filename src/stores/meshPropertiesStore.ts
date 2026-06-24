@@ -22,7 +22,8 @@ export type MeshColumn =
   | 'runCommand'
   | 'useWorktree'
   | 'sandbox'
-  | 'baseRef';
+  | 'baseRef'
+  | 'poolSize';
 
 interface MeshPropertiesState {
   meshId: number | null;
@@ -45,7 +46,7 @@ interface MeshPropertiesState {
   /// file** — every field lives on the `meshes` SQLite row. Throws on
   /// backend error so the caller can choose to suppress side-effects
   /// (e.g. `git.refresh()`).
-  save: (field: MeshColumn, value: string | boolean) => Promise<void>;
+  save: (field: MeshColumn, value: string | boolean | number) => Promise<void>;
 
   /// Apply a project preset's build/run commands in parallel — concurrently
   /// fires the two `update_mesh_column` writes so the panel sees one
@@ -125,6 +126,12 @@ export const useMeshPropertiesStore = create<MeshPropertiesState>((set, get) => 
           break;
         case 'baseRef':
           await api.updateWorktreeBaseRef(meshId, String(value));
+          break;
+        case 'poolSize':
+          // `Number(value)` is the canonical coercion — `true`/`false`
+          // from a misrouted toggle would otherwise become `NaN`, which
+          // the backend rejects with the typed `0..=5` invariant error.
+          await api.updateMeshPoolSize(meshId, Number(value));
           break;
       }
     } catch (e) {

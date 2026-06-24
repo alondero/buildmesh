@@ -4,5 +4,13 @@
  * A worktree (main or linked) and its prune-relevant metadata.
  *
  * Generated to src/types/generated/WorktreeInfo.ts (issue #404).
+ *
+ * `is_pool` distinguishes a pre-spawn pool entry from a normal worktree
+ * (issue #611). Pool entries are detached-HEAD worktrees under
+ * `{mesh.path}/.claude/worktrees/<slug>` whose path matches a row in
+ * the `warm_worktrees` table; the Worktree Manager tab shows them with
+ * a "Pre-spawn Pool" badge and disables the delete action so the
+ * background worker can refill on demand. Always `false` for the
+ * primary (repo-root) worktree — pool entries are always linked.
  */
-export type WorktreeInfo = { path: string, branch: string | null, is_active: boolean, is_stale: boolean, };
+export type WorktreeInfo = { path: string, branch: string | null, is_active: boolean, is_stale: boolean, is_pool: boolean, };

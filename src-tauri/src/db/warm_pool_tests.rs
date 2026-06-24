@@ -1,4 +1,5 @@
-//! Tests for the `warm_worktrees` table + CRUD helpers (issue #609, v21 schema).
+//! Tests for the `warm_worktrees` table + CRUD helpers (issue #609, v21 schema),
+//! extended in issue #611 for per-mesh pool size + downsize drain.
 //!
 //! These tests pin the contracts the spawn pipeline + background worker rely on:
 //!   * the safety-net `ensure_warm_worktables_table` is idempotent on a v20 DB
@@ -11,7 +12,12 @@
 //!     (the v21 tracer bullet's target is 1, so the worker fills until the
 //!     count is at least 1, then stands down);
 //!   * `list_worktree_enabled_meshes_for_warm` only returns rows whose
-//!     `use_worktree = 1`, so a worktree-disabled mesh never spawns pool work.
+//!     `use_worktree = 1`, so a worktree-disabled mesh never spawns pool work;
+//!   * (v22, issue #611) `pre_spawn_pool_size` round-trips through
+//!     `list_worktree_enabled_meshes_for_warm`, `count_warm_entries_for_mesh`
+//!     counts ALL statuses (not just `available`), `list_oldest_warm_entries`
+//!     prefers `filling` rows for drain, and `is_warm_pool_path` returns true
+//!     iff a row exists for the path.
 //!
 //! Run with: cargo test --package buildmesh --lib db::warm_pool_tests
 
@@ -19,8 +25,10 @@
 mod tests {
     use crate::db::{
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
-        delete_warm_worktrees_for_mesh_inner, ensure_warm_worktables_table,
-        insert_warm_worktree_inner, list_stale_warm_worktrees_inner,
+        count_warm_entries_for_mesh_inner, delete_warm_worktrees_for_mesh_inner,
+        ensure_mesh_pre_spawn_pool_size, ensure_warm_worktables_table,
+        insert_warm_worktree_inner, is_warm_pool_path_inner,
+        list_oldest_warm_entries_for_mesh_inner, list_stale_warm_worktrees_inner,
         list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
         WarmWorktreeStatus,
     };
@@ -327,7 +335,13 @@ mod tests {
                 default_provider TEXT,
                 base_ref TEXT NOT NULL DEFAULT 'origin/main',
                 scratchpad TEXT NOT NULL DEFAULT '',
-                sandbox INTEGER NOT NULL DEFAULT 0
+                sandbox INTEGER NOT NULL DEFAULT 0,
+                -- v22 (issue #611): per-mesh pool target. Test schema
+                -- mirrors the production v22 shape so the SELECT in
+                -- list_worktree_enabled_meshes_for_warm_inner finds the
+                -- column. Real DBs get the column via
+                -- `ensure_mesh_pre_spawn_pool_size` (see db::init).
+                pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0
             );
             INSERT INTO meshes (name, path, use_worktree) VALUES ('enabled', '/r/enabled', 1);
             INSERT INTO meshes (name, path, use_worktree) VALUES ('disabled', '/r/disabled', 0);
@@ -338,5 +352,220 @@ mod tests {
         let rows = list_worktree_enabled_meshes_for_warm_inner(&conn).unwrap();
         assert_eq!(rows.len(), 1, "only the worktree-enabled mesh must be listed");
         assert_eq!(rows[0].path, "/r/enabled");
+        assert_eq!(rows[0].pre_spawn_pool_size, 0);
+    }
+
+    // ── v22 (issue #611) — per-mesh pool size + drain helpers ─────────────
+
+    /// Build a v22 schema (meshes + pre_spawn_pool_size + warm_worktrees)
+    /// with one worktree-enabled mesh. Mirrors the v20 fixture's pattern
+    /// but exercises the safety-net forward path for both columns and
+    /// tables — proves that an older DB seeded here reads correctly
+    /// through the v22 helpers without an explicit migrate_if_needed call.
+    fn v22_schema_with_mesh(pool_size: i64) -> Connection {
+        let conn = v20_schema_with_mesh(true);
+        // Forward both: column add (v21→v22) and table create (v20→v21).
+        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
+        ensure_warm_worktables_table(&conn).unwrap();
+        conn.execute(
+            "UPDATE meshes SET pre_spawn_pool_size = ?1 WHERE id = 1",
+            rusqlite::params![pool_size],
+        )
+        .unwrap();
+        conn
+    }
+
+    /// `pre_spawn_pool_size` round-trips through `list_worktree_enabled_meshes_for_warm`.
+    /// The service-layer worker reads this column to decide its fill target
+    /// and downsize threshold, so a silent type/scope drift between the SQL
+    /// projection and the worker would surface here as a wrong-sized `target`
+    /// in the per-mesh fill loop.
+    #[test]
+    fn list_for_warm_reads_pre_spawn_pool_size() {
+        let conn = v22_schema_with_mesh(3);
+        let rows = list_worktree_enabled_meshes_for_warm_inner(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pre_spawn_pool_size, 3);
+        // And `0` (the off default) round-trips just as cleanly — a
+        // misrouted `null`/`None` would otherwise show up as 0 and
+        // accidentally turn the pool off for a user who'd set 5.
+        let conn_zero = v22_schema_with_mesh(0);
+        let rows_zero = list_worktree_enabled_meshes_for_warm_inner(&conn_zero).unwrap();
+        assert_eq!(rows_zero[0].pre_spawn_pool_size, 0);
+    }
+
+    /// `count_warm_entries_for_mesh` counts every status (filling,
+    /// available, claimed) — distinct from `count_available_warm_for_mesh`
+    /// which only counts claimable rows. The drain logic uses this so a
+    /// stuck `claimed` row from a failed `forget_after_spawn` doesn't fool
+    /// the drain into thinking the mesh is at target.
+    #[test]
+    fn count_warm_entries_counts_all_statuses() {
+        let conn = v22_schema_with_mesh(3);
+        // Two available, one filling, one claimed → 4 total.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = |name: &str| tmp.path().join(name).to_str().unwrap().to_string();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("a"),
+            "a",
+            Some("aa"),
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("b"),
+            "b",
+            Some("bb"),
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("c"),
+            "c",
+            None,
+            WarmWorktreeStatus::Filling,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("d"),
+            "d",
+            None,
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        let total = count_warm_entries_for_mesh_inner(&conn, 1).unwrap();
+        assert_eq!(total, 4, "all four rows (any status) must count");
+
+        // And the available-only count still works — the v21 contract
+        // the fill loop depends on.
+        let available = count_available_warm_for_mesh_inner(&conn, 1).unwrap();
+        assert_eq!(available, 2, "only the two Available rows count");
+    }
+
+    /// The drain ordering contract: `filling` rows beat every older
+    /// `available` row (cheapest to drop — they're mid-checkout and
+    /// would be GC'd on next reconcile anyway). Within the same status,
+    /// FIFO by `created_at`. Pinned here because a wrong ordering would
+    /// either delete the user's "freshest" pre-cut or leave a stuck
+    /// `filling` row to fester.
+    #[test]
+    fn list_oldest_warm_entries_prefers_filling_status() {
+        let conn = v22_schema_with_mesh(1);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = |name: &str| tmp.path().join(name).to_str().unwrap().to_string();
+        // Available inserted FIRST (older) but the drain must NOT pick
+        // it — the Filling row inserted SECOND (newer) wins on status.
+        let avail_id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("old-available"),
+            "old-available",
+            Some("aa"),
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+        let filling_id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p("new-filling"),
+            "new-filling",
+            None,
+            WarmWorktreeStatus::Filling,
+        )
+        .unwrap();
+
+        let picks = list_oldest_warm_entries_for_mesh_inner(&conn, 1, 1).unwrap();
+        assert_eq!(picks.len(), 1, "limit=1 must return one row");
+        assert_eq!(
+            picks[0].0, filling_id,
+            "Filling row must be picked over an older Available row"
+        );
+        assert_ne!(
+            picks[0].0, avail_id,
+            "older Available row must NOT be picked when a Filling row exists"
+        );
+
+        // And the path comes along — the caller needs it for
+        // `git worktree remove --force`.
+        assert_eq!(picks[0].1, p("new-filling"));
+    }
+
+    /// `list_oldest_warm_entries_for_mesh_inner` obeys the LIMIT. With
+    /// target shrink 3→1 we expect 2 picks; with shrink 3→0 we expect 3.
+    /// Regression test for the drain's `excess = count - target` math.
+    #[test]
+    fn list_oldest_warm_entries_obeys_limit() {
+        let conn = v22_schema_with_mesh(0);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = |name: &str| tmp.path().join(name).to_str().unwrap().to_string();
+        for (i, status) in [
+            WarmWorktreeStatus::Available,
+            WarmWorktreeStatus::Available,
+            WarmWorktreeStatus::Available,
+        ]
+        .iter()
+        .enumerate()
+        {
+            insert_warm_worktree_inner(
+                &conn,
+                1,
+                &p(&format!("wt-{i}")),
+                &format!("wt-{i}"),
+                None,
+                *status,
+            )
+            .unwrap();
+        }
+
+        let drain_two = list_oldest_warm_entries_for_mesh_inner(&conn, 1, 2).unwrap();
+        assert_eq!(drain_two.len(), 2, "limit=2 must return two rows");
+
+        let drain_all = list_oldest_warm_entries_for_mesh_inner(&conn, 1, 3).unwrap();
+        assert_eq!(drain_all.len(), 3, "limit=3 returns all three");
+    }
+
+    /// `is_warm_pool_path_inner` is the Worktree Manager's "is this row a
+    /// pool entry?" discriminator. A `warm_worktrees` row's existence for
+    /// the path → `true`; anything else (including a path that LOOKS like
+    /// a pool entry but has no row, e.g. after the row was claimed and
+    /// `forget_after_spawn` deleted it) → `false`.
+    #[test]
+    fn is_warm_pool_path_returns_true_iff_row_exists() {
+        let conn = v22_schema_with_mesh(2);
+        let pool_path = "/repo/m/.claude/worktrees/test-pool";
+        let other_path = "/repo/m/.claude/worktrees/not-a-pool";
+
+        // No row yet — both return false.
+        assert!(!is_warm_pool_path_inner(&conn, pool_path).unwrap());
+        assert!(!is_warm_pool_path_inner(&conn, other_path).unwrap());
+
+        // Insert a row at pool_path.
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            pool_path,
+            "test-pool",
+            None,
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+
+        assert!(
+            is_warm_pool_path_inner(&conn, pool_path).unwrap(),
+            "path with a row must read true"
+        );
+        assert!(
+            !is_warm_pool_path_inner(&conn, other_path).unwrap(),
+            "path without a row must read false even if it looks like a pool path"
+        );
     }
 }

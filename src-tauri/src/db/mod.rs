@@ -33,6 +33,17 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version.
 ///
+/// v22 — Per-mesh pre-spawn pool size (issue #611): add the
+/// `meshes.pre_spawn_pool_size` INTEGER column (0 = feature off,
+/// 1..5 = target). The pool worker (issue #609 / v21) previously
+/// hardcoded `POOL_TARGET_PER_MESH = 1`; the column lets each mesh
+/// opt in/out and size up. No data migration needed — the column has a
+/// `DEFAULT 0` so existing rows keep the previous behaviour. Mirrors
+/// how `sandbox` (v18) is a single typed integer rather than a
+/// separate enabled bool + size: one source of truth, one IPC boundary
+/// to validate. See `commands::mesh_properties::update_mesh_pool_size`
+/// for the typed write path and `services::warm_pool` for the reader.
+//
 /// v21 — Pre-spawn Worktree Pool (issue #609, PRD #608): add the
 /// `warm_worktrees` table that tracks pre-warmed detached HEAD
 /// worktrees. A row's `path` is the absolute on-disk directory the pool
@@ -56,7 +67,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 21;
+const SCHEMA_VERSION: i32 = 22;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -170,6 +181,12 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
 ensure_mesh_sandbox(&conn)?;
+    // v22 — Per-mesh pre-spawn pool target (issue #611). The column
+    // doesn't exist on pre-v22 DBs; the safety net backfills it on every
+    // init so existing rows read `0` (= pool off, preserving the v21
+    // hardcoded-target behaviour until the user opts in via the
+    // Worktrees Probe). Idempotent via `ensure_column`'s pragma check.
+    ensure_mesh_pre_spawn_pool_size(&conn)?;
     // v21 — Pre-spawn Worktree Pool (issue #609). The `warm_worktrees` table
     // is created inline above (it's a new table, not a column add), so this
     // safety net only needs to ensure it exists on a DB whose schema_version
@@ -534,6 +551,32 @@ pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
 pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "meshes", "sandbox", "INTEGER NOT NULL DEFAULT 0")? {
         tracing::warn!("ensure_mesh_sandbox: added missing sandbox column");
+    }
+    Ok(())
+}
+
+/// Safety net (v22): ensure the `pre_spawn_pool_size` column exists on
+/// `meshes`. The column is the per-mesh target for the pre-spawn Worktree
+/// Pool worker (issue #609 / v21), which previously hardcoded
+/// `POOL_TARGET_PER_MESH = 1`. A value of `0` means the pool is off for
+/// the mesh (no warm entries created); `1..=5` is the target the worker
+/// fills to on startup + after each claim. Clamping happens at the IPC
+/// boundary (`update_mesh_pool_size`), not here — this column is the
+/// typed integer the worker reads.
+///
+/// Off by default (`0`): pre-v22 rows opt out of the pool, matching
+/// their pre-v22 behaviour (no pool entries). The user opts in via the
+/// Worktrees Probe's ConfigurationCard → "Pre-spawn warm worktrees"
+/// toggle (issue #611). No backfill needed — every pre-v22 mesh
+/// defaults to "pool off".
+pub(crate) fn ensure_mesh_pre_spawn_pool_size(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(
+        conn,
+        "meshes",
+        "pre_spawn_pool_size",
+        "INTEGER NOT NULL DEFAULT 0",
+    )? {
+        tracing::warn!("ensure_mesh_pre_spawn_pool_size: added missing column");
     }
     Ok(())
 }
@@ -1521,7 +1564,8 @@ const MESH_COLUMNS: &str =
      COALESCE(model, ''), COALESCE(effort, ''), \
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
      COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
-     scratchpad, COALESCE(sandbox, 0)";
+     scratchpad, COALESCE(sandbox, 0), \
+     COALESCE(pre_spawn_pool_size, 0)";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -1545,6 +1589,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         base_ref: row.get::<_, String>(13)?,
         scratchpad: row.get(14)?,
         sandbox: row.get::<_, i32>(15)? != 0,
+        pre_spawn_pool_size: row.get::<_, i32>(16)?,
     })
 }
 
@@ -2345,10 +2390,93 @@ pub(crate) fn count_available_warm_for_mesh_inner(
     Ok(n)
 }
 
+/// How many warm entries a mesh has in **any** status (filling, available,
+/// claimed). Used by the downsize drain (`services::warm_pool`) — when the
+/// user shrinks `pre_spawn_pool_size` we need the total so we can compute
+/// `excess = count - new_target`. Counts `claimed` too so a stuck spawn
+/// that failed to call `forget_after_spawn` doesn't fool the drain into
+/// leaving it as "not over target".
+pub fn count_warm_entries_for_mesh(mesh_id: i64) -> SqlResult<i64> {
+    let db = get().lock().unwrap();
+    count_warm_entries_for_mesh_inner(&db, mesh_id)
+}
+
+pub(crate) fn count_warm_entries_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM warm_worktrees WHERE mesh_id = ?1",
+        params![mesh_id],
+        |row| row.get(0),
+    )?;
+    Ok(n)
+}
+
+/// Pick the oldest N warm entries for a mesh so the downsize drain can
+/// delete them. Ordering: `filling` first (cheapest to drop — worker's
+/// mid-checkout, will be GC'd on next reconcile anyway), then by
+/// `created_at ASC` (FIFO). The status preference uses a `CASE` so a
+/// brand-new `filling` row beats every older `available` row, but among
+/// rows of the same status creation order wins.
+///
+/// Returned tuple is `(id, path)` — the path is needed by the caller
+/// (`services::warm_pool::drain_excess_warm_entries`) to invoke
+/// `git::worktree::remove_one_worktree`. Returned ordered, so the caller
+/// can `take(limit)` and the limit is just a row cap.
+pub fn list_oldest_warm_entries_for_mesh(
+    mesh_id: i64,
+    limit: i64,
+) -> SqlResult<Vec<(i64, String)>> {
+    let db = get().lock().unwrap();
+    list_oldest_warm_entries_for_mesh_inner(&db, mesh_id, limit)
+}
+
+pub(crate) fn list_oldest_warm_entries_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+    limit: i64,
+) -> SqlResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM warm_worktrees \
+         WHERE mesh_id = ?1 \
+         ORDER BY CASE WHEN status = 'filling' THEN 0 ELSE 1 END ASC, \
+                  created_at ASC \
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![mesh_id, limit], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    rows.collect()
+}
+
+/// True iff `path` corresponds to a row in `warm_worktrees`. The prune
+/// pipeline queries this per worktree so the Worktree Manager tab can
+/// badge pool entries and `delete_worktrees` can reject them. Cheap
+/// (indexed on `path UNIQUE`) and side-effect free — safe to call from
+/// `collect_prune_info` for every worktree.
+pub fn is_warm_pool_path(path: &str) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    is_warm_pool_path_inner(&db, path)
+}
+
+pub(crate) fn is_warm_pool_path_inner(
+    conn: &Connection,
+    path: &str,
+) -> SqlResult<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM warm_worktrees WHERE path = ?1)",
+        params![path],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
 /// List every worktree-enabled mesh (use_worktree = 1) along with its id,
-/// path, and base_ref. The pool worker iterates this on startup to ensure at
-/// least one warm entry per mesh. Mirrors the projection `MeshRow` already
-/// uses for the spawn-time read so the two paths can't drift.
+/// path, base_ref, and pre_spawn_pool_size. The pool worker iterates this
+/// on startup and after each claim to reconcile downsize (drain) and
+/// fill-up to the per-mesh target. Mirrors the projection `MeshRow` uses
+/// for the spawn-time read so the two paths can't drift.
 pub fn list_worktree_enabled_meshes_for_warm() -> SqlResult<Vec<WarmPoolMeshRow>> {
     let db = get().lock().unwrap();
     list_worktree_enabled_meshes_for_warm_inner(&db)
@@ -2358,27 +2486,31 @@ pub(crate) fn list_worktree_enabled_meshes_for_warm_inner(
     conn: &Connection,
 ) -> SqlResult<Vec<WarmPoolMeshRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, path, base_ref FROM meshes WHERE use_worktree = 1",
+        "SELECT id, path, base_ref, pre_spawn_pool_size FROM meshes WHERE use_worktree = 1",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(WarmPoolMeshRow {
             id: row.get(0)?,
             path: row.get(1)?,
             base_ref: row.get(2)?,
+            pre_spawn_pool_size: row.get(3)?,
         })
     })?;
     rows.collect()
 }
 
 /// Lightweight projection of `meshes` for the warm pool worker — only the
-/// three columns the worker needs. Kept private to the pool (not part of the
+/// columns the worker needs. Kept private to the pool (not part of the
 /// `MeshRow` typed view) so the pool worker can't accidentally widen its
-/// dependency on the broader mesh config.
+/// dependency on the broader mesh config. `pre_spawn_pool_size` is the
+/// per-mesh target the worker fills to (issue #611); `0` means "pool off
+/// for this mesh".
 #[derive(Debug, Clone)]
 pub struct WarmPoolMeshRow {
     pub id: i64,
     pub path: String,
     pub base_ref: String,
+    pub pre_spawn_pool_size: i64,
 }
 
 /// What a claim hands back to the spawn path: the four columns it actually
