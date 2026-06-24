@@ -13,7 +13,7 @@ use tauri::Emitter;
 use ts_rs::TS;
 
 use crate::db;
-use crate::env::to_host_path;
+use crate::env::{active_node_paths, to_host_path};
 use crate::git::{health, primitives};
 use crate::models::MeshHealth;
 
@@ -469,14 +469,14 @@ pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
 
     let mut health = health::compute_mesh_health(&repo, &mesh.base_ref)?;
 
-    // Refine the holder: compute the holder with live active-paths so
+    // Refine the holder with the active paths for THIS mesh's nodes so
     // `is_active` reflects whether an agent node points at the worktree.
+    // Scoped to `mesh_id` — the holder can only live inside this repo, so
+    // nodes from other meshes are dead weight here.
     if let Some(local_base) = health.local_base_branch.clone() {
-        let active_paths: Vec<String> = db::list_agent_nodes()
-            .map_err(|e| format!("failed to list agent nodes: {}", e))?
-            .into_iter()
-            .map(|n| n.path)
-            .collect();
+        let nodes = db::list_agent_nodes_by_mesh(mesh_id)
+            .map_err(|e| format!("failed to list agent nodes: {}", e))?;
+        let active_paths = active_node_paths(&nodes);
         health.base_branch_holder =
             health::find_base_branch_holder(&repo, &local_base, &active_paths);
     }

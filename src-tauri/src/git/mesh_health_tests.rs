@@ -11,6 +11,8 @@
 //! Run with: `cd src-tauri && cargo test mesh_health_tests`
 
 use super::*;
+use crate::env::{active_node_paths, node_worktree_path};
+use crate::models::AgentNode;
 use git2::{Repository, WorktreeAddOptions};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -510,6 +512,47 @@ fn hostage_is_none_when_no_worktree_holds_base_branch() {
     checkout_branch(&repo, "feat/x");
     let holder = find_base_branch_holder(&repo, "main", &[]);
     assert!(holder.is_none());
+}
+
+/// Regression for #621: a Worktree Node whose linked worktree holds the
+/// base branch must read `is_active: true`. Pre-fix, the `n.path`-only
+/// mapping in `get_mesh_health` produced `is_active: false` even with a
+/// live agent on the worktree.
+#[test]
+fn hostage_marks_active_when_worktree_node_holds_base_branch() {
+    let td = TempDir::new();
+    let repo = init_repo(td.path());
+    move_root_off_main(&repo);
+
+    // Build the node first, then derive the worktree path from the same
+    // helper the active-paths entry uses. Keeps the test aligned with
+    // `env::node_worktree_path` — if the worktree layout ever changes, the
+    // canonical reader is the one source of truth.
+    let node_path = td.path().to_string_lossy().to_string();
+    let node = AgentNode {
+        path: node_path.clone(),
+        use_worktree: true,
+        worktree_name: Some("wt-main".to_string()),
+        ..Default::default()
+    };
+    let wt_path = node_worktree_path(&node).unwrap().host_path;
+    add_worktree_on_branch(&repo, Path::new(&wt_path), "main");
+
+    let active_paths = active_node_paths(&[node]);
+
+    let holder = find_base_branch_holder(&repo, "main", &active_paths);
+    assert!(holder.is_some(), "main is checked out in the linked worktree");
+    let h = holder.unwrap();
+    assert!(
+        h.is_active,
+        "Worktree Node holding the base branch must be flagged active (#621): {:?}",
+        active_paths
+    );
+    assert!(
+        h.path.contains("wt-main"),
+        "holder must point at the Worktree Node dir, got: {}",
+        h.path
+    );
 }
 
 // ── restore_to_base_impl — recovery guards ──────────────────────────────────

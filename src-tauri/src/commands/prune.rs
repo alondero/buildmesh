@@ -8,9 +8,9 @@
 use git2::{BranchType, Oid, Repository};
 
 use crate::db;
-use crate::env::to_host_path;
+use crate::env::{active_node_paths, to_host_path};
 use crate::git::primitives;
-use crate::models::{AgentNode, BranchInfo, GitRepoPruneInfo, WorktreeInfo};
+use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
 /// Discover all local branches, worktrees, and remote-tracking branches for
 /// the repo(s) in a mesh. MVP: the mesh path is treated as a single repo.
@@ -27,31 +27,6 @@ pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, S
     let repo_path = to_host_path(&mesh.path);
     let info = collect_prune_info(&repo_path, &active_paths)?;
     Ok(vec![info])
-}
-
-/// Build the set of paths considered "active" for the purpose of flagging a
-/// worktree as still in use by a node. Each node contributes:
-///   - its mesh path (`node.path`) — covers Root Nodes and the main worktree
-///   - the resolved Worktree Node dir, if any — covers Worktree Nodes whose
-///     work lives under `<mesh>/.claude/worktrees/<name>`
-///
-/// Without the worktree-dir entry, `collect_prune_info` matches every linked
-/// worktree against the mesh root alone, so every active worktree gets flagged
-/// `is_active: false` in the Worktree Manager (issue #607). The worktree-dir
-/// derivation goes through `env::node_worktree_path` rather than spelling the
-/// `.claude/worktrees/<name>` layout here — that helper is the single canonical
-/// reader of the `use_worktree` + trimmed-`worktree_name` rule shared with
-/// diff, PR, file-watcher, and close-safety.
-fn active_node_paths(nodes: &[AgentNode]) -> Vec<String> {
-    // Worktree Nodes contribute two entries (mesh + worktree dir); Root Nodes one.
-    let mut paths = Vec::with_capacity(nodes.len() * 2);
-    for node in nodes {
-        paths.push(node.path.clone());
-        if let Some(resolved) = crate::env::node_worktree_path(node) {
-            paths.push(resolved.host_path);
-        }
-    }
-    paths
 }
 
 /// Force-delete local branches by name from the repo at `worktree_path`.
