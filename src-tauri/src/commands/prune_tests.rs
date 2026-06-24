@@ -10,6 +10,7 @@ use super::*;
 // `remove_one_worktree` moved to the git module (ADR 0007); these removal
 // regression tests exercise it from here, alongside the worktree enumeration.
 use crate::git::worktree::{remove_one_worktree, remove_one_worktree_and_branch};
+use crate::models::AgentNode;
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -88,6 +89,75 @@ fn find_branch<'a>(info: &'a GitRepoPruneInfo, name: &str) -> &'a BranchInfo {
         .iter()
         .find(|b| b.name == name)
         .unwrap_or_else(|| panic!("branch {} not enumerated", name))
+}
+
+// ── active_node_paths (#607) ────────────────────────────────────────────────
+//
+// `n.path` alone is the mesh root. A Worktree Node's work lives at
+// `<mesh>/.claude/worktrees/<name>` — that subdir must also enter the active
+// set, or `path_is_active` matches every linked worktree against the mesh
+// root alone and flags them all `is_active: false` in the Worktree Manager.
+// `env::node_worktree_path` is the single canonical reader of the
+// `use_worktree` + trimmed-`worktree_name` rule (diff, PR, file-watcher, and
+// close-safety all go through it); delegating preserves the one-rule
+// invariant rather than re-spelling the worktree layout here.
+
+/// Minimal `AgentNode` fixture — only the fields the worktree-rule reads.
+/// `use_worktree=false` plus `worktree_name=None` builds a Root Node; pass
+/// `true` + `Some(name)` for a Worktree Node. Mirrors the `env::tests::node`
+/// shape (per #457: optional `..Default::default()`).
+fn node(use_worktree: bool, worktree_name: Option<&str>) -> AgentNode {
+    AgentNode {
+        path: "/home/user/repo".to_string(),
+        use_worktree,
+        worktree_name: worktree_name.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+/// Regression for #607: a Worktree Node must contribute BOTH its mesh path
+/// AND its resolved worktree dir, so the linked worktree on disk matches
+/// against the active set instead of being flagged inactive/stale.
+#[test]
+fn active_node_paths_includes_resolved_worktree_dir_for_worktree_nodes() {
+    let nodes = vec![node(true, Some("gentle-fox"))];
+
+    let paths = active_node_paths(&nodes);
+
+    assert!(
+        paths.iter().any(|p| p == "/home/user/repo"),
+        "mesh path must be present so the main worktree still matches: {:?}",
+        paths
+    );
+    assert!(
+        paths.iter().any(|p| p.contains("gentle-fox")),
+        "Worktree Node must contribute its resolved worktree dir (#607): {:?}",
+        paths
+    );
+}
+
+/// A Root Node has no worktree dir to add — only its mesh path participates.
+#[test]
+fn active_node_paths_root_node_contributes_only_mesh_path() {
+    let nodes = vec![node(false, None)];
+
+    let paths = active_node_paths(&nodes);
+
+    assert_eq!(paths.len(), 1, "root node contributes exactly one path: {:?}", paths);
+    assert_eq!(paths[0], "/home/user/repo");
+}
+
+/// A whitespace-only `worktree_name` collapses to "no worktree" per the
+/// canonical rule in `env::node_worktree_path`, so it contributes only the
+/// mesh path — same as a Root Node.
+#[test]
+fn active_node_paths_blank_worktree_name_contributes_only_mesh_path() {
+    let nodes = vec![node(true, Some("   "))];
+
+    let paths = active_node_paths(&nodes);
+
+    assert_eq!(paths.len(), 1, "blank worktree name is treated as no worktree: {:?}", paths);
+    assert_eq!(paths[0], "/home/user/repo");
 }
 
 // ── get_git_prune_info / collect_prune_info ─────────────────────────────────
