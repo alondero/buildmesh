@@ -618,7 +618,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setValue: setCoordEnabled,
       setBusy: setCoordBusy,
       setError,
-      mutation: () => api.setCoordinatorApiEnabled(enabled),
+      // The async wrapper turns `_invoke`'s `Promise<unknown>` into
+      // `Promise<void>` so it satisfies the helper's contract.
+      mutation: async () => {
+        await api.setCoordinatorApiEnabled(enabled);
+      },
     });
 
   // Flip LAN/VPN exposure. The backend rebinds the listeners live (loopback
@@ -635,7 +639,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setValue: setLanEnabled,
       setBusy: setLanBusy,
       setError,
-      mutation: () => api.setLanExposureEnabled(enabled),
+      // The async wrapper turns `_invoke`'s `Promise<unknown>` into
+      // `Promise<void>` so it satisfies the helper's contract.
+      mutation: async () => {
+        await api.setLanExposureEnabled(enabled);
+      },
       onSuccess: refreshNetworkStatus,
     });
 
