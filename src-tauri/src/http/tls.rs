@@ -76,7 +76,12 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<SelfSignedCert, rcgen::Error
 /// The non-loopback interface IPs a cert must cover, canonicalised (sorted,
 /// deduped, as strings) so it can be persisted and compared. Loopback/localhost
 /// SANs are constant and never part of this key.
-fn interface_san_key(interface_ips: &[IpAddr]) -> Vec<String> {
+///
+/// `pub(crate)` so `http::mod` can key the in-process `TlsAcceptor` cache by
+/// the same set the persisted cert was minted for (issue #587): a re-toggle
+/// with the same interface set must reuse the previously built acceptor
+/// instead of re-reading the DER + re-parsing the `ServerConfig`.
+pub(crate) fn interface_san_key(interface_ips: &[IpAddr]) -> Vec<String> {
     let mut v: Vec<String> = interface_ips
         .iter()
         .filter(|ip| !ip.is_loopback())
