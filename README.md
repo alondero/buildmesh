@@ -170,11 +170,9 @@ buildmesh/
 
 ## Contributing
 
-1. **File an issue first** — describe the problem, not just the fix. See [the triage process](docs/agents/triage-labels.md) for the labels used.
-2. **Match existing patterns** — the codebase has a strong opinionated style. Read `docs/knowledge-primer.md` before opening a PR that touches the backend.
-3. **Add or update tests** for any behaviour change. Unit tests live in `tests/unit`, integration in `tests/integration`, e2e in `tests/e2e`.
-4. **Verify before pushing** — run `npm run test:ci` and the `/verify` skill. The build must stay green.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop, commit conventions,
+harness-enforced rules, and the triage workflow.
 
 ## License
 
-Private / not yet published.
+[MIT](LICENSE) — Copyright (c) 2026 Adam Londero.
