@@ -2,9 +2,43 @@
 
 use std::net::IpAddr;
 
-use tokio::io::AsyncWriteExt;
+use serde::de::DeserializeOwned;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::http::MaybeTls;
+
+
+/// Read exactly `content_length` bytes from `lines`, enforce a `max` cap,
+/// and deserialize the payload as JSON into `T`.
+///
+/// Returns:
+/// * `Ok(value)` on success
+/// * `"413 Content Too Large"` if the body exceeds `max`
+/// * `"400 Bad Request"` (with detail) if the read fails or JSON is invalid
+///
+/// This centralises the ~7 copies of the same pattern in the HTTP routes so
+/// the cap-check, read, and error-mapping logic cannot drift between handlers.
+pub async fn read_json_body<T: DeserializeOwned>(
+    lines: &mut tokio::io::BufStream<MaybeTls>,
+    content_length: usize,
+    max: usize,
+) -> Result<T, String> {
+    if content_length > max {
+        return Err("413 Content Too Large".to_string());
+    }
+
+    let mut body_bytes = vec![0u8; content_length];
+    if content_length > 0 {
+        if lines.read_exact(&mut body_bytes).await.is_err() {
+            return Err("400 Bad Request".to_string());
+        }
+    }
+
+    let value: T = serde_json::from_slice(&body_bytes).map_err(|e| {
+        format!("400 Bad Request: {}", e)
+    })?;
+    Ok(value)
+}
 
 /// Pull a bearer token out of an `Authorization: Bearer <token>` header. This is
 /// the only header-carried credential shape the server accepts post-#500 (URL
@@ -17,6 +51,7 @@ pub fn bearer_token(headers: &str) -> Option<String> {
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
 }
+
 
 /// Extract `bm_session=<token>` from the `Cookie:` header. The cookie is
 /// set on the initial `/v2?token=...` load so subsequent fetches and the
@@ -31,6 +66,7 @@ pub fn extract_token_from_cookies(headers: &str) -> Option<String> {
     }
     None
 }
+
 
 /// `Set-Cookie` line attached to a successful `POST /api/session` login (issue
 /// #500), which is the sole place the session cookie is now minted. HttpOnly so
@@ -52,6 +88,7 @@ pub fn session_cookie_header(token: &str, secure: bool) -> String {
     )
 }
 
+
 /// Strip the optional `:port` (and IPv6 brackets) from a `Host` header value,
 /// returning the bare hostname/IP. `127.0.0.1:1992` -> `127.0.0.1`,
 /// `[::1]:1992` -> `::1`, `localhost` -> `localhost`.
@@ -63,6 +100,7 @@ pub fn strip_host_port(host: &str) -> &str {
     // Hostname or IPv4, optionally `:port`.
     host.split(':').next().unwrap_or(host)
 }
+
 
 /// Validate a request's `Host` header to defeat DNS rebinding. A browser cannot
 /// forge `Host`, so a rogue page that re-resolved its domain to `127.0.0.1`
@@ -87,6 +125,7 @@ pub fn host_is_allowed(host_header: &str, local_ips: &[IpAddr]) -> bool {
     }
 }
 
+
 pub fn extract_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
     let name_bytes = name.as_bytes();
     headers
@@ -100,6 +139,7 @@ pub fn extract_header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str>
         .map(|line| line[name.len() + 1..].trim())
 }
 
+
 pub async fn write_status_only(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
@@ -107,6 +147,7 @@ pub async fn write_status_only(
     let response = format!("HTTP/1.1 {}\r\nContent-Length: 0\r\n\r\n", status);
     lines.get_mut().write_all(response.as_bytes()).await
 }
+
 
 pub async fn write_json(
     lines: &mut tokio::io::BufStream<MaybeTls>,
@@ -122,6 +163,7 @@ pub async fn write_json(
     lines.get_mut().write_all(response.as_bytes()).await
 }
 
+
 pub async fn send_json_error(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
@@ -130,6 +172,7 @@ pub async fn send_json_error(
     let body = format!(r#"{{"error":"{}"}}"#, msg.replace('"', "\\\""));
     let _ = write_json(lines, status, &body).await;
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -253,3 +296,4 @@ mod tests {
         assert_eq!(extract_header_value(headers, "Missing"), None);
     }
 }
+
