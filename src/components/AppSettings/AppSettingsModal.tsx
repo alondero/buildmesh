@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
+import { optimisticToggle } from '../../lib/optimisticToggle';
 import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
@@ -607,43 +608,44 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   };
 
   // Flip the master kill-switch. Optimistic, with rollback on failure so the
-  // toggle never lies about the backend's real state.
-  const handleToggleCoordinator = async (enabled: boolean) => {
-    const previous = coordEnabled;
-    setCoordEnabled(enabled);
-    setCoordBusy(true);
-    setError(null);
-    try {
-      await api.setCoordinatorApiEnabled(enabled);
-    } catch (e) {
-      setCoordEnabled(previous);
-      setError(String(e));
-    } finally {
-      setCoordBusy(false);
-    }
-  };
+  // toggle never lies about the backend's real state. The shared
+  // `optimisticToggle` helper (issue #587) factors out the previous/set/try/
+  // catch/finally shape that's repeated by every settings toggle.
+  const handleToggleCoordinator = (enabled: boolean) =>
+    optimisticToggle({
+      current: coordEnabled,
+      next: enabled,
+      setValue: setCoordEnabled,
+      setBusy: setCoordBusy,
+      setError,
+      // The async wrapper turns `_invoke`'s `Promise<unknown>` into
+      // `Promise<void>` so it satisfies the helper's contract.
+      mutation: async () => {
+        await api.setCoordinatorApiEnabled(enabled);
+      },
+    });
 
   // Flip LAN/VPN exposure. The backend rebinds the listeners live (loopback
-  // plain HTTP ⇄ LAN interfaces over self-signed TLS), so we await the call and
-  // roll back the toggle if it fails. `user.click` swallows a rejected async
-  // onClick, so the try/catch/finally must live inside the handler. On success
-  // we re-read the network status so the realized-state UI (`tls_active`,
-  // `exposed_interfaces`) reflects the new bind (issue #586).
-  const handleToggleLanExposure = async (enabled: boolean) => {
-    const previous = lanEnabled;
-    setLanEnabled(enabled);
-    setLanBusy(true);
-    setError(null);
-    try {
-      await api.setLanExposureEnabled(enabled);
-      await refreshNetworkStatus();
-    } catch (e) {
-      setLanEnabled(previous);
-      setError(String(e));
-    } finally {
-      setLanBusy(false);
-    }
-  };
+  // plain HTTP ⇄ LAN interfaces over self-signed TLS), so we await the call
+  // and roll back the toggle if it fails. On success we re-read the network
+  // status so the realized-state UI (`tls_active`, `exposed_interfaces`)
+  // reflects the new bind (issue #586). Same `optimisticToggle` helper as
+  // the coordinator toggle — the only delta is the post-success
+  // `refreshNetworkStatus` hook (issue #587).
+  const handleToggleLanExposure = (enabled: boolean) =>
+    optimisticToggle({
+      current: lanEnabled,
+      next: enabled,
+      setValue: setLanEnabled,
+      setBusy: setLanBusy,
+      setError,
+      // The async wrapper turns `_invoke`'s `Promise<unknown>` into
+      // `Promise<void>` so it satisfies the helper's contract.
+      mutation: async () => {
+        await api.setLanExposureEnabled(enabled);
+      },
+      onSuccess: refreshNetworkStatus,
+    });
 
   // Mint (or replace) the read token. The value is returned exactly once, here —
   // get_coordinator_status only ever reports whether one exists, never its value.
