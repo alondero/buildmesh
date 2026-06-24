@@ -138,6 +138,20 @@ pub fn run() {
             // Start embedded HTTP/WebSocket server for mobile remote access
             http_server::start_http_server(app.handle().clone(), port_offset);
 
+            // Pre-spawn Worktree Pool reconcile (issue #609, PRD #608). Runs
+            // once per startup AFTER the HTTP server has bound, so a
+            // Playwright run hitting `/api/...` immediately after launch
+            // doesn't compete with the reconcile's per-mesh `git worktree add`
+            // for the DB mutex (the reconcile would otherwise hold the mutex
+            // across N+1 sequential round-trips while the HTTP server tries
+            // to accept requests). Prunes stale rows, then ensures one warm
+            // detached-HEAD worktree per worktree-enabled mesh. Best-effort —
+            // failures are logged and the spawn path falls back to cold
+            // checkout when the pool is empty.
+            std::thread::spawn(|| {
+                services::warm_pool::reconcile_on_startup();
+            });
+
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
             let crash_log_path = app_dir.join("logs").join("panic.log");

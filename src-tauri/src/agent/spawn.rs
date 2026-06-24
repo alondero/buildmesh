@@ -694,8 +694,64 @@ pub async fn spawn_agent_inner(
 
     timer.checkpoint("after_mesh_row_read");
 
-    // 6. Compute spawn path
-    let spawn_worktree_name = if use_worktree {
+    // 6. Compute spawn path. The warm-pool tracer bullet (issue #609) lets
+    //    manual spawns ADOPT a pre-warmed detached worktree as their own
+    //    worktree — zero cold checkout, no folder rename (the pool's
+    //    preassigned slug IS the node name). The claim happens BEFORE the
+    //    cold `create_git_worktree` block below; on success we rewrite the
+    //    worktree's mode (branched vs. detached) to match the mesh's
+    //    `worktree_mode`, then fall through to the rest of the spawn. A
+    //    claim failure (empty pool, PR/issue source, etc.) is logged and
+    //    falls through to the cold path — the spawn never fails because of
+    //    the pool, only because of an actual worktree-create error.
+    let mesh_id = db::get_mesh_by_path(&node.path).map(|m| m.id).unwrap_or(-1);
+    let mut warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry> = None;
+    if use_worktree {
+        // The path the node resolves to WITHOUT a pool claim. If it's already
+        // on disk this spawn is a resume / handover / re-spawn reusing an
+        // existing worktree — never claim a pool entry for it (that would
+        // re-point the node at a different directory and abandon its work).
+        let existing = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
+        let existing_present = std::path::Path::new(&existing.host_path).exists();
+        if mesh_id > 0
+            && crate::services::warm_pool::should_claim_for_spawn(&node, existing_present)
+        {
+            match crate::services::warm_pool::try_claim(mesh_id) {
+                Ok(Some(entry)) => {
+                    tracing::info!(
+                        "spawn_agent_inner: claimed warm pool entry id={} path={} slug={} base_sha={}",
+                        entry.id,
+                        entry.path,
+                        entry.preassigned_name,
+                        entry.base_sha.as_deref().unwrap_or("none"),
+                    );
+                    warm_claimed = Some(entry);
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        "spawn_agent_inner: warm pool empty for mesh {}; cold spawn",
+                        mesh_id
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "spawn_agent_inner: warm pool claim failed (non-fatal, falling back to cold): {}",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    // The effective spawn_worktree_name + path. When we claimed a warm
+    // entry, the worktree directory is already on disk — we use its
+    // preassigned slug as the node's `worktree_name` so the rest of the
+    // pipeline (which keys off `spawn_worktree_name`) treats this as just
+    // another worktree spawn. Without a claim, fall back to whatever the
+    // node row already carries (issue/PR spawns, resumes).
+    let spawn_worktree_name: Option<&str> = if let Some(ref entry) = warm_claimed {
+        Some(&entry.preassigned_name)
+    } else if use_worktree {
         node.worktree_name.as_deref()
     } else {
         tracing::info!("spawn_agent_inner: use_worktree=false, using repo root directly");
@@ -979,6 +1035,44 @@ pub async fn spawn_agent_inner(
         if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
             tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
         }
+
+        // Warm-pool claim fast path (issue #609): when we adopted a
+        // pre-warmed detached worktree above, the directory already exists
+        // (the cold-create block above is skipped because `host_path.exists()`
+        // is true). The pool cuts every entry in `detached` mode so a
+        // future claim can `git checkout -B <branch>` to upgrade without
+        // touching the mesh's branch refs. Do the upgrade here, off the
+        // async runtime, so the spawn timer captures the warm-checkout cost
+        // as a single `spawn_timing:` checkpoint.
+        if let Some(ref entry) = warm_claimed {
+            timer.checkpoint("before_warm_branch_upgrade");
+            let host_path_owned = resolved.host_path.clone();
+            let branch_name_owned = wt_name.to_string();
+            let mode_owned = worktree_mode.to_string();
+            let upgrade_result = tokio::task::spawn_blocking(move || {
+                upgrade_warm_to_mode(&host_path_owned, &branch_name_owned, &mode_owned)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("warm branch upgrade panicked: {}", e)));
+            timer.checkpoint("after_warm_branch_upgrade");
+            if let Err(e) = upgrade_result {
+                // Don't fail the spawn — fall through and let the PTY
+                // launch. The agent will land on the warm entry's current
+                // HEAD (already at base_ref) instead of the mesh's named
+                // branch, which is the cold-spawn behaviour anyway.
+                tracing::warn!(
+                    "spawn_agent_inner: warm branch upgrade failed ({}); agent will land on detached HEAD",
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "spawn_agent_inner: warm entry {} upgraded to mode={} branch={}",
+                    entry.preassigned_name,
+                    worktree_mode,
+                    wt_name,
+                );
+            }
+        }
     }
 
     // 8-9. Build the command, then spawn it — either normally (portable-pty)
@@ -1065,6 +1159,21 @@ pub async fn spawn_agent_inner(
     //     arriving then sees `reader_handle = None` and skips the join,
     //     matching the natural-exit test path).
     tracing::info!("spawn_agent_inner: storing agent process for session {}", session_id);
+    // Persist the adopted pool slug as the node's `worktree_name` and `name`
+    // BEFORE registering the agent (issue #609). The PTY reader thread and
+    // any concurrent `agent-spawned` listener fire right after registration,
+    // so doing the UPDATE post-register would let them briefly observe the
+    // throwaway stage-1 slug instead of the adopted pool slug.
+    if let Some(ref entry) = warm_claimed {
+        if let Err(e) = db::set_agent_node_worktree_name(session_id, &entry.preassigned_name) {
+            tracing::warn!(
+                "spawn_agent_inner: failed to set worktree_name={} on node {}: {}",
+                entry.preassigned_name,
+                session_id,
+                e
+            );
+        }
+    }
     register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start());
     tracing::info!("spawn_agent_inner: stored agent process");
 
@@ -1112,6 +1221,60 @@ pub async fn spawn_agent_inner(
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
+
+    // Warm-pool post-claim housekeeping (issue #609). After the spawn
+    // succeeds we (a) drop the bookkeeping row — the directory now lives
+    // on as the node's worktree so the row's purpose is done — and (b)
+    // fire a background refill so the pool is back at target before the
+    // next spawn. Both are best-effort: a failed delete leaves an orphan
+    // `claimed` row that the next startup reconcile prunes (its `path`
+    // exists, but the `claimed` status means no future claim will pick
+    // it up — it just sits there as harmless bookkeeping until a future
+    // issue adds GC for it); a failed refill is logged and retried on the
+    // next reconcile pass.
+    if let Some(entry) = warm_claimed.take() {
+        crate::services::warm_pool::forget_after_spawn(entry.id);
+        // Full name adoption (issue #609, PRD #608 §3 "Manual Spawns"). The
+        // node takes the warm entry's slug as BOTH its `worktree_name` (so
+        // path resolution lands on the pre-warmed directory) AND its display
+        // `name` (so the on-disk directory and the node name match with zero
+        // rename). At stage-1 the node was created under a throwaway slug;
+        // here we overwrite both with the adopted slug. The slug is a plain
+        // `on_spawn` adj-adj-noun, so it's still a `is_default_name` match —
+        // the auto-LLM renamer can override it later exactly as it would the
+        // throwaway slug. The `worktree_name` UPDATE was already done above
+        // (before `register_agent`) so the reader thread sees the adopted
+        // value; only `name` needs an event here.
+        if let Err(e) = db::update_agent_node_name(session_id, &entry.preassigned_name) {
+            tracing::warn!(
+                "spawn_agent_inner: failed to adopt name={} on node {}: {}",
+                entry.preassigned_name,
+                session_id,
+                e
+            );
+        } else {
+            // Re-label the frontend's optimistic stage-1 row (created under
+            // the throwaway slug) via the same `node-renamed` channel the
+            // manual-rename command uses (agentNodeStore listens for it).
+            let _ = app.emit(
+                "node-renamed",
+                serde_json::json!({
+                    "node_id": session_id,
+                    "name": entry.preassigned_name,
+                }),
+            );
+        }
+        // Background refill on the spawn-blocking pool so the async
+        // runtime can keep making progress on the spawn caller. Reuse
+        // the mesh_id we resolved above (line ~715) instead of re-reading
+        // the meshes row + re-locking the DB.
+        if mesh_id > 0 {
+            let mesh_id_for_refill = mesh_id;
+            std::thread::spawn(move || {
+                crate::services::warm_pool::refill_after_claim(mesh_id_for_refill);
+            });
+        }
+    }
 
     // Emit the post-spawn reconcile trigger (issue #332). Async-spawn paths
     // (auto-resume on startup, fresh auto-spawn, handover, etc.) race the
@@ -1419,6 +1582,53 @@ fn fetch_fork_head(
         return false;
     }
     true
+}
+
+/// Upgrade a warm pool entry from detached HEAD to the mesh's configured
+/// worktree mode (issue #609, PRD #608 §3). The pool cuts every entry as
+/// `detached` so a future claim can adopt the directory without ever
+/// touching the mesh's branch refs — the cost is one `git checkout -B
+/// <branch>` (branched mode, ~50ms) or no-op (detached mode, ~5ms).
+///
+/// This is the entire warm-path "checkout" cost the tracer bullet buys: the
+/// on-disk tree is already at the mesh's base SHA (the worker checked it
+/// out); all the spawn has to do is flip the working ref. The 97% of cold-
+/// spawn time that was Windows Defender / NTFS search indexer / USN journal
+/// scanning freshly-written files is paid ONCE on app startup, not per
+/// spawn.
+///
+/// Best-effort by design: any failure here is logged by the caller and the
+/// spawn falls through. The agent lands on the warm entry's current HEAD
+/// (still at base_ref) instead of the mesh's named branch — strictly worse
+/// than the branched path, but never worse than a cold spawn would be.
+///
+/// `command_no_window` already applies CREATE_NO_WINDOW on Windows
+/// (`process_util::command_no_window`), so we don't need per-OS cfg
+/// duplication here.
+fn upgrade_warm_to_mode(host_path: &str, branch_name: &str, mode: &str) -> Result<(), String> {
+    use crate::process_util::command_no_window;
+    if mode == "detached" {
+        // No-op: the pool already cut the entry as detached.
+        return Ok(());
+    }
+    // Branched mode: `git checkout -B <branch>` from the current HEAD. `-B`
+    // (uppercase) is used instead of `-b` so the call is idempotent — a
+    // second spawn that re-claims a still-detached entry reuses the
+    // existing branch instead of erroring on "branch already exists". The
+    // branch name is the agent's `worktree_name`, which the spawn path
+    // computed as the pool's preassigned slug — a plain adj-adj-noun like
+    // `bold-amber-fox`, a valid git branch name (matches `SLUG_REGEX`).
+    let mut cmd = command_no_window("git");
+    cmd.arg("-C").arg(host_path).arg("checkout").arg("-B").arg(branch_name);
+    let output = cmd.output().map_err(|e| format!("failed to spawn git checkout: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git checkout -B {} failed: {}",
+            branch_name,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 /// Read the local SHA at `refs/remotes/origin/<head_ref>` — the ref
