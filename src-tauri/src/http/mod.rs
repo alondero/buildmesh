@@ -1009,6 +1009,30 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         .unwrap_or(&path_with_query)
         .to_string();
 
+    // POST /__debug/log — diagnostic endpoint. The mobile SPA injects an
+    // error-catcher <script> (see assets::serve_spa_shell) that POSTs any
+    // uncaught error / unhandled rejection here. We log the body at INFO so
+    // it shows up in the dev log alongside the other connection events, then
+    // 204 No Content so the SPA's fetch resolves cleanly. Matched before
+    // `/api/*` so a debug POST never gets confused for a real API call.
+    if method == "POST" && path_without_query == "/__debug/log" {
+        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if content_length <= 64 * 1024 {
+            let mut body_bytes = vec![0u8; content_length];
+            if content_length == 0 || lines.read_exact(&mut body_bytes).await.is_ok() {
+                let body = String::from_utf8_lossy(&body_bytes).into_owned();
+                tracing::info!(target: "buildmesh_lib::diagnostics", "SPA debug event: {body}");
+            }
+        } else {
+            tracing::warn!(target: "buildmesh_lib::diagnostics",
+                "SPA debug log payload too large: {} bytes", content_length);
+        }
+        let _ = request::write_status_only(&mut lines, "204 No Content").await;
+        return;
+    }
+
     // GET /admin/devices — list paired devices for the "Authorized Devices"
     // panel (issue #502). Admin-only; the first real operation in the namespace
     // #500 reserved. Matched before the `/admin/*` catch-all below.
@@ -2034,8 +2058,8 @@ mod tests {
     /// production builder requires a real cert + key, so we mint a tiny one
     /// rather than mocking the type. Cheap (a few ms) and stays in-process.
     fn test_acceptor() -> TlsAcceptor {
-        let cert = tls::generate(&[]).expect("test cert generation");
-        tls::acceptor_from(&cert).expect("test acceptor build")
+        let chain = tls::generate(&[]).expect("test cert generation");
+        tls::acceptor_from(&chain.leaf).expect("test acceptor build")
     }
 
     /// Regression pin for issue #587: `get_or_build_acceptor`'s fast path.
