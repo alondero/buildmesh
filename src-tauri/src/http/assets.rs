@@ -30,14 +30,49 @@ pub async fn serve_spa_shell(
         return lines.get_mut().write_all(response.as_bytes()).await;
     };
     let extra = extra_header.unwrap_or("");
+    // Inject a tiny error-catcher so JS errors from the SPA land in the dev
+    // log instead of disappearing on the phone's screen. `__debug/log` is
+    // matched in `handle_connection` (see the diagnostics section) — it
+    // 200s immediately and writes the body to the dev log so we can see
+    // exactly what threw on a black-screen page. Inserted before the
+    // module script so it captures errors during the SPA's boot.
+    let debug_shim = r#"<script>
+window.addEventListener('error', function (e) {
+  try {
+    fetch('/__debug/log', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({kind:'error',msg:e.message,src:e.filename,line:e.lineno,col:e.colno,stack:e.error&&e.error.stack||''})
+    });
+  } catch (_) {}
+});
+window.addEventListener('unhandledrejection', function (e) {
+  try {
+    fetch('/__debug/log', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({kind:'promise',reason:String(e.reason),stack:(e.reason&&e.reason.stack)||''})
+    });
+  } catch (_) {}
+});
+</script>"#;
+    let body = format!(
+        "{}<!--buildmesh-debug-shim-->{}",
+        String::from_utf8_lossy(&file.data).replace("</head>", &format!("{}</head>", debug_shim)),
+        ""
+    );
+    // Compute length off the rendered string rather than `file.data.len()` —
+    // we just appended the shim to the body, so the Content-Length header
+    // must match what we actually write.
+    let body_bytes = body.as_bytes();
     let headers = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\n{}\r\n",
-        file.data.len(),
+        body_bytes.len(),
         extra
     );
     let stream = lines.get_mut();
     stream.write_all(headers.as_bytes()).await?;
-    stream.write_all(&file.data).await
+    stream.write_all(body_bytes).await
 }
 
 /// Serve a single bundled asset by request path. `path_without_query` is

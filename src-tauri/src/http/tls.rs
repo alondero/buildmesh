@@ -20,7 +20,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::sync::Arc;
 
-use rcgen::{CertificateParams, DnType, KeyPair, SanType};
+use rcgen::{
+    CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
+};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::TlsAcceptor;
 
@@ -30,9 +32,28 @@ pub struct SelfSignedCert {
     pub key_der: Vec<u8>,
 }
 
+/// A root CA + leaf-cert pair. The root is what the user installs on their
+/// phone as a trusted root CA (Android refuses a CA install unless the cert
+/// declares `CA:TRUE`; iOS wants the same via `.p12`); the leaf is what
+/// the dev binary serves over HTTPS. Both have the same private/public key
+/// pair as a self-signed cert would, BUT structurally the leaf carries
+/// `CA:FALSE` (rustls rejects a `CA:TRUE` cert as a TLS leaf with
+/// `CaUsedAsEndEntity`) and chains to the root via a real signature, so
+/// Chrome/Safari/Android validate the leaf → root path and the install
+/// path is satisfied.
+pub struct CertChain {
+    pub root_cert_der: Vec<u8>,
+    pub leaf: SelfSignedCert,
+}
+
 /// Subject Alternative Names for the cert: `localhost`, both loopback IPs, and
 /// every supplied non-loopback interface IP. Loopback IPs are added once even
-/// if `interface_ips` repeats them.
+/// if `interface_ips` repeats them, and the returned list is deduplicated so a
+/// link-local IPv6 that exists on multiple physical NICs (WiFi + Ethernet both
+/// carry `fe80::…`) does NOT appear twice — webpki-based TLS stacks
+/// (iOS/Android/Chrome) reject duplicate SAN entries as malformed
+/// (`AlertDescription::CertificateUnknown`); RFC 5280 §4.2.1.6 requires
+/// "each name … SHALL be specified once".
 fn san_entries(interface_ips: &[IpAddr]) -> Vec<SanType> {
     let mut sans = vec![
         SanType::DnsName(
@@ -48,15 +69,28 @@ fn san_entries(interface_ips: &[IpAddr]) -> Vec<SanType> {
             sans.push(SanType::IpAddress(*ip));
         }
     }
+    // Stable sort by a stringified key then dedup — `SanType` itself isn't
+    // `Ord`, so we project to a comparable form. `SanType::PartialEq` already
+    // compares the inner values, so a content-based dedup collapses the
+    // link-local IPv6 that arrives twice when both the WiFi and Ethernet
+    // adapters carry it (a real configuration on Adam's box).
+    sans.sort_by_key(|s| match s {
+        SanType::DnsName(d) => format!("dns:{}", d.as_ref()),
+        SanType::IpAddress(ip) => format!("ip:{}", ip),
+        _ => format!("{:?}", s),
+    });
+    sans.dedup();
     sans
 }
 
-/// Generate a fresh self-signed certificate covering `interface_ips`.
-///
-/// Validity is pinned to a wide fixed window (2020–2035) rather than "now + N"
-/// so the handshake never fails on clock skew and the persisted cert keeps
-/// working for years without regeneration.
-pub fn generate(interface_ips: &[IpAddr]) -> Result<SelfSignedCert, rcgen::Error> {
+/// Build the [`CertificateParams`] used by both `generate` and the regression
+/// tests. Pulled out so tests can assert the purpose extensions WITHOUT
+/// re-parsing the generated DER — Chrome/Safari reject TLS server certs that
+/// don't declare `ExtendedKeyUsage::ServerAuth` (RFC 5280 §4.2.1.12: "If the
+/// extension is present, then the certificate MUST only be used for one of
+/// the purposes indicated"). The pre-fix cert was missing this and the phone
+/// responded with `AlertDescription::CertificateUnknown` (46).
+fn build_params(interface_ips: &[IpAddr]) -> Result<CertificateParams, rcgen::Error> {
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     params.subject_alt_names = san_entries(interface_ips);
     params
@@ -64,12 +98,64 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<SelfSignedCert, rcgen::Error
         .push(DnType::CommonName, "Buildmesh (self-signed)");
     params.not_before = rcgen::date_time_ymd(2020, 1, 1);
     params.not_after = rcgen::date_time_ymd(2035, 1, 1);
+    // Chrome (TLS 1.3, BoringSSL) and Safari (Network.framework) refuse to
+    // handshake with a TLS server cert that doesn't carry an EKU of
+    // `serverAuth`; the error surfaces as `AlertDescription::CertificateUnknown`
+    // (alert 46 — rustls's `CertificateError::Other` catch-all). Pair it with
+    // `DigitalSignature` so the KeyUsage extension is also populated (some
+    // validators reject a TLS server cert with no KeyUsage at all).
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    // Basic Constraints: CA=FALSE. Chrome rejects end-entity TLS server certs
+    // without it (CA/Browser Forum baseline §7.1.2.1). rcgen's default
+    // `IsCa::NoCa` would OMIT the extension — `ExplicitNoCa` is what emits it.
+    params.is_ca = IsCa::ExplicitNoCa;
+    Ok(params)
+}
 
-    let key_pair = KeyPair::generate()?;
-    let cert = params.self_signed(&key_pair)?;
-    Ok(SelfSignedCert {
-        cert_der: cert.der().as_ref().to_vec(),
-        key_der: key_pair.serialize_der(),
+/// Build the [`CertificateParams`] for the root CA. `CA:TRUE` (mandatory
+/// for the Android install flow) with `keyCertSign` + `cRLSign` KeyUsage
+/// (the bits a CA needs to sign certs and CRLs). No SAN — root CAs don't
+/// match a hostname, they validate it.
+fn build_root_ca_params() -> Result<CertificateParams, rcgen::Error> {
+    let mut params = CertificateParams::new(Vec::<String>::new())?;
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "Buildmesh Dev Root CA");
+    params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2035, 1, 1);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    Ok(params)
+}
+
+/// Generate a fresh root-CA + leaf pair for `interface_ips`.
+///
+/// Validity is pinned to a wide fixed window (2020–2035) rather than "now + N"
+/// so the handshake never fails on clock skew and the persisted cert keeps
+/// working for years without regeneration. The root has no SAN — it
+/// validates the leaf, it isn't itself a TLS endpoint.
+pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
+    // Root CA — self-signed with CA:TRUE.
+    let root_params = build_root_ca_params()?;
+    let root_key = KeyPair::generate()?;
+    let root_cert = root_params.self_signed(&root_key)?;
+    let root_cert_der = root_cert.der().as_ref().to_vec();
+
+    // Leaf — TLS server cert shape (CA:FALSE, serverAuth EKU, DigitalSignature
+    // KU) signed by the root above.
+    let leaf_params = build_params(interface_ips)?;
+    let leaf_key = KeyPair::generate()?;
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &root_cert, &root_key)?;
+    let leaf_cert_der = leaf_cert.der().as_ref().to_vec();
+    let leaf_key_der = leaf_key.serialize_der();
+
+    Ok(CertChain {
+        root_cert_der,
+        leaf: SelfSignedCert {
+            cert_der: leaf_cert_der,
+            key_der: leaf_key_der,
+        },
     })
 }
 
@@ -104,30 +190,42 @@ fn persisted_covers(sans_path: &Path, wanted: &[String]) -> bool {
     wanted.iter().all(|ip| have.contains(ip.as_str()))
 }
 
-/// Load the persisted cert from `dir`, or generate + persist a new one. The
-/// persisted cert is reused only while it still covers the current
-/// `interface_ips` (a sidecar `sans.txt` records what it was minted for); a LAN
-/// IP change (DHCP, VPN, new subnet) forces regeneration so a client never
-/// hits a SAN/IP mismatch. A regenerated cert means a phone must re-trust it;
-/// deleting the `tls/` dir is the supported "rotate the cert" gesture.
-pub fn load_or_generate(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<SelfSignedCert> {
+/// Load the persisted cert chain from `dir`, or generate + persist a new one.
+/// The persisted chain is reused only while it still covers the current
+/// `interface_ips` (a sidecar `sans.txt` records what the leaf was minted for);
+/// a LAN IP change (DHCP, VPN, new subnet) forces regeneration so a client
+/// never hits a SAN/IP mismatch. A regenerated chain means a phone must
+/// re-trust the root; deleting the `tls/` dir is the supported "rotate the
+/// cert" gesture.
+pub fn load_or_generate(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<CertChain> {
+    let ca_path = dir.join("ca.der");
     let cert_path = dir.join("cert.der");
     let key_path = dir.join("key.der");
     let sans_path = dir.join("sans.txt");
 
     let wanted = interface_san_key(interface_ips);
-    if let (Ok(cert_der), Ok(key_der)) = (std::fs::read(&cert_path), std::fs::read(&key_path)) {
-        if !cert_der.is_empty() && !key_der.is_empty() && persisted_covers(&sans_path, &wanted) {
-            return Ok(SelfSignedCert { cert_der, key_der });
+    if let (Ok(ca_der), Ok(cert_der), Ok(key_der)) = (
+        std::fs::read(&ca_path),
+        std::fs::read(&cert_path),
+        std::fs::read(&key_path),
+    ) {
+        if !ca_der.is_empty() && !cert_der.is_empty() && !key_der.is_empty()
+            && persisted_covers(&sans_path, &wanted)
+        {
+            return Ok(CertChain {
+                root_cert_der: ca_der,
+                leaf: SelfSignedCert { cert_der, key_der },
+            });
         }
     }
 
-    let cert = generate(interface_ips).map_err(io::Error::other)?;
+    let chain = generate(interface_ips).map_err(io::Error::other)?;
     std::fs::create_dir_all(dir)?;
-    std::fs::write(&cert_path, &cert.cert_der)?;
-    std::fs::write(&key_path, &cert.key_der)?;
+    std::fs::write(&ca_path, &chain.root_cert_der)?;
+    std::fs::write(&cert_path, &chain.leaf.cert_der)?;
+    std::fs::write(&key_path, &chain.leaf.key_der)?;
     std::fs::write(&sans_path, wanted.join("\n"))?;
-    Ok(cert)
+    Ok(chain)
 }
 
 /// Build a [`TlsAcceptor`] from an in-memory cert + key.
@@ -145,10 +243,12 @@ pub fn acceptor_from(cert: &SelfSignedCert) -> Result<TlsAcceptor, rustls::Error
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-/// Load-or-generate the persisted cert under `dir` and build its acceptor.
+/// Load-or-generate the persisted chain under `dir` and build its acceptor
+/// (using the leaf only — the root sits on disk for the user to install
+/// on their phone).
 pub fn acceptor(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<TlsAcceptor> {
-    let cert = load_or_generate(dir, interface_ips)?;
-    acceptor_from(&cert).map_err(io::Error::other)
+    let chain = load_or_generate(dir, interface_ips)?;
+    acceptor_from(&chain.leaf).map_err(io::Error::other)
 }
 
 #[cfg(test)]
@@ -174,19 +274,95 @@ mod tests {
         assert_eq!(loopback_count, 2, "exactly the two canonical loopback IPs");
     }
 
+    /// Regression pin: a link-local IPv6 that exists on multiple physical NICs
+    /// (WiFi + Ethernet both have one) flows through `enumerate_interfaces` more
+    /// than once. Without dedup, the SAN list gets that IP twice, and webpki-
+    /// based TLS stacks (iOS/Android/Chrome) reject the cert as malformed —
+    /// emitting `AlertDescription::CertificateUnknown` (46) on the handshake.
+    /// RFC 5280 §4.2.1.6: "Each name … SHALL be specified once".
+    #[test]
+    fn san_entries_dedup_duplicate_interface_ips() {
+        let lan: IpAddr = "192.168.1.5".parse().unwrap();
+        let link_local: IpAddr = "fe80::1".parse().unwrap();
+        // The same IP twice — the production path that produced the broken
+        // cert on Adam's machine (WiFi + Ethernet both carrying fe80::…).
+        let sans = san_entries(&[lan, lan, link_local, link_local]);
+        let lan_count = sans
+            .iter()
+            .filter(|s| matches!(s, SanType::IpAddress(ip) if *ip == lan))
+            .count();
+        let link_local_count = sans
+            .iter()
+            .filter(|s| matches!(s, SanType::IpAddress(ip) if *ip == link_local))
+            .count();
+        assert_eq!(lan_count, 1, "duplicate LAN IP must collapse to a single SAN");
+        assert_eq!(
+            link_local_count, 1,
+            "duplicate link-local IP must collapse to a single SAN"
+        );
+    }
+
+    /// Regression pin: a self-signed TLS server cert MUST declare
+    /// `ExtendedKeyUsage::ServerAuth`. Chrome (BoringSSL, TLS 1.3) and Safari
+    /// (Network.framework) reject a TLS handshake with a cert that lacks it
+    /// — the alert surfaces as `CertificateUnknown` (46) on the rustls server
+    /// because BoringSSL's rejection maps through the
+    /// `CertificateError::Other` catch-all. The pre-fix cert was missing both
+    /// `key_usages` and `extended_key_usages` (rcgen leaves them empty by
+    /// default); pinning the values here makes a future regression that drops
+    /// them fail this test rather than silently break the mobile QR pairing.
+    #[test]
+    fn cert_params_declare_server_auth_extended_key_usage() {
+        let params = build_params(&[]).expect("build_params");
+        assert!(
+            params
+                .extended_key_usages
+                .iter()
+                .any(|eku| matches!(eku, ExtendedKeyUsagePurpose::ServerAuth)),
+            "self-signed TLS cert MUST declare ExtendedKeyUsagePurpose::ServerAuth \
+             (Chrome/Safari otherwise reject with CertificateUnknown)"
+        );
+        assert!(
+            params
+                .key_usages
+                .iter()
+                .any(|ku| matches!(ku, KeyUsagePurpose::DigitalSignature)),
+            "self-signed TLS cert SHOULD declare KeyUsagePurpose::DigitalSignature"
+        );
+    }
+
+    /// Regression pin: the cert MUST emit `BasicConstraints` with `CA:FALSE`
+    /// (RFC 5280 §4.2.1.9). Chrome rejects end-entity TLS server certs
+    /// without it (CA/Browser Forum baseline §7.1.2.1). rustls also refuses
+    /// to terminate a TLS handshake with a CA:TRUE cert as the leaf —
+    /// `CaUsedAsEndEntity` alert — so a self-signed cert can NOT double-duty
+    /// as both the CA root (for Android install) and the TLS leaf. The
+    /// Android-install path needs a separate root + leaf PKI; see the
+    /// follow-up note in this test.
+    #[test]
+    fn cert_params_emit_basic_constraints_ca_false() {
+        let params = build_params(&[]).expect("build_params");
+        assert!(
+            matches!(params.is_ca, IsCa::ExplicitNoCa),
+            "self-signed TLS leaf cert MUST emit BasicConstraints CA:FALSE; got {:?}",
+            params.is_ca
+        );
+    }
+
     #[test]
     fn generate_produces_non_empty_der() {
-        let cert = generate(&[]).unwrap();
-        assert!(!cert.cert_der.is_empty());
-        assert!(!cert.key_der.is_empty());
+        let chain = generate(&[]).unwrap();
+        assert!(!chain.root_cert_der.is_empty(), "root cert must be non-empty");
+        assert!(!chain.leaf.cert_der.is_empty(), "leaf cert must be non-empty");
+        assert!(!chain.leaf.key_der.is_empty(), "leaf key must be non-empty");
     }
 
     #[test]
     fn acceptor_builds_from_generated_cert() {
-        let cert = generate(&[]).unwrap();
+        let chain = generate(&[]).unwrap();
         // Proves the cert+key parse into a rustls ServerConfig under the ring
         // provider — the failure mode if the provider/feature wiring is wrong.
-        assert!(acceptor_from(&cert).is_ok());
+        assert!(acceptor_from(&chain.leaf).is_ok());
     }
 
     #[test]
@@ -195,8 +371,9 @@ mod tests {
         let first = load_or_generate(dir.path(), &[]).unwrap();
         // Second call must reuse the persisted bytes, not regenerate.
         let second = load_or_generate(dir.path(), &[]).unwrap();
-        assert_eq!(first.cert_der, second.cert_der);
-        assert_eq!(first.key_der, second.key_der);
+        assert_eq!(first.root_cert_der, second.root_cert_der);
+        assert_eq!(first.leaf.cert_der, second.leaf.cert_der);
+        assert_eq!(first.leaf.key_der, second.leaf.key_der);
     }
 
     #[test]
@@ -208,14 +385,126 @@ mod tests {
         let first = load_or_generate(dir.path(), &[ip_a]).unwrap();
         // Same interface set → reuse the persisted cert.
         let same = load_or_generate(dir.path(), &[ip_a]).unwrap();
-        assert_eq!(first.cert_der, same.cert_der, "unchanged interface set reuses the cert");
+        assert_eq!(first.leaf.cert_der, same.leaf.cert_der, "unchanged interface set reuses the cert");
         // A shrunk set (only loopback now) still passes — an extra stale SAN is harmless.
         let shrunk = load_or_generate(dir.path(), &[]).unwrap();
-        assert_eq!(first.cert_der, shrunk.cert_der, "a covered (subset) request reuses the cert");
+        assert_eq!(first.leaf.cert_der, shrunk.leaf.cert_der, "a covered (subset) request reuses the cert");
         // A new interface IP the persisted cert doesn't cover → regenerate, or a
         // phone connecting to the new IP would hit a SAN/name mismatch.
         let changed = load_or_generate(dir.path(), &[ip_b]).unwrap();
-        assert_ne!(first.cert_der, changed.cert_der, "a new interface IP forces regeneration");
+        assert_ne!(first.leaf.cert_der, changed.leaf.cert_der, "a new interface IP forces regeneration");
+    }
+
+    /// Regression pin for the root+leaf PKI: the root cert MUST declare
+    /// `CA:TRUE` so Android accepts it as a trusted root during install, AND
+    /// the leaf MUST declare `CA:FALSE` so rustls accepts it as the TLS leaf
+    /// (rustls rejects `CA:TRUE` certs as leaves with `CaUsedAsEndEntity`).
+    /// A self-signed cert can't satisfy both at once — that's why we now
+    /// generate two distinct certs with the same keypair root.
+    #[test]
+    fn root_cert_emits_basic_constraints_ca_true() {
+        let chain = generate(&[]).expect("generate");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("root.der"), &chain.root_cert_der).unwrap();
+        let output = std::process::Command::new("openssl")
+            .args(["x509", "-inform", "DER", "-in", dir.path().join("root.der").to_str().unwrap(),
+                   "-noout", "-ext", "basicConstraints"])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(output.status.success(), "openssl failed: {}", String::from_utf8_lossy(&output.stderr));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("CA:TRUE"),
+            "root cert MUST declare BasicConstraints CA:TRUE (Android install requirement); got: {stdout}"
+        );
+    }
+
+    #[test]
+    fn leaf_cert_chains_to_root_cert() {
+        // The whole point of the new PKI: openssl can verify the leaf by
+        // chaining to the root. Without a real signature this would fail with
+        // "unable to get local issuer". We use PEM form because the openssl
+        // 1.1.1i that ships with Git for Windows refuses to load DER via
+        // `-CAfile` with `Error loading file` regardless of path syntax.
+        let chain = generate(&[]).expect("generate");
+        let dir = tempfile::tempdir().unwrap();
+        let pem = |label: &str, der: &[u8]| -> String {
+            use std::fmt::Write;
+            let mut s = String::with_capacity(der.len() * 4 / 3 + 64);
+            s.push_str("-----BEGIN ");
+            s.push_str(label);
+            s.push_str("-----\n");
+            for chunk in der.chunks(48) {
+                // base64 with `STANDARD_NO_PAD` would be nicer but the
+                // standard alphabet + `=` padding is what openssl accepts.
+                write!(
+                    s,
+                    "{}\n",
+                    base64_encode(chunk)
+                ).unwrap();
+            }
+            s.push_str("-----END ");
+            s.push_str(label);
+            s.push_str("-----\n");
+            s
+        };
+        std::fs::write(
+            dir.path().join("root.pem"),
+            pem("CERTIFICATE", &chain.root_cert_der),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("leaf.pem"),
+            pem("CERTIFICATE", &chain.leaf.cert_der),
+        )
+        .unwrap();
+        let output = std::process::Command::new("openssl")
+            .args([
+                "verify",
+                "-CAfile",
+                dir.path().join("root.pem").to_str().unwrap(),
+                dir.path().join("leaf.pem").to_str().unwrap(),
+            ])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(
+            output.status.success(),
+            "leaf MUST chain to root via real signature; stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Minimal standard-alphabet base64 encoder (with `=` padding) for tests
+    /// that need to shell out to openssl. We avoid pulling the `pem` crate
+    /// just for two test certs.
+    fn base64_encode(data: &[u8]) -> String {
+        const ALPHA: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+        let chunks = data.chunks(3);
+        let mut last_len = 0;
+        for chunk in chunks {
+            let b0 = chunk[0];
+            let b1 = chunk.get(1).copied().unwrap_or(0);
+            let b2 = chunk.get(2).copied().unwrap_or(0);
+            let n = chunk.len();
+            last_len = n;
+            out.push(ALPHA[(b0 >> 2) as usize] as char);
+            out.push(ALPHA[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+            if n > 1 {
+                out.push(ALPHA[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+            } else {
+                out.push('=');
+            }
+            if n > 2 {
+                out.push(ALPHA[(b2 & 0x3f) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+        let _ = last_len;
+        out
     }
 
     /// End-to-end SSL handshake (issue #501 AC4): a real client completes a TLS
@@ -230,8 +519,8 @@ mod tests {
         use tokio::net::{TcpListener, TcpStream};
         use tokio_rustls::TlsConnector;
 
-        let cert = generate(&[]).unwrap();
-        let acceptor = acceptor_from(&cert).unwrap();
+        let chain = generate(&[]).unwrap();
+        let acceptor = acceptor_from(&chain.leaf).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -247,10 +536,11 @@ mod tests {
             tls.flush().await.unwrap();
         });
 
-        // Client: trust the self-signed cert, connect as `localhost`.
+        // Client: trust the root (the leaf is now signed by the root — see
+        // `leaf_cert_chains_to_root_cert` for the validation that proves it).
         let mut roots = rustls::RootCertStore::empty();
         roots
-            .add(CertificateDer::from(cert.cert_der.clone()))
+            .add(CertificateDer::from(chain.root_cert_der.clone()))
             .unwrap();
         let client_config = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
