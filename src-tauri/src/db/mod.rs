@@ -2376,6 +2376,28 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
     Ok(n)
 }
 
+/// List every warm pool directory path for a mesh (issue #639 gap 3). Called
+/// by `commands::mesh::delete_mesh` BEFORE the row cascade so the caller can
+/// `git worktree remove --force` each path — otherwise the on-disk
+/// `.claude/worktrees/<slug>` directories outlive the mesh as orphans and a
+/// subsequent prewarm on the same path can collide with the leftover slug.
+///
+/// Returns absolute host paths. Cheap: a `SELECT path` over a small index.
+/// Companion helper is `delete_warm_worktrees_for_mesh_inner`.
+pub fn list_warm_paths_for_mesh(mesh_id: i64) -> SqlResult<Vec<String>> {
+    let db = get().lock().unwrap();
+    list_warm_paths_for_mesh_inner(&db, mesh_id)
+}
+
+pub(crate) fn list_warm_paths_for_mesh_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM warm_worktrees WHERE mesh_id = ?1")?;
+    let rows = stmt.query_map(params![mesh_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
 /// A pool row the startup reconcile must tear down: its `id` (to delete the
 /// SQLite row), its on-disk `path`, and whether that directory is still
 /// `dir_present` (so the caller knows whether a Git worktree teardown is even
@@ -2472,8 +2494,13 @@ pub(crate) fn list_warm_worktrees_to_reconcile_inner(
 /// successful spawn) the row sits at `claimed` forever — `claim_warm_entry`
 /// won't pick it up again (the `status='available'` filter blocks it) and
 /// the missing-dir scan won't prune it. This function closes that hole by
-/// pruning any `claimed` row older than the most-recent app launch's
-/// reconcile. Called once from `reconcile_on_startup`.
+/// pruning EVERY `claimed` row unconditionally — the only way to safely
+/// remove a row whose directory may already belong to a live agent node is
+/// to drop the bookkeeping row without touching the filesystem (the dir is
+/// already adopted as the agent's worktree). No age guard: a fresh `claimed`
+/// row is just as stuck as an old one if the `forget_after_spawn` delete
+/// fails. Called once from `reconcile_on_startup` (step 1a, before the
+/// missing-dir scan).
 pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
     let db = get().lock().unwrap();
     delete_orphaned_claimed_warm_worktrees_inner(&db)

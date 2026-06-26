@@ -1184,11 +1184,17 @@ pub async fn spawn_agent_inner(
         // they skip this manual-only upgrade (#612).
         if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
             timer.checkpoint("before_warm_branch_upgrade");
+            let project_root_owned = node.path.clone();
             let host_path_owned = resolved.host_path.clone();
             let branch_name_owned = wt_name.to_string();
             let mode_owned = worktree_mode.to_string();
             let upgrade_result = tokio::task::spawn_blocking(move || {
-                upgrade_warm_to_mode(&host_path_owned, &branch_name_owned, &mode_owned)
+                upgrade_warm_to_mode(
+                    &project_root_owned,
+                    &host_path_owned,
+                    &branch_name_owned,
+                    &mode_owned,
+                )
             })
             .await
             .unwrap_or_else(|e| Err(format!("warm branch upgrade panicked: {}", e)));
@@ -1768,20 +1774,38 @@ fn fetch_fork_head(
 /// `command_no_window` already applies CREATE_NO_WINDOW on Windows
 /// (`process_util::command_no_window`), so we don't need per-OS cfg
 /// duplication here.
-fn upgrade_warm_to_mode(host_path: &str, branch_name: &str, mode: &str) -> Result<(), String> {
+fn upgrade_warm_to_mode(
+    project_root: &str,
+    host_path: &str,
+    branch_name: &str,
+    mode: &str,
+) -> Result<(), String> {
     if mode == "detached" {
         // No-op: the pool already cut the entry as detached.
-        return Ok(());
+    } else {
+        // Branched mode: `git checkout -B <branch>` from the current HEAD. `-B`
+        // (uppercase) is deliberate here — a manual spawn's branch IS the pool's
+        // preassigned slug (a random adj-adj-noun like `bold-amber-fox`), so a
+        // collision with a pre-existing branch is vanishingly unlikely and `-B`
+        // keeps the call idempotent across a re-claim of a still-detached entry.
+        // (The Issue/PR path uses `-b` instead — see `checkout_worktree_to_base` —
+        // because its branch name is deterministic and `-B` would force-reset a
+        // user's prior work.)
+        run_git_checkout(host_path, &["-B", branch_name])?;
     }
-    // Branched mode: `git checkout -B <branch>` from the current HEAD. `-B`
-    // (uppercase) is deliberate here — a manual spawn's branch IS the pool's
-    // preassigned slug (a random adj-adj-noun like `bold-amber-fox`), so a
-    // collision with a pre-existing branch is vanishingly unlikely and `-B`
-    // keeps the call idempotent across a re-claim of a still-detached entry.
-    // (The Issue/PR path uses `-b` instead — see `checkout_worktree_to_base` —
-    // because its branch name is deterministic and `-B` would force-reset a
-    // user's prior work.)
-    run_git_checkout(host_path, &["-B", branch_name])
+    // Re-apply `.worktreeinclude` so the manual warm claim matches what
+    // `create_git_worktree` and `adopt_warm_worktree_by_move` already do
+    // (issue #639 gap 1). The prewarm-time copy is stale by the time a user
+    // manually spawns — typical edits to a `.worktreeinclude` source (`.env`,
+    // build cache, `node_modules/`) would otherwise leave the agent on the
+    // prewarm snapshot. Best-effort like the other call sites: a copy
+    // failure here is logged inside `apply_worktree_include` but doesn't fail
+    // the spawn — the worktree is already usable without the extras.
+    crate::git::worktree::apply_worktree_include(
+        project_root,
+        std::path::Path::new(host_path),
+    );
+    Ok(())
 }
 
 /// Adopt a claimed warm-pool worktree for an Issue/PR spawn (issue #612): move
@@ -1913,6 +1937,169 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    // -----------------------------------------------------------------------
+    // Warm-pool manual claim — .worktreeinclude re-application (issue #639
+    // gap 1). The cold `create_git_worktree` and the Issue/PR `adopt…by_move`
+    // both call `apply_worktree_include` so an adopted worktree is byte-for-
+    // byte equivalent to a cold spawn. The manual warm-claim fast path
+    // (upgrade_warm_to_mode) MUST do the same — otherwise a user who edits a
+    // `.worktreeinclude`-referenced file (typical: `.env`, build cache) between
+    // prewarm time and spawn time lands on a stale copy.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn upgrade_warm_to_mode_reapplies_worktreeinclude_after_checkout() {
+        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
+        use std::fs;
+        let td = TempDir::new().unwrap();
+        let root = td.path();
+
+        // Set up `.worktreeinclude` + a tracked source file at its original
+        // content. The pool will copy v1 into the prewarm-time worktree.
+        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
+        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
+        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
+        // Commit the manifest so `.worktreeinclude` is reachable for `git
+        // worktree add`; the pool helper copies files relative to the repo
+        // root regardless of whether the manifest itself is tracked, but
+        // committing keeps the test setup close to a realistic repo.
+        let repo = git2::Repository::open(root).unwrap();
+        commit_file(
+            &repo,
+            root,
+            ".worktreeinclude",
+            "secrets.env\n",
+        );
+
+        // Cut a detached warm worktree (matches the pool's on-disk shape).
+        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
+        crate::git::worktree::create_git_worktree(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+        // Prewarm-time copy: `secrets.env` in the worktree must hold v1.
+        assert_eq!(
+            fs::read_to_string(pool.join("secrets.env")).unwrap(),
+            "v1=old\n",
+            "prewarm-time copy must reflect the original source"
+        );
+
+        // User edits the source file BETWEEN prewarm and manual spawn —
+        // exactly the window the missing apply_worktree_include used to leak.
+        fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
+
+        // The manual warm claim's mode upgrade — must re-copy `.worktreeinclude`
+        // sources so the agent's worktree matches the live repo state, not the
+        // stale prewarm snapshot.
+        upgrade_warm_to_mode(root.to_str().unwrap(), pool.to_str().unwrap(), "bold-amber-fox", "branched")
+            .expect("upgrade_warm_to_mode must succeed");
+
+        // The worktree's `.worktreeinclude`-referenced file must now reflect
+        // the live repo content (NEW), not the prewarm-time snapshot (old).
+        assert_eq!(
+            fs::read_to_string(pool.join("secrets.env")).unwrap(),
+            "v1=NEW\n",
+            "manual warm claim must re-apply .worktreeinclude so the agent sees the live source"
+        );
+    }
+
+    /// No `.worktreeinclude` at the repo root → the upgrade is still a no-op
+    /// rather than an error. Prevents a regression where adding the include
+    /// re-application broke a repo that never used the feature.
+    #[test]
+    fn upgrade_warm_to_mode_is_noop_when_no_worktreeinclude() {
+        use crate::env::test_helpers::init_repo_with_commit;
+        use std::fs;
+        let td = TempDir::new().unwrap();
+        let root = td.path();
+        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
+
+        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
+        crate::git::worktree::create_git_worktree(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+
+        upgrade_warm_to_mode(root.to_str().unwrap(), pool.to_str().unwrap(), "bold-amber-fox", "branched")
+            .expect("must succeed when no .worktreeinclude exists");
+        // No spurious `.worktreeinclude` was created in the worktree.
+        assert!(
+            !pool.join(".worktreeinclude").exists(),
+            "absent manifest must not be materialised by the upgrade"
+        );
+        // The tracked file round-trips.
+        assert_eq!(fs::read_to_string(pool.join("f.txt")).unwrap(), "tracked\n");
+    }
+
+    /// Detached mode must also re-apply `.worktreeinclude` (issue #639 gap 1,
+    /// review finding). The original `upgrade_warm_to_mode` returned early on
+    /// `mode == "detached"` and skipped the include copy — a regression that
+    /// re-instated that early-return would pass `…_reapplies…_after_checkout`
+    /// (branched) but leave a detached-mode spawn on the stale prewarm
+    /// snapshot, defeating the gap-1 fix for half the meshes.
+    #[test]
+    fn upgrade_warm_to_mode_reapplies_worktreeinclude_in_detached_mode() {
+        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
+        use std::fs;
+        let td = TempDir::new().unwrap();
+        let root = td.path();
+
+        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
+        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
+        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
+        let repo = git2::Repository::open(root).unwrap();
+        commit_file(&repo, root, ".worktreeinclude", "secrets.env\n");
+
+        // Pool entry: detached (matches the on-disk shape the pool cuts).
+        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
+        crate::git::worktree::create_git_worktree(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+            "HEAD",
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(pool.join("secrets.env")).unwrap(),
+            "v1=old\n",
+            "prewarm-time copy must reflect the original source"
+        );
+
+        // User edits the source — same window as the branched-mode test.
+        fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
+
+        // Upgrade in DETACHED mode. The branch name is unused (no checkout),
+        // but we pass the preassigned slug for consistency with the call site.
+        upgrade_warm_to_mode(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+        )
+        .expect("upgrade_warm_to_mode must succeed in detached mode");
+
+        assert_eq!(
+            fs::read_to_string(pool.join("secrets.env")).unwrap(),
+            "v1=NEW\n",
+            "manual warm claim in detached mode must also re-apply .worktreeinclude"
+        );
+        // And the worktree stayed detached — no branch was created.
+        let wt = git2::Repository::open(&pool).unwrap();
+        assert!(
+            wt.head_detached().unwrap_or(false),
+            "detached mode must leave the worktree detached"
+        );
     }
 
     // -----------------------------------------------------------------------

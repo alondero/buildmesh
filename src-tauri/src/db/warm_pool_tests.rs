@@ -26,10 +26,12 @@
 mod tests {
     use crate::db::{
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
-        count_droppable_warm_entries_for_mesh_inner, delete_warm_worktrees_for_mesh_inner,
+        count_droppable_warm_entries_for_mesh_inner,
+        delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktrees_for_mesh_inner,
         ensure_mesh_pre_spawn_pool_size, ensure_warm_worktables_table,
         insert_warm_worktree_inner, is_warm_pool_path_inner,
         list_oldest_warm_entries_for_mesh_inner,
+        list_warm_paths_for_mesh_inner,
         list_warm_worktrees_to_reconcile_inner,
         list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
         WarmWorktreeStatus,
@@ -384,6 +386,114 @@ mod tests {
         );
     }
 
+    /// `delete_orphaned_claimed_warm_worktrees_inner` (issue #639 gap 4) is
+    /// the orphan-row GC: it deletes EVERY `claimed` row, regardless of age,
+    /// because the directory may be backing a live agent node's worktree so
+    /// the only safe thing to do is drop the bookkeeping row. Called from
+    /// `services::warm_pool::reconcile_on_startup` (step 1a). A claim that
+    /// succeeds but whose post-spawn `forget_after_spawn` delete fails leaves
+    /// the row at `claimed` forever otherwise — the claim filter only matches
+    /// `available` and the missing-dir scan excludes `claimed`, so without
+    /// this GC the row leaks forever and `available` stays below target.
+    #[test]
+    fn delete_orphaned_claimed_prunes_every_claimed_row() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Three claimed rows + two available rows. GC must touch ONLY the
+        // claimed rows — the available rows are healthy pool inventory. Three
+        // claimed rows (not one) so a future refactor that GC's only the
+        // first matching row by index would surface as `deleted != 3`.
+        for (name, sha) in [("ca", Some("aa")), ("cb", Some("bb")), ("cc", None)] {
+            insert_warm_worktree_inner(
+                &conn,
+                1,
+                tmp.path().join(name).to_str().unwrap(),
+                name,
+                sha,
+                WarmWorktreeStatus::Claimed,
+            )
+            .unwrap();
+        }
+        for (name, sha) in [("aa", Some("aaa")), ("ab", Some("bbb"))] {
+            insert_warm_worktree_inner(
+                &conn,
+                1,
+                tmp.path().join(name).to_str().unwrap(),
+                name,
+                sha,
+                WarmWorktreeStatus::Available,
+            )
+            .unwrap();
+        }
+
+        let deleted = delete_orphaned_claimed_warm_worktrees_inner(&conn).unwrap();
+        assert_eq!(deleted, 3, "exactly the three claimed rows must be pruned");
+
+        // The claimed rows are gone.
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE status = 'claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "no claimed row may survive the GC");
+
+        // The available rows survive — this is pool inventory the spawn path
+        // needs intact.
+        let available_remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE status = 'available'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(available_remaining, 2, "every available row must survive the GC");
+    }
+
+    /// A `claimed` row pointing at a directory that's still on disk is GC'd
+    /// row-only — the directory belongs to a live agent node by definition,
+    /// so the GC must NOT touch the filesystem. The pin lives in the doc
+    /// comment; this test is the behaviour-level guard so a future refactor
+    /// that confused "drop the row" with "drop the worktree" surfaces as a
+    /// test failure rather than a lost agent's worktree.
+    #[test]
+    fn delete_orphaned_claimed_does_not_touch_directories() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("claimed-live");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("CLAIMED.md"), "live agent's work").unwrap();
+        let _id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            dir.to_str().unwrap(),
+            "claimed-live",
+            Some("dd"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        let n = delete_orphaned_claimed_warm_worktrees_inner(&conn).unwrap();
+        assert_eq!(n, 1);
+
+        // Row gone, directory INTACT — the live agent's work is preserved.
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE status = 'claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert!(
+            dir.join("CLAIMED.md").exists(),
+            "the GC must not touch a `claimed` row's on-disk directory (it may back a live agent)"
+        );
+    }
+
     /// `delete_warm_worktrees_for_mesh_inner` is the mesh-delete hook (wired
     /// into `delete_mesh`): when a mesh is deleted, every pool row pointing at
     /// its worktrees must go too — the FK cascade is off, so without this the
@@ -440,6 +550,111 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 1, "mesh-2 row must not be touched");
+    }
+
+    /// `list_warm_paths_for_mesh_inner` (issue #639 gap 3) returns every
+    /// pool row's `path` for the given mesh, regardless of status. The
+    /// `commands::mesh::delete_mesh` caller reads this list BEFORE the row
+    /// cascade so it can `git worktree remove --force` each directory — the
+    /// DB delete alone leaves on-disk directories orphaned forever.
+    ///
+    /// Exercises ALL four statuses (`Available`, `Filling`, `Refreshing`,
+    /// `Claimed`) so a future refactor that narrows the WHERE clause to a
+    /// subset (e.g. mirroring `count_droppable_warm_entries_for_mesh_inner`'s
+    /// `status != 'claimed'` filter) fails this test rather than silently
+    /// leaking `Refreshing` rows during a mesh delete.
+    #[test]
+    fn list_paths_returns_every_pool_row_path_for_mesh() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Mesh 1 owns one row per status — every status must come back.
+        let path_a = tmp.path().join("a").to_str().unwrap().to_string();
+        let path_b = tmp.path().join("b").to_str().unwrap().to_string();
+        let path_c = tmp.path().join("c").to_str().unwrap().to_string();
+        let path_d = tmp.path().join("d").to_str().unwrap().to_string();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &path_a,
+            "pool-warm-a",
+            Some("a"),
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &path_b,
+            "pool-warm-b",
+            None,
+            WarmWorktreeStatus::Filling,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &path_c,
+            "pool-warm-c",
+            None,
+            WarmWorktreeStatus::Refreshing,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &path_d,
+            "pool-warm-d",
+            Some("c"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+        // Mesh 2 (added manually) owns one row that must NOT appear.
+        conn.execute(
+            "INSERT INTO meshes (name, path) VALUES ('m2', '/repo/m2')",
+            [],
+        )
+        .unwrap();
+        let m2_id: i64 = conn.last_insert_rowid();
+        let path_m2 = tmp.path().join("m2").to_str().unwrap().to_string();
+        insert_warm_worktree_inner(
+            &conn,
+            m2_id,
+            &path_m2,
+            "pool-warm-m2",
+            Some("z"),
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+
+        let paths = list_warm_paths_for_mesh_inner(&conn, 1).unwrap();
+        let mut got = paths.clone();
+        got.sort();
+        let mut expected = vec![path_a, path_b, path_c, path_d];
+        expected.sort();
+        assert_eq!(
+            got, expected,
+            "every pool row path for mesh 1 must come back, regardless of status (Available + Filling + Refreshing + Claimed)"
+        );
+        // And mesh-2's row is NOT included.
+        assert!(
+            !paths.contains(&path_m2),
+            "a path belonging to a different mesh must not leak into the list"
+        );
+    }
+
+    /// A mesh with no pool rows returns an empty list (not an error) so the
+    /// caller can use the same code path for meshes that never warmed
+    /// anything.
+    #[test]
+    fn list_paths_returns_empty_when_mesh_has_no_pool_rows() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let paths = list_warm_paths_for_mesh_inner(&conn, 1).unwrap();
+        assert!(
+            paths.is_empty(),
+            "a mesh with zero pool rows must read as an empty list"
+        );
     }
 
     /// `list_worktree_enabled_meshes_for_warm` only returns meshes whose
