@@ -167,9 +167,14 @@ pub fn try_claim(mesh_id: i64) -> Result<Option<ClaimedWarmEntry>, String> {
 /// on as the node's worktree — the bookkeeping row's job is done.
 ///
 /// Safe to call from the spawn path's success branch: a failure here just
-/// leaves an orphan `claimed` row that the next startup reconcile prunes
-/// (its `path` exists, so the row stays; but `status = 'claimed'` is never
-/// claimed again, and we don't currently GC it — see issue #608 follow-up).
+/// leaves an orphan `claimed` row that the next startup reconcile GC's
+/// (issue #639 gap 4). `reconcile_on_startup` calls
+/// `db::delete_orphaned_claimed_warm_worktrees` as its first step — a
+/// `claimed` row is unreachable by the claim filter (`status='available'`
+/// is required) and exempt from the missing-dir scan (its directory may
+/// back a live agent), so the explicit claimed-row sweep is what keeps the
+/// pool inventory honest. See `db::delete_orphaned_claimed_warm_worktrees_inner`
+/// for the row-only contract.
 pub fn forget_after_spawn(id: i64) {
     if let Err(e) = db::delete_warm_worktree(id) {
         tracing::warn!(

@@ -69,10 +69,52 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
     db::list_meshes().map_err(|e| e.to_string())
 }
 
-/// Delete a mesh and its nodes
+/// Delete a mesh and its nodes, including the on-disk pool directories
+/// (issue #639 gap 3). Shared sync body used by both the Tauri command below
+/// and the HTTP test server's `handle_delete_mesh` shim — `delete_mesh_inner`
+/// owns the disk-drain sequencing so the two call sites can't drift.
+///
+/// Sequence:
+///   1. Snapshot the mesh's pool directory paths (read-only, lock released).
+///   2. Cascade-delete the rows via `db::delete_mesh` (which removes the
+///      `meshes` row + its `agent_nodes` + its `warm_worktrees` rows).
+///   3. `git worktree remove --force` each snapshot'd directory, best-effort.
+///
+/// The DB cascade is the source of truth for the user-visible state (a future
+/// `list_meshes` call won't return the deleted mesh), so the directory teardown
+/// runs AFTER it. A dir-remove failure is logged at WARN but never fails the
+/// delete — the row cascade has already happened.
+///
+/// **Known race (accepted for #639)**: between step 1 (snapshot) and step 2
+/// (cascade-delete), a concurrent background prewarm on the same mesh can
+/// `INSERT` a new `warm_worktrees` row whose path won't appear in the snapshot
+/// but WILL be deleted by the cascade. The dir-remove loop never sees that
+/// new path, so its directory is orphaned. The orphan is recoverable by the
+/// user (manual `rm -rf`) and self-heals on a slug collision: the next
+/// prewarm that lands on the same path will hit `create_git_worktree`'s
+/// `if host_path.exists() { return Ok(()) }` short-circuit and reuse the
+/// stale tree — which is incorrect for that mesh's pool, but only until the
+/// next `git reset --hard` lands (issue #613's refresh pass). Fixing this
+/// would require restructuring the FILL_LOCK to block user-initiated deletes,
+/// which is out of scope for the gap-3 hygiene fix.
+pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
+    let pool_paths = db::list_warm_paths_for_mesh(mesh_id).map_err(|e| e.to_string())?;
+    db::delete_mesh(mesh_id).map_err(|e| e.to_string())?;
+    for path in pool_paths {
+        if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {
+            tracing::warn!(
+                "delete_mesh: removed DB rows but failed to remove pool dir {}: {}",
+                path,
+                e
+            );
+        }
+    }
+    Ok(())
+}
+
 #[command]
 pub async fn delete_mesh(mesh_id: i64) -> Result<(), String> {
-    db::delete_mesh(mesh_id).map_err(|e| e.to_string())
+    delete_mesh_inner(mesh_id)
 }
 
 /// Update a mesh's layout preference

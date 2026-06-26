@@ -372,7 +372,7 @@ fn handle_inject_test_output(args: &serde_json::Value, app: AppHandle) -> String
 fn handle_delete_mesh(args: &serde_json::Value) -> String {
     let mesh_id = args.get("meshId").and_then(|v| v.as_i64()).unwrap_or(0);
 
-    match crate::db::delete_mesh(mesh_id) {
+    match crate::commands::mesh::delete_mesh_inner(mesh_id) {
         Ok(_) => JsonRpcResponse::success(&serde_json::json!({ "mesh_id": mesh_id })),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
     }
