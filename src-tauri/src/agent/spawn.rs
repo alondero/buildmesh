@@ -6,6 +6,7 @@
 
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
+use crate::agent::spawn_diag;
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
@@ -556,6 +557,16 @@ fn start_reader(
                 if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
                     let _ = db::update_cli_session_id(session_id, uuid);
                     session_captured.store(true, Ordering::Relaxed);
+                    // [DEBUG-concurrent-spawn] Reader-thread capture. The
+                    // `pty_output` source means we matched the regex from
+                    // the live PTY stream (vs. the orchestrator's
+                    // pre-assigned UUID in Assign mode). Two reads from
+                    // this stream while the orchestrator is still
+                    // in-flight would surface as two reader_event lines
+                    // with overlapping timestamps; a capture AFTER
+                    // `phase=exit` in the orchestrator's stream is the
+                    // "stale UUID on auto-resume" failure mode.
+                    crate::agent::spawn_diag::reader_event(session_id, "pty_output", uuid);
                     tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
                 }
             }
@@ -637,15 +648,30 @@ pub async fn spawn_agent_inner(
     );
 
     let timer = SpawnTimer::new(session_id);
+    // [DEBUG-concurrent-spawn] RAII counter — guards `IN_FLIGHT` across the
+    // entire function body (Ok/Err/?-returns all decrement via Drop). One
+    // log line on enter, one on exit, with a delta in between. The label
+    // discriminates manual vs Issue vs PR spawns so the dev log can group
+    // a single burst.
+    let diag_label: &'static str = match (&preloaded_node, resume.as_deref()) {
+        (_, Some(_)) => "resume",
+        (Some(n), _) if n.source_pr.is_some() => "pr-spawn",
+        (Some(n), _) if n.source_issue.is_some() => "issue-spawn",
+        _ => "manual-spawn",
+    };
+    let diag = spawn_diag::InFlightGuard::enter(session_id, diag_label);
 
     // 1. Check if already running
     if is_agent_already_running(&session_id) {
+        diag.checkpoint("already_running_short_circuit");
         return Ok(());
     }
+    diag.checkpoint("after_already_running_check");
 
     // 2. Kill any stale process for this session
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
     crate::commands::agent::kill_agent(session_id).await.ok();
+    diag.checkpoint("after_kill_stale");
 
     // 3. Get node and resolve paths (skip DB read if caller provided the node)
     let node = match preloaded_node {
@@ -658,6 +684,7 @@ pub async fn spawn_agent_inner(
     };
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
     timer.checkpoint("after_node_db_read");
+    diag.checkpoint("after_node_db_read");
 
     let adapter = provider.adapter();
 
@@ -672,6 +699,7 @@ pub async fn spawn_agent_inner(
                     let cli_uuid = uuid::Uuid::new_v4().to_string();
                     db::update_cli_session_id(session_id, &cli_uuid).map_err(|e| e.to_string())?;
                     tracing::info!("spawn_agent_inner: assigned cli_session_id={}", cli_uuid);
+                    diag.db_write("cli_session_id", &cli_uuid);
                     SessionIdMode::Assign(cli_uuid)
                 }
             }
@@ -699,6 +727,7 @@ pub async fn spawn_agent_inner(
     );
 
     timer.checkpoint("after_mesh_row_read");
+    diag.checkpoint("after_mesh_row_read");
 
     // 6. Compute spawn path. The warm-pool tracer bullet (issue #609) lets
     //    manual spawns ADOPT a pre-warmed detached worktree as their own
@@ -737,15 +766,18 @@ pub async fn spawn_agent_inner(
                         entry.preassigned_name,
                         entry.base_sha.as_deref().unwrap_or("none"),
                     );
+                    spawn_diag::warm_claim_event(mesh_id, session_id, &format!("ok:id={}:path={}", entry.id, entry.path));
                     warm_claimed = Some(entry);
                 }
                 Ok(None) => {
+                    spawn_diag::warm_claim_event(mesh_id, session_id, "none:pool_empty_or_already_claimed");
                     tracing::info!(
                         "spawn_agent_inner: warm pool empty for mesh {}; cold spawn",
                         mesh_id
                     );
                 }
                 Err(e) => {
+                    spawn_diag::warm_claim_event(mesh_id, session_id, &format!("err:{}", e));
                     tracing::warn!(
                         "spawn_agent_inner: warm pool claim failed (non-fatal, falling back to cold): {}",
                         e
@@ -825,6 +857,7 @@ pub async fn spawn_agent_inner(
             let root = node.path.clone();
             let base_ref_owned = base_ref.to_string();
             timer.checkpoint("before_fetch_origin");
+            diag.git_event("fetch_origin", "start");
             let sync_result = tokio::task::spawn_blocking(move || {
                 crate::git::sync::fetch_origin(&root, &base_ref_owned)
             })
@@ -839,6 +872,15 @@ pub async fn spawn_agent_inner(
                     e
                 )))
             });
+            let fetch_outcome: &'static str = match &sync_result {
+                Ok(crate::git::sync::FetchOutcome::Synced { .. }) => "ok:synced",
+                Ok(crate::git::sync::FetchOutcome::UpToDate) => "ok:up_to_date",
+                Ok(crate::git::sync::FetchOutcome::SkippedDirty) => "skip:dirty",
+                Ok(crate::git::sync::FetchOutcome::SkippedNoRemote) => "skip:no_remote",
+                Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. }) => "ok:diverged",
+                Err(_) => "err",
+            };
+            diag.git_event("fetch_origin", fetch_outcome);
             timer.checkpoint("after_fetch_origin");
             // Ref-freshness (issue #613 AC3): if the fetch actually pulled new
             // commits, the mesh's base ref has moved, so any OTHER warm pool
@@ -1146,6 +1188,7 @@ pub async fn spawn_agent_inner(
                     worktree_base_ref,
                 );
                 timer.checkpoint("before_worktree_create");
+                diag.git_event("worktree_add", "start");
                 let created = tokio::task::spawn_blocking(move || {
                     crate::git::worktree::create_git_worktree(
                         &create_args.0,
@@ -1157,6 +1200,11 @@ pub async fn spawn_agent_inner(
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("worktree creation task panicked: {}", e)));
+                let wt_outcome: String = match &created {
+                    Ok(()) => "ok".to_string(),
+                    Err(e) => format!("err:{}", e),
+                };
+                diag.git_event("worktree_add", &wt_outcome);
                 timer.checkpoint("after_worktree_create");
                 if let Err(e) = created {
                     let msg = format!("Failed to create git worktree: {}", e);
@@ -1320,10 +1368,14 @@ pub async fn spawn_agent_inner(
                 session_id,
                 e
             );
+        } else {
+            diag.db_write("worktree_name", &entry.preassigned_name);
         }
     }
+    diag.checkpoint("before_register_agent");
     register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start());
     tracing::info!("spawn_agent_inner: stored agent process");
+    diag.checkpoint("after_register_agent");
 
     // 13. Start reader thread
     let spawned_at = std::time::Instant::now();
@@ -1368,6 +1420,7 @@ pub async fn spawn_agent_inner(
     }
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
+    diag.db_write("status", "Running");
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
 
     // Warm-pool post-claim housekeeping (issue #609). After the spawn
