@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -430,6 +430,96 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // The Probe's "No project selected" empty state, not the form.
     expect(screen.getByText('No project selected')).toBeTruthy();
     expect(screen.queryByLabelText('Name')).toBeNull();
+  });
+});
+
+// Regression: "Directory" displays the *mesh* root, not the focused node's
+// worktree path. The tab is editing MESH-level config (Name, Build, Run,
+// etc.) — surfacing a worktree subdir under the "Directory" label silently
+// misleads the user, AND keeps the previous mesh's path displayed after a
+// sidebar switch when the focused node still belongs to the old mesh
+// (`activeNodeId` is not cleared by `selectMesh`). `useProbeContext` already
+// exposes `activeMeshPath` for this case (the hook itself documents the
+// distinction); the Directory input binds to the wrong field.
+describe('MeshPropertiesTab — Directory field shows the mesh root (not the focused worktree)', () => {
+  // Two meshes with distinct paths so a "wrong path" assertion is sharp.
+  const MESH_A: Mesh = { ...MESH, id: 1, name: 'alpha', path: '/repos/alpha' };
+  const MESH_B: Mesh = { ...MESH, id: 2, name: 'beta',  path: '/repos/beta' };
+
+  // A focused agent node in Mesh A — its `path` is the worktree subdir,
+  // distinct from the mesh root. This is the trigger condition for the
+  // bug: when this node is focused, `useProbeContext().activePath`
+  // resolves to the node's path (the worktree), not the mesh root.
+  const FOCUSED_NODE = {
+    id: 100,
+    mesh_id: 1,                    // belongs to Mesh A
+    name: 'agent-x',
+    path: '/repos/alpha/.claude/worktrees/agent-x',
+    branch: 'main',
+    env: 'windows',
+    provider: 'anthropic',
+    status: 'idle',
+    use_worktree: true,
+    position: 0,
+    created_at: '2026-01-01',
+  };
+
+  function setupTwoMeshesWithFocusedNode() {
+    useMeshStore.setState({
+      meshes: [MESH_A, MESH_B],
+      meshesById: new Map<number, Mesh>([
+        [MESH_A.id, MESH_A],
+        [MESH_B.id, MESH_B],
+      ]),
+      selectedMeshId: MESH_A.id,
+    });
+    useAgentNodeStore.setState({
+      agentNodes: [FOCUSED_NODE],
+      activeNodeId: FOCUSED_NODE.id,
+    });
+    useUIStore.setState({ probeOpen: true, probeTab: 'properties' });
+  }
+
+  it('shows the mesh root when an agent node is focused', async () => {
+    setupTwoMeshesWithFocusedNode();
+    render(<ProbePanel />);
+
+    const dir = (await screen.findByLabelText('Directory')) as HTMLInputElement;
+    // Must show the mesh root — NOT the focused worktree subdir. The
+    // worktree path slips into `activePath` only because `useProbeContext`
+    // routes "where am I working" through the focused node's path; the
+    // Directory field on Mesh Properties is a mesh-level property and
+    // should always read from the mesh row.
+    expect(dir.value).toBe('/repos/alpha');
+    expect(dir.value).not.toContain('.claude/worktrees');
+  });
+
+  it('updates the Directory field when switching to a different mesh, even with a focused node still pointing at the old mesh', async () => {
+    // This is the exact user-reported symptom: "the directory that is
+    // shown on the mesh properties probe sometimes doesn't update when
+    // switching meshes." The "sometimes" is the focused-node case —
+    // without a focused node, `activePath` already falls back to the
+    // mesh root, so the bug is invisible. With a focused node still
+    // pointing at Mesh A's worktree, switching the sidebar to Mesh B
+    // leaves `activeNodeId` set (selectMesh only updates selectedMeshId),
+    // so `activePath` keeps resolving to Mesh A's worktree.
+    setupTwoMeshesWithFocusedNode();
+    render(<ProbePanel />);
+
+    // Sanity: directory starts on Mesh A's path.
+    const dir = (await screen.findByLabelText('Directory')) as HTMLInputElement;
+    expect(dir.value).toBe('/repos/alpha');
+
+    // Switch the sidebar selection to Mesh B. This is exactly what
+    // `Sidebar.handleSelectMesh` does on click — `selectMesh(meshId)`.
+    act(() => {
+      useMeshStore.getState().selectMesh(MESH_B.id);
+    });
+
+    await waitFor(() => {
+      const updated = screen.getByLabelText('Directory') as HTMLInputElement;
+      expect(updated.value).toBe('/repos/beta');
+    });
   });
 });
 
