@@ -17,6 +17,12 @@ export const useWorktreeClosePromptStore = create<WorktreeClosePromptState>((set
   pending: null,
 
   request: (nodeName, safety) => new Promise<WorktreeCloseAction>((resolve) => {
+    // A back-to-back close (× on A, then × on B before dismissing A's
+    // dialog) would otherwise orphan A's resolver — deleteAgentNode awaits
+    // a promise that never settles, leaving the row stuck dimmed
+    // (issue #644). Settle any prior pending as 'cancel': that's the same
+    // path deleteAgentNode takes on manual dismiss.
+    get().choose('cancel');
     set({ pending: { nodeName, safety, resolve } });
   }),
 
