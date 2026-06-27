@@ -8,7 +8,7 @@
 //! was a path-collision error in the dev profile log:
 //!
 //! ```text
-//! failed to resolve path 'X:\\src\\buildmesh/.claude/worktrees/<slug>':
+//! failed to resolve path 'X:\src\buildmesh/.claude/worktrees/<slug>':
 //! The system cannot find the file specified.
 //! ```
 //!

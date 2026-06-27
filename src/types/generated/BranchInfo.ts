@@ -18,4 +18,17 @@ is_merged_into_main: boolean | null, is_orphan: boolean,
  * backend guard in `commands::prune::delete_branches` refuses to
  * drop the branch — the user must close the node first.
  */
-is_active: boolean, has_uncommitted: boolean, last_commit_date: string | null, ahead: number, behind: number, };
+is_active: boolean, 
+/**
+ * `Some(worktree_path)` when this branch is the HEAD of *any* working
+ * tree on disk — main or linked worktree, agent-attached or orphan.
+ * Orthogonal to `is_active`: that field is about a live agent node;
+ * this one is about the on-disk git state. An orphan agent worktree
+ * (its node was deleted/archived but its directory survives) reads
+ * `is_active: false` here, so the user can no longer hit libgit2's
+ * "current HEAD of a linked repository" error from the prune UI.
+ * The UI uses this to disable the branch checkbox and direct the
+ * user to the worktree row above (whose delete already cascades to
+ * the branch via `remove_one_worktree_and_branch`).
+ */
+checked_out_in_worktree: string | null, has_uncommitted: boolean, last_commit_date: string | null, ahead: number, behind: number, };

@@ -329,6 +329,13 @@ fn format_commit_time(time: git2::Time) -> Option<String> {
 /// the pool check out of this function removes a latent test-isolation
 /// race that surfaced when new branch-active tests started exercising
 /// the worktree enumeration path.
+///
+/// Three passes, in dependency order:
+/// 1. Cheap local-branch name list — feeds worktree `is_stale`.
+/// 2. Worktrees (main + linked) + a `branch → worktree_path` map so the
+///    branch pass below can stamp `checked_out_in_worktree` on every
+///    branch that is HEAD of some working tree (live or orphan).
+/// 3. Full `BranchInfo` list with worktree annotation.
 fn collect_prune_info(
     repo_path: &str,
     active_paths: &[String],
@@ -340,20 +347,85 @@ fn collect_prune_info(
     let main_oid = main_branch_oid(&repo);
     let head_dirty = primitives::is_dirty(&repo).unwrap_or(false);
 
-    // ── Local branches ──────────────────────────────────────────────────
-    let mut local_branches: Vec<BranchInfo> = Vec::new();
+    // ── Pass 1: cheap local-branch name list ────────────────────────────
     let mut local_names: Vec<String> = Vec::new();
-
-    let branches = repo
+    for entry in repo
         .branches(Some(BranchType::Local))
-        .map_err(|e| e.to_string())?;
-    for entry in branches {
+        .map_err(|e| e.to_string())?
+    {
+        let (branch, _) = entry.map_err(|e| e.to_string())?;
+        if let Ok(Some(name)) = branch.name() {
+            local_names.push(name.to_string());
+        }
+    }
+
+    // ── Pass 2: worktrees (main + linked) + branch → worktree-path map ──
+    //
+    // The map captures every branch checked out as the HEAD of some
+    // working tree, regardless of whether an agent node still points at
+    // it. A branch's value here drives `BranchInfo.checked_out_in_worktree`
+    // below, which is what stops the libgit2 "current HEAD of a linked
+    // repository" error in the prune UI: orphan agent worktrees
+    // (whose node was deleted/archived but whose directory survives)
+    // don't trip `is_active`, but they *do* appear in this map.
+    let mut worktrees: Vec<WorktreeInfo> = Vec::new();
+    let mut branch_to_wt_path: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+
+    if let Some(workdir) = repo.workdir() {
+        let path = workdir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+        let branch = primitives::head_branch_name(&repo);
+        if let Some(ref b) = branch {
+            branch_to_wt_path.insert(b.clone(), path.clone());
+        }
+        worktrees.push(WorktreeInfo {
+            is_active: path_is_active(&path, active_paths),
+            is_stale: branch_is_stale(&branch, &local_names),
+            // Primary (repo-root) worktree is never a pool entry — pool
+            // entries are always linked worktrees under
+            // `.claude/worktrees/<slug>`. The predicate comes from the
+            // caller (production: `db::is_warm_pool_path`; tests: `|_| false`)
+            // so this function stays DB-free.
+            is_pool: is_pool_path(&path),
+            branch,
+            path,
+        });
+    }
+
+    if let Ok(names) = repo.worktrees() {
+        for wt_name in names.iter().flatten() {
+            let wt = match repo.find_worktree(wt_name) {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
+            let path = wt.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+            let branch = Repository::open(wt.path())
+                .ok()
+                .and_then(|r| primitives::head_branch_name(&r));
+            if let Some(ref b) = branch {
+                branch_to_wt_path.insert(b.clone(), path.clone());
+            }
+            worktrees.push(WorktreeInfo {
+                is_active: path_is_active(&path, active_paths),
+                is_stale: branch_is_stale(&branch, &local_names),
+                is_pool: is_pool_path(&path),
+                branch,
+                path,
+            });
+        }
+    }
+
+    // ── Pass 3: local branches with worktree annotation ─────────────────
+    let mut local_branches: Vec<BranchInfo> = Vec::new();
+    for entry in repo
+        .branches(Some(BranchType::Local))
+        .map_err(|e| e.to_string())?
+    {
         let (branch, _) = entry.map_err(|e| e.to_string())?;
         let name = match branch.name().map_err(|e| e.to_string())? {
             Some(n) => n.to_string(),
             None => continue, // non-UTF8 branch name
         };
-        local_names.push(name.clone());
 
         let is_head = branch.is_head();
         let branch_oid = branch.get().peel_to_commit().ok().map(|c| c.id());
@@ -399,57 +471,24 @@ fn collect_prune_info(
         // (path matching) — same intent, different identity key.
         let is_active = active_branches.iter().any(|b| b == &name);
 
+        // Worktree HEAD annotation — independent of `is_active`. A branch
+        // can be HEAD of an orphan worktree (no live node) or of a live
+        // one (also `is_active: true`); the two flags overlap on the
+        // live case but each covers a separate scenario on its own.
+        let checked_out_in_worktree = branch_to_wt_path.get(&name).cloned();
+
         local_branches.push(BranchInfo {
             name,
             is_head,
             is_merged_into_main,
             is_orphan,
             is_active,
+            checked_out_in_worktree,
             has_uncommitted: is_head && head_dirty,
             last_commit_date,
             ahead,
             behind,
         });
-    }
-
-    // ── Worktrees (main + linked) ───────────────────────────────────────
-    let mut worktrees: Vec<WorktreeInfo> = Vec::new();
-
-    if let Some(workdir) = repo.workdir() {
-        let path = workdir.to_string_lossy().trim_end_matches(['/', '\\']).to_string();
-        let branch = primitives::head_branch_name(&repo);
-        worktrees.push(WorktreeInfo {
-            is_active: path_is_active(&path, active_paths),
-            is_stale: branch_is_stale(&branch, &local_names),
-            // Primary (repo-root) worktree is never a pool entry — pool
-            // entries are always linked worktrees under
-            // `.claude/worktrees/<slug>`. The predicate comes from the
-            // caller (production: `db::is_warm_pool_path`; tests: `|_| false`)
-            // so this function stays DB-free.
-            is_pool: is_pool_path(&path),
-            branch,
-            path,
-        });
-    }
-
-    if let Ok(names) = repo.worktrees() {
-        for wt_name in names.iter().flatten() {
-            let wt = match repo.find_worktree(wt_name) {
-                Ok(w) => w,
-                Err(_) => continue,
-            };
-            let path = wt.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
-            let branch = Repository::open(wt.path())
-                .ok()
-                .and_then(|r| primitives::head_branch_name(&r));
-            worktrees.push(WorktreeInfo {
-                is_active: path_is_active(&path, active_paths),
-                is_stale: branch_is_stale(&branch, &local_names),
-                is_pool: is_pool_path(&path),
-                branch,
-                path,
-            });
-        }
     }
 
     // ── Remote-tracking branches ────────────────────────────────────────
