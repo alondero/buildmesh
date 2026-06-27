@@ -59,7 +59,7 @@ const EFFORT_OPTIONS = [
 ];
 
 export function MeshPropertiesTab() {
-  const { activeMeshId, activePath } = useProbeContext();
+  const { activeMeshId, activeMeshPath } = useProbeContext();
   const mesh = useMeshStore((s) =>
     activeMeshId !== null ? s.meshesById.get(activeMeshId) : undefined
   );
@@ -140,20 +140,20 @@ sandbox: false,
   // MESH ROOT, not the focused node's working directory — a Worktree
   // Node's path is the worktree subdir (often missing Cargo.toml /
   // package.json if the worktree only carries the agent's edits), so
-  // running detection against `activePath` would silently miss the
-  // mesh's actual project type whenever a node is focused.
-  const meshRoot = mesh?.path ?? null;
+  // running detection against `activePath` (the focused-node path) would
+  // silently miss the mesh's actual project type whenever a node is
+  // focused.
   useAsyncEffect((signal) => {
-    if (activeMeshId === null || !meshRoot) return;
+    if (activeMeshId === null || !activeMeshPath) return;
     setDetected(null);
-    detectMeshProject(meshRoot)
+    detectMeshProject(activeMeshPath)
       .then((d) => {
         if (!signal.aborted) setDetected(d);
       })
       .catch(() => {
         if (!signal.aborted) setDetected(null);
       });
-  }, [activeMeshId, meshRoot]);
+  }, [activeMeshId, activeMeshPath]);
 
   // Load the mesh's saved config every time the active mesh changes.
   // Intentionally depends on `activeMeshId` only — re-firing on
@@ -164,12 +164,12 @@ sandbox: false,
   // name" fallback chain runs at mount only; the user can still rename
   // later via the Name field.
   useAsyncEffect((signal) => {
-    if (activeMeshId === null || !activePath) return;
+    if (activeMeshId === null || !activeMeshPath) return;
     setLoading(true);
     getMeshProperties(activeMeshId)
       .then((config) => {
         if (signal.aborted) return;
-        const folderName = activePath.split(/[/\\]/).pop() ?? '';
+        const folderName = activeMeshPath.split(/[/\\]/).pop() ?? '';
         const resolvedName = config.name || mesh?.name || folderName;
         setForm({
           name: resolvedName,
@@ -188,7 +188,7 @@ sandbox: config.sandbox,
     // Dep array intentionally excludes `mesh?.name` (see comment above).
     // `mesh` is captured at effect-run time, which is fine for the
     // fallback chain — the user can rename later via the form itself.
-  }, [activeMeshId, activePath]);
+  }, [activeMeshId, activeMeshPath]);
 
   // Keep `mountedRef` ONLY for the blur handlers' "save-after-unmount"
   // guard. The 3 IPC effects above use `useAsyncEffect`'s AbortSignal
@@ -278,7 +278,7 @@ sandbox: config.sandbox,
   // Without a focused mesh there is nothing to edit. The probe shell
   // already renders a friendlier "no project" empty state, so this is
   // belt-and-braces in case the tab is ever mounted standalone.
-  if (activeMeshId === null || !mesh || !activePath) return null;
+  if (activeMeshId === null || !mesh || !activeMeshPath) return null;
 
   return (
     <div className="p-4 space-y-4">
@@ -304,7 +304,7 @@ sandbox: config.sandbox,
             <input
               id="mesh-prop-dir"
               type="text"
-              value={activePath}
+              value={activeMeshPath}
               readOnly
               className="w-full bg-bg-surface border border-border-subtle rounded px-2 py-1.5 text-xs text-text-muted font-mono"
             />
@@ -315,7 +315,7 @@ sandbox: config.sandbox,
               about project configuration, not Git maintenance. */}
           <AiContextSection
             meshId={activeMeshId}
-            meshPath={activePath}
+            meshPath={activeMeshPath}
             isAuthenticated={isGhAuthenticated}
           />
 
