@@ -7,6 +7,7 @@ import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
+import { isMac } from '../../lib/platform';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
@@ -359,8 +360,14 @@ export function AgentNodeView() {
                   Add Mesh
                 </button>
                 <div className="mt-8 text-[11px] text-text-muted font-mono space-y-1">
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">Cmd+T</kbd> New agent node</p>
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">Cmd+1-9</kbd> Switch nodes</p>
+                  {/* Modifier prefix follows the platform convention used elsewhere
+                      (Terminal.tsx context menu, README): ⌘ on macOS, Ctrl on
+                      Windows/Linux. The arrow glyphs (←/→/↑/↓) read identically
+                      across platforms and match the key names bound by Tauri's
+                      global-shortcut plugin. */}
+                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘' : 'Ctrl'}+T</kbd> New agent node</p>
+                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘' : 'Ctrl'}+←/→/↑/↓</kbd> Traverse nodes</p>
+                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">Esc</kbd> Close dialogs / exit maximized view</p>
                 </div>
               </div>
             </div>

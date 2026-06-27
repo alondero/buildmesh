@@ -62,9 +62,9 @@ The Windows backend was pivoted off a per-node AppContainer ([ADR-0014](docs/adr
 
 ## Keyboard shortcuts
 
-- `Alt + 1–9` — switch to agent node N
-- `Alt + G` — toggle grid / single view
-- `Ctrl + Alt + D` — toggle debug overlay
+- `Ctrl + T` / `Cmd + T` — new agent node
+- `Ctrl + ←/→/↑/↓` / `Cmd + ←/→/↑/↓` — traverse the on-screen node grid (wrap within row; Up/Down no-op when there's only one row; from a maximized solo view, the first press restores the grid)
+- `Alt + G` — toggle grid / single view _(planned, tracked in [#668](https://github.com/alondero/buildmesh/issues/668))_
 
 ## Tech stack
 
