@@ -473,3 +473,103 @@ fn v19_custom_account_migration_is_idempotent() {
         "re-running the migration must not change the providers column"
     );
 }
+
+// ----- mesh-default composite-id safety net (issue follow-up to #575) -----
+//
+// The v19 first-class block rewrote `agent_nodes.provider` from
+// bare → composite but never touched `meshes.default_provider`. A
+// pre-#575 mesh whose default was set to `"minimax"` keeps the legacy
+// bare form after upgrade, which silently routes through
+// `resolve_provider_env` to the keyed MiniMax **account** — spawning
+// Claude CLI sessions against MiniMax's endpoint even when the user
+// never picked MiniMax-via-Claude.
+//
+// `ensure_mesh_default_provider_normalized` is the safety net that
+// closes this gap. The tests below pin its rewrite rules against a
+// v18-shape `meshes` schema.
+
+/// Helper: build a `meshes` table populated with the legacy bare
+/// forms the safety net should rewrite, plus rows it must NOT touch.
+fn mesh_default_setup_with_legacy_rows() -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "
+        CREATE TABLE meshes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            path TEXT NOT NULL UNIQUE,
+            layout TEXT NOT NULL DEFAULT 'grid',
+            position INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            default_provider TEXT
+        );
+        -- Legacy bare ids the safety net should rewrite.
+        INSERT INTO meshes (name, path, default_provider) VALUES ('m1', '/tmp/m1', 'minimax');
+        INSERT INTO meshes (name, path, default_provider) VALUES ('m2', '/tmp/m2', 'kimi');
+        -- Native harness id — left alone.
+        INSERT INTO meshes (name, path, default_provider) VALUES ('m3', '/tmp/m3', 'claude');
+        -- Already-migrated composite id — left alone.
+        INSERT INTO meshes (name, path, default_provider) VALUES ('m4', '/tmp/m4', 'claude:minimax');
+        -- No override — left alone.
+        INSERT INTO meshes (name, path) VALUES ('m5', '/tmp/m5');
+        ",
+    )
+    .unwrap();
+    conn
+}
+
+fn read_mesh_default_providers(conn: &rusqlite::Connection) -> Vec<(String, Option<String>)> {
+    let mut stmt = conn
+        .prepare("SELECT name, default_provider FROM meshes ORDER BY id ASC")
+        .unwrap();
+    stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+/// Safety net: bare `minimax` / `kimi` mesh defaults are rewritten to
+/// `claude:minimax` / `claude:kimi`. Native harness ids, already-
+/// composite ids, and NULL defaults are left untouched.
+#[test]
+fn ensure_mesh_default_provider_normalized_rewrites_bare_to_composite() {
+    let conn = mesh_default_setup_with_legacy_rows();
+
+    crate::db::ensure_mesh_default_provider_normalized(&conn).unwrap();
+
+    let got = read_mesh_default_providers(&conn);
+    assert_eq!(
+        got,
+        vec![
+            ("m1".into(), Some("claude:minimax".into())), // bare minimax rewritten
+            ("m2".into(), Some("claude:kimi".into())),    // bare kimi rewritten
+            ("m3".into(), Some("claude".into())),         // native — left alone
+            ("m4".into(), Some("claude:minimax".into())), // composite — left alone
+            ("m5".into(), None),                          // NULL — left alone
+        ],
+        "ensure_mesh_default_provider_normalized must rewrite bare first-class ids only"
+    );
+}
+
+/// Idempotency: re-running the safety net is a no-op on a healthy
+/// (already-normalized) DB. Mirrors the v19 first-class migration's
+/// `WHERE default_provider IN (...)` guard.
+#[test]
+fn ensure_mesh_default_provider_normalized_is_idempotent() {
+    let conn = mesh_default_setup_with_legacy_rows();
+    crate::db::ensure_mesh_default_provider_normalized(&conn).unwrap();
+    let after_first = read_mesh_default_providers(&conn);
+
+    crate::db::ensure_mesh_default_provider_normalized(&conn).unwrap();
+    let after_second = read_mesh_default_providers(&conn);
+
+    assert_eq!(
+        after_first, after_second,
+        "re-running the safety net must not change any default_provider"
+    );
+}

@@ -152,7 +152,12 @@ export const useMeshStore = create<MeshState>((set) => ({
       return await api.getDefaultProvider(meshId);
     } catch (e) {
       set({ error: String(e) });
-      return 'anthropic';
+      // Post-#538 the native Claude harness profile id is `'claude'`
+      // (the unified-claude-harness change renamed the bare `'anthropic'`
+      // provider id to the new harness-profile form). The backend's
+      // `get_default_provider` IPC returns the post-#538 form, so the
+      // fallback should mirror it for symmetry.
+      return 'claude';
     }
   },
 }));

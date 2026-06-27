@@ -36,6 +36,7 @@ import { groupByHarness } from '../../lib/groups';
 import {
   checkGhAuth,
   detectMeshProject,
+  getAppPreferences,
   getMeshProperties,
   listProviders,
   updateMeshColumn,
@@ -82,6 +83,14 @@ sandbox: false,
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
+  // App-wide default provider id (from preferences.json). Drives the
+  // `<Default> ({X})` label on the dropdown's first option so Adam can
+  // see at a glance whether `<Default>` would route through Claude Code
+  // or a proxied provider. Initial state mirrors the post-#538
+  // `resolve_default_provider` fallback (`"claude"`) so the first render
+  // doesn't flash a stale `"anthropic"` label before the async fetch
+  // resolves.
+  const [appWideDefault, setAppWideDefault] = useState<string>('claude');
   const [loading, setLoading] = useState(true);
   // `MeshHealth` does not surface `gh auth` status (it's about branch /
   // drift / dirty, not the GitHub CLI login state), but `<AiContextSection>`
@@ -117,6 +126,27 @@ sandbox: false,
 
   useEffect(() => { refreshProviders(); }, [refreshProviders]);
   useProviderListInvalidation(refreshProviders);
+
+  // Fetch the app-wide default provider id once. The label is purely
+  // informational (it tells Adam what `<Default>` would route to), so
+  // a single fetch on mount is enough — `setAppDefaultProvider` is a
+  // rare action that lives in Settings, and the user re-opens the
+  // tab to see its effect.
+  useEffect(() => {
+    getAppPreferences()
+      .then((prefs) => {
+        // Empty string is "no override" per the backend's
+        // `preferences::default_provider` filter — fall through to the
+        // post-#538 `claude` fallback so the label matches what
+        // `+`-click would actually spawn.
+        const value = prefs.default_provider?.trim();
+        setAppWideDefault(value && value.length > 0 ? value : 'claude');
+      })
+      .catch(() => {
+        // Swallow — the initial 'claude' default is a sensible fallback;
+        // the spawn path resolves it the same way.
+      });
+  }, []);
 
   // Lightweight `gh auth status` probe per active mesh. The result is
   // local to the section that needs it, so we don't need to share it via
@@ -370,7 +400,7 @@ sandbox: config.sandbox,
               }}
               className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
-              <option value="">&lt;Default&gt; (Anthropic)</option>
+              <option value="">&lt;Default&gt; ({appWideDefault})</option>
               {/* Issue #575 / ADR-0016 — group the Spawn Options by their
                   `group_key` (== `harness_id`) so the dropdown matches the
                   harness-grouped Spawn Menu shape on every other surface.

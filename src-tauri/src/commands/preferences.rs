@@ -14,7 +14,7 @@ pub async fn get_app_preferences() -> Result<AppPreferences, String> {
 
 /// Set the buildmesh-wide default provider. Pass `None` (or an empty string,
 /// which is normalised away) to clear the override and restore the hardcoded
-/// `anthropic` fallback.
+/// `claude` fallback (post-#538 unified harness id).
 #[command]
 pub async fn set_app_default_provider(provider: Option<String>) -> Result<(), String> {
     let mut prefs = preferences::load()?;

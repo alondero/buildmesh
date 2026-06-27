@@ -636,6 +636,54 @@ pub(crate) fn ensure_agent_node_provider_id_custom_accounts_migrated(
     migrate_agent_node_provider_id_custom_accounts(conn, accounts)
 }
 
+/// Safety net: re-apply the **mesh-default** Spawn Option composite-id
+/// rewrite. The v19 first-class block in
+/// [`migrate_agent_node_provider_id_to_composite`] only rewrites
+/// `agent_nodes.provider` — `meshes.default_provider` was missed, and a
+/// pre-#575 user still has bare `"minimax"` / `"kimi"` values in the
+/// per-mesh column after upgrade. Without this safety net, the bare
+/// form routes through `resolve_provider_env` to the keyed **account**
+/// instead of the post-#575 proxied pairing — the same trap the
+/// `preferences::ensure_default_provider_normalized` helper closes for
+/// the app-wide default.
+///
+/// Called from `lib.rs::setup` immediately after `preferences::init`.
+/// **Idempotent**: the `WHERE default_provider IN (...)` whitelist
+/// skips already-composite rows, so re-running on a healthy v19+ DB is
+/// a no-op.
+pub(crate) fn ensure_mesh_default_provider_normalized(conn: &Connection) -> SqlResult<()> {
+    // Table-exists guard mirrors `ensure_agent_node_provider_id_migrated`:
+    // a fresh DB creates the table above, so this is a no-op there.
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meshes'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(());
+    }
+    let rows_minimax = conn.execute(
+        "UPDATE meshes SET default_provider = 'claude:minimax'
+         WHERE default_provider = 'minimax'",
+        [],
+    )?;
+    let rows_kimi = conn.execute(
+        "UPDATE meshes SET default_provider = 'claude:kimi'
+         WHERE default_provider = 'kimi'",
+        [],
+    )?;
+    if rows_minimax > 0 || rows_kimi > 0 {
+        tracing::info!(
+            "ensure_mesh_default_provider_normalized: rewrote {} minimax + {} kimi mesh defaults to composite form",
+            rows_minimax,
+            rows_kimi
+        );
+    }
+    Ok(())
+}
+
 fn migrate_projects_layout(conn: &Connection) -> SqlResult<()> {
     let has_layout: bool = conn
         .query_row(

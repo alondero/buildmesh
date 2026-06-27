@@ -368,6 +368,52 @@ pub fn default_provider() -> Option<String> {
     }
 }
 
+/// One-shot normalization of legacy bare `default_provider` values to
+/// the post-#575 composite form (`minimax` → `claude:minimax`,
+/// `kimi` → `claude:kimi`).
+///
+/// The v19 Spawn Option composite-id migration rewrote
+/// `agent_nodes.provider` but never touched `preferences.json::default_provider`
+/// (issue #575 / ADR-0016 §6). A user whose app-wide default was set
+/// before #575 lands keeps the legacy bare form in their preferences.json
+/// — and the bare form routes through `resolve_provider_env` to the keyed
+/// **account** instead of the post-#575 proxied pairing, which silently
+/// spawns Claude-CLI sessions against the wrong endpoint.
+///
+/// Called from `lib.rs::setup` immediately after `preferences::init`,
+/// so this can `load()` against the real on-disk file. Idempotent —
+/// already-composite values, native harness ids, and `None` are left
+/// alone. On a no-op (the common case after the first launch) this is a
+/// single cached read plus an equality check.
+pub(crate) fn ensure_default_provider_normalized() -> Result<(), String> {
+    let mut prefs = load()?;
+    let normalized = prefs
+        .default_provider
+        .as_deref()
+        .and_then(normalize_legacy_default_provider);
+    if let Some(new_value) = normalized {
+        tracing::info!(
+            "default_provider normalized: {} → {}",
+            prefs.default_provider.as_deref().unwrap_or(""),
+            new_value
+        );
+        prefs.default_provider = Some(new_value.to_string());
+        save(prefs)?;
+    }
+    Ok(())
+}
+
+/// Pure translation table for [`ensure_default_provider_normalized`].
+/// Kept separate so it's the single seam to extend if a future legacy
+/// bare id lands (every addition is one match arm + one unit test).
+fn normalize_legacy_default_provider(bare: &str) -> Option<&'static str> {
+    match bare {
+        "minimax" => Some("claude:minimax"),
+        "kimi" => Some("claude:kimi"),
+        _ => None,
+    }
+}
+
 /// The code-defined harness profiles that always exist regardless of what
 /// `preferences.json` stores. Terminal is the first (and, this slice, only)
 /// one — a plain-shell harness that injects no provider env, which is why
@@ -1261,7 +1307,7 @@ fn openai_surface_env(
 ///   1. `explicit` (e.g. caller-passed argument)
 ///   2. `per_mesh` (DB column on `meshes.default_provider`)
 ///   3. `app_wide` (buildmesh-wide preference)
-///   4. `"anthropic"` hardcoded fallback
+///   4. `"claude"` hardcoded fallback (post-#538 unified harness id;
 ///
 /// Empty strings are treated as absent at every layer so a blank entry in
 /// the DB does not block lower layers from being consulted.
@@ -1276,7 +1322,7 @@ pub fn resolve_default_provider(
     non_empty(explicit)
         .or_else(|| non_empty(per_mesh))
         .or_else(|| non_empty(app_wide))
-        .unwrap_or_else(|| "anthropic".to_string())
+        .unwrap_or_else(|| "claude".to_string())
 }
 
 #[cfg(test)]
@@ -1363,9 +1409,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_precedence_falls_through_to_anthropic() {
+    fn resolve_precedence_falls_through_to_claude() {
         let got = resolve_default_provider(None, None, None);
-        assert_eq!(got, "anthropic");
+        // Post-#538 the unified Claude harness id is "claude", not the
+        // legacy provider id "anthropic". A fresh install with no stored
+        // preferences must resolve to a real harness id, not a dead one.
+        assert_eq!(got, "claude");
     }
 
     #[test]
@@ -1378,13 +1427,13 @@ mod tests {
         );
         assert_eq!(got, "minimax");
 
-        // All-empty everywhere collapses to the anthropic fallback.
+        // All-empty everywhere collapses to the claude fallback.
         let got = resolve_default_provider(
             Some(String::new()),
             Some(String::new()),
             Some(String::new()),
         );
-        assert_eq!(got, "anthropic");
+        assert_eq!(got, "claude");
     }
 
     #[test]
@@ -1394,6 +1443,133 @@ mod tests {
             *CACHE.lock().unwrap() = None;
             let prefs = load().unwrap();
             assert_eq!(prefs, AppPreferences::default());
+        });
+    }
+
+    /// Issue: v19 Spawn Option composite-id migration rewrote
+    /// `agent_nodes.provider` from bare → composite (e.g. `minimax` →
+    /// `claude:minimax`), but never touched `preferences.json::default_provider`.
+    /// A user whose app-wide default was set before #575 lands kept the
+    /// legacy bare form in their preferences.json. Without normalization,
+    /// `resolve_default_provider` returns that bare form, and
+    /// `resolve_provider_env("minimax")` happily maps it to the keyed
+    /// MiniMax account — spawning a Claude CLI session against MiniMax's
+    /// endpoint even though the user never picked MiniMax-via-Claude.
+    ///
+    /// Regression guard: a bare `"minimax"` value gets rewritten to
+    /// `"claude:minimax"` on the first run after upgrade. Idempotent —
+    /// a second call is a no-op.
+    #[test]
+    fn ensure_default_provider_normalized_rewrites_legacy_bare_to_composite() {
+        with_temp_dir(|_| {
+            // Seed preferences.json with the legacy bare form, mirroring
+            // the on-disk state Adam's machine has today.
+            save(AppPreferences {
+                default_provider: Some("minimax".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            ensure_default_provider_normalized().unwrap();
+
+            *CACHE.lock().unwrap() = None;
+            let loaded = load().unwrap();
+            assert_eq!(
+                loaded.default_provider,
+                Some("claude:minimax".to_string()),
+                "bare 'minimax' should be normalized to 'claude:minimax'"
+            );
+        });
+    }
+
+    #[test]
+    fn ensure_default_provider_normalized_rewrites_legacy_kimi_to_composite() {
+        with_temp_dir(|_| {
+            save(AppPreferences {
+                default_provider: Some("kimi".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            ensure_default_provider_normalized().unwrap();
+
+            *CACHE.lock().unwrap() = None;
+            let loaded = load().unwrap();
+            assert_eq!(
+                loaded.default_provider,
+                Some("claude:kimi".to_string()),
+                "bare 'kimi' should be normalized to 'claude:kimi'"
+            );
+        });
+    }
+
+    #[test]
+    fn ensure_default_provider_normalized_leaves_already_composite_unchanged() {
+        with_temp_dir(|_| {
+            // Already-migrated value — the safety net must not rewrite it.
+            save(AppPreferences {
+                default_provider: Some("claude:minimax".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            ensure_default_provider_normalized().unwrap();
+
+            *CACHE.lock().unwrap() = None;
+            let loaded = load().unwrap();
+            assert_eq!(
+                loaded.default_provider,
+                Some("claude:minimax".to_string()),
+                "already-composite values must not be rewritten"
+            );
+        });
+    }
+
+    #[test]
+    fn ensure_default_provider_normalized_leaves_native_harness_unchanged() {
+        with_temp_dir(|_| {
+            // Native Claude harness id — not a proxied-provider bare id.
+            save(AppPreferences {
+                default_provider: Some("claude".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            ensure_default_provider_normalized().unwrap();
+
+            *CACHE.lock().unwrap() = None;
+            let loaded = load().unwrap();
+            assert_eq!(
+                loaded.default_provider,
+                Some("claude".to_string()),
+                "native harness id 'claude' must not be rewritten"
+            );
+        });
+    }
+
+    #[test]
+    fn ensure_default_provider_normalized_leaves_none_unchanged() {
+        with_temp_dir(|_| {
+            // No app-wide override — the normalizer must be a no-op.
+            save(AppPreferences {
+                default_provider: None,
+                ..Default::default()
+            })
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            ensure_default_provider_normalized().unwrap();
+
+            *CACHE.lock().unwrap() = None;
+            let loaded = load().unwrap();
+            assert_eq!(
+                loaded.default_provider, None,
+                "None must not be rewritten"
+            );
         });
     }
 
