@@ -6,6 +6,13 @@
 //! *path* of a worktree (the `.claude/worktrees/<name>` layout and WSL/host
 //! conversion) still belongs to `env`; this module takes an already-resolved
 //! host path and makes / inspects / removes the git worktree there.
+//!
+//! The `provision` submodule owns the warm-pool-side worktree helpers (PR-head
+//! fetch + fork-remote registration + the warm-claim adoption / upgrade /
+//! shared-checkout functions) that used to live in `agent::spawn`. Keeping
+//! them here completes ADR 0007's consolidation.
+
+pub mod provision;
 
 use git2::{Oid, Reference, Repository};
 use serde::Serialize;
