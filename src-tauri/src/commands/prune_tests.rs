@@ -16,6 +16,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Pool-path predicate used by every prune-enumeration test in this file.
+/// Production callers wrap `db::is_warm_pool_path`; tests pass `|_| false`
+/// so the pure enumeration stays DB-free and avoids the `database not
+/// initialized` panic that hits any test touching `collect_prune_info`
+/// before the global DB has been set up.
+fn no_pool_paths(_path: &str) -> bool {
+    false
+}
+
 /// Unique temp directory with RAII cleanup on drop.
 struct TempDir(std::path::PathBuf);
 
@@ -90,6 +99,57 @@ fn find_branch<'a>(info: &'a GitRepoPruneInfo, name: &str) -> &'a BranchInfo {
         .unwrap_or_else(|| panic!("branch {} not enumerated", name))
 }
 
+// ── env::active_node_branches contract (review follow-ups) ────────────────
+
+/// `active_node_branches` filters out `Archived` nodes — the contract
+/// documented in `env/mod.rs`. The original implementation deferred the
+/// filter to the caller, which two of the three call sites (notably
+/// `delete_branches` via `list_agent_nodes_by_mesh`) silently dropped —
+/// producing a UI/backend mismatch where the Worktree Manager listed a
+/// branch as idle (`is_active: false`) but `delete_branches` still
+/// refused to drop it because the archived node's `branch` field stayed
+/// in the set. Pinning the filter at the helper closes the gap.
+#[test]
+fn active_node_branches_excludes_archived_nodes() {
+    use crate::env::active_node_branches;
+    use crate::models::{AgentNode, EnvType, SessionStatus};
+
+    let live = AgentNode {
+        id: 1,
+        mesh_id: 1,
+        name: "live".into(),
+        path: "/repo".into(),
+        branch: "feature-live".into(),
+        env: EnvType::Windows,
+        provider: "anthropic".into(),
+        status: SessionStatus::Running,
+        ..Default::default()
+    };
+    let archived = AgentNode {
+        id: 2,
+        mesh_id: 1,
+        name: "archived".into(),
+        path: "/repo/.claude/worktrees/archived".into(),
+        branch: "feature-archived".into(),
+        env: EnvType::Windows,
+        provider: "anthropic".into(),
+        status: SessionStatus::Archived,
+        ..Default::default()
+    };
+
+    let branches = active_node_branches(&[live, archived]);
+    assert!(
+        branches.contains(&"feature-live".to_string()),
+        "live node's branch must be in the active set; got {:?}",
+        branches
+    );
+    assert!(
+        !branches.contains(&"feature-archived".to_string()),
+        "archived node's branch must NOT be in the active set; got {:?}",
+        branches
+    );
+}
+
 // ── get_git_prune_info / collect_prune_info ─────────────────────────────────
 
 #[test]
@@ -99,7 +159,7 @@ fn enumerates_local_branches() {
     branch_from_head(&repo, "feature-a");
     branch_from_head(&repo, "feature-b");
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     let mut names: Vec<&str> = info.local_branches.iter().map(|b| b.name.as_str()).collect();
     names.sort();
     assert_eq!(names, vec!["feature-a", "feature-b", "main"]);
@@ -111,7 +171,7 @@ fn head_branch_is_flagged() {
     let repo = init_repo(dir.path());
     branch_from_head(&repo, "feature-a");
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(find_branch(&info, "main").is_head);
     assert!(!find_branch(&info, "feature-a").is_head);
 }
@@ -124,7 +184,7 @@ fn merged_branch_detected() {
     branch_from_head(&repo, "feature-a");
     commit_file(&repo, "more.txt", "more"); // advances main past feature-a
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert_eq!(find_branch(&info, "feature-a").is_merged_into_main, Some(true));
     // main is trivially "merged into" itself.
     assert_eq!(find_branch(&info, "main").is_merged_into_main, Some(true));
@@ -141,7 +201,7 @@ fn unmerged_branch_detected() {
         .unwrap();
     commit_file(&repo, "feat.txt", "feature work");
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert_eq!(find_branch(&info, "feature-a").is_merged_into_main, Some(false));
 }
 
@@ -168,7 +228,7 @@ fn squash_merged_branch_detected() {
         .unwrap();
     commit_file(&repo, "feature.txt", "feature work");
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert_eq!(
         find_branch(&info, "feature").is_merged_into_main,
         Some(true),
@@ -194,7 +254,7 @@ fn genuinely_unmerged_branch_not_falsely_merged() {
         .unwrap();
     commit_file(&repo, "unrelated.txt", "different work");
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert_eq!(
         find_branch(&info, "feature").is_merged_into_main,
         Some(false),
@@ -213,7 +273,7 @@ fn merged_state_none_without_main() {
         repo.set_head("refs/heads/trunk").unwrap();
     }
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert_eq!(find_branch(&info, "trunk").is_merged_into_main, None);
 }
 
@@ -221,7 +281,7 @@ fn merged_state_none_without_main() {
 fn last_commit_date_present() {
     let dir = TempDir::new();
     init_repo(dir.path());
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(find_branch(&info, "main").last_commit_date.is_some());
 }
 
@@ -245,7 +305,7 @@ fn ahead_behind_against_upstream() {
         .fetch::<&str>(&[], None, None)
         .unwrap();
 
-    let info = collect_prune_info(&work.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&work.path_str(), &[], &[], &no_pool_paths).unwrap();
     let main = find_branch(&info, "main");
     assert_eq!(main.ahead, 1, "one local commit not on origin");
     assert_eq!(main.behind, 1, "one origin commit not local");
@@ -266,7 +326,7 @@ fn orphan_branch_detected() {
         .delete()
         .unwrap();
 
-    let info = collect_prune_info(&work.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&work.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(find_branch(&info, "main").is_orphan, "upstream ref is gone → orphan");
 }
 
@@ -276,7 +336,7 @@ fn branch_without_upstream_is_not_orphan() {
     let repo = init_repo(dir.path());
     branch_from_head(&repo, "local-only");
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     let b = find_branch(&info, "local-only");
     assert!(!b.is_orphan);
     assert_eq!(b.ahead, 0);
@@ -291,7 +351,7 @@ fn remote_tracking_branches_listed_without_head() {
     let work = TempDir::new();
     git2::Repository::clone(origin.path().to_str().unwrap(), work.path()).unwrap();
 
-    let info = collect_prune_info(&work.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&work.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(
         info.remote_tracking_branches.iter().any(|b| b == "origin/main"),
         "expected origin/main, got {:?}",
@@ -307,7 +367,7 @@ fn remote_tracking_branches_listed_without_head() {
 fn main_worktree_enumerated() {
     let dir = TempDir::new();
     init_repo(dir.path());
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert_eq!(info.worktrees.len(), 1);
     assert_eq!(info.worktrees[0].branch.as_deref(), Some("main"));
     assert!(!info.worktrees[0].is_active);
@@ -332,7 +392,7 @@ fn linked_worktree_enumerated_and_active_flag() {
 
     // Mark the worktree path active.
     let active = vec![wt_dir.path_str()];
-    let info = collect_prune_info(&dir.path_str(), &active).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &active, &[], &no_pool_paths).unwrap();
 
     let wt = info
         .worktrees
@@ -364,7 +424,7 @@ fn stale_worktree_when_branch_deleted() {
     // ref directly.
     repo.find_reference("refs/heads/doomed").unwrap().delete().unwrap();
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     let wt = info
         .worktrees
         .iter()
@@ -382,9 +442,9 @@ fn delete_branches_removes_named_branches() {
     branch_from_head(&repo, "feature-a");
     branch_from_head(&repo, "feature-b");
 
-    delete_branches_in_repo(&dir.path_str(), &["feature-a".to_string()]).unwrap();
+    delete_branches_in_repo(&dir.path_str(), &["feature-a".to_string()], &[]).unwrap();
 
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     let names: Vec<&str> = info.local_branches.iter().map(|b| b.name.as_str()).collect();
     assert!(!names.contains(&"feature-a"));
     assert!(names.contains(&"feature-b"));
@@ -396,11 +456,11 @@ fn delete_branches_cannot_delete_head() {
     let dir = TempDir::new();
     init_repo(dir.path());
 
-    let err = delete_branches_in_repo(&dir.path_str(), &["main".to_string()]).unwrap_err();
+    let err = delete_branches_in_repo(&dir.path_str(), &["main".to_string()], &[]).unwrap_err();
     assert!(err.contains("main"), "error should name the failed branch: {}", err);
 
     // main must survive.
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(info.local_branches.iter().any(|b| b.name == "main"));
 }
 
@@ -418,6 +478,7 @@ fn delete_branches_continues_on_individual_failure() {
             "deletable".to_string(),
             "ghost".to_string(),
         ],
+        &[],
     )
     .unwrap_err();
 
@@ -425,8 +486,174 @@ fn delete_branches_continues_on_individual_failure() {
     assert!(err.contains("ghost"));
 
     // The deletable branch was still removed despite the others failing.
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(!info.local_branches.iter().any(|b| b.name == "deletable"));
+}
+
+// ── active-branch flag + delete guard (sibling of worktree `is_active`) ────
+
+/// `collect_prune_info` flags `is_active = true` for every branch whose
+/// name is in the caller's active-branch set — mirrors the path-based
+/// `WorktreeInfo.is_active` derivation. Without this flag the Worktree
+/// Manager tab can't disable the row's checkbox or show the active
+/// badge, so the user could click-delete a branch a live agent is on.
+#[test]
+fn collect_prune_info_marks_active_branches() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+    branch_from_head(&repo, "feature-b");
+
+    // Only "feature-a" is held by an agent — the rest are idle.
+    let active = vec!["feature-a".to_string()];
+    let info = collect_prune_info(&dir.path_str(), &[], &active, &no_pool_paths).unwrap();
+
+    assert!(find_branch(&info, "feature-a").is_active, "feature-a is in the active set");
+    assert!(!find_branch(&info, "feature-b").is_active, "feature-b is not in the active set");
+    assert!(!find_branch(&info, "main").is_active, "main is not in the active set");
+}
+
+/// Empty active-branch set: every branch is idle. Guards against a
+/// future refactor that defaults `is_active` to `true` for safety —
+/// idle branches must read `false` so the prune UI can select them.
+#[test]
+fn collect_prune_info_no_active_set_marks_all_idle() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
+    for b in &info.local_branches {
+        assert!(!b.is_active, "{} should not be active with empty set", b.name);
+    }
+}
+
+/// `delete_branches_in_repo` refuses to drop a branch whose name is in
+/// the active set — defence-in-depth for the prune UI. The frontend
+/// already disables the row's checkbox, but a stale UI or a direct
+/// API call must not be able to drop a branch a node is on. The
+/// rejection must (a) name every blocked branch in one combined error
+/// (bulk-select UX) and (b) leave the rest of the deletion request
+/// pending — no partial failure.
+#[test]
+fn delete_branches_rejects_active_branch() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+    branch_from_head(&repo, "feature-b");
+
+    let active = vec!["feature-a".to_string()];
+    let err = delete_branches_in_repo(
+        &dir.path_str(),
+        &["feature-a".to_string()],
+        &active,
+    )
+    .expect_err("active branch must be rejected with Err");
+
+    assert!(
+        err.contains("active"),
+        "error must name the active-branch class; got: {}",
+        err
+    );
+    assert!(
+        err.contains("feature-a"),
+        "error must include the blocked branch name; got: {}",
+        err
+    );
+
+    // The branch is intact — the rejection is a no-op.
+    let info = collect_prune_info(&dir.path_str(), &[], &active, &no_pool_paths).unwrap();
+    assert!(
+        info.local_branches.iter().any(|b| b.name == "feature-a"),
+        "rejected active branch must remain intact (no partial delete)"
+    );
+}
+
+/// Mixed request: one active branch + one deletable branch. The active
+/// one is named in a single combined error; the deletable one is NOT
+/// touched (we reject the whole request rather than partially
+/// processing — same posture as the pool-path rejection in
+/// `delete_worktrees`).
+#[test]
+fn delete_branches_active_and_deletable_blocked_together() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "active-one");
+    branch_from_head(&repo, "deletable");
+
+    let active = vec!["active-one".to_string()];
+    let err = delete_branches_in_repo(
+        &dir.path_str(),
+        &["active-one".to_string(), "deletable".to_string()],
+        &active,
+    )
+    .expect_err("active branch in request → reject the whole call");
+
+    assert!(err.contains("active-one"), "must name the active blocker");
+    assert!(
+        !err.contains("deletable"),
+        "deletable is not the failure cause and shouldn't be in the error: {}",
+        err
+    );
+
+    // Neither branch was touched.
+    let info = collect_prune_info(&dir.path_str(), &[], &active, &no_pool_paths).unwrap();
+    assert!(info.local_branches.iter().any(|b| b.name == "active-one"));
+    assert!(info.local_branches.iter().any(|b| b.name == "deletable"));
+}
+
+/// Empty active-branch set: the guard is a no-op, ordinary deletes
+/// still work. Pins the contract that the new arg does NOT silently
+/// block anything when no agents are live.
+#[test]
+fn delete_branches_empty_active_set_unaffected() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+
+    delete_branches_in_repo(
+        &dir.path_str(),
+        &["feature-a".to_string()],
+        &[],
+    )
+    .expect("empty active set → ordinary delete proceeds");
+
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
+    assert!(
+        !info.local_branches.iter().any(|b| b.name == "feature-a"),
+        "feature-a must be gone after a clean delete"
+    );
+}
+
+/// Pin the archived-node contract at the integration point: even if a
+/// caller passes an active-branch set containing a branch that ONLY an
+/// archived node was on, the guard does NOT reject the delete — because
+/// the helper (`active_node_branches`) is the boundary that drops
+/// archived nodes, callers that route through it won't pass an archived
+/// branch in the first place. This test exercises the lower-level
+/// `delete_branches_in_repo` to document that the archived-status filter
+/// lives in `active_node_branches` (the env helper), not here. If a
+/// future caller passes archived-node branches directly, this test
+/// documents the existing behaviour rather than fixing it at this layer
+/// — the canonical fix is at the helper.
+#[test]
+fn delete_branches_in_repo_treats_passed_in_set_literally() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-old");
+
+    // Caller passes a set containing "feature-old" — the helper layer
+    // (above) is responsible for dropping archived-node branches, so
+    // by the time we get here, "feature-old" appears active. The guard
+    // rejects it; the archive-status check is upstream.
+    let active = vec!["feature-old".to_string()];
+    let err = delete_branches_in_repo(
+        &dir.path_str(),
+        &["feature-old".to_string()],
+        &active,
+    )
+    .expect_err("branches in the passed-in active set are rejected");
+    assert!(err.contains("feature-old"), "{}", err);
 }
 
 // ── delete_worktrees ────────────────────────────────────────────────────────
@@ -452,7 +679,7 @@ fn remove_worktrees_removes_linked_worktree() {
 
     assert!(!wt_dir.path().exists(), "working directory should be gone");
     // The worktree admin entry is pruned too.
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert_eq!(info.worktrees.len(), 1, "only the main worktree remains");
 }
 
@@ -493,7 +720,7 @@ fn close_removes_worktree_and_its_branch() {
     remove_one_worktree_and_branch(&wt_dir.path_str()).unwrap();
 
     assert!(!wt_dir.path().exists(), "working directory should be gone");
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(
         !info.local_branches.iter().any(|b| b.name == "wt-branch"),
         "the worktree's branch must be deleted on close, not left orphaned"
@@ -522,7 +749,7 @@ fn manual_worktree_removal_keeps_branch() {
     remove_one_worktree(&wt_dir.path_str()).unwrap();
 
     assert!(!wt_dir.path().exists());
-    let info = collect_prune_info(&dir.path_str(), &[]).unwrap();
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
     assert!(
         info.local_branches.iter().any(|b| b.name == "wt-branch"),
         "manual worktree removal must leave the branch for separate selection"

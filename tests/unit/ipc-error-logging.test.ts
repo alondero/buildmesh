@@ -119,7 +119,9 @@ describe('central IPC error logging (#386)', () => {
 
     it('array-arg shapes show item count', async () => {
       mockInvoke.mockRejectedValueOnce(new Error('boom'));
-      await expect(api.deleteBranches('/p', ['a', 'b', 'c'])).rejects.toThrow('boom');
+      // New signature is (meshId, worktreePath, branchNames); the test only
+      // cares about the array-arg shape so any numeric meshId will do.
+      await expect(api.deleteBranches(1, '/p', ['a', 'b', 'c'])).rejects.toThrow('boom');
       const msg = mockLog.mock.calls[0][1];
       expect(msg).toContain('3 items');
     });

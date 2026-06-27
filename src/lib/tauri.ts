@@ -382,8 +382,8 @@ export type { BranchInfo, WorktreeInfo, GitRepoPruneInfo };
 export const getGitPruneInfo = (meshId: number) =>
   _invoke<GitRepoPruneInfo[]>('get_git_prune_info', { meshId });
 
-export const deleteBranches = (worktreePath: string, branchNames: string[]) =>
-  _invoke<void>('delete_branches', { worktreePath, branchNames });
+export const deleteBranches = (meshId: number, worktreePath: string, branchNames: string[]) =>
+  _invoke<void>('delete_branches', { meshId, worktreePath, branchNames });
 
 export const deleteWorktrees = (worktreePaths: string[]) =>
   _invoke<void>('delete_worktrees', { worktreePaths });
