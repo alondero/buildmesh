@@ -85,9 +85,25 @@ The Build/Run system allows users to execute build and run commands directly fro
 - Thin header bar with title and close button
 
 **State management:**
-- `openBuildRun: { nodeId: number; mode: 'build' | 'run' } | null` in `SessionView`
-- Lifted to `SessionView` level so state survives React remounts
-- Passed to `GridLayout` as `buildRunOpen` / `setBuildRunOpen` props
+- `openBuildRun: { nodeId: number; mode: 'build' | 'run' | 'terminal' } | null` in `AgentNodeView`
+- Lifted to `AgentNodeView` level so the visibility flag survives React remounts
+  (the previous `SessionView` owner was deleted in issue #380 — this section
+  was updated to reflect the actual current architecture)
+- Passed to `NodeCard` as `buildRunOpen` / `setBuildRunOpen` props
+
+**Persistence:**
+- The build-run terminal survives React remounts (mesh switches, pane
+  reorders, probe-panel expand/collapse) via a singleton
+  `BuildRunTerminalRegistry` (`src/components/Terminal/BuildRunTerminalRegistry.ts`)
+  that mirrors the agent terminal's `TerminalRegistry` pattern. The xterm
+  scrollback, the Rust PTY, and the output listener all survive across
+  mount/unmount cycles — the React component is a thin DOM host whose effect
+  calls `attach` on mount and `detach` on cleanup, with `dispose` (kills PTY +
+  disposes xterm) reserved for the explicit X-button close path.
+- A `build-run-exited-{node_id}` event from Rust tells the registry when the
+  shell process exits naturally (e.g. user typed `exit` while on another
+  mesh), so subsequent `writeToBuildRun` calls cleanly hit the "Build run not
+  running" path instead of silently vanishing into a dead PTY.
 
 ---
 
@@ -134,11 +150,14 @@ The Build/Run system allows users to execute build and run commands directly fro
 
 | File | Purpose |
 |------|---------|
-| `src-tauri/src/commands/build_run.rs` | Backend commands |
+| `src-tauri/src/commands/build_run.rs` | Backend commands (includes the `build-run-exited-{node_id}` sentinel emit) |
 | `src-tauri/src/commands/mod.rs` | Module registration |
 | `src-tauri/src/lib.rs` | Command handler registration |
 | `src/components/BuildRun/BuildRunDropdown.tsx` | Dropdown button component |
 | `src/components/BuildRun/index.ts` | Barrel export |
-| `src/components/Terminal/BuildRunTerminal.tsx` | xterm.js terminal component |
-| `src/components/SessionView/SessionView.tsx` | State management + layout |
+| `src/components/Terminal/BuildRunTerminal.tsx` | Thin React wrapper around the registry (DOM host only) |
+| `src/components/Terminal/BuildRunTerminalRegistry.ts` | Singleton that owns xterm + PTY + listener, mirrors `TerminalRegistry`'s attach/detach/dispose contract |
+| `src/components/AgentNodeView/AgentNodeView.tsx` | State management + layout (owns `openBuildRun`) |
+| `tests/unit/build-run-terminal-persistence.test.tsx` | Regression tests pinning the persistence contract |
+| `tests/unit/build-run-terminal-raf-batching.test.tsx` | RAF-batching regression (issue #303) |
 | `docs/specs/build-run-system.md` | This document |

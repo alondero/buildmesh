@@ -273,7 +273,19 @@ pub async fn build_run(
         loop {
             match r.read(&mut buf) {
                 Ok(0) => {
-                    // EOF — process exited
+                    // EOF — process exited. Notify the frontend BEFORE
+                    // emitting the trailing `[process exited]` line so
+                    // listeners know the PTY is dead regardless of whether
+                    // the output-stream EOF gets coalesced with the exit
+                    // text. The BuildRunTerminalRegistry uses this to flip
+                    // `ptyAlive=false` and surface a visible banner if the
+                    // terminal is currently attached — without it, a shell
+                    // that exits while the user is on another mesh would
+                    // leave a zombie PTY that silently swallows keystrokes.
+                    let _ = app_handle.emit(
+                        &format!("build-run-exited-{}", node_id_clone),
+                        serde_json::json!({}),
+                    );
                     break;
                 }
                 Ok(n) => {
