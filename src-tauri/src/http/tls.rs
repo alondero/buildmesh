@@ -47,10 +47,22 @@ pub struct CertChain {
 }
 
 /// Subject Alternative Names for the cert: `localhost`, both loopback IPs, and
-/// every supplied non-loopback interface IP. Loopback IPs are added once even
-/// if `interface_ips` repeats them, and the returned list is deduplicated so a
-/// link-local IPv6 that exists on multiple physical NICs (WiFi + Ethernet both
-/// carry `fe80::…`) does NOT appear twice — webpki-based TLS stacks
+/// every supplied reachable (non-loopback, non-link-local) interface IP — the
+/// exact set `http::bind_specs` opens TLS listeners for. Reusing the binder's
+/// [`super::is_link_local`] is deliberate: the cert must cover precisely what we
+/// bind. Link-local addresses (IPv4 APIPA `169.254.0.0/16`, IPv6 `fe80::/10`)
+/// are never bound (a phone can't reach a scoped address) AND are the most
+/// volatile addresses on a dev box — APIPA appears whenever a NIC loses its
+/// DHCP lease, link-local IPv6 can be privacy-randomised. If they were in the
+/// SAN set they'd also be in the regeneration key ([`interface_san_key`]), so
+/// any network flicker would re-mint the root CA and silently invalidate the
+/// cert the user already installed on their phone — the next handshake then
+/// fails with `CertificateUnknown` (46). Excluding them keeps the cert stable
+/// across network churn.
+///
+/// Loopback IPs are added once even if `interface_ips` repeats them, and the
+/// returned list is deduplicated so a routable IP that exists on multiple
+/// physical NICs does NOT appear twice — webpki-based TLS stacks
 /// (iOS/Android/Chrome) reject duplicate SAN entries as malformed
 /// (`AlertDescription::CertificateUnknown`); RFC 5280 §4.2.1.6 requires
 /// "each name … SHALL be specified once".
@@ -65,15 +77,14 @@ fn san_entries(interface_ips: &[IpAddr]) -> Vec<SanType> {
         SanType::IpAddress(IpAddr::V6(Ipv6Addr::LOCALHOST)),
     ];
     for ip in interface_ips {
-        if !ip.is_loopback() {
+        if !ip.is_loopback() && !super::is_link_local(ip) {
             sans.push(SanType::IpAddress(*ip));
         }
     }
     // Stable sort by a stringified key then dedup — `SanType` itself isn't
     // `Ord`, so we project to a comparable form. `SanType::PartialEq` already
-    // compares the inner values, so a content-based dedup collapses the
-    // link-local IPv6 that arrives twice when both the WiFi and Ethernet
-    // adapters carry it (a real configuration on Adam's box).
+    // compares the inner values, so a content-based dedup collapses a routable
+    // interface IP that arrives twice when two physical NICs carry it.
     sans.sort_by_key(|s| match s {
         SanType::DnsName(d) => format!("dns:{}", d.as_ref()),
         SanType::IpAddress(ip) => format!("ip:{}", ip),
@@ -159,9 +170,11 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
     })
 }
 
-/// The non-loopback interface IPs a cert must cover, canonicalised (sorted,
+/// The reachable interface IPs a cert must cover, canonicalised (sorted,
 /// deduped, as strings) so it can be persisted and compared. Loopback/localhost
-/// SANs are constant and never part of this key.
+/// SANs are constant and never part of this key; link-local IPs are excluded
+/// too (see [`super::is_link_local`]) — they are never bound and their churn
+/// would needlessly re-mint the cert, breaking an already-installed phone CA.
 ///
 /// `pub(crate)` so `http::mod` can key the in-process `TlsAcceptor` cache by
 /// the same set the persisted cert was minted for (issue #587): a re-toggle
@@ -170,7 +183,7 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
 pub(crate) fn interface_san_key(interface_ips: &[IpAddr]) -> Vec<String> {
     let mut v: Vec<String> = interface_ips
         .iter()
-        .filter(|ip| !ip.is_loopback())
+        .filter(|ip| !ip.is_loopback() && !super::is_link_local(ip))
         .map(|ip| ip.to_string())
         .collect();
     v.sort();
@@ -297,8 +310,78 @@ mod tests {
             .count();
         assert_eq!(lan_count, 1, "duplicate LAN IP must collapse to a single SAN");
         assert_eq!(
-            link_local_count, 1,
-            "duplicate link-local IP must collapse to a single SAN"
+            link_local_count, 0,
+            "link-local IPs are never bound (see http::bind_specs) and are the most \
+             volatile addresses on the box, so they MUST be excluded from the SAN set \
+             entirely — including them re-mints the cert on every network flap"
+        );
+    }
+
+    /// Regression pin for the silent-cert-rotation bug (mobile QR black screen):
+    /// link-local addresses — IPv4 APIPA `169.254.0.0/16` and IPv6 `fe80::/10` —
+    /// MUST NOT appear in the cert SAN set. They are never bound as exposed
+    /// interfaces (`http::bind_specs` skips them), yet they are the most volatile
+    /// addresses on a dev box: APIPA appears whenever a NIC loses its DHCP lease
+    /// and link-local IPv6 can be privacy-randomised. Including them put them in
+    /// the regeneration key, so any network flicker re-minted the root CA and
+    /// silently invalidated the cert the user had already installed on their
+    /// phone — the handshake then failed with `CertificateUnknown` (46).
+    #[test]
+    fn san_entries_excludes_link_local() {
+        let lan: IpAddr = "192.168.1.10".parse().unwrap();
+        let apipa: IpAddr = "169.254.143.41".parse().unwrap();
+        let ll6: IpAddr = "fe80::484e:b865:e74e:e8be".parse().unwrap();
+        let sans = san_entries(&[lan, apipa, ll6]);
+        assert!(
+            sans.iter()
+                .any(|s| matches!(s, SanType::IpAddress(ip) if *ip == lan)),
+            "the reachable LAN IP must be present in the SAN set"
+        );
+        assert!(
+            !sans
+                .iter()
+                .any(|s| matches!(s, SanType::IpAddress(ip) if *ip == apipa || *ip == ll6)),
+            "link-local (APIPA / fe80::) IPs must be excluded from the SAN set"
+        );
+    }
+
+    /// The regeneration key drives `persisted_covers`: if a link-local IP is in
+    /// the key, its appearance/disappearance forces a regenerate. Excluding them
+    /// keeps the key — and therefore the persisted cert — stable across the
+    /// network churn that was invalidating the user's installed root.
+    #[test]
+    fn interface_san_key_excludes_link_local() {
+        let lan: IpAddr = "192.168.1.10".parse().unwrap();
+        let apipa: IpAddr = "169.254.143.41".parse().unwrap();
+        let ll6: IpAddr = "fe80::1".parse().unwrap();
+        assert_eq!(
+            interface_san_key(&[lan, apipa, ll6]),
+            vec!["192.168.1.10".to_string()],
+            "only reachable, non-link-local interface IPs key the cert"
+        );
+    }
+
+    /// End-to-end regression for the recurring "I reinstalled the cert and it
+    /// broke again" report: a cert minted for the real LAN IP must be REUSED —
+    /// not regenerated — when only link-local addresses come and go. A regenerate
+    /// here mints a fresh root keypair and invalidates the phone's installed CA.
+    #[test]
+    fn load_or_generate_stable_across_link_local_churn() {
+        let dir = tempfile::tempdir().unwrap();
+        let lan: IpAddr = "192.168.1.10".parse().unwrap();
+        let apipa: IpAddr = "169.254.5.5".parse().unwrap();
+        let ll6: IpAddr = "fe80::abcd".parse().unwrap();
+
+        let first = load_or_generate(dir.path(), &[lan]).unwrap();
+        // A NIC drops to APIPA and a link-local IPv6 appears — pure churn.
+        let after_churn = load_or_generate(dir.path(), &[lan, apipa, ll6]).unwrap();
+        assert_eq!(
+            first.root_cert_der, after_churn.root_cert_der,
+            "link-local churn must NOT re-mint the root CA (phone keeps trusting it)"
+        );
+        assert_eq!(
+            first.leaf.cert_der, after_churn.leaf.cert_der,
+            "link-local churn must NOT re-mint the leaf"
         );
     }
 
