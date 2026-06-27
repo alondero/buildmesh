@@ -1,4 +1,4 @@
-//! Agent spawning — the `spawn_agent_inner` function and its helpers.
+﻿//! Agent spawning â€” the `spawn_agent_inner` function and its helpers.
 //!
 //! Provider-specific recipe lives behind `Provider::adapter()` (see `agent/provider`).
 //! OS-specific wrapping lives in `spawn_environment`.
@@ -10,6 +10,12 @@ use crate::agent::spawn_diag;
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
+// Fetch + warm-pool worktree helpers moved to `git::worktree::provision`
+// (ADR 0007 consolidation). They were previously inlined here.
+use crate::git::worktree::provision::{
+    adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
+    read_origin_ref_sha, upgrade_warm_to_mode,
+};
 use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
@@ -33,7 +39,7 @@ pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 /// the spawn-time auto-sync. The chain (each tier only runs if the previous
 /// one yields nothing useful):
 ///
-/// 1. The mesh's `base_ref` column from the `meshes` DB row — explicit
+/// 1. The mesh's `base_ref` column from the `meshes` DB row â€” explicit
 ///    user intent wins, even on a repo whose default branch disagrees.
 ///    **The COALESCE default `'origin/main'` is treated as "no config"**:
 ///    a fresh mesh whose `base_ref` column was never explicitly set reads
@@ -46,14 +52,14 @@ pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 ///    Code, see `commands::mesh_properties`).
 /// 2. The repo's actual default branch read from
 ///    `refs/remotes/origin/HEAD` (populated by `git clone` / `git fetch`)
-///    — closes the master-trunk regression where a repo whose default
+///    â€” closes the master-trunk regression where a repo whose default
 ///    branch is `master` was always fetched as `origin/main`.
 /// 3. The literal `"origin/main"` as a last resort. Used only for a
 ///    non-repo / unconfigured path so the spawn path never blocks.
 ///
 /// Extracted from `spawn_agent_inner` so the regression test in
 /// `mod tests` can call it directly without standing up the full async /
-/// PTY / DB machinery — the call site is a single expression.
+/// PTY / DB machinery â€” the call site is a single expression.
 fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) -> String {
     const COALESCE_DEFAULT: &str = "origin/main";
     let user_set = config_base_ref.filter(|b| b.trim() != COALESCE_DEFAULT);
@@ -63,12 +69,12 @@ fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) ->
             return trimmed.to_string();
         }
     }
-    // No explicit config (or the COALESCE sentinel) — read the repo's
+    // No explicit config (or the COALESCE sentinel) â€” read the repo's
     // actual default branch from `refs/remotes/origin/HEAD` (populated by
     // `git clone` / `git fetch`). `get_default_branch` falls back to
     // "main" if the repo can't be opened or the symbolic ref is missing,
     // so a non-repo / unconfigured mesh path still resolves to
-    // "origin/main" — preserving pre-fix behaviour and never blocking the
+    // "origin/main" â€” preserving pre-fix behaviour and never blocking the
     // spawn.
     let branch = crate::commands::git::get_default_branch(mesh_path.to_string());
     format!("origin/{}", branch)
@@ -76,13 +82,13 @@ fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) ->
 
 /// Per-spawn timing log. Records elapsed milliseconds at each
 /// `checkpoint(name)` call and at the end via `total()`. Output goes to
-/// `buildmesh.log` via the existing `tracing` setup — no extra plumbing.
+/// `buildmesh.log` via the existing `tracing` setup â€” no extra plumbing.
 ///
 /// Born of the spawn-latency investigation (5-10s lag between clicking
 /// "Spawn" and visible UI feedback). The checkpoints proved the bottleneck
 /// was NOT the hypothesised `git::sync::fetch_origin` (network) but
-/// `worktree_create` — 97% of which was libgit2's checkout. That checkout
-/// now shells out to `git worktree add` (~20× faster; ADR 0007 amendment),
+/// `worktree_create` â€” 97% of which was libgit2's checkout. That checkout
+/// now shells out to `git worktree add` (~20Ã— faster; ADR 0007 amendment),
 /// so a fresh node is usable in ~2s instead of ~14s. The timer is kept as a
 /// cheap spawn-latency regression guard; its only consumer is the `tracing`
 /// log file.
@@ -116,7 +122,7 @@ impl SpawnTimer {
         );
     }
 
-    /// Original start instant — exposed `pub(crate)` so `register_agent`
+    /// Original start instant â€” exposed `pub(crate)` so `register_agent`
     /// can clone it onto `AgentProcess.spawn_start`, giving the
     /// `first_user_input` log line the same reference as every other
     /// `spawn_timing:` checkpoint.
@@ -162,7 +168,7 @@ pub enum SessionIdMode {
 /// GitHub issue/PR bodies come back from the REST API with CRLF line endings.
 /// A bare carriage return reaching an agent's TUI input (notably when the
 /// agent is launched through `cmd.exe` or PowerShell on Windows) is
-/// interpreted as Enter, submitting the prompt after the first line — so an
+/// interpreted as Enter, submitting the prompt after the first line â€” so an
 /// issue-seeded agent only ever sees its first line. macOS and Linux
 /// (`claude` spawned directly) tolerate CRLF, which is why this only bit
 /// Windows.
@@ -177,8 +183,8 @@ fn normalize_prefill_newlines(text: &str) -> String {
 /// variables a custom Claude-compatible profile (MiniMax/Kimi/DeepSeek) needs to
 /// target its endpoint. Empty for the built-in Anthropic subscription and for
 /// the native-binary providers. Passed in (rather than resolved here) so this
-/// function stays a pure composition of its inputs — no disk / preferences-cache
-/// access — and the env injection can be unit-tested with an explicit list.
+/// function stays a pure composition of its inputs â€” no disk / preferences-cache
+/// access â€” and the env injection can be unit-tested with an explicit list.
 #[allow(clippy::too_many_arguments)]
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
@@ -252,7 +258,7 @@ pub fn build_spawn_command(
     // leak into the agent. For the built-in Anthropic subscription this clean
     // slate is the whole job (no overrides follow); a custom Claude-compatible
     // profile resets then sets its own `backend_env` below. On the WSL path this
-    // only clears the wsl.exe launcher's env — harmless, since only WSLENV-listed
+    // only clears the wsl.exe launcher's env â€” harmless, since only WSLENV-listed
     // vars cross the boundary anyway.
     if adapter.resets_backend_env() {
         for k in CLAUDE_BACKEND_ENV_VARS {
@@ -310,11 +316,11 @@ pub fn spawn_child(
 ///
 /// Uses the **restricted-token** primitive (ADR-0014), not the AppContainer:
 /// the AppContainer's object-namespace isolation hung `claude.exe` at libuv's
-/// named-pipe creation (#528) and blocked loopback (#533). The §4 spike proved
+/// named-pipe creation (#528) and blocked loopback (#533). The Â§4 spike proved
 /// the restricted token fixes both. It is launched **permissive**
-/// (`include_user_sid = true`) — read-confinement is *not* delivered here (a
+/// (`include_user_sid = true`) â€” read-confinement is *not* delivered here (a
 /// same-user token can't deny home reads while MSYS `bash` runs; see the spike's
-/// `tradeoff` test and ADR-0014 §Spike result), so home grants are unnecessary
+/// `tradeoff` test and ADR-0014 Â§Spike result), so home grants are unnecessary
 /// (`grant_home = false`). Deny-by-default reads are a tracked follow-up
 /// (separate-user principal / WSL).
 #[cfg(target_os = "windows")]
@@ -342,7 +348,7 @@ fn sandbox_spawn(
 /// Ensures the attention hooks exist in `{project}/.claude/settings.local.json`.
 ///
 /// Writes a catch-all `Notification` hook (fires on permission prompts, idle
-/// prompts, MCP elicitations — every type that means "the user is needed") plus
+/// prompts, MCP elicitations â€” every type that means "the user is needed") plus
 /// a `Stop` hook (fires the instant a turn ends). Both POST to the local
 /// attention endpoint. Idempotent: re-runs no-op once the config matches, and
 /// migrate an older `idle_prompt`-only config on the next spawn.
@@ -361,7 +367,7 @@ pub fn inject_attention_hook(project_path: &std::path::Path) {
 
     // Resolve the port from $BUILDMESH_PORT at hook-run time (set per-agent in
     // spawn_environment) rather than baking a literal. This keeps the hook
-    // correct across the 1992→1994 fallback and routes a dev-profile agent's
+    // correct across the 1992â†’1994 fallback and routes a dev-profile agent's
     // attention to the dev instance (2992), not the stable hub.
     let hook_command =
         "curl -sf -X POST http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"
@@ -370,7 +376,7 @@ pub fn inject_attention_hook(project_path: &std::path::Path) {
     // We register two hooks so the user is told the *instant* their input is
     // needed, not just when the agent goes idle:
     //   - Notification with an empty (catch-all) matcher fires on every
-    //     notification type — crucially `permission_prompt` (the agent is asking
+    //     notification type â€” crucially `permission_prompt` (the agent is asking
     //     to run a tool / answer a question) as well as `idle_prompt`. Matching
     //     only `idle_prompt` (the old behaviour) missed every permission prompt,
     //     so the user was never alerted when an agent paused to ask something.
@@ -425,7 +431,7 @@ pub fn is_agent_already_running(session_id: &i64) -> bool {
 
 /// Register the agent process in the registry.
 ///
-/// `spawn_start` is the original `SpawnTimer.start` clone — used by
+/// `spawn_start` is the original `SpawnTimer.start` clone â€” used by
 /// `record_first_input_if_first` (via `AgentProcess.spawn_start`) to
 /// timestamp the `first_user_input` log line against the same reference
 /// as every other `spawn_timing:` checkpoint.
@@ -456,7 +462,7 @@ fn register_agent(
             spawn_start,
             // First-write gate: starts false, flipped true exactly once
             // by `record_first_input_if_first` on the first successful
-            // `write_bytes` call for this session. Plain `AtomicBool` —
+            // `write_bytes` call for this session. Plain `AtomicBool` â€”
             // the field lives inside `Arc<AgentProcess>` already, so no
             // inner Arc is needed (the reader thread doesn't share this
             // flag).
@@ -497,17 +503,17 @@ pub fn pump_pty_output(
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
 ///
-/// Two time references are passed in, with distinct semantics — keep
+/// Two time references are passed in, with distinct semantics â€” keep
 /// them separate:
 ///
-/// * `spawned_at` — process-creation time (`Instant::now()` right after
+/// * `spawned_at` â€” process-creation time (`Instant::now()` right after
 ///   `spawn_child` returns). Used by the 3-second early-exit heuristic
 ///   to detect a likely-failed `--resume`. **Must NOT be unified with
 ///   `spawn_start`**: a slow 14s spawn pipeline followed by an agent
 ///   dying 1s after process creation must still trigger `resume-failed`,
 ///   and the original "3s after process creation" semantic preserves
 ///   that detection.
-/// * `spawn_start` — the original `SpawnTimer.start` from the top of
+/// * `spawn_start` â€” the original `SpawnTimer.start` from the top of
 ///   `spawn_agent_inner`. Used by the `first_pty_output` checkpoint log
 ///   so it lines up with every other `spawn_timing:` line (all
 ///   measured against the same "user clicked Spawn" instant).
@@ -527,8 +533,8 @@ fn start_reader(
 
     std::thread::spawn(move || {
         // The SpawnTimer in spawn_agent_inner stops at process *creation*
-        // (`after_pty_spawn`), so the shell → agent-CLI boot tail is invisible
-        // to it. Log the gap from spawn to the first byte of PTY output here —
+        // (`after_pty_spawn`), so the shell â†’ agent-CLI boot tail is invisible
+        // to it. Log the gap from spawn to the first byte of PTY output here â€”
         // that first byte is the earliest signal the agent process is actually
         // alive and producing a UI. Same `spawn_timing:` prefix so it sits
         // alongside the other checkpoints. Measured against `spawn_start` (not
@@ -539,14 +545,14 @@ fn start_reader(
             if first_chunk {
                 first_chunk = false;
                 tracing::info!(
-                    "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (spawn start → first output; agent CLI boot tail)",
+                    "spawn_timing: session={} checkpoint=first_pty_output elapsed={}ms (spawn start â†’ first output; agent CLI boot tail)",
                     session_id,
                     spawn_start.elapsed().as_millis()
                 );
             }
             // Mark the app as active so the background warm-pool worker holds
             // off its idle refills while an agent is actively producing output
-            // (issue #613 AC2) — a `git worktree add` must not compete with a
+            // (issue #613 AC2) â€” a `git worktree add` must not compete with a
             // live agent's I/O.
             crate::services::pool_worker::note_activity();
 
@@ -586,8 +592,8 @@ fn start_reader(
         reader_alive_clone.store(false, Ordering::SeqCst);
 
         if is_plain_terminal {
-            // A plain terminal's shell exiting — whether via `exit`, the
-            // user closing the window, or the process being killed — is
+            // A plain terminal's shell exiting â€” whether via `exit`, the
+            // user closing the window, or the process being killed â€” is
             // a normal Idle state, never an Error. Skip the LLM-specific
             // 3-second "resume-failed" early-exit warning and event: a
             // shell is not a --resume, so a fast exit isn't a resume
@@ -597,7 +603,7 @@ fn start_reader(
             // Detect early exit (likely a failed --resume). Uses
             // `spawned_at` (process-creation time), NOT `spawn_start`,
             // because the heuristic answers "did the process die
-            // almost immediately after it was created?" — a slow
+            // almost immediately after it was created?" â€” a slow
             // spawn pipeline followed by a 1s-later death should
             // still trigger `resume-failed`. Switching the reference
             // to `spawn_start` here would add the entire pipeline
@@ -606,7 +612,7 @@ fn start_reader(
             let elapsed = spawned_at.elapsed();
             if elapsed < std::time::Duration::from_secs(3) {
                 tracing::warn!(
-                    "Node {} reader exited after {:?} — likely resume failure",
+                    "Node {} reader exited after {:?} â€” likely resume failure",
                     session_id,
                     elapsed
                 );
@@ -615,7 +621,7 @@ fn start_reader(
                     "resume-failed",
                     serde_json::json!({
                         "node_id": session_id,
-                        "error": "Agent exited immediately after spawn — session may have expired"
+                        "error": "Agent exited immediately after spawn â€” session may have expired"
                     }),
                 );
             } else {
@@ -648,7 +654,7 @@ pub async fn spawn_agent_inner(
     );
 
     let timer = SpawnTimer::new(session_id);
-    // [DEBUG-concurrent-spawn] RAII counter — guards `IN_FLIGHT` across the
+    // [DEBUG-concurrent-spawn] RAII counter â€” guards `IN_FLIGHT` across the
     // entire function body (Ok/Err/?-returns all decrement via Drop). One
     // log line on enter, one on exit, with a delta in between. The label
     // discriminates manual vs Issue vs PR spawns so the dev log can group
@@ -731,13 +737,13 @@ pub async fn spawn_agent_inner(
 
     // 6. Compute spawn path. The warm-pool tracer bullet (issue #609) lets
     //    manual spawns ADOPT a pre-warmed detached worktree as their own
-    //    worktree — zero cold checkout, no folder rename (the pool's
+    //    worktree â€” zero cold checkout, no folder rename (the pool's
     //    preassigned slug IS the node name). The claim happens BEFORE the
     //    cold `create_git_worktree` block below; on success we rewrite the
     //    worktree's mode (branched vs. detached) to match the mesh's
     //    `worktree_mode`, then fall through to the rest of the spawn. A
     //    claim failure (empty pool, PR/issue source, etc.) is logged and
-    //    falls through to the cold path — the spawn never fails because of
+    //    falls through to the cold path â€” the spawn never fails because of
     //    the pool, only because of an actual worktree-create error.
     let mesh_id = db::get_mesh_by_path(&node.path).map(|m| m.id).unwrap_or(-1);
     // Issue/PR spawns adopt a warm entry differently from manual spawns: they
@@ -750,7 +756,7 @@ pub async fn spawn_agent_inner(
     if use_worktree {
         // The path the node resolves to WITHOUT a pool claim. If it's already
         // on disk this spawn is a resume / handover / re-spawn reusing an
-        // existing worktree — never claim a pool entry for it (that would
+        // existing worktree â€” never claim a pool entry for it (that would
         // re-point the node at a different directory and abandon its work).
         let existing = env::resolve_agent_path(&node.path, node.worktree_name.as_deref());
         let existing_present = std::path::Path::new(&existing.host_path).exists();
@@ -794,8 +800,8 @@ pub async fn spawn_agent_inner(
     //    resolves straight onto the already-on-disk pool directory (#609).
     //  * Issue/PR warm claim (`is_rename_spawn`): keep the node's own
     //    `gh{N}-`/`pr{N}-` `worktree_name`. It resolves to a path that does
-    //    NOT exist yet, so we enter the cold-create block below — where the
-    //    PR-head fetch runs — and there `git worktree move` the pool directory
+    //    NOT exist yet, so we enter the cold-create block below â€” where the
+    //    PR-head fetch runs â€” and there `git worktree move` the pool directory
     //    onto this target instead of a cold `git worktree add` (#612).
     //  * No claim: fall back to whatever the node row carries (resumes, or a
     //    cold issue/PR spawn).
@@ -847,7 +853,7 @@ pub async fn spawn_agent_inner(
             // warning` Tauri event so the frontend can show a non-fatal
             // toast, but spawn always proceeds from the local HEAD.
             // Skips (dirty parent, no remote, already up to date) are
-            // silent — the user doesn't need to know about them.
+            // silent â€” the user doesn't need to know about them.
             //
             // The remote is derived from the mesh's `base_ref` (issue
             // #276), so a Mesh with `base_ref = "upstream/main"` syncs
@@ -886,7 +892,7 @@ pub async fn spawn_agent_inner(
             // commits, the mesh's base ref has moved, so any OTHER warm pool
             // entries for this mesh are now parked on a stale SHA and must be
             // `git reset --hard`ed onto the new commit. Only `Synced` /
-            // `FetchedButDiverged` advance the ref — `UpToDate` / skipped means
+            // `FetchedButDiverged` advance the ref â€” `UpToDate` / skipped means
             // nothing moved. We record the fact here and let the single
             // post-spawn maintenance task (at the end of this fn) run the
             // freshness pass, so refresh and refill share one fill-lock
@@ -906,10 +912,10 @@ pub async fn spawn_agent_inner(
             // same commits the PR is built from. Two cases:
             //
             //  - Same-repo PRs (`head_repo_owner` is `None`): the head
-            //    lives on `origin` — we call `fetch_single_ref` and use
+            //    lives on `origin` â€” we call `fetch_single_ref` and use
             //    `origin/<head_ref>` (the #420 path).
             //  - Fork PRs (`head_repo_owner` is `Some`): the head lives on
-            //    the fork's clone URL — we call `fetch_fork_head`, which
+            //    the fork's clone URL â€” we call `fetch_fork_head`, which
             //    registers the fork as a remote (`fork-<login>`) and fetches
             //    from there (issue #443, follow-up to #36). The worktree
             //    base_ref becomes `fork-<login>/<head_ref>`.
@@ -917,7 +923,7 @@ pub async fn spawn_agent_inner(
             // The fetch is best-effort: a network failure or stale local ref
             // falls back to the mesh's `base_ref` (the ADR 0001 offline
             // pattern), and the user sees the agent spawn on the wrong
-            // commits rather than a hard error — strictly worse than a clean
+            // commits rather than a hard error â€” strictly worse than a clean
             // spawn on the right commits, but a strict-error spawn is
             // brittle to the very first offline session.
             //
@@ -926,7 +932,7 @@ pub async fn spawn_agent_inner(
             // silently lands on the wrong commits. We piggy-back on the
             // existing `mesh-sync-warning` event (the same non-fatal channel
             // the auto-sync path uses) with a `pr_head_unfetchable` or
-            // `pr_fork_unfetchable` outcome — the App.tsx listener already
+            // `pr_fork_unfetchable` outcome â€” the App.tsx listener already
             // renders a toast for that event, so no frontend change is
             // required.
             let worktree_base_ref = if node.source_pr.is_some() {
@@ -974,14 +980,14 @@ pub async fn spawn_agent_inner(
                     };
                     let remote_ref = format!("{}/{}", remote_name, node.branch);
 
-                    // Issue #444 — exact-pinning: after a successful fetch,
+                    // Issue #444 â€” exact-pinning: after a successful fetch,
                     // compare the local SHA at the remote ref we just
                     // populated to the `source_pr_pinned_sha` we stored at
                     // spawn time. On mismatch (PR was force-pushed / rebased
                     // between click-time and spawn-time) emit a non-fatal
                     // `pr_sha_drift` warning via the same `mesh-sync-warning`
                     // channel the offline-fallback path uses. The worktree
-                    // proceeds on the new tip — strict-fail would block
+                    // proceeds on the new tip â€” strict-fail would block
                     // legitimate rebase-and-merge workflows for one stale
                     // click. The drift check is a no-op for v15-and-earlier
                     // PR-spawned rows where `source_pr_pinned_sha` is None
@@ -1009,7 +1015,7 @@ pub async fn spawn_agent_inner(
                             let head_ref = node.branch.clone();
                             let message = format!(
                                 "PR #{} was force-pushed or rebased after you clicked Spawn \
-                                 (expected {}, now {} on {}). Spawning on the new tip — \
+                                 (expected {}, now {} on {}). Spawning on the new tip â€” \
                                  re-spawn to pin to a fresh SHA.",
                                 pr_number, expected, actual, remote_ref,
                             );
@@ -1060,7 +1066,7 @@ pub async fn spawn_agent_inner(
                     let message = format!(
                         "Could not fetch PR #{} head ref '{}' from {}; \
                          spawning from the mesh's base ref '{}' instead. \
-                         The agent may land on stale commits — re-spawn \
+                         The agent may land on stale commits â€” re-spawn \
                          when the network is back to retry.",
                         pr_number, head_ref, source_label, base_ref,
                     );
@@ -1096,7 +1102,7 @@ pub async fn spawn_agent_inner(
             // claimed a warm entry for a `gh{N}-`/`pr{N}-` spawn, the pool's
             // pre-warmed directory is sitting under a plain slug at
             // `entry.path`. Instead of a cold `git worktree add` (which writes
-            // the whole tree — the ~11s NTFS cost the pool exists to avoid), we
+            // the whole tree â€” the ~11s NTFS cost the pool exists to avoid), we
             // `git worktree move` that directory onto this target name and then
             // `git checkout` it to the ref the cold path resolved
             // (`worktree_base_ref`: the mesh base for Issue spawns, the fetched
@@ -1155,8 +1161,8 @@ pub async fn spawn_agent_inner(
                         // (`entry.path`, move not done) or the target path
                         // (`resolved.host_path`, move done but checkout/include
                         // failed). Remove BOTH: that (a) frees the target so the
-                        // cold `create_git_worktree` below — which no-ops if the
-                        // path already exists — actually cuts a fresh tree at the
+                        // cold `create_git_worktree` below â€” which no-ops if the
+                        // path already exists â€” actually cuts a fresh tree at the
                         // right ref instead of leaving the agent on the pool's
                         // stale SHA, and (b) prevents a leaked pool directory.
                         // `remove_one_worktree` is idempotent on a missing path.
@@ -1248,7 +1254,7 @@ pub async fn spawn_agent_inner(
             .unwrap_or_else(|e| Err(format!("warm branch upgrade panicked: {}", e)));
             timer.checkpoint("after_warm_branch_upgrade");
             if let Err(e) = upgrade_result {
-                // Don't fail the spawn — fall through and let the PTY
+                // Don't fail the spawn â€” fall through and let the PTY
                 // launch. The agent will land on the warm entry's current
                 // HEAD (already at base_ref) instead of the mesh's named
                 // branch, which is the cold-spawn behaviour anyway.
@@ -1267,14 +1273,14 @@ pub async fn spawn_agent_inner(
         }
     }
 
-    // 8-9. Build the command, then spawn it — either normally (portable-pty)
+    // 8-9. Build the command, then spawn it â€” either normally (portable-pty)
     //       or, when the mesh opts in on Windows, inside an AppContainer sandbox
     //       (issue #498). The sandbox path owns its ConPTY spawn but returns the
     //       same `Child`/`MasterPty` trait objects, so everything downstream
     //       (Job Object containment, reader thread, resize, kill) is identical.
     // The node's stored `provider` is the harness-profile id; resolve its paired
     // model-provider account into the `ANTHROPIC_*` backend env (issue #538). A
-    // built-in/absent account yields an empty list → vanilla claude on the
+    // built-in/absent account yields an empty list â†’ vanilla claude on the
     // Anthropic subscription.
     let backend_env = crate::preferences::resolve_provider_env(&node.provider);
     let cmd = build_spawn_command(
@@ -1317,7 +1323,7 @@ pub async fn spawn_agent_inner(
     timer.checkpoint("after_pty_spawn");
 
     // Contain the whole process tree in a Job Object straight away, before the
-    // shell launches the agent CLI — so any process the agent later detaches
+    // shell launches the agent CLI â€” so any process the agent later detaches
     // (e.g. a dev server it backgrounds) is still killed on close, even when its
     // parent has exited and `taskkill /T` could no longer reach it.
     let job = child.process_id().and_then(crate::process_util::JobHandle::contain);
@@ -1346,7 +1352,7 @@ pub async fn spawn_agent_inner(
     //     (register-then-start) is the one that closes the TOCTOU window
     //     in `is_agent_already_running`: a concurrent spawn for the
     //     same session_id sees the entry and bails. The `reader_handle`
-    //     is stashed via a setter after the thread is spawned — the
+    //     is stashed via a setter after the thread is spawned â€” the
     //     tiny window between insert and setter is benign (kill_session
     //     arriving then sees `reader_handle = None` and skips the join,
     //     matching the natural-exit test path).
@@ -1358,8 +1364,8 @@ pub async fn spawn_agent_inner(
     // throwaway stage-1 slug instead of the adopted pool slug.
     //
     // Manual claims only: an Issue/PR claim (`is_rename_spawn`) kept its own
-    // `gh{N}-`/`pr{N}-` `worktree_name` — the pool directory was moved to
-    // match it — so there is nothing to overwrite (#612).
+    // `gh{N}-`/`pr{N}-` `worktree_name` â€” the pool directory was moved to
+    // match it â€” so there is nothing to overwrite (#612).
     if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
         if let Err(e) = db::set_agent_node_worktree_name(session_id, &entry.preassigned_name) {
             tracing::warn!(
@@ -1383,7 +1389,7 @@ pub async fn spawn_agent_inner(
     // reader-thread `first_pty_output` checkpoint log for timeline
     // alignment with every other `spawn_timing:` line. Distinct from
     // `spawned_at` (process-creation time) which the early-exit
-    // heuristic needs — see `start_reader` doc comment.
+    // heuristic needs â€” see `start_reader` doc comment.
     let spawn_start = timer.start();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     crate::http_server::ensure_pty_channel(session_id);
@@ -1424,33 +1430,33 @@ pub async fn spawn_agent_inner(
     db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
 
     // Warm-pool post-claim housekeeping (issue #609). After the spawn
-    // succeeds we (a) drop the bookkeeping row — the directory now lives
-    // on as the node's worktree so the row's purpose is done — and (b)
+    // succeeds we (a) drop the bookkeeping row â€” the directory now lives
+    // on as the node's worktree so the row's purpose is done â€” and (b)
     // fire a background refill so the pool is back at target before the
     // next spawn. Both are best-effort: a failed delete leaves an orphan
     // `claimed` row that the next startup reconcile prunes (its `path`
     // exists, but the `claimed` status means no future claim will pick
-    // it up — it just sits there as harmless bookkeeping until a future
+    // it up â€” it just sits there as harmless bookkeeping until a future
     // issue adds GC for it); a failed refill is logged and retried on the
     // next reconcile pass.
     let did_claim_warm = warm_claimed.is_some();
     if let Some(entry) = warm_claimed.take() {
         crate::services::warm_pool::forget_after_spawn(entry.id);
-        // Full name adoption — MANUAL spawns only (issue #609, PRD #608 §3
+        // Full name adoption â€” MANUAL spawns only (issue #609, PRD #608 Â§3
         // "Manual Spawns"). The node takes the warm entry's slug as BOTH its
         // `worktree_name` (so path resolution lands on the pre-warmed
         // directory) AND its display `name` (so the on-disk directory and the
         // node name match with zero rename). At stage-1 the node was created
         // under a throwaway slug; here we overwrite both with the adopted slug.
         // The slug is a plain `on_spawn` adj-adj-noun, so it's still a
-        // `is_default_name` match — the auto-LLM renamer can override it later
+        // `is_default_name` match â€” the auto-LLM renamer can override it later
         // exactly as it would the throwaway slug. The `worktree_name` UPDATE
         // was already done above (before `register_agent`) so the reader thread
         // sees the adopted value; only `name` needs an event here.
         //
         // Issue/PR claims (`is_rename_spawn`) keep their own `gh{N}-`/`pr{N}-`
-        // name — the pool DIRECTORY was renamed to match the node, not the
-        // reverse — so they skip the name adoption entirely (#612).
+        // name â€” the pool DIRECTORY was renamed to match the node, not the
+        // reverse â€” so they skip the name adoption entirely (#612).
         if !is_rename_spawn {
             if let Err(e) = db::update_agent_node_name(session_id, &entry.preassigned_name) {
                 tracing::warn!(
@@ -1477,13 +1483,13 @@ pub async fn spawn_agent_inner(
     // Single post-spawn pool-maintenance task (issue #613). Runs on its own
     // thread (it shells out to `git` and re-locks the DB) so it never delays
     // the spawn caller, and does BOTH jobs under ONE fill-lock acquisition:
-    //   * ref-freshness — `git reset --hard` stale warm entries onto the new
+    //   * ref-freshness â€” `git reset --hard` stale warm entries onto the new
     //     base SHA, when the spawn-time fetch advanced the ref;
-    //   * refill — top the pool back up to target after this spawn claimed an
+    //   * refill â€” top the pool back up to target after this spawn claimed an
     //     entry.
     // Combining them means refresh and refill can never lose a fill-lock race
     // to each other (the previous split into two threads dropped whichever
-    // lost, with no in-session retry — issue #613 review). Fired whenever
+    // lost, with no in-session retry â€” issue #613 review). Fired whenever
     // either job has work to do.
     if mesh_id > 0 && (ref_advanced_for_pool || did_claim_warm) {
         let mesh_id_for_pool = mesh_id;
@@ -1507,7 +1513,7 @@ pub async fn spawn_agent_inner(
     // running" and is silently swallowed. The PTY was created at the
     // caller-supplied `rows`/`cols` (80x24 for auto_resume_sessions), and
     // because term.cols is already the fitted value no further onResize
-    // fires — the PTY stays at the spawn-time size and the agent wraps
+    // fires â€” the PTY stays at the spawn-time size and the agent wraps
     // its first lines of output inside a wider pane. By emitting here
     // (after the agent is registered AND the DB status flips to
     // `Running`, so the frontend knows the term is mountable), we give
@@ -1577,13 +1583,13 @@ fn emit_sync_outcome_event(
             return;
         }
         Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { new_commits, reason }) => {
-            // Diverged is informational, not an error — the fetch
+            // Diverged is informational, not an error â€” the fetch
             // succeeded, the new commits are visible locally, we just
             // can't auto-apply them without a real merge. The user
             // should know so they can decide whether to `git pull`
             // themselves or rebase.
             let message = format!(
-                "Fetched {} new commit(s) from origin, but local history has diverged ({}). Spawning from local HEAD — pull manually to sync.",
+                "Fetched {} new commit(s) from origin, but local history has diverged ({}). Spawning from local HEAD â€” pull manually to sync.",
                 new_commits, reason
             );
             tracing::warn!("spawn_agent_inner: {}", message);
@@ -1600,7 +1606,7 @@ fn emit_sync_outcome_event(
         }
         Err(crate::git::sync::FetchError::RepoUnusable(reason)) => {
             let message = format!(
-                "Couldn't auto-sync the mesh — repository is unusable: {}. Spawning from local HEAD instead.",
+                "Couldn't auto-sync the mesh â€” repository is unusable: {}. Spawning from local HEAD instead.",
                 reason
             );
             tracing::warn!("spawn_agent_inner: {}", message);
@@ -1616,7 +1622,7 @@ fn emit_sync_outcome_event(
         }
         Err(crate::git::sync::FetchError::FetchFailed(reason)) => {
             // The most common case: network down. We don't try to
-            // distinguish "no network" from "auth failure" — both look
+            // distinguish "no network" from "auth failure" â€” both look
             // the same to `git fetch`. The user knows whether they
             // have connectivity; we just tell them we couldn't sync.
             let message = if reason.is_empty() {
@@ -1642,349 +1648,17 @@ fn emit_sync_outcome_event(
     let _ = app.emit(event_name, payload);
 }
 
-/// Fetch a single ref from `origin` into the local repo. Used by the PR-spawn
-/// path (#420) to materialise `origin/<head_ref>` so the worktree can be cut
-/// from it. `head_ref` is the PR's source branch (e.g. `feat/420-pr-spawn`);
-/// the function runs `git fetch origin <head_ref>` and returns `true` on a
-/// clean exit, `false` on any failure.
-///
-/// Best-effort by design: the caller falls back to the mesh's `base_ref` on
-/// `false` rather than failing the spawn (ADR 0001 offline pattern). The user
-/// sees the agent spawn on the wrong commits in the rare offline / stale-ref
-/// case, instead of a hard error every time the network blips. The
-/// alternative (strict-error spawn) is brittle to the very first offline
-/// session after a fresh install.
-///
-/// `--` separator before `head_ref` defends against an adversarial / malformed
-/// ref starting with `-` (e.g. `--upload-pack=…`); `git fetch` would otherwise
-/// treat it as a flag. GitHub's branch-name validation blocks this in
-/// practice, but the cost of the separator is zero and the upside is hardening
-/// against a future refactor that lets a hand-entered or imported ref flow
-/// through.
-fn fetch_single_ref(project_root: &str, head_ref: &str) -> bool {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    tracing::info!(
-        "fetch_single_ref: running git fetch origin -- {} in {}",
-        head_ref,
-        host_root
-    );
-    let mut cmd = command_no_window("git");
-    cmd.arg("fetch").arg("origin").arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("fetch_single_ref: failed to spawn git fetch: {}", e);
-            return false;
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(
-            "fetch_single_ref: git fetch origin -- {} failed: {}",
-            head_ref,
-            stderr.trim()
-        );
-        return false;
-    }
-    true
-}
-
-/// The alias used for a fork remote (issue #443). `fork-<login>` is
-/// human-readable in `git remote -v` and stays distinct from any user-defined
-/// remote name (a regular remote can't start with `fork-` because GitHub
-/// logins are alphanumeric + `-` with no leading `-`, but a user could
-/// still define one; the `fork-` prefix keeps our entries easy to spot in
-/// the output and trivial to clean up if we ever need to).
-fn fork_remote_alias(head_repo_owner: &str) -> String {
-    format!("fork-{}", head_repo_owner)
-}
-
-/// Fetch a single ref from a fork's clone URL into the local repo. Used by
-/// the PR-spawn path (issue #443, follow-up to #36 worktree adoption) when
-/// the PR's head branch lives on a fork — `fetch_single_ref` only fetches
-/// from `origin`, which the fork's head ref isn't on.
-///
-/// The function:
-///   1. Registers the fork as a remote named `fork-<login>` (idempotent —
-///      ignores the "remote already exists" error from `git remote add` and
-///      updates the URL via `git remote set-url` if the existing URL drifted,
-///      e.g. the user re-pointed the fork's origin on GitHub).
-///   2. Runs `git fetch <alias> <head_ref>` to materialise the ref locally.
-///   3. Returns `true` only when both steps succeed.
-///
-/// Best-effort by design (same contract as `fetch_single_ref`): the caller
-/// falls back to the mesh's `base_ref` on `false` rather than failing the
-/// spawn. The user sees the agent spawn on the wrong commits in the rare
-/// offline / stale-ref / removed-fork case, instead of a hard error every
-/// time the network blips.
-fn fetch_fork_head(
-    project_root: &str,
-    head_repo_owner: &str,
-    head_repo_clone_url: &str,
-    head_ref: &str,
-) -> bool {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    let alias = fork_remote_alias(head_repo_owner);
-    tracing::info!(
-        "fetch_fork_head: ensuring remote {} -> {} in {}",
-        alias,
-        head_repo_clone_url,
-        host_root
-    );
-
-    // Step 1: `git remote add` is idempotent via the explicit existence check.
-    // We use `git remote get-url` (read-only) to see if the remote already
-    // exists; if it does, `set-url` keeps it in sync with the fork's current
-    // clone URL. If it doesn't, `remote add` registers it. This avoids
-    // parsing `git remote add`'s non-zero stderr for the "already exists"
-    // signal — easier to read, and works on every git version.
-    let mut get_url = command_no_window("git");
-    get_url.arg("remote").arg("get-url").arg(&alias);
-    let existing = get_url
-        .current_dir(&host_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-    let url_matches = existing.as_deref() == Some(head_repo_clone_url);
-    if !url_matches {
-        let mut cmd = command_no_window("git");
-        if existing.is_some() {
-            cmd.arg("remote").arg("set-url").arg(&alias).arg(head_repo_clone_url);
-            tracing::info!("fetch_fork_head: updating remote {} URL", alias);
-        } else {
-            cmd.arg("remote").arg("add").arg(&alias).arg(head_repo_clone_url);
-            tracing::info!("fetch_fork_head: adding remote {}", alias);
-        }
-        let output = match cmd.current_dir(&host_root).output() {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::warn!("fetch_fork_head: failed to spawn git remote: {}", e);
-                return false;
-            }
-        };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                "fetch_fork_head: git remote config for {} failed: {}",
-                alias,
-                stderr.trim()
-            );
-            return false;
-        }
-    }
-
-    // Step 2: fetch the head ref. `--` before `head_ref` defends against an
-    // adversarial / malformed ref starting with `-` (same hardening as
-    // `fetch_single_ref`).
-    tracing::info!(
-        "fetch_fork_head: running git fetch {} -- {} in {}",
-        alias,
-        head_ref,
-        host_root
-    );
-    let mut cmd = command_no_window("git");
-    cmd.arg("fetch").arg(&alias).arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("fetch_fork_head: failed to spawn git fetch: {}", e);
-            return false;
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(
-            "fetch_fork_head: git fetch {} -- {} failed: {}",
-            alias,
-            head_ref,
-            stderr.trim()
-        );
-        return false;
-    }
-    true
-}
-
-/// Upgrade a warm pool entry from detached HEAD to the mesh's configured
-/// worktree mode (issue #609, PRD #608 §3). The pool cuts every entry as
-/// `detached` so a future claim can adopt the directory without ever
-/// touching the mesh's branch refs — the cost is one `git checkout -B
-/// <branch>` (branched mode, ~50ms) or no-op (detached mode, ~5ms).
-///
-/// This is the entire warm-path "checkout" cost the tracer bullet buys: the
-/// on-disk tree is already at the mesh's base SHA (the worker checked it
-/// out); all the spawn has to do is flip the working ref. The 97% of cold-
-/// spawn time that was Windows Defender / NTFS search indexer / USN journal
-/// scanning freshly-written files is paid ONCE on app startup, not per
-/// spawn.
-///
-/// Best-effort by design: any failure here is logged by the caller and the
-/// spawn falls through. The agent lands on the warm entry's current HEAD
-/// (still at base_ref) instead of the mesh's named branch — strictly worse
-/// than the branched path, but never worse than a cold spawn would be.
-///
-/// `command_no_window` already applies CREATE_NO_WINDOW on Windows
-/// (`process_util::command_no_window`), so we don't need per-OS cfg
-/// duplication here.
-fn upgrade_warm_to_mode(
-    project_root: &str,
-    host_path: &str,
-    branch_name: &str,
-    mode: &str,
-) -> Result<(), String> {
-    if mode == "detached" {
-        // No-op: the pool already cut the entry as detached.
-    } else {
-        // Branched mode: `git checkout -B <branch>` from the current HEAD. `-B`
-        // (uppercase) is deliberate here — a manual spawn's branch IS the pool's
-        // preassigned slug (a random adj-adj-noun like `bold-amber-fox`), so a
-        // collision with a pre-existing branch is vanishingly unlikely and `-B`
-        // keeps the call idempotent across a re-claim of a still-detached entry.
-        // (The Issue/PR path uses `-b` instead — see `checkout_worktree_to_base` —
-        // because its branch name is deterministic and `-B` would force-reset a
-        // user's prior work.)
-        run_git_checkout(host_path, &["-B", branch_name])?;
-    }
-    // Re-apply `.worktreeinclude` so the manual warm claim matches what
-    // `create_git_worktree` and `adopt_warm_worktree_by_move` already do
-    // (issue #639 gap 1). The prewarm-time copy is stale by the time a user
-    // manually spawns — typical edits to a `.worktreeinclude` source (`.env`,
-    // build cache, `node_modules/`) would otherwise leave the agent on the
-    // prewarm snapshot. Best-effort like the other call sites: a copy
-    // failure here is logged inside `apply_worktree_include` but doesn't fail
-    // the spawn — the worktree is already usable without the extras.
-    crate::git::worktree::apply_worktree_include(
-        project_root,
-        std::path::Path::new(host_path),
-    );
-    Ok(())
-}
-
-/// Adopt a claimed warm-pool worktree for an Issue/PR spawn (issue #612): move
-/// the pre-warmed plain-slug directory to the node's `gh{N}-`/`pr{N}-` target
-/// path, then check that worktree out to `base_ref` on the node's branch (or
-/// detached), then re-apply `.worktreeinclude` so the result matches a cold
-/// spawn. Any step failing returns `Err` so the spawn path can clean up the
-/// warm entry and fall back to a cold `git worktree add`.
-///
-/// The move is the cheap part (`git worktree move`, ~tens of ms); the checkout
-/// only writes the diff between the pool's base SHA and `base_ref` — for an
-/// Issue spawn `base_ref` IS the mesh base the pool already sits on (near-zero
-/// writes), and for a PR spawn it's the freshly fetched PR head (just the PR's
-/// changed files), versus a cold spawn re-writing the entire tree.
-fn adopt_warm_worktree_by_move(
-    project_root: &str,
-    old_host_path: &str,
-    new_host_path: &str,
-    branch_name: &str,
-    mode: &str,
-    base_ref: &str,
-) -> Result<(), String> {
-    // Resolve `base_ref` to a concrete SHA up front (offline → HEAD fallback,
-    // and never a symbolic ref to `git checkout`), mirroring what the cold
-    // path's `add_worktree_impl` does via `resolve_base_commit`. Resolving
-    // BEFORE the move means a bad ref fails fast, before we disturb the pool
-    // directory.
-    let base_sha = crate::git::worktree::resolve_base_ref_sha(project_root, base_ref)?;
-    crate::git::worktree::move_git_worktree(project_root, old_host_path, new_host_path)?;
-    checkout_worktree_to_base(new_host_path, branch_name, mode, &base_sha)?;
-    crate::git::worktree::apply_worktree_include(
-        project_root,
-        std::path::Path::new(new_host_path),
-    );
-    Ok(())
-}
-
-/// `git checkout` a (just-moved) warm worktree onto a specific `base_sha`.
-/// Branched mode uses `-b <branch> <base_sha>` — like the cold path's
-/// `git worktree add -b`, it REFUSES if the branch already exists rather than
-/// clobbering it, so a re-spawn never silently force-resets a deterministic
-/// `gh{N}-`/`pr{N}-` branch and orphans the agent's earlier commits. Detached
-/// mode uses `--detach <base_sha>`.
-///
-/// Unlike [`upgrade_warm_to_mode`] (manual spawns, which stay on the warm
-/// entry's current HEAD), Issue/PR spawns must land on a *named* ref: the mesh
-/// base for Issue spawns, the PR head (`origin/<head>` / `fork-<login>/<head>`)
-/// for PR spawns. The cold-path PR-head-fetch resolves that ref, and
-/// `adopt_warm_worktree_by_move` resolves it to the `base_sha` passed here.
-fn checkout_worktree_to_base(
-    host_path: &str,
-    branch_name: &str,
-    mode: &str,
-    base_sha: &str,
-) -> Result<(), String> {
-    if mode == "branched" {
-        run_git_checkout(host_path, &["-b", branch_name, base_sha])
-    } else {
-        run_git_checkout(host_path, &["--detach", base_sha])
-    }
-}
-
-/// Shared `git -C <host_path> checkout <args…>` runner for the warm-pool
-/// checkout paths (manual mode-upgrade and Issue/PR adoption). Centralises the
-/// `command_no_window` plumbing and the stderr-surfacing error shape so a
-/// future fix (arg quoting, lock-retry) lands for both callers at once; the
-/// deliberate flag differences (`-B` vs `-b`) stay explicit at the call sites.
-fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
-    use crate::process_util::command_no_window;
-    let mut cmd = command_no_window("git");
-    cmd.arg("-C").arg(host_path).arg("checkout").args(args);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to spawn git checkout: {}", e))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git checkout {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(())
-}
-
-/// Read the local SHA at `refs/remotes/origin/<head_ref>` — the ref
-/// `fetch_single_ref` populates via `git fetch origin -- <head_ref>`.
-/// Returns `None` when the ref doesn't exist (a stale local cache, a
-/// first-time fetch, or a non-git directory) so the spawn path can treat
-/// the absence as "skip the drift check" rather than a hard error.
-///
-/// Issue #444 — exact-pinning: the spawn path compares this to the
-/// `source_pr_pinned_sha` we stored at `create_pr_node` time and emits a
-/// `pr_sha_drift` `mesh-sync-warning` if they differ. SHA comparison is
-/// direct string equality: both `git rev-parse` and GitHub's API return
-/// 40-char lowercase hex, so a `String::ne` check is sufficient (no need
-/// to lowercase or trim).
-///
-/// `remote_ref` is the full remote-tracking ref (e.g. `origin/feat-x` for
-/// same-repo PRs from #420, or `fork-alice/feat-x` for fork PRs from #443).
-/// `git rev-parse` accepts both the short and the fully-qualified
-/// `refs/remotes/origin/...` form.
-fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Option<String> {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    // Read the symbolic SHA in one shot — `git rev-parse` exits non-zero
-    // (and produces no stdout) when the ref doesn't exist, so we don't
-    // need a separate "is this a ref?" probe first.
-    let mut cmd = command_no_window("git");
-    cmd.arg("rev-parse").arg(remote_ref);
-    let output = cmd.current_dir(&host_root).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The fetch + worktree helpers that drive warm-pool adoption / upgrade
+    // moved to `git::worktree::provision` (deepening completion of ADR 0007).
+    // The tests below still live in this module for historical locality but
+    // reach the helpers across the new seam.
+    use crate::git::worktree::provision::{
+        adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
+        read_origin_ref_sha, upgrade_warm_to_mode,
+    };
     use tempfile::TempDir;
 
     /// Pin the spawn-time fallback. Sole pin of `DEFAULT_WORKTREE_MODE`
@@ -1995,11 +1669,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Warm-pool manual claim — .worktreeinclude re-application (issue #639
-    // gap 1). The cold `create_git_worktree` and the Issue/PR `adopt…by_move`
+    // Warm-pool manual claim â€” .worktreeinclude re-application (issue #639
+    // gap 1). The cold `create_git_worktree` and the Issue/PR `adoptâ€¦by_move`
     // both call `apply_worktree_include` so an adopted worktree is byte-for-
     // byte equivalent to a cold spawn. The manual warm-claim fast path
-    // (upgrade_warm_to_mode) MUST do the same — otherwise a user who edits a
+    // (upgrade_warm_to_mode) MUST do the same â€” otherwise a user who edits a
     // `.worktreeinclude`-referenced file (typical: `.env`, build cache) between
     // prewarm time and spawn time lands on a stale copy.
     // -----------------------------------------------------------------------
@@ -2045,11 +1719,11 @@ mod tests {
             "prewarm-time copy must reflect the original source"
         );
 
-        // User edits the source file BETWEEN prewarm and manual spawn —
+        // User edits the source file BETWEEN prewarm and manual spawn â€”
         // exactly the window the missing apply_worktree_include used to leak.
         fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
 
-        // The manual warm claim's mode upgrade — must re-copy `.worktreeinclude`
+        // The manual warm claim's mode upgrade â€” must re-copy `.worktreeinclude`
         // sources so the agent's worktree matches the live repo state, not the
         // stale prewarm snapshot.
         upgrade_warm_to_mode(root.to_str().unwrap(), pool.to_str().unwrap(), "bold-amber-fox", "branched")
@@ -2064,7 +1738,7 @@ mod tests {
         );
     }
 
-    /// No `.worktreeinclude` at the repo root → the upgrade is still a no-op
+    /// No `.worktreeinclude` at the repo root â†’ the upgrade is still a no-op
     /// rather than an error. Prevents a regression where adding the include
     /// re-application broke a repo that never used the feature.
     #[test]
@@ -2098,8 +1772,8 @@ mod tests {
 
     /// Detached mode must also re-apply `.worktreeinclude` (issue #639 gap 1,
     /// review finding). The original `upgrade_warm_to_mode` returned early on
-    /// `mode == "detached"` and skipped the include copy — a regression that
-    /// re-instated that early-return would pass `…_reapplies…_after_checkout`
+    /// `mode == "detached"` and skipped the include copy â€” a regression that
+    /// re-instated that early-return would pass `â€¦_reappliesâ€¦_after_checkout`
     /// (branched) but leave a detached-mode spawn on the stale prewarm
     /// snapshot, defeating the gap-1 fix for half the meshes.
     #[test]
@@ -2131,7 +1805,7 @@ mod tests {
             "prewarm-time copy must reflect the original source"
         );
 
-        // User edits the source — same window as the branched-mode test.
+        // User edits the source â€” same window as the branched-mode test.
         fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
 
         // Upgrade in DETACHED mode. The branch name is unused (no checkout),
@@ -2149,7 +1823,7 @@ mod tests {
             "v1=NEW\n",
             "manual warm claim in detached mode must also re-apply .worktreeinclude"
         );
-        // And the worktree stayed detached — no branch was created.
+        // And the worktree stayed detached â€” no branch was created.
         let wt = git2::Repository::open(&pool).unwrap();
         assert!(
             wt.head_detached().unwrap_or(false),
@@ -2161,7 +1835,7 @@ mod tests {
     // Warm-pool Issue/PR adoption (issue #612): move a detached pool worktree
     // onto the node's target name and check it out to the resolved base SHA on
     // its own branch. These pin the code-review fixes for two confirmed bugs:
-    // resolving `base_ref` → SHA (offline resilience), and using `-b` (NOT
+    // resolving `base_ref` â†’ SHA (offline resilience), and using `-b` (NOT
     // `-B`) so a re-spawn can never force-reset a branch carrying prior work.
     // -----------------------------------------------------------------------
 
@@ -2253,11 +1927,11 @@ mod tests {
     //
     // Pre-fix, the spawn path hardcoded `"origin/main"` as the default
     // `base_ref` when the `meshes.base_ref` DB column was `'origin/main'`
-    // (its COALESCE default) — meaning a master-trunk repo always hit
+    // (its COALESCE default) â€” meaning a master-trunk repo always hit
     // `mesh-sync-warning` on every spawn (`fatal: couldn't find remote
     // ref main`). These tests pin the resolution chain:
     //
-    //   1. meshes.base_ref (BUT NOT the COALESCE default — that's
+    //   1. meshes.base_ref (BUT NOT the COALESCE default â€” that's
     //      treated as "no config" so the detection chain runs)
     //   2. refs/remotes/origin/HEAD read from the local repo
     //   3. "origin/main" last resort
@@ -2265,7 +1939,7 @@ mod tests {
     // The COALESCE-sentinel treatment is critical: the DB column is
     // NOT NULL with default `'origin/main'`, so `Mesh.base_ref` is
     // ALWAYS a non-empty `String` and `MeshRow.base_ref` is ALWAYS
-    // `Some(_)` — a naive `if let Some(b) = config_base_ref { return b }`
+    // `Some(_)` â€” a naive `if let Some(b) = config_base_ref { return b }`
     // would make the detection chain dead code in production. The
     // `resolve_base_ref_treats_coalesce_sentinel_as_unset` test pins the
     // production call path (`Some("origin/main")`).
@@ -2273,7 +1947,7 @@ mod tests {
 
     #[test]
     fn resolve_base_ref_uses_config_value_when_set() {
-        // The config wins even on a non-repo / non-master path — explicit
+        // The config wins even on a non-repo / non-master path â€” explicit
         // user intent overrides any auto-detection. Empty / whitespace
         // config falls through to the detection chain (regression guard
         // for an empty-string value slipping through the COALESCE).
@@ -2283,7 +1957,7 @@ mod tests {
             "origin/develop"
         );
         // Empty / whitespace strings are treated as "no config" so the
-        // detection chain runs — mirrors the COALESCE-to-default contract
+        // detection chain runs â€” mirrors the COALESCE-to-default contract
         // in the DB layer.
         assert_eq!(
             resolve_base_ref_for_spawn(tmp.path().to_str().unwrap(), Some("")),
@@ -2299,7 +1973,7 @@ mod tests {
 
     #[test]
     fn resolve_base_ref_falls_back_to_origin_main_for_non_repo() {
-        // Non-repo path with no config — must not panic. Last-resort
+        // Non-repo path with no config â€” must not panic. Last-resort
         // behaviour preserved: `get_default_branch` returns "main" on a
         // failed `Repository::open`, and we prefix it with "origin/".
         // The spawn path itself short-circuits to `RepoUnusable` so the
@@ -2322,7 +1996,7 @@ mod tests {
         let td = TestDir::new("base_ref_master");
         let parent = td.path();
         // Create a working repo on whatever default branch git picks.
-        // The local branch name doesn't matter — what matters is that
+        // The local branch name doesn't matter â€” what matters is that
         // `refs/remotes/origin/HEAD` points at `refs/remotes/origin/master`.
         crate::env::test_helpers::init_repo_with_commit(
             parent,
@@ -2412,8 +2086,8 @@ mod tests {
         // The production call path: `meshes.base_ref` is a NOT NULL
         // column with a COALESCE default of `'origin/main'` (see
         // `db::MESH_COLUMNS`). A fresh mesh whose base_ref was never
-        // explicitly set reads as `Some("origin/main")` from the DB →
-        // `MeshRow.base_ref = Some("origin/main")` →
+        // explicitly set reads as `Some("origin/main")` from the DB â†’
+        // `MeshRow.base_ref = Some("origin/main")` â†’
         // `config.as_ref().and_then(|c| c.base_ref.as_deref())` returns
         // `Some("origin/main")`. The helper MUST treat this sentinel as
         // "no config" and fall through to the detection chain, otherwise
@@ -2456,7 +2130,7 @@ mod tests {
         assert_eq!(
             resolved, "origin/master",
             "the COALESCE default 'origin/main' from a fresh mesh's DB row \
-             must be treated as 'no config' — fall through to origin/HEAD \
+             must be treated as 'no config' â€” fall through to origin/HEAD \
              detection. A master-trunk repo with an unconfigured mesh \
              produces origin/master, not origin/main. This is the actual \
              production contract; the test passing None never reaches \
@@ -2507,7 +2181,7 @@ mod tests {
         assert_eq!(
             resolved, "origin/main",
             "explicit user-set 'origin/main' on a main-trunk repo must resolve \
-             to 'origin/main' (same as auto-detect — no behaviour change)"
+             to 'origin/main' (same as auto-detect â€” no behaviour change)"
         );
     }
 
@@ -2525,7 +2199,7 @@ mod tests {
     fn read_origin_ref_sha_returns_local_sha_when_ref_exists() {
         let tmp = TempDir::new().unwrap();
         let repo = git2::Repository::init(tmp.path()).unwrap();
-        // Create a real commit on a known branch — we need a tree OID the
+        // Create a real commit on a known branch â€” we need a tree OID the
         // commit can point at. `Repository::init` leaves the index empty
         // but write_tree() on an empty index still produces a valid tree.
         let tree_oid = repo.index().unwrap().write_tree().unwrap();
@@ -2555,14 +2229,14 @@ mod tests {
         git2::Repository::init(tmp.path()).unwrap();
         // No refs/remotes/origin/* exists; the function must return None
         // (the spawn path treats this as "skip drift check" rather than
-        // failing — same fail-open semantics as `pr_head_unfetchable`).
+        // failing â€” same fail-open semantics as `pr_head_unfetchable`).
         let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/nope");
         assert!(sha.is_none(), "missing ref must return None, not error");
     }
 
     #[test]
     fn read_origin_ref_sha_returns_none_for_non_git_directory() {
-        // A path that isn't a git repo at all — `git rev-parse` exits non-zero,
+        // A path that isn't a git repo at all â€” `git rev-parse` exits non-zero,
         // the helper must swallow that and return None rather than panicking.
         let tmp = TempDir::new().unwrap();
         let sha = read_origin_ref_sha(tmp.path().to_str().unwrap(), "origin/main");
@@ -2577,7 +2251,7 @@ mod tests {
     }
 
     /// The Notification hook must fire on EVERY notification type, not just
-    /// `idle_prompt`. An empty matcher is Claude Code's "match all" — without it
+    /// `idle_prompt`. An empty matcher is Claude Code's "match all" â€” without it
     /// the hook ignores `permission_prompt` notifications, so the user is never
     /// alerted when an agent asks to run a tool or otherwise needs a decision.
     /// Regression guard for the "only alerted after the agent finishes" gap.
@@ -2632,7 +2306,7 @@ mod tests {
     }
 
     /// Injection must preserve unrelated keys already present in the user's
-    /// settings.local.json (e.g. `permissions`) — it only owns `hooks`.
+    /// settings.local.json (e.g. `permissions`) â€” it only owns `hooks`.
     #[test]
     fn attention_hook_preserves_other_settings() {
         let temp = TempDir::new().unwrap();
@@ -2672,7 +2346,7 @@ mod tests {
     /// doesn't need a network round-trip) and a regular repo that will
     /// register the fork as a remote. The fork has a single commit on
     /// `main` plus a `feat/443-fork` branch so the fetch can target a
-    /// non-default ref. Returns `(local, fork_bare_dir, fork_path)` —
+    /// non-default ref. Returns `(local, fork_bare_dir, fork_path)` â€”
     /// the caller holds the dirs for the duration of the test.
     fn init_fork_fixture() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
         // Source: a regular repo with a feature branch we can fetch.
@@ -2700,15 +2374,15 @@ mod tests {
         )
         .unwrap();
         let _ = tree;
-        // `main_commit` is a `git2::Oid` (Copy) — no need to `drop` it; the
+        // `main_commit` is a `git2::Oid` (Copy) â€” no need to `drop` it; the
         // explicit `drop()` was a no-op flagged by clippy.
         let feat_commit = src_repo.find_commit(feat_commit).unwrap();
         src_repo
             .branch("feat/443-fork", &feat_commit, true)
             .unwrap();
         // Bare clone target (so the fork has no working tree, like a real
-        // remote on GitHub — `git fetch` reads its objects directly).
-        // Use a unique, path-safe name — avoid `{:?}` on the source path
+        // remote on GitHub â€” `git fetch` reads its objects directly).
+        // Use a unique, path-safe name â€” avoid `{:?}` on the source path
         // (it produces `C:\...` with backslashes and quotes that don't
         // round-trip as a directory name on Windows).
         let bare_dir = std::env::temp_dir().join(format!(
@@ -2722,7 +2396,7 @@ mod tests {
         remote
             .fetch(&["refs/heads/*:refs/heads/*"], None, None)
             .unwrap();
-        // Local: a fresh repo with no remotes — this is what
+        // Local: a fresh repo with no remotes â€” this is what
         // `fetch_fork_head` will register the fork on.
         let local = TempDir::new().unwrap();
         git2::Repository::init(local.path()).unwrap();
@@ -2757,7 +2431,7 @@ mod tests {
         let url = remote.url().expect("remote URL must be set");
         assert_eq!(url, bare_dir_str, "remote URL must match the fork's clone URL");
 
-        // Verify the ref was fetched — it should be visible as
+        // Verify the ref was fetched â€” it should be visible as
         // `fork-alice/feat/443-fork`.
         let reference = local_repo
             .find_reference("refs/remotes/fork-alice/feat/443-fork")
@@ -2783,7 +2457,7 @@ mod tests {
         );
         assert!(first, "first call must succeed");
 
-        // Second call with the SAME URL — must not error (the `remote add`
+        // Second call with the SAME URL â€” must not error (the `remote add`
         // path is the failure-prone one without the existence check; the
         // `get-url` probe should return the right URL and skip the add).
         let second = fetch_fork_head(
@@ -2803,7 +2477,7 @@ mod tests {
     }
 
     /// URL drift: if the fork's clone URL changes between spawns (the
-    /// user renamed the repo, or — more likely — the first call stored a
+    /// user renamed the repo, or â€” more likely â€” the first call stored a
     /// stale URL), the second call should update the existing remote's
     /// URL via `git remote set-url` rather than fail or keep the stale
     /// URL. Pin this so a future refactor that skips the set-url branch
@@ -2829,7 +2503,7 @@ mod tests {
         );
         assert!(first, "first call must succeed");
 
-        // Second call: same alias, drifted URL — the function should run
+        // Second call: same alias, drifted URL â€” the function should run
         // `git remote set-url` and re-fetch.
         let second = fetch_fork_head(
             local.path().to_str().unwrap(),
@@ -2845,7 +2519,7 @@ mod tests {
             .find_remote("fork-alice")
             .expect("remote must still be registered");
         let stored = remote.url().unwrap();
-        // git normalises file:// URLs slightly on Windows — assert it's
+        // git normalises file:// URLs slightly on Windows â€” assert it's
         // the drifted one rather than the original.
         assert_ne!(
             stored, stale_url,
@@ -2875,17 +2549,17 @@ mod tests {
 
     // ----- fetch_single_ref (issue #420) ---------------------------------
     //
-    // Same-repo PR spawn (#420) — the worktree adoption path calls
+    // Same-repo PR spawn (#420) â€” the worktree adoption path calls
     // `fetch_single_ref` to materialise `origin/<head_ref>` so the worktree
     // can be cut from it. The function shells out to `git fetch origin -- <ref>`;
     // the `--` separator is the security hardening (a ref starting with `-`
-    // would otherwise be parsed as a `git` flag like `--upload-pack=…`).
+    // would otherwise be parsed as a `git` flag like `--upload-pack=â€¦`).
     //
     // These tests pin all four cases the issue calls out:
-    //   1. success — ref exists on origin
-    //   2. ref-not-found — ref missing on origin (caller falls back to base_ref)
-    //   3. non-git path — caller passed a directory that isn't a repo
-    //   4. adversarial ref — `--`-prefixed input is rejected by `git` itself
+    //   1. success â€” ref exists on origin
+    //   2. ref-not-found â€” ref missing on origin (caller falls back to base_ref)
+    //   3. non-git path â€” caller passed a directory that isn't a repo
+    //   4. adversarial ref â€” `--`-prefixed input is rejected by `git` itself
     //
     // The fixture mirrors `init_fork_fixture` but for the same-repo path:
     // a bare repo holds a single branch, the local repo has `origin`
@@ -2894,7 +2568,7 @@ mod tests {
 
     /// Build a "remote + local" pair: the bare repo has a single commit on
     /// `main` plus a `feat/420-pr-spawn` branch; the local repo has `origin`
-    /// pointed at the bare. Returns `(local, bare_path)` — the local TempDir
+    /// pointed at the bare. Returns `(local, bare_path)` â€” the local TempDir
     /// owns its on-disk path; `bare_path` is a plain PathBuf that lives
     /// inside `std::env::temp_dir()` and is reused across calls (it gets
     /// re-populated with the same content each time, so the SHA is stable
@@ -2902,7 +2576,7 @@ mod tests {
     fn init_same_repo_fixture() -> (TempDir, std::path::PathBuf) {
         // Source: a working repo with a feature branch we can fetch.
         // We reuse the same on-disk source across tests in a single
-        // process — `init_same_repo_fixture` is only called from the
+        // process â€” `init_same_repo_fixture` is only called from the
         // same-repo tests below, and the contents are deterministic.
         static SRC_DIR: std::sync::OnceLock<std::path::PathBuf> =
             std::sync::OnceLock::new();
@@ -2925,7 +2599,7 @@ mod tests {
                 src_repo
                     .branch("feat/420-pr-spawn", &main_commit_obj, true)
                     .unwrap();
-                // Leak the TempDir guard — we want src_path to stay alive
+                // Leak the TempDir guard â€” we want src_path to stay alive
                 // for the whole process, and the bare-fetch step below
                 // re-reads from the on-disk path on every test.
                 std::mem::forget(src);
@@ -2933,7 +2607,7 @@ mod tests {
             })
             .clone();
 
-        // Bare remote — same pattern as `init_fork_fixture`. A unique
+        // Bare remote â€” same pattern as `init_fork_fixture`. A unique
         // name per process so parallel `cargo test` invocations don't
         // collide on the bare dir.
         let bare_dir = std::env::temp_dir().join(format!(
@@ -2971,7 +2645,7 @@ mod tests {
             ok,
             "fetch_single_ref must return true when the ref exists on origin"
         );
-        // Verify the ref actually got materialised — a true return with no
+        // Verify the ref actually got materialised â€” a true return with no
         // visible ref would mean a silent no-op, which is a worse failure
         // mode than a hard error.
         let local_repo = git2::Repository::open(local.path()).unwrap();
@@ -2987,7 +2661,7 @@ mod tests {
     /// Ref-not-found path: a ref that does NOT exist on `origin` causes
     /// `git fetch` to exit non-zero. The function returns `false` (not
     /// an error) so the spawn path can fall back to the mesh's
-    /// `base_ref` — this is the ADR 0001 offline pattern, surface as
+    /// `base_ref` â€” this is the ADR 0001 offline pattern, surface as
     /// `pr_head_unfetchable` rather than failing the spawn.
     #[test]
     fn fetch_single_ref_returns_false_when_ref_missing() {
@@ -3002,7 +2676,7 @@ mod tests {
 
     /// Non-git path: a directory that isn't a git repo at all. `git fetch`
     /// errors immediately; the function swallows that and returns `false`.
-    /// This is the "user has a partial / broken clone" edge case — the
+    /// This is the "user has a partial / broken clone" edge case â€” the
     /// spawn must not panic.
     #[test]
     fn fetch_single_ref_returns_false_for_non_git_directory() {
@@ -3018,18 +2692,18 @@ mod tests {
     /// (e.g. `--upload-pack=evil`) is rejected by `git` itself because of
     /// the `--` separator before `head_ref`. Without the separator, `git`
     /// would parse `--upload-pack=evil` as a flag and use it for the
-    /// fetch — a vector for arbitrary command execution on a malicious
+    /// fetch â€” a vector for arbitrary command execution on a malicious
     /// server (CVE-2017-1000117 / CVE-2018-17456 class). The hardening
     /// lives in `fetch_single_ref`; this test pins the contract so a
     /// future refactor that drops the `--` separator fails the test
     /// rather than silently re-introducing the vulnerability.
     ///
     /// We pass a ref that, WITHOUT the separator, `git` would parse as a
-    /// flag (`--upload-pack=evil`) — `git fetch` will then error out on
+    /// flag (`--upload-pack=evil`) â€” `git fetch` will then error out on
     /// "fatal: bad config name", proving the separator did its job. With
     /// the separator, the value reaches the ref-spec parser as a
     /// literal ref name (which still doesn't exist on origin, so the
-    /// call returns `false` either way — the contract is "the function
+    /// call returns `false` either way â€” the contract is "the function
     /// returns false rather than letting `--upload-pack` reach git").
     #[test]
     fn fetch_single_ref_rejects_adversarial_dash_ref() {

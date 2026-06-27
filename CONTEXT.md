@@ -45,6 +45,14 @@ _Avoid_: Provider row, launch option, harness profile (the existing `HarnessProf
 The single, backend-derived, **Agent Harness**-grouped, user-ordered list of **Spawn Options**. Every spawn surface renders this one menu as-is.
 _Avoid_: Provider menu, launch dropdown.
 
+**Spawn Context**:
+The fully resolved state Buildmesh carries mid-spawn — the loaded `AgentNode`, the resolved **Agent Harness** adapter, the mesh row fields (`base_ref`, `sandbox`, `use_worktree`, `worktree_mode`), the path pair (Windows `host_path` for git operations, the spawn-form path the agent sees), the optional **Pre-spawn Worktree** claim, and the SHAs resolved from the spawn-time fetch. It is the boundary between *resolving* what to spawn (one round of DB / mesh-row / git-fetch reads) and *provisioning* the Worktree Node + spawning the process. Each phase of the spawn pipeline reads the Spawn Context and may augment it (e.g. the warm-pool claim attaches a `ClaimedWarmEntry`; the worktree provisioner attaches the resolved `base_sha`) before handing it to the next phase. Today the Spawn Context is the implicit local-variable set inside `spawn_agent_inner`; deepening the spawn pipeline means giving it a name and a type so the Worktree Node provisioner (`git::worktree`) and the process spawner (`agent::process`) take it as their interface.
+_Avoid_: spawn state, spawn config, resolved spawn params (these miss the temporal "between phases" sense); **Spawn Recipe** (that's the per-**Agent Harness** shell + env-var bundle, not the resolved state of one attempt).
+
+**Spawn Source**:
+The runtime classification of an **Agent Node** spawn — how it was triggered. One of three values: `Manual` (user clicked Spawn from the mesh panel — no `source_issue`, no `source_pr`), `Issue` (spawned from the Issues Probe — `source_issue` is set, the node carries a `gh{N}-` branch name), or `PullRequest` (spawned from the PR Probe — `source_pr` is set, the node carries a `pr{N}-` branch name). The Worktree Node provisioner uses Spawn Source to decide between the two Pre-spawn Worktree adoption modes: `Issue` and `PullRequest` move the pool's plain-slug directory to the node's `gh{N}-`/`pr{N}-` name (`git worktree move` + checkout to the resolved base SHA); `Manual` adopts the pool's pre-assigned slug as the node's own name and `git checkout -B` aligns the worktree's mode with the mesh's `worktree_mode`. Distinct from **Spawn Option** (which is a menu entry — what the user *could have* picked) and from **Spawn Context** (which is the resolved state of one attempt).
+_Avoid_: spawn kind, spawn type, spawn trigger (these miss the runtime-vs-menu distinction).
+
 
 **Mesh**:
 A project workspace associated with a local Git repository root path.
