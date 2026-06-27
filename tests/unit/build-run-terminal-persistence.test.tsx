@@ -154,7 +154,11 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
 
     // Explicit close — the X button path. Must kill the PTY (otherwise
     // a leak accumulates every time the user opens then closes a
-    // terminal).
+    // terminal). Flush microtasks so the api.buildRun().then() callback
+    // that flips ptyAlive=true has fired — in real usage the user takes
+    // hundreds of ms between open and X-click, but the test goes straight
+    // from `await attach()` to `dispose()` and would otherwise race.
+    await Promise.resolve();
     buildRunTerminalManager.dispose(8, 'terminal', true);
 
     const closeCalls = vi.mocked(invoke).mock.calls.filter(

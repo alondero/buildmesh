@@ -38,14 +38,15 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
   useAsyncEffect((signal) => {
     if (!containerRef.current) return;
     const container = containerRef.current;
-    buildRunTerminalManager.attach(sessionId, mode, useWorktree, container);
+    buildRunTerminalManager.attach(sessionId, mode, useWorktree, container, signal);
     return () => {
       // DOM-only teardown — the registry preserves the xterm + PTY. The
       // next mount's `attach` will re-parent the existing `.xterm` element
-      // into the new container with zero re-initialization.
-      if (!signal.aborted) {
-        buildRunTerminalManager.detach(sessionId, mode, useWorktree);
-      }
+      // into the new container with zero re-initialization. Always run
+      // `detach` unconditionally — `useAsyncEffect` aborts the signal
+      // BEFORE invoking this cleanup, so a `signal.aborted` guard here
+      // would skip `detach` entirely (bug seen in code review).
+      buildRunTerminalManager.detach(sessionId, mode, useWorktree);
     };
   }, [sessionId, mode, useWorktree]);
 

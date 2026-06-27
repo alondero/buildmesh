@@ -273,14 +273,11 @@ pub async fn build_run(
         loop {
             match r.read(&mut buf) {
                 Ok(0) => {
-                    // EOF — process exited. Notify the frontend BEFORE
-                    // emitting the trailing `[process exited]` line so
-                    // listeners know the PTY is dead regardless of whether
-                    // the output-stream EOF gets coalesced with the exit
-                    // text. The BuildRunTerminalRegistry uses this to flip
-                    // `ptyAlive=false` and surface a visible banner if the
-                    // terminal is currently attached — without it, a shell
-                    // that exits while the user is on another mesh would
+                    // EOF — process exited. Notify the frontend so the
+                    // BuildRunTerminalRegistry can flip `ptyAlive=false`
+                    // and surface a visible banner if the terminal is
+                    // currently attached — without this, a shell that
+                    // exits while the user is on another mesh would
                     // leave a zombie PTY that silently swallows keystrokes.
                     let _ = app_handle.emit(
                         &format!("build-run-exited-{}", node_id_clone),
@@ -301,8 +298,14 @@ pub async fn build_run(
                 }
             }
         }
-        // Emit end event
-        let _ = app_handle.emit(&format!("build-run-output-{}", node_id_clone), &"[process exited]\r\n");
+        // Drop the BUILD_RUN_REGISTRY entry on EOF so subsequent
+        // `write_to_build_run` calls correctly hit the "Build run not
+        // running" path. Without this, the registry still holds the
+        // writer after the child has exited, so `write_bytes` succeeds
+        // at the syscall level — keystrokes vanish silently into a dead
+        // PTY instead of producing the visible rejection. See code-review
+        // Finding Alt-2.
+        BUILD_RUN_REGISTRY.lock().unwrap().remove(&node_id_clone);
     });
 
     // 10. Drop child guard — the process continues in the reader thread
