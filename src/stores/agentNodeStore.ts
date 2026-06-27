@@ -246,10 +246,20 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       return { closingNodeIds: next };
     });
 
+    // Capture the row up-front so a Phase-2 (delete_commit) failure can
+    // re-insert it. By the time the IPC rejects the row is already gone from
+    // `agentNodes`, so reading from get() would not find it.
+    const node = get().agentNodes.find(s => s.id === id);
+
+    // Phase 1: safety check + worktree-confirmation prompt. Failures here
+    // release the closing flag (the row is still on screen and retryable) and
+    // surface `state.error` for the App.tsx toast pipeline. The promise
+    // resolves — callers don't need to react to a transient safety-check
+    // rejection any more than they do to the existing `kill_agent` warn-only.
+    let removeWorktree = false;
     try {
-      const node = get().agentNodes.find(s => s.id === id);
       const safety = await api.getWorktreeCloseSafety(id);
-      let removeWorktree = Boolean(safety.worktree_path);
+      removeWorktree = Boolean(safety.worktree_path);
 
       if (safety.worktree_path && hasWorktreeCloseRisk(safety)) {
         if (!node) {
@@ -259,43 +269,67 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         if (action === 'cancel') { clearClosing(); return; }
         removeWorktree = action === 'remove';
       }
-
-      // Optimistic close: drop the node from the UI now so closing feels
-      // instant. The backend kills the agent and removes the row in a fast
-      // Phase 1, then reclaims the worktree directory in the background; a
-      // failed cleanup surfaces later via the 'worktree-cleanup-failed' event
-      // rather than holding the node on screen while the slow delete runs.
-      disposeTerminal(id);
-      set((state) => {
-        const closing = new Set(state.closingNodeIds);
-        closing.delete(id);
-        return {
-          agentNodes: state.agentNodes.filter(s => s.id !== id),
-          activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
-          closingNodeIds: closing,
-        };
-      });
-
-      try {
-        // kill_agent tears the process down before its bookkeeping (a DB status
-        // update) can fail, and the node is being deleted anyway — so never let
-        // a kill_agent rejection skip delete_session, or the node would vanish
-        // from the UI while its row and worktree survive and resurrect on the
-        // next fetch.
-        try {
-          await api.killAgent(id);
-        } catch (e) {
-          console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
-        }
-        await api.deleteAgentNode(id, removeWorktree);
-      } catch (e) {
-        set({ error: String(e) });
-      }
     } catch (e) {
-      // A failed safety check (or prompt) must release the closing flag so the
-      // row isn't stranded dimmed — the node is still on screen and retryable.
       clearClosing();
       set({ error: String(e) });
+      return;
+    }
+
+    // Re-capture the row RIGHT BEFORE the optimistic remove so the restore
+    // path below sees the version of the node that's actually being dropped
+    // (Phase 1 awaited `getWorktree_close_safety`, and a `node-renamed`
+    // event could fire during that window — capturing after the await closes
+    // that race). Reading after the optimistic remove would find nothing.
+    const nodeForRestore = get().agentNodes.find(s => s.id === id);
+
+    // Phase 2: optimistic close + backend commit. The row drops from the UI
+    // here so closing feels instant; the backend kills the agent and removes
+    // the row in a fast Phase 1, then reclaims the worktree directory in the
+    // background (a failed cleanup surfaces later via the
+    // 'worktree-cleanup-failed' event rather than holding the node on screen
+    // while the slow delete runs).
+    disposeTerminal(id);
+    set((state) => {
+      const closing = new Set(state.closingNodeIds);
+      closing.delete(id);
+      return {
+        agentNodes: state.agentNodes.filter(s => s.id !== id),
+        activeNodeId: state.activeNodeId === id ? null : state.activeNodeId,
+        closingNodeIds: closing,
+      };
+    });
+
+    // kill_agent tears the process down before its bookkeeping (a DB status
+    // update) can fail, and the node is being deleted anyway — so never let
+    // a kill_agent rejection skip delete_agent_node, or the node would vanish
+    // from the UI while its row and worktree survive and resurrect on the
+    // next fetch.
+    try {
+      await api.killAgent(id);
+    } catch (e) {
+      console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
+    }
+
+    try {
+      await api.deleteAgentNode(id, removeWorktree);
+    } catch (e) {
+      // Issue #645: restore the optimistically-removed row so UI/DB stay in
+      // sync. Without this the catch would silently swallow the rejection —
+      // `state.error` alone is invisible to the user (no toast), and any
+      // unrelated fetchAgentNodes (node-created, mesh switch, …) would
+      // resurrect the row anyway, making it look like a "zombie" close.
+      // Re-inserting here makes the resurrection immediate and the failure
+      // visible via the App.tsx state.error → 'System' toast pipeline
+      // (App.tsx:186-190). Re-throw to match createAgentNode / renameAgentNode
+      // so callers awaiting the close can react. `nodeForRestore` was
+      // captured AFTER Phase 1's await so a `node-renamed` event fired
+      // mid-flight (e.g. user renamed then closed) restores the post-rename
+      // version, not a stale pre-rename snapshot.
+      set((state) => ({
+        agentNodes: nodeForRestore ? [...state.agentNodes, nodeForRestore] : state.agentNodes,
+        error: String(e),
+      }));
+      throw e;
     }
   },
 

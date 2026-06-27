@@ -451,6 +451,97 @@ describe('useAgentNodeStore', () => {
         removeWorktree: false,
       });
     });
+
+    // Issue #645: when `delete_agent_node` rejects, the optimistic removal must
+    // not be allowed to silently hide the failure. Three invariants:
+    //   1. The row is restored to `agentNodes` so UI/DB stay in sync — otherwise
+    //      the next fetchAgentNodes (any unrelated trigger — node-created,
+    //      mesh switch, …) re-fetches from the DB and the row "zombie"
+    //      reappears, looking like the close silently failed. Pin the row
+    //      back BEFORE the next refetch.
+    //   2. The error is surfaced on `state.error`. App.tsx:186-190 already
+    //      subscribes to that field and adds a 'System' toast — that's the
+    //      user-visible feedback path. The store's job is to write to it.
+    //   3. The promise rejects, so any caller wanting to react (catch block,
+    //      await rejection) can. Matches `createAgentNode` / `renameAgentNode`
+    //      which already re-throw.
+    it('restores the node on delete_agent_node failure (issue #645 zombie-row fix)', async () => {
+      const node = makeNode({ id: 41 });
+      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 41 });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
+        if (cmd === 'delete_agent_node') return Promise.reject(new Error('db locked'));
+        return Promise.resolve(undefined);
+      });
+
+      await expect(
+        useAgentNodeStore.getState().deleteAgentNode(41)
+      ).rejects.toThrow('db locked');
+
+      // The row is back — UI matches the DB (which still holds the row).
+      const restored = useAgentNodeStore.getState().agentNodes;
+      expect(restored).toHaveLength(1);
+      expect(restored[0]).toEqual(node);
+    });
+
+    it('surfaces the delete_agent_node rejection on state.error for the toast pipeline', async () => {
+      const node = makeNode({ id: 42 });
+      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 42 });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
+        if (cmd === 'delete_agent_node') return Promise.reject(new Error('foreign key violation'));
+        return Promise.resolve(undefined);
+      });
+
+      await expect(
+        useAgentNodeStore.getState().deleteAgentNode(42)
+      ).rejects.toThrow('foreign key');
+
+      // App.tsx subscribes to state.error and adds a 'System' toast on change.
+      // Pin that the store writes the message there — not just to console.
+      expect(useAgentNodeStore.getState().error).toContain('foreign key');
+    });
+
+    it('rejects the outer promise so callers can react to a delete_agent_node failure', async () => {
+      const node = makeNode({ id: 43 });
+      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 43 });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
+        if (cmd === 'delete_agent_node') return Promise.reject(new Error('ipc disconnected'));
+        return Promise.resolve(undefined);
+      });
+
+      // Pre-fix: the catch swallowed the rejection, so `await …` resolved
+      // successfully and the UI thought the delete succeeded. Post-fix: the
+      // store re-throws, matching createAgentNode / renameAgentNode.
+      let didThrow = false;
+      try {
+        await useAgentNodeStore.getState().deleteAgentNode(43);
+      } catch {
+        didThrow = true;
+      }
+      expect(didThrow).toBe(true);
+    });
+
+    // Belt-and-braces: the kill_agent rejection path must still surface
+    // errors. kill_agent is best-effort (warn-only), but a delete_agent_node
+    // failure that follows it must not regress when we add the rollback.
+    it('restores the row even when kill_agent rejects first', async () => {
+      const node = makeNode({ id: 44 });
+      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 44 });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
+        if (cmd === 'kill_agent') return Promise.reject(new Error('status update failed'));
+        if (cmd === 'delete_agent_node') return Promise.reject(new Error('db locked'));
+        return Promise.resolve(undefined);
+      });
+
+      await expect(
+        useAgentNodeStore.getState().deleteAgentNode(44)
+      ).rejects.toThrow('db locked');
+
+      expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
+    });
   });
 
   describe('renameAgentNode', () => {
