@@ -8,7 +8,10 @@ import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
+import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
+import { arrowTargetIndex } from './lib/gridTraversal';
+import { getGridRows } from './hooks/useGridLayout';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import * as api from './lib/tauri';
 import {
@@ -42,18 +45,14 @@ function App() {
   // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
   // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
   // Only register shortcuts when the window is focused so they don't steal from other apps.
+  // Ctrl/Cmd+←/→/↑/↓ traverses the on-screen agent-node grid in the active mesh.
   useEffect(() => {
     const shortcuts = [
       { key: 'CommandOrControl+T', action: 'new-agent' },
-      { key: 'CommandOrControl+1', action: 'switch-1' },
-      { key: 'CommandOrControl+2', action: 'switch-2' },
-      { key: 'CommandOrControl+3', action: 'switch-3' },
-      { key: 'CommandOrControl+4', action: 'switch-4' },
-      { key: 'CommandOrControl+5', action: 'switch-5' },
-      { key: 'CommandOrControl+6', action: 'switch-6' },
-      { key: 'CommandOrControl+7', action: 'switch-7' },
-      { key: 'CommandOrControl+8', action: 'switch-8' },
-      { key: 'CommandOrControl+9', action: 'switch-9' },
+      { key: 'CommandOrControl+ArrowLeft', action: 'arrow-left' },
+      { key: 'CommandOrControl+ArrowRight', action: 'arrow-right' },
+      { key: 'CommandOrControl+ArrowUp', action: 'arrow-up' },
+      { key: 'CommandOrControl+ArrowDown', action: 'arrow-down' },
     ];
     const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
 
@@ -119,26 +118,24 @@ function App() {
     };
   }, []);
 
-  // Quick switch session: Alt+1..9 (not intercepted by xterm, so window listener is fine)
+  // Handle shortcut events emitted from Rust (Ctrl+T new-agent; Ctrl/Cmd+Arrow for
+  // node traversal). Arrow traversal works in two phases: if a node is currently
+  // maximized, the first arrow press restores the grid AND moves focus to the
+  // maximized node (so the user "exits" the solo view onto the node they were
+  // actually viewing, not whatever was active before the zoom); on the next press
+  // (and beyond) we walk the on-screen grid from that node. Edge semantics are
+  // defined in `arrowTargetIndex` (src/lib/gridTraversal.ts): Left/Right wrap
+  // within the row, Up/Down are no-ops at the grid's vertical edges.
+  //
+  // Note: this differs from the Escape-to-un-maximize path in AgentNodeView.tsx
+  // (which leaves activeNodeId alone). Esc is a passive exit; Ctrl+Arrow is an
+  // exit-and-move, so it makes sense to refocus the node the user was on.
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.altKey && /^[1-9]$/.test(e.key)) {
-        const index = parseInt(e.key) - 1;
-        const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
-          s.mesh_id === useAgentNodeStore.getState().getActiveNode()?.mesh_id
-        );
-        if (currentNodes[index]) {
-          useAgentNodeStore.getState().setActiveNode(currentNodes[index].id);
-        }
-      }
-    };
+    const ARROW_DIRECTIONS = ['left', 'right', 'up', 'down'] as const;
+    type ArrowDirection = (typeof ARROW_DIRECTIONS)[number];
+    const isArrowAction = (a: string): a is `arrow-${ArrowDirection}` =>
+      a.startsWith('arrow-') && (ARROW_DIRECTIONS as readonly string[]).includes(a.slice('arrow-'.length));
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  // Handle shortcut events emitted from Rust (Ctrl+T, Ctrl+1..9)
-  useEffect(() => {
     const handleShortcut = (e: Event) => {
       const action = (e as CustomEvent<string>).detail;
 
@@ -161,14 +158,38 @@ function App() {
             .getState()
             .selectProviderForMesh(mesh.id, mesh.name, mesh.path, provider, undefined);
         });
-      } else if (action.startsWith('switch-')) {
-        const index = parseInt(action.replace('switch-', '')) - 1;
-        const currentNodes = useAgentNodeStore.getState().agentNodes.filter(s =>
-          s.mesh_id === useAgentNodeStore.getState().getActiveNode()?.mesh_id
-        );
-        if (currentNodes[index]) {
-          useAgentNodeStore.getState().setActiveNode(currentNodes[index].id);
-        }
+        return;
+      }
+
+      if (!isArrowAction(action)) return;
+      const direction: ArrowDirection = action.slice('arrow-'.length) as ArrowDirection;
+
+      // Phase 1: if a node is maximized, the first arrow press restores the
+      // grid AND moves focus to the maximized node. Capturing the id BEFORE
+      // clearMaximizedNode() (which nulls it) is what lets the subsequent
+      // setActiveNode see the right id.
+      const maximizedId = useUIStore.getState().maximizedNodeId;
+      if (maximizedId !== null) {
+        useUIStore.getState().clearMaximizedNode();
+        useAgentNodeStore.getState().setActiveNode(maximizedId);
+        return;
+      }
+
+      // Phase 2: walk the active mesh's grid. Sort by `position` because that's
+      // the on-screen order the grid renders in (matches `list_agent_nodes`).
+      const activeNode = useAgentNodeStore.getState().getActiveNode();
+      if (!activeNode) return;
+      const meshNodes = useAgentNodeStore.getState().agentNodes
+        .filter(s => s.mesh_id === activeNode.mesh_id)
+        .sort((a, b) => a.position - b.position);
+      const currentIndex = meshNodes.findIndex(s => s.id === activeNode.id);
+      if (currentIndex === -1) return;
+
+      const rows = getGridRows(meshNodes.length);
+      const targetIndex = arrowTargetIndex(currentIndex, direction, rows);
+      const target = meshNodes[targetIndex];
+      if (target && target.id !== activeNode.id) {
+        useAgentNodeStore.getState().setActiveNode(target.id);
       }
     };
 
