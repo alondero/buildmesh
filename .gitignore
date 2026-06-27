@@ -44,6 +44,10 @@ test-results/
 /review_diff.patch
 /*.patch.tmp
 /diff.tmp
+# Scratch directory for one-off agent session artifacts (e.g. body-file
+# passed to `gh issue create`). Anything worth keeping should move out of
+# `.tmp/` and into `docs/` before commit.
+.tmp/
 # Scratch diff files from code-review agents (e.g. /tmp/real_diff.txt saved
 # into the worktree to coordinate with subagents). Never intended to ship.
 /real_diff.txt

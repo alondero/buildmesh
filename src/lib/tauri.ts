@@ -388,8 +388,10 @@ export const deleteBranches = (worktreePath: string, branchNames: string[]) =>
 export const deleteWorktrees = (worktreePaths: string[]) =>
   _invoke<void>('delete_worktrees', { worktreePaths });
 
+// Issue #657: returns the trimmed `git fetch --prune` stderr so the
+// frontend can surface git's own output (or an empty string on a no-op).
 export const pruneRemoteTracking = (worktreePath: string) =>
-  _invoke<void>('prune_remote_tracking', { worktreePath });
+  _invoke<string>('prune_remote_tracking', { worktreePath });
 
 // Attention
 export const registerAttentionNode = (nodeId: number) =>

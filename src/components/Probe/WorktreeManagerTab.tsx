@@ -32,7 +32,7 @@
  * including on GIT_CHANGED events from the file-watcher.
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshRecovery } from '../../hooks/useMeshRecovery';
@@ -185,6 +185,16 @@ export function WorktreeManagerTab() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Issue #657 — per-repo in-flight flag for `prune_remote_tracking`, plus
+  // a transient success message that auto-clears after 4s (matches the
+  // `gitSync` pattern in `src/components/Sidebar/MeshItem.tsx`). The
+  // existing `error` channel is reserved for prune / recovery / remote-
+  // tracking failures — we prefix prune failures with "Prune failed: "
+  // so the user can distinguish them from `deleteBranches`/`deleteWorktrees`
+  // errors that share the same renderer.
+  const [pruningPaths, setPruningPaths] = useState<Set<string>>(new Set());
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Configuration card state (issue #451). The three fields are
   // initialised to the legacy `MeshPropertiesPanel` defaults (use a
@@ -229,6 +239,20 @@ export function WorktreeManagerTab() {
       .finally(() => setLoading(false));
   }, [activeMeshId]);
 
+  // Mesh-switch reset (review findings B1 + B2): clear any in-flight
+  // pruning set (the repo paths belong to the previous mesh) and wipe
+  // the transient success message + its 4s timer. Lives in a separate
+  // effect (NOT inside `load`) so a successful prune's own `load()` call
+  // doesn't wipe the success message we just set.
+  useEffect(() => {
+    setPruningPaths(new Set());
+    setSuccessMessage(null);
+    if (successTimerRef.current) {
+      clearTimeout(successTimerRef.current);
+      successTimerRef.current = null;
+    }
+  }, [activeMeshId]);
+
   useAsyncEffect(
     (signal) => {
       if (activeMeshId === null) return;
@@ -251,6 +275,19 @@ export function WorktreeManagerTab() {
     },
     [activeMeshId, load],
   );
+
+  // Issue #657 — clear any pending prune-success timer on unmount so a
+  // late-firing `setSuccessMessage` can't land on an unmounted tree
+  // (e.g. user switches meshes or closes the probe before the 4s
+  // auto-clear fires).
+  useEffect(() => {
+    return () => {
+      if (successTimerRef.current) {
+        clearTimeout(successTimerRef.current);
+        successTimerRef.current = null;
+      }
+    };
+  }, []);
 
   // Configuration card load (issue #451). Mirrors the dep discipline
   // from `MeshPropertiesTab.tsx:143-167`: the dep set is intentionally
@@ -533,6 +570,14 @@ export function WorktreeManagerTab() {
       </div>
 
       {error && <p className="text-xs text-status-error break-words">{error}</p>}
+      {/* Issue #657 — success channel for prune_remote_tracking. Same
+          inline style + 4s auto-clear as the `gitSync` pattern in
+          `MeshItem.tsx` (cleaner than wiring the global toast system
+          for one button). Styled `text-status-success` to mirror the
+          red error above. */}
+      {successMessage && (
+        <p className="text-xs text-status-success whitespace-pre-wrap break-words">{successMessage}</p>
+      )}
 
       {loading && repos.length === 0 ? (
         <p className="text-xs text-text-muted">Loading git objects…</p>
@@ -544,12 +589,61 @@ export function WorktreeManagerTab() {
               repo={repo}
               selected={selected}
               onToggle={toggle}
+              pruning={pruningPaths.has(repo.path)}
               onPruneRemote={async () => {
+                // Mark this repo as pruning so the button shows
+                // "Pruning…" + disabled until the invoke resolves
+                // (issue #657, AC2).
+                setPruningPaths((prev) => {
+                  const next = new Set(prev);
+                  next.add(repo.path);
+                  return next;
+                });
+                // Mirrors the legacy `handleDelete` pattern at
+                // `WorktreeManagerTab.tsx:478-486` — accumulate partial-
+                // failure errors, refresh in `finally`, then restore the
+                // error AFTER `load()`'s own `setError(null)` runs. Keeps
+                // a post-prune refresh failure from being mislabelled
+                // "Prune failed:" (review finding A1/C1).
+                let pruneError: string | null = null;
                 try {
-                  await pruneRemoteTracking(repo.path);
-                  await load();
+                  const message = await pruneRemoteTracking(repo.path);
+                  // git returns its (possibly empty) report on stderr.
+                  // The Rust side already trims; empty stderr means
+                  // "nothing was pruned" — surface a fallback so the
+                  // user always sees something.
+                  const display = message || 'Remote-tracking refs pruned.';
+                  setSuccessMessage(display);
+                  if (successTimerRef.current) clearTimeout(successTimerRef.current);
+                  successTimerRef.current = setTimeout(() => setSuccessMessage(null), 4000);
                 } catch (e) {
-                  setError(String(e));
+                  // Prefix distinguishes prune failures from
+                  // `deleteBranches`/`deleteWorktrees` failures that
+                  // share the same inline-error renderer (AC4). Also
+                  // clear any stale success message — the two channels
+                  // are mutually exclusive (review finding A2/B3).
+                  setSuccessMessage(null);
+                  if (successTimerRef.current) {
+                    clearTimeout(successTimerRef.current);
+                    successTimerRef.current = null;
+                  }
+                  pruneError = `Prune failed: ${String(e)}`;
+                } finally {
+                  setPruningPaths((prev) => {
+                    const next = new Set(prev);
+                    next.delete(repo.path);
+                    return next;
+                  });
+                  // Refresh the prune-info list after the prune settles.
+                  // `load()`'s own catch writes refresh errors to the
+                  // shared `error` channel WITHOUT the "Prune failed:"
+                  // prefix — refresh failures shouldn't be mislabelled
+                  // as prune failures.
+                  await load();
+                  // Restore the prune error AFTER `load()`'s own
+                  // `setError(null)` has run (so the prune message
+                  // doesn't get clobbered by a successful refresh).
+                  if (pruneError) setError(pruneError);
                 }
               }}
             />
@@ -682,6 +776,7 @@ interface RepoBlockProps {
   selected: Set<string>;
   onToggle: (key: string) => void;
   onPruneRemote: () => void | Promise<void>;
+  pruning: boolean;
 }
 
 /**
@@ -690,7 +785,7 @@ interface RepoBlockProps {
  * as a one-line header so a mesh with multiple nested repos stays
  * readable.
  */
-function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) {
+function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlockProps) {
   return (
     <div className="space-y-3 rounded border border-border-subtle p-3">
       {/* Repo path + open-in-explorer. `min-w-0` lets the path truncate
@@ -874,9 +969,10 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) 
             <button
               type="button"
               onClick={() => void onPruneRemote()}
-              className="text-[10px] text-text-muted hover:text-text-primary transition-colors"
+              disabled={pruning}
+              className="text-[10px] text-text-muted hover:text-text-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Prune
+              {pruning ? 'Pruning…' : 'Prune'}
             </button>
           </div>
           <div className="space-y-0.5">

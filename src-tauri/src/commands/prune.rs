@@ -124,8 +124,13 @@ fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
 }
 
 /// Prune stale remote-tracking refs by fetching with `--prune`.
+///
+/// Returns the trimmed stderr from `git fetch --prune` on success so the
+/// frontend can show what happened (e.g. `"From <url>\n - [deleted]
+/// origin/feature-x"` when refs were dropped, or an empty/`"From <url>"`
+/// line when nothing changed). Issue #657.
 #[tauri::command]
-pub async fn prune_remote_tracking(worktree_path: String) -> Result<(), String> {
+pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, String> {
     let host_path = to_host_path(&worktree_path);
     let output = crate::process_util::command_no_window("git")
         .args(["fetch", "--prune"])
@@ -133,10 +138,11 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<(), String> 
         .output()
         .map_err(|e| format!("failed to run git fetch --prune: {}", e))?;
 
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if output.status.success() {
-        Ok(())
+        Ok(stderr)
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        Err(stderr)
     }
 }
 
