@@ -10,4 +10,12 @@ export type BranchInfo = { name: string, is_head: boolean,
 /**
  * None when the repo has no main/master branch to compare against.
  */
-is_merged_into_main: boolean | null, is_orphan: boolean, has_uncommitted: boolean, last_commit_date: string | null, ahead: number, behind: number, };
+is_merged_into_main: boolean | null, is_orphan: boolean, 
+/**
+ * `true` when a non-archived agent node has this branch checked out
+ * (sibling of `WorktreeInfo.is_active`). Mirrors the worktree's
+ * protection in the prune UI: the row's checkbox is disabled and a
+ * backend guard in `commands::prune::delete_branches` refuses to
+ * drop the branch — the user must close the node first.
+ */
+is_active: boolean, has_uncommitted: boolean, last_commit_date: string | null, ahead: number, behind: number, };

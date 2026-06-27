@@ -517,6 +517,12 @@ pub struct BranchInfo {
     /// None when the repo has no main/master branch to compare against.
     pub is_merged_into_main: Option<bool>,
     pub is_orphan: bool,
+    /// `true` when a non-archived agent node has this branch checked out
+    /// (sibling of `WorktreeInfo.is_active`). Mirrors the worktree's
+    /// protection in the prune UI: the row's checkbox is disabled and a
+    /// backend guard in `commands::prune::delete_branches` refuses to
+    /// drop the branch — the user must close the node first.
+    pub is_active: bool,
     pub has_uncommitted: bool,
     pub last_commit_date: Option<String>,
     #[ts(as = "i32")]

@@ -280,7 +280,7 @@ pub fn to_host_path(path: &str) -> String {
 // ResolvedPath — high-level path resolution for agent operations
 // ---------------------------------------------------------------------------
 
-use crate::models::{AgentNode, EnvType};
+use crate::models::{AgentNode, EnvType, SessionStatus};
 
 /// A fully-resolved set of paths for an agent node, ready for use by callers
 /// without needing to compose env detection + host conversion + worktree logic.
@@ -400,6 +400,41 @@ pub fn active_node_paths(nodes: &[AgentNode]) -> Vec<String> {
         }
     }
     paths
+}
+
+/// The branches a node currently has checked out — the `branch` field of
+/// every non-archived node. Sibling reader to [`active_node_paths`]: just
+/// as a worktree is "active" when a node's path resolves to it, a branch
+/// is "active" when a live node has it checked out.
+///
+/// Used by the Worktree Manager tab to (a) flag local branches with an
+/// `is_active` badge in the prune list and (b) gate the delete checkbox
+/// so the user can't accidentally drop a branch a live agent is using.
+/// The corresponding backend guard in `commands::prune::delete_branches`
+/// is defence-in-depth — a stale UI (or a direct API call) must not be
+/// able to delete a branch a live node is on.
+///
+/// **Two filter axes the caller must handle**:
+/// 1. **Mesh scope** — branch names are not filesystem-unique like paths,
+///    so a `feature-a` in `/repo1` would collide with a `feature-a` in
+///    `/repo2`. Callers that care about repo-scoped active-ness should
+///    pre-filter `nodes` by mesh (`db::list_agent_nodes_by_mesh`) before
+///    calling this. `delete_branches` does this; `get_git_prune_info` does
+///    NOT (it uses `db::list_agent_nodes`) — that asymmetry is intentional
+///    because path collisions don't happen for branches the user is
+///    actively viewing in their currently-selected mesh.
+/// 2. **Archived status** — enforced here. The function drops any node
+///    whose `status == SessionStatus::Archived` so a closed agent node
+///    doesn't keep its branch locked. This matches the contract
+///    `db::list_agent_nodes()` provides on its own (`WHERE status !=
+///    'archived'`); `db::list_agent_nodes_by_mesh` does NOT filter
+///    archived, which is why the filter lives here.
+pub fn active_node_branches(nodes: &[AgentNode]) -> Vec<String> {
+    nodes
+        .iter()
+        .filter(|n| n.status != SessionStatus::Archived)
+        .map(|n| n.branch.clone())
+        .collect()
 }
 
 /// Get the .claude directory for session storage in the correct environment

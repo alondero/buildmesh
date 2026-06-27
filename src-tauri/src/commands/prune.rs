@@ -8,7 +8,7 @@
 use git2::{BranchType, Oid, Repository};
 
 use crate::db;
-use crate::env::{active_node_paths, to_host_path};
+use crate::env::{active_node_branches, active_node_paths, to_host_path};
 use crate::git::primitives;
 use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
@@ -19,32 +19,103 @@ pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, S
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
-    // Cross-reference worktree paths against non-archived agent nodes.
-    let nodes = db::list_agent_nodes()
+    // Cross-reference worktree paths AND branch names against THIS mesh's
+    // non-archived agent nodes. Mesh-scoping matters more for branches
+    // than for worktrees: worktree paths are filesystem-unique on the
+    // host, so a global path-set happens to work; branch names are NOT
+    // — `feature-a` in `/repo1` would collide with `feature-a` in
+    // `/repo2` if a Mesh-A agent was on its own `feature-a`, falsely
+    // flagging Mesh-B's branch as `is_active` in the prune UI. The
+    // mesh-scoped query prevents that. `active_node_branches` further
+    // drops any `Archived` nodes defensively (the SQL query already
+    // filters them, but the helper enforces the contract for any future
+    // caller that passes unfiltered input).
+    let nodes = db::list_agent_nodes_by_mesh(mesh_id)
         .map_err(|e| format!("failed to list agent nodes: {}", e))?;
     let active_paths = active_node_paths(&nodes);
+    let active_branches = active_node_branches(&nodes);
 
     let repo_path = to_host_path(&mesh.path);
-    let info = collect_prune_info(&repo_path, &active_paths)?;
+    // Pool-path lookup is supplied as a closure so the pure enumeration
+    // function stays DB-free and unit-testable against temp repos. Tests
+    // pass `|_| false` (the `no_pool_paths` helper in `prune_tests.rs`)
+    // so they don't need the global DB initialized — production here
+    // wraps `db::is_warm_pool_path` for the real pool-entry classification.
+    let is_pool_path = |p: &str| db::is_warm_pool_path(p).unwrap_or(false);
+    let info = collect_prune_info(&repo_path, &active_paths, &active_branches, &is_pool_path)?;
     Ok(vec![info])
 }
 
 /// Force-delete local branches by name from the repo at `worktree_path`.
 /// Batches across all names, continuing past individual failures and
 /// reporting the combined set of errors at the end.
+///
+/// `mesh_id` is used to scope the "is this branch active" guard: the
+/// mesh's non-archived agent nodes feed `active_branches`, and any
+/// requested branch whose name matches an active node's `branch` is
+/// rejected before we touch git. Mesh-scoping prevents cross-mesh
+/// false positives — a `feature-a` in `/repo2` is not blocked by a
+/// node in `/repo1` that happens to be on its own `feature-a`. The UI
+/// already disables the row's checkbox as the primary defence; this
+/// is belt-and-braces.
 #[tauri::command]
 pub async fn delete_branches(
+    mesh_id: i64,
     worktree_path: String,
     branch_names: Vec<String>,
 ) -> Result<(), String> {
-    delete_branches_in_repo(&to_host_path(&worktree_path), &branch_names)
+    let nodes = db::list_agent_nodes_by_mesh(mesh_id)
+        .map_err(|e| format!("failed to list agent nodes: {}", e))?;
+    let active_branches = active_node_branches(&nodes);
+    delete_branches_in_repo(
+        &to_host_path(&worktree_path),
+        &branch_names,
+        &active_branches,
+    )
 }
 
-fn delete_branches_in_repo(repo_path: &str, branch_names: &[String]) -> Result<(), String> {
+fn delete_branches_in_repo(
+    repo_path: &str,
+    branch_names: &[String],
+    active_branches: &[String],
+) -> Result<(), String> {
     let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
 
-    let mut errors: Vec<String> = Vec::new();
+    // Partition: active branches are rejected up-front with a single combined
+    // error so the user sees the full blocked set in one toast, not multiple
+    // per-branch errors mixed with successful deletes. Mirrors the
+    // pool-path rejection in `remove_worktrees` above.
+    //
+    // Note on the "continue past failures" contract: the original function
+    // accumulated per-branch git2 errors and still attempted the rest of
+    // the batch. The active-branch carve-out intentionally departs from
+    // that — a request containing any active branch is rejected atomically
+    // (matching `remove_worktrees` for pool paths), because silently
+    // deleting the deletable siblings would leave the user with a partial
+    // state they may not want. The frontend disables active-branch rows so
+    // this only fires for stale-UI / direct-API paths.
+    let mut active_blocked: Vec<&String> = Vec::new();
+    let mut deletable: Vec<&String> = Vec::new();
     for name in branch_names {
+        if active_branches.iter().any(|b| b == name) {
+            active_blocked.push(name);
+        } else {
+            deletable.push(name);
+        }
+    }
+    if !active_blocked.is_empty() {
+        return Err(format!(
+            "cannot delete branches held by an active agent node: {}",
+            active_blocked
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    for name in deletable {
         match repo.find_branch(name, BranchType::Local) {
             Ok(mut branch) => {
                 if let Err(e) = branch.delete() {
@@ -244,11 +315,19 @@ fn format_commit_time(time: git2::Time) -> Option<String> {
     chrono::DateTime::from_timestamp(time.seconds(), 0).map(|dt| dt.to_rfc3339())
 }
 
-/// Pure enumeration: given a repo path and the set of active node paths,
-/// build the prune info. No DB access — the caller supplies `active_paths`.
+/// Pure enumeration: given a repo path, the set of active node paths and
+/// branches, and an `is_pool_path` predicate, build the prune info. No DB
+/// access — the caller supplies everything. The three siblings
+/// (`active_paths` for worktrees, `active_branches` for branches,
+/// `is_pool_path` for pre-spawn pool entries) feed the row flags; lifting
+/// the pool check out of this function removes a latent test-isolation
+/// race that surfaced when new branch-active tests started exercising
+/// the worktree enumeration path.
 fn collect_prune_info(
     repo_path: &str,
     active_paths: &[String],
+    active_branches: &[String],
+    is_pool_path: &dyn Fn(&str) -> bool,
 ) -> Result<GitRepoPruneInfo, String> {
     let repo = Repository::open(repo_path).map_err(|e| e.to_string())?;
 
@@ -308,11 +387,18 @@ fn collect_prune_info(
             _ => None,
         };
 
+        // Cross-reference against the active-branch set: a branch is
+        // "active" iff its name matches any non-archived agent node's
+        // `branch` field. Mirrors the worktree `is_active` derivation
+        // (path matching) — same intent, different identity key.
+        let is_active = active_branches.iter().any(|b| b == &name);
+
         local_branches.push(BranchInfo {
             name,
             is_head,
             is_merged_into_main,
             is_orphan,
+            is_active,
             has_uncommitted: is_head && head_dirty,
             last_commit_date,
             ahead,
@@ -331,10 +417,10 @@ fn collect_prune_info(
             is_stale: branch_is_stale(&branch, &local_names),
             // Primary (repo-root) worktree is never a pool entry — pool
             // entries are always linked worktrees under
-            // `.claude/worktrees/<slug>`. Query is cheap (indexed UNIQUE
-            // on `path`) and keeps the field uniformly populated across
-            // both construction sites.
-            is_pool: db::is_warm_pool_path(&path).unwrap_or(false),
+            // `.claude/worktrees/<slug>`. The predicate comes from the
+            // caller (production: `db::is_warm_pool_path`; tests: `|_| false`)
+            // so this function stays DB-free.
+            is_pool: is_pool_path(&path),
             branch,
             path,
         });
@@ -353,7 +439,7 @@ fn collect_prune_info(
             worktrees.push(WorktreeInfo {
                 is_active: path_is_active(&path, active_paths),
                 is_stale: branch_is_stale(&branch, &local_names),
-                is_pool: db::is_warm_pool_path(&path).unwrap_or(false),
+                is_pool: is_pool_path(&path),
                 branch,
                 path,
             });

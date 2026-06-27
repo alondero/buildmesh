@@ -68,6 +68,7 @@ const PRUNE_INFO = [
         is_head: true,
         is_merged_into_main: null,
         is_orphan: false,
+        is_active: false,
         has_uncommitted: false,
         last_commit_date: '2026-06-01T00:00:00Z',
         ahead: 0,
@@ -78,6 +79,7 @@ const PRUNE_INFO = [
         is_head: false,
         is_merged_into_main: true,
         is_orphan: false,
+        is_active: false,
         has_uncommitted: false,
         last_commit_date: '2026-05-01T00:00:00Z',
         ahead: 0,
@@ -90,12 +92,14 @@ const PRUNE_INFO = [
         branch: 'main',
         is_active: true,
         is_stale: false,
+        is_pool: false,
       },
       {
         path: '/repos/demo/.worktrees/orphan',
         branch: null,
         is_active: false,
         is_stale: true,
+        is_pool: false,
       },
     ],
     remote_tracking_branches: ['origin/main'],
@@ -642,5 +646,154 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     // checkbox on the orphan row".
     const deleteBtn = screen.getByRole('button', { name: /Delete Selected/i });
     expect((deleteBtn as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  // ── active-branch flag (sibling of worktree `is_active`) ───────────────
+
+  /**
+   * Pin the user-symptom contract for the active-branch block in the 🌳
+   * tab: a branch held by a live agent node surfaces with the same
+   * visual treatment as an active worktree — disabled checkbox, faded
+   * row, "active" badge with a tooltip explaining why. Mirrors the
+   * worktree active-block pattern and prevents accidental deletion of
+   * a branch a node is using.
+   */
+  it('active branches render with a disabled checkbox + active badge', async () => {
+    mockBackend({
+      prune: [
+        {
+          path: '/repos/demo',
+          local_branches: [
+            {
+              name: 'main',
+              is_head: true,
+              is_merged_into_main: null,
+              is_orphan: false,
+              is_active: false,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+            {
+              name: 'feature/live',
+              is_head: false,
+              is_merged_into_main: true,
+              is_orphan: false,
+              // Held by an agent node → cannot delete.
+              is_active: true,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+          ],
+          worktrees: [
+            {
+              path: '/repos/demo',
+              branch: 'main',
+              is_active: true,
+              is_stale: false,
+              is_pool: false,
+            },
+          ],
+          remote_tracking_branches: [],
+        },
+      ],
+    });
+    await openWorktreesTab();
+
+    // Wait for the prune info to render.
+    await screen.findByText('feature/live');
+
+    // The active branch row's checkbox is disabled. `main` (idle) stays
+    // enabled so the contrast is visible — idle branches must remain
+    // selectable.
+    const liveCheckbox = screen.getByRole('checkbox', { name: /feature\/live/i });
+    expect((liveCheckbox as HTMLInputElement).disabled).toBe(true);
+
+    const mainCheckbox = screen.getByRole('checkbox', { name: /^main/i });
+    expect((mainCheckbox as HTMLInputElement).disabled).toBe(false);
+
+    // The "active" badge surfaces next to the branch name so the user
+    // knows why the row is locked. The badge reuses the same
+    // cyan styling as the worktree active-block.
+    const activeBadges = screen.getAllByTitle('Active — cannot delete');
+    expect(activeBadges.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * An idle branch must remain selectable even if it's a "good prune
+   * candidate" (merged + clean + not HEAD). `isRecommendedBranch`
+   * excludes active branches — the recommended selection should never
+   * include a branch a node is on.
+   */
+  it('active branches are not in the "Select recommended" set', async () => {
+    mockBackend({
+      prune: [
+        {
+          path: '/repos/demo',
+          local_branches: [
+            {
+              name: 'main',
+              is_head: true,
+              is_merged_into_main: null,
+              is_orphan: false,
+              is_active: false,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+            {
+              name: 'feature/merged-clean',
+              is_head: false,
+              is_merged_into_main: true,
+              is_orphan: false,
+              is_active: false,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+            {
+              name: 'feature/merged-active',
+              is_head: false,
+              is_merged_into_main: true,
+              is_orphan: false,
+              // Same prune flags as feature/merged-clean, but held by a
+              // live agent — must NOT be in the recommended set.
+              is_active: true,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+          ],
+          worktrees: [
+            {
+              path: '/repos/demo',
+              branch: 'main',
+              is_active: true,
+              is_stale: false,
+              is_pool: false,
+            },
+          ],
+          remote_tracking_branches: [],
+        },
+      ],
+    });
+    await openWorktreesTab();
+
+    await screen.findByText('feature/merged-active');
+
+    // "Select recommended" surfaces a count in its label — only the
+    // idle merged branch counts. The active one is held by a node and
+    // must NOT appear in the count.
+    const selectRecommended = await screen.findByRole('button', {
+      name: /Select recommended/i,
+    });
+    expect(selectRecommended.textContent).toMatch(/\(1\)/);
+    expect(selectRecommended.textContent).not.toMatch(/\(2\)/);
   });
 });

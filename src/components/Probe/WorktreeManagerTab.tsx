@@ -112,12 +112,17 @@ const branchKey = (repo: string, name: string) => `b:${repo}::${name}`;
 const worktreeKey = (path: string) => `w:${path}`;
 
 // "Safe to prune" recommendation. A branch is recommended when it isn't the
-// current HEAD, has nothing uncommitted to lose, and is either fully merged
-// into main or orphaned (its upstream remote branch is gone). A worktree is
-// recommended when its branch no longer exists (stale) and no agent is using
-// it. Mirrors the legacy section's logic.
+// current HEAD, has nothing uncommitted to lose, isn't held by an active
+// agent node, and is either fully merged into main or orphaned (its upstream
+// remote branch is gone). The `!is_active` clause mirrors the worktree rule
+// — a live agent on a branch must close the node first before the branch
+// becomes prunable. A worktree is recommended when its branch no longer
+// exists (stale) and no agent is using it. Mirrors the legacy section's logic.
 const isRecommendedBranch = (b: BranchInfo) =>
-  !b.is_head && !b.has_uncommitted && (b.is_merged_into_main === true || b.is_orphan);
+  !b.is_head &&
+  !b.has_uncommitted &&
+  !b.is_active &&
+  (b.is_merged_into_main === true || b.is_orphan);
 
 const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
 
@@ -433,6 +438,18 @@ export function WorktreeManagerTab() {
   };
 
   const handleDelete = async () => {
+    // `activeMeshId` is the mesh-scoped key `deleteBranches` needs to
+    // scope the active-branch guard. The tab early-returns at the
+    // bottom when no mesh is active, but TypeScript can't narrow that
+    // across the closure boundary here, so guard locally. We close the
+    // dialog + surface an error rather than silently freezing the modal
+    // — a stale closure (mesh switched after the dialog opened) would
+    // otherwise leave the user staring at a non-responsive confirmation.
+    if (activeMeshId === null) {
+      setConfirming(false);
+      setError('No active mesh — cannot delete.');
+      return;
+    }
     setConfirming(false);
     setDeleting(true);
     setError(null);
@@ -440,7 +457,7 @@ export function WorktreeManagerTab() {
     try {
       for (const [repoPath, names] of branchesByRepo) {
         try {
-          await deleteBranches(repoPath, names);
+          await deleteBranches(activeMeshId, repoPath, names);
         } catch (e) {
           errors.push(String(e));
         }
@@ -725,43 +742,68 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote }: RepoBlockProps) 
           <div className="space-y-0.5">
             {repo.local_branches.map((b) => {
               const key = branchKey(repo.path, b.name);
+              // Active branches are held by a live agent node — sibling of
+              // the worktree `is_active` block. The UI disables the
+              // checkbox as the primary defence; the backend
+              // `delete_branches` rejects active branches as
+              // defence-in-depth.
+              const undeletable = b.is_active;
               return (
-                <label
+                <div
                   key={key}
-                  className="flex items-center gap-2 text-xs cursor-pointer hover:bg-bg-overlay/40 rounded px-1 py-0.5"
+                  title={b.is_active ? 'Active — cannot delete' : undefined}
+                  className={`flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
+                    undeletable
+                      ? 'opacity-60'
+                      : 'cursor-pointer hover:bg-bg-overlay/40'
+                  }`}
                 >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(key)}
-                    onChange={() => onToggle(key)}
-                    className="accent-accent-cyan"
-                  />
-                  <span className="text-text-primary truncate flex-1">{b.name}</span>
-                  <span className="flex items-center gap-1 flex-shrink-0">
-                    {b.is_head && (
-                      <Badge color="bg-accent-cyan/15 text-accent-cyan" text="HEAD" />
-                    )}
-                    {b.is_merged_into_main && (
-                      <Badge color="bg-status-success/15 text-status-success" text="merged" />
-                    )}
-                    {b.is_orphan && (
-                      <Badge color="bg-status-warning/15 text-status-warning" text="orphan" />
-                    )}
-                    {!b.has_uncommitted && (
-                      <Badge color="bg-bg-overlay text-text-muted" text="clean" />
-                    )}
-                    {(b.ahead > 0 || b.behind > 0) && (
-                      <span className="text-[9px] font-mono text-text-muted">
-                        ↑{b.ahead} ↓{b.behind}
-                      </span>
-                    )}
-                    {b.last_commit_date && (
-                      <span className="text-[9px] text-text-muted">
-                        {formatDate(b.last_commit_date)}
-                      </span>
-                    )}
-                  </span>
-                </label>
+                  <label
+                    className={`flex items-center gap-2 flex-1 min-w-0 ${
+                      undeletable ? 'cursor-not-allowed' : 'cursor-pointer'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected.has(key)}
+                      disabled={undeletable}
+                      onChange={() => onToggle(key)}
+                      className="accent-accent-cyan disabled:cursor-not-allowed flex-shrink-0"
+                    />
+                    <span className="text-text-primary truncate flex-1">{b.name}</span>
+                    <span className="flex items-center gap-1 flex-shrink-0">
+                      {b.is_head && (
+                        <Badge color="bg-accent-cyan/15 text-accent-cyan" text="HEAD" />
+                      )}
+                      {b.is_active && (
+                        <Badge
+                          color="bg-accent-cyan/15 text-accent-cyan"
+                          text="active"
+                          title="Active — cannot delete"
+                        />
+                      )}
+                      {b.is_merged_into_main && (
+                        <Badge color="bg-status-success/15 text-status-success" text="merged" />
+                      )}
+                      {b.is_orphan && (
+                        <Badge color="bg-status-warning/15 text-status-warning" text="orphan" />
+                      )}
+                      {!b.has_uncommitted && (
+                        <Badge color="bg-bg-overlay text-text-muted" text="clean" />
+                      )}
+                      {(b.ahead > 0 || b.behind > 0) && (
+                        <span className="text-[9px] font-mono text-text-muted">
+                          ↑{b.ahead} ↓{b.behind}
+                        </span>
+                      )}
+                      {b.last_commit_date && (
+                        <span className="text-[9px] text-text-muted">
+                          {formatDate(b.last_commit_date)}
+                        </span>
+                      )}
+                    </span>
+                  </label>
+                </div>
               );
             })}
           </div>
