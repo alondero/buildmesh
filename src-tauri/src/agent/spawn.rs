@@ -757,7 +757,7 @@ pub async fn spawn_agent_inner(
         if mesh_id > 0
             && crate::services::warm_pool::should_claim_for_spawn(existing_present)
         {
-            match crate::services::warm_pool::try_claim(mesh_id) {
+            match crate::services::warm_pool::try_claim(&app, mesh_id) {
                 Ok(Some(entry)) => {
                     tracing::info!(
                         "spawn_agent_inner: claimed warm pool entry id={} path={} slug={} base_sha={}",
@@ -1489,11 +1489,13 @@ pub async fn spawn_agent_inner(
         let mesh_id_for_pool = mesh_id;
         let do_refresh = ref_advanced_for_pool;
         let do_refill = did_claim_warm;
+        let app_for_pool = app.clone();
         std::thread::spawn(move || {
             crate::services::warm_pool::post_spawn_maintenance(
                 mesh_id_for_pool,
                 do_refresh,
                 do_refill,
+                &app_for_pool,
             );
         });
     }

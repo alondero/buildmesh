@@ -18,11 +18,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
+import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
 
 const MESH: Mesh = {
   id: 42,
@@ -138,12 +140,19 @@ const DRIFTED_HEALTH: Record<string, unknown> = {
  * Fails` and `saveBaseRefFails` are opt-in knobs that flip the two
  * worktree-config save commands to rejecting handlers, used by the
  * "save failure surfaces inline" test.
+ *
+ * `poolCount` controls the response of `get_mesh_pool_count` for the
+ * Worktrees Probe's pre-spawn pool badge. The default is `0` so
+ * existing tests stay deterministic (no badge to find). The pool-badge
+ * tests override it with a specific value (or `null` to simulate a
+ * pool-disabled mesh).
  */
 function mockBackend(
   overrides: {
     health?: unknown;
     prune?: unknown;
     meshRow?: Partial<MeshRow>;
+    poolCount?: number;
     saveUseWorktreeFails?: boolean;
     saveBaseRefFails?: boolean;
   } = {},
@@ -160,8 +169,12 @@ function mockBackend(
     use_worktree: true,
     worktree_mode: 'branched',
     default_provider: null,
+    pre_spawn_pool_size: 0,
     ...overrides.meshRow,
   };
+  // Default pool count is 0 so the badge stays hidden (`preSpawnPoolSize === 0`)
+  // for every test that doesn't override either the config or the count.
+  const poolCount = overrides.poolCount ?? 0;
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'get_mesh_health':
@@ -186,7 +199,9 @@ function mockBackend(
       case 'list_providers':
         return Promise.resolve([]);
       case 'get_mesh_properties':
-        return Promise.resolve(meshConfig);
+        return Promise.resolve(meshRow);
+      case 'get_mesh_pool_count':
+        return Promise.resolve(poolCount);
       case 'detect_mesh_project':
         return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
       case 'detect_ai_context':
@@ -923,5 +938,195 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
     });
     expect(selectRecommended.textContent).toMatch(/\(1\)/);
     expect(selectRecommended.textContent).not.toMatch(/\(2\)/);
+  });
+});
+
+// ── Pre-spawn pool badge (PRD #608 §6 — pool observability) ──────────────
+//
+// The Worktrees Probe shows a small progress-bar + numeric label under
+// the "Pre-spawn warm worktrees" header, driven by `get_mesh_pool_count`
+// + `usePoolChanged`. These tests pin:
+//   * Hidden state when the pool is disabled (`preSpawnPoolSize === 0`).
+//   * Visible state with correct "X / Y ready" formatting when enabled.
+//   * a11y attributes (role="status" + aria-label) so screen readers
+//     announce the change.
+//   * Live refresh on `pool-count-changed` events from the Rust pool
+//     service (try_claim / prewarm_one / drain_excess /
+//     update_mesh_pool_size / reconcile_on_startup).
+//   * Re-fetch on mesh switch (useAsyncEffect deps).
+//
+// The `poolCount` knob on `mockBackend` controls what the
+// `get_mesh_pool_count` mock returns; flipping it mid-test isn't
+// supported (the mock captures the value at call time), so the live
+// refresh test relies on the event handler firing AFTER the initial
+// fetch has resolved.
+
+describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
+  // Capture every Tauri event handler the probe attaches so individual
+  // tests can fire the pool-count-changed event and assert the badge
+  // re-fetches. Other tests in this file don't care about events, so
+  // we keep the capture scoped to this describe block.
+  let poolEventHandler: ((e: { payload: unknown }) => void) | null = null;
+  const listenMock = vi.fn();
+
+  beforeEach(() => {
+    poolEventHandler = null;
+    listenMock.mockClear();
+    // Default mock: no-op unlisten + capture only the pool-count-changed
+    // handler. Other events (none today, but future-proof) are ignored.
+    // The `listenMock(event, handler)` call mirrors the
+    // `useProviderListInvalidation` test fixture so a future
+    // `expect(listenMock).toHaveBeenCalledWith(POOL_COUNT_CHANGED_EVENT, …)`
+    // has something to assert against.
+    vi.mocked(listen).mockImplementation((event: string, handler: (e: unknown) => void) => {
+      listenMock(event, handler);
+      if (event === POOL_COUNT_CHANGED_EVENT) {
+        poolEventHandler = handler as (e: { payload: unknown }) => void;
+      }
+      return Promise.resolve(() => {});
+    });
+  });
+
+  it('hides the badge when preSpawnPoolSize === 0 (pool disabled)', async () => {
+    // Default meshRow has pre_spawn_pool_size: 0; mockBackend default
+    // poolCount: 0. The badge must NOT render.
+    mockBackend();
+    await openWorktreesTab();
+
+    // Wait for the config card to render so the negative assertion is
+    // stable (the badge mounts after the form populates from the load).
+    await screen.findByLabelText('Pre-spawn warm worktrees');
+    expect(screen.queryByTestId('pool-status')).toBeNull();
+  });
+
+  it('shows "X / Y ready" when the pool is enabled', async () => {
+    mockBackend({
+      meshRow: { pre_spawn_pool_size: 3 },
+      poolCount: 2,
+    });
+    await openWorktreesTab();
+
+    // The badge uses the live count (2) and the persisted target (3).
+    const status = await screen.findByTestId('pool-status');
+    expect(status).toBeTruthy();
+    const text = screen.getByTestId('pool-status-text');
+    expect(text.textContent).toBe('2 / 3 ready');
+    // role="status" + aria-live="polite" so screen readers announce
+    // pool-count-changed events without interrupting other speech.
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.getAttribute('aria-label')).toBe(
+      '2 of 3 pre-spawn worktrees ready',
+    );
+  });
+
+  it('shows "0 / Y ready" with a present-but-empty bar when the pool is enabled but empty', async () => {
+    // After a shrink (target 3 → 0 → 1) the badge must show 0 / 1 ready,
+    // not "…/1 ready" (the count IS known, just zero). The Plan agent's
+    // synchronous-drain UX fix is what makes this settle immediately on
+    // a config change — but the badge format itself is tested here.
+    mockBackend({
+      meshRow: { pre_spawn_pool_size: 1 },
+      poolCount: 0,
+    });
+    await openWorktreesTab();
+
+    const text = await screen.findByTestId('pool-status-text');
+    expect(text.textContent).toBe('0 / 1 ready');
+  });
+
+  it('re-fetches the pool count when pool-count-changed fires', async () => {
+    // Seed the initial fetch with 1 ready, then fire the event and
+    // assert the badge updated to 4 (simulating the Rust side emitting
+    // pool-count-changed after a successful prewarm_one).
+    mockBackend({
+      meshRow: { pre_spawn_pool_size: 5 },
+      poolCount: 1,
+    });
+    await openWorktreesTab();
+
+    // Sanity check: initial fetch resolved.
+    await waitFor(() => {
+      expect(screen.getByTestId('pool-status-text').textContent).toBe(
+        '1 / 5 ready',
+      );
+    });
+
+    // Override get_mesh_pool_count so the NEXT call (the one triggered
+    // by the event) returns 4. The flag flips inside the override's
+    // closure, so the initial fetch (already done) isn't affected by
+    // this swap.
+    let eventFired = false;
+    const prevImpl = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'get_mesh_pool_count') {
+        return Promise.resolve(eventFired ? 4 : 1);
+      }
+      return prevImpl?.(cmd, args) ?? Promise.resolve({});
+    });
+
+    // Fire the pool-count-changed event from the backend.
+    eventFired = true;
+    poolEventHandler?.({ payload: 42 });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('pool-status-text').textContent).toBe(
+        '4 / 5 ready',
+      );
+    });
+    // And the listener was actually attached (not just lying around).
+    expect(listenMock).toHaveBeenCalledWith(
+      POOL_COUNT_CHANGED_EVENT,
+      expect.any(Function),
+    );
+  });
+
+  it('re-fetches when activeMeshId switches', async () => {
+    // Seed mesh 42 with 2 ready; switch to mesh 7 with 4 ready. The
+    // badge must re-fetch (via the useAsyncEffect on activeMeshId) and
+    // land on 4 / 3 ready.
+    mockBackend({
+      meshRow: { pre_spawn_pool_size: 3 },
+      poolCount: 2,
+    });
+    await openWorktreesTab();
+    await waitFor(() => {
+      expect(screen.getByTestId('pool-status-text').textContent).toBe(
+        '2 / 3 ready',
+      );
+    });
+
+    // Switch to a second mesh and override the response.
+    const mesh2: Mesh = {
+      ...MESH,
+      id: 7,
+      name: 'demo2',
+      path: '/repos/demo2',
+    };
+    useMeshStore.setState({
+      meshes: [MESH, mesh2],
+      meshesById: new Map([
+        [MESH.id, MESH],
+        [mesh2.id, mesh2],
+      ]),
+      selectedMeshId: mesh2.id,
+    });
+    // Override get_mesh_pool_count for the new mesh's id.
+    const impl = vi.mocked(invoke).getMockImplementation();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === 'get_mesh_pool_count') {
+        // Differentiate by meshId from the args.
+        const a = args as { meshId?: number } | undefined;
+        if (a?.meshId === mesh2.id) return Promise.resolve(4);
+        return Promise.resolve(2);
+      }
+      return impl?.(cmd, args) ?? Promise.resolve({});
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('pool-status-text').textContent).toBe(
+        '4 / 3 ready',
+      );
+    });
   });
 });

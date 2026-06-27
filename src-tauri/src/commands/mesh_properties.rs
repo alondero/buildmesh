@@ -13,7 +13,9 @@
 
 use crate::db;
 use crate::models::MeshRow;
+use crate::services::warm_pool;
 use std::path::PathBuf;
+use tauri::AppHandle;
 
 // ---------------------------------------------------------------------------
 // Settings.json helpers (for base_ref only)
@@ -140,11 +142,23 @@ pub async fn update_mesh_use_worktree(mesh_id: i64, use_worktree: bool) -> Resul
 /// (or a future bulk-import path) can't write a garbage value to the
 /// DB column and break the worker's count/target comparisons.
 ///
+/// On a successful save, schedules a background drain-and-fill via the
+/// same `std::thread::spawn` pattern as `spawn::post_spawn_maintenance`.
+/// The drain runs off the IPC thread because `git worktree remove` is a
+/// blocking syscall (1-3s per worktree on Windows with Defender) — a
+/// 5→1 shrink would otherwise freeze the UI for 4-12 seconds. The
+/// inner `drain_excess_warm_entries` / `prewarm_one` emit
+/// `pool-count-changed` for every actual state change, so the badge
+/// settles as rows drop / fill without any explicit end-of-pass emit
+/// here (the previous unconditional settle emit was the source of the
+/// double-emit when `drain_excess_warm_entries` already fired).
+///
 /// Dedicated command (not the generic `update_mesh_column` allowlist)
 /// so the typed integer + the `0..=5` invariant are enforced here —
 /// the catch-all is intentionally unvalidated.
 #[tauri::command]
 pub async fn update_mesh_pool_size(
+    app: AppHandle,
     mesh_id: i64,
     pool_size: i32,
 ) -> Result<(), String> {
@@ -172,7 +186,32 @@ pub async fn update_mesh_pool_size(
             mesh_id
         ));
     }
+    drop(db);
+
+    // Drain-then-fill runs on a dedicated OS thread so the IPC handler
+    // returns immediately. Inner `drain_excess_warm_entries` /
+    // `prewarm_one` emit `pool-count-changed` for each state change
+    // they make, so the badge settles naturally as rows drop / fill —
+    // no explicit settle emit needed (would double-fire when drain
+    // already emitted).
+    let app_for_drain = app.clone();
+    std::thread::spawn(move || {
+        warm_pool::drain_and_fill_for_mesh(&app_for_drain, mesh_id);
+    });
+
     Ok(())
+}
+
+/// Return the number of `available` warm pool entries for `mesh_id`.
+/// Powers the Worktrees Probe's per-mesh pool badge
+/// (`usePoolChanged` listener + `WorktreeManagerTab` UI). Thin wrapper
+/// over `db::count_available_warm_for_mesh` — the DB layer is the
+/// single source of truth for pool state, so the IPC command is just
+/// the typed edge.
+#[tauri::command]
+pub async fn get_mesh_pool_count(mesh_id: i64) -> Result<i64, String> {
+    db::count_available_warm_for_mesh(mesh_id)
+        .map_err(|e| format!("pool count for mesh {} failed: {}", mesh_id, e))
 }
 
 /// Toggle whether this mesh's agent nodes run inside an OS process sandbox

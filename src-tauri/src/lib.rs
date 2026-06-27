@@ -148,8 +148,13 @@ pub fn run() {
             // detached-HEAD worktree per worktree-enabled mesh. Best-effort —
             // failures are logged and the spawn path falls back to cold
             // checkout when the pool is empty.
-            std::thread::spawn(|| {
-                services::warm_pool::reconcile_on_startup();
+            //
+            // The handle is captured so `reconcile_on_startup` can emit
+            // `pool-count-changed` at end-of-pass (settles the
+            // 0 → target transition for any probe opened during boot).
+            let reconcile_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                services::warm_pool::reconcile_on_startup(reconcile_handle);
             });
 
             // Background pool maintenance worker (issue #613). A long-lived
@@ -161,7 +166,10 @@ pub fn run() {
             // agent I/O) and serialized behind the same fill lock as
             // `refill_after_claim`, so concurrent spawns can't trigger
             // overlapping `git worktree add` fills.
-            services::pool_worker::start_background_worker();
+            //
+            // The handle is captured so `maintain_all_pools` can emit
+            // `pool-count-changed` from its inner drain/fill calls.
+            services::pool_worker::start_background_worker(app.handle().clone());
 
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
@@ -270,6 +278,7 @@ pub fn run() {
             commands::mesh_properties::update_mesh_use_worktree,
             commands::mesh_properties::update_mesh_sandbox,
             commands::mesh_properties::update_mesh_pool_size,
+            commands::mesh_properties::get_mesh_pool_count,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
             commands::scratchpad::get_mesh_scratchpad,
             commands::scratchpad::set_mesh_scratchpad,
