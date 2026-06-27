@@ -10,7 +10,10 @@ import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
+import { isTextInputFocused } from './lib/focusGuard';
 import { arrowTargetIndex } from './lib/gridTraversal';
+import { toggleGridMaximize } from './lib/gridShortcuts';
+import { isMac } from './lib/platform';
 import { getGridRows } from './hooks/useGridLayout';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import * as api from './lib/tauri';
@@ -25,6 +28,11 @@ import {
 import './App.css';
 
 const createNodeGuard = createShortcutGuard(300);
+// Cooldown for the Alt+G / Cmd+G grid-toggle (issue #668). Same 300ms budget
+// as the new-agent guard: long enough that holding the key doesn't fire a
+// burst of toggles, short enough that a deliberate second press feels
+// responsive.
+const toggleMaximizeGuard = createShortcutGuard(300);
 
 type ErrorToast = Toast;
 
@@ -46,13 +54,25 @@ function App() {
   // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
   // Only register shortcuts when the window is focused so they don't steal from other apps.
   // Ctrl/Cmd+←/→/↑/↓ traverses the on-screen agent-node grid in the active mesh.
+  // Alt+G (Win/Linux) / Cmd+G (macOS) toggles grid ↔ single-view (issue #668).
   useEffect(() => {
+    // Tauri 2's global-shortcut plugin doesn't expose an `AltOrCommand`
+    // combinator (only `CommandOrControl`, which means Cmd on Mac and Ctrl
+    // elsewhere). Issue #668 explicitly wants `Alt+G` on Windows/Linux —
+    // the mnemonic "G for Grid" — and `Cmd+G` on macOS. So we register
+    // the platform-appropriate binding only, branched on `isMac`. The
+    // handler below is platform-agnostic: same action, same store calls.
+    const gridToggleShortcut = isMac
+      ? { key: 'CommandOrControl+G', action: 'toggle-maximize-grid' as const }
+      : { key: 'Alt+G', action: 'toggle-maximize-grid' as const };
+
     const shortcuts = [
       { key: 'CommandOrControl+T', action: 'new-agent' },
       { key: 'CommandOrControl+ArrowLeft', action: 'arrow-left' },
       { key: 'CommandOrControl+ArrowRight', action: 'arrow-right' },
       { key: 'CommandOrControl+ArrowUp', action: 'arrow-up' },
       { key: 'CommandOrControl+ArrowDown', action: 'arrow-down' },
+      gridToggleShortcut,
     ];
     const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
 
@@ -157,6 +177,26 @@ function App() {
           await useAgentNodeStore
             .getState()
             .selectProviderForMesh(mesh.id, mesh.name, mesh.path, provider, undefined);
+        });
+        return;
+      }
+
+      if (action === 'toggle-maximize-grid') {
+        // Issue #668 — Alt+G (Win/Linux) / Cmd+G (macOS). The toggle logic
+        // (restore if maximized, else maximize active node) is a pure
+        // store-mutator extracted to `src/lib/gridShortcuts.ts` for unit
+        // testing; here we only own the platform wiring: cooldown so a held
+        // key doesn't burst-toggle, and a text-input focus guard so typing
+        // an inline-renamed node header or a future search box doesn't
+        // accidentally collapse the grid.
+        //
+        // Check the focus guard BEFORE wrapping in `toggleMaximizeGuard`:
+        // the guard sets `blocked = true` on entry, so a no-op press would
+        // burn the 300ms cooldown and silently drop the user's next
+        // deliberate Alt+G inside that window.
+        if (isTextInputFocused()) return;
+        toggleMaximizeGuard(async () => {
+          toggleGridMaximize();
         });
         return;
       }
