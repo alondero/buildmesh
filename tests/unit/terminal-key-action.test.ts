@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { resolveKeyAction, KeyEventState } from '../../src/components/Terminal/terminalKeyAction';
+import {
+  resolveKeyAction,
+  resolveZoomKeyAction,
+  KeyEventState,
+} from '../../src/components/Terminal/terminalKeyAction';
 
 function makeState(overrides: Partial<KeyEventState>): KeyEventState {
   return {
@@ -129,6 +133,77 @@ describe('resolveKeyAction', () => {
 
     it('Cmd+V uppercase key → paste on macOS', () => {
       expect(resolveKeyAction(makeState({ isMac: true, metaKey: true, key: 'V' }))).toBe('paste');
+    });
+  });
+});
+
+// Terminal font-zoom shortcuts (issue #667). The previous inline handler in
+// Terminal.tsx only checked `e.ctrlKey`, which meant ⌘+0/+/- on macOS never
+// fired — the OS-level browser zoom captured ⌘ but the handler ignored it.
+// The platform-canonical modifier is meta on Mac and ctrl elsewhere; this
+// helper encodes that split so the test guards against regressions.
+describe('resolveZoomKeyAction', () => {
+  describe('macOS (isMac: true)', () => {
+    it('Cmd+0 → reset', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, metaKey: true, key: '0' }))).toBe('reset');
+    });
+
+    it('Cmd+= → in (unshifted US layout)', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, metaKey: true, key: '=' }))).toBe('in');
+    });
+
+    it('Cmd++ → in (shifted US layout)', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, metaKey: true, shiftKey: true, key: '+' }))).toBe('in');
+    });
+
+    it('Cmd+- → out', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, metaKey: true, key: '-' }))).toBe('out');
+    });
+
+    it('Cmd+_ → out (shifted dash)', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, metaKey: true, shiftKey: true, key: '_' }))).toBe('out');
+    });
+
+    it('Ctrl+0 (no Cmd) → null — Mac does not honor ctrl for zoom', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, ctrlKey: true, key: '0' }))).toBeNull();
+    });
+
+    it('Cmd+unhandled key → null', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, metaKey: true, key: 'a' }))).toBeNull();
+    });
+
+    it('plain "0" (no modifier) → null', () => {
+      expect(resolveZoomKeyAction(makeState({ isMac: true, key: '0' }))).toBeNull();
+    });
+  });
+
+  describe('Linux/Windows (isMac: false)', () => {
+    it('Ctrl+0 → reset', () => {
+      expect(resolveZoomKeyAction(makeState({ ctrlKey: true, key: '0' }))).toBe('reset');
+    });
+
+    it('Ctrl+= → in', () => {
+      expect(resolveZoomKeyAction(makeState({ ctrlKey: true, key: '=' }))).toBe('in');
+    });
+
+    it('Ctrl++ → in', () => {
+      expect(resolveZoomKeyAction(makeState({ ctrlKey: true, shiftKey: true, key: '+' }))).toBe('in');
+    });
+
+    it('Ctrl+- → out', () => {
+      expect(resolveZoomKeyAction(makeState({ ctrlKey: true, key: '-' }))).toBe('out');
+    });
+
+    it('Ctrl+_ → out', () => {
+      expect(resolveZoomKeyAction(makeState({ ctrlKey: true, shiftKey: true, key: '_' }))).toBe('out');
+    });
+
+    it('Cmd+0 (no Ctrl) → null — Win/Linux do not honor meta for zoom', () => {
+      expect(resolveZoomKeyAction(makeState({ metaKey: true, key: '0' }))).toBeNull();
+    });
+
+    it('Ctrl+unhandled key → null', () => {
+      expect(resolveZoomKeyAction(makeState({ ctrlKey: true, key: 'a' }))).toBeNull();
     });
   });
 });

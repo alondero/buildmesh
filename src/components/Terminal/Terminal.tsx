@@ -4,6 +4,7 @@ import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import * as api from '../../lib/tauri';
 import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS } from './terminalConfig';
+import { resolveZoomKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
@@ -50,7 +51,10 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   // an element-level HTML5 onDrop never receives the files.
 
   const handleWheel = useCallback((e: ReactWheelEvent<HTMLDivElement>) => {
-    if (e.ctrlKey) {
+    // ⌘ on macOS, Ctrl elsewhere — same platform split as the keyboard zoom
+    // handler above (issue #667).
+    const mod = isMac ? e.metaKey : e.ctrlKey;
+    if (mod) {
       e.preventDefault();
       const delta = e.deltaY < 0 ? 2 : -2;
       setTerminalFontSize(terminalFontSize() + delta);
@@ -188,16 +192,27 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
   }, [handleSearchNext, handleSearchPrev]);
 
   // Keyboard shortcuts: Ctrl+0 reset, Ctrl++ zoom in, Ctrl+- zoom out
+  // (Cmd on macOS — see resolveZoomKeyAction in terminalKeyAction.ts.)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (!e.ctrlKey) return;
-      if (e.key === '0') {
+      // Cheap out for the overwhelming majority of keystrokes that don't carry
+      // a modifier at all — keeps this window-level listener off the hot path
+      // for plain text input.
+      if (!e.ctrlKey && !e.metaKey) return;
+      const action = resolveZoomKeyAction({
+        key: e.key,
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+        isMac,
+      });
+      if (action === 'reset') {
         e.preventDefault();
         setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT);
-      } else if (e.key === '=' || e.key === '+') {
+      } else if (action === 'in') {
         e.preventDefault();
         setTerminalFontSize(terminalFontSize() + 2);
-      } else if (e.key === '-' || e.key === '_') {
+      } else if (action === 'out') {
         e.preventDefault();
         setTerminalFontSize(terminalFontSize() - 2);
       }
