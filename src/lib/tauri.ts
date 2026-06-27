@@ -215,6 +215,20 @@ export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
 export const updateMeshPoolSize = (meshId: number, poolSize: number) =>
   _invoke<void>('update_mesh_pool_size', { meshId, poolSize });
 
+/**
+ * Returns the number of `available` warm pool entries for the given mesh —
+ * the value behind the Worktrees Probe's per-mesh pool badge. Powers the
+ * badge alongside `usePoolChanged`, which fires this on every
+ * `pool-count-changed` event from the Rust pool service.
+ *
+ * Thin wrapper over `commands::mesh_properties::get_mesh_pool_count`,
+ * which is itself a thin wrapper over `db::count_available_warm_for_mesh`
+ * — the badge's source of truth is the DB row count, never a derived
+ * value cached in TS state.
+ */
+export const getWarmPoolCount = (meshId: number) =>
+  _invoke<number>('get_mesh_pool_count', { meshId });
+
 export const updateWorktreeBaseRef = (meshId: number, baseRef: string) =>
   _invoke<void>('update_worktree_base_ref', { meshId, baseRef });
 

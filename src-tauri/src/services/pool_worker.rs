@@ -131,6 +131,10 @@ pub fn try_with_fill_lock(f: impl FnOnce()) -> bool {
 ///      or freshness pass is mid-flight) the tick is skipped and retried on
 ///      the next one.
 ///
+/// `app` is captured into the thread closure so `maintain_all_pools` can
+/// emit `pool-count-changed` from its inner drain/fill calls. The handle
+/// is `Clone + Send + Sync`, so the move into the std::thread is zero-cost.
+///
 /// Best-effort and infallible from the caller's perspective — every error
 /// inside the pass is logged and swallowed by `maintain_all_pools`, so the
 /// loop never dies.
@@ -143,15 +147,17 @@ pub fn try_with_fill_lock(f: impl FnOnce()) -> bool {
 /// gated), so pools still top up after spawns during activity. A scoped
 /// (per-mesh) activity signal or a max-staleness override would lift this; it's
 /// deferred to keep this tranche focused.
-pub fn start_background_worker() {
+pub fn start_background_worker(app: tauri::AppHandle) {
     std::thread::Builder::new()
         .name("warm-pool-worker".to_string())
-        .spawn(|| loop {
+        .spawn(move || loop {
             std::thread::sleep(TICK);
             if !is_idle_enough(idle_duration(), IDLE_SILENCE) {
                 continue;
             }
-            try_with_fill_lock(crate::services::warm_pool::maintain_all_pools);
+            try_with_fill_lock(|| {
+                crate::services::warm_pool::maintain_all_pools(&app);
+            });
         })
         .expect("failed to spawn warm-pool-worker thread");
 }

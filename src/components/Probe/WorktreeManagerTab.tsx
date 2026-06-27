@@ -37,12 +37,14 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshRecovery } from '../../hooks/useMeshRecovery';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { usePoolChanged } from '../../hooks/usePoolChanged';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   deleteBranches,
   deleteWorktrees,
   getGitPruneInfo,
   getMeshProperties,
+  getWarmPoolCount,
   openInFileManager,
   pruneRemoteTracking,
   updateMeshColumn,
@@ -207,6 +209,58 @@ export function WorktreeManagerTab() {
   // claim, draining excess and filling up to this target.
   const [preSpawnPoolSize, setPreSpawnPoolSize] = useState(0);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Live pre-spawn pool *ready* count for the active mesh. Source of
+  // truth is `db::count_available_warm_for_mesh` on the Rust side; the
+  // badge re-fetches on mount, on mesh switch, and on every
+  // `pool-count-changed` event (which fires from try_claim, prewarm_one,
+  // drain_excess_warm_entries, update_mesh_pool_size, and
+  // reconcile_on_startup). `null` = first fetch in flight (don't show
+  // a stale "0/N" while we don't know yet).
+  const [poolCount, setPoolCount] = useState<number | null>(null);
+
+  // Single refresh body — mount, mesh-switch, and every event route
+  // through this. Stable closure via `useCallback([activeMeshId])` so
+  // `usePoolChanged` doesn't tear down and re-attach its listener on
+  // every render (the dep-array contract `usePoolChanged` documents).
+  // Errors are swallowed (keep stale value) so a transient SQLite hiccup
+  // doesn't blank the badge — same recovery rule as the config-load
+  // path.
+  const refreshPoolCount = useCallback(() => {
+    if (activeMeshId === null) return;
+    getWarmPoolCount(activeMeshId)
+      .then((n) => setPoolCount(n))
+      .catch(() => {
+        /* keep stale value */
+      });
+  }, [activeMeshId]);
+
+  // Initial fetch on mount + every activeMeshId switch. Re-uses the
+  // `useAsyncEffect` `signal.aborted` gate so a rapid mesh switch while
+  // a previous fetch is in flight can't clobber state with a stale
+  // response (matches the `load` pattern at line 232).
+  useAsyncEffect(
+    (signal) => {
+      if (activeMeshId === null) {
+        setPoolCount(null);
+        return;
+      }
+      getWarmPoolCount(activeMeshId)
+        .then((n) => {
+          if (!signal.aborted) setPoolCount(n);
+        })
+        .catch(() => {
+          /* keep stale value */
+        });
+    },
+    [activeMeshId],
+  );
+
+  // Cross-component invalidation: re-fetch on every `pool-count-changed`
+  // event from the Rust pool service. The payload (mesh_id) is currently
+  // ignored — the badge re-fetches unconditionally on any mesh's change
+  // (one extra O(1) COUNT query per event, which is fine).
+  usePoolChanged(refreshPoolCount);
 
   // Single prune-fetch body. Mount, mesh-switch, manual Refresh, and
   // post-recovery all route through `load`. The function returns the
@@ -492,6 +546,7 @@ export function WorktreeManagerTab() {
         baseRef={baseRef}
         worktreeMode={worktreeMode}
         preSpawnPoolSize={preSpawnPoolSize}
+        poolCount={poolCount}
         onToggleUseWorktree={handleToggleUseWorktree}
         onChangeBaseRef={handleChangeBaseRef}
         onChangeWorktreeMode={handleChangeWorktreeMode}
@@ -904,6 +959,13 @@ interface ConfigurationCardProps {
   /** Per-mesh pre-spawn pool target (`0` = off, `1..=5`). The toggle's
    *  `checked` is derived from `preSpawnPoolSize > 0`. */
   preSpawnPoolSize: number;
+  /**
+   * Live count of `available` warm pool entries for the mesh. Drives
+   * the `<PoolStatus>` row under the "Pre-spawn warm worktrees"
+   * header. `null` = first fetch in flight (badge shows "…" instead
+   * of a misleading "0/N").
+   */
+  poolCount: number | null;
   onToggleUseWorktree: (next: boolean) => void;
   onChangeBaseRef: (next: BaseRefForm) => void;
   onChangeWorktreeMode: (next: WorktreeModeForm) => void;
@@ -951,6 +1013,7 @@ function ConfigurationCard({
   baseRef,
   worktreeMode,
   preSpawnPoolSize,
+  poolCount,
   onToggleUseWorktree,
   onChangeBaseRef,
   onChangeWorktreeMode,
@@ -1007,6 +1070,17 @@ function ConfigurationCard({
               />
               <span>Pre-spawn warm worktrees</span>
             </label>
+            {/* Live pool-ready badge. Hidden when the pool is disabled
+                (`preSpawnPoolSize === 0`); otherwise shows the ratio
+                `poolCount / target` plus a thin progress bar that fills
+                proportionally. Listens to `pool-count-changed` events
+                upstream (via `usePoolChanged` in the parent) so a
+                successful spawn drops the bar in real time and the
+                background worker's refill climbs it back up. A11y: the
+                wrapper is `role="status"` + `aria-live="polite"` so
+                screen readers announce changes, and the full
+                human-readable label sits in `aria-label` / `title`. */}
+            {poolEnabled && <PoolStatus count={poolCount} target={preSpawnPoolSize} />}
             <label
               className={`flex items-center gap-2 text-xs pl-4 ${
                 poolEnabled
@@ -1092,6 +1166,58 @@ function ConfigurationCard({
           </fieldset>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Pool status badge ──────────────────────────────────────────────────────
+
+/**
+ * Live ready-vs-target indicator for the pre-spawn pool.
+ *
+ * **Bar (not text):** the probe is dense with controls — a 4px bar is
+ * glanceable at a distance where a `${count}/${target}` label competes
+ * with the size input next to it.
+ *
+ * **Muted by default (no green):** `refreshing` rows aren't counted as
+ * ready, so a pool "at target" can still be mid-refresh; and `0 ready`
+ * is the *expected* state during a spawn's in-flight claim. A green
+ * "ready" colour would promise health that the count doesn't deliver.
+ *
+ * **A11y:** `role="status"` + `aria-live="polite"` so screen readers
+ * announce updates; `aria-label` carries the full sentence because
+ * the visible "…" placeholder is ambiguous.
+ */
+function PoolStatus({ count, target }: { count: number | null; target: number }) {
+  const display = count === null ? '…' : String(count);
+  const fullLabel = count === null
+    ? 'Pool status unknown'
+    : `${count} of ${target} pre-spawn worktrees ready`;
+  // Clamp to [0, 100] — a transient over-full (count > target) is
+  // capped rather than rendered as a >100% bar.
+  const pct = count === null ? 0 : Math.max(0, Math.min(100, (count / Math.max(target, 1)) * 100));
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label={fullLabel}
+      title={fullLabel}
+      className="flex items-center gap-2 pl-4 text-[10px] text-text-muted"
+      data-testid="pool-status"
+    >
+      <div
+        className="relative h-1 flex-1 max-w-[120px] rounded-full bg-bg-overlay overflow-hidden"
+        aria-hidden
+      >
+        <div
+          className="absolute inset-y-0 left-0 bg-accent-cyan/70 transition-[width] duration-300"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="tabular-nums" data-testid="pool-status-text">
+        {display} / {target} ready
+      </span>
     </div>
   );
 }

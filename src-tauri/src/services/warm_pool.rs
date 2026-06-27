@@ -66,6 +66,27 @@
 use crate::db::{self, WarmWorktreeStatus};
 use crate::session_naming::on_spawn;
 use std::path::Path;
+use tauri::Emitter;
+
+/// Event name broadcast on every state transition that changes a mesh's
+/// pre-spawn pool *ready* count. Frontend `usePoolChanged` listens for
+/// it and re-queries `get_mesh_pool_count` to refresh the Worktrees
+/// Probe badge. Payload is `mesh_id: i64` so a future per-mesh listener
+/// can short-circuit without a DB hit.
+pub const POOL_COUNT_CHANGED_EVENT: &str = "pool-count-changed";
+
+/// Broadcast `pool-count-changed` for `mesh_id`. Fire-and-forget — a
+/// listener-drop (the frontend hasn't subscribed yet, or the window is
+/// unfocused) must never fail a pool mutation, so the `let _` swallows
+/// any emission error.
+///
+/// `maintain_all_pools` and `post_spawn_maintenance` deliberately do
+/// NOT emit at end-of-pass — every state change inside them already
+/// fires this, and an unconditional end-of-pass emit would wake the
+/// listener every idle tick (~2s) for no reason.
+pub fn emit_pool_changed(app: &tauri::AppHandle, mesh_id: i64) {
+    let _ = app.emit(POOL_COUNT_CHANGED_EVENT, mesh_id);
+}
 
 /// A `filling` / `refreshing` row younger than this is assumed to belong to a
 /// worker that is actively mid-checkout right now (a fresh `refill_after_claim`
@@ -132,7 +153,15 @@ pub struct ClaimedWarmEntry {
 /// checked on disk to protect against claiming a row whose `git worktree
 /// add` was rolled back by a crash between row insert and checkout
 /// completion; a missing directory drops the row and reports `None`.
-pub fn try_claim(mesh_id: i64) -> Result<Option<ClaimedWarmEntry>, String> {
+///
+/// Emits `pool-count-changed` SYNCHRONOUSLY after a successful claim — this
+/// is the load-bearing emit for the spawn-failure gap: if the spawn dies
+/// between claim and `post_spawn_maintenance`, the badge still sees the
+/// count drop because this emit fired before the spawn could fail.
+pub fn try_claim(
+    app: &tauri::AppHandle,
+    mesh_id: i64,
+) -> Result<Option<ClaimedWarmEntry>, String> {
     let claimed = match db::claim_warm_entry_for_mesh(mesh_id) {
         Ok(Some(row)) => row,
         Ok(None) => return Ok(None),
@@ -154,6 +183,8 @@ pub fn try_claim(mesh_id: i64) -> Result<Option<ClaimedWarmEntry>, String> {
         let _ = db::delete_warm_worktree(claimed.id);
         return Ok(None);
     }
+
+    emit_pool_changed(app, mesh_id);
 
     Ok(Some(ClaimedWarmEntry {
         id: claimed.id,
@@ -223,7 +254,14 @@ pub(crate) fn warm_worktree_host_path(mesh_path: &str, slug: &str) -> String {
 /// mesh was already at target (no work done). Errors from
 /// `create_git_worktree` propagate so the worker can log + skip + try the
 /// next mesh on the next reconcile pass.
-pub fn prewarm_one(mesh: &db::WarmPoolMeshRow) -> Result<bool, String> {
+///
+/// Emits `pool-count-changed` after a successful fill (count +1) so a
+/// long-running multi-row fill surfaces each row becoming available
+/// immediately, instead of all-at-once at end-of-pass.
+pub fn prewarm_one(
+    app: &tauri::AppHandle,
+    mesh: &db::WarmPoolMeshRow,
+) -> Result<bool, String> {
     // Per-mesh target (issue #611). `0` is a hard no-op — the mesh has
     // opted out of the pool via the Worktrees Probe toggle. We still
     // want reconcile_on_startup and refill_after_claim to call us (so
@@ -313,6 +351,10 @@ pub fn prewarm_one(mesh: &db::WarmPoolMeshRow) -> Result<bool, String> {
                     mesh.id,
                     available + 1,
                 );
+                // Surface the new row immediately — a long multi-row fill
+                // gets to show "1/N ready" → "2/N ready" mid-tick instead
+                // of all-at-once at end-of-pass.
+                emit_pool_changed(app, mesh.id);
                 return Ok(true);
             }
             Err(e) => {
@@ -355,6 +397,38 @@ fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
 /// pool of target N starting from empty needs N calls — this loops it until
 /// the mesh reports "at target" (`Ok(false)`) or a `git worktree add` fails.
 ///
+/// Looks the mesh up by id (vs. `fill_mesh_to_target`'s in-hand row) so a
+/// single-mesh caller like `update_mesh_pool_size` doesn't need to first
+/// query `list_worktree_enabled_meshes_for_warm`. Silently no-ops when the
+/// mesh is not worktree-enabled — the caller already wrote the column, so
+/// the drain/fill aren't applicable.
+///
+/// All state changes inside (`drain_excess_warm_entries`, `prewarm_one`)
+/// emit `pool-count-changed` themselves; no end-of-pass emit here.
+pub fn drain_and_fill_for_mesh(app: &tauri::AppHandle, mesh_id: i64) {
+    let meshes = match db::list_worktree_enabled_meshes_for_warm() {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                "warm_pool: drain_and_fill_for_mesh list failed for {}: {}",
+                mesh_id,
+                e
+            );
+            return;
+        }
+    };
+    let Some(mesh) = meshes.into_iter().find(|m| m.id == mesh_id) else {
+        // Mesh is not worktree-enabled (or has been deleted) — nothing to drain/fill.
+        return;
+    };
+    fill_mesh_to_target(app, &mesh);
+}
+
+/// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
+/// target (issue #613). `prewarm_one` warms exactly ONE entry per call, so a
+/// pool of target N starting from empty needs N calls — this loops it until
+/// the mesh reports "at target" (`Ok(false)`) or a `git worktree add` fails.
+///
 /// The loop is bounded by `target` iterations as a belt-and-braces guard: each
 /// successful `prewarm_one` raises the `available` count by one, so the
 /// `available >= target` early-return inside `prewarm_one` is the real
@@ -365,8 +439,8 @@ fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
 /// The "single sequential `git worktree add`" cadence the issue calls for
 /// falls out naturally: this runs the cuts one after another on the calling
 /// thread, and every caller is already serialized behind the fill lock.
-fn fill_mesh_to_target(mesh: &db::WarmPoolMeshRow) {
-    if let Err(e) = drain_excess_warm_entries(mesh) {
+fn fill_mesh_to_target(app: &tauri::AppHandle, mesh: &db::WarmPoolMeshRow) {
+    if let Err(e) = drain_excess_warm_entries(app, mesh) {
         tracing::warn!(
             "warm_pool: drain failed for mesh {} ({}): {}",
             mesh.id,
@@ -376,7 +450,7 @@ fn fill_mesh_to_target(mesh: &db::WarmPoolMeshRow) {
     }
     let target = mesh.pre_spawn_pool_size.max(0);
     for _ in 0..target {
-        match prewarm_one(mesh) {
+        match prewarm_one(app, mesh) {
             Ok(true) => continue,
             Ok(false) => break,
             Err(e) => {
@@ -403,7 +477,13 @@ fn fill_mesh_to_target(mesh: &db::WarmPoolMeshRow) {
 /// `fill_mesh_to_target` and never stops the next mesh. Infallible from the
 /// worker's perspective so the loop thread can never die on a transient git
 /// error.
-pub fn maintain_all_pools() {
+///
+/// `app` is passed through so the inner `drain_excess_warm_entries` /
+/// `prewarm_one` emits can reach the frontend. No end-of-pass emit here —
+/// the inner calls already fire one per real state change, and a blanket
+/// end-of-pass emit would wake the listener every idle tick (every ~2s)
+/// even when nothing changed.
+pub fn maintain_all_pools(app: &tauri::AppHandle) {
     let meshes = match db::list_worktree_enabled_meshes_for_warm() {
         Ok(rows) => rows,
         Err(e) => {
@@ -412,7 +492,7 @@ pub fn maintain_all_pools() {
         }
     };
     for mesh in meshes {
-        fill_mesh_to_target(&mesh);
+        fill_mesh_to_target(app, &mesh);
     }
 }
 
@@ -424,7 +504,13 @@ pub fn maintain_all_pools() {
 /// so it never blocks the UI / window-creation path (issue #610 AC4).
 /// Failures are logged and swallowed — a transient git error on one mesh must
 /// not block the rest of the reconcile or the rest of app startup.
-pub fn reconcile_on_startup() {
+///
+/// Emits `pool-count-changed` ONCE at end-of-pass so a probe opened during
+/// the reconcile (the 0 → target transition) gets a final settle signal
+/// even if no individual fill row tripped the inner emit (e.g. the mesh
+/// was already at target from a previous session and the reconcile was a
+/// no-op for it).
+pub fn reconcile_on_startup(app: tauri::AppHandle) {
     // Step 1a: prune rows stuck in `claimed` after a previous crash (the
     // spawn path's `forget_after_spawn` failed after a successful spawn,
     // leaving the row alive with its directory present — the next claim
@@ -476,7 +562,15 @@ pub fn reconcile_on_startup() {
         // target=0, where the fill is a no-op and the drain is the only
         // useful work), then the pool is filled all the way up to the
         // per-mesh target rather than topped up by a single entry.
-        fill_mesh_to_target(&mesh);
+        fill_mesh_to_target(&app, &mesh);
+        // End-of-mesh settle emit — fires AFTER `fill_mesh_to_target`
+        // returns so the badge sees the final count for this mesh even
+        // when the mesh was already at target (in which case no inner
+        // emit fired). Carries the mesh_id per the `pool-count-changed`
+        // IPC contract (`usePoolChanged` documents the payload as
+        // `{ mesh_id: number }` — a single mesh-wide `app.emit((), ())`
+        // would violate it).
+        emit_pool_changed(&app, mesh.id);
     }
 }
 
@@ -571,7 +665,18 @@ fn with_warm_mesh(mesh_id: i64, what: &str, f: impl FnOnce(&db::WarmPoolMeshRow)
 /// then optionally refill the pool back to target (`do_refill`, set when this
 /// spawn claimed an entry). Folding both into one locked section is what stops
 /// refresh and refill from racing each other for the lock (issue #613 review).
-pub fn post_spawn_maintenance(mesh_id: i64, do_refresh: bool, do_refill: bool) {
+///
+/// `app` is passed through so the inner `drain_excess_warm_entries` /
+/// `prewarm_one` emits can reach the frontend. The `try_claim` call that
+/// precedes this in the spawn path has ALREADY emitted `pool-count-changed`
+/// (count -1 on the claim); the refill emits here cover the +N to restore
+/// to target. Together they tell the badge exactly what changed.
+pub fn post_spawn_maintenance(
+    mesh_id: i64,
+    do_refresh: bool,
+    do_refill: bool,
+    app: &tauri::AppHandle,
+) {
     with_warm_mesh(mesh_id, "post-spawn", |mesh| {
         if do_refresh {
             if let Err(e) = refresh_stale_warm_worktrees(mesh) {
@@ -584,7 +689,7 @@ pub fn post_spawn_maintenance(mesh_id: i64, do_refresh: bool, do_refill: bool) {
             }
         }
         if do_refill {
-            fill_mesh_to_target(mesh);
+            fill_mesh_to_target(app, mesh);
         }
     });
 }
@@ -609,7 +714,14 @@ pub fn post_spawn_maintenance(mesh_id: i64, do_refresh: bool, do_refill: bool) {
 /// Returns the number of entries dropped (0 when droppable ≤ target).
 /// Idempotent: safe to call from `reconcile_on_startup`, `maintain_all_pools`,
 /// and `refill_after_claim`.
-pub fn drain_excess_warm_entries(mesh: &db::WarmPoolMeshRow) -> Result<usize, String> {
+///
+/// Emits `pool-count-changed` IFF any rows were actually dropped — a no-op
+/// drain (already at or below target) doesn't change the count and so
+/// doesn't need to wake the listener.
+pub fn drain_excess_warm_entries(
+    app: &tauri::AppHandle,
+    mesh: &db::WarmPoolMeshRow,
+) -> Result<usize, String> {
     let target = mesh.pre_spawn_pool_size.max(0);
     let count = match db::count_droppable_warm_entries_for_mesh(mesh.id) {
         Ok(n) => n,
@@ -661,6 +773,7 @@ pub fn drain_excess_warm_entries(mesh: &db::WarmPoolMeshRow) -> Result<usize, St
             target,
             count
         );
+        emit_pool_changed(app, mesh.id);
     }
     Ok(dropped)
 }
@@ -795,6 +908,11 @@ fn refresh_warm_entries(
 /// and infallible from the caller's side; intended to be invoked on a
 /// background thread from the fetch paths so it never blocks a spawn or a
 /// manual sync.
+///
+/// No `pool-count-changed` emit here: the refresh path flips entries
+/// `available → refreshing → available`, so the net available count is
+/// unchanged (and a probe opened during a refresh would see the same
+/// count it had before the fetch started).
 pub fn on_fetch_completed(mesh_id: i64) {
     with_warm_mesh(mesh_id, "freshness", |mesh| {
         if let Err(e) = refresh_stale_warm_worktrees(mesh) {
@@ -812,6 +930,24 @@ pub fn on_fetch_completed(mesh_id: i64) {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    // ---- event name drift guard ----
+    //
+    // The `pool-count-changed` event is the IPC contract with the React
+    // `usePoolChanged` hook. The TS side exports `POOL_COUNT_CHANGED_EVENT`
+    // as a single source of truth — this test pins the Rust half so a
+    // future rename here (e.g. `pool-changed`, `warm-pool-changed`) fails
+    // loudly instead of silently breaking the badge's live updates.
+    // Symmetric test in `tests/unit/usePoolChanged.test.tsx`.
+
+    #[test]
+    fn pool_count_changed_event_name_matches_frontend_constant() {
+        assert_eq!(
+            POOL_COUNT_CHANGED_EVENT, "pool-count-changed",
+            "the event name must match `POOL_COUNT_CHANGED_EVENT` in src/hooks/usePoolChanged.ts — \
+             rename in lockstep on both sides"
+        );
+    }
 
     // ---- reconcile_warm_entries (the teardown + row-delete orchestration) ----
     //
