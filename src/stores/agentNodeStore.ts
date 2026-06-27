@@ -275,6 +275,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       return;
     }
 
+    // Re-capture the row RIGHT BEFORE the optimistic remove so the restore
+    // path below sees the version of the node that's actually being dropped
+    // (Phase 1 awaited `getWorktree_close_safety`, and a `node-renamed`
+    // event could fire during that window — capturing after the await closes
+    // that race). Reading after the optimistic remove would find nothing.
+    const nodeForRestore = get().agentNodes.find(s => s.id === id);
+
     // Phase 2: optimistic close + backend commit. The row drops from the UI
     // here so closing feels instant; the backend kills the agent and removes
     // the row in a fast Phase 1, then reclaims the worktree directory in the
@@ -314,9 +321,12 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // Re-inserting here makes the resurrection immediate and the failure
       // visible via the App.tsx state.error → 'System' toast pipeline
       // (App.tsx:186-190). Re-throw to match createAgentNode / renameAgentNode
-      // so callers awaiting the close can react.
+      // so callers awaiting the close can react. `nodeForRestore` was
+      // captured AFTER Phase 1's await so a `node-renamed` event fired
+      // mid-flight (e.g. user renamed then closed) restores the post-rename
+      // version, not a stale pre-rename snapshot.
       set((state) => ({
-        agentNodes: node ? [...state.agentNodes, node] : state.agentNodes,
+        agentNodes: nodeForRestore ? [...state.agentNodes, nodeForRestore] : state.agentNodes,
         error: String(e),
       }));
       throw e;
