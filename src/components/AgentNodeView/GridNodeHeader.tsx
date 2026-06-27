@@ -11,6 +11,7 @@ import { getMeshColor } from '../../lib/meshColors';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { isMac } from '../../lib/platform';
 
 interface GridNodeHeaderProps {
   node: AgentNode;
@@ -67,11 +68,18 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
     return m ? `[${m.name} #${node.id}]` : `[#${node.id}]`;
   }, [meshesById, node.mesh_id, node.id]);
 
+  // Issue #668 — advertise the Alt+G / Cmd+G shortcut in the title tooltip
+  // alongside the existing double-click affordance, so discoverability
+  // doesn't depend on the empty-state splash being on screen.
+  const toggleShortcutHint = `${isMac ? '⌘' : 'Alt'}+G`;
+
   return (
     <div
       {...dragHandleProps}
       onDoubleClick={() => toggleMaximizedNode(node.id)}
-      title={isMaximized ? 'Double-click to restore grid' : 'Double-click to maximize'}
+      title={isMaximized
+        ? `Double-click or press ${toggleShortcutHint} to restore grid`
+        : `Double-click or press ${toggleShortcutHint} to maximize`}
       className={`flex items-center justify-between px-2.5 py-1.5 border-b border-border-default ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}40` }}
     >
@@ -156,7 +164,10 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         <button
           onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
           className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
-          title={isMaximized ? 'Restore grid' : 'Maximize'}
+          // Issue #668 — surface the Alt+G / ⌘+G shortcut in the button
+          // tooltip so discoverability isn't gated on the header double-click
+          // or the empty-state splash.
+          title={isMaximized ? `Restore grid (or ${toggleShortcutHint})` : `Maximize (or ${toggleShortcutHint})`}
           aria-label={isMaximized ? 'Restore grid layout' : 'Maximize agent node'}
         >
           {isMaximized ? (

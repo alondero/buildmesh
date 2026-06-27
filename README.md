@@ -67,7 +67,7 @@ The Windows backend was pivoted off a per-node AppContainer ([ADR-0014](docs/adr
 - `Ctrl + 0` / `Cmd + 0` — reset terminal font size
 - `Ctrl + +` / `Cmd + +` — increase terminal font size
 - `Ctrl + -` / `Cmd + -` — decrease terminal font size
-- `Alt + G` — toggle grid / single view _(planned, tracked in [#668](https://github.com/alondero/buildmesh/issues/668))_
+- `Alt + G` / `Cmd + G` — toggle grid ↔ single view (maximize the active node or restore the split; no-op when there is no active node)
 
 The `Ctrl` modifier shown above is `Cmd` on macOS — Tauri normalises
 `CommandOrControl+…` registrations and JSX labels use `isMac ? '⌘' : 'Ctrl'`,

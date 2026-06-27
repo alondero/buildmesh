@@ -199,6 +199,55 @@ describe('GridNodeHeader maximize (#65)', () => {
     fireEvent.click(getByLabelText('Restore grid layout'));
     expect(useUIStore.getState().maximizedNodeId).toBe(null);
   });
+
+  // Issue #668 — Alt+G (Win/Linux) / Cmd+G (macOS) is the keyboard
+  // counterpart to the double-click and the explicit button. The header
+  // tooltip must surface it so users discover the shortcut without
+  // hunting through the empty-state splash.
+  it('mentions the platform-specific Alt+G / ⌘+G shortcut in the maximize tooltip', () => {
+    const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const title = (container.firstChild as Element).getAttribute('title') ?? '';
+    // Canonical sentence — substring-only asserts would accept broken
+    // strings like "Alt+G to do something unrelated maximize".
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    const expected = isMac
+      ? 'Double-click or press ⌘+G to maximize'
+      : 'Double-click or press Alt+G to maximize';
+    expect(title).toBe(expected);
+  });
+
+  it('mentions the shortcut in the restore tooltip when the node is maximized', () => {
+    useUIStore.setState({ maximizedNodeId: NODE.id });
+    const { container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const title = (container.firstChild as Element).getAttribute('title') ?? '';
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    const expected = isMac
+      ? 'Double-click or press ⌘+G to restore grid'
+      : 'Double-click or press Alt+G to restore grid';
+    expect(title).toBe(expected);
+  });
+
+  // Issue #668 — the explicit maximize button (visible on hover) must
+  // advertise the same shortcut so discoverability isn't gated on the
+  // header-bar double-click affordance.
+  it('the maximize button tooltip mentions the Alt+G / ⌘+G shortcut', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const button = getByLabelText('Maximize agent node');
+    const title = button.getAttribute('title') ?? '';
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    expect(title).toMatch(isMac ? /⌘\+G/ : /Alt\+G/);
+    expect(title.toLowerCase()).toContain('maximize');
+  });
+
+  it('the restore button tooltip mentions the shortcut when maximized', () => {
+    useUIStore.setState({ maximizedNodeId: NODE.id });
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const button = getByLabelText('Restore grid layout');
+    const title = button.getAttribute('title') ?? '';
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    expect(title).toMatch(isMac ? /⌘\+G/ : /Alt\+G/);
+    expect(title.toLowerCase()).toContain('restore');
+  });
 });
 
 describe('GridNodeHeader PR chip', () => {
