@@ -65,6 +65,43 @@ pub fn run() {
                 }
             }
 
+            // Mesh-default Spawn Option composite-id safety net (v19 follow-up).
+            // The v19 first-class block in `db::init` rewrote `agent_nodes.provider`
+            // from bare → composite but never touched `meshes.default_provider` —
+            // a pre-#575 mesh whose default was set to "minimax" or "kimi" kept
+            // the legacy bare form after upgrade. Without this safety net, the
+            // bare form routes through `resolve_provider_env` to the keyed
+            // **account** instead of the post-#575 proxied pairing, silently
+            // spawning Claude-CLI sessions against the wrong endpoint.
+            // Idempotent — the `WHERE default_provider IN (...)` guard is a
+            // no-op on already-migrated rows.
+            if let Ok(conn) = db::get().lock() {
+                if let Err(e) = db::ensure_mesh_default_provider_normalized(&conn) {
+                    tracing::warn!(
+                        "mesh-default provider normalization failed (non-fatal, meshes \
+                         will keep legacy bare ids until the next launch): {}",
+                        e
+                    );
+                }
+            }
+
+            // App-wide default-provider Spawn Option composite-id safety net.
+            // Companion to `ensure_mesh_default_provider_normalized` for the
+            // `preferences.json::default_provider` field — the v19 migration
+            // never rewrote that either. Without this, a user whose app-wide
+            // default was set before #575 keeps the legacy bare form in
+            // preferences.json, and `resolve_default_provider` returns it
+            // verbatim to `+`-click spawns on meshes without a per-mesh
+            // override. Idempotent — already-normalized values are a no-op.
+            if let Err(e) = preferences::ensure_default_provider_normalized() {
+                tracing::warn!(
+                    "app-wide default provider normalization failed (non-fatal, spawns \
+                     without a per-mesh override will keep the legacy bare id until \
+                     the next launch): {}",
+                    e
+                );
+            }
+
             // Auto-detect installed agent harnesses and populate dynamic profiles
             // (PRD #534 / issue #536). A dep-free in-process PATH scan — a few
             // hundred cached stat() calls, typically a couple of ms — so it runs

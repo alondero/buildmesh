@@ -172,7 +172,7 @@ fn pick_best_lan_ip(interfaces: &[(String, std::net::IpAddr)]) -> Option<String>
 /// Get the default provider for a mesh, applying the precedence chain:
 ///   1. per-mesh DB `default_provider` (set via Mesh Properties)
 ///   2. buildmesh-wide `preferences::default_provider` (set via Settings)
-///   3. hardcoded `anthropic` fallback
+///   3. hardcoded `claude` fallback (post-#538 unified harness id)
 #[command]
 pub async fn get_default_provider(mesh_id: i64) -> Result<String, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
