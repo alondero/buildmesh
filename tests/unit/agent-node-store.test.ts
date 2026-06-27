@@ -7,6 +7,7 @@ import {
   type AgentNode,
 } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
@@ -58,6 +59,10 @@ describe('useAgentNodeStore', () => {
       loading: false,
       error: null,
     });
+    // The #644 regression test drives the real prompt-store resolver; a
+    // leftover pending from a sibling test would silently settle an
+    // unrelated promise as 'cancel' on the first request() call.
+    useWorktreeClosePromptStore.setState({ pending: null });
   });
 
   describe('fetchAgentNodes', () => {
@@ -452,7 +457,7 @@ describe('useAgentNodeStore', () => {
       });
     });
 
-    // Issue #645: when `delete_agent_node` rejects, the optimistic removal must
+// Issue #645: when `delete_agent_node` rejects, the optimistic removal must
     // not be allowed to silently hide the failure. Three invariants:
     //   1. The row is restored to `agentNodes` so UI/DB stay in sync — otherwise
     //      the next fetchAgentNodes (any unrelated trigger — node-created,
@@ -541,6 +546,43 @@ describe('useAgentNodeStore', () => {
       ).rejects.toThrow('db locked');
 
       expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
+    });
+
+    // Regression for #644 — pins the user-visible "stuck row" symptom.
+    // Contract is owned by worktree-close-prompt-store.test.ts. Uses ids
+    // 50/51 to avoid colliding with the #645 zombie-row tests (41-44).
+    it('clears the prior closing flag when a second close supersedes the first prompt', async () => {
+      const nodeA = makeNode({ id: 50, name: 'alpha' });
+      const nodeB = makeNode({ id: 51, name: 'beta' });
+      useAgentNodeStore.setState({ agentNodes: [nodeA, nodeB], activeNodeId: 50 });
+      mockDeleteFlow(makeSafety({ has_unpushed: true }));
+      // Use the real worktreeClosePromptStore resolver so this exercises the
+      // actual orphan-promise code path.
+      setWorktreeCloseActionResolverForTests();
+
+      const closeA = useAgentNodeStore.getState().deleteAgentNode(50);
+      await vi.waitFor(() => {
+        expect(useAgentNodeStore.getState().closingNodeIds.has(50)).toBe(true);
+      });
+
+      // Before the fix: this would overwrite pending and orphan A's resolver.
+      const closeB = useAgentNodeStore.getState().deleteAgentNode(51);
+
+      // The promise returned to A must settle (as 'cancel'), allowing its
+      // deleteAgentNode to clear closingNodeIds(50). If this never resolves
+      // the test fails by timeout — the exact symptom of the bug.
+      await closeA;
+
+      expect(useAgentNodeStore.getState().closingNodeIds.has(50)).toBe(false);
+      // A is still in the list because 'cancel' is a no-op for the actual
+      // delete — only the closing flag clears.
+      expect(useAgentNodeStore.getState().agentNodes.find(n => n.id === 50)).toBeDefined();
+
+      // B's prompt is the one currently displayed. Dismiss it so closeB can
+      // also settle — proving the dialog still works for the second node.
+      useWorktreeClosePromptStore.getState().choose('cancel');
+      await closeB;
+      expect(useAgentNodeStore.getState().closingNodeIds.has(51)).toBe(false);
     });
   });
 
