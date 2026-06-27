@@ -108,6 +108,12 @@ function formatDate(iso: string | null): string {
   return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+// Last path segment — used to render a short, friendly worktree or
+// branch-row label from a full path (e.g. `/repos/foo/.claude/worktrees/abc`
+// → `abc`). Falls back to the original string when the path has no
+// separator (root paths, edge cases) so the UI never shows "undefined".
+const pathDirname = (p: string): string => p.split(/[/\\]/).pop() ?? p;
+
 // Composite keys keep selection unambiguous across multiple repos (a Mesh
 // can include nested git repos — each contributes its own branch list).
 const branchKey = (repo: string, name: string) => `b:${repo}::${name}`;
@@ -115,15 +121,23 @@ const worktreeKey = (path: string) => `w:${path}`;
 
 // "Safe to prune" recommendation. A branch is recommended when it isn't the
 // current HEAD, has nothing uncommitted to lose, isn't held by an active
-// agent node, and is either fully merged into main or orphaned (its upstream
-// remote branch is gone). The `!is_active` clause mirrors the worktree rule
-// — a live agent on a branch must close the node first before the branch
-// becomes prunable. A worktree is recommended when its branch no longer
-// exists (stale) and no agent is using it. Mirrors the legacy section's logic.
+// agent node, isn't checked out as the HEAD of *any* working tree on disk
+// (main or linked, live or orphan), and is either fully merged into main or
+// orphaned (its upstream remote branch is gone). The `!is_active` clause
+// mirrors the worktree rule — a live agent on a branch must close the node
+// first before the branch becomes prunable. The `!checked_out_in_worktree`
+// clause catches the orphan-worktree case `is_active` misses: when an
+// agent node was deleted/archived but its directory survives, the branch
+// is HEAD of a working tree git refuses to delete, and the only safe path
+// is to remove the worktree (which cascades to the branch via
+// `remove_one_worktree_and_branch`). A worktree is recommended when its
+// branch no longer exists (stale) and no agent is using it. Mirrors the
+// legacy section's logic.
 const isRecommendedBranch = (b: BranchInfo) =>
   !b.is_head &&
   !b.has_uncommitted &&
   !b.is_active &&
+  !b.checked_out_in_worktree &&
   (b.is_merged_into_main === true || b.is_orphan);
 
 const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
@@ -897,11 +911,31 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
               // checkbox as the primary defence; the backend
               // `delete_branches` rejects active branches as
               // defence-in-depth.
-              const undeletable = b.is_active;
+              //
+              // `checked_out_in_worktree` catches the orphan-worktree
+              // case `is_active` misses: a branch is HEAD of some
+              // working tree on disk (main or linked, live or orphan).
+              // Deleting the branch while a worktree holds it would hit
+              // libgit2's "current HEAD of a linked repository" error;
+              // the safe path is to remove the worktree above, which
+              // already cascades to the branch via
+              // `remove_one_worktree_and_branch`. Same UI treatment as
+              // `is_active` — disabled checkbox, dimmed row, "in
+              // worktree" badge pointing at the holding worktree.
+              const undeletable = b.is_active || !!b.checked_out_in_worktree;
+              const inWorktreeName = b.checked_out_in_worktree
+                ? pathDirname(b.checked_out_in_worktree)
+                : null;
               return (
                 <div
                   key={key}
-                  title={b.is_active ? 'Active — cannot delete' : undefined}
+                  title={
+                    b.is_active
+                      ? 'Active — cannot delete'
+                      : b.checked_out_in_worktree
+                      ? `Checked out in worktree "${inWorktreeName}" — remove the worktree above to delete this branch`
+                      : undefined
+                  }
                   className={`flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
                     undeletable
                       ? 'opacity-60'
@@ -930,6 +964,13 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                           color="bg-accent-cyan/15 text-accent-cyan"
                           text="active"
                           title="Active — cannot delete"
+                        />
+                      )}
+                      {b.checked_out_in_worktree && (
+                        <Badge
+                          color="bg-status-warning/15 text-status-warning"
+                          text={`in ${inWorktreeName}`}
+                          title={`Branch is HEAD of worktree at ${b.checked_out_in_worktree} — delete the worktree to remove this branch`}
                         />
                       )}
                       {b.is_merged_into_main && (
@@ -971,7 +1012,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
           <div className="space-y-0.5">
             {repo.worktrees.map((w) => {
               const key = worktreeKey(w.path);
-              const name = w.path.split(/[/\\]/).pop() || w.path;
+              const name = pathDirname(w.path);
               // A pool entry is also locked from delete (the worker
               // owns the directory and will refill on next reconcile).
               // The UI disables the checkbox; the backend

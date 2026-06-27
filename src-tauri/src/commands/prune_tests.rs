@@ -99,6 +99,16 @@ fn find_branch<'a>(info: &'a GitRepoPruneInfo, name: &str) -> &'a BranchInfo {
         .unwrap_or_else(|| panic!("branch {} not enumerated", name))
 }
 
+/// Path comparison helper. libgit2 normalises internal paths to forward
+/// slashes on every platform, so a worktree path returned from
+/// `Worktree::path()` is `C:/foo/bar` even on Windows. A `PathBuf` built
+/// locally (e.g. from a `TempDir`) keeps the platform-native separator
+/// (`C:\foo\bar`). The two are equal on disk but compare unequal as
+/// strings; normalise to one form before asserting.
+fn normalize_slashes(p: &str) -> String {
+    p.replace('\\', "/")
+}
+
 // ── env::active_node_branches contract (review follow-ups) ────────────────
 
 /// `active_node_branches` filters out `Archived` nodes — the contract
@@ -431,6 +441,136 @@ fn stale_worktree_when_branch_deleted() {
         .find(|w| w.branch.as_deref() == Some("doomed"))
         .expect("worktree still enumerated");
     assert!(wt.is_stale, "branch no longer in local list → stale");
+}
+
+// ── checked_out_in_worktree annotation ──────────────────────────────────────
+
+/// A branch checked out in a *linked* worktree has its worktree path
+/// stamped on `BranchInfo.checked_out_in_worktree`. This is the data
+/// that lets the prune UI disable the branch checkbox and direct the
+/// user to the worktree row above (the only safe way to drop a branch
+/// that's HEAD of another working tree — git2's `branch.delete()` would
+/// otherwise return `class=Reference (4)` "current HEAD of a linked
+/// repository").
+#[test]
+fn branch_in_linked_worktree_has_checked_out_path() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
+    let wt_branch = find_branch(&info, "wt-branch");
+    let wt_path = wt_dir.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    assert_eq!(
+        normalize_slashes(wt_branch.checked_out_in_worktree.as_deref().unwrap()),
+        normalize_slashes(&wt_path),
+        "linked worktree's branch must carry its worktree path"
+    );
+}
+
+/// The main repo's HEAD branch is also HEAD of the main worktree (it's
+/// literally what `main` means), so its `checked_out_in_worktree` is the
+/// main workdir — distinct from a linked worktree but the same shape of
+/// annotation. The `is_head` flag still distinguishes it in the UI (cyan
+/// HEAD badge), but the worktree annotation is what disables deletion
+/// regardless.
+#[test]
+fn main_head_branch_has_checked_out_path() {
+    let dir = TempDir::new();
+    init_repo(dir.path());
+
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
+    let main = find_branch(&info, "main");
+    let main_path = dir.path().to_string_lossy().trim_end_matches(['/', '\\']).to_string();
+    assert!(
+        main.is_head,
+        "main is HEAD of the main worktree in this fixture"
+    );
+    assert_eq!(
+        normalize_slashes(main.checked_out_in_worktree.as_deref().unwrap()),
+        normalize_slashes(&main_path),
+        "main repo's HEAD branch carries the main workdir path"
+    );
+}
+
+/// A standalone local branch (no worktree, never checked out anywhere)
+/// reads `checked_out_in_worktree: None` — the safe baseline. Only
+/// branches that are HEAD of *some* working tree get the annotation,
+/// which is exactly the set the UI must block from direct deletion.
+#[test]
+fn standalone_branch_has_no_checked_out_path() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "feature-a");
+    // `feature-a` was created from HEAD but never switched to or
+    // checked out anywhere — no worktree, no HEAD pointer at it.
+
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
+    let feat = find_branch(&info, "feature-a");
+    assert_eq!(
+        feat.checked_out_in_worktree, None,
+        "a branch never checked out has no worktree path"
+    );
+}
+
+/// The whole point: `delete_branches` must STILL refuse a branch that's
+/// HEAD of a linked worktree. The new `checked_out_in_worktree`
+/// annotation is *UI-only* (so the row is disabled); the backend
+/// continues to be defence-in-depth and lets libgit2's error surface
+/// as before. This test pins that contract so a future "auto-cascade"
+/// refactor doesn't silently change it.
+#[test]
+fn delete_branches_still_refuses_worktree_branch() {
+    let dir = TempDir::new();
+    let repo = init_repo(dir.path());
+    branch_from_head(&repo, "wt-branch");
+
+    let wt_dir = TempDir::new();
+    repo.worktree(
+        "wt1",
+        wt_dir.path(),
+        Some(git2::WorktreeAddOptions::new().reference(Some(
+            &repo.find_reference("refs/heads/wt-branch").unwrap(),
+        ))),
+    )
+    .unwrap();
+
+    // `delete_branches` partitions active branches (the `active_branches`
+    // arg) before attempting libgit2 deletes. Here we pass `wt-branch` as
+    // *not* active, so it falls through to git2 — which then refuses.
+    let err = delete_branches_in_repo(
+        &dir.path_str(),
+        &["wt-branch".to_string()],
+        &[],
+    )
+    .expect_err("git2 refuses to delete a branch checked out in a linked worktree");
+    assert!(
+        err.contains("wt-branch") && err.contains("linked repository"),
+        "expected libgit2's HEAD-of-linked-worktree error naming the branch; got: {}",
+        err
+    );
+
+    // The branch and its worktree must both still exist after the
+    // refused delete — nothing was partially removed.
+    let info = collect_prune_info(&dir.path_str(), &[], &[], &no_pool_paths).unwrap();
+    assert!(
+        info.local_branches.iter().any(|b| b.name == "wt-branch"),
+        "wt-branch must survive a refused delete"
+    );
+    assert!(
+        info.worktrees.iter().any(|w| w.branch.as_deref() == Some("wt-branch")),
+        "linked worktree must survive a refused branch delete"
+    );
 }
 
 // ── delete_branches ─────────────────────────────────────────────────────────

@@ -1129,4 +1129,185 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
       );
     });
   });
+
+  // ── checked_out_in_worktree (orphan-worktree branch protection) ──────
+
+  /**
+   * Pin the orphan-worktree contract: a branch that is HEAD of some
+   * working tree on disk — even if the agent node is gone (so
+   * `is_active` is false) — must surface with a disabled checkbox and
+   * an "in worktree" badge pointing at the holding worktree. The user
+   * can no longer accidentally hit libgit2's "current HEAD of a linked
+   * repository" error from the prune UI.
+   */
+  it('branches checked out in a worktree render with a disabled checkbox + in-worktree badge', async () => {
+    mockBackend({
+      prune: [
+        {
+          path: '/repos/demo',
+          local_branches: [
+            {
+              name: 'main',
+              is_head: true,
+              is_merged_into_main: null,
+              is_orphan: false,
+              is_active: false,
+              checked_out_in_worktree: null,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+            {
+              name: 'feature/orphan',
+              is_head: false,
+              is_merged_into_main: true,
+              is_orphan: false,
+              // No live agent node (is_active: false), but a worktree
+              // directory still exists with this branch checked out.
+              is_active: false,
+              checked_out_in_worktree: '/repos/demo/.claude/worktrees/hefty-slick-ocean',
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+          ],
+          worktrees: [
+            {
+              path: '/repos/demo',
+              branch: 'main',
+              is_active: true,
+              is_stale: false,
+              is_pool: false,
+            },
+            {
+              // The orphan — node deleted but dir survives. Not active
+              // (no live agent path match), not stale (branch exists).
+              path: '/repos/demo/.claude/worktrees/hefty-slick-ocean',
+              branch: 'feature/orphan',
+              is_active: false,
+              is_stale: false,
+              is_pool: false,
+            },
+          ],
+          remote_tracking_branches: [],
+        },
+      ],
+    });
+    await openWorktreesTab();
+
+    await screen.findByText('feature/orphan');
+
+    // The branch row's checkbox is disabled even though `is_active` is
+    // false — the orphan worktree is what blocks deletion, not an
+    // agent node. The worktree row also renders "feature/orphan" in its
+    // label (as the branch), so we anchor the regex to grab only the
+    // branch row. The branch row's accessible name concatenates without
+    // spaces between adjacent `<span>`s — the "in <wt>" badge's text
+    // runs into the branch name (`feature/orphanin hefty-slick-ocean…`).
+    // The worktree row's name is `<wt-name> · feature/orphan`, which
+    // starts with `hefty-slick-ocean`, not `feature/orphan`, so the
+    // `^feature/orphan` anchor is sufficient to disambiguate.
+    const orphanCheckbox = screen.getByRole('checkbox', {
+      name: /^feature\/orphan/i,
+    });
+    expect((orphanCheckbox as HTMLInputElement).disabled).toBe(true);
+
+    // `main` (idle, no worktree on it beyond the main repo's HEAD) stays
+    // enabled so the contrast is visible.
+    const mainCheckbox = screen.getByRole('checkbox', { name: /^main/i });
+    expect((mainCheckbox as HTMLInputElement).disabled).toBe(false);
+
+    // An "in <worktree>" badge appears on the orphan row so the user
+    // knows why it's locked and which worktree they should remove
+    // instead. The badge text uses the worktree's last path segment
+    // (the directory name), matching the worktree-row convention.
+    // `findByText` resolves with the matched element (or throws after
+    // timeout), so just confirming the call resolves is enough — no
+    // `toBeInTheDocument` import needed.
+    await screen.findByText(/in hefty-slick-ocean/);
+  });
+
+  /**
+   * Same recommendation contract as `is_active`: a branch HEAD of a
+   * worktree (orphan or live) is NOT in the "Select recommended" set.
+   * The user has to delete the worktree row, which cascades to the
+   * branch via `remove_one_worktree_and_branch`.
+   */
+  it('branches checked out in a worktree are not in "Select recommended"', async () => {
+    mockBackend({
+      prune: [
+        {
+          path: '/repos/demo',
+          local_branches: [
+            {
+              name: 'main',
+              is_head: true,
+              is_merged_into_main: null,
+              is_orphan: false,
+              is_active: false,
+              checked_out_in_worktree: null,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+            {
+              name: 'feature/merged-clean',
+              is_head: false,
+              is_merged_into_main: true,
+              is_orphan: false,
+              is_active: false,
+              checked_out_in_worktree: null,
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+            {
+              name: 'feature/merged-orphan-wt',
+              is_head: false,
+              is_merged_into_main: true,
+              is_orphan: false,
+              is_active: false,
+              // Same prune flags as feature/merged-clean, but HEAD of a
+              // surviving worktree directory → must NOT be recommended.
+              checked_out_in_worktree: '/repos/demo/.claude/worktrees/hefty-slick-ocean',
+              has_uncommitted: false,
+              last_commit_date: null,
+              ahead: 0,
+              behind: 0,
+            },
+          ],
+          worktrees: [
+            {
+              path: '/repos/demo',
+              branch: 'main',
+              is_active: true,
+              is_stale: false,
+              is_pool: false,
+            },
+            {
+              path: '/repos/demo/.claude/worktrees/hefty-slick-ocean',
+              branch: 'feature/merged-orphan-wt',
+              is_active: false,
+              is_stale: false,
+              is_pool: false,
+            },
+          ],
+          remote_tracking_branches: [],
+        },
+      ],
+    });
+    await openWorktreesTab();
+
+    await screen.findByText('feature/merged-orphan-wt');
+
+    const selectRecommended = await screen.findByRole('button', {
+      name: /Select recommended/i,
+    });
+    expect(selectRecommended.textContent).toMatch(/\(1\)/);
+    expect(selectRecommended.textContent).not.toMatch(/\(2\)/);
+  });
 });

@@ -7,8 +7,10 @@
 //! invalid node left behind — and the only signal a static read gave us
 //! was a path-collision error in the dev profile log:
 //!
-//!     failed to resolve path 'X:\\src\\buildmesh/.claude/worktrees/<slug>':
-//!     The system cannot find the file specified.
+//! ```text
+//! failed to resolve path 'X:\src\buildmesh/.claude/worktrees/<slug>':
+//! The system cannot find the file specified.
+//! ```
 //!
 //! Static reasoning ruled out PROCESS_REGISTRY races (it's mutex-guarded) and
 //! the obvious `git fetch` / `git worktree add` lock collisions (local repro
