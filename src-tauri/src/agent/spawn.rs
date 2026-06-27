@@ -29,6 +29,15 @@ use tauri::Emitter;
 /// rationale.
 pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 
+/// Threshold for the PTY reader thread's early-exit heuristic (issue #654).
+/// If the reader thread exits within this window the agent is flagged
+/// `Error` — typically because `--resume <uuid>` failed against an expired
+/// session. The orchestrator's delayed `Spawning → Running` promotion sleeps
+/// just past this same window (see `spawn_agent_inner` step 14b) so the two
+/// sites MUST stay in sync; bumping this constant without re-checking the
+/// promotion delay recreates the ghost-Running race.
+pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Resolve the `base_ref` string that `git::sync::fetch_origin` will use for
 /// the spawn-time auto-sync. The chain (each tier only runs if the previous
 /// one yields nothing useful):
@@ -604,13 +613,22 @@ fn start_reader(
             // duration (often 2-14s) to the threshold and miss
             // legitimate early-exit detections on slow spawns.
             let elapsed = spawned_at.elapsed();
-            if elapsed < std::time::Duration::from_secs(3) {
+            if elapsed < EARLY_EXIT_WINDOW {
                 tracing::warn!(
                     "Node {} reader exited after {:?} — likely resume failure",
                     session_id,
                     elapsed
                 );
-                let _ = db::update_agent_node_status(session_id, SessionStatus::Error);
+                // Symmetric guard with the orchestrator's Spawning write
+                // (issue #654): never resurrect `Archived` (user-initiated
+                // terminal state). `Error` itself is excluded so a
+                // double-write is a no-op rather than bumping
+                // `status_changed_at` a second time.
+                let _ = db::update_agent_node_status_unless_in(
+                    session_id,
+                    SessionStatus::Error,
+                    &[SessionStatus::Error, SessionStatus::Archived],
+                );
                 let _ = app_clone.emit(
                     "resume-failed",
                     serde_json::json!({
@@ -1420,8 +1438,63 @@ pub async fn spawn_agent_inner(
     }
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
-    diag.db_write("status", "Running");
-    db::update_agent_node_status(session_id, SessionStatus::Running).map_err(|e| e.to_string())?;
+    // Issue #654 — post-spawn status + early-exit race. The PTY reader thread
+    // fires its early-exit `Error` write within `EARLY_EXIT_WINDOW` of process
+    // creation if the agent CLI exits immediately (typically a stale `--resume
+    // <uuid>`). Writing `Running` here unconditionally let that Error write
+    // race with this one — whichever landed last won, so a "ghost Running"
+    // node could outlive its process.
+    //
+    // We now write the transient `Spawning` status with a
+    // `NOT IN (Error, Archived)` guard so the same race doesn't recur in
+    // the symmetric direction (reader-error-then-orchestrator-spawning
+    // resurrecting Error back to Spawning). Then we schedule a delayed
+    // conditional promotion (`Running` only if status is still
+    // `Spawning`). If the reader already wrote `error` before the
+    // early-exit window elapses, the promotion is a no-op and the node
+    // correctly stays `error`.
+    diag.db_write("status", "Spawning");
+    db::update_agent_node_status_unless_in(
+        session_id,
+        SessionStatus::Spawning,
+        &[SessionStatus::Error, SessionStatus::Archived],
+    )
+    .map_err(|e| e.to_string())?;
+    std::thread::spawn(move || {
+        // Sleep just past the reader thread's early-exit window. If the
+        // process died quickly the reader's `Error` write has already
+        // landed; the conditional promotion sees `status != Spawning` and
+        // bails out. If the agent is still alive, the promotion flips the
+        // status to `Running`.
+        std::thread::sleep(EARLY_EXIT_WINDOW);
+        match db::update_agent_node_status_if(
+            session_id,
+            SessionStatus::Running,
+            SessionStatus::Spawning,
+        ) {
+            Ok(true) => {
+                crate::agent::spawn_diag::promotion_event(session_id, "running");
+            }
+            Ok(false) => {
+                // Reader's Error write already won — leave the node as Error.
+                crate::agent::spawn_diag::promotion_event(session_id, "noop");
+            }
+            Err(e) => {
+                // Emit a `promotion_event` even on the failure path so a
+                // log reader can reconstruct the four-way race outcome from
+                // a single grep of `[DEBUG-concurrent-spawn] phase=promotion`.
+                // The previous free-form `tracing::warn!` swallowed this
+                // signal; failure data is most needed exactly here (DB
+                // contention mid-3s-window).
+                crate::agent::spawn_diag::promotion_event(session_id, "err");
+                tracing::warn!(
+                    "spawn_agent_inner: conditional Running promotion failed for session {}: {}",
+                    session_id,
+                    e
+                );
+            }
+        }
+    });
 
     // Warm-pool post-claim housekeeping (issue #609). After the spawn
     // succeeds we (a) drop the bookkeeping row — the directory now lives
@@ -1510,12 +1583,13 @@ pub async fn spawn_agent_inner(
     // fires — the PTY stays at the spawn-time size and the agent wraps
     // its first lines of output inside a wider pane. By emitting here
     // (after the agent is registered AND the DB status flips to
-    // `Running`, so the frontend knows the term is mountable), we give
-    // the frontend a definitive "agent is up, push the real size now"
-    // signal that closes the race uniformly for all three paths.
-    // Frontend consumer: TerminalRegistry listens and calls syncPtySize,
-    // which is self-guarding (no-op on detached/missing terminals) and
-    // swallows the "Agent not running" rejection.
+    // `Spawning` — the transient state between process launch and the
+    // conditional `Spawning → Running` promotion 3s later; issue #654),
+    // we give the frontend a definitive "agent is up, push the real
+    // size now" signal that closes the race uniformly for all three
+    // paths. Frontend consumer: TerminalRegistry listens and calls
+    // syncPtySize, which is self-guarding (no-op on detached/missing
+    // terminals) and swallows the "Agent not running" rejection.
     let _ = app.emit(
         "agent-spawned",
         serde_json::json!({

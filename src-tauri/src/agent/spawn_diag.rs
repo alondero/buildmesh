@@ -184,3 +184,27 @@ pub(super) fn warm_claim_event(mesh_id: i64, session_id: i64, outcome: &str) {
         IN_FLIGHT.load(Ordering::SeqCst),
     );
 }
+
+/// Emit a Spawning→Running promotion event from the orchestrator's delayed
+/// conditional write (issue #654). `outcome` is one of:
+/// - `running` — the conditional promotion applied (agent survived the
+///   early-exit window).
+/// - `noop` — status was no longer Spawning (reader thread's early-exit
+///   `Error` write already won the race; the node stays `error`).
+/// - `err:<message>` — the conditional DB write itself failed (lock
+///   contention, disk-full, etc.). Including the failure path lets a
+///   log reader reconstruct all four race outcomes from a single grep
+///   of `[DEBUG-concurrent-spawn] phase=promotion`.
+///
+/// Deliberately does NOT include `IN_FLIGHT`: this event fires ~3s AFTER
+/// `spawn_agent_inner` returned, so the `InFlightGuard` it owned has
+/// already dropped and `IN_FLIGHT` reflects unrelated concurrent spawns,
+/// not the promoted session's own spawn context (which would be
+/// misleading-by-construction).
+pub(super) fn promotion_event(session_id: i64, outcome: &'static str) {
+    tracing::info!(
+        "[DEBUG-concurrent-spawn] phase=promotion session={} outcome={}",
+        session_id,
+        outcome,
+    );
+}

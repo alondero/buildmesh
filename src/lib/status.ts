@@ -1,5 +1,6 @@
 export type SessionStatus =
   | 'pending'
+  | 'spawning'
   | 'running'
   | 'idle'
   | 'awaiting_input'
@@ -14,6 +15,18 @@ export const STATUS_CONFIG = {
   // user sees something is happening; the dot character is a hollow
   // circle (◌) to distinguish from the filled idle circle (○).
   pending: {
+    color: 'text-text-muted animate-pulse-fast',
+    bgColor: 'bg-text-muted animate-pulse-fast',
+    dot: '◌',
+    label: 'Starting…',
+  },
+  // Agent process is launched but the early-exit window (< 3s) has not yet
+  // elapsed (issue #654 — post-spawn status + early-exit race). The
+  // orchestrator writes this transient state between `start_reader`
+  // returning and the conditional Running promotion; visually identical
+  // to `pending` so the user sees the node progress through two
+  // "in-progress" stages before reaching Running.
+  spawning: {
     color: 'text-text-muted animate-pulse-fast',
     bgColor: 'bg-text-muted animate-pulse-fast',
     dot: '◌',
