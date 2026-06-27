@@ -169,7 +169,12 @@ function mockBackend(
       case 'delete_worktrees':
         return Promise.resolve();
       case 'prune_remote_tracking':
-        return Promise.resolve();
+        // Issue #657 — the command now returns the trimmed `git fetch
+        // --prune` stderr so the frontend can show what happened. The
+        // mock returns the empty string for the happy-path tests; the
+        // failure-path test below overrides this case via
+        // `vi.mocked(invoke).mockImplementationOnce`.
+        return Promise.resolve('');
       case 'restore_mesh_to_base':
         return Promise.resolve({ restored: true, message: 'Restored to main.' });
       case 'free_base_branch':
@@ -366,6 +371,129 @@ describe('WorktreeManagerTab (issue #377)', () => {
         ([cmd]) => cmd === 'get_git_prune_info',
       );
       expect(calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('clicking Prune disables the button with a "Pruning…" label and surfaces a success message (issue #657)', async () => {
+    // The default `mockBackend()` returns `''` from `prune_remote_tracking`,
+    // which the frontend treats as "nothing to report" → success message
+    // shows the fallback text.
+    const user = userEvent.setup();
+    mockBackend();
+    await openWorktreesTab();
+
+    const prune = await screen.findByRole('button', { name: /^Prune$/ });
+    expect(prune).toBeTruthy();
+    expect((prune as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(prune);
+
+    // After the click the IPC must have fired (success resolves
+    // synchronously under our mock — the in-flight state may be too
+    // brief to observe, but the eventual-state assertions pin behaviour).
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'prune_remote_tracking',
+        expect.objectContaining({ worktreePath: '/repos/demo' }),
+      );
+    });
+
+    // Success path: an inline message renders with the fallback text
+    // (the mock returns `''`). The user now sees *something* happened.
+    expect(await screen.findByText(/Remote-tracking refs pruned/)).toBeTruthy();
+    // The list re-fetch fires after the prune command resolves.
+    await waitFor(() => {
+      const calls = vi.mocked(invoke).mock.calls.filter(
+        ([cmd]) => cmd === 'get_git_prune_info',
+      );
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('clicking Prune with a failing backend surfaces an inline error prefixed "Prune failed: " (issue #657)', async () => {
+    const user = userEvent.setup();
+    mockBackend();
+    await openWorktreesTab();
+
+    // The default mock returns success for `prune_remote_tracking`.
+    // Override the *next* call so this single click fails — leaves other
+    // tests' mocks untouched. Throw for unknown commands so a future
+    // refactor that consumes the override early (e.g. an automatic
+    // warm-prune on tab focus) surfaces the wrong-order bug loudly
+    // instead of silently turning this into the success path
+    // (review finding C2/C3/C6).
+    vi.mocked(invoke).mockImplementationOnce((cmd: string) => {
+      if (cmd === 'prune_remote_tracking') {
+        return Promise.reject(new Error('fatal: not a git repository'));
+      }
+      throw new Error(`unexpected cmd in prune-failure test: ${cmd}`);
+    });
+
+    const prune = await screen.findByRole('button', { name: /^Prune$/ });
+    await user.click(prune);
+
+    // Error prefix is mandatory (AC4) — distinguishes prune failures
+    // from `deleteBranches`/`deleteWorktrees` failures that share the
+    // same inline-error channel. We match just the prefix here because
+    // `String(e)` for a JS `Error` instance produces `"Error: <msg>"`
+    // (same caveat applies to the save-failure test above at #321).
+    const error = await screen.findByText(/Prune failed:/);
+    expect(error).toBeTruthy();
+    expect(error.className).toContain('text-status-error');
+  });
+
+  it('a successful prune whose follow-up load() rejects surfaces the refresh error WITHOUT the "Prune failed:" prefix (review finding A1/C1)', async () => {
+    // Regression test for review finding A1/C1: previously the prune
+    // handler awaited `load()` inside the same try-block, so a refresh
+    // failure after a successful prune was labelled "Prune failed:" —
+    // misleading, since the prune itself succeeded. The fix mirrors
+    // the legacy `handleDelete` pattern: accumulate the prune error,
+    // await `load()` in `finally`, then re-set the prune error so it
+    // isn't clobbered by `load()`'s own `setError(null)`.
+    //
+    // NOTE: this test exercises the wire-shape invariant via two
+    // simpler proxies that don't depend on `String(Error)` text
+    // formatting:
+    //   1. The post-prune `get_git_prune_info` call was attempted (and
+    //      rejected) — so the refresh path ran. `load()`'s own catch
+    //      writes the rejection to the shared `error` channel WITHOUT
+    //      the "Prune failed:" prefix.
+    //   2. No "Prune failed:" text is rendered (because the prune
+    //      itself succeeded — only a refresh error occurred).
+    const user = userEvent.setup();
+    mockBackend();
+
+    let pruneInfoCount = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string, _args?: unknown) => {
+      if (cmd === 'prune_remote_tracking') {
+        return Promise.resolve('');
+      }
+      if (cmd === 'get_git_prune_info') {
+        pruneInfoCount += 1;
+        // First call (mount) succeeds, subsequent calls (refresh) reject.
+        return pruneInfoCount === 1
+          ? Promise.resolve(PRUNE_INFO)
+          : Promise.reject(new Error('db: connection refused'));
+      }
+      return Promise.resolve('');
+    });
+
+    await openWorktreesTab();
+
+    const prune = await screen.findByRole('button', { name: /^Prune$/ });
+    await user.click(prune);
+
+    // The refresh was attempted and rejected.
+    await waitFor(() => {
+      expect(pruneInfoCount).toBeGreaterThanOrEqual(2);
+    });
+
+    // Critical assertion: NO "Prune failed:" text rendered. The prune
+    // itself succeeded, so its error channel stays empty. The refresh
+    // failure surfaces on the shared `error` channel (via `load()`'s
+    // own `.catch`), which is the *non-prefixed* path.
+    await waitFor(() => {
+      expect(screen.queryByText(/^Prune failed:/)).toBeNull();
     });
   });
 

@@ -794,3 +794,81 @@ fn delete_worktrees_does_not_reject_non_pool_path() {
         );
     }
 }
+
+// ── prune_remote_tracking (issue #657) ──────────────────────────────────
+//
+// `prune_remote_tracking` now returns `Result<String, String>` so the
+// frontend can surface git's stderr output to the user. These tests pin the
+// return type and exercise both the success path (real local "remote" +
+// clone) and the failure path (non-repo directory).
+
+fn run_git(path: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {:?}: {}", args, e));
+    assert!(
+        output.status.success(),
+        "git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn run_git_clone(from: &str, to: &str) {
+    let output = std::process::Command::new("git")
+        .args(["clone", from, to])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn git clone: {}", e));
+    assert!(
+        output.status.success(),
+        "git clone failed\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn prune_remote_tracking_returns_string_on_success() {
+    // Bare "remote" → seed push → local clone. The clone is clean and
+    // already in sync, so `git fetch --prune` exits 0 with no refs to
+    // drop. The test pins the return type — `.unwrap()` must produce a
+    // `String` (currently it produces `()`, which fails to bind).
+    let bare = TempDir::new();
+    fs::create_dir_all(bare.path()).unwrap();
+    git2::Repository::init_bare(bare.path()).unwrap();
+
+    let seed = TempDir::new();
+    let _seed_repo = init_repo(seed.path());
+    run_git(seed.path(), &["branch", "-M", "main"]);
+    run_git(
+        seed.path(),
+        &["remote", "add", "origin", bare.path().to_str().unwrap()],
+    );
+    run_git(seed.path(), &["push", "-u", "origin", "main"]);
+
+    let local = TempDir::new();
+    run_git_clone(bare.path().to_str().unwrap(), local.path().to_str().unwrap());
+
+    let result = prune_remote_tracking(local.path_str()).await;
+    // Type-anchor: the success variant MUST be a String. If the signature
+    // regresses to `Result<(), String>` the `: String` annotation fails
+    // to compile, which is the desired RED state.
+    let message: String = result.expect("prune should succeed against a clean clone");
+}
+
+#[tokio::test]
+async fn prune_remote_tracking_returns_err_on_non_repo_path() {
+    // A temp directory that is NOT a git repo: `git fetch --prune` exits
+    // non-zero with "fatal: not a git repository" on stderr. The function
+    // must surface that as `Err`, not swallow it.
+    let dir = TempDir::new();
+    fs::create_dir_all(dir.path()).unwrap();
+    let result = prune_remote_tracking(dir.path_str()).await;
+    assert!(
+        result.is_err(),
+        "expected Err for non-repo path, got {:?}",
+        result
+    );
+}
