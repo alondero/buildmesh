@@ -1,8 +1,33 @@
+import { useEffect } from 'react';
 import { useWorktreeClosePromptStore } from '../../stores/worktreeClosePromptStore';
 
 export function WorktreeCloseDialog() {
   const pending = useWorktreeClosePromptStore(state => state.pending);
   const choose = useWorktreeClosePromptStore(state => state.choose);
+
+  // Esc dismisses the prompt as 'cancel'. Issue #643: when the WebView
+  // was occluded (another window on top, system-modal layer), the only
+  // dismiss path was a click on the backdrop — and that click never
+  // reached React when the WebView wasn't the focused surface. The
+  // pending promise then hung forever and `closingNodeIds` was never
+  // cleared. Escape is a keyboard path that works regardless of focus.
+  //
+  // Gated on `pending` because `<WorktreeCloseDialog />` is mounted
+  // unconditionally in App.tsx, so the early-return below does NOT
+  // unmount the component — it only returns null from render. Without
+  // the gate, the keydown listener would live for the lifetime of the
+  // app and silently steal Escape from agent CLIs in the terminal grid
+  // (the very behaviour `DiffOverlayShell`'s discipline is designed to
+  // prevent). With the gate, the listener attaches on transition into
+  // a pending prompt and detaches on resolution.
+  useEffect(() => {
+    if (!pending) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') choose('cancel');
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [choose, pending]);
 
   if (!pending) return null;
 
