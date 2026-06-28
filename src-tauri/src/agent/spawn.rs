@@ -10,6 +10,10 @@ use crate::agent::spawn_diag;
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
+use crate::git::worktree::provision::{
+    fetch_fork_head, fetch_single_ref, fork_remote_alias, provision_for_spawn, read_origin_ref_sha,
+    ProvisionOutcome, SpawnContext, SpawnSource,
+};
 use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
@@ -749,22 +753,18 @@ pub async fn spawn_agent_inner(
     timer.checkpoint("after_mesh_row_read");
     diag.checkpoint("after_mesh_row_read");
 
-    // 6. Compute spawn path. The warm-pool tracer bullet (issue #609) lets
-    //    manual spawns ADOPT a pre-warmed detached worktree as their own
-    //    worktree — zero cold checkout, no folder rename (the pool's
-    //    preassigned slug IS the node name). The claim happens BEFORE the
-    //    cold `create_git_worktree` block below; on success we rewrite the
-    //    worktree's mode (branched vs. detached) to match the mesh's
-    //    `worktree_mode`, then fall through to the rest of the spawn. A
-    //    claim failure (empty pool, PR/issue source, etc.) is logged and
-    //    falls through to the cold path — the spawn never fails because of
-    //    the pool, only because of an actual worktree-create error.
+    // 6. Compute spawn path. The pool claim (issue #609/#612) decides whether
+    //    the spawn adopts a pre-warmed worktree (Manual: pool slug IS the
+    //    node name; Issue/PR: `git worktree move` the pool dir onto the
+    //    `gh{N}-`/`pr{N}-` target) or falls through to a cold create. A
+    //    claim failure is non-fatal — the spawn falls back to cold; it
+    //    only fails on an actual worktree-create error.
     let mesh_id = db::get_mesh_by_path(&node.path).map(|m| m.id).unwrap_or(-1);
-    // Issue/PR spawns adopt a warm entry differently from manual spawns: they
-    // keep their own `gh{N}-`/`pr{N}-` name and `git worktree move` the pool
-    // directory to match (issue #612), whereas a manual spawn adopts the pool's
-    // plain slug as the node name (issue #609). This flag selects between the
-    // two adoption modes at every warm-pool branch below.
+    // `is_rename_spawn` selects between the two warm-pool adoption modes
+    // downstream: Manual adopts the pool's slug as the node name (issue #609);
+    // Issue/PR keep their own `gh{N}-`/`pr{N}-` name and move the pool dir
+    // to match (issue #612). Consumed by the post-spawn name adoption
+    // (further below) and by the SpawnContext built at phase 7.
     let is_rename_spawn = node.source_issue.is_some() || node.source_pr.is_some();
     let mut warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry> = None;
     // Issue #653: a successful `try_claim` that the use-site recheck later
@@ -882,6 +882,18 @@ pub async fn spawn_agent_inner(
         resolved.env_type
     );
 
+    // For a Manual warm claim, the pool's preassigned slug IS the node's
+    // `worktree_name` once the spawn completes — the post-spawn DB write
+    // (below, before `register_agent`) persists that, but `provision_for_spawn`
+    // needs the right branch name in the Spawn Context NOW so the manual
+    // `Upgraded` branch's `git checkout -B <branch>` targets the pool's slug
+    // rather than the node's stage-1 throwaway. Mutate `node.worktree_name`
+    // in place here; `node.clone()` carries the value into the Spawn Context.
+    let mut node = node;
+    if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
+        node.worktree_name = Some(entry.preassigned_name.clone());
+    }
+
     // Set true when the spawn-time fetch advances the mesh's base ref, so the
     // single post-spawn pool-maintenance task at the end runs the ref-freshness
     // pass (issue #613 AC3). Carried to the end rather than firing its own
@@ -889,15 +901,15 @@ pub async fn spawn_agent_inner(
     // never lose a lock race to each other (issue #613 review).
     let mut ref_advanced_for_pool = false;
 
-    // 7. Create worktree if needed
-    if let Some(wt_name) = spawn_worktree_name.as_deref() {
-        // Branched worktrees are isolated checkouts: git worktree add checks
-        // out the commit, not the parent's working tree, so uncommitted
-        // changes in the parent cannot leak into the new worktree. We
-        // intentionally do not gate spawn on parent cleanliness (see
-        // docs/adr/0002-allow-branched-worktree-creation-on-dirty-mesh.md).
-        let host_path = std::path::Path::new(&resolved.host_path);
-        if !host_path.exists() {
+    // Auto-sync (issue #213) + PR-head-fetch (#420/#443) + worktree_base_ref
+    // resolution only run when the host path doesn't exist yet — for resume /
+    // handover / re-spawn the existing worktree's tree IS the agent's starting
+    // point and re-syncing would churn refs unnecessarily. Root Nodes
+    // (`use_worktree = false`) skip both auto-sync and the PR-head-fetch by
+    // virtue of `spawn_worktree_name` being None.
+    let host_path_exists = std::path::Path::new(&resolved.host_path).exists();
+    let worktree_base_ref = if spawn_worktree_name.is_some() {
+        if !host_path_exists {
             // Auto-sync the parent **Mesh** before we cut a new worktree
             // (issue #213). The sync is best-effort: a network failure or
             // a non-fast-forwardable history is surfaced as a `mesh-sync-
@@ -996,7 +1008,7 @@ pub async fn spawn_agent_inner(
             // `pr_fork_unfetchable` outcome — the App.tsx listener already
             // renders a toast for that event, so no frontend change is
             // required.
-            let worktree_base_ref = if node.source_pr.is_some() {
+            if node.source_pr.is_some() {
                 let head_ref_owned = node.branch.clone();
                 let root = node.path.clone();
                 let fork_owner_owned = node.head_repo_owner.clone();
@@ -1075,9 +1087,7 @@ pub async fn spawn_agent_inner(
                             let pr_number = node.source_pr.unwrap_or(-1);
                             let head_ref = node.branch.clone();
                             let message = format!(
-                                "PR #{} was force-pushed or rebased after you clicked Spawn \
-                                 (expected {}, now {} on {}). Spawning on the new tip — \
-                                 re-spawn to pin to a fresh SHA.",
+                                "PR #{} was force-pushed or rebased after you clicked Spawn                                  (expected {}, now {} on {}). Spawning on the new tip —                                  re-spawn to pin to a fresh SHA.",
                                 pr_number, expected, actual, remote_ref,
                             );
                             tracing::warn!(
@@ -1125,10 +1135,7 @@ pub async fn spawn_agent_inner(
                         "origin".to_string()
                     };
                     let message = format!(
-                        "Could not fetch PR #{} head ref '{}' from {}; \
-                         spawning from the mesh's base ref '{}' instead. \
-                         The agent may land on stale commits — re-spawn \
-                         when the network is back to retry.",
+                        "Could not fetch PR #{} head ref '{}' from {};                          spawning from the mesh's base ref '{}' instead.                          The agent may land on stale commits — re-spawn                          when the network is back to retry.",
                         pr_number, head_ref, source_label, base_ref,
                     );
                     tracing::warn!(
@@ -1157,181 +1164,174 @@ pub async fn spawn_agent_inner(
                 }
             } else {
                 base_ref.to_string()
-            };
+            }
+        } else {
+            // Path already exists (resume / handover / re-spawn). No
+            // auto-sync, no PR-head-fetch — the existing worktree's tree IS
+            // the spawn point.
+            base_ref.to_string()
+        }
+    } else {
+        // Root Node (`use_worktree = false`) — no worktree, no base_ref
+        // resolution needed; `provision_for_spawn` short-circuits to `Reused`.
+        base_ref.to_string()
+    };
 
-            // Warm-pool adoption for Issue/PR spawns (issue #612). When we
-            // claimed a warm entry for a `gh{N}-`/`pr{N}-` spawn, the pool's
-            // pre-warmed directory is sitting under a plain slug at
-            // `entry.path`. Instead of a cold `git worktree add` (which writes
-            // the whole tree — the ~11s NTFS cost the pool exists to avoid), we
-            // `git worktree move` that directory onto this target name and then
-            // `git checkout` it to the ref the cold path resolved
-            // (`worktree_base_ref`: the mesh base for Issue spawns, the fetched
-            // PR head for PR spawns). On ANY failure we clean up the warm entry
-            // and fall back to the cold create so the spawn still succeeds.
+    // 7. Provision the Worktree Node via `provision_for_spawn` (issue #677).
+    //    The 4-way decision (Reused / Adopted / Upgraded / Created) lives
+    //    inside `git::worktree::provision` now; this orchestrator just
+    //    builds the Spawn Context, awaits the call, and matches the
+    //    outcome to drive the post-spawn bookkeeping.
+    //
+    //    CRITICAL CORRECTNESS:
+    //    * `ctx.base_ref` is `worktree_base_ref` (post-fetch for PR/Issue,
+    //      the mesh base otherwise). Setting this AFTER the PR-head-fetch
+    //      block — not the original `base_ref` — is what makes every PR
+    //      spawn land on the freshly fetched PR head rather than going
+    //      cold. For Resume / Root Node it's `base_ref` (no fetch ran).
+    //    * `warm_claimed.take()` moves the claim into the context; the
+    //      post-spawn housekeeping rebuilds it from the outcome's `entry`
+    //      field on `Adopted` / `Upgraded`.
+    //    * `is_rename_spawn` is preserved unchanged — the post-spawn name
+    //      adoption (further below) still reads it.
+    //
+    //    `warm_claimed.take()` moves the claim into the context — but we
+    //    ALSO hold a copy in `warm_entry_for_cleanup` so the error branch
+    //    below can find it for the warm-pool cleanup. Without this second
+    //    handle, the `Err` branch's cleanup is dead code (the move above
+    //    already emptied `warm_claimed`) and the post-spawn `forget_after_spawn`
+    //    never runs on a provision failure. Cloning the entry is cheap (4
+    //    short strings) and only happens once per spawn — the alternative
+    //    of having `provision_for_spawn` return the still-owned entry on
+    //    `Err` would expand the API surface for the rare failure case.
+    let warm_entry_for_cleanup = warm_claimed.take();
+    let provision_ctx = SpawnContext {
+        node: node.clone(),
+        source: SpawnSource::from_node(&node),
+        base_ref: worktree_base_ref.clone(),
+        resolved_base_sha: String::new(),
+        worktree_mode: worktree_mode.to_string(),
+        use_worktree,
+        sandbox,
+        warm_entry: warm_entry_for_cleanup.clone(),
+        spawn_path: resolved.spawn_path.clone(),
+        host_path: resolved.host_path.clone(),
+    };
+    timer.checkpoint("before_provision");
+    diag.git_event("provision_for_spawn", "start");
+    let provision_result = tokio::task::spawn_blocking(move || provision_for_spawn(provision_ctx))
+        .await
+        .unwrap_or_else(|e| Err(format!("provision_for_spawn task panicked: {}", e)));
+    timer.checkpoint("after_provision");
+    let provision_outcome = match provision_result {
+        Ok(o) => o,
+        Err(e) => {
+            // Provision failed. Two cases:
             //
-            // Only Issue/PR claims reach here: a manual warm claim resolves
-            // `spawn_worktree_name` onto the already-present pool directory, so
-            // `host_path.exists()` is true and this whole block is skipped.
-            let warm_adopt = if is_rename_spawn { warm_claimed.take() } else { None };
-            let mut adopted = false;
-            if let Some(entry) = warm_adopt {
-                let move_args = (
-                    node.path.clone(),
-                    entry.path.clone(),
-                    resolved.host_path.clone(),
-                    wt_name.to_string(),
-                    worktree_mode.to_string(),
-                    worktree_base_ref.clone(),
-                );
-                timer.checkpoint("before_warm_move");
-                let move_result = tokio::task::spawn_blocking(move || {
-                    adopt_warm_worktree_by_move(
-                        &move_args.0,
-                        &move_args.1,
-                        &move_args.2,
-                        &move_args.3,
-                        &move_args.4,
-                        &move_args.5,
-                    )
+            // (a) We had a warm claim (`warm_entry_for_cleanup` is Some) — the
+            //     warm-path helpers inside `provision_for_spawn` left the pool
+            //     directory in either the pool-path or target-path state (the
+            //     `git worktree move` may have succeeded and the
+            //     `git checkout -b` failed, or vice versa). Remove BOTH paths
+            //     (idempotent on whichever was untouched) and forget the row,
+            //     then FALL THROUGH to a cold create so the spawn still
+            //     succeeds on the cold path — preserves pre-refactor behavior
+            //     where warm-adopt failures were a graceful degradation rather
+            //     than a fatal error (issue #612).
+            // (b) No warm claim — `provision_for_spawn` failed on the cold
+            //     create itself; surface the error.
+            diag.git_event("provision_for_spawn", &format!("err:{}", e));
+            tracing::warn!(
+                "spawn_agent_inner: provision_for_spawn failed ({}); warm_entry_present={}",
+                e,
+                warm_entry_for_cleanup.is_some()
+            );
+            if let Some(entry) = warm_entry_for_cleanup.as_ref() {
+                let pool_path = entry.path.clone();
+                let target_path = resolved.host_path.clone();
+                let row_id = entry.id;
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = crate::git::worktree::remove_one_worktree(&target_path);
+                    let _ = crate::git::worktree::remove_one_worktree(&pool_path);
                 })
-                .await
-                .unwrap_or_else(|e| Err(format!("warm worktree move task panicked: {}", e)));
-                timer.checkpoint("after_warm_move");
-                match move_result {
-                    Ok(()) => {
-                        tracing::info!(
-                            "spawn_agent_inner: adopted warm entry {} -> {} via git worktree move (base_ref={})",
-                            entry.path,
-                            resolved.host_path,
-                            worktree_base_ref,
-                        );
-                        // Keep the entry so the post-spawn housekeeping drops
-                        // the bookkeeping row and refills the pool.
-                        warm_claimed = Some(entry);
-                        adopted = true;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "spawn_agent_inner: warm worktree adoption failed ({}); cleaning up and falling back to cold checkout",
-                            e
-                        );
-                        // Best-effort teardown. The failure could have struck
-                        // before OR after the `git worktree move`, so the
-                        // worktree may now sit at EITHER the pool path
-                        // (`entry.path`, move not done) or the target path
-                        // (`resolved.host_path`, move done but checkout/include
-                        // failed). Remove BOTH: that (a) frees the target so the
-                        // cold `create_git_worktree` below — which no-ops if the
-                        // path already exists — actually cuts a fresh tree at the
-                        // right ref instead of leaving the agent on the pool's
-                        // stale SHA, and (b) prevents a leaked pool directory.
-                        // `remove_one_worktree` is idempotent on a missing path.
-                        let pool_path = entry.path.clone();
-                        let target_path = resolved.host_path.clone();
-                        let row_id = entry.id;
-                        let _ = tokio::task::spawn_blocking(move || {
-                            let _ = crate::git::worktree::remove_one_worktree(&target_path);
-                            let _ = crate::git::worktree::remove_one_worktree(&pool_path);
-                        })
-                        .await;
-                        // `warm_claimed` was already taken, so the post-spawn
-                        // housekeeping won't double-free it; the next reconcile
-                        // refills the pool back to target.
-                        crate::services::warm_pool::forget_after_spawn(row_id);
-                    }
-                }
-            }
-
-            if !adopted {
-                tracing::info!("spawn_agent_inner: worktree {} not found, creating...", wt_name);
-                // The checkout can take seconds on a large repo; spawn_blocking keeps
-                // it off the async runtime's worker threads (same as fetch_origin above).
-                let create_args = (
-                    node.path.clone(),
-                    resolved.host_path.clone(),
-                    wt_name.to_string(),
-                    worktree_mode.to_string(),
-                    worktree_base_ref,
-                );
-                timer.checkpoint("before_worktree_create");
-                diag.git_event("worktree_add", "start");
-                let created = tokio::task::spawn_blocking(move || {
-                    crate::git::worktree::create_git_worktree(
-                        &create_args.0,
-                        &create_args.1,
-                        &create_args.2,
-                        &create_args.3,
-                        &create_args.4,
-                    )
-                })
-                .await
-                .unwrap_or_else(|e| Err(format!("worktree creation task panicked: {}", e)));
-                let wt_outcome: String = match &created {
-                    Ok(()) => "ok".to_string(),
-                    Err(e) => format!("err:{}", e),
+                .await;
+                crate::services::warm_pool::forget_after_spawn(row_id);
+                // Retry as cold create. The SpawnContext is rebuilt with
+                // `warm_entry: None` so `provision_for_spawn` takes the
+                // `Created` branch on the no-warm-claim / path-doesn't-exist
+                // path. `pool_was_drained_by_this_spawn` is still true from
+                // the original `try_claim` so the post-spawn refill below
+                // restores the pool inventory after this spawn completes.
+                timer.checkpoint("before_cold_fallback");
+                let cold_ctx = SpawnContext {
+                    node: node.clone(),
+                    source: SpawnSource::from_node(&node),
+                    base_ref: worktree_base_ref.clone(),
+                    resolved_base_sha: String::new(),
+                    worktree_mode: worktree_mode.to_string(),
+                    use_worktree,
+                    sandbox,
+                    warm_entry: None,
+                    spawn_path: resolved.spawn_path.clone(),
+                    host_path: resolved.host_path.clone(),
                 };
-                diag.git_event("worktree_add", &wt_outcome);
-                timer.checkpoint("after_worktree_create");
-                if let Err(e) = created {
-                    let msg = format!("Failed to create git worktree: {}", e);
-                    tracing::error!("spawn_agent_inner: {}", msg);
-                    return Err(msg);
+                let cold_result =
+                    tokio::task::spawn_blocking(move || provision_for_spawn(cold_ctx))
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(format!("cold-create fallback task panicked: {}", e))
+                        });
+                timer.checkpoint("after_cold_fallback");
+                match cold_result {
+                    Ok(o) => {
+                        diag.git_event("provision_for_spawn", "ok_cold_fallback");
+                        o
+                    }
+                    Err(cold_e) => {
+                        diag.git_event(
+                            "provision_for_spawn",
+                            &format!("err_cold_fallback:{}", cold_e),
+                        );
+                        let msg = format!(
+                            "spawn_agent_inner: provision_for_spawn failed AND cold fallback failed: \
+                             warm={}, cold={}",
+                            e, cold_e
+                        );
+                        tracing::error!("{}", msg);
+                        return Err(msg);
+                    }
                 }
-            }
-        }
-
-        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
-            tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
-        }
-
-        // Warm-pool claim fast path for MANUAL spawns (issue #609): when we
-        // adopted a pre-warmed detached worktree above, the directory already
-        // exists (the cold-create block above is skipped because
-        // `host_path.exists()` is true). The pool cuts every entry in
-        // `detached` mode so a future claim can `git checkout -B <branch>` to
-        // upgrade without touching the mesh's branch refs. Do the upgrade here,
-        // off the async runtime, so the spawn timer captures the warm-checkout
-        // cost as a single `spawn_timing:` checkpoint.
-        //
-        // Issue/PR claims (`is_rename_spawn`) are already checked out to the
-        // right ref by `adopt_warm_worktree_by_move` inside the cold block, so
-        // they skip this manual-only upgrade (#612).
-        if let (false, Some(ref entry)) = (is_rename_spawn, &warm_claimed) {
-            timer.checkpoint("before_warm_branch_upgrade");
-            let project_root_owned = node.path.clone();
-            let host_path_owned = resolved.host_path.clone();
-            let branch_name_owned = wt_name.to_string();
-            let mode_owned = worktree_mode.to_string();
-            let upgrade_result = tokio::task::spawn_blocking(move || {
-                upgrade_warm_to_mode(
-                    &project_root_owned,
-                    &host_path_owned,
-                    &branch_name_owned,
-                    &mode_owned,
-                )
-            })
-            .await
-            .unwrap_or_else(|e| Err(format!("warm branch upgrade panicked: {}", e)));
-            timer.checkpoint("after_warm_branch_upgrade");
-            if let Err(e) = upgrade_result {
-                // Don't fail the spawn — fall through and let the PTY
-                // launch. The agent will land on the warm entry's current
-                // HEAD (already at base_ref) instead of the mesh's named
-                // branch, which is the cold-spawn behaviour anyway.
-                tracing::warn!(
-                    "spawn_agent_inner: warm branch upgrade failed ({}); agent will land on detached HEAD",
-                    e
-                );
             } else {
-                tracing::info!(
-                    "spawn_agent_inner: warm entry {} upgraded to mode={} branch={}",
-                    entry.preassigned_name,
-                    worktree_mode,
-                    wt_name,
-                );
+                let msg = format!("spawn_agent_inner: provision_for_spawn: {}", e);
+                tracing::error!("{}", msg);
+                return Err(msg);
             }
         }
+    };
+    let wt_outcome: String = match &provision_outcome {
+        ProvisionOutcome::Reused { .. } => "reused".to_string(),
+        ProvisionOutcome::Adopted { .. } => "adopted".to_string(),
+        ProvisionOutcome::Upgraded { .. } => "upgraded".to_string(),
+        ProvisionOutcome::Created { .. } => "created".to_string(),
+    };
+    diag.git_event("provision_for_spawn", &wt_outcome);
+
+    // Rebuild `warm_claimed` from the outcome so the post-spawn bookkeeping
+    // (`forget_after_spawn` + name adoption) sees the entry on
+    // Adopted/Upgraded and None on Reused/Created. The Manual `Upgraded`
+    // variant carries the entry whose `preassigned_name` overwrites the
+    // node's stage-1 throwaway slug (the DB write below persists this).
+    if let ProvisionOutcome::Adopted { entry, .. } | ProvisionOutcome::Upgraded { entry, .. } =
+        &provision_outcome
+    {
+        warm_claimed = Some(entry.clone());
+    }
+
+    // Fix WSL/Windows path mismatches in the worktree's .git file — without
+    // this, agent commands run inside the worktree see a broken gitlink on
+    // Windows-side shells. Best-effort: a failure is logged, never fatal.
+    if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
+        tracing::warn!("spawn_agent_inner: failed to sanitize worktree .git file: {}", e);
     }
 
     // 8-9. Build the command, then spawn it — either normally (portable-pty)
@@ -1760,349 +1760,24 @@ fn emit_sync_outcome_event(
     let _ = app.emit(event_name, payload);
 }
 
-/// Fetch a single ref from `origin` into the local repo. Used by the PR-spawn
-/// path (#420) to materialise `origin/<head_ref>` so the worktree can be cut
-/// from it. `head_ref` is the PR's source branch (e.g. `feat/420-pr-spawn`);
-/// the function runs `git fetch origin <head_ref>` and returns `true` on a
-/// clean exit, `false` on any failure.
-///
-/// Best-effort by design: the caller falls back to the mesh's `base_ref` on
-/// `false` rather than failing the spawn (ADR 0001 offline pattern). The user
-/// sees the agent spawn on the wrong commits in the rare offline / stale-ref
-/// case, instead of a hard error every time the network blips. The
-/// alternative (strict-error spawn) is brittle to the very first offline
-/// session after a fresh install.
-///
-/// `--` separator before `head_ref` defends against an adversarial / malformed
-/// ref starting with `-` (e.g. `--upload-pack=…`); `git fetch` would otherwise
-/// treat it as a flag. GitHub's branch-name validation blocks this in
-/// practice, but the cost of the separator is zero and the upside is hardening
-/// against a future refactor that lets a hand-entered or imported ref flow
-/// through.
-fn fetch_single_ref(project_root: &str, head_ref: &str) -> bool {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    tracing::info!(
-        "fetch_single_ref: running git fetch origin -- {} in {}",
-        head_ref,
-        host_root
-    );
-    let mut cmd = command_no_window("git");
-    cmd.arg("fetch").arg("origin").arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("fetch_single_ref: failed to spawn git fetch: {}", e);
-            return false;
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(
-            "fetch_single_ref: git fetch origin -- {} failed: {}",
-            head_ref,
-            stderr.trim()
-        );
-        return false;
-    }
-    true
-}
-
-/// The alias used for a fork remote (issue #443). `fork-<login>` is
-/// human-readable in `git remote -v` and stays distinct from any user-defined
-/// remote name (a regular remote can't start with `fork-` because GitHub
-/// logins are alphanumeric + `-` with no leading `-`, but a user could
-/// still define one; the `fork-` prefix keeps our entries easy to spot in
-/// the output and trivial to clean up if we ever need to).
-fn fork_remote_alias(head_repo_owner: &str) -> String {
-    format!("fork-{}", head_repo_owner)
-}
-
-/// Fetch a single ref from a fork's clone URL into the local repo. Used by
-/// the PR-spawn path (issue #443, follow-up to #36 worktree adoption) when
-/// the PR's head branch lives on a fork — `fetch_single_ref` only fetches
-/// from `origin`, which the fork's head ref isn't on.
-///
-/// The function:
-///   1. Registers the fork as a remote named `fork-<login>` (idempotent —
-///      ignores the "remote already exists" error from `git remote add` and
-///      updates the URL via `git remote set-url` if the existing URL drifted,
-///      e.g. the user re-pointed the fork's origin on GitHub).
-///   2. Runs `git fetch <alias> <head_ref>` to materialise the ref locally.
-///   3. Returns `true` only when both steps succeed.
-///
-/// Best-effort by design (same contract as `fetch_single_ref`): the caller
-/// falls back to the mesh's `base_ref` on `false` rather than failing the
-/// spawn. The user sees the agent spawn on the wrong commits in the rare
-/// offline / stale-ref / removed-fork case, instead of a hard error every
-/// time the network blips.
-fn fetch_fork_head(
-    project_root: &str,
-    head_repo_owner: &str,
-    head_repo_clone_url: &str,
-    head_ref: &str,
-) -> bool {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    let alias = fork_remote_alias(head_repo_owner);
-    tracing::info!(
-        "fetch_fork_head: ensuring remote {} -> {} in {}",
-        alias,
-        head_repo_clone_url,
-        host_root
-    );
-
-    // Step 1: `git remote add` is idempotent via the explicit existence check.
-    // We use `git remote get-url` (read-only) to see if the remote already
-    // exists; if it does, `set-url` keeps it in sync with the fork's current
-    // clone URL. If it doesn't, `remote add` registers it. This avoids
-    // parsing `git remote add`'s non-zero stderr for the "already exists"
-    // signal — easier to read, and works on every git version.
-    let mut get_url = command_no_window("git");
-    get_url.arg("remote").arg("get-url").arg(&alias);
-    let existing = get_url
-        .current_dir(&host_root)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-
-    let url_matches = existing.as_deref() == Some(head_repo_clone_url);
-    if !url_matches {
-        let mut cmd = command_no_window("git");
-        if existing.is_some() {
-            cmd.arg("remote").arg("set-url").arg(&alias).arg(head_repo_clone_url);
-            tracing::info!("fetch_fork_head: updating remote {} URL", alias);
-        } else {
-            cmd.arg("remote").arg("add").arg(&alias).arg(head_repo_clone_url);
-            tracing::info!("fetch_fork_head: adding remote {}", alias);
-        }
-        let output = match cmd.current_dir(&host_root).output() {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::warn!("fetch_fork_head: failed to spawn git remote: {}", e);
-                return false;
-            }
-        };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(
-                "fetch_fork_head: git remote config for {} failed: {}",
-                alias,
-                stderr.trim()
-            );
-            return false;
-        }
-    }
-
-    // Step 2: fetch the head ref. `--` before `head_ref` defends against an
-    // adversarial / malformed ref starting with `-` (same hardening as
-    // `fetch_single_ref`).
-    tracing::info!(
-        "fetch_fork_head: running git fetch {} -- {} in {}",
-        alias,
-        head_ref,
-        host_root
-    );
-    let mut cmd = command_no_window("git");
-    cmd.arg("fetch").arg(&alias).arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("fetch_fork_head: failed to spawn git fetch: {}", e);
-            return false;
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(
-            "fetch_fork_head: git fetch {} -- {} failed: {}",
-            alias,
-            head_ref,
-            stderr.trim()
-        );
-        return false;
-    }
-    true
-}
-
-/// Upgrade a warm pool entry from detached HEAD to the mesh's configured
-/// worktree mode (issue #609, PRD #608 §3). The pool cuts every entry as
-/// `detached` so a future claim can adopt the directory without ever
-/// touching the mesh's branch refs — the cost is one `git checkout -B
-/// <branch>` (branched mode, ~50ms) or no-op (detached mode, ~5ms).
-///
-/// This is the entire warm-path "checkout" cost the tracer bullet buys: the
-/// on-disk tree is already at the mesh's base SHA (the worker checked it
-/// out); all the spawn has to do is flip the working ref. The 97% of cold-
-/// spawn time that was Windows Defender / NTFS search indexer / USN journal
-/// scanning freshly-written files is paid ONCE on app startup, not per
-/// spawn.
-///
-/// Best-effort by design: any failure here is logged by the caller and the
-/// spawn falls through. The agent lands on the warm entry's current HEAD
-/// (still at base_ref) instead of the mesh's named branch — strictly worse
-/// than the branched path, but never worse than a cold spawn would be.
-///
-/// `command_no_window` already applies CREATE_NO_WINDOW on Windows
-/// (`process_util::command_no_window`), so we don't need per-OS cfg
-/// duplication here.
-fn upgrade_warm_to_mode(
-    project_root: &str,
-    host_path: &str,
-    branch_name: &str,
-    mode: &str,
-) -> Result<(), String> {
-    if mode == "detached" {
-        // No-op: the pool already cut the entry as detached.
-    } else {
-        // Branched mode: `git checkout -B <branch>` from the current HEAD. `-B`
-        // (uppercase) is deliberate here — a manual spawn's branch IS the pool's
-        // preassigned slug (a random adj-adj-noun like `bold-amber-fox`), so a
-        // collision with a pre-existing branch is vanishingly unlikely and `-B`
-        // keeps the call idempotent across a re-claim of a still-detached entry.
-        // (The Issue/PR path uses `-b` instead — see `checkout_worktree_to_base` —
-        // because its branch name is deterministic and `-B` would force-reset a
-        // user's prior work.)
-        run_git_checkout(host_path, &["-B", branch_name])?;
-    }
-    // Re-apply `.worktreeinclude` so the manual warm claim matches what
-    // `create_git_worktree` and `adopt_warm_worktree_by_move` already do
-    // (issue #639 gap 1). The prewarm-time copy is stale by the time a user
-    // manually spawns — typical edits to a `.worktreeinclude` source (`.env`,
-    // build cache, `node_modules/`) would otherwise leave the agent on the
-    // prewarm snapshot. Best-effort like the other call sites: a copy
-    // failure here is logged inside `apply_worktree_include` but doesn't fail
-    // the spawn — the worktree is already usable without the extras.
-    crate::git::worktree::apply_worktree_include(
-        project_root,
-        std::path::Path::new(host_path),
-    );
-    Ok(())
-}
-
-/// Adopt a claimed warm-pool worktree for an Issue/PR spawn (issue #612): move
-/// the pre-warmed plain-slug directory to the node's `gh{N}-`/`pr{N}-` target
-/// path, then check that worktree out to `base_ref` on the node's branch (or
-/// detached), then re-apply `.worktreeinclude` so the result matches a cold
-/// spawn. Any step failing returns `Err` so the spawn path can clean up the
-/// warm entry and fall back to a cold `git worktree add`.
-///
-/// The move is the cheap part (`git worktree move`, ~tens of ms); the checkout
-/// only writes the diff between the pool's base SHA and `base_ref` — for an
-/// Issue spawn `base_ref` IS the mesh base the pool already sits on (near-zero
-/// writes), and for a PR spawn it's the freshly fetched PR head (just the PR's
-/// changed files), versus a cold spawn re-writing the entire tree.
-fn adopt_warm_worktree_by_move(
-    project_root: &str,
-    old_host_path: &str,
-    new_host_path: &str,
-    branch_name: &str,
-    mode: &str,
-    base_ref: &str,
-) -> Result<(), String> {
-    // Resolve `base_ref` to a concrete SHA up front (offline → HEAD fallback,
-    // and never a symbolic ref to `git checkout`), mirroring what the cold
-    // path's `add_worktree_impl` does via `resolve_base_commit`. Resolving
-    // BEFORE the move means a bad ref fails fast, before we disturb the pool
-    // directory.
-    let base_sha = crate::git::worktree::resolve_base_ref_sha(project_root, base_ref)?;
-    crate::git::worktree::move_git_worktree(project_root, old_host_path, new_host_path)?;
-    checkout_worktree_to_base(new_host_path, branch_name, mode, &base_sha)?;
-    crate::git::worktree::apply_worktree_include(
-        project_root,
-        std::path::Path::new(new_host_path),
-    );
-    Ok(())
-}
-
-/// `git checkout` a (just-moved) warm worktree onto a specific `base_sha`.
-/// Branched mode uses `-b <branch> <base_sha>` — like the cold path's
-/// `git worktree add -b`, it REFUSES if the branch already exists rather than
-/// clobbering it, so a re-spawn never silently force-resets a deterministic
-/// `gh{N}-`/`pr{N}-` branch and orphans the agent's earlier commits. Detached
-/// mode uses `--detach <base_sha>`.
-///
-/// Unlike [`upgrade_warm_to_mode`] (manual spawns, which stay on the warm
-/// entry's current HEAD), Issue/PR spawns must land on a *named* ref: the mesh
-/// base for Issue spawns, the PR head (`origin/<head>` / `fork-<login>/<head>`)
-/// for PR spawns. The cold-path PR-head-fetch resolves that ref, and
-/// `adopt_warm_worktree_by_move` resolves it to the `base_sha` passed here.
-fn checkout_worktree_to_base(
-    host_path: &str,
-    branch_name: &str,
-    mode: &str,
-    base_sha: &str,
-) -> Result<(), String> {
-    if mode == "branched" {
-        run_git_checkout(host_path, &["-b", branch_name, base_sha])
-    } else {
-        run_git_checkout(host_path, &["--detach", base_sha])
-    }
-}
-
-/// Shared `git -C <host_path> checkout <args…>` runner for the warm-pool
-/// checkout paths (manual mode-upgrade and Issue/PR adoption). Centralises the
-/// `command_no_window` plumbing and the stderr-surfacing error shape so a
-/// future fix (arg quoting, lock-retry) lands for both callers at once; the
-/// deliberate flag differences (`-B` vs `-b`) stay explicit at the call sites.
-fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
-    use crate::process_util::command_no_window;
-    let mut cmd = command_no_window("git");
-    cmd.arg("-C").arg(host_path).arg("checkout").args(args);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to spawn git checkout: {}", e))?;
-    if !output.status.success() {
-        return Err(format!(
-            "git checkout {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(())
-}
-
-/// Read the local SHA at `refs/remotes/origin/<head_ref>` — the ref
-/// `fetch_single_ref` populates via `git fetch origin -- <head_ref>`.
-/// Returns `None` when the ref doesn't exist (a stale local cache, a
-/// first-time fetch, or a non-git directory) so the spawn path can treat
-/// the absence as "skip the drift check" rather than a hard error.
-///
-/// Issue #444 — exact-pinning: the spawn path compares this to the
-/// `source_pr_pinned_sha` we stored at `create_pr_node` time and emits a
-/// `pr_sha_drift` `mesh-sync-warning` if they differ. SHA comparison is
-/// direct string equality: both `git rev-parse` and GitHub's API return
-/// 40-char lowercase hex, so a `String::ne` check is sufficient (no need
-/// to lowercase or trim).
-///
-/// `remote_ref` is the full remote-tracking ref (e.g. `origin/feat-x` for
-/// same-repo PRs from #420, or `fork-alice/feat-x` for fork PRs from #443).
-/// `git rev-parse` accepts both the short and the fully-qualified
-/// `refs/remotes/origin/...` form.
-fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Option<String> {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    // Read the symbolic SHA in one shot — `git rev-parse` exits non-zero
-    // (and produces no stdout) when the ref doesn't exist, so we don't
-    // need a separate "is this a ref?" probe first.
-    let mut cmd = command_no_window("git");
-    cmd.arg("rev-parse").arg(remote_ref);
-    let output = cmd.current_dir(&host_root).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sha.is_empty() {
-        None
-    } else {
-        Some(sha)
-    }
-}
+// The eight worktree-provision helpers — `fetch_single_ref`, `fork_remote_alias`,
+// `fetch_fork_head`, `read_origin_ref_sha`, `upgrade_warm_to_mode`,
+// `adopt_warm_worktree_by_move`, `checkout_worktree_to_base`, `run_git_checkout` —
+// live in `crate::git::worktree::provision` (ADR 0007 consolidation, issue
+// #677). The spawn path reaches them through the module-level `use` at the
+// top of this file; the call sites inside `spawn_agent_inner` use them
+// transparently.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The eight worktree-provision helpers were moved to
+    // `crate::git::worktree::provision` in PR #676 / issue #677; the tests
+    // here exercise them by name, so re-import at the test-module scope.
+    use crate::git::worktree::provision::{
+        adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
+        read_origin_ref_sha, upgrade_warm_to_mode,
+    };
     use tempfile::TempDir;
 
     /// Pin the spawn-time fallback. Sole pin of `DEFAULT_WORKTREE_MODE`
