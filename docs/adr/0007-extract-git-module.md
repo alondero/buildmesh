@@ -80,3 +80,63 @@ is unchanged and still covered by the existing `git::worktree::tests` suite.
 one module ADR 0007 consolidated, and a hard runtime dependency on `git` being
 on `PATH` for spawn (already true in practice). Justified by making a freshly
 spawned Agent Node usable in ~2s instead of ~14s — a win libgit2 cannot match.
+
+## Amendment (2026-06-27): warm-path worktree helpers move into `git::worktree::provision`
+
+The four warm-path helpers — `adopt_warm_worktree_by_move`,
+`upgrade_warm_to_mode`, `checkout_worktree_to_base`, `run_git_checkout` —
+along with the four fetch helpers that feed the warm-path adoption
+(`fetch_single_ref`, `fork_remote_alias`, `fetch_fork_head`,
+`read_origin_ref_sha`) move out of `agent::spawn` and into a new
+`git::worktree::provision` submodule. The cold-path primitives
+(`create_git_worktree`, `move_git_worktree`, `resolve_base_ref_sha`,
+`apply_worktree_include`) stay in `git::worktree` (now a directory
+module, not a flat file). A new `provision_for_spawn(SpawnContext) →
+Result<ProvisionOutcome, String>` encapsulates the 4-way decision
+(Reused / Adopted / Upgraded / Created) and returns a typed outcome
+with per-branch timing data.
+
+**Why.** `spawn_agent_inner` was a 900-line god function that owned
+both phases of the spawn pipeline — worktree provisioning (warm-pool
+claim → adopt / upgrade / cold-create) and process orchestration
+(PTY open → sandbox dispatch → reader thread → process registry).
+The two phases have different test surfaces, different callers, and
+different change cadences; co-locating them was the biggest remaining
+navigability cost in the spawn path. The `SpawnContext` and
+`SpawnSource` vocabulary (see `CONTEXT.md`) is the boundary type that
+makes the split explicit: the orchestrator builds the Spawn Context
+from mesh-row + node-row reads, the provisioner consumes it, and the
+process spawner downstream consumes the same context's `host_path` /
+`spawn_path` fields.
+
+**Scope of the move.** All eight helpers are private (`fn`, not `pub`)
+in both their old and new locations — there is no public-API delta.
+The provision module does not promote any of `git::worktree`'s existing
+public surface; it consumes `create_git_worktree`, `move_git_worktree`,
+`resolve_base_ref_sha`, and `apply_worktree_include` exactly as the
+spawn path already did. The exception to ADR 0007's "all git access via
+libgit2" rule (the `git worktree add` shell-out, the `git checkout` /
+`git fetch` / `git remote` shell-outs) continues to hold — every
+helper that shells out was either already documented as an exception
+or is a thin CLI invocation that libgit2 cannot match. No new
+shell-outs are introduced by this amendment.
+
+**Behaviour unchanged.** The four branches (Reused / Adopted /
+Upgraded / Created) are exactly the four code paths the spawn
+function already took; the new module gives them names, a return
+type, and per-branch timing. The `is_rename_spawn` boolean is
+preserved for the post-spawn name-overwrite dance (it is still the
+cheapest read at the two call sites that need it). The
+`[DEBUG-concurrent-spawn]` IN_FLIGHT counter stays in the orchestrator
+— the concurrent-spawn diagnostic is the next planned deepening, not
+this one. The `agent-spawned`, `mesh-sync-warning`, and `pr_sha_drift`
+Tauri events all stay where they fire today.
+
+**Test surface.** The existing `upgrade_warm_to_mode_*` and
+`adopt_warm_worktree_*` tests move with the helpers into the new
+module's `mod tests` block. New tests at the `provision_for_spawn`
+boundary cover each of the four branches in isolation, plus the two
+error paths (`refuses_to_clobber_existing_branch`,
+`returns_ok_on_bad_base_ref_for_adopted`). No new test fixtures are
+needed: the existing `TestDir` / `init_repo_with_commit` pattern from
+`env::test_helpers` covers every branch.
