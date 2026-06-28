@@ -26,6 +26,57 @@ function status(overrides: Partial<NetworkStatus>): NetworkStatus {
   };
 }
 
+/// Stub jsdom's read-only `window.location` so the modal's
+/// `window.location.href = installUrl` writes can be captured. Returns a
+/// `navigated` getter + a `restore()` to put the original Location back.
+///
+/// jsdom installs `location` as a *prototype accessor* on `window`, not a
+/// data property — `Object.getOwnPropertyDescriptor(window, 'location')`
+/// returns `{get, set, …}` from the prototype. A naive `Object.defineProperty`
+/// with `value:` would replace it with a data descriptor, silently breaking
+/// any later test that introspects the shape. The original descriptor is
+/// captured (not just the value) so `restore()` reinstalls it exactly as
+/// jsdom had it — the data-property leak that the early version of this
+/// helper caused (visible in `git log tests/unit/remote-access-modal.test.tsx`).
+function stubWindowLocation(): { navigated: () => string | null; restore: () => void } {
+  let captured: string | null = null;
+  const originalDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
+  const originalLocation = window.location;
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    get() {
+      return {
+        ...originalLocation,
+        set href(url: string) {
+          captured = url;
+        },
+        get href() {
+          return captured ?? '';
+        },
+      };
+    },
+    set(value: Location) {
+      // jsdom's own setter (rarely hit in tests) — keep the override
+      // symmetric so a future test that reassigns `window.location` doesn't
+      // observe an asymmetry between the get-stub and the set-stub.
+      Object.defineProperty(window, 'location', { configurable: true, value });
+    },
+  });
+  return {
+    navigated: () => captured,
+    restore: () => {
+      if (originalDescriptor) {
+        Object.defineProperty(window, 'location', originalDescriptor);
+      } else {
+        Object.defineProperty(window, 'location', {
+          configurable: true,
+          value: originalLocation,
+        });
+      }
+    },
+  };
+}
+
 const SAMPLE_CERT: CertChainStatus = {
   root_fingerprint_sha256:
     'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
@@ -237,5 +288,83 @@ describe('RemoteAccessModal', () => {
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(SAMPLE_CERT.cert_path),
     );
+  });
+
+  // --- issue #636: one-tap cert install --------------------------------
+  // The QR modal surfaces an "Install on this device" picker (Android /
+  // Windows / macOS) that navigates to /install-cert.der on the SAME host the
+  // QR encodes — the target device, not the desktop host, opens the URL.
+  // Auto-detection via `navigator.userAgent` would reflect the desktop, not
+  // the phone, so the user picks explicitly.
+
+  it('shows the install picker when LAN exposure is realized and cert status is loaded', async () => {
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    const install = await screen.findByTestId('remote-access-install');
+    expect(install.textContent).toMatch(/Android/);
+    expect(install.textContent).toMatch(/Windows/);
+    expect(install.textContent).toMatch(/macOS/);
+  });
+
+  it('hides the install picker when LAN exposure is not realized', async () => {
+    // `reachable: false` ⇒ `installUrl` is null, no install buttons rendered.
+    // The QR shows the unreachable warning instead. Mirrors the cert-status
+    // gating (fingerprint hides when fetch fails) — the install button only
+    // makes sense when the LAN URL the phone would hit is actually live.
+    mockBackend(status({ tls_active: false, exposed_interfaces: [] }));
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await screen.findByTestId('remote-access-warning');
+    expect(screen.queryByTestId('remote-access-install')).toBeNull();
+  });
+
+  it('navigates to the install-cert.der URL on the same host as the QR when a target is picked', async () => {
+    const user = userEvent.setup();
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    const { navigated, restore } = stubWindowLocation();
+    try {
+      render(<RemoteAccessModal onClose={() => {}} />);
+
+      // Click Android — the URL must use the realized bind's scheme+host
+      // (`https://192.168.1.10:1992`), NOT `tauri://` or the loopback
+      // origin (a phone opening that would error with ERR_INVALID_URL).
+      await user.click(await screen.findByTestId('remote-access-install-android'));
+
+      await waitFor(() =>
+        expect(navigated()).toBe('https://192.168.1.10:1992/install-cert.der'),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('matches the scheme of the realized bind (http when LAN exposure is plain)', async () => {
+    // A plain (non-TLS) realized bind → the install URL is also http://. The
+    // route itself doesn't gate on scheme, but a phone reaching the server
+    // over the wrong scheme hits the wrong port — symmetry matters.
+    const user = userEvent.setup();
+    mockBackend(
+      status({
+        tls_active: false,
+        exposed_interfaces: [{ address: '192.168.1.10:1992', tls: false }],
+      }),
+    );
+    const { navigated, restore } = stubWindowLocation();
+    try {
+      render(<RemoteAccessModal onClose={() => {}} />);
+
+      await user.click(await screen.findByTestId('remote-access-install-windows'));
+
+      await waitFor(() =>
+        expect(navigated()).toBe('http://192.168.1.10:1992/install-cert.der'),
+      );
+    } finally {
+      restore();
+    }
   });
 });

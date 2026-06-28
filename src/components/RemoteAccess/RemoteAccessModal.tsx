@@ -9,6 +9,16 @@ interface RemoteAccessModalProps {
 }
 
 /**
+ * Devices the one-tap install supports (issue #636). iOS is deliberately
+ * absent — `.mobileconfig` requires a signed XML payload and the profile
+ * structure Apple Configurator publishes is a separate 1-2 day scope, filed
+ * as a follow-up. Picking "this Mac" or "this PC" picks the same `/install-
+ * cert.der` URL the phone does; the OS-native installer is what differs, not
+ * the bytes served.
+ */
+export type InstallTarget = 'android' | 'windows' | 'macos';
+
+/**
  * Build the URL the phone should hit from the server's *realized* network
  * exposure, not a hardcoded scheme/port. When LAN exposure is enabled the
  * non-loopback interfaces serve self-signed TLS (issue #501), so the QR must
@@ -62,6 +72,7 @@ export function buildRemoteAccessUrl(
 export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [host, setHost] = useState<string>('discovering...');
+  const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [unreachable, setUnreachable] = useState(false);
   // Server's current root CA fingerprint (issue #635). Shown below the QR so
@@ -73,6 +84,12 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // "Copied!" feedback for the cert path copy button. Mirrors the
   // AppSettingsModal.tsx:670 clipboard pattern (2s timeout).
   const [certPathCopied, setCertPathCopied] = useState(false);
+  // Target-device picker for the one-tap install (issue #636). The desktop
+  // modal is NOT the device that needs the cert — `navigator.userAgent` here
+  // reflects the host (Windows/macOS), not the phone. The user picks the
+  // device they're setting up; collapsed by default so the modal stays calm
+  // for users who already have the root installed.
+  const [installTarget, setInstallTarget] = useState<InstallTarget | null>(null);
 
   useEffect(() => {
     const init = async () => {
@@ -99,6 +116,22 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         setHost(displayHost);
         setUnreachable(!reachable);
         setCertStatus(cert);
+        // Build the one-tap install URL from the same realized bind the QR
+        // encodes (issue #636). The target device — NOT the desktop host —
+        // opens this URL, so the scheme MUST match the bind the phone reaches:
+        // a `tauri://` / `https://tauri.localhost` URL pointed at the phone
+        // would fail with `ERR_INVALID_URL`. We strip the path off the QR
+        // URL and append the install route; reachable matches the same
+        // condition as the QR — when the LAN isn't actually exposed, the
+        // install button is hidden via `installUrl` being null.
+        if (reachable) {
+          // Use the URL parser instead of `url.indexOf('/', …)` math —
+          // handles IPv6 brackets (`[::1]:1992`) and any future URL shape
+          // that adds a path before the query string uniformly.
+          setInstallUrl(`${new URL(url).origin}/install-cert.der`);
+        } else {
+          setInstallUrl(null);
+        }
 
         const dataUrl = await QRCode.toDataURL(url, {
           width: 384,
@@ -131,6 +164,21 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
       // non-fatal — match AppSettingsModal's pattern of letting the copy
       // surface its own error if it must.
     }
+  };
+
+  const handleInstall = (target: InstallTarget) => {
+    // One-tap install (issue #636). Same URL for every target — Android
+    // Chrome auto-routes the `.der` MIME into the system cert installer,
+    // Windows opens the Certificate Import Wizard, macOS Safari/Firefox
+    // download the file for a manual Keychain drag. Setting `window.location`
+    // (rather than `<a download>` + click) is the only path that works on
+    // every platform: `download` is a download attribute (no navigation),
+    // and Safari ignores it for cross-origin MIME types.
+    if (!installUrl) return;
+    // Remember which target so the picker stays expanded while the OS-native
+    // installer opens in the background.
+    setInstallTarget(target);
+    window.location.href = installUrl;
   };
 
   return (
@@ -187,6 +235,39 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 we can't see the phone side from here, and a banner that almost-
                 never-fires erodes trust. The fingerprint + Re-install button
                 are the always-on remediation path. */}
+            {installUrl && certStatus && (
+              <div
+                data-testid="remote-access-install"
+                className="mt-4 w-full text-left"
+              >
+                <div className="text-xs text-text-muted mb-2">
+                  Install on this device ↓
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: 'android', label: 'Android' },
+                      { id: 'windows', label: 'Windows' },
+                      { id: 'macos', label: 'macOS' },
+                    ] as { id: InstallTarget; label: string }[]
+                  ).map(opt => (
+                    <button
+                      key={opt.id}
+                      data-testid={`remote-access-install-${opt.id}`}
+                      onClick={() => handleInstall(opt.id)}
+                      className={`px-3 py-2 rounded text-xs ${
+                        installTarget === opt.id
+                          ? 'bg-accent-cyan text-bg-base'
+                          : 'bg-border-subtle hover:bg-border-default text-text-secondary'
+                      }`}
+                      type="button"
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {certStatus && (
               <div
                 data-testid="remote-access-cert-status"

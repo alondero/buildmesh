@@ -58,6 +58,22 @@ pub fn port_offset(identifier: &str) -> u16 {
     if identifier.ends_with(".dev") { 1000 } else { 0 }
 }
 
+/// Short profile label for surface filenames that the user can see
+/// (e.g. the `Content-Disposition: filename=` on `/install-cert.der`).
+/// Stable hub gets `prod`; the dev profile gets `dev`. A custom identifier
+/// (test binary, sideloaded build) falls back to `custom` so the download
+/// filename stays distinct per build rather than silently bucketing
+/// unknown builds as `prod`.
+pub fn port_profile_label(identifier: &str) -> &'static str {
+    if identifier.ends_with(".dev") {
+        "dev"
+    } else if identifier.ends_with(".prod") || identifier == "com.alond.buildmesh" {
+        "prod"
+    } else {
+        "custom"
+    }
+}
+
 /// The HTTP port the server actually bound, published once `start_http_server`
 /// succeeds. Agent spawning reads this (via `current_http_port`) so the
 /// attention webhook points at *this* instance — both for the dev-profile
@@ -1073,6 +1089,57 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
+    // GET /install-cert.der — one-tap root CA install (issue #636). Same
+    // pre-auth, Host-guarded placement as `/__certs/status` above; serves the
+    // raw `ca.der` bytes with the Android-friendly `application/x-x509-ca-cert`
+    // MIME so Chrome auto-routes the download into the system cert installer.
+    // Windows opens its Certificate Import Wizard from this same MIME; macOS
+    // Safari/Firefox download the file for a manual Keychain drag. `Content-
+    // Length` is taken from the in-memory byte count of the file we are about
+    // to send (not from `Path::metadata`) so a concurrent `load_or_generate`
+    // mid-handle can't trip Chrome's `ERR_CONTENT_LENGTH_MISMATCH`.
+    //
+    // The download filename is profile-aware (CLAUDE.local.md: stable vs dev
+    // produce distinct app-data dirs and binaries). Hardcoding `buildmesh-dev-
+    // root-ca.der` would land the wrong-named file in a stable-hub user's
+    // Downloads, defeating the per-profile separation enforced elsewhere.
+    if method == "GET" && path_without_query == "/install-cert.der" {
+        let Some(app) = APP_HANDLE.get() else {
+            let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+            return;
+        };
+        let dir = match app.path().app_data_dir() {
+            Ok(p) => p.join("tls"),
+            Err(_) => {
+                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                return;
+            }
+        };
+        let profile = crate::http::port_profile_label(&app.config().identifier);
+        match routes::certs::install_cert_der(&dir) {
+            Ok(bytes) => {
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-x509-ca-cert\r\n\
+                     Content-Disposition: attachment; filename=\"buildmesh-{profile}-root-ca.der\"\r\n\
+                     Content-Length: {}\r\n\r\n",
+                    bytes.len()
+                );
+                let writer = lines.get_mut();
+                if writer.write_all(resp.as_bytes()).await.is_err() {
+                    return;
+                }
+                if writer.write_all(&bytes).await.is_err() {
+                    return;
+                }
+                let _ = writer.flush().await;
+            }
+            Err(_) => {
+                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+            }
+        }
+        return;
+    }
+
     // GET /admin/devices — list paired devices for the "Authorized Devices"
     // panel (issue #502). Admin-only; the first real operation in the namespace
     // #500 reserved. Matched before the `/admin/*` catch-all below.
@@ -1579,6 +1646,20 @@ mod tests {
         // Dev offset shifts the HTTP range clear of the stable hub: 1992 → 2992.
         assert_eq!(HTTP_PORT_START + port_offset("com.alond.buildmesh.dev"), 2992);
         assert_eq!(HTTP_PORT_END + port_offset("com.alond.buildmesh.dev"), 2994);
+    }
+
+    #[test]
+    fn port_profile_label_matches_known_identifiers() {
+        // Issue #636: the `/install-cert.der` download filename carries the
+        // profile so a stable-hub user doesn't see a `dev` file land in
+        // their Downloads. Drift guard for the .dev / .prod / default
+        // matches that `start_http_server` keys its bind port on.
+        assert_eq!(port_profile_label("com.alond.buildmesh"), "prod");
+        assert_eq!(port_profile_label("com.alond.buildmesh.dev"), "dev");
+        assert_eq!(port_profile_label("com.alond.buildmesh.prod"), "prod");
+        // Custom identifiers (tests, sideloaded builds) bucketed as
+        // `custom` rather than silently aliased to prod.
+        assert_eq!(port_profile_label("com.example.other"), "custom");
     }
 
     async fn attention_post(path: &str) -> u16 {
@@ -2587,6 +2668,26 @@ mod tests {
             "expected 503 when APP_HANDLE is not set in tests \
              (this proves the route is matched BEFORE auth — a 401 would \
              mean the route was moved past the admin-auth gate)"
+        );
+    }
+
+    // --- /install-cert.der route (issue #636) -----------------------------
+
+    /// Mount pin for the one-tap cert install endpoint: like `/__certs/status`
+    /// it must be reachable BEFORE auth gates (a phone whose TLS chain is
+    /// broken still needs the cert bytes, so a token can't be the gate), AND
+    /// the dispatcher's first action when APP_HANDLE is unset is the same
+    /// 503 short-circuit the sibling certs route uses. A refactor that moves
+    /// this past the admin gate surfaces as 401; one that drops the short-
+    /// circuit surfaces as a hang or panic.
+    #[tokio::test]
+    async fn install_cert_der_returns_503_when_app_handle_unset() {
+        let status = get_request("/install-cert.der").await;
+        assert_eq!(
+            status, 503,
+            "expected 503 when APP_HANDLE is not set in tests \
+             (proves the route is matched BEFORE auth — a 401 would mean the \
+             route was moved past the admin-auth gate)"
         );
     }
 }
