@@ -21,6 +21,9 @@ mod device_session_tests;
 #[cfg(test)]
 mod warm_pool_tests;
 
+#[cfg(test)]
+mod agent_node_tests;
+
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
@@ -2039,16 +2042,118 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
 
 pub fn update_agent_node_status(id: i64, status: SessionStatus) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    // Stamp `status_changed_at` on every transition — this is the single choke
-    // point all lifecycle changes flow through (including attention mark/clear),
-    // so the coordinator digest's `last_activity`/`waiting_since` stay accurate.
-    // Stored as RFC3339 (unambiguous, timezone-aware) rather than SQLite's
-    // space-separated `datetime('now')` form.
-    db.execute(
+    // Single choke point for status transitions; the coordinator digest
+    // reads `status_changed_at` for `last_activity`. Stored as RFC3339
+    // rather than SQLite's `datetime('now')` (timezone-aware, sortable).
+    update_agent_node_status_inner(&db, id, status)
+}
+
+/// `_inner` form of [`update_agent_node_status`]. Exists so the race-fix
+/// test in `db/agent_node_tests.rs` can exercise the production SQL against
+/// an in-memory fixture; duplicating the SQL in the test silently drifts
+/// when this path changes (timestamp format, extra column, transaction).
+pub fn update_agent_node_status_inner(
+    conn: &Connection,
+    id: i64,
+    status: SessionStatus,
+) -> SqlResult<()> {
+    conn.execute(
         "UPDATE agent_nodes SET status = ?1, status_changed_at = ?2 WHERE id = ?3",
         params![status.to_db_str(), chrono::Utc::now().to_rfc3339(), id],
     )?;
     Ok(())
+}
+
+/// Conditional `update_agent_node_status`. Returns whether the row matched.
+///
+/// Issue #654 — the orchestrator's delayed `Spawning → Running` promotion;
+/// no-op if the reader thread's early-exit Error write already won.
+pub fn update_agent_node_status_if(
+    id: i64,
+    new: SessionStatus,
+    expected: SessionStatus,
+) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    update_agent_node_status_if_inner(&db, id, new, expected)
+}
+
+/// `_inner` form of [`update_agent_node_status_if`].
+///
+/// The `AND status = ?4` predicate means a no-op match leaves
+/// `status_changed_at` untouched, so the coordinator's `last_activity`
+/// keeps reporting the real event (e.g. the reader's Error write) rather
+/// than a phantom orchestrator activity timestamp.
+pub fn update_agent_node_status_if_inner(
+    conn: &Connection,
+    id: i64,
+    new: SessionStatus,
+    expected: SessionStatus,
+) -> SqlResult<bool> {
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET status = ?1, status_changed_at = ?2 \
+         WHERE id = ?3 AND status = ?4",
+        params![
+            new.to_db_str(),
+            chrono::Utc::now().to_rfc3339(),
+            id,
+            expected.to_db_str(),
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Inverse of [`update_agent_node_status_if`]: write `new` UNLESS current
+/// status is in `forbidden`. Issue #654 — both writers (orchestrator's
+/// `Spawning`, reader's `Error`) forbid the terminal set so whichever
+/// fires first sticks and the other becomes a no-op.
+pub fn update_agent_node_status_unless_in(
+    id: i64,
+    new: SessionStatus,
+    forbidden: &[SessionStatus],
+) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    update_agent_node_status_unless_in_inner(&db, id, new, forbidden)
+}
+
+pub fn update_agent_node_status_unless_in_inner(
+    conn: &Connection,
+    id: i64,
+    new: SessionStatus,
+    forbidden: &[SessionStatus],
+) -> SqlResult<bool> {
+    if forbidden.is_empty() {
+        // Disjoint surface from `update_agent_node_status_inner`: an empty
+        // forbidden list would match every row, which is exactly that
+        // primitive's job.
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    // Positional placeholders (`?N`) so SQLite parameterises every value —
+    // no SQL injection surface, no enum-name interpolation.
+    let placeholders = forbidden
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 4))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE agent_nodes SET status = ?1, status_changed_at = ?2 \
+         WHERE id = ?3 AND status NOT IN ({placeholders})"
+    );
+    let now = chrono::Utc::now().to_rfc3339();
+    // `SessionStatus::to_db_str` returns `&'static str`, so the slice of
+    // refs is `&'static [&'static str]` — no lifetime juggling required,
+    // just collect the static refs into a Vec and pass to execute.
+    let new_str: &'static str = new.to_db_str();
+    let forbidden_strs: Vec<&'static str> = forbidden.iter().map(|f| f.to_db_str()).collect();
+    let mut params_vec: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(3 + forbidden.len());
+    params_vec.push(&new_str);
+    params_vec.push(&now);
+    params_vec.push(&id);
+    for s in &forbidden_strs {
+        params_vec.push(s);
+    }
+    let changed = conn.execute(&sql, params_vec.as_slice())?;
+    Ok(changed > 0)
 }
 
 pub fn archive_agent_node(id: i64) -> SqlResult<()> {
@@ -2076,8 +2181,11 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
     // bookkeeping, not agent activity, so the coordinator digest's
     // `last_activity` should keep reporting when the node *actually* last did
     // work (pre-crash), not the moment the app reopened. (See ADR-0008 spine.)
+    // `spawning` (issue #654) is included so a crash between process launch
+    // and the 3s Running promotion leaves a recoverable `suspended` row.
     let count = db.execute(
-        "UPDATE agent_nodes SET status = 'suspended' WHERE status IN ('running', 'awaiting_input', 'pending')",
+        "UPDATE agent_nodes SET status = 'suspended' \
+         WHERE status IN ('running', 'awaiting_input', 'pending', 'spawning')",
         [],
     )?;
     Ok(count)

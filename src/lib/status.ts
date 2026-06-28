@@ -1,5 +1,6 @@
 export type SessionStatus =
   | 'pending'
+  | 'spawning'
   | 'running'
   | 'idle'
   | 'awaiting_input'
@@ -7,13 +8,16 @@ export type SessionStatus =
   | 'suspended';
 
 export const STATUS_CONFIG = {
-  // Node row exists but the slow stage-2 of spawn (git fetch, worktree
-  // create, PTY spawn) has not yet completed. The two-stage spawn flow
-  // (create_issue_node → start_node_background) flips this to 'running'
-  // on stage-2 success or 'error' on failure. Visually pulses so the
-  // user sees something is happening; the dot character is a hollow
-  // circle (◌) to distinguish from the filled idle circle (○).
+  // Stage-2 in progress; visually pulses so the user sees liveness.
   pending: {
+    color: 'text-text-muted animate-pulse-fast',
+    bgColor: 'bg-text-muted animate-pulse-fast',
+    dot: '◌',
+    label: 'Starting…',
+  },
+  // Issue #654 — agent launched but the 3s early-exit window hasn't elapsed.
+  // Visually mirrors `pending`; conditional promotion to Running fires next.
+  spawning: {
     color: 'text-text-muted animate-pulse-fast',
     bgColor: 'bg-text-muted animate-pulse-fast',
     dot: '◌',

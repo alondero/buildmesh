@@ -162,6 +162,12 @@ pub enum SessionStatus {
     /// `create_issue_node` / `create_pending`; flipped to `Running` on
     /// stage-2 success or `Error` on stage-2 failure.
     Pending,
+    /// Issue #654 — agent process launched but the early-exit window has not
+    /// elapsed. Orchestrator writes this after `start_reader` returns, then
+    /// schedules a delayed conditional promotion to `Running`; no-op if the
+    /// reader thread already wrote `error`. Closes the race where each
+    /// writer could clobber the other, leaving a ghost-Running node.
+    Spawning,
 }
 
 /// Parse a session status from a DB string column
@@ -174,6 +180,7 @@ impl SessionStatus {
             "archived" => SessionStatus::Archived,
             "suspended" => SessionStatus::Suspended,
             "pending" => SessionStatus::Pending,
+            "spawning" => SessionStatus::Spawning,
             _ => SessionStatus::Idle,
         }
     }
@@ -187,6 +194,7 @@ impl SessionStatus {
             SessionStatus::Archived => "archived",
             SessionStatus::Suspended => "suspended",
             SessionStatus::Pending => "pending",
+            SessionStatus::Spawning => "spawning",
         }
     }
 }
@@ -849,6 +857,7 @@ mod tests {
     fn session_status_round_trip_all_variants() {
         let variants = [
             SessionStatus::Pending,
+            SessionStatus::Spawning,
             SessionStatus::Running,
             SessionStatus::Idle,
             SessionStatus::AwaitingInput,
@@ -874,6 +883,7 @@ mod tests {
         // Issue #359.
         let variants = [
             SessionStatus::Pending,
+            SessionStatus::Spawning,
             SessionStatus::Running,
             SessionStatus::Idle,
             SessionStatus::AwaitingInput,

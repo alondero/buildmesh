@@ -184,3 +184,15 @@ pub(super) fn warm_claim_event(mesh_id: i64, session_id: i64, outcome: &str) {
         IN_FLIGHT.load(Ordering::SeqCst),
     );
 }
+
+/// Issue #654 — Spawning→Running promotion event from the orchestrator's
+/// delayed conditional write. Deliberately omits `IN_FLIGHT`: this fires
+/// ~3s after `spawn_agent_inner` returned, by which point its InFlightGuard
+/// has dropped and `IN_FLIGHT` reflects unrelated concurrent spawns.
+pub(super) fn promotion_event(session_id: i64, outcome: &'static str) {
+    tracing::info!(
+        "[DEBUG-concurrent-spawn] phase=promotion session={} outcome={}",
+        session_id,
+        outcome,
+    );
+}
