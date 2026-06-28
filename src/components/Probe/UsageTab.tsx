@@ -37,6 +37,10 @@ export function UsageTab() {
   const [meters, setMeters] = useState<ProviderMeters[] | null>(null);
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Reset in `finally` so a rejected fetch can't leave the button stuck
+  // disabled. The flag is set synchronously before the await so React
+  // renders the busy state before the IPC roundtrip.
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const loadMeters = useCallback(async (force: boolean) => {
     try {
@@ -95,13 +99,18 @@ export function UsageTab() {
   // async and rejects on backend failure. Wrap the Refresh click in a
   // try/catch so any uncaught throw (e.g. a future refactor that escapes the
   // internal try/catch) lands in the error banner instead of becoming an
-  // unhandled rejection that fails the test suite.
+  // unhandled rejection that fails the test suite. `finally` resets
+  // `isRefreshing` so a rejected fetch can't leave the button stuck
+  // disabled (the safety-net catch on its own would silently swallow).
   const handleRefresh = async () => {
+    setIsRefreshing(true);
     try {
       await loadMeters(true);
     } catch {
       // loadMeters already updates the error banner; this catch is just
       // a safety net for anything that escapes its internal try/catch.
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -119,9 +128,17 @@ export function UsageTab() {
         <button
           type="button"
           onClick={handleRefresh}
+          disabled={isRefreshing}
+          aria-busy={isRefreshing}
           aria-label="Refresh usage"
-          className="text-xs text-accent-cyan hover:text-accent-cyan/80"
+          className="text-xs text-accent-cyan hover:text-accent-cyan/80 disabled:cursor-not-allowed disabled:hover:text-accent-cyan inline-flex items-center gap-1.5"
         >
+          {isRefreshing && (
+            <span
+              className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent"
+              aria-hidden="true"
+            />
+          )}
           Refresh
         </button>
       </div>
@@ -135,7 +152,11 @@ export function UsageTab() {
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+      <div
+        data-testid="usage-rows"
+        aria-busy={isRefreshing}
+        className={`flex-1 overflow-y-auto p-3 space-y-3 transition-opacity ${isRefreshing ? 'opacity-60' : ''}`}
+      >
         {rows.length === 0 ? (
           <div className="text-center py-8 text-text-muted text-xs">
             No usage meters available. Enable a provider in Settings to see
