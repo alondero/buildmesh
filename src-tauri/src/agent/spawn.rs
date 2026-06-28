@@ -915,8 +915,18 @@ pub async fn spawn_agent_inner(
             let base_ref_owned = base_ref.to_string();
             timer.checkpoint("before_fetch_origin");
             diag.git_event("fetch_origin", "start");
+            // Issue #652 — per-Mesh serialization. Without this lock, N
+            // concurrent spawns against the same Mesh race on
+            // .git/FETCH_HEAD, .git/index.lock, and refs/heads/<branch>.lock:
+            // one git fetch wins, the others fail with "another git process"
+            // and the spawn lands on a stale ref. The lock is *blocking*
+            // (not try_lock-or-skip), so caller #2 waits for caller #1 to
+            // populate the refs and then reuses them (its natural outcome
+            // is UpToDate, which is correct).
             let sync_result = tokio::task::spawn_blocking(move || {
-                crate::git::sync::fetch_origin(&root, &base_ref_owned)
+                crate::services::sync_lock::with_mesh_sync_lock(&root, || {
+                    crate::git::sync::fetch_origin(&root, &base_ref_owned)
+                })
             })
             .await
             .unwrap_or_else(|e| {
