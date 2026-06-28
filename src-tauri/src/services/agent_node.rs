@@ -311,6 +311,14 @@ pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
         pending,
         crate::git::worktree::remove_one_worktree_and_branch,
         db::delete_pending_worktree_removal,
+        // Issue #653 deleter-side guard: skip paths whose `warm_worktrees`
+        // row is currently `claimed` (a live spawn has just adopted the
+        // directory). The skip deques the pending removal — claim supersedes
+        // tombstone intent, and the live agent's worktree must survive. When
+        // the spawn's `forget_after_spawn` later drops the row, the path is
+        // no longer claimed and any *new* pending removal (e.g. a subsequent
+        // close of the same node) flows through normally.
+        db::warm_pool_claims_path,
     )
 }
 
@@ -319,28 +327,79 @@ pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
 /// Dependencies are injected so the "dequeue only on success" invariant — the
 /// thing that guarantees failed cleanups get retried rather than lost — is
 /// testable without the global DB or a real filesystem.
+///
+/// `is_claimed` is the issue #653 deleter-side guard: when it returns `true`
+/// for a removal's path, the drain skips the `remove` call (the directory
+/// belongs to a live spawn's worktree — deleting it would destroy the
+/// agent's work) AND dequeues the pending entry (claim supersedes tombstone
+/// intent). It does NOT append to `failures` — the path is alive, not
+/// broken; no user warning is warranted.
 fn process_removals(
     pending: Vec<PendingWorktreeRemoval>,
     remove: impl Fn(&str) -> Result<(), String>,
     dequeue: impl Fn(&str) -> db::SqlResult<()>,
+    is_claimed: impl Fn(&str) -> db::SqlResult<bool>,
 ) -> Vec<(PendingWorktreeRemoval, String)> {
     let mut failures = Vec::new();
     for removal in pending {
-        match remove(&removal.worktree_path) {
-            Ok(()) => {
+        match is_claimed(&removal.worktree_path) {
+            Ok(true) => {
+                // Issue #653 — the warm pool has this path as a live spawn's
+                // worktree. Dequeue the tombstone (the spawn's intent
+                // supersedes the close's intent) but do NOT touch the
+                // directory. The spawn's `forget_after_spawn` will drop the
+                // `claimed` row when the agent is up; any subsequent close
+                // that enqueues a fresh tombstone at this path will be
+                // handled normally because the row is then gone.
+                tracing::info!(
+                    "warm_pool: skipping pending removal for {} — path is claimed by a warm-pool spawn",
+                    removal.worktree_path
+                );
                 if let Err(e) = dequeue(&removal.worktree_path) {
                     tracing::error!(
-                        "removed worktree {} but failed to dequeue it: {}",
-                        removal.worktree_path, e
+                        "warm_pool: failed to dequeue superseded tombstone for claimed path {}: {}",
+                        removal.worktree_path,
+                        e
                     );
                 }
             }
+            Ok(false) => match remove(&removal.worktree_path) {
+                Ok(()) => {
+                    if let Err(e) = dequeue(&removal.worktree_path) {
+                        tracing::error!(
+                            "removed worktree {} but failed to dequeue it: {}",
+                            removal.worktree_path, e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "worktree removal for {} failed, will retry: {}",
+                        removal.node_name, e
+                    );
+                    failures.push((removal, e));
+                }
+            },
             Err(e) => {
+                // The guard query failed — fail closed (don't remove the
+                // directory) but DON'T drop the tombstone either, so the
+                // next drain retries. This is the conservative choice: a
+                // transient DB error must not cascade into "agent's worktree
+                // silently deleted because we couldn't read the pool table".
+                //
+                // Deliberately NOT pushing to `failures`: the caller
+                // (`commands::agent_node::drain_pending_removals`) emits a
+                // `worktree-cleanup-failed` Tauri event per failure, which
+                // renders a "worktree cleanup failed" toast to the user —
+                // but no worktree cleanup was attempted here, only a pool-
+                // claim read. A transient SQLite error during the guard
+                // check must NOT surface as user-facing "cleanup failed"
+                // noise; the next drain retries silently.
                 tracing::warn!(
-                    "worktree removal for {} failed, will retry: {}",
-                    removal.node_name, e
+                    "warm_pool: is_claimed check failed for {} ({}); leaving tombstone queued for retry",
+                    removal.worktree_path,
+                    e
                 );
-                failures.push((removal, e));
             }
         }
     }
@@ -449,6 +508,10 @@ mod tests {
                 dequeued.borrow_mut().push(path.to_string());
                 Ok(())
             },
+            // Issue #653: this test predates the deleter-side guard and its
+            // fixture doesn't touch `warm_worktrees`, so the guard is a
+            // pure no-op. `_| Ok(false)` keeps the original behaviour intact.
+            |_path| Ok(false),
         );
 
         assert!(!good.exists(), "the real worktree directory must be removed");
@@ -459,6 +522,118 @@ mod tests {
         );
         assert_eq!(failures.len(), 1, "the failed removal is returned for warning");
         assert_eq!(failures[0].0.node_name, "wt-bad");
+    }
+
+    /// Issue #653 deleter-side guard: a pending-removal entry whose path is
+    /// currently `claimed` in `warm_worktrees` (a live spawn has just adopted
+    /// the directory) must be SKIPPED — `remove` is not called (the directory
+    /// belongs to a live agent) and the tombstone IS dequeued (claim
+    /// supersedes the close's intent, so the entry is dead). It must NOT be
+    /// reported as a failure (no user-facing warning for a healthy state).
+    ///
+    /// Without this guard, a concurrent close + spawn on the same path would
+    /// race `process_pending_removals` to delete the directory out from under
+    /// the spawning agent — issue #653's exact symptom (Error node + stranded
+    /// `claimed` row).
+    #[test]
+    fn process_removals_skips_claimed_path_and_dequeues() {
+        let pending = vec![
+            // Live spawn's worktree: warm pool row is `claimed`. The drain
+            // must skip — no `remove`, dequeue + no failure.
+            PendingWorktreeRemoval {
+                worktree_path: "/repo/m/.claude/worktrees/wt-claimed".to_string(),
+                node_name: "wt-claimed".to_string(),
+            },
+            // Normal cold removal: not claimed. The drain proceeds.
+            PendingWorktreeRemoval {
+                worktree_path: "/repo/m/.claude/worktrees/wt-cold".to_string(),
+                node_name: "wt-cold".to_string(),
+            },
+        ];
+
+        let removed = std::cell::RefCell::new(Vec::<String>::new());
+        let dequeued = std::cell::RefCell::new(Vec::<String>::new());
+        let failures = process_removals(
+            pending,
+            |path| {
+                removed.borrow_mut().push(path.to_string());
+                Ok(())
+            },
+            |path| {
+                dequeued.borrow_mut().push(path.to_string());
+                Ok(())
+            },
+            // Warm pool says `claimed` for the first path only.
+            |path| Ok(path.ends_with("wt-claimed")),
+        );
+
+        assert_eq!(
+            removed.into_inner(),
+            vec!["/repo/m/.claude/worktrees/wt-cold".to_string()],
+            "only the non-claimed path is touched by the removal driver — the live spawn's directory must survive"
+        );
+        // Both paths are dequeued: the skip branch consumes the tombstone
+        // (claim supersedes intent), and the successful removal consumes its
+        // own tombstone. The shared log is what proves the order-agnostic
+        // "both paths leave the queue" invariant.
+        let dequeued = dequeued.into_inner();
+        assert!(
+            dequeued.contains(&"/repo/m/.claude/worktrees/wt-claimed".to_string()),
+            "the superseded tombstone must be dequeued (claim supersedes close intent)"
+        );
+        assert!(
+            dequeued.contains(&"/repo/m/.claude/worktrees/wt-cold".to_string()),
+            "the normal removal's tombstone must be dequeued"
+        );
+        assert_eq!(dequeued.len(), 2, "every pending entry must exit the queue");
+        assert!(
+            failures.is_empty(),
+            "a `claimed` skip is not a failure — no user warning warranted (got: {failures:?})"
+        );
+    }
+
+    /// A transient `is_claimed` error (e.g. SQLite lock contention mid-drain)
+    /// must fail CLOSED: don't remove the directory (could be a live spawn)
+    /// and don't drop the tombstone — the next drain retries. The caller
+    /// MUST NOT see this as a worktree-cleanup failure: only `remove()`
+    /// errors reach `failures`, so a guard-query error stays silent on the
+    /// user side (no spurious "worktree cleanup failed" toast) and the
+    /// tombstone survives for the next drain to retry.
+    #[test]
+    fn process_removals_fails_closed_when_is_claimed_errors() {
+        let pending = vec![PendingWorktreeRemoval {
+            worktree_path: "/repo/m/.claude/worktrees/wt-uncertain".to_string(),
+            node_name: "wt-uncertain".to_string(),
+        }];
+
+        let removed = std::cell::RefCell::new(Vec::<String>::new());
+        let dequeued = std::cell::RefCell::new(Vec::<String>::new());
+        let failures = process_removals(
+            pending,
+            |path| {
+                removed.borrow_mut().push(path.to_string());
+                Ok(())
+            },
+            |path| {
+                dequeued.borrow_mut().push(path.to_string());
+                Ok(())
+            },
+            |_path| Err(rusqlite::Error::QueryReturnedNoRows), // guard query failed
+        );
+
+        assert!(
+            removed.borrow().is_empty(),
+            "must NOT touch the directory when the guard check errors — could be a live spawn"
+        );
+        assert!(
+            dequeued.borrow().is_empty(),
+            "must NOT dequeue when the guard check errors — leave the tombstone for the next drain"
+        );
+        assert!(
+            failures.is_empty(),
+            "a guard-query error must NOT surface as a worktree-cleanup failure \
+             (would emit a misleading user toast); the next drain retries silently"
+        );
     }
 
     // -------------------------------------------------------------------

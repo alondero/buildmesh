@@ -767,6 +767,15 @@ pub async fn spawn_agent_inner(
     // two adoption modes at every warm-pool branch below.
     let is_rename_spawn = node.source_issue.is_some() || node.source_pr.is_some();
     let mut warm_claimed: Option<crate::services::warm_pool::ClaimedWarmEntry> = None;
+    // Issue #653: a successful `try_claim` that the use-site recheck later
+    // dropped still drained the pool by one row — `warm_claimed` is None
+    // (the spawn fell back to cold), but the mesh's pool inventory is one
+    // short. Track "we claimed at least once this spawn" so the post-spawn
+    // refill still fires (otherwise the pool stays at target-1 until the
+    // next reconcile). Distinct from `warm_claimed` because `warm_claimed`
+    // tracks "we adopted the warm entry as this node's worktree" — that's
+    // what `forget_after_spawn` and the manual name adoption gate on.
+    let mut pool_was_drained_by_this_spawn = false;
     if use_worktree {
         // The path the node resolves to WITHOUT a pool claim. If it's already
         // on disk this spawn is a resume / handover / re-spawn reusing an
@@ -787,7 +796,35 @@ pub async fn spawn_agent_inner(
                         entry.base_sha.as_deref().unwrap_or("none"),
                     );
                     spawn_diag::warm_claim_event(mesh_id, session_id, &format!("ok:id={}:path={}", entry.id, entry.path));
-                    warm_claimed = Some(entry);
+                    // Issue #653 use-site guard: `try_claim` just checked
+                    // the directory exists, but the spawn then waits
+                    // seconds inside `fetch_origin` + git worktree move;
+                    // another thread can delete the directory in that gap.
+                    // Re-check immediately before committing to the warm
+                    // path. On false, `recheck_after_claim` already dropped
+                    // the row + tombstone; we just leave `warm_claimed`
+                    // None so the existing `spawn_worktree_name` fallback
+                    // resolves to the throwaway slug and the cold-create
+                    // block runs naturally for both spawn modes (Issue/PR
+                    // and manual).
+                    if crate::services::warm_pool::recheck_after_claim(entry.id, &entry.path) {
+                        warm_claimed = Some(entry);
+                        pool_was_drained_by_this_spawn = true;
+                    } else {
+                        spawn_diag::warm_claim_event(mesh_id, session_id, "none:dir_vanished");
+                        // Note: `recheck_after_claim` already logs the
+                        // reason (claimed row N's directory disappeared...).
+                        // Don't duplicate that WARN here — the spawn-diag
+                        // event is enough structured signal; logging twice
+                        // is just operator noise for one race event.
+                        // warm_claimed stays None — do NOT adopt. The row
+                        // was already dropped by recheck_after_claim, but
+                        // the pool inventory is still down by one; the
+                        // post-spawn refill below must run regardless of
+                        // the local `did_claim_warm` flag (which checks
+                        // `warm_claimed.is_some()`, not the DB).
+                        pool_was_drained_by_this_spawn = true;
+                    }
                 }
                 Ok(None) => {
                     spawn_diag::warm_claim_event(mesh_id, session_id, "none:pool_empty_or_already_claimed");
@@ -1491,7 +1528,12 @@ pub async fn spawn_agent_inner(
     // it up — it just sits there as harmless bookkeeping until a future
     // issue adds GC for it); a failed refill is logged and retried on the
     // next reconcile pass.
-    let did_claim_warm = warm_claimed.is_some();
+    //
+    // Issue #653: `warm_claimed` is None when the use-site recheck fired
+    // (the spawn fell back to cold), but the pool inventory is still
+    // drained — `pool_was_drained_by_this_spawn` captures that case for
+    // the post-spawn refill trigger. `warm_claimed.is_some()` would
+    // miss the recheck-fired case and leave the pool at target-1.
     if let Some(entry) = warm_claimed.take() {
         crate::services::warm_pool::forget_after_spawn(entry.id);
         // Full name adoption — MANUAL spawns only (issue #609, PRD #608 §3
@@ -1543,10 +1585,17 @@ pub async fn spawn_agent_inner(
     // to each other (the previous split into two threads dropped whichever
     // lost, with no in-session retry — issue #613 review). Fired whenever
     // either job has work to do.
-    if mesh_id > 0 && (ref_advanced_for_pool || did_claim_warm) {
+    if mesh_id > 0 && (ref_advanced_for_pool || pool_was_drained_by_this_spawn) {
         let mesh_id_for_pool = mesh_id;
         let do_refresh = ref_advanced_for_pool;
-        let do_refill = did_claim_warm;
+        // Issue #653: `pool_was_drained_by_this_spawn` covers the
+        // recheck-fired case where `did_claim_warm` (gated on
+        // `warm_claimed.is_some()`) is false but the pool still needs a
+        // refill. Use the drained flag for the refill trigger, keep
+        // `did_claim_warm` for the name-adoption bookkeeping above (those
+        // are distinct concerns: refill restores inventory; name adoption
+        // only makes sense when the spawn actually adopted the entry).
+        let do_refill = pool_was_drained_by_this_spawn;
         let app_for_pool = app.clone();
         std::thread::spawn(move || {
             crate::services::warm_pool::post_spawn_maintenance(

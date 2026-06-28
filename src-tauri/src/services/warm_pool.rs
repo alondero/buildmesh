@@ -65,6 +65,7 @@
 
 use crate::db::{self, WarmWorktreeStatus};
 use crate::session_naming::on_spawn;
+use rusqlite::Connection;
 use std::path::Path;
 use tauri::Emitter;
 
@@ -154,6 +155,16 @@ pub struct ClaimedWarmEntry {
 /// add` was rolled back by a crash between row insert and checkout
 /// completion; a missing directory drops the row and reports `None`.
 ///
+/// **Issue #653 cancel-at-claim**: a successful claim also drops any tombstone
+/// in `pending_worktree_removals` at the same path. A previous close (or a
+/// stale entry from a prior crash) may have queued this directory for
+/// removal; the new claim supersedes that intent. The tombstone drop is
+/// idempotent (`DELETE WHERE worktree_path = ?` on a missing row is 0 rows
+/// affected, no error), so the `let _` swallow is safe. This is the
+/// defense-in-depth half of the race fix — the deleter-side guard in
+/// `services::agent_node::process_removals` independently skips any *new*
+/// tombstone that lands at this path while the spawn is in flight.
+///
 /// Emits `pool-count-changed` SYNCHRONOUSLY after a successful claim — this
 /// is the load-bearing emit for the spawn-failure gap: if the spawn dies
 /// between claim and `post_spawn_maintenance`, the badge still sees the
@@ -173,7 +184,10 @@ pub fn try_claim(
     // first then crashed mid-checkout, OR the user deleted the
     // `.claude/worktrees/<slug>` directory by hand). In that case the
     // claim succeeded at the DB layer but the directory isn't there — drop
-    // the row and report `None` so the spawn falls back to cold.
+    // BOTH the warm row AND any pending-removal tombstone (so the next
+    // drain doesn't fire `remove_one_worktree` on a non-existent path and
+    // generate a spurious failure log) and report `None` so the spawn
+    // falls back to cold.
     if !Path::new(&claimed.path).exists() {
         tracing::warn!(
             "warm_pool: claimed row {} points at missing directory {}; dropping and falling back to cold",
@@ -181,8 +195,20 @@ pub fn try_claim(
             claimed.path
         );
         let _ = db::delete_warm_worktree(claimed.id);
+        let _ = db::delete_pending_worktree_removal(&claimed.path);
         return Ok(None);
     }
+
+    // Issue #653 cancel-at-claim (success path): any tombstone at this path
+    // was queued by a prior close that's now obsolete — the new spawn's
+    // intent supersedes it. Without this, a stale pending removal would
+    // linger; if the user then closes the *spawning* node before the spawn
+    // completes, a new tombstone would land on top and the deleter-side
+    // guard in `process_removals` would skip+dequeue it (claim supersedes
+    // intent), but this stale one would still be queued and the next drain
+    // would see no claim (the spawn succeeded and dropped the row) and
+    // delete the live agent's worktree. Cancelling now closes that gap.
+    let _ = db::delete_pending_worktree_removal(&claimed.path);
 
     emit_pool_changed(app, mesh_id);
 
@@ -192,6 +218,91 @@ pub fn try_claim(
         preassigned_name: claimed.preassigned_name,
         base_sha: claimed.base_sha,
     }))
+}
+
+/// Use-site guard for the claim → spawn window (issue #653). After
+/// `try_claim` returns, the spawn path may wait seconds inside
+/// `fetch_origin` and a `git worktree move`; another thread can delete the
+/// directory in that gap (e.g. the close path enqueues a fresh tombstone
+/// after the claim, or a user deletes the directory in Explorer). Re-check
+/// at the use site to catch any disappearance that occurred AFTER the
+/// claim's own existence check, drop the row, and signal `false` so the
+/// spawn falls back to cold `create_git_worktree`.
+///
+/// Called from `agent/spawn.rs` immediately after the `try_claim` call.
+/// Returns `true` if the directory is still on disk (the spawn may proceed
+/// to use it). Returns `false` if the directory is gone — the row has been
+/// dropped via `db::delete_warm_worktree` (best-effort) and the caller must
+/// route the spawn through the cold-create path.
+///
+/// **The use-site guard is independent from the deleter-side guard in
+/// `process_removals`**. The deleter-side guard prevents in-process races
+/// (one thread deleting a path another is mid-spawn on). The use-site
+/// guard catches everything else — user deletes, external processes,
+/// stale pending removals that slipped past the cancel-at-claim, and the
+/// microsecond TOCTOU window inside `try_claim` itself. Both fail closed.
+pub fn recheck_after_claim(id: i64, path: &str) -> bool {
+    recheck_after_claim_id(
+        &db::delete_warm_worktree,
+        &db::delete_pending_worktree_removal,
+        id,
+        path,
+    )
+}
+
+/// `_inner`-style testable variant. Takes the row-delete and tombstone-cancel
+/// functions as injected dependencies so a test can run against an in-memory
+/// `Connection` without touching the global DB mutex.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn recheck_after_claim_inner(
+    conn: &Connection,
+    id: i64,
+    path: &str,
+) -> bool {
+    let delete_row = |row_id: i64| db::delete_warm_worktree_inner(conn, row_id);
+    let cancel_tombstone = |p: &str| db::delete_pending_worktree_removal_inner(conn, p);
+    recheck_after_claim_id(&delete_row, &cancel_tombstone, id, path)
+}
+
+/// The shared body of `recheck_after_claim` and `_inner`. Pulled out so
+/// the logic and warning message are identical across both call sites and
+/// any future "drop the row AND tombstone" extension lands in one place.
+fn recheck_after_claim_id(
+    delete_row: impl Fn(i64) -> db::SqlResult<()>,
+    cancel_tombstone: impl Fn(&str) -> db::SqlResult<()>,
+    id: i64,
+    path: &str,
+) -> bool {
+    if Path::new(path).exists() {
+        return true;
+    }
+    tracing::warn!(
+        "warm_pool: claimed row {}'s directory {} disappeared between claim and spawn use; dropping row and falling back to cold",
+        id,
+        path
+    );
+    // Best-effort row drop. `delete_warm_worktree_inner` returns `Ok(())`
+    // even when the row was already deleted (0 rows affected is not an
+    // error for `rusqlite::Connection::execute`), so this is idempotent
+    // against the rare double-recheck race.
+    //
+    // The tombstone-cancel is also best-effort and is run defensively:
+    // a stale tombstone in `pending_worktree_removals` at this path
+    // (e.g. enqueued by a prior close that lost the race to the claim's
+    // cancel-at-claim step) would otherwise sit queued until a future
+    // `remove_one_worktree` ran on it — at which point the operation is
+    // a no-op anyway because the directory is gone, so the cost of
+    // leaving the tombstone is purely queue churn. Cancelling here keeps
+    // the queue clean.
+    if let Err(e) = delete_row(id) {
+        tracing::warn!(
+            "warm_pool: recheck_after_claim failed to drop row {} (non-fatal): {}",
+            id,
+            e
+        );
+    }
+    let _ = cancel_tombstone(path);
+    false
 }
 
 /// Drop a warm pool row after a successful spawn. The directory now lives
@@ -1255,6 +1366,138 @@ mod tests {
             *reset_calls.lock().unwrap(),
             vec!["/repo/m/.claude/worktrees/slug-4".to_string()],
             "a NULL-sha entry must be reset onto the new sha"
+        );
+    }
+
+    // ---- recheck_after_claim (use-site guard, issue #653) ----
+    //
+    // The spawn path calls this immediately after `try_claim` to close the
+    // TOCTOU window between the claim's own existence check and the spawn's
+    // use of the path (which involves seconds of `fetch_origin` + git work).
+    // The tests pin all three observable branches: present→true, missing→
+    // false+row-dropped, and missing-row-idempotency (a delete during the
+    // recheck must not panic the spawn).
+
+    fn make_claimed_row(conn: &Connection, path: &str) -> i64 {
+        // `insert_warm_worktree_inner` has a foreign key into `meshes`, so
+        // the helper builds a v20-shape `meshes` table and inserts the parent
+        // row before bringing the warm table forward. Mirrors
+        // `db::warm_pool_tests::v20_schema_with_mesh(true)` — we replicate
+        // it here because the `_inner` helpers we use don't ship their own
+        // schema fixture (and the `db::warm_pool_tests` `v20_schema_with_mesh`
+        // is private to that module).
+        conn.execute_batch(
+            "
+            CREATE TABLE meshes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                layout TEXT NOT NULL DEFAULT 'grid',
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                build_command TEXT,
+                run_command TEXT,
+                model TEXT,
+                effort TEXT,
+                use_worktree INTEGER NOT NULL DEFAULT 1,
+                worktree_mode TEXT,
+                default_provider TEXT,
+                base_ref TEXT NOT NULL DEFAULT 'origin/main',
+                scratchpad TEXT NOT NULL DEFAULT '',
+                sandbox INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO meshes (name, path) VALUES ('m', '/repo/m');
+            ",
+        )
+        .unwrap();
+        db::ensure_warm_worktables_table(conn).unwrap();
+        db::insert_warm_worktree_inner(
+            conn,
+            1,
+            path,
+            "pool-warm-recheck",
+            Some("aaaa"),
+            db::WarmWorktreeStatus::Claimed,
+        )
+        .unwrap()
+    }
+
+    /// Happy path: the directory exists at recheck time. Returns `true`,
+    /// row is untouched, the spawn proceeds to use the warm entry.
+    #[test]
+    fn recheck_after_claim_returns_true_when_directory_present() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let id = make_claimed_row(&conn, &path);
+
+        assert!(
+            recheck_after_claim_inner(&conn, id, &path),
+            "directory exists → recheck must say true so the spawn proceeds"
+        );
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1, "row must survive when dir is present");
+    }
+
+    /// Race outcome: the directory vanished between `try_claim`'s check and
+    /// the spawn's use. Returns `false` AND drops the row so the pool's
+    /// bookkeeping stays consistent — without this, `claimed` rows would
+    /// accumulate pointing at missing directories (the exact symptom in
+    /// issue #653). The caller falls back to cold `create_git_worktree`.
+    #[test]
+    fn recheck_after_claim_returns_false_and_drops_row_when_dir_missing() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let id = make_claimed_row(&conn, &path);
+        // Now delete the directory — simulate the race outcome.
+        std::fs::remove_dir_all(&path).unwrap();
+
+        assert!(
+            !recheck_after_claim_inner(&conn, id, &path),
+            "missing dir → recheck must say false so the spawn falls back to cold"
+        );
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE id = ?1",
+                rusqlite::params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "the dropped directory must drop its bookkeeping row — issue #653's stranded-row symptom"
+        );
+    }
+
+    /// Idempotency guard: if some other path (the deleter-side guard,
+    /// startup reconcile, etc.) already dropped the row, the recheck's own
+    /// DELETE on a non-existent id must not panic. `rusqlite::Connection::
+    /// execute` returns `Ok(0)` for a missing row, so this is just a
+    /// regression guard against a future refactor that changed the
+    /// semantics.
+    #[test]
+    fn recheck_after_claim_is_idempotent_on_already_dropped_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().to_str().unwrap().to_string();
+        let id = make_claimed_row(&conn, &path);
+        std::fs::remove_dir_all(&path).unwrap();
+        // First call drops the row (per the previous test).
+        assert!(!recheck_after_claim_inner(&conn, id, &path));
+        // Second call must not panic on the already-missing row.
+        assert!(
+            !recheck_after_claim_inner(&conn, id, &path),
+            "idempotent recheck on a missing row + missing dir must still return false"
         );
     }
 }
