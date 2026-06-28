@@ -174,6 +174,36 @@ pub enum SessionIdMode {
     None,
 }
 
+/// Whether the PTY reader thread should attempt to capture a session ID
+/// from live PTY output (issue #651).
+///
+/// Two independent code paths target the same `agent_nodes.cli_session_id`
+/// column: the orchestrator's pre-write in `spawn_agent_inner` step 4 (Assign
+/// mode) and the reader thread's `session_capture::try_extract_session_id`
+/// match. They are unsynchronised, so a last-writer-wins race leaves the DB
+/// holding either the orchestrator's UUID or a regex match — and on
+/// auto-resume `claude --resume <wrong-uuid>` → "Conversation not found".
+///
+/// This predicate is the single source of truth for which path is allowed to
+/// write for a given spawn:
+///
+/// * `Assign(_)` — orchestrator is authoritative; the reader MUST NOT
+///   capture (the orchestrator just wrote the UUID that the agent was
+///   launched with via `--session-id <uuid>`).
+/// * `Resume(_)` — the resume arg is authoritative; the DB column already
+///   holds the same ID from a prior spawn. A reader capture would race
+///   `claude --resume <id>` with a possibly-different UUID.
+/// * `None` — orchestrator did not pre-write (Codex / Agy self-assign
+///   internally). Capture is allowed only if the provider's adapter
+///   declares `self_assigns_session_id() = true`; otherwise any UUID
+///   match would be spurious noise from a non-resumable shell.
+fn reader_should_capture_session_id(
+    session_id_mode: &SessionIdMode,
+    adapter_self_assigns: bool,
+) -> bool {
+    adapter_self_assigns && matches!(session_id_mode, SessionIdMode::None)
+}
+
 /// Collapse `\r\n` and bare `\r` to `\n` in prefill text.
 ///
 /// GitHub issue/PR bodies come back from the REST API with CRLF line endings.
@@ -1454,7 +1484,17 @@ pub async fn spawn_agent_inner(
     let spawn_start = timer.start();
     tracing::debug!("spawn_agent_inner: starting reader thread for session {}", session_id);
     crate::http_server::ensure_pty_channel(session_id);
-    let needs_session_capture = adapter.self_assigns_session_id() && node.cli_session_id.is_none();
+    // Issue #651: derive the reader-capture gate from `session_id_mode`
+    // (the orchestrator's authoritative decision) rather than from
+    // `adapter.self_assigns_session_id() && node.cli_session_id.is_none()`
+    // (a derived condition that could drift if a future adapter violates the
+    // "Assign => !self_assigns" invariant). The two writes — orchestrator
+    // pre-write at step 4 and reader capture at `start_reader` — are
+    // unsynchronised; only one path must own the column for any given spawn.
+    let needs_session_capture = reader_should_capture_session_id(
+        &session_id_mode,
+        adapter.self_assigns_session_id(),
+    );
     let reader_handle = start_reader(
         app.clone(),
         session_id,
@@ -2832,6 +2872,81 @@ mod tests {
             !ok,
             "fetch_single_ref must return false for a ref starting with '-' \
              (the '--' separator must block git from treating it as a flag)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Reader-thread session-id capture gate (issue #651)
+    //
+    // The orchestrator's pre-write at spawn_agent_inner (Assign mode) and the
+    // PTY reader thread's capture-from-output path both target the same
+    // `agent_nodes.cli_session_id` column. They are unsynchronised, so a
+    // last-writer-wins race left the row holding a UUID the agent never
+    // claimed — and auto-resume later invoked `claude --resume <wrong-uuid>`
+    // → "Conversation not found". The fix pins the gate to a single function
+    // of `session_id_mode` (the source of truth) so the two writers can never
+    // both target the same column. Each test pins one row of the truth table;
+    // the regression test is the `Assign(_)` row.
+    // -----------------------------------------------------------------------
+
+    /// Regression for issue #651. Even if a future adapter returns
+    /// `self_assigns_session_id() = true`, the reader thread MUST NOT capture
+    /// when the orchestrator is in Assign mode — the orchestrator already
+    /// wrote a UUID at `spawn_agent_inner` step 4, and the reader would
+    /// overwrite it with whatever UUID matched the regex on PTY output
+    /// (possibly a different log line, possibly never echoed back).
+    #[test]
+    fn reader_should_not_capture_in_assign_mode_even_if_provider_self_assigns() {
+        assert!(
+            !reader_should_capture_session_id(
+                &SessionIdMode::Assign("orchestrator-uuid".into()),
+                true,
+            ),
+            "Assign mode is authoritative — reader MUST NOT overwrite the \
+             orchestrator's pre-written UUID with a regex match from PTY output \
+             (issue #651: 'a UUID the agent never claimed')"
+        );
+    }
+
+    /// Resume already has the authoritative ID stored in `cli_session_id`
+    /// (or, for fresh `--resume` calls, the resume arg passed to the CLI).
+    /// Capture would race the in-flight `claude --resume <id>` with a
+    /// possibly-different UUID from the regex, so the reader must stay quiet.
+    #[test]
+    fn reader_should_not_capture_in_resume_mode() {
+        assert!(
+            !reader_should_capture_session_id(
+                &SessionIdMode::Resume("resume-uuid".into()),
+                true,
+            ),
+            "Resume mode carries the authoritative ID; reader MUST NOT capture"
+        );
+    }
+
+    /// `None` mode is the only mode where reader capture is allowed — and only
+    /// for providers that self-assign session IDs (Codex, Agy). Anthropic,
+    /// OpenCode, and Terminal accept `--session-id` (or don't track sessions
+    /// at all), so the regex match would be spurious noise.
+    #[test]
+    fn reader_should_capture_when_provider_self_assigns_and_mode_is_none() {
+        assert!(
+            reader_should_capture_session_id(&SessionIdMode::None, true),
+            "Codex / Agy fresh spawns rely on the reader capturing the UUID \
+             from PTY output (orchestrator has no pre-write in None mode)"
+        );
+    }
+
+    /// Self-assigning capability is necessary but not sufficient — if the
+    /// provider accepts `--session-id` (Anthropic / OpenCode), the regex
+    /// match is not the source of truth even when the orchestrator didn't
+    /// pre-write (e.g. a Terminal-style provider that doesn't accept
+    /// `--session-id`).
+    #[test]
+    fn reader_should_not_capture_when_provider_does_not_self_assign() {
+        assert!(
+            !reader_should_capture_session_id(&SessionIdMode::None, false),
+            "reader MUST NOT capture when provider does not self-assign; \
+             any UUID match would overwrite the existing cli_session_id"
         );
     }
 }
