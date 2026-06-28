@@ -485,13 +485,7 @@ pub fn prewarm_one(
 /// failure (the row stays `available` with `base_sha = NULL` and the
 /// spawn-time freshness check degrades to "no SHA to compare").
 fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("rev-parse")
-        .arg("HEAD")
-        .output()
-        .ok()?;
+    let output = read_warm_head_sha_cmd(worktree_path).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -501,6 +495,20 @@ fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
     } else {
         Some(sha)
     }
+}
+
+/// Build the `git rev-parse HEAD` command used by `read_warm_head_sha`.
+/// Uses `command_no_window` so the child doesn't flash a console window on
+/// Windows — `prewarm_one` calls this on the post-spawn thread, and an
+/// un-flagged `git.exe` would briefly steal foreground focus from buildmesh's
+/// WebView2, disrupting the user's terminal view (issue #665).
+fn read_warm_head_sha_cmd(worktree_path: &str) -> std::process::Command {
+    let mut cmd = crate::process_util::command_no_window("git");
+    cmd.arg("-C")
+        .arg(worktree_path)
+        .arg("rev-parse")
+        .arg("HEAD");
+    cmd
 }
 
 /// Drain any excess, then fill a single mesh up to its `pre_spawn_pool_size`
