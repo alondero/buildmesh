@@ -21,13 +21,6 @@ use crate::env::to_host_path;
 use crate::git::primitives;
 use crate::models::EnvType;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-// Suppress the transient console window git.exe would otherwise pop under a
-// GUI-subsystem Tauri process (CREATE_NO_WINDOW). No winapi dep needed.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 // ── Create ──────────────────────────────────────────────────────────────────
 
 /// Resolve the base commit a new worktree should be created from.
@@ -99,7 +92,8 @@ fn add_worktree_impl(
         .workdir()
         .ok_or_else(|| "cannot add a worktree to a bare repository".to_string())?;
 
-    let mut cmd = std::process::Command::new("git");
+    // `command_no_window` applies CREATE_NO_WINDOW on Windows (no per-OS cfg here).
+    let mut cmd = crate::process_util::command_no_window("git");
     cmd.arg("-C").arg(workdir).arg("worktree").arg("add");
     if use_branched {
         cmd.arg("-b").arg(branch_name);
@@ -107,8 +101,6 @@ fn add_worktree_impl(
         cmd.arg("--detach");
     }
     cmd.arg(host_path).arg(&base_sha);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let output = cmd
         .output()
@@ -278,15 +270,13 @@ pub fn move_git_worktree(
         return Err(format!("git worktree move target already exists: {}", new));
     }
 
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::process_util::command_no_window("git");
     cmd.arg("-C")
         .arg(&host_root)
         .arg("worktree")
         .arg("move")
         .arg(&old)
         .arg(&new);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let output = cmd
         .output()
@@ -314,14 +304,12 @@ pub fn move_git_worktree(
 pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String> {
     let host = to_host_path(worktree_path);
 
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::process_util::command_no_window("git");
     cmd.arg("-C")
         .arg(&host)
         .arg("reset")
         .arg("--hard")
         .arg(sha);
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
 
     let output = cmd
         .output()

@@ -913,25 +913,11 @@ async fn summarize_and_rename_with(
     // versions, so we use the stdin-only mode for reliability.
     let full_input = format!("{}\n\nTerminal log to summarize:\n{}", prompt, clean_buffer);
 
-    let mut cmd = {
-#[cfg(target_os = "windows")]
-            {
-                // `claude.exe` is a native binary — no `cmd.exe /c` wrapper
-                // needed (cwrap's `.cmd` shim is gone with the cwrap absorption).
-                // `CREATE_NO_WINDOW` (0x08000000) keeps the brief console flash
-                // off-screen for a one-shot background rename.
-                let mut c = tokio::process::Command::new("claude.exe");
-                c.args(["--print"]);
-                c.creation_flags(0x08000000);
-                c
-            }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let mut c = tokio::process::Command::new("claude");
-            c.args(["--print"]);
-            c
-        }
-    };
+    // `claude` is a native binary, so no shell wrapper is needed. The
+    // CREATE_NO_WINDOW setting carries through the std→tokio `From` conversion.
+    let mut cmd: tokio::process::Command =
+        crate::process_util::command_no_window("claude").into();
+    cmd.args(["--print"]);
 
     // Clear any inherited claude backend env (cwrap `unset` parity) so a value
     // exported in buildmesh's own environment can't override the MiniMax routing
