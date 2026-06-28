@@ -52,6 +52,24 @@ jobs:
         run: cargo test
         working-directory: src-tauri
 
+      # Fail CI if any code path in the spawn pipeline spawns `git` via bare
+      # `Command::new("git")` — only `process_util::command_no_window("git")`
+      # (which sets CREATE_NO_WINDOW on Windows) is allowed in services/ and
+      # agent/. Test files are excluded. Issue #665 — guards against the
+      # console-flash regression returning to the post-spawn / idle-refill path.
+      - name: Verify no bare Command::new("git") in spawn pipeline (gh665)
+        shell: bash
+        run: |
+          HITS=$(rg -n 'std::process::Command::new\("git"\)' src-tauri/src/services src-tauri/src/agent \
+                  --type rust --glob '!**/*_tests.rs' --glob '!**/tests/**' \
+                  || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::Bare Command::new(\"git\") found in spawn pipeline (issue #665):"
+            echo "$HITS"
+            echo "::error::Replace with crate::process_util::command_no_window(\"git\") to suppress the Windows console flash."
+            exit 1
+          fi
+
       # Fail CI if the committed bindings drift from what the Rust structs now
       # generate — wire-shape drift becomes a red build, not a runtime crash.
       - name: Check Rust↔TS type bindings are up to date
