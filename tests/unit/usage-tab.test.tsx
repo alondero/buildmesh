@@ -118,6 +118,98 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
     });
   });
 
+  // Without feedback on Refresh, a slow backend refresh leaves the user
+  // staring at stale-looking rows with no signal anything is happening.
+  it('Refresh button shows aria-busy + spinner while the fetch is in flight, then clears', async () => {
+    let resolveRefresh!: (rows: ProviderMeters[]) => void;
+    const refreshPending = new Promise<ProviderMeters[]>((res) => { resolveRefresh = res; });
+
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      const a = args as { forceRefresh?: boolean } | undefined;
+      if (cmd === 'get_provider_meters') {
+        // Hold the forced-refresh call; the initial mount-fetch resolves fast.
+        if (a?.forceRefresh === true) return refreshPending;
+        return Promise.resolve([
+          { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 42, resetsAt: null }], balance: null, detail: null, error: null } },
+        ]);
+      }
+      if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
+      return Promise.resolve({});
+    });
+
+    const user = userEvent.setup();
+    const { container } = render(<UsageTab />);
+    await screen.findByText('Anthropic / Claude');
+
+    const btn = screen.getByRole('button', { name: /refresh usage/i });
+    const rows = screen.getByTestId('usage-rows');
+
+    // Pre-click: idle — not busy, not disabled, no spinner.
+    expect(btn.getAttribute('aria-busy')).not.toBe('true');
+    expect(btn.hasAttribute('disabled')).toBe(false);
+    expect(container.querySelector('button[aria-label="Refresh usage"] .animate-spin')).toBeNull();
+
+    // Click and let the in-flight state render.
+    await user.click(btn);
+
+    // While pending: button is busy + disabled with an inline spinner;
+    // the rows region carries aria-busy so AT users hear the update too.
+    await waitFor(() => {
+      expect(btn.getAttribute('aria-busy')).toBe('true');
+      expect(btn.hasAttribute('disabled')).toBe(true);
+    });
+    expect(container.querySelector('button[aria-label="Refresh usage"] .animate-spin')).toBeTruthy();
+    expect(rows.getAttribute('aria-busy')).toBe('true');
+
+    // Resolve the in-flight refresh — counts must include the forced call.
+    resolveRefresh([
+      { provider: 'anthropic', usageTracked: true, usage: { provider: 'anthropic', loggedIn: true, windows: [{ label: '5-hour', usedPercent: 75, resetsAt: null }], balance: null, detail: null, error: null } },
+    ]);
+
+    // Post-resolve: button returns to idle, rows region clears.
+    await waitFor(() => {
+      expect(btn.getAttribute('aria-busy')).not.toBe('true');
+      expect(btn.hasAttribute('disabled')).toBe(false);
+    });
+    expect(container.querySelector('button[aria-label="Refresh usage"] .animate-spin')).toBeNull();
+    expect(rows.getAttribute('aria-busy')).not.toBe('true');
+  });
+
+  it('clears the refreshing state even when the refresh fetch rejects', async () => {
+    // The safety-net `catch` in handleRefresh must not leak isRefreshing=true
+    // on a backend failure — otherwise the button is stuck disabled and the
+    // tab looks permanently broken until the user closes the probe.
+    let rejectRefresh!: (err: Error) => void;
+    const refreshPending = new Promise<ProviderMeters[]>((_res, rej) => { rejectRefresh = rej; });
+
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      const a = args as { forceRefresh?: boolean } | undefined;
+      if (cmd === 'get_provider_meters') {
+        if (a?.forceRefresh === true) return refreshPending;
+        return Promise.resolve([]);
+      }
+      if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
+      return Promise.resolve({});
+    });
+
+    const user = userEvent.setup();
+    render(<UsageTab />);
+    await screen.findByText(/no usage meters available/i);
+
+    const btn = screen.getByRole('button', { name: /refresh usage/i });
+    await user.click(btn);
+
+    await waitFor(() => {
+      expect(btn.getAttribute('aria-busy')).toBe('true');
+    });
+
+    rejectRefresh(new Error('backend gone'));
+    await waitFor(() => {
+      expect(btn.getAttribute('aria-busy')).not.toBe('true');
+      expect(btn.hasAttribute('disabled')).toBe(false);
+    });
+  });
+
   it('renders no edit-credentials / enable-toggle / Remove affordances (read-only)', async () => {
     mockBackend();
     render(<UsageTab />);
