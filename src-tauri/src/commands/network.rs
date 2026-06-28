@@ -88,3 +88,49 @@ pub async fn set_lan_exposure_enabled(enabled: bool) -> Result<(), String> {
     crate::http::reapply_binding().await;
     Ok(())
 }
+
+/// Snapshot of the on-disk TLS cert chain for the QR modal (issue #635). The
+/// desktop surfaces this so a user whose installed root CA doesn't match the
+/// server's can see the discrepancy and re-install. **Only the desktop reads
+/// `cert_path`; the HTTP route at `routes::certs::status_json` sets it to
+/// `None` so the user's Windows username (in `%APPDATA%\<user>\...`) never
+/// crosses the LAN boundary.** The same struct serialises over both wires —
+/// `serde` skips `cert_path` when it's `None` so the HTTP JSON has only the
+/// 4 fingerprint/issuer/validity fields.
+///
+/// Generated to `src/types/generated/CertChainStatus.ts` (ADR-0009, issue #359).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export, export_to = "CertChainStatus.ts")]
+pub struct CertChainStatus {
+    pub root_fingerprint_sha256: String,
+    pub leaf_fingerprint_sha256: String,
+    pub leaf_issuer: String,
+    pub valid_until: String,
+    /// Absolute path to `ca.der`. `Some` for the desktop Tauri command
+    /// response; `None` (and serialised-as-absent) for the HTTP route — see
+    /// the type-level docstring.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cert_path: Option<String>,
+}
+
+/// Read the on-disk TLS cert chain and return the snapshot the QR modal
+/// needs (issue #635). Resolves `<app-data>/tls/` from the Tauri app handle
+/// — the same dir `http::tls::acceptor` reads at startup, so the chain the
+/// user sees is guaranteed to match what's currently being served.
+#[command]
+pub fn get_cert_chain_status(app: tauri::AppHandle) -> Result<CertChainStatus, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tls");
+    let status = crate::http::tls::cert_status(&dir).map_err(|e| e.to_string())?;
+    Ok(CertChainStatus {
+        root_fingerprint_sha256: status.root_fingerprint_sha256,
+        leaf_fingerprint_sha256: status.leaf_fingerprint_sha256,
+        leaf_issuer: status.leaf_issuer,
+        valid_until: status.valid_until,
+        cert_path: Some(dir.join("ca.der").to_string_lossy().into_owned()),
+    })
+}

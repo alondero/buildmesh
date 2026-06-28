@@ -849,6 +849,16 @@ export const getLocalIp = () =>
 export const getRootToken = () =>
   _invoke<string>('get_root_token');
 
+// Cert status (issue #635). The QR modal surfaces the server's current root
+// fingerprint so a user whose installed root CA is stale can see the mismatch
+// and re-install. Only the desktop reads `cert_path` (the HTTP route omits it
+// to avoid leaking the Windows username across the LAN).
+import type { CertChainStatus } from '../types/generated/CertChainStatus';
+export type { CertChainStatus };
+
+export const getCertChainStatus = () =>
+  _invoke<CertChainStatus>('get_cert_chain_status');
+
 /** Test-only: clear the module-level provider caches between cases. Exported
  *  with a leading-underscore name so accidental production use is loud. */
 export function __resetProviderCachesForTests(): void {

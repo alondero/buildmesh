@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import * as api from '../../lib/tauri';
 import type { NetworkStatus } from '../../types/generated/NetworkStatus';
+import type { CertChainStatus } from '../../types/generated/CertChainStatus';
 
 interface RemoteAccessModalProps {
   onClose: () => void;
@@ -63,19 +64,31 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const [host, setHost] = useState<string>('discovering...');
   const [error, setError] = useState<string | null>(null);
   const [unreachable, setUnreachable] = useState(false);
+  // Server's current root CA fingerprint (issue #635). Shown below the QR so
+  // a user whose installed root is stale can compare before re-installing.
+  // Fetch failure is silent — the modal still works without it.
+  const [certStatus, setCertStatus] = useState<CertChainStatus | null>(null);
+  // Inline sub-section toggle for the "Re-install root CA" affordance.
+  const [showReinstall, setShowReinstall] = useState(false);
+  // "Copied!" feedback for the cert path copy button. Mirrors the
+  // AppSettingsModal.tsx:670 clipboard pattern (2s timeout).
+  const [certPathCopied, setCertPathCopied] = useState(false);
 
   useEffect(() => {
     const init = async () => {
       try {
-        // These three reads are independent — dispatch them together rather than
+        // These reads are independent — dispatch them together rather than
         // serially so the modal opens in one round-trip. The `getLocalIp`
         // fallback string is a UX placeholder, not a typed contract: it is only
         // used when no LAN listener is bound, in which case `reachable` is false
-        // and we warn rather than rely on it.
-        const [rootToken, status, localIp] = await Promise.all([
+        // and we warn rather than rely on it. `getCertChainStatus` failure is
+        // silently swallowed (`.catch(() => null)`) — the modal still works,
+        // we just won't show the fingerprint.
+        const [rootToken, status, localIp, cert] = await Promise.all([
           api.getRootToken(),
           api.getNetworkStatus(),
           api.getLocalIp().catch(() => '192.168.1.x'),
+          api.getCertChainStatus().catch(() => null),
         ]);
 
         const { url, host: displayHost, reachable } = buildRemoteAccessUrl(
@@ -85,6 +98,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         );
         setHost(displayHost);
         setUnreachable(!reachable);
+        setCertStatus(cert);
 
         const dataUrl = await QRCode.toDataURL(url, {
           width: 384,
@@ -98,6 +112,26 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
     };
     init();
   }, []);
+
+  const handleCopyCertPath = async () => {
+    // Narrow `cert_path` against the optional TS field (skipped in the HTTP
+    // route's JSON via `#[serde(skip_serializing_if = "Option::is_none")]`).
+    // In practice the desktop modal only ever reads the Tauri command
+    // response, which always sets `cert_path: Some(...)`; the optional shape
+    // is so a future HTTP consumer of the same TS type can read it safely.
+    const path = certStatus?.cert_path;
+    if (!path) return;
+    try {
+      await navigator.clipboard.writeText(path);
+      setCertPathCopied(true);
+      setTimeout(() => setCertPathCopied(false), 2000);
+    } catch {
+      // jsdom in tests + some browsers without clipboard permission reject.
+      // The fingerprint text below is still copyable manually, so this is
+      // non-fatal — match AppSettingsModal's pattern of letting the copy
+      // surface its own error if it must.
+    }
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
@@ -144,6 +178,87 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
             <div className="text-base text-text-muted font-mono text-center">
               <div>{host}</div>
             </div>
+            {/* Cert status (issue #635): when the phone's installed root CA
+                doesn't match the server's (regen on LAN-IP change, fresh
+                `cargo build`, etc.) TLS fails silently with `CertificateUnknown`
+                and the user has no signal. We always show the server's current
+                fingerprint and a "Re-install" affordance so the user can act
+                without reaching for `openssl`. No "mismatch detected" banner —
+                we can't see the phone side from here, and a banner that almost-
+                never-fires erodes trust. The fingerprint + Re-install button
+                are the always-on remediation path. */}
+            {certStatus && (
+              <div
+                data-testid="remote-access-cert-status"
+                className="mt-4 w-full text-left"
+              >
+                <div className="text-xs text-text-muted mb-1">
+                  Server root CA fingerprint
+                </div>
+                <div
+                  data-testid="remote-access-cert-fingerprint"
+                  className="text-xs font-mono text-text-secondary break-all bg-bg-base/40 rounded px-2 py-1"
+                >
+                  {certStatus.root_fingerprint_sha256}
+                </div>
+                <button
+                  data-testid="remote-access-cert-reinstall-toggle"
+                  onClick={() => setShowReinstall(s => !s)}
+                  className="mt-2 text-xs text-accent-cyan hover:underline"
+                  type="button"
+                >
+                  {showReinstall ? 'Hide' : 'Re-install root CA'}
+                </button>
+                {showReinstall && (
+                  <div
+                    data-testid="remote-access-cert-reinstall"
+                    className="mt-2 text-xs text-text-muted border border-border-subtle rounded p-3 space-y-2"
+                  >
+                    <div>
+                      <div className="mb-1 text-text-secondary">
+                        On your computer, the cert is at:
+                      </div>
+                      <div className="flex items-start gap-2">
+                        <code
+                          data-testid="remote-access-cert-path"
+                          className="flex-1 font-mono break-all bg-bg-base/40 rounded px-2 py-1 text-text-secondary"
+                        >
+                          {certStatus.cert_path ?? ''}
+                        </code>
+                        <button
+                          data-testid="remote-access-cert-copy"
+                          onClick={handleCopyCertPath}
+                          className="shrink-0 px-2 py-1 rounded bg-border-subtle hover:bg-border-default text-text-secondary"
+                          type="button"
+                        >
+                          {certPathCopied ? 'Copied!' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="font-medium text-text-secondary mb-1">
+                        Android
+                      </div>
+                      <ol className="list-decimal list-inside space-y-0.5">
+                        <li>Transfer <code className="font-mono">ca.der</code> to the phone (AirDrop / email / cable).</li>
+                        <li>Settings → Security → Encryption &amp; credentials → Install a certificate → CA certificate.</li>
+                        <li>Pick <code className="font-mono">ca.der</code> from the path above.</li>
+                      </ol>
+                    </div>
+                    <div>
+                      <div className="font-medium text-text-secondary mb-1">
+                        iOS
+                      </div>
+                      <ol className="list-decimal list-inside space-y-0.5">
+                        <li>Transfer <code className="font-mono">ca.der</code> to the phone.</li>
+                        <li>Settings → General → VPN &amp; Device Management → tap the profile → Install.</li>
+                        <li>Settings → General → About → Certificate Trust Settings → enable the new root.</li>
+                      </ol>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex justify-center py-12">

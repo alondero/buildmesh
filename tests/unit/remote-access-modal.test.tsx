@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import type { NetworkStatus } from '../../src/types/generated/NetworkStatus';
+import type { CertChainStatus } from '../../src/types/generated/CertChainStatus';
 import {
   RemoteAccessModal,
   buildRemoteAccessUrl,
@@ -23,6 +25,16 @@ function status(overrides: Partial<NetworkStatus>): NetworkStatus {
     ...overrides,
   };
 }
+
+const SAMPLE_CERT: CertChainStatus = {
+  root_fingerprint_sha256:
+    'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
+  leaf_fingerprint_sha256:
+    '11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11',
+  leaf_issuer: 'CN=Buildmesh Dev Root CA',
+  valid_until: '2035-01-01 00:00:00',
+  cert_path: 'C:\\Users\\alond\\AppData\\Roaming\\com.alond.buildmesh\\tls\\ca.der',
+};
 
 describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
   it('uses https:// and the realized bind address when a TLS interface is bound', () => {
@@ -110,7 +122,14 @@ describe('RemoteAccessModal', () => {
     toDataURL.mockClear();
   });
 
-  function mockBackend(s: NetworkStatus, localIp = '192.168.1.10') {
+  function mockBackend(
+    s: NetworkStatus,
+    opts: { localIp?: string; cert?: CertChainStatus | null } = {},
+  ) {
+    const localIp = opts.localIp ?? '192.168.1.10';
+    // Default to returning the sample cert; tests that want to exercise the
+    // "fetch failed" path pass `cert: null`.
+    const cert = opts.cert === undefined ? SAMPLE_CERT : opts.cert;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
         case 'get_root_token':
@@ -119,6 +138,10 @@ describe('RemoteAccessModal', () => {
           return Promise.resolve(localIp);
         case 'get_network_status':
           return Promise.resolve(s);
+        case 'get_cert_chain_status':
+          return cert === null
+            ? Promise.reject(new Error('cert status unavailable'))
+            : Promise.resolve(cert);
         default:
           return Promise.resolve({});
       }
@@ -144,5 +167,75 @@ describe('RemoteAccessModal', () => {
 
     const warning = await screen.findByTestId('remote-access-warning');
     expect(warning.textContent).toMatch(/no.*interface|not.*exposed|reach/i);
+  });
+
+  // --- issue #635: cert status surface ------------------------------------
+  // The QR modal surfaces the server's current root CA fingerprint so a user
+  // whose installed root is stale (LAN-IP change forced a regen) can see the
+  // mismatch and re-install without reaching for `openssl`. The fingerprint is
+  // always shown when the status fetch succeeds; the "Re-install" affordance
+  // expands to reveal OS-specific install steps.
+
+  it('renders the server root fingerprint below the QR', async () => {
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    const fp = await screen.findByTestId('remote-access-cert-fingerprint');
+    expect(fp.textContent).toBe(SAMPLE_CERT.root_fingerprint_sha256);
+  });
+
+  it('does not crash when the cert status fetch fails', async () => {
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+      { cert: null },
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    // QR still renders, fingerprint section is absent.
+    await screen.findByText(/192\.168\.1\.10:1992/);
+    expect(screen.queryByTestId('remote-access-cert-fingerprint')).toBeNull();
+  });
+
+  it('expands the Re-install section when the toggle is clicked', async () => {
+    const user = userEvent.setup();
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    // Wait for the section to render, then click the toggle.
+    const toggle = await screen.findByTestId('remote-access-cert-reinstall-toggle');
+    expect(screen.queryByTestId('remote-access-cert-reinstall')).toBeNull();
+
+    await user.click(toggle);
+
+    const section = await screen.findByTestId('remote-access-cert-reinstall');
+    expect(section.textContent).toMatch(/Android/);
+    expect(section.textContent).toMatch(/iOS/);
+    expect(
+      screen.getByTestId('remote-access-cert-path').textContent,
+    ).toBe(SAMPLE_CERT.cert_path);
+  });
+
+  it('copies the cert path to the clipboard when Copy is clicked', async () => {
+    // userEvent.setup() installs its own jsdom clipboard stub (the same
+    // pattern as `coordinator-settings.test.tsx:98`). We assert by reading
+    // the clipboard back, no manual stub required.
+    const user = userEvent.setup();
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await user.click(
+      await screen.findByTestId('remote-access-cert-reinstall-toggle'),
+    );
+    await user.click(await screen.findByTestId('remote-access-cert-copy'));
+
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe(SAMPLE_CERT.cert_path),
+    );
   });
 });

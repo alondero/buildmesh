@@ -24,6 +24,7 @@ use rcgen::{
     CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use sha2::{Digest, Sha256};
 use tokio_rustls::TlsAcceptor;
 
 /// A self-signed certificate and its private key, both DER-encoded.
@@ -262,6 +263,70 @@ pub fn acceptor_from(cert: &SelfSignedCert) -> Result<TlsAcceptor, rustls::Error
 pub fn acceptor(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<TlsAcceptor> {
     let chain = load_or_generate(dir, interface_ips)?;
     acceptor_from(&chain.leaf).map_err(io::Error::other)
+}
+
+// --- /__certs/status surface (issue #635) ---------------------------------
+//
+// The QR modal needs to tell the user "the cert you installed on your phone
+// has fingerprint X; the server is now serving fingerprint Y" so they know to
+// re-install when the dev profile regenerated the root. We don't pull in
+// `x509-parser` (50-100 KB compile) just to read two fields — the leaf issuer
+// and `not_after` are constants in `build_root_ca_params` / `build_params`,
+// pinned by the `cert_status_constants_match_generated_chain` test below.
+
+/// Snapshot of the on-disk cert chain for `GET /__certs/status`.
+///
+/// Mirrors the `models/mod.rs:262` convention: `valid_until` is the SQLite
+/// `YYYY-MM-DD HH:MM:SS` text — the backend never does date math on it, so
+/// pulling in `chrono` for an RFC3339 parse is wasted surface. No
+/// `chain_valid` field: chain integrity is proven in CI by
+/// `leaf_cert_chains_to_root_cert` (openssl verify), not at runtime.
+#[derive(Debug, Clone)]
+pub struct CertChainStatus {
+    pub root_fingerprint_sha256: String,
+    pub leaf_fingerprint_sha256: String,
+    pub leaf_issuer: String,
+    pub valid_until: String,
+}
+
+/// SHA-256 fingerprint of a certificate's DER bytes, formatted as colon-
+/// separated uppercase hex — the `openssl x509 -fingerprint -sha256 -noout`
+/// convention — so a user can paste-compare the modal's text against
+/// `openssl` on their own machine. Always 95 chars (32 bytes × 2 hex + 31
+/// colons); the length is pinned by `cert_fingerprint_matches_openssl`.
+pub fn cert_fingerprint(cert_der: &[u8]) -> String {
+    let digest = Sha256::digest(cert_der);
+    digest
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Read the persisted chain from `dir` and produce the diagnostic snapshot
+/// served by `GET /__certs/status` (and the desktop Tauri command
+/// `get_cert_chain_status`). The HTTP wrapper at `routes::certs::status_json`
+/// omits the desktop-only `cert_path` field, and adds a separate accessor for
+/// it so the user's Windows username (embedded in `%APPDATA%\<user>\...`)
+/// never crosses the LAN.
+///
+/// Race note: between the two `std::fs::read` calls a concurrent LAN toggle
+/// could `load_or_generate` a fresh pair on another thread, returning
+/// fingerprints that don't chain. We accept the race — the openssl test
+/// `leaf_cert_chains_to_root_cert` proves *generation* integrity, not read
+/// integrity, and the window is dominated by user-initiated events.
+pub fn cert_status(dir: &Path) -> io::Result<CertChainStatus> {
+    let ca_der = std::fs::read(dir.join("ca.der"))?;
+    let leaf_der = std::fs::read(dir.join("cert.der"))?;
+    Ok(CertChainStatus {
+        root_fingerprint_sha256: cert_fingerprint(&ca_der),
+        leaf_fingerprint_sha256: cert_fingerprint(&leaf_der),
+        // Constant from `build_root_ca_params` — see the pinning test below.
+        leaf_issuer: "CN=Buildmesh Dev Root CA".to_string(),
+        // Window end from `build_params` (line ~111): pinned to 2035-01-01 so
+        // a persisted cert stays valid for years without regen.
+        valid_until: "2035-01-01 00:00:00".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -646,5 +711,200 @@ mod tests {
         let mut reply = [0u8; 5];
         tls.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"world");
+    }
+
+    // --- /__certs/status surface (issue #635) ---------------------------------
+    // These pin the shape of the diagnostic endpoint that lets the QR modal
+    // tell the user "the cert you installed on your phone has fingerprint X;
+    // the server is now serving fingerprint Y" without the user having to
+    // reach for `openssl` themselves.
+
+    /// SHA-256 of the DER bytes, colon-separated uppercase hex. Matches
+    /// `openssl x509 -fingerprint -sha256 -noout` so a user can paste-compare
+    /// what the modal shows against `openssl` on their own machine.
+    #[test]
+    fn cert_fingerprint_matches_openssl() {
+        let chain = generate(&[]).expect("generate");
+        let dir = tempfile::tempdir().unwrap();
+        // `-inform DER` is sufficient for `-fingerprint` (the `-CAfile` DER
+        // issue in `leaf_cert_chains_to_root_cert` is specific to *chain
+        // verification* with `-CAfile`, not `-fingerprint`).
+        std::fs::write(dir.path().join("root.der"), &chain.root_cert_der).unwrap();
+
+        let got = crate::http::tls::cert_fingerprint(&chain.root_cert_der);
+        let output = std::process::Command::new("openssl")
+            .args([
+                "x509",
+                "-inform",
+                "DER",
+                "-in",
+                dir.path().join("root.der").to_str().unwrap(),
+                "-fingerprint",
+                "-sha256",
+                "-noout",
+            ])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(
+            output.status.success(),
+            "openssl failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // openssl prints `SHA256 Fingerprint=AB:CD:...` (OpenSSL 3.x uses
+        // uppercase; older versions and LibreSSL emit `sha256 Fingerprint=`).
+        // Accept either — the equals + fingerprint is what we care about.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+        let openssl_fp = trimmed
+            .strip_prefix("SHA256 Fingerprint=")
+            .or_else(|| trimmed.strip_prefix("sha256 Fingerprint="))
+            .unwrap_or_else(|| panic!("unexpected openssl output: {stdout}"));
+        assert_eq!(
+            got, openssl_fp,
+            "cert_fingerprint output must match openssl's colon-separated uppercase hex"
+        );
+        // 32 bytes × 2 hex chars + 31 colons = 95 chars.
+        assert_eq!(got.len(), 95, "SHA-256 fingerprint must be 95 chars (32 bytes colon-separated)");
+    }
+
+    /// `cert_status` on a freshly generated chain populates all four fields.
+    #[test]
+    fn cert_status_loads_persisted_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let _chain = load_or_generate(dir.path(), &[]).expect("load_or_generate");
+
+        let status = crate::http::tls::cert_status(dir.path()).expect("cert_status");
+        assert_eq!(status.root_fingerprint_sha256.len(), 95);
+        assert_eq!(status.leaf_fingerprint_sha256.len(), 95);
+        assert!(
+            status.leaf_issuer.contains("Buildmesh Dev Root CA"),
+            "leaf issuer must be the root's CN; got: {:?}",
+            status.leaf_issuer
+        );
+        // The validity window is pinned 2020-01-01 .. 2035-01-01 in build_params
+        // (see the comment at the top of that function).
+        assert!(
+            status.valid_until.starts_with("2035-01-01"),
+            "valid_until must start with the pinned 2035-01-01 expiry; got: {:?}",
+            status.valid_until
+        );
+        // Root and leaf must have DIFFERENT fingerprints — rcgen generates a
+        // fresh keypair per cert in `generate()`.
+        assert_ne!(
+            status.root_fingerprint_sha256, status.leaf_fingerprint_sha256,
+            "root and leaf fingerprints must differ (distinct keypairs)"
+        );
+    }
+
+    /// The load-bearing property: when load_or_generate regenerates the chain
+    /// (because the SAN set changed), cert_status reflects the NEW fingerprints.
+    /// This is what lets the modal tell the user their installed root is stale.
+    #[test]
+    fn cert_status_reflects_regen_after_dir_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ip_a: IpAddr = "192.168.1.5".parse().unwrap();
+        let ip_b: IpAddr = "10.0.0.9".parse().unwrap();
+
+        let _first = load_or_generate(dir.path(), &[ip_a]).unwrap();
+        let before = crate::http::tls::cert_status(dir.path()).unwrap();
+
+        // Force regeneration via a new interface IP — `persisted_covers` fails
+        // because the SAN sidecar doesn't contain 10.0.0.9.
+        let _second = load_or_generate(dir.path(), &[ip_b]).unwrap();
+        let after = crate::http::tls::cert_status(dir.path()).unwrap();
+
+        assert_ne!(
+            before.root_fingerprint_sha256, after.root_fingerprint_sha256,
+            "regen after interface IP change MUST produce a new root fingerprint"
+        );
+        assert_ne!(
+            before.leaf_fingerprint_sha256, after.leaf_fingerprint_sha256,
+            "regen after interface IP change MUST produce a new leaf fingerprint"
+        );
+    }
+
+    /// Missing cert files are the realistic failure mode for a fresh install
+    /// or a wiped `<app-data>/tls/`. The endpoint must surface a 503, not
+    /// panic, so the QR modal can fall back to its other content.
+    ///
+    /// Note: we deliberately do NOT detect in-content corruption (e.g. a
+    /// truncated half-written DER). Detecting that would need an X.509 parser
+    /// (`x509-parser`, ~50-100 KB compile) which isn't worth the dep just to
+    /// read two constant fields. SHA-256 is computed on whatever bytes are
+    /// on disk; a corrupt file still yields a stable fingerprint. The openssl
+    /// test `leaf_cert_chains_to_root_cert` proves *generation* integrity, not
+    /// read integrity.
+    #[test]
+    fn cert_status_handles_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // No ca.der or cert.der present.
+        assert!(
+            crate::http::tls::cert_status(dir.path()).is_err(),
+            "missing cert files must surface as io::Error so the HTTP route can 503"
+        );
+    }
+
+    /// Drift guard: the `leaf_issuer` and `valid_until` strings hardcoded in
+    /// `cert_status` must stay in sync with `build_root_ca_params` /
+    /// `build_params`. We shell out to openssl — the same tool a user would
+    /// reach for — and assert the parsed values match what `cert_status` reports.
+    /// A future bump of the validity window or root CN fails this test and
+    /// forces the constant to be updated alongside the gen function.
+    #[test]
+    fn cert_status_constants_match_generated_chain() {
+        let chain = generate(&[]).expect("generate");
+        let dir = tempfile::tempdir().unwrap();
+        // cert_status reads `ca.der` and `cert.der` — write both, not just the
+        // leaf (cert_status computes BOTH fingerprints).
+        std::fs::write(dir.path().join("ca.der"), &chain.root_cert_der).unwrap();
+        std::fs::write(dir.path().join("cert.der"), &chain.leaf.cert_der).unwrap();
+
+        let status = crate::http::tls::cert_status(dir.path()).unwrap();
+
+        // Parse the leaf's ISSUER via openssl (NOT its subject — `-subject` would
+        // show `Buildmesh (self-signed)` from `build_params`, while `-issuer`
+        // shows the root's CN, which is what `cert_status` reports as
+        // `leaf_issuer`). `issuer=CN = Buildmesh Dev Root CA, ...` is the
+        // RFC4514 printable form.
+        let issuer_out = std::process::Command::new("openssl")
+            .args([
+                "x509",
+                "-inform", "DER",
+                "-in", dir.path().join("cert.der").to_str().unwrap(),
+                "-noout", "-issuer",
+            ])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(issuer_out.status.success(), "openssl issuer failed");
+        let issuer = String::from_utf8_lossy(&issuer_out.stdout);
+        assert!(
+            issuer.contains("Buildmesh Dev Root CA"),
+            "openssl-parsed leaf issuer must contain the root CN; got: {issuer}"
+        );
+        assert_eq!(
+            status.leaf_issuer, "CN=Buildmesh Dev Root CA",
+            "cert_status leaf_issuer must match the constant the user sees"
+        );
+
+        // Parse the leaf's notAfter via openssl — `notAfter=Jan  1 00:00:00 2035 GMT`.
+        let dates_out = std::process::Command::new("openssl")
+            .args([
+                "x509",
+                "-inform", "DER",
+                "-in", dir.path().join("cert.der").to_str().unwrap(),
+                "-noout", "-dates",
+            ])
+            .output()
+            .expect("openssl must be on PATH");
+        assert!(dates_out.status.success(), "openssl dates failed");
+        let dates = String::from_utf8_lossy(&dates_out.stdout);
+        assert!(
+            dates.contains("2035") && dates.contains("Jan") && dates.contains("GMT"),
+            "leaf notAfter must include 2035 Jan ... GMT; got: {dates}"
+        );
+        assert_eq!(
+            status.valid_until, "2035-01-01 00:00:00",
+            "cert_status valid_until must match the gen-constant in SQLite text form"
+        );
     }
 }

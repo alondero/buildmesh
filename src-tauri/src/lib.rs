@@ -285,6 +285,10 @@ pub fn run() {
             // Network exposure (issue #501)
             commands::network::get_network_status,
             commands::network::set_lan_exposure_enabled,
+            // Cert status (issue #635) — QR-modal fingerprint surface so a
+            // user whose installed root CA is stale can see "your cert is X,
+            // server is now Y" without reaching for openssl.
+            commands::network::get_cert_chain_status,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

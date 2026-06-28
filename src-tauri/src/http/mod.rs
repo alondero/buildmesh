@@ -1033,6 +1033,46 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
+    // GET /__certs/status — diagnostic JSON for the QR modal (issue #635).
+    // Unauthenticated; mirrors `__debug/log` placement above. The Host guard
+    // at line 881 still applies, so DNS-rebinding is blocked. We deliberately
+    // do NOT expose `cert_path` here — that field embeds the user's Windows
+    // username and the route is LAN-reachable. The desktop Tauri command is
+    // the only caller that needs the path (for the Re-install button's
+    // clipboard copy).
+    if method == "GET" && path_without_query == "/__certs/status" {
+        let Some(app) = APP_HANDLE.get() else {
+            let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+            return;
+        };
+        let dir = match app.path().app_data_dir() {
+            Ok(p) => p.join("tls"),
+            Err(_) => {
+                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                return;
+            }
+        };
+        match routes::certs::status_json(&dir) {
+            Ok(json) => {
+                // Access-Control-Allow-Origin: * — the desktop modal reads via
+                // the Tauri command (not fetch), but a LAN-side debug tool
+                // hitting this from a browser shouldn't be CORS-blocked. The
+                // response carries no secrets — just fingerprints + issuer.
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    json.len(),
+                    json
+                );
+                let _ = lines.get_mut().write_all(resp.as_bytes()).await;
+            }
+            Err(_) => {
+                let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+            }
+        }
+        return;
+    }
+
     // GET /admin/devices — list paired devices for the "Authorized Devices"
     // panel (issue #502). Admin-only; the first real operation in the namespace
     // #500 reserved. Matched before the `/admin/*` catch-all below.
@@ -2524,6 +2564,29 @@ mod tests {
         assert!(
             host_header_allowed(&format!("{}:1992", lan_ip)),
             "lan ip in cached snapshot -> still accepted"
+        );
+    }
+
+    // --- /__certs/status route (issue #635) -----------------------------------
+
+    /// Locks the hot-path contract: the route is reached BEFORE auth gates
+    /// (mirroring `__debug/log`), so a bare GET with no credentials must be
+    /// parsed and dispatched. In tests `APP_HANDLE` is never initialised, so
+    /// the handler short-circuits to 503 — but a refactor that drops the
+    /// short-circuit or moves the route AFTER the auth gates would surface
+    /// as a different status code (401) or a hang.
+    ///
+    /// The happy path (200 with JSON body) is covered by the unit tests in
+    /// `tls.rs::tests::cert_status_*` — we don't need to re-spin a real
+    /// app data dir in the integration test.
+    #[tokio::test]
+    async fn certs_status_returns_503_when_app_handle_unset() {
+        let status = get_request("/__certs/status").await;
+        assert_eq!(
+            status, 503,
+            "expected 503 when APP_HANDLE is not set in tests \
+             (this proves the route is matched BEFORE auth — a 401 would \
+             mean the route was moved past the admin-auth gate)"
         );
     }
 }
