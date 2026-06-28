@@ -2042,22 +2042,16 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
 
 pub fn update_agent_node_status(id: i64, status: SessionStatus) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    // Stamp `status_changed_at` on every transition — this is the single choke
-    // point all lifecycle changes flow through (including attention mark/clear),
-    // so the coordinator digest's `last_activity`/`waiting_since` stay accurate.
-    // Stored as RFC3339 (unambiguous, timezone-aware) rather than SQLite's
-    // space-separated `datetime('now')` form.
+    // Single choke point for status transitions; the coordinator digest
+    // reads `status_changed_at` for `last_activity`. Stored as RFC3339
+    // rather than SQLite's `datetime('now')` (timezone-aware, sortable).
     update_agent_node_status_inner(&db, id, status)
 }
 
-/// `_inner` form of [`update_agent_node_status`]. Takes the locked
-/// `&Connection` so callers holding the db lock can chain status writes
-/// without re-locking (matches the codebase's `_inner` convention, see
-/// `db/warm_pool_tests.rs`). The unconditional sibling exists so the
-/// race-fix test in `db/agent_node_tests.rs` can exercise the production
-/// SQL verbatim against an in-memory fixture — duplicating the SQL+RFC3339
-/// stamp in the test would silently drift if the production path ever
-/// changes (e.g. switches to `datetime('now')` or adds a column).
+/// `_inner` form of [`update_agent_node_status`]. Exists so the race-fix
+/// test in `db/agent_node_tests.rs` can exercise the production SQL against
+/// an in-memory fixture; duplicating the SQL in the test silently drifts
+/// when this path changes (timestamp format, extra column, transaction).
 pub fn update_agent_node_status_inner(
     conn: &Connection,
     id: i64,
@@ -2070,21 +2064,10 @@ pub fn update_agent_node_status_inner(
     Ok(())
 }
 
-/// Conditionally update `agent_nodes.status`, only if the row's current
-/// status matches `expected`. Returns `true` if the UPDATE matched a row,
-/// `false` otherwise.
+/// Conditional `update_agent_node_status`. Returns whether the row matched.
 ///
-/// Issue #654 — "post-spawn status + early-exit race": the PTY reader thread
-/// fires its early-exit `Error` write within 3 seconds of process creation if
-/// the agent CLI exits immediately (typically a stale `--resume <uuid>`).
-/// The orchestrator writes `status = Running` after `start_reader` returns.
-/// Whichever write lands last wins, so a node can be left in `Running` state
-/// with no live process — a "ghost node".
-///
-/// The fix introduces a `Spawning` intermediate status and a delayed
-/// conditional promotion (`Running` only if status is still `Spawning`).
-/// If the reader has already written `error`, the promotion is a no-op and
-/// the node correctly stays `error`.
+/// Issue #654 — the orchestrator's delayed `Spawning → Running` promotion;
+/// no-op if the reader thread's early-exit Error write already won.
 pub fn update_agent_node_status_if(
     id: i64,
     new: SessionStatus,
@@ -2094,22 +2077,18 @@ pub fn update_agent_node_status_if(
     update_agent_node_status_if_inner(&db, id, new, expected)
 }
 
-/// `_inner` form of [`update_agent_node_status_if`]. Takes the locked
-/// `&Connection` so callers holding the db lock can chain status writes
-/// without re-locking (matches the codebase's `_inner` convention, see
-/// `db/warm_pool_tests.rs`). Test fixture uses an in-memory
-/// `Connection::open_in_memory()` directly.
+/// `_inner` form of [`update_agent_node_status_if`].
+///
+/// The `AND status = ?4` predicate means a no-op match leaves
+/// `status_changed_at` untouched, so the coordinator's `last_activity`
+/// keeps reporting the real event (e.g. the reader's Error write) rather
+/// than a phantom orchestrator activity timestamp.
 pub fn update_agent_node_status_if_inner(
     conn: &Connection,
     id: i64,
     new: SessionStatus,
     expected: SessionStatus,
 ) -> SqlResult<bool> {
-    // The `AND status = ?4` predicate is the whole point: the UPDATE only
-    // matches when the row is still in `expected`. A no-op match leaves
-    // `status_changed_at` untouched, so the coordinator digest's
-    // `last_activity` keeps reporting the real event (the reader's Error
-    // write) rather than a phantom orchestrator activity timestamp.
     let changed = conn.execute(
         "UPDATE agent_nodes SET status = ?1, status_changed_at = ?2 \
          WHERE id = ?3 AND status = ?4",
@@ -2123,17 +2102,10 @@ pub fn update_agent_node_status_if_inner(
     Ok(changed > 0)
 }
 
-/// Inverse form of [`update_agent_node_status_if`]: write `new` UNLESS the
-/// row's current status is in `forbidden`. Returns `true` if the UPDATE
-/// matched a row.
-///
-/// Used to close the symmetric race window of issue #654 where the
-/// orchestrator's unconditional `Spawning` write could resurrect a
-/// reader-thread Error write that landed first. Both writers are now
-/// forbidden from touching the `Error` / `Archived` terminal states, so
-/// whichever fires first sticks and the other becomes a no-op. `Error` is
-/// the dominant signal (the agent died); `Archived` is a user-initiated
-/// terminal state that no automatic transition should overwrite.
+/// Inverse of [`update_agent_node_status_if`]: write `new` UNLESS current
+/// status is in `forbidden`. Issue #654 — both writers (orchestrator's
+/// `Spawning`, reader's `Error`) forbid the terminal set so whichever
+/// fires first sticks and the other becomes a no-op.
 pub fn update_agent_node_status_unless_in(
     id: i64,
     new: SessionStatus,
@@ -2143,8 +2115,6 @@ pub fn update_agent_node_status_unless_in(
     update_agent_node_status_unless_in_inner(&db, id, new, forbidden)
 }
 
-/// `_inner` form of [`update_agent_node_status_unless_in`]. Matches the
-/// codebase's `_inner` convention; see `db/warm_pool_tests.rs`.
 pub fn update_agent_node_status_unless_in_inner(
     conn: &Connection,
     id: i64,
@@ -2152,15 +2122,13 @@ pub fn update_agent_node_status_unless_in_inner(
     forbidden: &[SessionStatus],
 ) -> SqlResult<bool> {
     if forbidden.is_empty() {
-        // An empty forbidden list would make the UPDATE match every row,
-        // which is exactly what `update_agent_node_status_inner` already
-        // does. Refuse the call to keep the two primitives disjoint.
+        // Disjoint surface from `update_agent_node_status_inner`: an empty
+        // forbidden list would match every row, which is exactly that
+        // primitive's job.
         return Err(rusqlite::Error::InvalidQuery);
     }
-    // Build a `status NOT IN (?, ?, …)` clause with positional
-    // placeholders so SQLite parameterises every value (no SQL-injection
-    // surface, no string interpolation of enum names). The forbidden
-    // values start at position 4 (after new, timestamp, id).
+    // Positional placeholders (`?N`) so SQLite parameterises every value —
+    // no SQL injection surface, no enum-name interpolation.
     let placeholders = forbidden
         .iter()
         .enumerate()
@@ -2213,10 +2181,8 @@ pub fn mark_running_nodes_suspended() -> SqlResult<usize> {
     // bookkeeping, not agent activity, so the coordinator digest's
     // `last_activity` should keep reporting when the node *actually* last did
     // work (pre-crash), not the moment the app reopened. (See ADR-0008 spine.)
-    // `spawning` (issue #654) is included alongside `running`/`awaiting_input`
-    // /`pending` so a crash between process launch and the 3s Running
-    // promotion leaves a recoverable `suspended` row, not a perpetual
-    // "Spawning…" badge.
+    // `spawning` (issue #654) is included so a crash between process launch
+    // and the 3s Running promotion leaves a recoverable `suspended` row.
     let count = db.execute(
         "UPDATE agent_nodes SET status = 'suspended' \
          WHERE status IN ('running', 'awaiting_input', 'pending', 'spawning')",

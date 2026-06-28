@@ -162,14 +162,11 @@ pub enum SessionStatus {
     /// `create_issue_node` / `create_pending`; flipped to `Running` on
     /// stage-2 success or `Error` on stage-2 failure.
     Pending,
-    /// Agent process is launched but the early-exit window (< 3s) has not
-    /// yet elapsed. The orchestrator writes this *after* `start_reader`
-    /// returns, then schedules a delayed conditional promotion to
-    /// `Running` (`update_agent_node_status_if(Running, Spawning)`) that
-    /// fires only if the PTY reader hasn't already written `error`. This
-    /// closes the race where the reader's early-exit Error write and the
-    /// orchestrator's late Running write could each clobber the other,
-    /// leaving a "ghost Running" node with no live process (issue #654).
+    /// Issue #654 — agent process launched but the early-exit window has not
+    /// elapsed. Orchestrator writes this after `start_reader` returns, then
+    /// schedules a delayed conditional promotion to `Running`; no-op if the
+    /// reader thread already wrote `error`. Closes the race where each
+    /// writer could clobber the other, leaving a ghost-Running node.
     Spawning,
 }
 

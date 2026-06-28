@@ -32,15 +32,11 @@ export const STATUS_META: Record<NodeStatus, { color: string; label: string }> =
   error: { color: "#f44336", label: "error" },
   awaiting_input: { color: "#ff9800", label: "needs input" },
   archived: { color: "#555", label: "archived" },
-  // `pending` is now part of the generated SessionStatus union (issue #359);
+  // `pending` is part of the generated SessionStatus union (issue #359);
   // the two-stage spawn flow sets it while stage-2 (worktree + PTY) runs.
   pending: { color: "#9c27b0", label: "starting" },
-  // `spawning` (issue #654) — agent process is launched but the early-exit
-  // window (< 3s) has not yet elapsed. The orchestrator writes this transient
-  // state between `start_reader` returning and the conditional Running
-  // promotion. Visually mirrors `pending` (also a transient "in-progress"
-  // state) so the user sees the node move Pending → Spawning → Running
-  // across stage-2.
+  // Issue #654 — transient state between process launch and the 3s
+  // conditional Running promotion.
   spawning: { color: "#9c27b0", label: "starting" },
 };
 

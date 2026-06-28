@@ -36,6 +36,10 @@ pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 /// just past this same window (see `spawn_agent_inner` step 14b) so the two
 /// sites MUST stay in sync; bumping this constant without re-checking the
 /// promotion delay recreates the ghost-Running race.
+/// Shared by the reader thread's early-exit heuristic and the
+/// orchestrator's delayed Spawning→Running promotion sleep (#654). The two
+/// MUST stay in lock-step — drifting them recreates the race in either
+/// direction.
 pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Resolve the `base_ref` string that `git::sync::fetch_origin` will use for
@@ -619,11 +623,9 @@ fn start_reader(
                     session_id,
                     elapsed
                 );
-                // Symmetric guard with the orchestrator's Spawning write
-                // (issue #654): never resurrect `Archived` (user-initiated
-                // terminal state). `Error` itself is excluded so a
-                // double-write is a no-op rather than bumping
-                // `status_changed_at` a second time.
+                // Symmetric to the orchestrator's Spawning write (#654):
+                // never resurrect `Archived`, and don't double-write `Error`
+                // (which would bump `status_changed_at` needlessly).
                 let _ = db::update_agent_node_status_unless_in(
                     session_id,
                     SessionStatus::Error,
@@ -1438,21 +1440,11 @@ pub async fn spawn_agent_inner(
     }
 
     tracing::info!("spawn_agent_inner: reader thread spawned, updating node status");
-    // Issue #654 — post-spawn status + early-exit race. The PTY reader thread
-    // fires its early-exit `Error` write within `EARLY_EXIT_WINDOW` of process
-    // creation if the agent CLI exits immediately (typically a stale `--resume
-    // <uuid>`). Writing `Running` here unconditionally let that Error write
-    // race with this one — whichever landed last won, so a "ghost Running"
-    // node could outlive its process.
-    //
-    // We now write the transient `Spawning` status with a
-    // `NOT IN (Error, Archived)` guard so the same race doesn't recur in
-    // the symmetric direction (reader-error-then-orchestrator-spawning
-    // resurrecting Error back to Spawning). Then we schedule a delayed
-    // conditional promotion (`Running` only if status is still
-    // `Spawning`). If the reader already wrote `error` before the
-    // early-exit window elapses, the promotion is a no-op and the node
-    // correctly stays `error`.
+    // Issue #654 — close the post-spawn status + early-exit race. The
+    // `NOT IN (Error, Archived)` guard is the symmetric race fix: prevents
+    // the orchestrator from resurrecting a reader-written Error back to
+    // Spawning (which would let the delayed promotion later write Running
+    // onto a dead node — same ghost-Running bug, other direction).
     diag.db_write("status", "Spawning");
     db::update_agent_node_status_unless_in(
         session_id,
@@ -1461,11 +1453,8 @@ pub async fn spawn_agent_inner(
     )
     .map_err(|e| e.to_string())?;
     std::thread::spawn(move || {
-        // Sleep just past the reader thread's early-exit window. If the
-        // process died quickly the reader's `Error` write has already
-        // landed; the conditional promotion sees `status != Spawning` and
-        // bails out. If the agent is still alive, the promotion flips the
-        // status to `Running`.
+        // Promote to Running iff the reader hasn't already written Error.
+        // Both delay and reader check must share `EARLY_EXIT_WINDOW`.
         std::thread::sleep(EARLY_EXIT_WINDOW);
         match db::update_agent_node_status_if(
             session_id,
@@ -1476,16 +1465,12 @@ pub async fn spawn_agent_inner(
                 crate::agent::spawn_diag::promotion_event(session_id, "running");
             }
             Ok(false) => {
-                // Reader's Error write already won — leave the node as Error.
                 crate::agent::spawn_diag::promotion_event(session_id, "noop");
             }
             Err(e) => {
-                // Emit a `promotion_event` even on the failure path so a
-                // log reader can reconstruct the four-way race outcome from
-                // a single grep of `[DEBUG-concurrent-spawn] phase=promotion`.
-                // The previous free-form `tracing::warn!` swallowed this
-                // signal; failure data is most needed exactly here (DB
-                // contention mid-3s-window).
+                // Log under `phase=promotion` so a single grep reconstructs
+                // the four-way race outcome; the old free-form warn swallowed
+                // this signal.
                 crate::agent::spawn_diag::promotion_event(session_id, "err");
                 tracing::warn!(
                     "spawn_agent_inner: conditional Running promotion failed for session {}: {}",
