@@ -2229,7 +2229,7 @@ fn list_pending_worktree_removals_inner(conn: &Connection) -> SqlResult<Vec<Pend
     rows.collect()
 }
 
-fn delete_pending_worktree_removal_inner(conn: &Connection, path: &str) -> SqlResult<()> {
+pub(crate) fn delete_pending_worktree_removal_inner(conn: &Connection, path: &str) -> SqlResult<()> {
     conn.execute(
         "DELETE FROM pending_worktree_removals WHERE worktree_path = ?1",
         params![path],
@@ -2516,7 +2516,18 @@ pub(crate) fn claim_warm_entry_for_mesh_inner(
 /// becomes the node's worktree and the row's bookkeeping purpose is done).
 pub fn delete_warm_worktree(id: i64) -> SqlResult<()> {
     let db = get().lock().unwrap();
-    db.execute("DELETE FROM warm_worktrees WHERE id = ?1", params![id])?;
+    delete_warm_worktree_inner(&db, id)
+}
+
+/// Lock-free `_inner` so the use-site guard in
+/// `services::warm_pool::recheck_after_claim` can drop a row against an
+/// in-memory test connection without taking the global DB mutex. The
+/// `WHERE id = ?` is the primary-key index, so this is O(log n) regardless
+/// of pool size. Idempotent: 0 rows affected on a missing id is not an
+/// error (rusqlite returns `Ok(0)`), which is the property the
+/// recheck_after_claim tests rely on for double-recheck safety.
+pub(crate) fn delete_warm_worktree_inner(conn: &Connection, id: i64) -> SqlResult<()> {
+    conn.execute("DELETE FROM warm_worktrees WHERE id = ?1", params![id])?;
     Ok(())
 }
 
@@ -2778,6 +2789,49 @@ pub(crate) fn is_warm_pool_path_inner(
 ) -> SqlResult<bool> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM warm_worktrees WHERE path = ?1)",
+        params![path],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
+/// Narrower sibling of `is_warm_pool_path_inner` used by the
+/// `pending_worktree_removals` drain (issue #653). Returns true iff the path
+/// is currently in `warm_worktrees` with `status = 'claimed'` — i.e. a live
+/// spawn has just taken the row and is about to use (or is using) the
+/// directory.
+///
+/// Why this is a separate predicate instead of a flag on
+/// `is_warm_pool_path_inner`:
+///   * The pending-removal drain needs to ASK a yes/no question with very
+///     different semantics from `collect_prune_info`'s "is this a pool row?"
+///     check. The prune info flow happily sees `available`/`filling`/
+///     `refreshing` rows (those are pool inventory, not live spawns, so the
+///     drain there must proceed); only `claimed` blocks the deletion. A
+///     single flag would either over-block (drain stalls for healthy pool
+///     rows) or under-block (drain deletes a live spawn's worktree).
+///   * The narrower contract is the one that closes the race. The drain
+///     must SKIP-and-DEQUEUE the pending removal when this returns true
+///     (claim supersedes tombstone intent); it must NOT remove the
+///     directory (that's a live agent's worktree). When the spawn
+///     completes and `forget_after_spawn` drops the row, the next drain
+///     sees `false` and proceeds.
+///
+/// `path` is the unique-key index (`warm_worktrees.path` is UNIQUE), so
+/// this query is O(log n) regardless of pool size. Side-effect free; safe
+/// to call from `services::agent_node::process_pending_removals` for every
+/// pending entry.
+pub fn warm_pool_claims_path(path: &str) -> SqlResult<bool> {
+    let db = get().lock().unwrap();
+    warm_pool_claims_path_inner(&db, path)
+}
+
+pub(crate) fn warm_pool_claims_path_inner(
+    conn: &Connection,
+    path: &str,
+) -> SqlResult<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM warm_worktrees WHERE path = ?1 AND status = 'claimed')",
         params![path],
         |row| row.get(0),
     )?;

@@ -30,6 +30,7 @@ mod tests {
         delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktrees_for_mesh_inner,
         ensure_mesh_pre_spawn_pool_size, ensure_warm_worktables_table,
         insert_warm_worktree_inner, is_warm_pool_path_inner,
+        warm_pool_claims_path_inner,
         list_oldest_warm_entries_for_mesh_inner,
         list_warm_paths_for_mesh_inner,
         list_warm_worktrees_to_reconcile_inner,
@@ -961,6 +962,130 @@ mod tests {
         assert!(
             !is_warm_pool_path_inner(&conn, other_path).unwrap(),
             "path without a row must read false even if it looks like a pool path"
+        );
+    }
+
+    /// `warm_pool_claims_path_inner` is the deleter-side guard for issue #653:
+    /// the pending-removal drain calls it before deciding whether a
+    /// `pending_worktree_removals` entry is safe to act on. ONLY a row with
+    /// `status = 'claimed'` matches — `available`, `filling`, and `refreshing`
+    /// rows are pool inventory or in-flight worker state, not a live spawn's
+    /// worktree, so they must NOT block the drain.
+    ///
+    /// Crucially this is NOT a generalised "warm pool row exists?" predicate:
+    /// the older `is_warm_pool_path_inner` returns true for every status and is
+    /// still used by `collect_prune_info` (which legitimately cares about any
+    /// row at the path). The pending-removal drain needs the narrower contract
+    /// — "is this path owned by a live spawn right now?" — and a future
+    /// refactor that collapsed the two would either (a) block legitimate
+    /// `available` row drains or (b) let a `claimed` row's directory be
+    /// deleted out from under a live spawn, both regressions.
+    #[test]
+    fn warm_pool_claims_path_inner_returns_true_only_for_claimed() {
+        let conn = v22_schema_with_mesh(2);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = |name: &str| tmp.path().join(name).to_str().unwrap().to_string();
+
+        let avail_path = p("avail");
+        let fill_path = p("filling");
+        let refr_path = p("refreshing");
+        let claim_path = p("claimed");
+
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &avail_path,
+            "avail",
+            Some("aa"),
+            WarmWorktreeStatus::Available,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &fill_path,
+            "filling",
+            None,
+            WarmWorktreeStatus::Filling,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &refr_path,
+            "refreshing",
+            Some("rr"),
+            WarmWorktreeStatus::Refreshing,
+        )
+        .unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            &claim_path,
+            "claimed",
+            Some("cc"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        assert!(
+            warm_pool_claims_path_inner(&conn, &claim_path).unwrap(),
+            "a `claimed` row must read true — the drain must skip the pending removal"
+        );
+        // Every other status reads false: the drain may proceed to remove
+        // these (or, in the case of `filling`/`refreshing`, the worker
+        // itself owns the teardown).
+        assert!(
+            !warm_pool_claims_path_inner(&conn, &avail_path).unwrap(),
+            "an `available` row is pool inventory, not a live spawn — drain must proceed"
+        );
+        assert!(
+            !warm_pool_claims_path_inner(&conn, &fill_path).unwrap(),
+            "a `filling` row is mid-checkout by the pool worker — drain must proceed"
+        );
+        assert!(
+            !warm_pool_claims_path_inner(&conn, &refr_path).unwrap(),
+            "a `refreshing` row is mid-`git reset --hard` by the freshness pass — drain must proceed"
+        );
+        // And a path with no row at all reads false (defends the drain
+        // against a stale-pending-removal that was enqueued for a path
+        // whose row was dropped between enqueue and drain).
+        assert!(
+            !warm_pool_claims_path_inner(&conn, "/no/row/here").unwrap(),
+            "a path with no row must read false"
+        );
+    }
+
+    /// After the spawn completes successfully and `forget_after_spawn` drops
+    /// the row, the path is no longer claimed — so the next drain must
+    /// proceed to remove it. This is the post-condition that closes the
+    /// "skip without dequeuing" loop: claim supersedes tombstone intent,
+    /// and once the claim ends (the row is dropped), the tombstone is
+    /// consumed and the directory goes.
+    #[test]
+    fn warm_pool_claims_path_inner_returns_false_after_row_dropped() {
+        let conn = v22_schema_with_mesh(1);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = tmp.path().to_str().unwrap().to_string();
+        let id = insert_warm_worktree_inner(
+            &conn,
+            1,
+            &p,
+            "claimed",
+            Some("cc"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+        assert!(warm_pool_claims_path_inner(&conn, &p).unwrap());
+        // Simulate forget_after_spawn's row drop.
+        conn.execute(
+            "DELETE FROM warm_worktrees WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+        assert!(
+            !warm_pool_claims_path_inner(&conn, &p).unwrap(),
+            "after the row is dropped, the path must no longer be claimed — the next drain proceeds"
         );
     }
 }
