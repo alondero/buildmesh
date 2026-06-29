@@ -1839,44 +1839,8 @@ mod tests {
 
     #[test]
     fn upgrade_warm_to_mode_reapplies_worktreeinclude_after_checkout() {
-        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
         use std::fs;
-        let td = TempDir::new().unwrap();
-        let root = td.path();
-
-        // Set up `.worktreeinclude` + a tracked source file at its original
-        // content. The pool will copy v1 into the prewarm-time worktree.
-        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
-        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
-        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
-        // Commit the manifest so `.worktreeinclude` is reachable for `git
-        // worktree add`; the pool helper copies files relative to the repo
-        // root regardless of whether the manifest itself is tracked, but
-        // committing keeps the test setup close to a realistic repo.
-        let repo = git2::Repository::open(root).unwrap();
-        commit_file(
-            &repo,
-            root,
-            ".worktreeinclude",
-            "secrets.env\n",
-        );
-
-        // Cut a detached warm worktree (matches the pool's on-disk shape).
-        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
-        crate::git::worktree::create_git_worktree(
-            root.to_str().unwrap(),
-            pool.to_str().unwrap(),
-            "warm-amber-fox",
-            "detached",
-            "HEAD",
-        )
-        .unwrap();
-        // Prewarm-time copy: `secrets.env` in the worktree must hold v1.
-        assert_eq!(
-            fs::read_to_string(pool.join("secrets.env")).unwrap(),
-            "v1=old\n",
-            "prewarm-time copy must reflect the original source"
-        );
+        let (_td, root, pool) = setup_warm_pool_with_include();
 
         // User edits the source file BETWEEN prewarm and manual spawn —
         // exactly the window the missing apply_worktree_include used to leak.
@@ -1904,10 +1868,10 @@ mod tests {
     fn upgrade_warm_to_mode_is_noop_when_no_worktreeinclude() {
         use crate::env::test_helpers::init_repo_with_commit;
         use std::fs;
+        // Skip the .worktreeinclude side of the helper — bare repo + pool.
         let td = TempDir::new().unwrap();
         let root = td.path();
-        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
-
+        let _ = init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
         let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
         crate::git::worktree::create_git_worktree(
             root.to_str().unwrap(),
@@ -1917,6 +1881,7 @@ mod tests {
             "HEAD",
         )
         .unwrap();
+        let _ = td; // keep alive for the duration of the test
 
         upgrade_warm_to_mode(root.to_str().unwrap(), pool.to_str().unwrap(), "bold-amber-fox", "branched")
             .expect("must succeed when no .worktreeinclude exists");
@@ -1937,32 +1902,8 @@ mod tests {
     /// snapshot, defeating the gap-1 fix for half the meshes.
     #[test]
     fn upgrade_warm_to_mode_reapplies_worktreeinclude_in_detached_mode() {
-        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
         use std::fs;
-        let td = TempDir::new().unwrap();
-        let root = td.path();
-
-        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
-        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
-        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
-        let repo = git2::Repository::open(root).unwrap();
-        commit_file(&repo, root, ".worktreeinclude", "secrets.env\n");
-
-        // Pool entry: detached (matches the on-disk shape the pool cuts).
-        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
-        crate::git::worktree::create_git_worktree(
-            root.to_str().unwrap(),
-            pool.to_str().unwrap(),
-            "warm-amber-fox",
-            "detached",
-            "HEAD",
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_to_string(pool.join("secrets.env")).unwrap(),
-            "v1=old\n",
-            "prewarm-time copy must reflect the original source"
-        );
+        let (_td, root, pool) = setup_warm_pool_with_include();
 
         // User edits the source — same window as the branched-mode test.
         fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
@@ -1988,6 +1929,59 @@ mod tests {
             wt.head_detached().unwrap_or(false),
             "detached mode must leave the worktree detached"
         );
+    }
+
+    /// Shared setup for the two `upgrade_warm_to_mode` `.worktreeinclude`
+    /// re-application tests (#642.5). The third test
+    /// (`…_is_noop_when_no_worktreeinclude`) deliberately inlines its own
+    /// setup because the no-manifest case is the whole point of that test
+    /// — running it through the helper would materialise `secrets.env` and
+    /// `.worktreeinclude` in the worktree, defeating the no-op assertion.
+    ///
+    /// The helper stands up: a tempdir holding a real git repo with
+    /// `secrets.env` + `.worktreeinclude` (both tracked), AND a pool-shaped
+    /// DETACHED worktree under `.claude/worktrees/warm-amber-fox` that has
+    /// already had the include copied at prewarm time (so the tests assert
+    /// the upgrade re-applies, not the original copy). Both the branched and
+    /// the detached call-site tests cut the pool as detached (the pool's
+    /// on-disk shape) — the difference between them is the
+    /// `upgrade_warm_to_mode` mode argument, not the helper's setup.
+    ///
+    /// Returns `(tempdir, repo_root_path, pool_path)`. The tempdir is held
+    /// to keep the underlying directory alive for the duration of the test
+    /// — dropping it would delete the repo and break subsequent asserts.
+    fn setup_warm_pool_with_include() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
+        use std::fs;
+
+        let td = TempDir::new().unwrap();
+        let root = td.path().to_path_buf();
+
+        init_repo_with_commit(&root, &[("f.txt", "tracked\n")]);
+        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
+        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
+        // Commit the manifest so `.worktreeinclude` is reachable for `git
+        // worktree add`; the pool helper copies files relative to the repo
+        // root regardless of whether the manifest itself is tracked, but
+        // committing keeps the test setup close to a realistic repo.
+        let repo = git2::Repository::open(&root).unwrap();
+        commit_file(&repo, &root, ".worktreeinclude", "secrets.env\n");
+
+        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
+        crate::git::worktree::create_git_worktree(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+            "HEAD",
+        )
+        .expect("prewarm-shape worktree must be creatable for this helper");
+        assert_eq!(
+            fs::read_to_string(pool.join("secrets.env")).unwrap(),
+            "v1=old\n",
+            "prewarm-time copy must reflect the original source"
+        );
+        (td, root, pool)
     }
 
     // -----------------------------------------------------------------------

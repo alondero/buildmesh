@@ -70,12 +70,20 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 }
 
 /// Delete a mesh and its nodes, including the on-disk pool directories
-/// (issue #639 gap 3). Shared sync body used by both the Tauri command below
-/// and the HTTP test server's `handle_delete_mesh` shim — `delete_mesh_inner`
-/// owns the disk-drain sequencing so the two call sites can't drift.
+/// (issue #639 gap 3, hardened by #642.1). Shared sync body used by both the
+/// Tauri command below and the HTTP test server's `handle_delete_mesh` shim —
+/// `delete_mesh_inner` owns the disk-drain sequencing so the two call sites
+/// can't drift.
 ///
 /// Sequence:
-///   1. Snapshot the mesh's pool directory paths (read-only, lock released).
+///   1. Snapshot the mesh's DROPPABLE pool directory paths (read-only, lock
+///      released). `claimed` rows are excluded — their directories may back a
+///      live agent process whose `agent_nodes` row was just deleted by step
+///      2's cascade, so we have no DB way to ask "is this still a live agent?".
+///      The conservative choice is to leave the dir on disk for the user to
+///      clean up by hand. (`process_pending_removals` does NOT cover this
+///      gap — the mesh's `agent_nodes` rows are cascade-deleted by the same
+///      transaction, so no `close` event ever fires to enqueue a tombstone.)
 ///   2. Cascade-delete the rows via `db::delete_mesh` (which removes the
 ///      `meshes` row + its `agent_nodes` + its `warm_worktrees` rows).
 ///   3. `git worktree remove --force` each snapshot'd directory, best-effort.
@@ -85,20 +93,21 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 /// runs AFTER it. A dir-remove failure is logged at WARN but never fails the
 /// delete — the row cascade has already happened.
 ///
-/// **Known race (accepted for #639)**: between step 1 (snapshot) and step 2
-/// (cascade-delete), a concurrent background prewarm on the same mesh can
-/// `INSERT` a new `warm_worktrees` row whose path won't appear in the snapshot
-/// but WILL be deleted by the cascade. The dir-remove loop never sees that
-/// new path, so its directory is orphaned. The orphan is recoverable by the
-/// user (manual `rm -rf`) and self-heals on a slug collision: the next
-/// prewarm that lands on the same path will hit `create_git_worktree`'s
-/// `if host_path.exists() { return Ok(()) }` short-circuit and reuse the
-/// stale tree — which is incorrect for that mesh's pool, but only until the
-/// next `git reset --hard` lands (issue #613's refresh pass). Fixing this
-/// would require restructuring the FILL_LOCK to block user-initiated deletes,
-/// which is out of scope for the gap-3 hygiene fix.
+/// **Known race (accepted for #639, tracked by #642.3)**: between step 1
+/// (snapshot) and step 2 (cascade-delete), a concurrent background prewarm on
+/// the same mesh can `INSERT` a new `warm_worktrees` row whose path won't
+/// appear in the snapshot but WILL be deleted by the cascade. The dir-remove
+/// loop never sees that new path, so its directory is orphaned. The orphan
+/// is recoverable by the user (manual `rm -rf`) and self-heals on a slug
+/// collision: the next prewarm that lands on the same path will hit
+/// `create_git_worktree`'s `if host_path.exists() { return Ok(()) }`
+/// short-circuit and reuse the stale tree — which is incorrect for that
+/// mesh's pool, but only until the next `git reset --hard` lands (issue
+/// #613's refresh pass). Fixing this would require restructuring the
+/// FILL_LOCK to block user-initiated deletes, which is out of scope.
 pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
-    let pool_paths = db::list_warm_paths_for_mesh(mesh_id).map_err(|e| e.to_string())?;
+    let pool_paths =
+        db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
     db::delete_mesh(mesh_id).map_err(|e| e.to_string())?;
     for path in pool_paths {
         if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {
@@ -114,7 +123,17 @@ pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
 
 #[command]
 pub async fn delete_mesh(mesh_id: i64) -> Result<(), String> {
-    delete_mesh_inner(mesh_id)
+    // `delete_mesh_inner` does blocking work — DB lock acquisition and N
+    // libgit2 `git worktree remove --force` calls (each one reopens the
+    // dir as a Repository and walks the admin gitdir). Calling it inline
+    // on the async runtime pins a Tokio worker thread for the full
+    // duration (#642.4); `spawn.rs` already wraps its libgit2 work in
+    // `tokio::task::spawn_blocking` (see `spawn_blocking(move ||
+    // provision_for_spawn(...))`), so the mesh-delete path should match
+    // that convention.
+    tokio::task::spawn_blocking(move || delete_mesh_inner(mesh_id))
+        .await
+        .map_err(|e| format!("delete_mesh task panicked: {}", e))?
 }
 
 /// Update a mesh's layout preference
