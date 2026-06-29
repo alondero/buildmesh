@@ -52,21 +52,25 @@ jobs:
         run: cargo test
         working-directory: src-tauri
 
-      # Fail CI if any code path in the spawn pipeline spawns `git` via bare
-      # `Command::new("git")` — only `process_util::command_no_window("git")`
-      # (which sets CREATE_NO_WINDOW on Windows) is allowed in services/ and
-      # agent/. Test files are excluded. Issue #665 — guards against the
-      # console-flash regression returning to the post-spawn / idle-refill path.
-      - name: Verify no bare Command::new("git") in spawn pipeline (gh665)
+      # Fail CI if any code path spawns `git` via bare `Command::new("git")`
+      # or sets `creation_flags` inline — only `process_util::command_no_window(...)`
+      # (which sets CREATE_NO_WINDOW on Windows) is allowed, and that's the only
+      # site permitted to call `.creation_flags(`. Test files are excluded because
+      # `cargo test` owns its own console. Broadened in #690 from services/ + agent/
+      # to all of src-tauri/src/, now that the #685 migration left no other
+      # production sites. Issues #665 + #690.
+      - name: Verify no inline process-spawn patterns outside process_util (gh665/gh690)
         shell: bash
         run: |
-          HITS=$(rg -n 'std::process::Command::new\("git"\)' src-tauri/src/services src-tauri/src/agent \
-                  --type rust --glob '!**/*_tests.rs' --glob '!**/tests/**' \
+          HITS=$(rg -n '\.creation_flags\(|std::process::Command::new\("git"\)' src-tauri/src \
+                  --type rust \
+                  --glob '!**/*_tests.rs' --glob '!**/tests/**' \
+                  --glob '!**/process_util.rs' \
                   || true)
           if [ -n "$HITS" ]; then
-            echo "::error::Bare Command::new(\"git\") found in spawn pipeline (issue #665):"
+            echo "::error::Inline process-spawn pattern outside process_util (issue #665 / #690):"
             echo "$HITS"
-            echo "::error::Replace with crate::process_util::command_no_window(\"git\") to suppress the Windows console flash."
+            echo "::error::Use crate::process_util::command_no_window(\"program\") so CREATE_NO_WINDOW is set on Windows."
             exit 1
           fi
 
