@@ -32,7 +32,7 @@ mod tests {
         insert_warm_worktree_inner, is_warm_pool_path_inner,
         warm_pool_claims_path_inner,
         list_oldest_warm_entries_for_mesh_inner,
-        list_warm_paths_for_mesh_inner,
+        list_warm_paths_for_mesh_droppable_inner, list_warm_paths_for_mesh_inner,
         list_warm_worktrees_to_reconcile_inner,
         list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
         WarmWorktreeStatus,
@@ -387,15 +387,17 @@ mod tests {
         );
     }
 
-    /// `delete_orphaned_claimed_warm_worktrees_inner` (issue #639 gap 4) is
-    /// the orphan-row GC: it deletes EVERY `claimed` row, regardless of age,
-    /// because the directory may be backing a live agent node's worktree so
-    /// the only safe thing to do is drop the bookkeeping row. Called from
-    /// `services::warm_pool::reconcile_on_startup` (step 1a). A claim that
-    /// succeeds but whose post-spawn `forget_after_spawn` delete fails leaves
-    /// the row at `claimed` forever otherwise — the claim filter only matches
-    /// `available` and the missing-dir scan excludes `claimed`, so without
-    /// this GC the row leaks forever and `available` stays below target.
+    /// `delete_orphaned_claimed_warm_worktrees_inner` (#639 gap 4, hardened
+    /// by #642.2) is the orphan-row GC. It walks every `claimed` row and
+    /// classifies each against `agent_nodes`: a row whose `preassigned_name`
+    /// matches a live `agent_nodes.worktree_name` is adopted (drop row only);
+    /// everything else is an orphan (tear down dir then drop row). Called
+    /// from `services::warm_pool::reconcile_on_startup` (step 1a). A claim
+    /// that succeeds but whose post-spawn `forget_after_spawn` delete fails
+    /// leaves the row at `claimed` forever otherwise — the claim filter only
+    /// matches `available` and the missing-dir scan excludes `claimed`, so
+    /// without this GC the row leaks forever and `available` stays below
+    /// target.
     #[test]
     fn delete_orphaned_claimed_prunes_every_claimed_row() {
         let conn = v20_schema_with_mesh(true);
@@ -453,12 +455,22 @@ mod tests {
         assert_eq!(available_remaining, 2, "every available row must survive the GC");
     }
 
-    /// A `claimed` row pointing at a directory that's still on disk is GC'd
-    /// row-only — the directory belongs to a live agent node by definition,
-    /// so the GC must NOT touch the filesystem. The pin lives in the doc
-    /// comment; this test is the behaviour-level guard so a future refactor
-    /// that confused "drop the row" with "drop the worktree" surfaces as a
-    /// test failure rather than a lost agent's worktree.
+    /// The `claimed`-row GC is **row-only by design** (#642 — see the
+    /// function doc). The on-disk directory may be backing a live agent
+    /// node's worktree — a DB-only adoption check can be fooled by a silent
+    /// failure in the spawn's best-effort `set_agent_node_worktree_name`
+    /// UPDATE (the agent's `worktree_name` stays at the throwaway stage-1
+    /// slug, the check misses, the GC tears down the live agent's working
+    /// tree). So the GC NEVER touches the filesystem; the trade-off is
+    /// that a crashed mid-claim spawn leaks its `.claude/worktrees/<slug>/`
+    /// directory until the user cleans it up by hand.
+    ///
+    /// This test pins the safety property: the dir on disk is untouched
+    /// by the GC, regardless of whether an `agent_nodes` row exists with
+    /// the warm's preassigned_name as its `worktree_name`. A future
+    /// refactor that re-introduces the row-vs-dir classification must
+    /// surface here as a test failure rather than a silent data-loss
+    /// path.
     #[test]
     fn delete_orphaned_claimed_does_not_touch_directories() {
         let conn = v20_schema_with_mesh(true);
@@ -491,7 +503,9 @@ mod tests {
         assert_eq!(remaining, 0);
         assert!(
             dir.join("CLAIMED.md").exists(),
-            "the GC must not touch a `claimed` row's on-disk directory (it may back a live agent)"
+            "the GC must not touch a `claimed` row's on-disk directory \
+             (it may back a live agent; a DB-only adoption check is unsafe \
+             against silent best-effort UPDATE failures upstream)"
         );
     }
 
@@ -553,11 +567,11 @@ mod tests {
         assert_eq!(remaining, 1, "mesh-2 row must not be touched");
     }
 
-    /// `list_warm_paths_for_mesh_inner` (issue #639 gap 3) returns every
-    /// pool row's `path` for the given mesh, regardless of status. The
-    /// `commands::mesh::delete_mesh` caller reads this list BEFORE the row
-    /// cascade so it can `git worktree remove --force` each directory — the
-    /// DB delete alone leaves on-disk directories orphaned forever.
+    /// `list_warm_paths_for_mesh_inner` (issue #639 gap 3, retained for
+    /// diagnostics under #642) returns every pool row's `path` for the
+    /// given mesh, regardless of status. The mesh-delete path (`#642.1`)
+    /// uses the safer `list_warm_paths_for_mesh_droppable_inner` instead,
+    /// but the "everything" view is kept for diagnostic / audit tools.
     ///
     /// Exercises ALL four statuses (`Available`, `Filling`, `Refreshing`,
     /// `Claimed`) so a future refactor that narrows the WHERE clause to a
@@ -641,6 +655,56 @@ mod tests {
         assert!(
             !paths.contains(&path_m2),
             "a path belonging to a different mesh must not leak into the list"
+        );
+    }
+
+    /// `list_warm_paths_for_mesh_droppable_inner` (#642.1) is the
+    /// force-remove-safe view: every status EXCEPT `claimed`. The mesh-delete
+    /// path uses this view because a `claimed` row's directory may back a
+    /// live agent process — force-removing it would destroy the agent's
+    /// working tree. Mirrors the `status != 'claimed'` filter convention used
+    /// by `count_droppable_warm_entries_for_mesh_inner` and
+    /// `list_oldest_warm_entries_for_mesh_inner` (#613).
+    #[test]
+    fn list_paths_droppable_excludes_claimed_rows() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Available + Filling + Refreshing come back; Claimed is dropped.
+        let path_a = tmp.path().join("a").to_str().unwrap().to_string();
+        let path_b = tmp.path().join("b").to_str().unwrap().to_string();
+        let path_c = tmp.path().join("c").to_str().unwrap().to_string();
+        let path_d = tmp.path().join("d").to_str().unwrap().to_string();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_a, "pool-warm-a", Some("a"),
+            WarmWorktreeStatus::Available,
+        ).unwrap();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_b, "pool-warm-b", None,
+            WarmWorktreeStatus::Filling,
+        ).unwrap();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_c, "pool-warm-c", None,
+            WarmWorktreeStatus::Refreshing,
+        ).unwrap();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_d, "pool-warm-d", Some("d"),
+            WarmWorktreeStatus::Claimed,
+        ).unwrap();
+
+        let paths = list_warm_paths_for_mesh_droppable_inner(&conn, 1).unwrap();
+        let mut got = paths.clone();
+        got.sort();
+        let mut expected = vec![path_a, path_b, path_c];
+        expected.sort();
+        assert_eq!(
+            got, expected,
+            "the droppable view must include Available + Filling + Refreshing \
+             but exclude Claimed (whose dir may back a live agent)"
+        );
+        assert!(
+            !paths.contains(&path_d),
+            "the claimed row's path must not appear in the droppable view"
         );
     }
 

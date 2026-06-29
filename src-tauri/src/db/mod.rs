@@ -2543,14 +2543,20 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
     Ok(n)
 }
 
-/// List every warm pool directory path for a mesh (issue #639 gap 3). Called
-/// by `commands::mesh::delete_mesh` BEFORE the row cascade so the caller can
-/// `git worktree remove --force` each path — otherwise the on-disk
-/// `.claude/worktrees/<slug>` directories outlive the mesh as orphans and a
-/// subsequent prewarm on the same path can collide with the leftover slug.
+/// List every warm pool directory path for a mesh, regardless of status
+/// (issue #639 gap 3). The "everything" view — kept for diagnostic /
+/// audit tools that want the full set of warm paths for a mesh,
+/// INCLUDING `claimed` rows whose directories may back live agents.
+/// Safe force-removal must exclude `claimed` rows (their directories may
+/// back live agent processes); use [`list_warm_paths_for_mesh_droppable`]
+/// for that path (#642.1).
 ///
 /// Returns absolute host paths. Cheap: a `SELECT path` over a small index.
-/// Companion helper is `delete_warm_worktrees_for_mesh_inner`.
+/// `#[allow(dead_code)]` because no production code path currently needs
+/// the everything view; preserving the public surface so diagnostic tools
+/// and the next issue can reach it without going through the `pub(crate)`
+/// inner.
+#[allow(dead_code)]
 pub fn list_warm_paths_for_mesh(mesh_id: i64) -> SqlResult<Vec<String>> {
     let db = get().lock().unwrap();
     list_warm_paths_for_mesh_inner(&db, mesh_id)
@@ -2561,6 +2567,33 @@ pub(crate) fn list_warm_paths_for_mesh_inner(
     mesh_id: i64,
 ) -> SqlResult<Vec<String>> {
     let mut stmt = conn.prepare("SELECT path FROM warm_worktrees WHERE mesh_id = ?1")?;
+    let rows = stmt.query_map(params![mesh_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// List warm pool directory paths for a mesh that are SAFE to force-remove —
+/// every status EXCEPT `claimed`. This is the correct view for `delete_mesh`:
+/// a `claimed` row's directory may back a live agent process, and force-
+/// removing it would destroy the agent's working tree (#642.1). The mesh's
+/// `agent_nodes` rows are also deleted by the cascade, so we can't ask the DB
+/// "is there a live agent for this path?" — the conservative choice is to
+/// skip every claimed row and leave the dir behind. The user opted to delete
+/// the mesh; if they want the claimed dir gone too they can remove it by
+/// hand. The dir is leaked (not data-lost) — `process_pending_removals` does
+/// NOT help here because the mesh's `agent_nodes` rows are cascade-deleted
+/// by the same transaction, so no `close` event ever fires for them.
+pub fn list_warm_paths_for_mesh_droppable(mesh_id: i64) -> SqlResult<Vec<String>> {
+    let db = get().lock().unwrap();
+    list_warm_paths_for_mesh_droppable_inner(&db, mesh_id)
+}
+
+pub(crate) fn list_warm_paths_for_mesh_droppable_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'",
+    )?;
     let rows = stmt.query_map(params![mesh_id], |row| row.get::<_, String>(0))?;
     rows.collect()
 }
@@ -2652,22 +2685,40 @@ pub(crate) fn list_warm_worktrees_to_reconcile_inner(
     Ok(out)
 }
 
-/// Delete rows that are stuck in `claimed` status (their directories exist
-/// — `list_warm_worktrees_to_reconcile` deliberately excludes `claimed` rows
-/// because their directory may back a live node). The only path that
+/// Delete rows that are stuck in `claimed` status. The only path that
 /// produces a `claimed` row is `claim_warm_entry_for_mesh_inner`; the only
 /// path that should remove it is `forget_after_spawn`, called from the
 /// spawn's success branch. If that DELETE fails (DB error after a
 /// successful spawn) the row sits at `claimed` forever — `claim_warm_entry`
 /// won't pick it up again (the `status='available'` filter blocks it) and
-/// the missing-dir scan won't prune it. This function closes that hole by
-/// pruning EVERY `claimed` row unconditionally — the only way to safely
-/// remove a row whose directory may already belong to a live agent node is
-/// to drop the bookkeeping row without touching the filesystem (the dir is
-/// already adopted as the agent's worktree). No age guard: a fresh `claimed`
-/// row is just as stuck as an old one if the `forget_after_spawn` delete
-/// fails. Called once from `reconcile_on_startup` (step 1a, before the
-/// missing-dir scan).
+/// the missing-dir scan (`list_warm_worktrees_to_reconcile` deliberately
+/// excludes `claimed` rows because their directory may back a live node)
+/// won't prune it either. This function closes that hole by pruning EVERY
+/// `claimed` row unconditionally — the only safe thing to do is drop the
+/// bookkeeping row without touching the filesystem (the dir is either an
+/// adopted live agent's worktree, OR a crashed-spawn orphan that the user
+/// can clean up by hand; either way the GC must not risk force-removing
+/// a working tree).
+///
+/// No age guard: a fresh `claimed` row is just as stuck as an old one if
+/// the `forget_after_spawn` delete fails. Called once from
+/// `reconcile_on_startup` (step 1a, before the missing-dir scan).
+///
+/// **Issue #642.2 (REVERTED — see PR description):** a previous draft of
+/// this function classified each `claimed` row against `agent_nodes`
+/// (`worktree_name = preassigned_name`) and tore down dirs that looked
+/// orphan. The check is unsafe in the corner case where BOTH
+/// `set_agent_node_worktree_name` (best-effort in spawn.rs:1461) AND
+/// `forget_after_spawn` (best-effort in warm_pool.rs:320) silently fail
+/// — the agent's `worktree_name` stays at the throwaway stage-1 slug, the
+/// adoption check misses, the GC classifies the row as orphan, and
+/// `remove_one_worktree` destroys the LIVE agent's working tree. The
+/// pre-#642 behaviour is preserved: drop the row only, leave any on-disk
+/// directory alone. The orphan-dir leak from a crashed mid-claim spawn
+/// (a few `.claude/worktrees/<slug>/` dirs that never get cleaned up)
+/// is the trade-off; data loss is the alternative. A robust fix needs
+/// the `PROCESS_REGISTRY` lookup (live session check) rather than the
+/// DB-only check, which is out of scope for this PR.
 pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
     let db = get().lock().unwrap();
     delete_orphaned_claimed_warm_worktrees_inner(&db)

@@ -315,8 +315,11 @@ fn recheck_after_claim_id(
 /// `claimed` row is unreachable by the claim filter (`status='available'`
 /// is required) and exempt from the missing-dir scan (its directory may
 /// back a live agent), so the explicit claimed-row sweep is what keeps the
-/// pool inventory honest. See `db::delete_orphaned_claimed_warm_worktrees_inner`
-/// for the row-only contract.
+/// pool inventory honest. The GC's contract is row-only by design (#642):
+/// it must not touch the on-disk directory because the row's directory
+/// may already belong to a live agent node, and a DB-only adoption check
+/// can be fooled by a silent failure in the spawn's best-effort
+/// `set_agent_node_worktree_name` UPDATE.
 pub fn forget_after_spawn(id: i64) {
     if let Err(e) = db::delete_warm_worktree(id) {
         tracing::warn!(
