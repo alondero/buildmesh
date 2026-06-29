@@ -1,17 +1,24 @@
 //! Per-Mesh **synchronous** mutex for `git fetch` + `git pull --ff-only` runs.
 //!
-//! Why this exists (issue #652)
-//! ----------------------------
-//! The spawn-time auto-sync (`git::sync::fetch_origin`) shells out to
-//! `git fetch <remote> <branch>` then `git pull --ff-only --no-rebase` on the
-//! parent Mesh. Without serialization, N concurrent spawns against the same
-//! mesh race on `.git/FETCH_HEAD`, `.git/index.lock`, and
-//! `.git/refs/heads/<branch>.lock` — one process's `git fetch` succeeds
-//! while another's fails with `FetchFailed("... another git process ...")`,
-//! leaving the losers parked on a stale ref. A local bare-remote repro at
-//! N=2/5/10 produced zero failures (git's per-process fetch lock serializes
-//! and the fetch is too fast to overlap meaningfully); real GitHub remotes
-//! have wide enough timing windows to expose the collision.
+//! Why this exists (issues #652, #680)
+//! -----------------------------------
+//! The spawn-time auto-sync (`git::sync::fetch_origin`) and the manual
+//! `git_sync` Tauri command (`commands::git::git_sync`) both shell out
+//! to `git fetch <remote> <branch>` then `git pull --ff-only --no-rebase`
+//! on the parent Mesh. Without serialization, N concurrent callers
+//! against the same mesh race on `.git/FETCH_HEAD`, `.git/index.lock`,
+//! and `.git/refs/heads/<branch>.lock` — one process's `git fetch`
+//! succeeds while another's fails with
+//! `FetchFailed("... another git process ...")`, leaving the losers
+//! parked on a stale ref. A local bare-remote repro at N=2/5/10
+//! produced zero failures (git's per-process fetch lock serializes
+//! and the fetch is too fast to overlap meaningfully); real GitHub
+//! remotes have wide enough timing windows to expose the collision.
+//!
+//! #652 wired the spawn-time auto-sync into this lock; #680 added the
+//! manual `git_sync` command so a Sync click can't race against an
+//! in-flight spawn. Today every `git fetch + git pull --ff-only`
+//! shell-out in the app routes through `with_mesh_sync_lock`.
 //!
 //! The existing `services::pool_worker::FILL_LOCK` is `try_lock`-or-skip and
 //! is the wrong shape here — a *skipped* fetch would leave the spawn without
@@ -34,13 +41,6 @@
 //! `Arc` on the inner mutex lets the address survive any future map
 //! compaction. Today the map is append-only (Meshes are a small fixed set
 //! per app session — typically a handful), so memory growth is bounded.
-//!
-//! Out of scope
-//! ------------
-//! The manual `git_sync` Tauri command (`commands::git::git_sync`) is
-//! interactive and not burst-triggered; routing it through the same mutex
-//! would benefit it but is not the user's pain point and is left for a
-//! follow-up (issue #680). Only the spawn-time auto-sync is wrapped here.
 //!
 //! Key shape
 //! ---------

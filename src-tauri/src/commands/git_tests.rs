@@ -10,6 +10,8 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -333,6 +335,89 @@ mod tests {
         assert!(result.pulled, "expected fast-forward pull: {}", result.message);
         assert_eq!(result.new_commits, 1);
         assert!(local.path().join("remote-change.txt").exists());
+    }
+
+    /// Regression test for issue #680 — the manual `git_sync` Tauri
+    /// command must run inside `services::sync_lock::with_mesh_sync_lock`
+    /// so a manual Sync click on a Mesh can't race against concurrent
+    /// spawn-time `fetch_origin` calls (or against a second manual Sync)
+    /// for the same Mesh. Without the wrap, two `git fetch` shell-outs
+    /// collide on `.git/FETCH_HEAD` / `refs/heads/<branch>.lock`.
+    ///
+    /// Strategy: hold the per-mesh lock for 500 ms in a holder thread,
+    /// then call `git_sync` and time it. With the wrap, `git_sync`
+    /// blocks ~450 ms waiting for the holder; without, it runs
+    /// concurrently with the holder and finishes in tens of ms.
+    ///
+    /// Why wall-clock (not `fetch_add`): the per-mesh lock is correctly
+    /// implemented (issue #652 tests), so it *prevents* simultaneous
+    /// critical-section entries — `max_concurrent == 1` even on a
+    /// working lock. The only signal that `git_sync` shares the same
+    /// lock key is that it waits for the holder to release.
+    ///
+    /// Test setup deliberately leaves the clone at the same commit as
+    /// the remote so `do_sync` returns `UpToDate` — that keeps the
+    /// outcome out of the `Synced` / `FetchedButDiverged` branches
+    /// (`git_sync` looks up the Mesh in the DB to fire the warm-pool
+    /// freshness pass, and the test binary doesn't initialise the DB).
+    /// `UpToDate` still goes through the full `git fetch` shell-out,
+    /// which is the operation we need to serialize.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn git_sync_serializes_via_per_mesh_sync_lock_gh680() {
+        let remote = TempGitRepo::new();
+        fs::create_dir_all(remote.path()).unwrap();
+        git2::Repository::init_bare(remote.path()).unwrap();
+
+        let seed = TempGitRepo::new();
+        let _seed_repo = init_git_repo(seed.path());
+        run_git(seed.path(), &["branch", "-M", "main"]);
+        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let local = TempGitRepo::new();
+        run_git_without_dir(&[
+            "clone",
+            "-b",
+            "main",
+            remote.path().to_str().unwrap(),
+            local.path().to_str().unwrap(),
+        ]);
+
+        let path_key = local.path().to_string_lossy().into_owned();
+
+        // Holder: acquires the per-mesh lock and sleeps inside it.
+        let holder_path = path_key.clone();
+        let holder = thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        // Give the holder time to acquire the inner lock before
+        // `git_sync` runs. Otherwise `git_sync` could sneak in first
+        // and we'd measure its natural duration, not its blocked
+        // duration. 50 ms is comfortably past the inner-mutex acquire
+        // overhead.
+        thread::sleep(Duration::from_millis(50));
+
+        // Run the manual sync and time it.
+        let start = Instant::now();
+        let _ = crate::commands::git::git_sync(path_key.clone()).await;
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        // With wrap: elapsed >= ~450 ms (`git_sync` waited for holder).
+        // Without wrap: elapsed = tens of ms (`git_sync` ran
+        // concurrently with the holder's sleep). Bound is 400 ms —
+        // leaves 100 ms of slack for setup overhead and CI jitter.
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "git_sync did not block on the per-mesh lock (elapsed = {:?}); \
+             issue #680 wrap is missing — concurrent manual Sync and \
+             spawn-time fetch_origin would race on .git/FETCH_HEAD",
+            elapsed,
+        );
     }
 
     #[test]

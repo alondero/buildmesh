@@ -357,7 +357,18 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     // `git_sync` is a manual user click, not a spawn-time path, so
     // the all-refs fetch is fine here (and matches the behaviour of
     // `git fetch` with no arguments that the pre-#274 code used).
-    let outcome = crate::git::sync::do_sync(&host_path, &remote, None);
+    //
+    // Issue #680 — wrap in the per-Mesh sync lock so a manual Sync
+    // click can't race against concurrent spawn-time `fetch_origin`
+    // (or against a second manual Sync) for the same Mesh. Without
+    // this lock, two `git fetch` shell-outs collide on
+    // `.git/FETCH_HEAD` / `refs/heads/<branch>.lock`. Keying on `&path`
+    // (the DB-stored canonical form, NOT `&host_path`) matches the
+    // spawn-time caller in `agent::spawn`, which keys on `node.path` —
+    // both call sites share one lock entry per Mesh row.
+    let outcome = crate::services::sync_lock::with_mesh_sync_lock(&path, || {
+        crate::git::sync::do_sync(&host_path, &remote, None)
+    });
 
     // Ref-freshness (issue #613 AC3): a manual Sync that pulled new commits
     // moved the mesh's base ref, so its warm pool entries are now stale.
