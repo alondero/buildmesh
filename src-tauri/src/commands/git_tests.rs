@@ -9,6 +9,7 @@
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -344,10 +345,12 @@ mod tests {
     /// for the same Mesh. Without the wrap, two `git fetch` shell-outs
     /// collide on `.git/FETCH_HEAD` / `refs/heads/<branch>.lock`.
     ///
-    /// Strategy: hold the per-mesh lock for 500 ms in a holder thread,
-    /// then call `git_sync` and time it. With the wrap, `git_sync`
-    /// blocks ~450 ms waiting for the holder; without, it runs
-    /// concurrently with the holder and finishes in tens of ms.
+    /// Strategy: a holder thread sets a flag once it's inside the
+    /// per-mesh lock and sleeps there; the test waits on the flag
+    /// (deterministic — no `thread::sleep` race), then times `git_sync`.
+    /// With the wrap, `git_sync` blocks ~450 ms waiting for the holder;
+    /// without, it runs concurrently with the holder and finishes in
+    /// tens of ms.
     ///
     /// Why wall-clock (not `fetch_add`): the per-mesh lock is correctly
     /// implemented (issue #652 tests), so it *prevents* simultaneous
@@ -364,12 +367,14 @@ mod tests {
     /// which is the operation we need to serialize.
     #[tokio::test(flavor = "multi_thread")]
     async fn git_sync_serializes_via_per_mesh_sync_lock_gh680() {
+        use std::sync::atomic::AtomicUsize;
+
         let remote = TempGitRepo::new();
         fs::create_dir_all(remote.path()).unwrap();
         git2::Repository::init_bare(remote.path()).unwrap();
 
         let seed = TempGitRepo::new();
-        let _seed_repo = init_git_repo(seed.path());
+        init_git_repo(seed.path());
         run_git(seed.path(), &["branch", "-M", "main"]);
         run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
         run_git(seed.path(), &["push", "-u", "origin", "main"]);
@@ -385,22 +390,33 @@ mod tests {
 
         let path_key = local.path().to_string_lossy().into_owned();
 
-        // Holder: acquires the per-mesh lock and sleeps inside it.
+        // Holder enters the per-mesh lock and announces entry via
+        // `entered_flag` before sleeping, so the main thread can
+        // deterministically start timing only once the holder holds
+        // the lock (no `thread::sleep` race — CI jitter can't make
+        // `git_sync` sneak in first).
+        let entered_flag = Arc::new(AtomicUsize::new(0));
         let holder_path = path_key.clone();
+        let entered_holder = Arc::clone(&entered_flag);
         let holder = thread::spawn(move || {
             crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                entered_holder.store(1, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(500));
             });
         });
 
-        // Give the holder time to acquire the inner lock before
-        // `git_sync` runs. Otherwise `git_sync` could sneak in first
-        // and we'd measure its natural duration, not its blocked
-        // duration. 50 ms is comfortably past the inner-mutex acquire
-        // overhead.
-        thread::sleep(Duration::from_millis(50));
+        // Spin-wait (bounded) for the holder to actually be inside the
+        // critical section. Cap at 2s so a hung holder surfaces as a
+        // test panic, not a forever-wait.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered_flag.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "holder thread never entered the per-mesh lock"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
 
-        // Run the manual sync and time it.
         let start = Instant::now();
         let _ = crate::commands::git::git_sync(path_key.clone()).await;
         let elapsed = start.elapsed();
