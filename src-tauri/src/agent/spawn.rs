@@ -1374,6 +1374,12 @@ pub async fn spawn_agent_inner(
     // built-in/absent account yields an empty list → vanilla claude on the
     // Anthropic subscription.
     let backend_env = crate::preferences::resolve_provider_env(&node.provider);
+    // Custom-endpoint tiers preflight — refuses to spawn if a Claude-compatible
+    // third-party (OpenRouter, Generic) is configured without a primary model,
+    // which would otherwise silently 400 in the spawned `claude` (the binary
+    // sends its hardcoded `claude-*` default; OpenRouter wants `provider/model`).
+    crate::preferences::preflight_resolve_provider_env(&node.provider)
+        .map_err(|e| format!("spawn preflight failed: {}", e))?;
     let cmd = build_spawn_command(
         &resolved,
         provider,
