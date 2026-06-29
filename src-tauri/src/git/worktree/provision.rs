@@ -241,6 +241,46 @@ pub(crate) fn fetch_fork_head(
     true
 }
 
+/// Run the PR-spawn head fetch inside `services::sync_lock::with_mesh_sync_lock`
+/// so concurrent PR-spawns (or a PR-spawn racing the manual `git_sync` from
+/// #680) can't collide on `.git/FETCH_HEAD`, `.git/refs/remotes/<remote>/
+/// <ref>.lock`, or — for the fork branch — the config files `git remote add/
+/// set-url` write (issues #652, #680 follow-up #698).
+///
+/// The lock key is the mesh's host path (`project_root`), matching the key
+/// `spawn_agent_inner` uses for the auto-sync `fetch_origin` call two steps
+/// earlier. Same-key contention serialises; different keys (different meshes)
+/// never wait on each other.
+///
+/// Both branches of the underlying match share one helper so `spawn_agent_inner`
+/// has a single, audit-able lock acquisition rather than two inline branches.
+/// The closure that `with_mesh_sync_lock` runs owns nothing: it captures all
+/// four arguments by reference, so the closure borrows are valid for the
+/// duration of the fetch and the lock is released as soon as `fetch_single_ref`
+/// or `fetch_fork_head` returns. Best-effort by design (ADR 0001) — the spawn
+/// falls through to `base_ref` on `false` rather than hard-failing.
+///
+/// The two underlying helpers (`fetch_single_ref`, `fetch_fork_head`) stay
+/// lock-free so the no-lock shape is testable in isolation (the issue #420 /
+/// #443 unit tests in `agent::spawn` call them directly with unique tempdir
+/// paths); `locked_fetch_pr_head` is the only caller that needs the
+/// serialization guarantee.
+pub(crate) fn locked_fetch_pr_head(
+    project_root: &str,
+    head_ref: &str,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+) -> bool {
+    crate::services::sync_lock::with_mesh_sync_lock(project_root, || {
+        match (head_repo_owner, head_repo_clone_url) {
+            (Some(owner), Some(clone_url)) => {
+                fetch_fork_head(project_root, owner, clone_url, head_ref)
+            }
+            _ => fetch_single_ref(project_root, head_ref),
+        }
+    })
+}
+
 /// Read the local SHA at `refs/remotes/origin/<head_ref>` — the ref
 /// `fetch_single_ref` populates via `git fetch origin -- <head_ref>`.
 /// Returns `None` when the ref doesn't exist (a stale local cache, a
