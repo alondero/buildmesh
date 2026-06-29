@@ -53,7 +53,15 @@ function App() {
   // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
   // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
   // Only register shortcuts when the window is focused so they don't steal from other apps.
-  // Ctrl/Cmd+←/→/↑/↓ traverses the on-screen agent-node grid in the active mesh.
+  // Ctrl/Cmd+Alt+←/→/↑/↓ traverses the on-screen agent-node grid in the active mesh.
+  // We use TWO modifiers here (not bare Ctrl/Cmd+Arrow) because Ctrl+←/→ is
+  // the readline `backward-word` / `forward-word` gesture in bash/zsh/fish/
+  // PSReadLine and every node/python REPL — the global-shortcut plugin
+  // captures at the OS layer (before xterm sees the keydown), so bare
+  // Ctrl+Arrow would silently steal word-movement whenever the user tries to
+  // fix a typo in a long agent prompt. Adding `Alt+` matches the Windows
+  // Snap / tmux prefix+Arrow / i3 / VS Code "Move Editor Group" precedent
+  // for pane navigation and collides with nothing.
   // Alt+G (Win/Linux) / Cmd+G (macOS) toggles grid ↔ single-view (issue #668).
   useEffect(() => {
     // Tauri 2's global-shortcut plugin doesn't expose an `AltOrCommand`
@@ -68,10 +76,10 @@ function App() {
 
     const shortcuts = [
       { key: 'CommandOrControl+T', action: 'new-agent' },
-      { key: 'CommandOrControl+ArrowLeft', action: 'arrow-left' },
-      { key: 'CommandOrControl+ArrowRight', action: 'arrow-right' },
-      { key: 'CommandOrControl+ArrowUp', action: 'arrow-up' },
-      { key: 'CommandOrControl+ArrowDown', action: 'arrow-down' },
+      { key: 'CommandOrControl+Alt+ArrowLeft', action: 'arrow-left' },
+      { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
+      { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
+      { key: 'CommandOrControl+Alt+ArrowDown', action: 'arrow-down' },
       gridToggleShortcut,
     ];
     const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
@@ -202,6 +210,14 @@ function App() {
       }
 
       if (!isArrowAction(action)) return;
+      // Defensive focus guard (matches the Alt+G handler above). The binding
+      // is Ctrl/Cmd+Alt+Arrow, which has no readline collision, but if the
+      // user is focused on a real text input (an inline rename, a future
+      // search box) we'd rather not move the grid behind their typing. The
+      // xterm-helper-textarea carve-out in isTextInputFocused() means this
+      // guard is a no-op when an agent terminal has focus — exactly what we
+      // want.
+      if (isTextInputFocused()) return;
       const direction: ArrowDirection = action.slice('arrow-'.length) as ArrowDirection;
 
       // Phase 1: if a node is maximized, the first arrow press restores the
