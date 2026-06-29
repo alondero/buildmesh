@@ -917,6 +917,11 @@ async fn summarize_and_rename_with(
     // CREATE_NO_WINDOW setting carries through the std→tokio `From` conversion.
     let mut cmd: tokio::process::Command =
         crate::process_util::command_no_window("claude").into();
+    // Caller (on_turn_with, line 734) is `tauri::async_runtime::spawn` and this
+    // future is wrapped in a 30s `tokio::time::timeout` (line below) — both
+    // cancel the awaiter, not the child, so without this flag a claude leak
+    // accumulates up to MAX_RENAME_ATTEMPTS times per node (gh688).
+    cmd.kill_on_drop(true);
     cmd.args(["--print"]);
 
     // Clear any inherited claude backend env (cwrap `unset` parity) so a value
@@ -2019,5 +2024,34 @@ mod tests {
 
         // Post-cleanup: the node's entire naming state is gone.
         assert!(!has_state(node_id), "cleanup must remove the node's entry");
+    }
+
+    // --- gh688: async claude spawn must set kill_on_drop ---
+
+    /// Regression guard for issue #688: `summarize_and_rename_with` spawns an
+    /// async `claude --print` child via `tokio::process::Command`. The rename
+    /// is fire-and-forget (caller is `tauri::async_runtime::spawn`) and
+    /// bounded by a 30s `tokio::time::timeout` — but tokio timeout cancels
+    /// the awaiter, NOT the spawned child. Without `.kill_on_drop(true)`,
+    /// cancellation, timeout, or app-shutdown leave the LLM child orphaned,
+    /// and the leak accumulates (one per node rename, capped at
+    /// `MAX_RENAME_ATTEMPTS = 3`).
+    ///
+    /// `tokio::process::Command::get_kill_on_drop()` (tokio ≥ 1.47) would let
+    /// us test this at runtime, but only against a separately-constructed
+    /// command — not the actual line. A static check binds the assertion to
+    /// the production code, so a future refactor that drops the call fails
+    /// this test. The substring is unique to this site; a second async
+    /// `tokio::process::Command` would warrant a body-scope (see #665 for the
+    /// setter-only `creation_flags` precedent that motivated this shape).
+    #[test]
+    fn summarize_and_rename_with_sets_kill_on_drop_on_claude_command() {
+        let source = include_str!("session_naming.rs");
+        assert!(
+            source.contains(".kill_on_drop(true)"),
+            "summarize_and_rename_with must call .kill_on_drop(true) on its \
+             tokio::process::Command (issue #688). Without it, cancellation, \
+             timeout, or app-shutdown leaves the claude child orphaned."
+        );
     }
 }
