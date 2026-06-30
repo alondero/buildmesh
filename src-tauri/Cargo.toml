@@ -59,6 +59,12 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 parking_lot = "0.12"
 local-ip-address = "0.6"
+
+# OS-level interface-change notifications for issue #591.
+# Windows: `NotifyAddrChange` from Iphlpapi.dll. The crate is already in the
+# tree transitively via `rustix`/`signal-hook`; pinning to 0.61 keeps the
+# `windows-sys` versions aligned. macOS/Linux use a polling fallback (no new
+# deps) — see `http::interface_watcher`.
 reqwest = { version = "0.12", features = ["json", "blocking"] }
 rust-embed = "8"
 # Shared Rust→TS type generation (issue #359). `#[derive(TS)]` on wire structs
@@ -66,6 +72,9 @@ rust-embed = "8"
 # (`git diff --exit-code`) then fails on drift. chrono-impl maps DateTime<Utc>
 # to `string`; serde-compat (default) honours #[serde(rename_all = ...)].
 ts-rs = { version = "12", features = ["chrono-impl"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"

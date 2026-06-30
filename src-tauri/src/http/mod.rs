@@ -7,6 +7,7 @@ pub mod assets;
 pub mod auth;
 pub mod events;
 pub mod interface_rank;
+pub mod interface_watcher;
 pub mod request;
 pub mod revocation;
 pub mod routes;
@@ -212,6 +213,18 @@ pub fn start_http_server(app: tauri::AppHandle, port_offset: u16) {
     PORT_OFFSET.store(port_offset, Ordering::SeqCst);
     tauri::async_runtime::spawn(async move {
         apply_binding(port_offset).await;
+    });
+    // OS-level interface-change watcher (issue #591). A VPN connecting mid-
+    // session, a DHCP lease change, or a Wi-Fi reconnect would otherwise leave
+    // the LAN-exposure listeners stale until the user re-toggles or restarts.
+    // The watcher fires `reapply_binding` after a 250 ms debounce so one
+    // network change produces one rebind (not one per kernel signal). When
+    // LAN exposure is off, `reapply_binding` is a loopback-only no-op, so a
+    // non-LAN user pays nothing beyond the platform source's idle work.
+    interface_watcher::spawn_interface_watcher(|| {
+        tauri::async_runtime::spawn(async move {
+            reapply_binding().await;
+        });
     });
 }
 
