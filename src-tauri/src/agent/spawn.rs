@@ -11,9 +11,14 @@ use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
 use crate::git::worktree::provision::{
-    fetch_fork_head, fetch_single_ref, fork_remote_alias, provision_for_spawn, read_origin_ref_sha,
+    fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
     ProvisionOutcome, SpawnContext, SpawnSource,
 };
+// The bare fetch helpers (`fetch_single_ref`, `fetch_fork_head`) are
+// re-exported under `#[cfg(test)]` below — production code goes through
+// `locked_fetch_pr_head` (issue #698), which wraps the per-Mesh
+// `with_mesh_sync_lock` around the bare helpers so callers can't forget to
+// serialize concurrent PR-spawn fetches.
 use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
@@ -1015,13 +1020,14 @@ pub async fn spawn_agent_inner(
             // same commits the PR is built from. Two cases:
             //
             //  - Same-repo PRs (`head_repo_owner` is `None`): the head
-            //    lives on `origin` — we call `fetch_single_ref` and use
-            //    `origin/<head_ref>` (the #420 path).
+            //    lives on `origin` — we call `locked_fetch_pr_head` and
+            //    use `origin/<head_ref>` (the #420 path).
             //  - Fork PRs (`head_repo_owner` is `Some`): the head lives on
-            //    the fork's clone URL — we call `fetch_fork_head`, which
-            //    registers the fork as a remote (`fork-<login>`) and fetches
-            //    from there (issue #443, follow-up to #36). The worktree
-            //    base_ref becomes `fork-<login>/<head_ref>`.
+            //    the fork's clone URL — `locked_fetch_pr_head` calls
+            //    `fetch_fork_head`, which registers the fork as a remote
+            //    (`fork-<login>`) and fetches from there (issue #443,
+            //    follow-up to #36). The worktree base_ref becomes
+            //    `fork-<login>/<head_ref>`.
             //
             // The fetch is best-effort: a network failure or stale local ref
             // falls back to the mesh's `base_ref` (the ADR 0001 offline
@@ -1045,20 +1051,25 @@ pub async fn spawn_agent_inner(
                 let fork_url_owned = node.head_repo_clone_url.clone();
                 timer.checkpoint("before_fetch_pr_head");
                 let fetch_ok = tokio::task::spawn_blocking(move || {
-                    // Fork path (#443): when the head repo's owner is
-                    // recorded, the head lives on the fork's clone URL, not
-                    // on `origin`. The clone URL is part of the row (set by
-                    // `create_pr_node` from `head_repo_clone_url`), so the
-                    // stage-2 spawn has everything it needs without a
-                    // second GitHub lookup. The same-repo path (#420)
-                    // passes `None` for both fork fields and takes the
-                    // `git fetch origin` branch via `fetch_single_ref`.
-                    match (fork_owner_owned.as_deref(), fork_url_owned.as_deref()) {
-                        (Some(owner), Some(clone_url)) => {
-                            fetch_fork_head(&root, owner, clone_url, &head_ref_owned)
-                        }
-                        _ => fetch_single_ref(&root, &head_ref_owned),
-                    }
+                    // Issue #698 — per-Mesh serialization for the PR-spawn
+                    // fetch. The match lives inside `locked_fetch_pr_head`
+                    // so both branches share one lock acquisition keyed on
+                    // `&root` (the mesh's DB-stored path, same key
+                    // `fetch_origin` uses two steps above). Without the
+                    // lock, two concurrent PR-spawns (or a PR-spawn racing
+                    // the manual `git_sync` from #680) collide on
+                    // `.git/FETCH_HEAD` / `refs/remotes/<remote>/<ref>.lock`
+                    // and the losing spawn silently falls back to `base_ref`.
+                    // The fork branch additionally writes `git remote add/
+                    // set-url` config that the next caller must observe,
+                    // so the lock covers both remote registration and
+                    // fetch in one critical section.
+                    locked_fetch_pr_head(
+                        &root,
+                        &head_ref_owned,
+                        fork_owner_owned.as_deref(),
+                        fork_url_owned.as_deref(),
+                    )
                 })
                 .await
                 .unwrap_or_else(|e| {
@@ -1806,23 +1817,25 @@ fn emit_sync_outcome_event(
     let _ = app.emit(event_name, payload);
 }
 
-// The eight worktree-provision helpers — `fetch_single_ref`, `fork_remote_alias`,
-// `fetch_fork_head`, `read_origin_ref_sha`, `upgrade_warm_to_mode`,
-// `adopt_warm_worktree_by_move`, `checkout_worktree_to_base`, `run_git_checkout` —
-// live in `crate::git::worktree::provision` (ADR 0007 consolidation, issue
-// #677). The spawn path reaches them through the module-level `use` at the
-// top of this file; the call sites inside `spawn_agent_inner` use them
-// transparently.
+// The worktree-provision helpers — `fetch_single_ref`, `locked_fetch_pr_head`,
+// `fork_remote_alias`, `fetch_fork_head`, `read_origin_ref_sha`,
+// `upgrade_warm_to_mode`, `adopt_warm_worktree_by_move`,
+// `checkout_worktree_to_base`, `run_git_checkout` — live in
+// `crate::git::worktree::provision` (ADR 0007 consolidation, issue #677, plus
+// #698's `locked_fetch_pr_head` wrapper). The spawn path reaches them through
+// the module-level `use` at the top of this file; the call sites inside
+// `spawn_agent_inner` use them transparently.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     // The eight worktree-provision helpers were moved to
-    // `crate::git::worktree::provision` in PR #676 / issue #677; the tests
-    // here exercise them by name, so re-import at the test-module scope.
+    // `crate::git::worktree::provision` in PR #676 / issue #677, and #698
+    // added `locked_fetch_pr_head` on top. The tests here exercise them by
+    // name, so re-import at the test-module scope.
     use crate::git::worktree::provision::{
         adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
-        read_origin_ref_sha, upgrade_warm_to_mode,
+        locked_fetch_pr_head, read_origin_ref_sha, upgrade_warm_to_mode,
     };
     use tempfile::TempDir;
 
@@ -2872,6 +2885,174 @@ mod tests {
             !ok,
             "fetch_single_ref must return false for a ref starting with '-' \
              (the '--' separator must block git from treating it as a flag)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // locked_fetch_pr_head — per-Mesh sync_lock wrap (issue #698)
+    //
+    // `locked_fetch_pr_head` must run inside `services::sync_lock::with_mesh_
+    // sync_lock` so two concurrent PR-spawns (or a PR-spawn racing the manual
+    // `git_sync` from #680 / the spawn-time `fetch_origin` from #652) can't
+    // collide on `.git/FETCH_HEAD` / `.git/refs/remotes/<remote>/<ref>.lock`.
+    // Without the wrap the losing fetch fails with "another git process" and
+    // the spawn silently lands on `base_ref` (the wrong commits).
+    //
+    // We test the wrap with a wall-clock bound (mirroring the #680
+    // `git_sync_serializes_via_per_mesh_sync_lock_gh680` shape in
+    // `commands/git_tests.rs`). The `with_mesh_sync_lock` unit tests in
+    // `services::sync_lock` prove the primitive itself serialises; this test
+    // proves THIS specific call site uses the SAME key the spawn path uses,
+    // which is the bug class #698 closes.
+    //
+    // Holder enters the per-mesh lock and announces entry via an AtomicUsize
+    // flag before sleeping. Main thread spin-waits on the flag (deterministic
+    // — no `thread::sleep` race), then times `locked_fetch_pr_head`. With the
+    // wrap, `locked_fetch_pr_head` blocks ~450 ms waiting for the holder;
+    // without, it runs concurrently with the holder and finishes in tens of ms.
+    // -----------------------------------------------------------------------
+
+    /// Regression test for issue #698 — `locked_fetch_pr_head` must acquire
+    /// the per-Mesh `with_mesh_sync_lock` keyed on the spawn's `node.path`,
+    /// matching what `spawn_agent_inner` calls `fetch_origin` with two steps
+    /// earlier. Without this wrap, concurrent PR-spawns on the same Mesh
+    /// (and a PR-spawn racing the manual `git_sync` button) race on
+    /// `.git/FETCH_HEAD` / `refs/remotes/<remote>/<ref>.lock` and the loser
+    /// silently falls back to `base_ref`.
+    ///
+    /// Strategy: holder thread enters `with_mesh_sync_lock(&path_key, ...)`
+    /// and announces via an AtomicUsize flag, then sleeps. Main thread
+    /// spin-waits on the flag (deterministic — no `thread::sleep` race), then
+    /// times `locked_fetch_pr_head`. With the wrap, `locked_fetch_pr_head`
+    /// blocks waiting for the holder; without, it returns immediately while
+    /// the holder is still inside its critical section.
+    ///
+    /// Why wall-clock (not `fetch_add`): the per-Mesh lock is correctly
+    /// implemented (issue #652 + `services::sync_lock` unit tests prove it),
+    /// so it *prevents* simultaneous critical-section entries — `max_concurrent
+    /// == 1` even on a working lock. The only signal that `locked_fetch_pr_head`
+    /// shares the same key is that it waits for the holder to release the lock.
+    ///
+    /// The test uses the same-repo branch (passes `None, None` for fork
+    /// fields). The fork branch shares the same wrapper so the regression
+    /// coverage is sufficient with one call site — a #698 regression that
+    /// branched out of the wrapper entirely would fail this test and the
+    /// #443 fork tests would still pass on the unwrapped helper, surfacing
+    /// the gap.
+    #[test]
+    fn locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        use std::time::{Duration, Instant};
+
+        let (local, _bare) = init_same_repo_fixture();
+        let path_key = local.path().to_string_lossy().into_owned();
+
+        // Holder enters the per-mesh lock and announces entry via
+        // `entered_flag` before sleeping. Spinning on the flag avoids the
+        // `thread::sleep` race — CI jitter can't make `locked_fetch_pr_head`
+        // sneak in first.
+        let entered_flag = std::sync::Arc::new(AtomicUsize::new(0));
+        let holder_path = path_key.clone();
+        let entered_holder = std::sync::Arc::clone(&entered_flag);
+        let holder = std::thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                entered_holder.store(1, AOrdering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        // Spin-wait (bounded) for the holder to actually be inside the
+        // critical section. Cap at 2 s so a hung holder surfaces as a
+        // test panic, not a forever-wait.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered_flag.load(AOrdering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "holder thread never entered the per-mesh lock"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let start = Instant::now();
+        let _ = locked_fetch_pr_head(&path_key, "feat/420-pr-spawn", None, None);
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        // With wrap: elapsed >= ~450 ms (`locked_fetch_pr_head` waited for
+        // the holder). Without wrap: elapsed = tens of ms (the fetch ran
+        // concurrently with the holder's sleep). Bound is 400 ms — leaves
+        // 100 ms of slack for setup overhead and CI jitter on a busy box.
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "locked_fetch_pr_head did not block on the per-mesh lock \
+             (elapsed = {:?}); issue #698 wrap is missing — concurrent PR-spawn \
+             and spawn-time fetch_origin (or manual git_sync from #680) would \
+             race on .git/FETCH_HEAD and refs/remotes/<remote>/<ref>.lock",
+            elapsed,
+        );
+    }
+
+    /// Companion to `locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698`
+    /// — exercises the FORK branch (`Some/Some` → `fetch_fork_head`) of the
+    /// wrapper. The same-repo test alone leaves a CI blind spot: a #698
+    /// regression that bypassed the wrapper for fork PRs (e.g. an inlined
+    /// `fetch_fork_head` call in `spawn_agent_inner` to skip the remote-
+    /// config lock acquisition) would still pass the same-repo test and
+    /// every existing #443 fork unit test (those hit the bare helper
+    /// directly, no lock). This test closes the gap by hitting the fork
+    /// arm of the wrapper with the same wall-clock shape; its `git remote
+    /// add` then `git fetch` sequence MUST hold the lock for the holder's
+    /// 500 ms sleep.
+    #[test]
+    fn locked_fetch_pr_head_serializes_fork_branch_via_per_mesh_sync_lock_gh698() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        use std::time::{Duration, Instant};
+
+        let (local, bare_dir, _src) = init_fork_fixture();
+        let bare_dir_str = bare_dir.to_str().unwrap().to_string();
+        let path_key = local.path().to_string_lossy().into_owned();
+
+        // Holder enters the per-mesh lock (same key as the wrapper) and
+        // announces via `entered_flag` before sleeping.
+        let entered_flag = std::sync::Arc::new(AtomicUsize::new(0));
+        let holder_path = path_key.clone();
+        let entered_holder = std::sync::Arc::clone(&entered_flag);
+        let holder = std::thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                entered_holder.store(1, AOrdering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered_flag.load(AOrdering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "holder thread never entered the per-mesh lock"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let start = Instant::now();
+        let _ = locked_fetch_pr_head(
+            &path_key,
+            "feat/443-fork",
+            Some("alice"),
+            Some(&bare_dir_str),
+        );
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "locked_fetch_pr_head (fork branch) did not block on the per-mesh \
+             lock (elapsed = {:?}); issue #698 wrap is missing for the fork path \
+             — concurrent fork-PR spawns would race on .git/FETCH_HEAD, \
+             refs/remotes/fork-<login>/<ref>.lock, AND the git remote add/config \
+             files that fetch_fork_head writes before its fetch",
+            elapsed,
         );
     }
 

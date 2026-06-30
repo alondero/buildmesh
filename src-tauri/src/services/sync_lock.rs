@@ -17,16 +17,17 @@
 //!
 //! #652 wired the spawn-time auto-sync into this lock; #680 added the
 //! manual `git_sync` command so a Sync click can't race against an
-//! in-flight spawn. Today every `git fetch + git pull --ff-only`
-//! shell-out in the spawn-time auto-sync and manual sync paths routes
-//! through `with_mesh_sync_lock`.
+//! in-flight spawn; #698 wrapped the PR-spawn head fetch (the
+//! `locked_fetch_pr_head` helper at `git::worktree::provision`,
+//! covering both the same-repo `fetch_single_ref` and the fork
+//! `fetch_fork_head` calls) so two concurrent PR-spawns (or a PR-spawn
+//! racing a manual `git_sync`) can't collide on `.git/FETCH_HEAD`,
+//! `.git/refs/remotes/<remote>/<ref>.lock`, or — for the fork branch —
+//! the config files `git remote add/set-url` write.
 //!
-//! Out of scope (deliberate): the PR-spawn path's single-ref
-//! `git fetch` shell-outs (`git::worktree::provision::fetch_single_ref`
-//! and `fetch_fork_head`) and the worktree prune's `git fetch` operate
-//! on different contention points (`refs/remotes/<remote>/<ref>.lock`
-//! and a different worktree's `.git`, respectively) and are best
-//! handled by their own helpers.
+//! Out of scope (deliberate): the worktree prune's `git fetch` operates
+//! on a different worktree's `.git` and is best handled by its own
+//! helper.
 //!
 //! The existing `services::pool_worker::FILL_LOCK` is `try_lock`-or-skip and
 //! is the wrong shape here — a *skipped* fetch would leave the spawn without
