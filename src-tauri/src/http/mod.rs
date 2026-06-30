@@ -1102,15 +1102,23 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // GET /install-cert.der — one-tap root CA install (issue #636). Same
-    // pre-auth, Host-guarded placement as `/__certs/status` above; serves the
-    // raw `ca.der` bytes with the Android-friendly `application/x-x509-ca-cert`
-    // MIME so Chrome auto-routes the download into the system cert installer.
-    // Windows opens its Certificate Import Wizard from this same MIME; macOS
-    // Safari/Firefox download the file for a manual Keychain drag. `Content-
-    // Length` is taken from the in-memory byte count of the file we are about
-    // to send (not from `Path::metadata`) so a concurrent `load_or_generate`
-    // mid-handle can't trip Chrome's `ERR_CONTENT_LENGTH_MISMATCH`.
+    // GET /install-cert.der — manual root CA install fallback (issue #702).
+    // Same pre-auth, Host-guarded placement as `/__certs/status` above; serves
+    // the raw `ca.der` bytes with the Android-friendly
+    // `application/x-x509-ca-cert` MIME so Chrome auto-routes the download
+    // into the system cert installer. Windows opens its Certificate Import
+    // Wizard from this same MIME; macOS Safari/Firefox download the file for
+    // a manual Keychain drag. `Content-Length` is taken from the in-memory
+    // byte count of the file we are about to send (not from `Path::metadata`)
+    // so a concurrent `load_or_generate` mid-handle can't trip Chrome's
+    // `ERR_CONTENT_LENGTH_MISMATCH`.
+    //
+    // After issue #702, the desktop modal's primary install path is a
+    // `data:application/x-x509-ca-cert;base64,...` QR (handled by
+    // `commands::network::get_root_cert_der`). This HTTP route is the
+    // manual fallback for users who can't scan the install-QR (older
+    // Android, custom camera apps, ad-blockers) — they open the URL in
+    // the phone's browser and Chrome's MIME-routed install takes over.
     //
     // The download filename is profile-aware (CLAUDE.local.md: stable vs dev
     // produce distinct app-data dirs and binaries). Hardcoding `buildmesh-dev-

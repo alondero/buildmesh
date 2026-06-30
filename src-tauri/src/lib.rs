@@ -394,6 +394,11 @@ pub fn run() {
             // user whose installed root CA is stale can see "your cert is X,
             // server is now Y" without reaching for openssl.
             commands::network::get_cert_chain_status,
+            // Root CA bytes for the QR-modal one-tap phone install (issue
+            // #702). Same disk read as the /install-cert.der route, encoded
+            // as base64 for embedding in a data: URL the phone's OS CA
+            // installer intercepts.
+            commands::network::get_root_cert_der,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

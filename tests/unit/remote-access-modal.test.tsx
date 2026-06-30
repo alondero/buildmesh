@@ -26,57 +26,6 @@ function status(overrides: Partial<NetworkStatus>): NetworkStatus {
   };
 }
 
-/// Stub jsdom's read-only `window.location` so the modal's
-/// `window.location.href = installUrl` writes can be captured. Returns a
-/// `navigated` getter + a `restore()` to put the original Location back.
-///
-/// jsdom installs `location` as a *prototype accessor* on `window`, not a
-/// data property — `Object.getOwnPropertyDescriptor(window, 'location')`
-/// returns `{get, set, …}` from the prototype. A naive `Object.defineProperty`
-/// with `value:` would replace it with a data descriptor, silently breaking
-/// any later test that introspects the shape. The original descriptor is
-/// captured (not just the value) so `restore()` reinstalls it exactly as
-/// jsdom had it — the data-property leak that the early version of this
-/// helper caused (visible in `git log tests/unit/remote-access-modal.test.tsx`).
-function stubWindowLocation(): { navigated: () => string | null; restore: () => void } {
-  let captured: string | null = null;
-  const originalDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
-  const originalLocation = window.location;
-  Object.defineProperty(window, 'location', {
-    configurable: true,
-    get() {
-      return {
-        ...originalLocation,
-        set href(url: string) {
-          captured = url;
-        },
-        get href() {
-          return captured ?? '';
-        },
-      };
-    },
-    set(value: Location) {
-      // jsdom's own setter (rarely hit in tests) — keep the override
-      // symmetric so a future test that reassigns `window.location` doesn't
-      // observe an asymmetry between the get-stub and the set-stub.
-      Object.defineProperty(window, 'location', { configurable: true, value });
-    },
-  });
-  return {
-    navigated: () => captured,
-    restore: () => {
-      if (originalDescriptor) {
-        Object.defineProperty(window, 'location', originalDescriptor);
-      } else {
-        Object.defineProperty(window, 'location', {
-          configurable: true,
-          value: originalLocation,
-        });
-      }
-    },
-  };
-}
-
 const SAMPLE_CERT: CertChainStatus = {
   root_fingerprint_sha256:
     'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99',
@@ -86,6 +35,13 @@ const SAMPLE_CERT: CertChainStatus = {
   valid_until: '2035-01-01 00:00:00',
   cert_path: 'C:\\Users\\alond\\AppData\\Roaming\\com.alond.buildmesh\\tls\\ca.der',
 };
+
+// Base64 of a synthetic ~16-byte DER blob. Tests assert the modal embeds
+// this EXACT string in the install-QR's data: URL (no re-encoding, no
+// truncation). Real `ca.der` files are 700-1300 bytes; the test cert is
+// small so the QR payload stays trivial — the contract under test is
+// "embed verbatim", not "fit a real cert".
+const ROOT_DER_B64 = 'MIIB/zCCAaegAwIBAgIBAjANBgkqhkiG9w0BAQUFADA=';
 
 describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
   it('uses https:// and the realized bind address when a TLS interface is bound', () => {
@@ -175,12 +131,16 @@ describe('RemoteAccessModal', () => {
 
   function mockBackend(
     s: NetworkStatus,
-    opts: { localIp?: string; cert?: CertChainStatus | null } = {},
+    opts: { localIp?: string; cert?: CertChainStatus | null; rootDer?: string | null } = {},
   ) {
     const localIp = opts.localIp ?? '192.168.1.10';
     // Default to returning the sample cert; tests that want to exercise the
     // "fetch failed" path pass `cert: null`.
     const cert = opts.cert === undefined ? SAMPLE_CERT : opts.cert;
+    // Same shape: default to a known base64 string; `rootDer: null`
+    // simulates the IPC failure path (issue #702 — the modal should still
+    // render the connect QR, just omit the install-QR).
+    const rootDer = opts.rootDer === undefined ? ROOT_DER_B64 : opts.rootDer;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
         case 'get_root_token':
@@ -193,6 +153,10 @@ describe('RemoteAccessModal', () => {
           return cert === null
             ? Promise.reject(new Error('cert status unavailable'))
             : Promise.resolve(cert);
+        case 'get_root_cert_der':
+          return rootDer === null
+            ? Promise.reject(new Error('root cert unavailable'))
+            : Promise.resolve(rootDer);
         default:
           return Promise.resolve({});
       }
@@ -290,81 +254,101 @@ describe('RemoteAccessModal', () => {
     );
   });
 
-  // --- issue #636: one-tap cert install --------------------------------
-  // The QR modal surfaces an "Install on this device" picker (Android /
-  // Windows / macOS) that navigates to /install-cert.der on the SAME host the
-  // QR encodes — the target device, not the desktop host, opens the URL.
-  // Auto-detection via `navigator.userAgent` would reflect the desktop, not
-  // the phone, so the user picks explicitly.
+  // --- issue #702: phone-side cert install via second QR ----------------
+  // The previous 3-button picker (#636) was cosmetically branched but
+  // functionally identical — all three buttons did `window.location.href =
+  // installUrl` on the DESKTOP's WebView, installing the cert on the PC
+  // not the phone. The fix is a second QR whose payload is
+  // `data:application/x-x509-ca-cert;base64,<base64-of-ca.der>`. Scanning
+  // that QR on Android Chrome (≥ 90) / iOS Safari (≥ 14) routes through
+  // the OS CA installer; the desktop WebView is never involved. The
+  // "Re-install root CA" toggle remains as the iOS / older-Android /
+  // explicit-download fallback.
 
-  it('shows the install picker when LAN exposure is realized and cert status is loaded', async () => {
+  it('renders the install-QR alongside the connect-QR when reachable + cert fetched', async () => {
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
     );
     render(<RemoteAccessModal onClose={() => {}} />);
 
-    const install = await screen.findByTestId('remote-access-install');
-    expect(install.textContent).toMatch(/Android/);
-    expect(install.textContent).toMatch(/Windows/);
-    expect(install.textContent).toMatch(/macOS/);
+    // Two QR.toDataURL calls: one for the connect URL, one for the cert
+    // data: URL. Locate each by payload prefix so the test is
+    // order-agnostic — the two are run in parallel via Promise.allSettled
+    // and the mock captures them in an order that depends on which
+    // canvas encode resolves first.
+    await waitFor(() => expect(toDataURL).toHaveBeenCalledTimes(2));
+    const payloads = toDataURL.mock.calls.map(c => c[0] as string);
+    expect(payloads.some(p => p.startsWith('https://192.168.1.10:1992'))).toBe(true);
+    expect(
+      payloads.some(p => p.startsWith('data:application/x-x509-ca-cert;base64,')),
+    ).toBe(true);
+    expect(await screen.findByTestId('remote-access-install-qr')).toBeTruthy();
   });
 
-  it('hides the install picker when LAN exposure is not realized', async () => {
-    // `reachable: false` ⇒ `installUrl` is null, no install buttons rendered.
-    // The QR shows the unreachable warning instead. Mirrors the cert-status
-    // gating (fingerprint hides when fetch fails) — the install button only
-    // makes sense when the LAN URL the phone would hit is actually live.
+  it('install-QR payload decodes back to the same base64 the backend served', async () => {
+    // Round-trip: whatever the Rust command returned, the modal embeds
+    // verbatim. A regression that double-base64-encodes or strips
+    // padding breaks this test.
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await waitFor(() => expect(toDataURL).toHaveBeenCalledTimes(2));
+    const prefix = 'data:application/x-x509-ca-cert;base64,';
+    const certPayload = toDataURL.mock.calls
+      .map(c => c[0] as string)
+      .find(p => p.startsWith(prefix))!;
+    const b64 = certPayload.slice(prefix.length);
+    // atob accepts the standard alphabet + '=' padding.
+    expect(() => atob(b64)).not.toThrow();
+    // The bytes the modal embeds are exactly the bytes the backend
+    // served — no re-encoding in the modal layer.
+    expect(b64).toBe(ROOT_DER_B64);
+  });
+
+  it('install-QR uses errorCorrectionLevel L to maximize capacity', async () => {
+    // A 2 KB base64 cert payload just fits at L, fails at M. Pinning L
+    // is deliberate — locks the "fit a future-larger cert" property so
+    // a regression reverts to M fails this test with a clear message,
+    // not a runtime scan failure.
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await waitFor(() => expect(toDataURL).toHaveBeenCalledTimes(2));
+    const prefix = 'data:application/x-x509-ca-cert;base64,';
+    const certCall = toDataURL.mock.calls.find(c => (c[0] as string).startsWith(prefix))!;
+    const opts = certCall[1] as { errorCorrectionLevel?: string };
+    expect(opts.errorCorrectionLevel).toBe('L');
+  });
+
+  it('omits the install-QR when LAN exposure is not realized', async () => {
+    // Mirrors the original "hides picker when not realized" test —
+    // install-QR is gated on the same condition (reachable + cert).
+    // The unreachable path skips BOTH QRs; the connect URL fallback
+    // is also absent (we only warn).
     mockBackend(status({ tls_active: false, exposed_interfaces: [] }));
     render(<RemoteAccessModal onClose={() => {}} />);
 
     await screen.findByTestId('remote-access-warning');
-    expect(screen.queryByTestId('remote-access-install')).toBeNull();
+    expect(screen.queryByTestId('remote-access-install-qr')).toBeNull();
+    expect(toDataURL).not.toHaveBeenCalled();
   });
 
-  it('navigates to the install-cert.der URL on the same host as the QR when a target is picked', async () => {
-    const user = userEvent.setup();
+  it('omits the install-QR when the root cert fetch fails', async () => {
+    // Connect QR still renders; install-QR is absent. A transient Rust
+    // panic on `get_root_cert_der` must not brick the connect flow —
+    // the user can still scan the connect QR (TLS warning is recoverable
+    // by manual install via the Re-install toggle).
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+      { rootDer: null },
     );
-    const { navigated, restore } = stubWindowLocation();
-    try {
-      render(<RemoteAccessModal onClose={() => {}} />);
+    render(<RemoteAccessModal onClose={() => {}} />);
 
-      // Click Android — the URL must use the realized bind's scheme+host
-      // (`https://192.168.1.10:1992`), NOT `tauri://` or the loopback
-      // origin (a phone opening that would error with ERR_INVALID_URL).
-      await user.click(await screen.findByTestId('remote-access-install-android'));
-
-      await waitFor(() =>
-        expect(navigated()).toBe('https://192.168.1.10:1992/install-cert.der'),
-      );
-    } finally {
-      restore();
-    }
-  });
-
-  it('matches the scheme of the realized bind (http when LAN exposure is plain)', async () => {
-    // A plain (non-TLS) realized bind → the install URL is also http://. The
-    // route itself doesn't gate on scheme, but a phone reaching the server
-    // over the wrong scheme hits the wrong port — symmetry matters.
-    const user = userEvent.setup();
-    mockBackend(
-      status({
-        tls_active: false,
-        exposed_interfaces: [{ address: '192.168.1.10:1992', tls: false }],
-      }),
-    );
-    const { navigated, restore } = stubWindowLocation();
-    try {
-      render(<RemoteAccessModal onClose={() => {}} />);
-
-      await user.click(await screen.findByTestId('remote-access-install-windows'));
-
-      await waitFor(() =>
-        expect(navigated()).toBe('http://192.168.1.10:1992/install-cert.der'),
-      );
-    } finally {
-      restore();
-    }
+    await screen.findByText(/192\.168\.1\.10:1992/);
+    expect(screen.queryByTestId('remote-access-install-qr')).toBeNull();
   });
 });

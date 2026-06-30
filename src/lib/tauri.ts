@@ -859,6 +859,15 @@ export type { CertChainStatus };
 export const getCertChainStatus = () =>
   _invoke<CertChainStatus>('get_cert_chain_status');
 
+/** Root CA bytes for the phone-install QR (issue #702). Returns base64
+ *  (standard alphabet, '=' padding) — concatenate with the data: prefix
+ *  to produce the OS-installable URL. The desktop modal embeds this in
+ *  a second QR; scanning the QR on Android/iOS routes through the OS
+ *  CA installer instead of opening /install-cert.der in the desktop's
+ *  WebView2. */
+export const getRootCertDer = () =>
+  _invoke<string>('get_root_cert_der');
+
 /** Test-only: clear the module-level provider caches between cases. Exported
  *  with a leading-underscore name so accidental production use is loud. */
 export function __resetProviderCachesForTests(): void {
