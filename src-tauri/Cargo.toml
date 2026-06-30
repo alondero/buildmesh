@@ -90,7 +90,3 @@ panic = "abort"
 
 [profile.dev]
 opt-level = 0
-
-[profile.dev.release]
-opt-level = 2
-lto = "thin"

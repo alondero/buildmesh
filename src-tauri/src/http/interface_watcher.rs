@@ -73,7 +73,16 @@ where
 
     // The debouncer is the part tests drive directly. It owns the receiver
     // and runs `on_change` once per debounce window.
-    tokio::spawn(debounce_loop(rx, on_change));
+    //
+    // CRITICAL: must use `tauri::async_runtime::spawn`, NOT `tokio::spawn`.
+    // `spawn_interface_watcher` is called from `start_http_server` which is
+    // called from the Tauri setup callback. Setup runs synchronously during
+    // `Builder::build` — before Tauri's tokio runtime is wired up — so
+    // `tokio::spawn` panics with "there is no reactor running, must be called
+    // from the context of a Tokio 1.x runtime" (issue #591 follow-up).
+    // `tauri::async_runtime::spawn` uses Tauri's own runtime, which is
+    // available from the very first setup invocation.
+    tauri::async_runtime::spawn(debounce_loop(rx, on_change));
 }
 
 /// Coalesce a stream of raw interface-change events into debounced
@@ -105,7 +114,12 @@ where
 
 #[cfg(target_os = "windows")]
 fn spawn_production_source(tx: mpsc::Sender<()>) {
-    tokio::task::spawn_blocking(move || windows_event_loop(tx));
+    // Use `tauri::async_runtime::spawn_blocking`, NOT `tokio::task::spawn_blocking`.
+    // Same reasoning as the debouncer above: `spawn_interface_watcher` is
+    // called from the Tauri setup callback before any tokio runtime is in
+    // scope. `tauri::async_runtime` provides a runtime handle from the first
+    // call onward.
+    tauri::async_runtime::spawn_blocking(move || windows_event_loop(tx));
 }
 
 /// Windows event loop: block on `NotifyAddrChange` forever, forwarding each
@@ -139,7 +153,9 @@ fn windows_event_loop(tx: mpsc::Sender<()>) {
 
 #[cfg(not(target_os = "windows"))]
 fn spawn_production_source(tx: mpsc::Sender<()>) {
-    tokio::spawn(polling_event_loop(tx));
+    // Same reasoning as the Windows path: must use Tauri's runtime, not raw
+    // tokio, because this is called from the Tauri setup callback.
+    tauri::async_runtime::spawn(polling_event_loop(tx));
 }
 
 /// Polling fallback for macOS / Linux. Enumerate interfaces on a fixed
@@ -193,6 +209,53 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    /// Regression test for the startup crash discovered 2026-06-30:
+    /// `spawn_interface_watcher` is called from `start_http_server` which is
+    /// called from the Tauri setup callback. Setup runs synchronously during
+    /// `Builder::build` — BEFORE Tauri's tokio runtime is wired up — so a raw
+    /// `tokio::spawn` or `tokio::task::spawn_blocking` from this context panics
+    /// with "there is no reactor running, must be called from the context of a
+    /// Tokio 1.x runtime". This test reproduces that environment (a fresh
+    /// `std::thread` with no tokio runtime in scope) and asserts the watcher
+    /// spawns cleanly.
+    ///
+    /// Failure mode caught: any use of `tokio::spawn` / `tokio::task::spawn_blocking`
+    /// inside `spawn_interface_watcher` or its `spawn_production_source`
+    /// helpers. The fix is to use `tauri::async_runtime::spawn` /
+    /// `tauri::async_runtime::spawn_blocking` instead — Tauri's runtime is
+    /// available from the first setup invocation onward.
+    ///
+    /// NB: the spawned production source (Windows `NotifyAddrChange` block,
+    /// non-Windows 1 s polling) and the debouncer run for the rest of the
+    /// process. They're cheap background work — no events fire during a test
+    /// so the callback counter stays at zero. When the test process exits,
+    /// the detached tasks are cleaned up.
+    #[test]
+    fn spawn_interface_watcher_runs_without_a_tokio_runtime() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_cb = count.clone();
+
+        // Bare thread — no tokio runtime in scope. Mirrors what the Tauri
+        // setup callback looks like at the moment `start_http_server` runs.
+        let handle = std::thread::Builder::new()
+            .name("regression-spawn-interface-watcher".to_string())
+            .spawn(move || {
+                super::spawn_interface_watcher(move || {
+                    count_cb.fetch_add(1, Ordering::SeqCst);
+                });
+            })
+            .expect("failed to spawn test thread");
+
+        // If `spawn_interface_watcher` panicked inside the thread — the
+        // signature of `tokio::spawn` from a non-runtime context — `join()`
+        // returns `Err`.
+        handle.join().expect(
+            "spawn_interface_watcher panicked — likely a tokio::spawn \
+             from a context with no tokio runtime in scope. Use \
+             tauri::async_runtime::spawn(/_blocking) instead.",
+        );
+    }
 
     /// One event arriving on a quiet channel → one `on_change` call after the
     /// debounce window. Pins the basic trigger contract.
