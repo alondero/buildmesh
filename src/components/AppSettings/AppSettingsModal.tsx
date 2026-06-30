@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
@@ -352,6 +352,23 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     [],
   );
 
+  // Issue #581: mirror `providers` and `selected` into refs so the
+  // optimistic rollback handlers below read the *latest* committed value
+  // instead of whichever value the render that created the closure
+  // happened to hold. A closure-captured `previous = providers` goes stale
+  // the moment a re-render commits a new `providers`, and two reorders
+  // fired in quick succession would both roll back to the same stale
+  // snapshot. Mirrors `optimisticToggle`'s "explicit current argument"
+  // pattern (#587), generalised via refs for the non-toggling state.
+  const providersRef = useRef<ProviderInfo[]>([]);
+  useEffect(() => {
+    providersRef.current = providers;
+  }, [providers]);
+  const selectedRef = useRef<string>(NO_OVERRIDE);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
+
   // Re-read network status after a toggle completes so the realized state
   // reflects the post-rebind listeners. Without this the user flips the
   // switch, the optimistic `lanEnabled` flips, but the realized fields stay
@@ -496,12 +513,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // appended at the end, exactly as the backend re-derives them — and roll back
   // on failure so the visible order never lies about what was stored. The
   // backend emits `provider-list-changed`, so the sidebar / probes re-read live.
+  // `previous` is read from `providersRef` (issue #581) so a handler running
+  // against a stale closure still rolls back to the latest committed state.
   const handleReorderHarnesses = async (order: string[]) => {
-    const previous = providers;
-    const byId = new Map(providers.map(p => [p.id, p]));
+    const previous = providersRef.current;
+    const byId = new Map(previous.map(p => [p.id, p]));
     const reordered = [
       ...(order.map(id => byId.get(id)).filter(Boolean) as ProviderInfo[]),
-      ...providers.filter(p => !order.includes(p.id)),
+      ...previous.filter(p => !order.includes(p.id)),
     ];
     setProviders(reordered);
     setError(null);
@@ -513,8 +532,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
+  // Persist the default-provider dropdown. Reads `previous` from `selectedRef`
+  // (issue #581) so a rapid second change rolls back to the value as of its
+  // own selection, not to a snapshot from the render that captured the first
+  // change's closure.
   const handleSave = async (newValue: string) => {
-    const previous = selected;
+    const previous = selectedRef.current;
     setSelected(newValue);
     setSaving(true);
     setError(null);
