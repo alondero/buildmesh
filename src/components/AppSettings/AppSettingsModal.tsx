@@ -21,7 +21,7 @@ const NO_OVERRIDE = '__no_override__';
 // Built-ins can only be disabled, never removed (a "remove" just reverts them to
 // the code default), so we hide the Remove action for these ids. Kept in sync with
 // `preferences::default_provider_accounts`.
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax', 'kimi'];
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax', 'kimi', 'openrouter'];
 
 // The five Claude model aliases a Claude-compatible provider can pin (issue #567).
 // `key` is the ProviderAccount.model_tiers field; `label` is the UI caption.
