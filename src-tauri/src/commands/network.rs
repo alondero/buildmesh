@@ -6,6 +6,10 @@
 //! takes effect without restarting the app.
 
 use std::net::SocketAddr;
+use std::path::Path;
+
+use base64::Engine;
+use tauri::Manager;
 
 use crate::db;
 use crate::http::RealizedBind;
@@ -119,7 +123,6 @@ pub struct CertChainStatus {
 /// user sees is guaranteed to match what's currently being served.
 #[command]
 pub fn get_cert_chain_status(app: tauri::AppHandle) -> Result<CertChainStatus, String> {
-    use tauri::Manager;
     let dir = app
         .path()
         .app_data_dir()
@@ -133,4 +136,76 @@ pub fn get_cert_chain_status(app: tauri::AppHandle) -> Result<CertChainStatus, S
         valid_until: status.valid_until,
         cert_path: Some(dir.join("ca.der").to_string_lossy().into_owned()),
     })
+}
+
+/// QR-payload source for the desktop→phone one-tap root-CA install
+/// (issue #702). Returns the persisted root cert DER as base64 so the
+/// frontend can paste it directly into a `data:application/x-x509-ca-
+/// cert;base64,...` URL inside a second QR. Routing the install through
+/// a data: URL (rather than `window.location.href = /install-cert.der`)
+/// is the only mechanism that hands the bytes to the phone's OS cert
+/// installer instead of the desktop's Edge WebView2 — the same endpoint
+/// on the same host routes differently per origin's policy.
+///
+/// Reuses `routes::certs::install_cert_der` for the read + empty check
+/// so a corrupt / 0-byte ca.der cannot leak into a QR payload and
+/// produce a silent install failure on the phone.
+#[command]
+pub fn get_root_cert_der(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tls");
+    get_root_cert_der_inner(&dir)
+}
+
+/// Inner implementation of [`get_root_cert_der`] extracted so the
+/// `#[command]` wrapper (which takes a `tauri::AppHandle` we can't
+/// construct in a unit test) and the tests below share the same code
+/// path. The same shape as `routes::certs::install_cert_der` but
+/// returns the base64 string the QR data: URL needs.
+fn get_root_cert_der_inner(dir: &Path) -> Result<String, String> {
+    let bytes = crate::http::routes::certs::install_cert_der(dir)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip contract: the base64 the desktop embeds in the
+    /// install-QR must decode to the same bytes `install_cert_der`
+    /// serves to `/install-cert.der`, so the phone sees the same cert
+    /// via either path. Locks the "both endpoints expose the same
+    /// bytes" contract the issue is built on.
+    #[test]
+    fn get_root_cert_der_decodes_to_install_cert_der_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain = crate::http::tls::load_or_generate(dir.path(), &[]).unwrap();
+        let encoded = get_root_cert_der_inner(dir.path()).expect("get_root_cert_der");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("base64");
+        assert_eq!(
+            decoded, chain.root_cert_der,
+            "install-QR payload must decode to the same DER bytes /install-cert.der serves"
+        );
+    }
+
+    /// Empty `ca.der` is corruption (the issue explicitly warns about
+    /// silent install failure on the phone). `install_cert_der` rejects
+    /// it; this command must propagate the error rather than serving
+    /// an empty base64 string that would scan to a 0-byte "cert".
+    #[test]
+    fn get_root_cert_der_errors_when_ca_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ca.der"), b"").unwrap();
+        let result = get_root_cert_der_inner(dir.path());
+        assert!(
+            result.is_err(),
+            "empty ca.der must NOT be served as a 0-byte base64 QR payload; got Ok of {} chars",
+            result.as_ref().map(|s| s.len()).unwrap_or(0)
+        );
+    }
 }
