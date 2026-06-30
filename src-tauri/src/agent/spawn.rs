@@ -2704,15 +2704,25 @@ mod tests {
     //
     // Same-repo PR spawn (#420) — the worktree adoption path calls
     // `fetch_single_ref` to materialise `origin/<head_ref>` so the worktree
-    // can be cut from it. The function shells out to `git fetch origin -- <ref>`;
-    // the `--` separator is the security hardening (a ref starting with `-`
-    // would otherwise be parsed as a `git` flag like `--upload-pack=…`).
+    // can be cut from it. As of issue #446 the function is a thin wrapper
+    // over `git::sync::do_fetch_only` (the fetch-only half of `do_sync` —
+    // open + dirty-check + has-remote + `git fetch`, NO `git pull` tail);
+    // the `-`-adversarial-ref hardening is preserved at the wrapper
+    // boundary because `do_fetch_only` passes the branch as a plain argv
+    // entry without a `--` separator (it doesn't know about the spawn
+    // context).
     //
-    // These tests pin all four cases the issue calls out:
+    // These tests pin the cases the issue calls out:
     //   1. success — ref exists on origin
     //   2. ref-not-found — ref missing on origin (caller falls back to base_ref)
     //   3. non-git path — caller passed a directory that isn't a repo
-    //   4. adversarial ref — `--`-prefixed input is rejected by `git` itself
+    //   4. adversarial ref — `-`-prefixed input is rejected by the wrapper
+    //      before `do_fetch_only` sees it (the hardening migrated from the
+    //      shell-out's `--` separator to an upfront string check, since
+    //      `do_fetch_only` doesn't pass a `--` separator to `git fetch`)
+    //   5. dirty-skip (issue #446 acceptance #2) — a parent repo with
+    //      uncommitted changes must return `false` (mirrors
+    //      `fetch_origin_skips_dirty_parent` in `git/fetch_origin_tests.rs`)
     //
     // The fixture mirrors `init_fork_fixture` but for the same-repo path:
     // a bare repo holds a single branch, the local repo has `origin`
@@ -2865,7 +2875,49 @@ mod tests {
         assert!(
             !ok,
             "fetch_single_ref must return false for a ref starting with '-' \
-             (the '--' separator must block git from treating it as a flag)"
+             (the wrapper rejects it before do_sync sees it)"
+        );
+    }
+
+    /// Dirty-skip pin (issue #446 acceptance #2): a parent repo with
+    /// uncommitted changes must skip the fetch entirely rather than let
+    /// `git fetch` run into a dirty tree. Before the refactor, the
+    /// shell-out path skipped no checks and would have raced on
+    /// `.git/FETCH_HEAD` against a half-written working tree; after the
+    /// consolidation onto `do_fetch_only`, the PR-spawn fetch inherits the
+    /// same dirty-handling the base-ref fetch
+    /// (`fetch_origin_skips_dirty_parent`) already enforces. Pin the
+    /// contract so a future refactor that re-introduces the shell-out path
+    /// fails this test.
+    ///
+    /// `is_dirty` includes untracked files, so writing one to the freshly-
+    /// init'd local repo is enough to dirty it — no need to seed a tracked
+    /// file first.
+    #[test]
+    fn fetch_single_ref_skips_dirty_parent() {
+        let (local, _bare) = init_same_repo_fixture();
+        // Precondition: the fixture's local repo must start clean, then we
+        // make it dirty with an untracked file.
+        assert!(
+            !crate::env::test_helpers::repo_is_dirty(local.path()),
+            "precondition: freshly-init'd local repo must start clean"
+        );
+        std::fs::write(local.path().join("dirty-marker.txt"), "uncommitted\n").unwrap();
+        assert!(
+            crate::env::test_helpers::repo_is_dirty(local.path()),
+            "precondition: writing an untracked file must dirty the repo"
+        );
+
+        // Without the dirty-skip, this would have shelled out to
+        // `git fetch origin -- feat/420-pr-spawn` and returned true —
+        // racing the dirty working tree against the fetch lock. With the
+        // refactor, `do_fetch_only` returns `SkippedDirty` and the wrapper
+        // maps it to `false`.
+        let ok = fetch_single_ref(local.path().to_str().unwrap(), "feat/420-pr-spawn");
+        assert!(
+            !ok,
+            "fetch_single_ref must return false on a dirty parent (do_fetch_only's \
+             SkippedDirty → false mapping; the spawn falls back to base_ref)"
         );
     }
 

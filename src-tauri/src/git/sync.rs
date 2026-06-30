@@ -131,6 +131,13 @@ pub(crate) enum SyncOutcome {
 ///    `SkippedDirty` skip above exists to make sure this pull is
 ///    never asked to merge into a dirty tree.
 ///
+/// **Steps 1-4 are factored into [`do_fetch_only`]** (issue #446) so
+/// the PR-spawn fetch helper can reuse the open-repo + dirty-check +
+/// has-remote + `git fetch` chain WITHOUT the `commits_behind` /
+/// `git pull` tail — the PR-head fetch is a single-ref materialisation
+/// and must not mutate the mesh's currently-checked-out branch as a
+/// side effect of spawning a PR agent.
+///
 /// Caller responsibilities:
 /// - Open the repo / resolve the remote / decide whether to narrow
 ///   the fetch. Both call sites have their own remote-resolution
@@ -145,77 +152,26 @@ pub(crate) fn do_sync(
     remote: &str,
     branch: Option<&str>,
 ) -> SyncOutcome {
-    // Step 1: open the repo. If the path isn't a git repo, the helper
-    // bails with the same `RepoUnusable` variant the spawn-time caller
-    // already maps to its own `FetchError::RepoUnusable`.
+    // Steps 1-4: open + dirty-check + has-remote + `git fetch`. The
+    // helper returns the same `SyncOutcome` variants we would have
+    // returned inline, so the early return is a literal rename of the
+    // old Step 1-4 ladder.
+    if let Err(outcome) = do_fetch_only(host_path, remote, branch) {
+        return outcome;
+    }
+
+    // Re-open the repo for steps 5-6. The cost is a stat walk — we
+    // paid it once in `do_fetch_only` and would pay it again here, but
+    // threading the open repo through the `Err` channel would couple
+    // the helper to its two consumers' needs.
     let repo = match git2::Repository::open(host_path) {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(
-                "do_sync: path {} is not a usable git repo ({}); skipping sync",
-                host_path,
-                e
-            );
             return SyncOutcome::RepoUnusable {
                 reason: e.to_string(),
             };
         }
     };
-
-    // Step 2: skip if dirty. Fail-closed: a corrupt index or perm
-    // denied on .git is treated as dirty rather than as a clean
-    // green light to pull.
-    if crate::git::primitives::is_dirty(&repo).unwrap_or(true) {
-        tracing::info!(
-            "do_sync: {} has uncommitted changes; skipping sync",
-            host_path
-        );
-        return SyncOutcome::SkippedDirty;
-    }
-
-    // Step 3: skip if the remote is missing. A Mesh may be a purely
-    // local repo (not yet pushed) and that's a valid state.
-    if repo.find_remote(remote).is_err() {
-        tracing::info!(
-            "do_sync: {} has no '{}' remote; skipping sync",
-            host_path,
-            remote
-        );
-        return SyncOutcome::SkippedNoRemote;
-    }
-
-    // Step 4: `git fetch <remote> [<branch>]`. Narrowing to a single
-    // branch keeps cold-spawn latency down on repos with hundreds of
-    // refs (the spawn-time call site always passes a branch; the
-    // manual `git_sync` passes `None` for the all-refs default).
-    tracing::info!(
-        "do_sync: running git fetch {} {} in {}",
-        remote,
-        branch.unwrap_or("(all refs)"),
-        host_path
-    );
-    let mut fetch_builder = command_no_window("git");
-    fetch_builder.arg("fetch").arg(remote);
-    if let Some(b) = branch {
-        fetch_builder.arg(b);
-    }
-    let fetch_output = match fetch_builder.current_dir(host_path).output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("do_sync: failed to spawn git fetch: {}", e);
-            return SyncOutcome::FetchFailed {
-                reason: e.to_string(),
-            };
-        }
-    };
-    if !fetch_output.status.success() {
-        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-        let trimmed = stderr.trim();
-        tracing::warn!("do_sync: git fetch {} failed: {}", remote, trimmed);
-        return SyncOutcome::FetchFailed {
-            reason: trimmed.to_string(),
-        };
-    }
 
     // Step 5: count how many commits the local branch is behind. No
     // upstream → treat as "nothing to pull" rather than an error.
@@ -283,6 +239,114 @@ pub(crate) fn do_sync(
     }
 
     SyncOutcome::Synced { new_commits }
+}
+
+/// The fetch-only half of [`do_sync`] (issue #446): open the repo,
+/// dirty-check, has-remote, `git fetch`. Returns the same
+/// [`SyncOutcome`] non-success variants [`do_sync`] would have
+/// returned at the same step, so [`do_sync`] can early-return without
+/// re-implementing the mapping. Returns `Ok(())` on a clean fetch.
+///
+/// **Why this exists:** [`do_sync`]’s Step 6 (`git pull --ff-only
+/// --no-rebase`) mutates the mesh's currently-checked-out branch. For
+/// the PR-spawn fetch path ([`crate::git::worktree::provision::fetch_single_ref`]),
+/// the only goal is to materialise a single ref into
+/// `refs/remotes/origin/<head_ref>` so the worktree can be cut from
+/// it — running `git pull` on the mesh's current branch is wasted
+/// work (a few hundred ms of duplicate fast-forward on top of the
+/// `fetch_origin` call a few lines earlier under the same per-Mesh
+/// `sync_lock`), AND a behavioural surprise (the user's local `main`
+/// advances as a side effect of spawning a PR agent). Factoring out
+/// the fetch-only chain lets the PR-spawn path use the shared
+/// algorithm without inheriting the pull tail.
+///
+/// **Note:** this helper intentionally does NOT pass a `--` separator
+/// to `git fetch`. The fetch-only caller ([`fetch_single_ref`])
+/// rejects `-`-prefixed refs up front for the same security reason
+/// the old shell-out had `cmd.arg("--")` — see that fn's doc.
+pub(crate) fn do_fetch_only(
+    host_path: &str,
+    remote: &str,
+    branch: Option<&str>,
+) -> Result<(), SyncOutcome> {
+    // Step 1: open the repo. If the path isn't a git repo, the helper
+    // bails with the same `RepoUnusable` variant `do_sync` would have
+    // returned inline.
+    let repo = match git2::Repository::open(host_path) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                "do_fetch_only: path {} is not a usable git repo ({}); skipping",
+                host_path,
+                e
+            );
+            return Err(SyncOutcome::RepoUnusable {
+                reason: e.to_string(),
+            });
+        }
+    };
+
+    // Step 2: skip if dirty. Fail-closed: a corrupt index or perm
+    // denied on .git is treated as dirty rather than as a clean
+    // green light to fetch into a state we couldn't read.
+    if crate::git::primitives::is_dirty(&repo).unwrap_or(true) {
+        tracing::info!(
+            "do_fetch_only: {} has uncommitted changes; skipping",
+            host_path
+        );
+        return Err(SyncOutcome::SkippedDirty);
+    }
+
+    // Step 3: skip if the remote is missing. A Mesh may be a purely
+    // local repo (not yet pushed) and that's a valid state.
+    if repo.find_remote(remote).is_err() {
+        tracing::info!(
+            "do_fetch_only: {} has no '{}' remote; skipping",
+            host_path,
+            remote
+        );
+        return Err(SyncOutcome::SkippedNoRemote);
+    }
+
+    // Step 4: `git fetch <remote> [<branch>]`. Narrowing to a single
+    // branch keeps cold-spawn latency down on repos with hundreds of
+    // refs (the spawn-time call site always passes a branch; the
+    // manual `git_sync` passes `None` for the all-refs default).
+    tracing::info!(
+        "do_fetch_only: running git fetch {} {} in {}",
+        remote,
+        branch.unwrap_or("(all refs)"),
+        host_path
+    );
+    let mut fetch_builder = command_no_window("git");
+    fetch_builder.arg("fetch").arg(remote);
+    if let Some(b) = branch {
+        fetch_builder.arg(b);
+    }
+    let fetch_output = match fetch_builder.current_dir(host_path).output() {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!("do_fetch_only: failed to spawn git fetch: {}", e);
+            return Err(SyncOutcome::FetchFailed {
+                reason: e.to_string(),
+            });
+        }
+    };
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        let trimmed = stderr.trim();
+        tracing::warn!(
+            "do_fetch_only: git fetch {} {} failed: {}",
+            remote,
+            branch.unwrap_or(""),
+            trimmed
+        );
+        return Err(SyncOutcome::FetchFailed {
+            reason: trimmed.to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Derive the remote name from a configured `base_ref` string, if the
