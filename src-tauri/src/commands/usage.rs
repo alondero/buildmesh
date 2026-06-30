@@ -9,7 +9,7 @@ use tauri::command;
 /// id isn't here — a **Generic Model Provider** (custom endpoint) — is
 /// configurable but has no usage endpoint, so it renders an explicit "usage not
 /// tracked" state instead.
-const FETCHABLE: [&str; 5] = ["anthropic", "codex", "minimax", "agy", "kimi"];
+const FETCHABLE: [&str; 6] = ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter"];
 
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
@@ -120,6 +120,15 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
         // own "No API key configured" message.
         "kimi" => usage::kimi_usage(
             preferences::kimi_api_key_resolved()
+                .as_deref()
+                .unwrap_or(""),
+        ),
+        // OpenRouter — identical seam pattern: account key only, no legacy flat
+        // field. Empty string lets `openrouter_usage` surface its own "No API
+        // key configured" message and renders as `usage_tracked` with a logged-
+        // out card until the user adds a key.
+        "openrouter" => usage::openrouter_usage(
+            preferences::openrouter_api_key_resolved()
                 .as_deref()
                 .unwrap_or(""),
         ),
@@ -246,7 +255,7 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "minimax", "agy", "kimi"] {
+        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.
@@ -263,11 +272,16 @@ mod tests {
             account("codex", true),     // tracked but harness undetected → out
             account("minimax", true),   // enabled keyed tracked → in
             account("kimi", true),      // enabled keyed tracked → in (wallet meter)
+            // OpenRouter joins the tracked keyed set — opt-in via missing key
+            // (defaults to enabled, but `account_visible` lets it through; the
+            // fetcher's empty-key path returns `logged_out` until the user adds
+            // a key). The `poll_ids` gate here is purely enable+visible+tracked.
+            account("openrouter", true),
             account("deepseek", true),  // Generic, no fetcher → out
         ];
         assert_eq!(
             poll_ids(&accounts, &claude),
-            vec!["anthropic", "minimax", "kimi"]
+            vec!["anthropic", "minimax", "kimi", "openrouter"]
         );
     }
 

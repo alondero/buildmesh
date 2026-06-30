@@ -78,6 +78,36 @@ which can stall for seconds behind a VPN/Docker stack on Windows. The old
 the box held at the moment of `accept` was reachable — so the refresh is the
 smallest change that restores that reachability for per-interface TLS binds.
 
+**8. OS-level interface events drive the rebind (issue #591).** Even with the
+per-bind refresh in §7, the rebind only fires when something *triggers* it — a
+user LAN toggle or startup. An interface that appears **without** a user action
+(VPN connecting mid-session, DHCP lease change, Wi-Fi reconnect) was
+previously not picked up until the user re-toggled LAN exposure or restarted.
+The `http::interface_watcher` module closes this: it listens for OS-level
+interface notifications and re-runs `apply_binding` after a 250 ms debounce,
+so one network change produces one rebind — not one per kernel signal.
+
+The split is platform-specific:
+
+- **Windows** — `NotifyAddrChange` from `Iphlpapi.dll`, called via
+  `tokio::task::spawn_blocking`. The syscall blocks the thread until any
+  address change occurs; the watcher loops so a single watcher call outlives
+  any number of changes. Returns `NO_ERROR` on a successful wake-up; non-zero
+  logs and exits (the next user toggle recovers). `windows-sys 0.61` is pinned
+  (the crate is already in the tree transitively via `rustix`/`signal-hook`).
+- **macOS / Linux** — polling fallback. The watcher re-enumerates interfaces
+  every second via `list_afinet_netifas` and emits only when the snapshot
+  differs from the previous one, so a stable network stays silent. The 1 s
+  latency is invisible to the user; the debouncer collapses DHCP bursts.
+
+The watcher callback reads `lan_exposure_enabled` from the DB and is a no-op
+when LAN exposure is off — a user who has never opted in pays nothing for the
+background work. When LAN exposure is on, the callback reuses the existing
+`apply_binding` path; TLS cert regeneration, SAN update, and `bind_specs`
+rebuild are unchanged. Tests drive the debouncer directly through an
+`mpsc::Sender<()>` so the production source code path is exercised by smoke-
+test, not unit-test.
+
 ## Consequences
 
 - The mobile client connects to `https://<lan-ip>:<port>` (WSS for terminals)
@@ -97,15 +127,11 @@ smallest change that restores that reachability for per-interface TLS binds.
   SAN/IP mismatch; a shrunk set keeps the cert (a stale extra SAN is harmless).
 - The DNS-rebinding `Host` guard (ADR-0012/#496) and the two-tier header auth
   (ADR-0015/#500) are unchanged and still run on every request, TLS or not.
-- **Refresh is on user action, not on OS events.** The bind path re-enumerates
-  interfaces only when triggered (`set_lan_exposure_enabled` toggling the LAN
-  switch, or the initial startup). An interface that appears **without** a
-  user toggle — a VPN connecting mid-session, a DHCP lease change, a Wi-Fi
-  reconnect — is not picked up until the user re-toggles LAN exposure (off→on)
-  or restarts the app. The TLS cert is missing the new IP from its SAN list,
-  and the per-request Host guard rejects it. Listening for OS-level interface
-  events (Windows `NotifyAddrChange`, `netlink` on Linux) and forcing a rebind
-  on change is a follow-up.
+- **Interface changes mid-session are picked up automatically (issue #591).**
+  The watcher re-runs `apply_binding` on every debounced OS event, so the
+  realised bind set stays in lockstep with the host's actual interface set
+  without user action. A burst of DHCP renews (the noisy case) collapses to
+  a single rebind; the user never sees a stale QR URL.
 
 ### Known limitations (tracked follow-ups)
 

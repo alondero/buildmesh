@@ -62,24 +62,30 @@ export function buildRemoteAccessUrl(
 export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [host, setHost] = useState<string>('discovering...');
-  const [installUrl, setInstallUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [unreachable, setUnreachable] = useState(false);
   // Server's current root CA fingerprint (issue #635). Shown below the QR so
   // a user whose installed root is stale can compare before re-installing.
   // Fetch failure is silent — the modal still works without it.
   const [certStatus, setCertStatus] = useState<CertChainStatus | null>(null);
+  // The rendered QR PNG of the install-cert data: URL (issue #702). The
+  // data: URL itself stays as a local const inside the effect — it's
+  // the *QR payload*, not a render artifact, so it doesn't need state.
+  // The PNG IS the visible image: browsers won't render a
+  // `data:application/x-x509-ca-cert` URL as an image, so we use
+  // QRCode.toDataURL to produce a viewable PNG of the data: URL.
+  const [installQrDataUrl, setInstallQrDataUrl] = useState<string | null>(null);
+  // HTTPS URL of `/install-cert.der` for the manual install fallback
+  // (issue #702 review finding). The Re-install section surfaces this
+  // so a user whose phone can't scan the install-QR (older Android,
+  // custom camera apps, ad-blockers) can open the URL in their phone's
+  // browser and let Chrome's MIME-routed install take over.
+  const [installUrl, setInstallUrl] = useState<string | null>(null);
   // Inline sub-section toggle for the "Re-install root CA" affordance.
   const [showReinstall, setShowReinstall] = useState(false);
   // "Copied!" feedback for the cert path copy button. Mirrors the
   // AppSettingsModal.tsx:670 clipboard pattern (2s timeout).
   const [certPathCopied, setCertPathCopied] = useState(false);
-  // HTTPS URL (not `data:application/x-x509-ca-cert;base64,…`): Android's
-  // QR scanner has no intent filter for `data:` + cert MIME and shows
-  // "no apps can use this data". An `https://` URL lets the phone's
-  // browser handle the TLS warning once and route the downloaded .der
-  // into com.android.certinstaller (or iOS's profile installer).
-  const [installQrDataUrl, setInstallQrDataUrl] = useState<string | null>(null);
   // 'connect' is the default — modal opens for the common case. Tabs
   // let each QR render at full modal width so a phone can scan from
   // across the room; a side-by-side layout made both QRs too small.
@@ -343,6 +349,9 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
               >
                 <div className="text-xs text-text-muted mb-1">
                   Server root CA fingerprint
+                  <span className="ml-2 text-text-muted/70">
+                    (or re-install manually for iOS / older Android)
+                  </span>
                 </div>
                 <div
                   data-testid="remote-access-cert-fingerprint"
@@ -363,6 +372,24 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                     data-testid="remote-access-cert-reinstall"
                     className="mt-2 text-xs text-text-muted border border-border-subtle rounded p-3 space-y-2"
                   >
+                    {installUrl && (
+                      <div>
+                        <div className="mb-1 text-text-secondary">
+                          On your phone, open this URL in the browser:
+                        </div>
+                        <code
+                          data-testid="remote-access-cert-install-url"
+                          className="block font-mono break-all bg-bg-base/40 rounded px-2 py-1 text-text-secondary"
+                        >
+                          {installUrl}
+                        </code>
+                        <div className="mt-1 text-text-muted/80">
+                          Chrome auto-routes the .der download into the
+                          system cert installer — same one-tap install as
+                          the QR above, but via the browser instead.
+                        </div>
+                      </div>
+                    )}
                     <div>
                       <div className="mb-1 text-text-secondary">
                         On your computer, the cert is at:

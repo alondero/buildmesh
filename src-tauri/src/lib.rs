@@ -25,6 +25,107 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Early panic hook — captures panics that fire BEFORE the main panic
+    // hook is installed later in `setup` (Tauri setup can panic on misconfig,
+    // and those panics would otherwise die with only the truncated "disabled
+    // backtrace" tail in `panic.log`). Writes to a separate
+    // `panic_early.log` so it doesn't interleave with the main hook's output,
+    // and syncs to disk so the message survives `panic = "abort"` killing
+    // the process via __fastfail before the OS file buffer flushes.
+    //
+    // Cross-platform + dev-profile aware: derives the bundle id from the binary
+    // name (buildmesh.exe → stable, buildmesh-dev.exe → dev) so dev-profile
+    // crashes go to their own `com.alond.buildmesh.dev` dir, not the stable
+    // hub's. macOS/Linux resolve `$HOME` / `$XDG_DATA_HOME` instead of APPDATA.
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic".to_string()
+        };
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let line = format!(
+            "[{}] msg={} loc={}",
+            chrono::Utc::now().to_rfc3339(),
+            msg,
+            loc
+        );
+        // Always echo to stderr — if the file write fails (no APPDATA, no
+        // HOME, missing parent dir, permission), the panic payload is at
+        // least visible in the launcher's terminal.
+        eprintln!("{}", line);
+
+        // Derive the bundle id from the running binary name so dev-profile
+        // panics don't pollute the stable profile's logs (and vice versa).
+        // `cargo tauri:build:dev` emits `buildmesh-dev.exe`; the stable CLI
+        // emits `buildmesh.exe`.
+        let bundle_id = std::env::args()
+            .next()
+            .map(|a| {
+                let leaf = std::path::Path::new(&a)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if leaf.contains("dev") {
+                    "com.alond.buildmesh.dev"
+                } else {
+                    "com.alond.buildmesh"
+                }
+            })
+            .unwrap_or("com.alond.buildmesh");
+
+        // Per-platform data dir: APPDATA on Windows, XDG_DATA_HOME (fallback
+        // ~/.local/share) on Linux, $HOME/Library/Application Support on macOS.
+        let data_dir: Option<std::path::PathBuf> = if cfg!(target_os = "windows") {
+            std::env::var_os("APPDATA").map(std::path::PathBuf::from)
+        } else if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::PathBuf::from(home);
+            if cfg!(target_os = "macos") {
+                Some(home.join("Library").join("Application Support"))
+            } else {
+                Some(
+                    std::env::var_os("XDG_DATA_HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| home.join(".local").join("share")),
+                )
+            }
+        } else {
+            None
+        };
+
+        if let Some(dir) = data_dir {
+            let log_path = dir.join(bundle_id).join("logs").join("panic_early.log");
+            // Create the parent dirs — `OpenOptions::create(true)` only
+            // creates the file, not the path. On a fresh install neither
+            // `%APPDATA%\com.alond.buildmesh\` nor its `logs/` subdir exist
+            // when the first panic fires.
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                let _ = writeln!(f, "{}", line);
+                // `flush()` + `sync_all()`: the hook runs to completion
+                // BEFORE `panic = "abort"` calls `__fastfail` to terminate
+                // the process, so both syscalls return normally — `sync_all`
+                // is the durability guarantee that survives the abrupt
+                // termination. Drop them only if you also drop `panic=abort`.
+                let _ = f.flush();
+                let _ = f.sync_all();
+            }
+        }
+    }));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
@@ -237,6 +338,10 @@ pub fn run() {
                 {
                     use std::io::Write;
                     let _ = writeln!(file, "{}", panic_msg);
+                    // panic = "abort" kills the process via __fastfail; the OS
+                    // file buffer would otherwise discard this write.
+                    let _ = file.flush();
+                    let _ = file.sync_all();
                 }
             }));
 
@@ -289,6 +394,11 @@ pub fn run() {
             // user whose installed root CA is stale can see "your cert is X,
             // server is now Y" without reaching for openssl.
             commands::network::get_cert_chain_status,
+            // Root CA bytes for the QR-modal one-tap phone install (issue
+            // #702). Same disk read as the /install-cert.der route, encoded
+            // as base64 for embedding in a data: URL the phone's OS CA
+            // installer intercepts.
+            commands::network::get_root_cert_der,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

@@ -6,8 +6,7 @@
 //! the SPA shell directly so the existing QR code at `http://lan-ip:1992/`
 //! keeps working unchanged.
 
-use tokio::io::AsyncWriteExt;
-use crate::http::MaybeTls;
+use crate::http::{MaybeTls, request};
 
 #[derive(rust_embed::Embed)]
 #[folder = "../dist/mobile"]
@@ -27,7 +26,7 @@ pub async fn serve_spa_shell(
             body.len(),
             body
         );
-        return lines.get_mut().write_all(response.as_bytes()).await;
+        return request::write_full(lines, response.as_bytes()).await;
     };
     let extra = extra_header.unwrap_or("");
     // Inject a tiny error-catcher so JS errors from the SPA land in the dev
@@ -70,17 +69,28 @@ window.addEventListener('unhandledrejection', function (e) {
         body_bytes.len(),
         extra
     );
-    let stream = lines.get_mut();
-    stream.write_all(headers.as_bytes()).await?;
-    stream.write_all(body_bytes).await
+    // Single write+flush for headers + body. Without the flush, the last
+    // partial chunk of the body can sit in the BufStream buffer when the
+    // function returns — the connection drops before it reaches the wire,
+    // and Chrome surfaces that as ERR_CONTENT_LENGTH_MISMATCH on the
+    // shell HTML too.
+    let mut combined = Vec::with_capacity(headers.len() + body_bytes.len());
+    combined.extend_from_slice(headers.as_bytes());
+    combined.extend_from_slice(body_bytes);
+    request::write_full(lines, &combined).await
 }
 
 /// Serve a single bundled asset by request path. `path_without_query` is
 /// the full path like `/assets/index-abc.js`; we strip the leading slash
-/// and look it up in the embedded asset list.
+/// and look it up in the embedded asset list. `range_header` is the
+/// optional value of the `Range:` request header — when present and
+/// well-formed, we honour it with `206 Partial Content` so module
+/// scripts can stream-parse without tripping Chrome's
+/// `ERR_CONTENT_LENGTH_MISMATCH` (the issue this was added for).
 pub async fn serve_asset(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     path_without_query: &str,
+    range_header: Option<&str>,
 ) -> std::io::Result<()> {
     let relative = path_without_query.trim_start_matches('/');
     let Some(file) = MobileAssets::get(relative) else {
@@ -90,17 +100,118 @@ pub async fn serve_asset(
             body.len(),
             body
         );
-        return lines.get_mut().write_all(response.as_bytes()).await;
+        return request::write_full(lines, response.as_bytes()).await;
     };
     let mime = mime_for(relative);
+    let total = file.data.len();
+
+    // Single satisfiable range → 206 Partial Content. We refuse
+    // multi-range rather than emit multipart: none of our callers
+    // (Vite-emitted JS/CSS/PNG/font chunks) need it, and multipart
+    // would re-introduce the same Content-Length trap we're fixing.
+    // Suffix (`bytes=-N`) and open-ended (`bytes=N-`) forms both
+    // expand against `total`; unsatisfiable ranges get `416` so the
+    // client can fall back to a full GET.
+    if let Some(spec) = range_header.and_then(parse_bytes_range) {
+        let Some((start, end)) = resolve_range(spec, total) else {
+            let resp = format!(
+                "HTTP/1.1 416 Range Not Satisfiable\r\n\
+                 Content-Range: bytes */{total}\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            return request::write_full(lines, resp.as_bytes()).await;
+        };
+        let slice = &file.data[start..=end];
+        let headers = format!(
+            "HTTP/1.1 206 Partial Content\r\n\
+             Content-Type: {mime}\r\n\
+             Content-Length: {len}\r\n\
+             Content-Range: bytes {start}-{end}/{total}\r\n\
+             Accept-Ranges: bytes\r\n\
+             Cache-Control: public, max-age=31536000, immutable\r\n\r\n",
+            len = slice.len(),
+        );
+        // Coalesce headers + body into one write so a single flush
+        // covers both — eliminates the last-partial-chunk race that
+        // produced ERR_CONTENT_LENGTH_MISMATCH on Android Chrome.
+        let mut combined = Vec::with_capacity(headers.len() + slice.len());
+        combined.extend_from_slice(headers.as_bytes());
+        combined.extend_from_slice(slice);
+        return request::write_full(lines, &combined).await;
+    }
+
     let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=31536000, immutable\r\n\r\n",
-        mime,
-        file.data.len()
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: {mime}\r\n\
+         Content-Length: {total}\r\n\
+         Accept-Ranges: bytes\r\n\
+         Cache-Control: public, max-age=31536000, immutable\r\n\r\n"
     );
-    let stream = lines.get_mut();
-    stream.write_all(headers.as_bytes()).await?;
-    stream.write_all(&file.data).await
+    // Same coalesce+flush pattern as the 206 branch above.
+    let mut combined = Vec::with_capacity(headers.len() + total);
+    combined.extend_from_slice(headers.as_bytes());
+    combined.extend_from_slice(&file.data);
+    request::write_full(lines, &combined).await
+}
+
+/// One of the three forms of a `Range: bytes=...` value, before
+/// resolution against the actual total size. Both open-ended
+/// `bytes=N-` and suffix `bytes=-N` need the total to materialise
+/// into concrete `(start, end)` indices.
+#[derive(Debug, PartialEq, Eq)]
+enum BytesRange {
+    Closed { start: usize, end: usize },
+    OpenEnded { start: usize },
+    Suffix { last_n: usize },
+}
+
+fn parse_bytes_range(header: &str) -> Option<BytesRange> {
+    let rest = header.trim().strip_prefix("bytes=")?;
+    // Multi-range — refuse.
+    if rest.contains(',') {
+        return None;
+    }
+    let (s, e) = rest.split_once('-')?;
+    if s.is_empty() && e.is_empty() {
+        return None; // `-` alone is malformed
+    }
+    if s.is_empty() {
+        let n: usize = e.parse().ok()?;
+        Some(BytesRange::Suffix { last_n: n })
+    } else if e.is_empty() {
+        let start: usize = s.parse().ok()?;
+        Some(BytesRange::OpenEnded { start })
+    } else {
+        let start: usize = s.parse().ok()?;
+        let end: usize = e.parse().ok()?;
+        if start > end {
+            return None;
+        }
+        Some(BytesRange::Closed { start, end })
+    }
+}
+
+/// Materialise a `BytesRange` against an actual total size. Returns
+/// `None` when the range is unsatisfiable (start >= total) or empty
+/// after suffix resolution.
+fn resolve_range(spec: BytesRange, total: usize) -> Option<(usize, usize)> {
+    if total == 0 {
+        return None;
+    }
+    let (start, end) = match spec {
+        BytesRange::Closed { start, end } => (start, end.min(total - 1)),
+        BytesRange::OpenEnded { start } => (start, total - 1),
+        BytesRange::Suffix { last_n } => {
+            if last_n == 0 || last_n > total {
+                return None;
+            }
+            (total - last_n, total - 1)
+        }
+    };
+    if start >= total || start > end {
+        return None;
+    }
+    Some((start, end))
 }
 
 fn mime_for(path: &str) -> &'static str {
@@ -153,5 +264,98 @@ mod tests {
         assert!(mime_for("style.css").starts_with("text/css"));
         assert!(mime_for("logo.svg") == "image/svg+xml");
         assert!(mime_for("unknown.xyz") == "application/octet-stream");
+    }
+
+    /// Range parser — the unit that decides whether a Range header is
+    /// well-formed. Each test pins one form of the documented RFC 9110
+    /// grammar; combined they lock the rejection paths so a future
+    /// tweak doesn't quietly widen what's accepted.
+    #[test]
+    fn parse_bytes_range_closed() {
+        assert_eq!(
+            parse_bytes_range("bytes=0-1023"),
+            Some(BytesRange::Closed { start: 0, end: 1023 })
+        );
+        assert_eq!(
+            parse_bytes_range("bytes=100-200"),
+            Some(BytesRange::Closed { start: 100, end: 200 })
+        );
+    }
+
+    #[test]
+    fn parse_bytes_range_open_ended() {
+        assert_eq!(
+            parse_bytes_range("bytes=1024-"),
+            Some(BytesRange::OpenEnded { start: 1024 })
+        );
+    }
+
+    #[test]
+    fn parse_bytes_range_suffix() {
+        assert_eq!(
+            parse_bytes_range("bytes=-512"),
+            Some(BytesRange::Suffix { last_n: 512 })
+        );
+    }
+
+    #[test]
+    fn parse_bytes_range_rejects_garbage() {
+        assert_eq!(parse_bytes_range(""), None);
+        assert_eq!(parse_bytes_range("bits=0-99"), None);
+        assert_eq!(parse_bytes_range("bytes="), None);
+        assert_eq!(parse_bytes_range("bytes=-"), None);
+        assert_eq!(parse_bytes_range("bytes=0-99,200-299"), None); // multi-range
+        assert_eq!(parse_bytes_range("bytes=abc-def"), None);
+        assert_eq!(parse_bytes_range("bytes=200-100"), None); // start > end
+    }
+
+    /// Range resolver — materialises the symbolic forms against the
+    /// actual total size. Pins the off-by-one and unsatisfiable paths
+    /// so a future change can't regress the 416 response.
+    #[test]
+    fn resolve_range_closed_truncates_overshoot() {
+        assert_eq!(
+            resolve_range(BytesRange::Closed { start: 0, end: 9999 }, 100),
+            Some((0, 99))
+        );
+    }
+
+    #[test]
+    fn resolve_range_open_ended_lands_on_last_byte() {
+        assert_eq!(
+            resolve_range(BytesRange::OpenEnded { start: 50 }, 100),
+            Some((50, 99))
+        );
+    }
+
+    #[test]
+    fn resolve_range_suffix_counts_back_from_total() {
+        assert_eq!(
+            resolve_range(BytesRange::Suffix { last_n: 10 }, 100),
+            Some((90, 99))
+        );
+        assert_eq!(
+            resolve_range(BytesRange::Suffix { last_n: 100 }, 100),
+            Some((0, 99))
+        );
+    }
+
+    #[test]
+    fn resolve_range_unsatisfiable_yields_none() {
+        // Past the end
+        assert_eq!(
+            resolve_range(BytesRange::OpenEnded { start: 100 }, 100),
+            None
+        );
+        // Suffix longer than the body
+        assert_eq!(
+            resolve_range(BytesRange::Suffix { last_n: 200 }, 100),
+            None
+        );
+        // Empty body
+        assert_eq!(
+            resolve_range(BytesRange::Closed { start: 0, end: 0 }, 0),
+            None
+        );
     }
 }

@@ -77,9 +77,31 @@
 
 /// Fetch a single ref from `origin` into the local repo. Used by the PR-spawn
 /// path (#420) to materialise `origin/<head_ref>` so the worktree can be cut
-/// from it. `head_ref` is the PR's source branch (e.g. `feat/420-pr-spawn`);
-/// the function runs `git fetch origin <head_ref>` and returns `true` on a
-/// clean exit, `false` on any failure.
+/// from it. `head_ref` is the PR's source branch (e.g. `feat/420-pr-spawn`).
+///
+/// As of issue #446, this is a thin wrapper over
+/// [`crate::git::sync::do_fetch_only`] — the fetch-only half of `do_sync`
+/// (the shared fetch+ff-pull algorithm used by `fetch_origin` and the manual
+/// `git_sync` command). Consolidating onto the shared algorithm means:
+///   - The PR-spawn path inherits `do_fetch_only`'s dirty-check (skips with
+///     `SkippedDirty` on a dirty parent) — the old shell-out would have run
+///     anyway, which left the spawn path inconsistent with the base-ref
+///     fetch behaviour.
+///   - Windows quoting, ref-with-special-chars, and lock-contention fixes
+///     land in one place for both the auto-sync and the PR-head fetch.
+///
+/// **Why fetch-only, not full `do_sync`:** the PR-head fetch is a
+/// single-ref materialisation; the goal is to populate
+/// `refs/remotes/origin/<head_ref>` so the worktree can be cut from it.
+/// `do_sync`'s Step 6 (`git pull --ff-only --no-rebase`) would mutate
+/// the mesh's currently-checked-out branch (typically `main`) as a side
+/// effect of spawning a PR agent — a behavioural surprise (the user's
+/// `main` advances on every PR spawn) AND wasted work (a few hundred ms
+/// of duplicate fast-forward on top of the `fetch_origin` call a few
+/// lines earlier in `spawn_agent_inner`, under the same per-Mesh
+/// `sync_lock`). `do_fetch_only` runs steps 1-4 (open, dirty-check,
+/// has-remote, `git fetch`) and stops before the `commits_behind` and
+/// `git pull` tail.
 ///
 /// Best-effort by design: the caller falls back to the mesh's `base_ref` on
 /// `false` rather than failing the spawn (ADR 0001 offline pattern). The user
@@ -88,39 +110,34 @@
 /// alternative (strict-error spawn) is brittle to the very first offline
 /// session after a fresh install.
 ///
-/// `--` separator before `head_ref` defends against an adversarial / malformed
-/// ref starting with `-` (e.g. `--upload-pack=…`); `git fetch` would otherwise
-/// treat it as a flag. GitHub's branch-name validation blocks this in
-/// practice, but the cost of the separator is zero and the upside is hardening
-/// against a future refactor that lets a hand-entered or imported ref flow
-/// through.
+/// **Adversarial-ref guard:** `do_fetch_only` passes the branch as a single
+/// argv entry without a `--` separator (it doesn't know it's running in the
+/// spawn context, and the auto-sync + manual-sync callers both want git to
+/// parse the ref as a refspec). So the wrapper rejects any `head_ref`
+/// starting with `-` (e.g. `--upload-pack=evil`) up front — the same
+/// hardening the old shell-out had via `cmd.arg("--")`. GitHub's branch-name
+/// validation blocks this in practice, but the cost of the check is zero
+/// and the upside is defending against a future refactor that lets a
+/// hand-entered or imported ref flow through. Pinned by
+/// `fetch_single_ref_rejects_adversarial_dash_ref`.
 pub(crate) fn fetch_single_ref(project_root: &str, head_ref: &str) -> bool {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    tracing::info!(
-        "fetch_single_ref: running git fetch origin -- {} in {}",
-        head_ref,
-        host_root
-    );
-    let mut cmd = command_no_window("git");
-    cmd.arg("fetch").arg("origin").arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("fetch_single_ref: failed to spawn git fetch: {}", e);
-            return false;
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // Adversarial-ref guard — see fn doc. Must run BEFORE we hand `head_ref`
+    // to `do_fetch_only`, because the helper passes it as a plain argv entry
+    // without a `--` separator.
+    if head_ref.starts_with('-') {
         tracing::warn!(
-            "fetch_single_ref: git fetch origin -- {} failed: {}",
-            head_ref,
-            stderr.trim()
+            "fetch_single_ref: rejecting adversarial ref {} (starts with '-')",
+            head_ref
         );
         return false;
     }
-    true
+
+    let host_root = crate::env::to_host_path(project_root);
+    // `do_fetch_only` returns the same `SyncOutcome` variants `do_sync` would,
+    // but without the count-behind / pull tail. `Ok(())` covers every fetch-
+    // succeeded case (UpToDate / Synced / FetchedButDiverged in `do_sync`'s
+    // world); every `Err` variant maps to `false` per the wrapper contract.
+    crate::git::sync::do_fetch_only(&host_root, "origin", Some(head_ref)).is_ok()
 }
 
 /// The alias used for a fork remote (issue #443). `fork-<login>` is
@@ -239,6 +256,50 @@ pub(crate) fn fetch_fork_head(
         return false;
     }
     true
+}
+
+/// Run the PR-spawn head fetch inside `services::sync_lock::with_mesh_sync_lock`
+/// so concurrent PR-spawns (or a PR-spawn racing the manual `git_sync` from
+/// #680) can't collide on `.git/FETCH_HEAD`, `.git/refs/remotes/<remote>/
+/// <ref>.lock`, or — for the fork branch — the config files `git remote add/
+/// set-url` write (issues #652, #680 follow-up #698).
+///
+/// The lock key is the mesh's **DB-stored path** (`project_root`), matching
+/// the key `spawn_agent_inner` uses for the auto-sync `fetch_origin` call
+/// two steps earlier. `sync_lock.rs` documents the key as the form stored on
+/// `agent_nodes.path` — the host-native form for Windows repos, the WSL
+/// form for WSL repos (the bare helpers internally re-map to the host
+/// path via `env::to_host_path`, but the lock key stays as the DB-stored
+/// string). Same-key contention serialises; different keys (different
+/// meshes) never wait on each other.
+///
+/// Both branches of the underlying match share one helper so `spawn_agent_inner`
+/// has a single, audit-able lock acquisition rather than two inline branches.
+/// The closure that `with_mesh_sync_lock` runs owns nothing: it captures all
+/// four arguments by reference, so the closure borrows are valid for the
+/// duration of the fetch and the lock is released as soon as `fetch_single_ref`
+/// or `fetch_fork_head` returns. Best-effort by design (ADR 0001) — the spawn
+/// falls through to `base_ref` on `false` rather than hard-failing.
+///
+/// The two underlying helpers (`fetch_single_ref`, `fetch_fork_head`) stay
+/// lock-free so the no-lock shape is testable in isolation (the issue #420 /
+/// #443 unit tests in `agent::spawn` call them directly with unique tempdir
+/// paths); `locked_fetch_pr_head` is the only caller that needs the
+/// serialization guarantee.
+pub(crate) fn locked_fetch_pr_head(
+    project_root: &str,
+    head_ref: &str,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+) -> bool {
+    crate::services::sync_lock::with_mesh_sync_lock(project_root, || {
+        match (head_repo_owner, head_repo_clone_url) {
+            (Some(owner), Some(clone_url)) => {
+                fetch_fork_head(project_root, owner, clone_url, head_ref)
+            }
+            _ => fetch_single_ref(project_root, head_ref),
+        }
+    })
 }
 
 /// Read the local SHA at `refs/remotes/origin/<head_ref>` — the ref

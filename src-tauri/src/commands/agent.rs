@@ -187,18 +187,33 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
 /// and its slot is restored verbatim when it reappears.
 ///
 /// Pure and stable (no disk / globals) so the ordering is the unit-test seam:
-/// the `(is_terminal, rank)` tuple key sorts Terminal last via the bool, ranks
-/// the rest by stored harness order, and the stable sort keeps equal-rank
-/// rows in their input order (a harness's native row is built first in
-/// `compose_provider_menu`, so it lands first in each group).
+/// the `(is_terminal, rank, harness_id)` tuple key sorts Terminal last via the
+/// bool, ranks the rest by stored harness order, and the `harness_id`
+/// tiebreak pins multiple *newcomers* — all sharing `rank = usize::MAX - 1` —
+/// into a deterministic alphabetical order rather than relying on the input
+/// order from `harness_profiles()` (issue #581). Listed harnesses always have
+/// distinct ranks so the tiebreak is moot for them; Proxied rows share their
+/// parent's `harness_id` and the stable sort keeps the native header ahead
+/// of its children (the native row is built first in `compose_provider_menu`).
 fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]) -> Vec<ProviderInfo> {
-    providers.sort_by_key(|p| {
-        let is_terminal = p.harness_id == "terminal";
-        let rank = order
-            .iter()
-            .position(|id| *id == p.harness_id)
-            .unwrap_or(usize::MAX - 1);
-        (is_terminal, rank)
+    providers.sort_by(|a, b| {
+        let key_a = (
+            a.harness_id == "terminal",
+            order
+                .iter()
+                .position(|id| *id == a.harness_id)
+                .unwrap_or(usize::MAX - 1),
+            a.harness_id.as_str(),
+        );
+        let key_b = (
+            b.harness_id == "terminal",
+            order
+                .iter()
+                .position(|id| *id == b.harness_id)
+                .unwrap_or(usize::MAX - 1),
+            b.harness_id.as_str(),
+        );
+        key_a.cmp(&key_b)
     });
     providers
 }
@@ -1132,6 +1147,38 @@ mod tests {
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["claude", "codex", "newbie", "terminal"]);
+    }
+
+    /// Issue #581: multiple *newcomers* (harnesses not yet in the stored
+    /// order) all share `rank = usize::MAX - 1`. Without a tiebreak the
+    /// relative order between them depends on the input order from
+    /// `harness_profiles()` — which is deterministic today but is a
+    /// hidden coupling. The `harness_id` tiebreak pins them into a
+    /// deterministic alphabetical order, independent of how the upstream
+    /// row derivation is implemented.
+    #[test]
+    fn order_providers_multiple_newcomers_sort_alphabetically() {
+        // No stored order — every real harness is a newcomer.
+        let order: Vec<String> = vec![];
+        // The input is in *detection* order (claude, codex, agy, opencode),
+        // NOT alphabetical. The assertion pins the alphabetical tiebreak,
+        // not the input order.
+        let ordered = order_providers(
+            vec![
+                row_native("terminal"),
+                row_native("claude"),
+                row_native("codex"),
+                row_native("agy"),
+                row_native("opencode"),
+            ],
+            &order,
+        );
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["agy", "claude", "codex", "opencode", "terminal"],
+            "newcomers must sort alphabetically by harness_id, not by input order"
+        );
     }
 
     /// Issue #573 AC: an uninstalled harness keeps its saved slot — when it
