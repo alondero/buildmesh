@@ -86,6 +86,10 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // "Copied!" feedback for the cert path copy button. Mirrors the
   // AppSettingsModal.tsx:670 clipboard pattern (2s timeout).
   const [certPathCopied, setCertPathCopied] = useState(false);
+  // 'connect' is the default — modal opens for the common case. Tabs
+  // let each QR render at full modal width so a phone can scan from
+  // across the room; a side-by-side layout made both QRs too small.
+  const [activeTab, setActiveTab] = useState<'connect' | 'install'>('connect');
 
   useEffect(() => {
     const init = async () => {
@@ -94,15 +98,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // serially so the modal opens in one round-trip. The `getLocalIp`
         // fallback string is a UX placeholder, not a typed contract: it is only
         // used when no LAN listener is bound, in which case `reachable` is false
-        // and we warn rather than rely on it. `getCertChainStatus` and
-        // `getRootCertDer` failures are silently swallowed (`.catch(() => null)`)
-        // — the modal still works, we just won't show the install affordance.
-        const [rootToken, status, localIp, cert, rootDerB64] = await Promise.all([
+        // and we warn rather than rely on it. `getCertChainStatus` failure is
+        // silently swallowed (`.catch(() => null)`) — the modal still works,
+        // we just won't show the fingerprint.
+        const [rootToken, status, localIp, cert] = await Promise.all([
           api.getRootToken(),
           api.getNetworkStatus(),
           api.getLocalIp().catch(() => '192.168.1.x'),
           api.getCertChainStatus().catch(() => null),
-          api.getRootCertDer().catch(() => null),
         ]);
 
         const { url, host: displayHost, reachable } = buildRemoteAccessUrl(
@@ -113,77 +116,56 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         setHost(displayHost);
         setUnreachable(!reachable);
         setCertStatus(cert);
-        // Manual-install URL for the Re-install section (issue #702).
-        // Same origin as the connect URL, /install-cert.der path.
-        // Set even when unreachable so the user's clipboard fallback
-        // works if they have a real bind reachable via a different
-        // path. (Mostly unreachable ⇒ no usable URL, but the render
-        // hides the QR section entirely in that case anyway.)
-        if (reachable) {
-          setInstallUrl(`${new URL(url).origin}/install-cert.der`);
-        } else {
-          setInstallUrl(null);
-        }
+        // Hoist the install URL once — the QR payload and the fallback
+        // link must stay in sync, and `${origin}/install-cert.der` has
+        // future query-string / path churn risk (#702 rotation).
+        const installUrlValue = reachable ? `${new URL(url).origin}/install-cert.der` : null;
+        setInstallUrl(installUrlValue);
 
         if (!reachable) {
           // Skip both QRs when the LAN isn't actually exposed — the
           // warning UI below takes over. Generating a QR for a
-          // `reachable: false` URL would hand the user a dead link
-          // (the connect URL is the discovered-IP fallback, not a
-          // realized bind).
+          // `reachable: false` URL would hand the user a dead link.
           return;
         }
 
-        // Both QRs are independent (no data dependency between the
-        // connect URL and the cert data: URL) — run them in parallel
-        // so React 19 auto-batches the two setStates into one render.
-        // Per-QR try/catch: a 2.7+ KB cert would throw at the qrcode
-        // lib's capacity check; that must NOT undo the connect-QR's
-        // successful setState, so each phase guards its own.
-        const results = await Promise.allSettled([
+        // Both QRs are independent. Run them in parallel so React 19
+        // auto-batches the two setStates. `Promise.allSettled` so an
+        // install-QR failure cannot undo the connect-QR's successful
+        // setState — the install URL is already exposed as a fallback
+        // link below.
+        //
+        // `installUrlValue!` is sound: the early-return above guarantees
+        // non-null whenever this line is reached.
+        const [connectResult, installResult] = await Promise.allSettled([
           QRCode.toDataURL(url, {
             width: 384,
             margin: 2,
             color: { dark: '#e0e0e0', light: '#1a1a1a' },
           }),
-          // Phone install QR (issue #702). Embed the root cert as a
-          // `data:application/x-x509-ca-cert;base64,...` URL so the
-          // phone's OS CA installer intercepts the scan — Android
-          // Chrome (≥ 90) and iOS Safari (≥ 14) both route this MIME
-          // into native install, bypassing the chicken-and-egg of
-          // "phone needs the cert before it trusts the server, but
-          // the server serves the cert over TLS". Pinned to
-          // error-correction level L: a 2 KB cert just fits at L,
-          // fails at the qrcode lib's default M, so future-larger
-          // certs (e.g. RSA-4096 roots) get ~30% headroom for free.
-          rootDerB64
-            ? QRCode.toDataURL(
-                `data:application/x-x509-ca-cert;base64,${rootDerB64}`,
-                {
-                  width: 256,
-                  margin: 2,
-                  errorCorrectionLevel: 'L',
-                  color: { dark: '#e0e0e0', light: '#1a1a1a' },
-                },
-              )
-            : Promise.resolve(null),
+          // Encode at the SAME pixel size as the render box (w-96 = 384px).
+          // A 256px raster upscaled by the browser blurs the QR modules
+          // and degrades scan reliability at distance — the whole point
+          // of the tabs layout.
+          QRCode.toDataURL(installUrlValue!, {
+            width: 384,
+            margin: 2,
+            color: { dark: '#e0e0e0', light: '#1a1a1a' },
+          }),
         ]);
-        const [connectResult, installResult] = results;
         if (connectResult.status === 'fulfilled') {
           setQrDataUrl(connectResult.value);
         } else {
-          // Only the connect-QR failure is fatal to the modal — the
-          // install-QR has its own path below.
+          // Only the connect-QR failure is fatal — without it the user
+          // has no way to reach the server.
           throw connectResult.reason;
         }
-        if (installResult.status === 'fulfilled' && installResult.value) {
+        if (installResult.status === 'fulfilled') {
           setInstallQrDataUrl(installResult.value);
-        } else if (installResult.status === 'rejected') {
-          // Install-QR failure (cert > capacity, etc.) must NOT undo
-          // the connect-QR's successful setState. Swallow and continue
-          // — the Re-install toggle below is the user's remediation
-          // path. (issue #702 review finding: silent brick.)
         }
+        // Install-QR failure is silent — the install URL is exposed as
+        // a copy-link fallback, so the user has a working remediation
+        // path even when the QR fails to render.
       } catch (e) {
         setError(String(e));
       }
@@ -209,6 +191,17 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
       // non-fatal — match AppSettingsModal's pattern of letting the copy
       // surface its own error if it must.
     }
+  };
+
+  const handleInstall = () => {
+    // Open the install URL in the desktop's browser. The PRIMARY phone path
+    // is the install-QR above (scan with phone camera); this fallback is
+    // for the desktop user who wants to install on the host itself (e.g.
+    // fresh build, cert rotated, LAN exposure toggle flipped). Same URL
+    // works for both — the QR scanner is just a more convenient delivery
+    // mechanism for the phone.
+    if (!installUrl) return;
+    window.location.href = installUrl;
   };
 
   return (
@@ -248,45 +241,83 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
           </div>
         ) : qrDataUrl ? (
           <div className="flex flex-col items-center">
-            {/* Install-QR first (Step 1) so the flow reads top-to-bottom:
-                install the root, then connect. Issue #702. The 3-button
-                picker previously at this slot navigated the DESKTOP's
-                WebView, installing the cert on the PC not the phone. The
-                data: URL inside this QR routes through the phone's OS CA
-                installer instead — no desktop WebView involved.
-
-                Both the install-QR and the "Step N" labels are gated on
-                `installQrDataUrl` together: when the cert fetch fails or
-                the cert is too large for a single QR, we drop BOTH
-                step labels so the user doesn't see a "Step 2" with no
-                preceding "Step 1". */}
-            {installQrDataUrl && (
-              <div
-                data-testid="remote-access-install-qr"
-                className="flex flex-col items-center mb-6"
+            {/* Tab bar. Connect is the default — the modal opens for the
+                common case (phone already has the root, user wants to
+                connect). Install is opt-in for the fresh-phone /
+                rotated-cert case. Each tab renders its QR at full modal
+                width so the phone can scan from a comfortable distance. */}
+            <div
+              data-testid="remote-access-tabs"
+              role="tablist"
+              className="flex w-full mb-4 border-b border-border-subtle"
+            >
+              <button
+                data-testid="remote-access-tab-connect"
+                role="tab"
+                aria-selected={activeTab === 'connect'}
+                onClick={() => setActiveTab('connect')}
+                className={`flex-1 px-3 py-2 text-sm font-medium ${
+                  activeTab === 'connect'
+                    ? 'text-accent-cyan border-b-2 border-accent-cyan'
+                    : 'text-text-muted hover:text-text-secondary'
+                }`}
+                type="button"
               >
-                <div className="text-xs text-text-muted mb-2">
-                  Step 1 — scan with your phone to install the root CA
-                </div>
+                Connect
+              </button>
+              {installQrDataUrl && (
+                <button
+                  data-testid="remote-access-tab-install"
+                  role="tab"
+                  aria-selected={activeTab === 'install'}
+                  onClick={() => setActiveTab('install')}
+                  className={`flex-1 px-3 py-2 text-sm font-medium ${
+                    activeTab === 'install'
+                      ? 'text-accent-cyan border-b-2 border-accent-cyan'
+                      : 'text-text-muted hover:text-text-secondary'
+                  }`}
+                  type="button"
+                >
+                  Install cert
+                </button>
+              )}
+            </div>
+            {/* Single active QR at full size. Both tabs render the same
+                w-96 h-96 size as the original connect QR — the side-by-side
+                attempt squeezed both into w-40 which failed at scan
+                distance. Mounting only the active QR avoids keeping the
+                inactive <img> in the DOM (a phone scanning the wrong tab
+                would see the wrong URL in any accidental screen-grab). */}
+            {activeTab === 'connect' && (
+              <div
+                data-testid="remote-access-connect-qr"
+                className="flex flex-col items-center"
+              >
                 <img
-                  src={installQrDataUrl}
-                  alt="Install root CA QR"
-                  data-testid="remote-access-install-qr-img"
-                  className="w-64 h-64 rounded border border-border-subtle"
+                  src={qrDataUrl}
+                  alt="QR Code to connect"
+                  className="w-96 h-96 rounded border border-border-subtle"
                 />
+                <div className="mt-2 text-base text-text-secondary font-medium font-mono">
+                  {host}
+                </div>
               </div>
             )}
-            <div className="text-xs text-text-muted mb-2">
-              {installQrDataUrl ? 'Step 2 — scan to connect' : 'Scan to connect'}
-            </div>
-            <img
-              src={qrDataUrl}
-              alt="QR Code"
-              className="w-96 h-96 rounded border border-border-subtle mb-4"
-            />
-            <div className="text-base text-text-muted font-mono text-center">
-              <div>{host}</div>
-            </div>
+            {activeTab === 'install' && installQrDataUrl && (
+              <div
+                data-testid="remote-access-install-qr"
+                className="flex flex-col items-center"
+              >
+                <img
+                  src={installQrDataUrl}
+                  alt="QR Code to install Buildmesh root CA"
+                  className="w-96 h-96 rounded border border-border-subtle"
+                />
+                <div className="mt-2 text-sm text-text-muted text-center">
+                  Scan with your phone to install the root CA.
+                </div>
+              </div>
+            )}
             {/* Cert status (issue #635): when the phone's installed root CA
                 doesn't match the server's (regen on LAN-IP change, fresh
                 `cargo build`, etc.) TLS fails silently with `CertificateUnknown`
@@ -296,6 +327,21 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 we can't see the phone side from here, and a banner that almost-
                 never-fires erodes trust. The fingerprint + Re-install button
                 are the always-on remediation path. */}
+            {installUrl && certStatus && (
+              <div
+                data-testid="remote-access-install-fallback"
+                className="mt-4 w-full text-left"
+              >
+                <button
+                  data-testid="remote-access-install-link"
+                  onClick={handleInstall}
+                  className="text-xs text-accent-cyan hover:underline"
+                  type="button"
+                >
+                  Or open the install URL on this computer →
+                </button>
+              </div>
+            )}
             {certStatus && (
               <div
                 data-testid="remote-access-cert-status"
