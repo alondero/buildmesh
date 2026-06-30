@@ -2,9 +2,30 @@
 
 use std::net::IpAddr;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufStream};
 
 use crate::http::MaybeTls;
+
+/// Write `bytes` to the connection **and flush them to the wire**.
+///
+/// Every HTTP response MUST go through this. Skipping the flush lets the
+/// last partial chunk sit in `BufStream`'s 8 KB buffer; when the function
+/// returns the connection drops before the chunk reaches Rustls, and
+/// the client sees fewer bytes than the `Content-Length` header
+/// advertised. Chrome surfaces this as `ERR_CONTENT_LENGTH_MISMATCH`
+/// and aborts the module fetch — which is exactly the symptom that
+/// black-screens the mobile SPA on Android.
+///
+/// The fix is systemic: one helper, one invariant ("flush after every
+/// write"), every route passes through it.
+pub async fn write_full(
+    lines: &mut BufStream<MaybeTls>,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    let writer = lines.get_mut();
+    writer.write_all(bytes).await?;
+    writer.flush().await
+}
 
 /// Pull a bearer token out of an `Authorization: Bearer <token>` header. This is
 /// the only header-carried credential shape the server accepts post-#500 (URL
@@ -105,7 +126,7 @@ pub async fn write_status_only(
     status: &str,
 ) -> std::io::Result<()> {
     let response = format!("HTTP/1.1 {}\r\nContent-Length: 0\r\n\r\n", status);
-    lines.get_mut().write_all(response.as_bytes()).await
+    write_full(lines, response.as_bytes()).await
 }
 
 pub async fn write_json(
@@ -119,7 +140,7 @@ pub async fn write_json(
         body.len(),
         body
     );
-    lines.get_mut().write_all(response.as_bytes()).await
+    write_full(lines, response.as_bytes()).await
 }
 
 pub async fn send_json_error(

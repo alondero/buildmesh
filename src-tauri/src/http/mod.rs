@@ -1124,14 +1124,16 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                      Content-Length: {}\r\n\r\n",
                     bytes.len()
                 );
-                let writer = lines.get_mut();
-                if writer.write_all(resp.as_bytes()).await.is_err() {
-                    return;
-                }
-                if writer.write_all(&bytes).await.is_err() {
-                    return;
-                }
-                let _ = writer.flush().await;
+                // Coalesce headers + body, write+flush atomically via
+                // the same helper as every other route. Previously this
+                // site hand-rolled the flush and split the write across
+                // two calls — kept that behaviour then, but consolidating
+                // here closes the systemic race and removes a class of
+                // bug we never want to chase again.
+                let mut combined = Vec::with_capacity(resp.len() + bytes.len());
+                combined.extend_from_slice(resp.as_bytes());
+                combined.extend_from_slice(&bytes);
+                let _ = request::write_full(&mut lines, &combined).await;
             }
             Err(_) => {
                 let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
@@ -1226,7 +1228,13 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                             cookie,
                             body
                         );
-                        let _ = lines.get_mut().write_all(response.as_bytes()).await;
+                        // Login response carries the long-lived device token
+                        // (issue #502). A truncated body here silently breaks
+                        // auth on every subsequent call (401s that look
+                        // unrelated to this endpoint). Same systemic concern
+                        // as `serve_asset`: must flush the whole response to
+                        // the wire before the function returns.
+                        let _ = request::write_full(&mut lines, response.as_bytes()).await;
                     }
                     _ => {
                         let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
@@ -1580,6 +1588,12 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // can run POST /api/session to authenticate; all data APIs stay gated, and
     // the DNS-rebinding Host guard above still runs on every request. Legacy
     // `/v2/assets/*` paths still resolve for any cached mobile bundle.
+    //
+    // `Range:` is honoured so module scripts can stream-parse without
+    // tripping Chrome's `ERR_CONTENT_LENGTH_MISMATCH` — Chrome issues
+    // `Range: bytes=0-` for `<script type="module">` and a server that
+    // ignores it sends the full body, which Chrome then rejects because
+    // the bytes received don't match the slice it asked for.
     if method == "GET"
         && (path_without_query.starts_with("/assets/")
             || path_without_query.starts_with("/v2/assets/"))
@@ -1587,7 +1601,8 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         let normalized = path_without_query
             .strip_prefix("/v2")
             .unwrap_or(&path_without_query);
-        let _ = assets::serve_asset(&mut lines, normalized).await;
+        let range_header = request::extract_header_value(&headers, "Range");
+        let _ = assets::serve_asset(&mut lines, normalized, range_header).await;
         return;
     }
 
@@ -1603,7 +1618,11 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
             "HTTP/1.1 301 Moved Permanently\r\nLocation: /{}\r\nContent-Length: 0\r\n\r\n",
             preserve_query
         );
-        let _ = lines.get_mut().write_all(response.as_bytes()).await;
+        // Same invariant as every other route: flush atomically via the
+        // shared helper. The response here is small enough that truncation
+        // is unlikely, but the systematic-fix point is to never hand-roll
+        // write+flush at call sites.
+        let _ = request::write_full(&mut lines, response.as_bytes()).await;
         return;
     }
 
@@ -1762,6 +1781,82 @@ mod tests {
         // built filename (the bundle is content-hashed), so it 404s — the point
         // is that it is NOT gated behind 401 anymore.
         assert_eq!(get_request("/assets/index.js").await, 404);
+    }
+
+    /// Regression pin for the byte-framing bug that surfaced as
+    /// `ERR_CONTENT_LENGTH_MISMATCH` on Android Chrome: every HTTP
+    /// response must flush its body to the wire before the connection
+    /// drops, otherwise the last partial chunk of a multi-buffer body
+    /// sits in `BufStream` and never reaches the client. The fix routes
+    /// every write through `request::write_full` (single write+flush)
+    /// and this test asserts that contract end-to-end.
+    ///
+    /// Asks for the real built `index.html` (the SPA shell), reads the
+    /// full response, parses `Content-Length`, and asserts the body
+    /// byte count matches — that's the exact signal Chrome would see
+    /// as a mismatch.
+    #[tokio::test]
+    async fn response_body_byte_count_matches_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = "GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        // Read until the server closes the connection. Buffer grows as
+        // needed; the SPA shell with the inline shim is small but we
+        // don't hardcode its size — the test asserts the framing
+        // contract rather than the payload.
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break, // EOF
+                Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => break,
+                Err(_) => panic!("server hung mid-response"),
+            }
+        }
+
+        // Split headers from body on the first CRLFCRLF.
+        let split = received
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response missing header terminator");
+        let headers = &received[..split];
+        let body = &received[split + 4..];
+
+        let content_length: usize = headers
+            .split(|&b| b == b'\r' || b == b'\n')
+            .filter_map(|line| {
+                let mut parts = line.splitn(2, |&b| b == b':');
+                let name = parts.next()?;
+                let value = parts.next()?.trim_ascii();
+                if name.eq_ignore_ascii_case(b"Content-Length") {
+                    std::str::from_utf8(value).ok()?.parse().ok()
+                } else {
+                    None
+                }
+            })
+            .next()
+            .expect("Content-Length header missing");
+
+        assert_eq!(
+            body.len(),
+            content_length,
+            "body byte count must equal Content-Length (no truncation)"
+        );
     }
 
     #[tokio::test]
