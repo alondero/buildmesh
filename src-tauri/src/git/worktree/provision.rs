@@ -247,10 +247,14 @@ pub(crate) fn fetch_fork_head(
 /// <ref>.lock`, or — for the fork branch — the config files `git remote add/
 /// set-url` write (issues #652, #680 follow-up #698).
 ///
-/// The lock key is the mesh's host path (`project_root`), matching the key
-/// `spawn_agent_inner` uses for the auto-sync `fetch_origin` call two steps
-/// earlier. Same-key contention serialises; different keys (different meshes)
-/// never wait on each other.
+/// The lock key is the mesh's **DB-stored path** (`project_root`), matching
+/// the key `spawn_agent_inner` uses for the auto-sync `fetch_origin` call
+/// two steps earlier. `sync_lock.rs` documents the key as the form stored on
+/// `agent_nodes.path` — the host-native form for Windows repos, the WSL
+/// form for WSL repos (the bare helpers internally re-map to the host
+/// path via `env::to_host_path`, but the lock key stays as the DB-stored
+/// string). Same-key contention serialises; different keys (different
+/// meshes) never wait on each other.
 ///
 /// Both branches of the underlying match share one helper so `spawn_agent_inner`
 /// has a single, audit-able lock acquisition rather than two inline branches.

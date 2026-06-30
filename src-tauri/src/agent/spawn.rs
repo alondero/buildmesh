@@ -2987,6 +2987,69 @@ mod tests {
         );
     }
 
+    /// Companion to `locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698`
+    /// — exercises the FORK branch (`Some/Some` → `fetch_fork_head`) of the
+    /// wrapper. The same-repo test alone leaves a CI blind spot: a #698
+    /// regression that bypassed the wrapper for fork PRs (e.g. an inlined
+    /// `fetch_fork_head` call in `spawn_agent_inner` to skip the remote-
+    /// config lock acquisition) would still pass the same-repo test and
+    /// every existing #443 fork unit test (those hit the bare helper
+    /// directly, no lock). This test closes the gap by hitting the fork
+    /// arm of the wrapper with the same wall-clock shape; its `git remote
+    /// add` then `git fetch` sequence MUST hold the lock for the holder's
+    /// 500 ms sleep.
+    #[test]
+    fn locked_fetch_pr_head_serializes_fork_branch_via_per_mesh_sync_lock_gh698() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        use std::time::{Duration, Instant};
+
+        let (local, bare_dir, _src) = init_fork_fixture();
+        let bare_dir_str = bare_dir.to_str().unwrap().to_string();
+        let path_key = local.path().to_string_lossy().into_owned();
+
+        // Holder enters the per-mesh lock (same key as the wrapper) and
+        // announces via `entered_flag` before sleeping.
+        let entered_flag = std::sync::Arc::new(AtomicUsize::new(0));
+        let holder_path = path_key.clone();
+        let entered_holder = std::sync::Arc::clone(&entered_flag);
+        let holder = std::thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                entered_holder.store(1, AOrdering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered_flag.load(AOrdering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "holder thread never entered the per-mesh lock"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let start = Instant::now();
+        let _ = locked_fetch_pr_head(
+            &path_key,
+            "feat/443-fork",
+            Some("alice"),
+            Some(&bare_dir_str),
+        );
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "locked_fetch_pr_head (fork branch) did not block on the per-mesh \
+             lock (elapsed = {:?}); issue #698 wrap is missing for the fork path \
+             — concurrent fork-PR spawns would race on .git/FETCH_HEAD, \
+             refs/remotes/fork-<login>/<ref>.lock, AND the git remote add/config \
+             files that fetch_fork_head writes before its fetch",
+            elapsed,
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Reader-thread session-id capture gate (issue #651)
     //
