@@ -87,16 +87,27 @@ for free — every interface the box held at the moment of `accept` was
 reachable — so the refresh is the smallest change that restores that
 reachability for per-interface TLS binds.
 
-**7a. The QR-display fallback shares the bind-path snapshot (issue #630).**
-`commands::mesh::get_local_ip` is the Tauri command the QR modal polls for a
-display fallback when no LAN listener is bound (`status.exposed_interfaces`
-empty). It reads the cached `(IPs, IfaceClass)` from §7 when present — no
-second syscall — and falls back to a fresh `tauri::async_runtime::
-spawn_blocking` walk on cold start. Both paths funnel through the same
-`interface_rank::pick_best_lan` / `rank_with_classes` core, so the bind
-order and the display fallback cannot diverge. `10.0.0.x` consumer-router
-LANs (Apple Airport default, many ISP gateways) surface correctly —
-previously the fallback hard-excluded this range (#291 closed-out).
+**7a. The QR-display fallback shares the bind-path snapshot — Windows-only
+"no second syscall" (issue #630 + #630 review).** `commands::mesh::get_local_ip`
+is the Tauri command the QR modal polls for a display fallback when no LAN
+listener is bound (`status.exposed_interfaces` empty). **On Windows** it
+reads the cached `(IPs, IfaceClass)` from §7 when present — the no-second-
+syscall path; the QR modal opens in <200 ms regardless of how heavy the
+user's VPN/Docker/Hyper-V stack is. **On macOS/Linux** the cached classes map
+is always empty (no `GetAdaptersAddresses` on those platforms), so the QR
+fallback still issues a single `list_afinet_netifas` walk on every modal
+open — the cache short-circuit only saves work on Windows. **On both
+platforms** the fall-through path on cold start (no snapshot yet) is
+`tauri::async_runtime::spawn_blocking` wrapped in `tokio::time::timeout(5s)`
+— load-bearing: the #630 review surfaced that without the timeout, a stuck
+filter driver leaves `spawn_blocking` alive indefinitely, the QR modal's
+`Promise.all` never resolves, and the user sees an indefinite blank modal
+instead of the `.catch(() => '192.168.1.x')` fallback. Both surfaces funnel
+through the same `interface_rank::pick_best_lan` / `rank_with_classes` core,
+so the bind order and the display fallback cannot diverge. `10.0.0.x`
+consumer-router LANs (Apple Airport default, many ISP gateways) surface
+correctly — previously the fallback hard-excluded this range (#291
+closed-out).
 
 **8. OS-level interface events drive the rebind (issue #591).** Even with the
 per-bind refresh in §7, the rebind only fires when something *triggers* it — a

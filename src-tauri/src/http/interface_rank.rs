@@ -50,11 +50,12 @@ pub(crate) struct IfaceClass {
 
 /// Single-walk enumeration: returns (ordered unicast IPs, per-IP routing
 /// classification). Windows walks `GetAdaptersAddresses` once (was two
-/// syscalls per refresh — issue #630). Non-Windows falls back to
-/// `local_ip_address::list_afinet_netifas` and an empty classes map (range
-/// heuristic decides, as before). Honours the
-/// `INTERFACE_SNAPSHOT_OVERRIDE` test seam first so the bind-path tests work
-/// identically on every platform.
+/// syscalls per refresh — issue #630); on failure (filter-driver stall,
+/// permission issue) we fall back to `local_ip_address::list_afinet_netifas`
+/// for the IP list alone so the bind path still works (#630 review).
+/// Non-Windows always uses `list_afinet_netifas` + empty classes map (range
+/// heuristic decides). Honours the `INTERFACE_SNAPSHOT_OVERRIDE` test seam
+/// first so bind-path tests work identically on every platform.
 pub fn enumerate_with_classes() -> (Vec<IpAddr>, HashMap<IpAddr, IfaceClass>) {
     if let Some(override_ips) = super::read_interface_override_for_test() {
         return (override_ips, HashMap::new());
@@ -64,10 +65,13 @@ pub fn enumerate_with_classes() -> (Vec<IpAddr>, HashMap<IpAddr, IfaceClass>) {
         match windows_impl::walk_adapters() {
             Ok(result) => result,
             Err(e) => {
+                // Pre-#630 the bind path always had `list_afinet_netifas` to
+                // fall back on; restoring it keeps LAN exposure alive when
+                // `GetAdaptersAddresses` returns an error or stalls.
                 tracing::warn!(
-                    "GetAdaptersAddresses failed: {e}; ranking by range heuristic only"
+                    "GetAdaptersAddresses failed: {e}; falling back to list_afinet_netifas (range heuristic only)"
                 );
-                (Vec::new(), HashMap::new())
+                super::enumerate_interfaces_with_classes_fallback()
             }
         }
     }
@@ -82,11 +86,14 @@ pub fn enumerate_with_classes() -> (Vec<IpAddr>, HashMap<IpAddr, IfaceClass>) {
 /// heuristic; `192.168/16` > `10/8` with `10.0.0.x` included per #291) —
 /// filtered first to drop addresses that can never be what the phone connects
 /// to: IPv6 (bracketed URL is a phone-browser dead-end), loopback, the
-/// wildcard `0.0.0.0`, and VirtualBox's host-only `192.168.56/24` (never a
-/// shared LAN even when it carries a gateway). The Docker/Hyper-V
-/// `172.16-31/12` range is NOT hard-excluded (consistent with `range_rank` —
-/// only soft-demoted below generic addresses); a host whose only candidate
-/// is a Docker bridge still surfaces that IP rather than returning `None`.
+/// wildcard `0.0.0.0`, IPv4 APIPA link-local (`169.254/16`, DHCP-less /
+/// direct-cable networks — phone can't route), IPv6 link-local (`fe80::/10`,
+/// needs a zone id the phone doesn't share), and VirtualBox's host-only
+/// `192.168.56/24` (never a shared LAN even when it carries a gateway). The
+/// Docker/Hyper-V `172.16-31/12` range is NOT hard-excluded (consistent with
+/// `range_rank` — only soft-demoted below generic addresses); a host whose only
+/// candidate is a Docker bridge still surfaces that IP rather than returning
+/// `None`.
 pub fn pick_best_lan(
     ips: &[IpAddr],
     classes: &HashMap<IpAddr, IfaceClass>,
@@ -100,12 +107,30 @@ pub fn pick_best_lan(
 /// IPs that can never be what the phone connects to regardless of routing
 /// signals. Distinct from `is_vbox_host_only`/`range_rank` which only order:
 /// the bind path includes these (filtered downstream by `is_loopback` outside
-/// `rank_interface_ips`); the QR fallback excludes them at the picker.
+/// `rank_interface_ips`); the QR fallback excludes them at the picker. The
+/// link-local predicate covers IPv4 APIPA (`169.254/16`) AND IPv6 link-local
+/// (`fe80::/10`) — both need a zone/scope id the phone browser cannot supply,
+/// so the QR URL would render but the phone can't route (#630 review).
 fn is_excluded_for_qr(ip: &IpAddr) -> bool {
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_ipv6()
         || is_vbox_host_only(ip)
+        || is_link_local(ip)
+}
+
+/// IPv4 APIPA (`169.254/16`) + IPv6 link-local (`fe80::/10`). Both ranges
+/// require a scope/zone identifier (`%en0`, `%eth0`) the phone browser can't
+/// supply — the QR URL renders but the phone can't route, surfacing as
+/// `ERR_INVALID_ARGUMENT` or `ERR_CONNECTION_REFUSED`.
+fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 169 && o[1] == 254
+        }
+        IpAddr::V6(v6) => v6.segments()[0] == 0xfe80,
+    }
 }
 
 /// Pure ranking core, split out so tests can inject a deterministic classifier
@@ -383,6 +408,34 @@ mod windows_impl {
         }
         Ok((ips, classes))
     }
+
+    /// Pin the FFI flag bits `walk_adapters` ORs together so the next refactor
+    /// can't silently drop `GAA_FLAG_INCLUDE_GATEWAYS` (would demote every
+    /// Windows IP to "no gateway") or add a DNS-server flag (would inflate
+    /// the IP set with resolver addresses). The exact constant values are
+    /// also pinned (Win32 header values) so this test catches a typo
+    /// (#630 review).
+    #[cfg(test)]
+    #[test]
+    fn walk_adapters_flag_bits_pin() {
+        const EXPECTED: ULONG = GAA_FLAG_SKIP_ANYCAST
+            | GAA_FLAG_SKIP_MULTICAST
+            | GAA_FLAG_SKIP_DNS_SERVER
+            | GAA_FLAG_INCLUDE_GATEWAYS;
+        // Composition: every flag present, no extra bits set.
+        assert_eq!(
+            EXPECTED,
+            GAA_FLAG_SKIP_ANYCAST
+                | GAA_FLAG_SKIP_MULTICAST
+                | GAA_FLAG_SKIP_DNS_SERVER
+                | GAA_FLAG_INCLUDE_GATEWAYS
+        );
+        // Header constants (win32 iptypes.h):
+        assert_eq!(GAA_FLAG_SKIP_ANYCAST, 0x0002);
+        assert_eq!(GAA_FLAG_SKIP_MULTICAST, 0x0004);
+        assert_eq!(GAA_FLAG_SKIP_DNS_SERVER, 0x0008);
+        assert_eq!(GAA_FLAG_INCLUDE_GATEWAYS, 0x0080);
+    }
 }
 
 #[cfg(test)]
@@ -579,11 +632,36 @@ mod tests {
         assert_eq!(pick_best_lan(&ips, &HashMap::new()), None);
     }
 
+    /// IPv4 APIPA (`169.254/16`) and IPv6 link-local (`fe80::/10`) both need
+    /// a zone/scope id the phone browser can't supply. The QR URL would render
+    /// but the phone can't route (`ERR_INVALID_ARGUMENT`). Pin that the QR
+    /// filter drops both ranges (#630 review).
+    #[test]
+    fn pick_best_lan_hard_excludes_link_local() {
+        // IPv4 APIPA — common on DHCP-less / direct-cable hosts.
+        let apipa_only = vec![ip("169.254.169.254")];
+        assert_eq!(pick_best_lan(&apipa_only, &HashMap::new()), None);
+        // IPv6 link-local. The phone can't form a URL with `%en0` scope.
+        let v6_ll_only = vec![ip("fe80::1")];
+        assert_eq!(pick_best_lan(&v6_ll_only, &HashMap::new()), None);
+        // Mixed with a real candidate: link-local doesn't outrank the real
+        // one even when it's enumerated first.
+        let mixed = vec![ip("169.254.1.1"), ip("192.168.1.10")];
+        assert_eq!(
+            pick_best_lan(&mixed, &HashMap::new()),
+            Some(ip("192.168.1.10"))
+        );
+    }
+
     /// Invariant that pins the consolidation: on a candidate set where every
     /// IP is QR-eligible, `pick_best_lan` is the head of the same ranked list
     /// the bind path consumes. The two surfaces can then differ only on
-    /// hard-excluded cases (loopback / wildcard / VBox) — which the bind path
-    /// handles separately, downstream of `rank_interface_ips`.
+    /// hard-excluded cases — which the bind path handles separately,
+    /// downstream of `rank_interface_ips`.
+    ///
+    /// Uses `is_excluded_for_qr` directly rather than inlining its predicate,
+    /// so a future addition to the helper (e.g. link-local in #630 review)
+    /// is reflected in this invariant automatically (#630 review).
     #[test]
     fn pick_best_lan_equals_head_of_ranked() {
         let ips = vec![
@@ -597,21 +675,15 @@ mod tests {
             ("172.20.0.1", false, false),
         ]);
         let picked = pick_best_lan(&ips, &classes);
-        // Filter first (none of these are excluded), then rank — the eligible
-        // head is the gatewayed Ethernet.
+        // Filter using the SAME helper the production picker uses — no
+        // inline duplication that could drift from the helper.
         let filtered: Vec<IpAddr> = ips
             .iter()
             .copied()
-            .filter(|ip| ip.is_loopback()
-                || ip.is_unspecified()
-                || ip.is_ipv6()
-                || matches!(ip, IpAddr::V4(v4) if {
-                    let o = v4.octets();
-                    o[0] == 192 && o[1] == 168 && o[2] == 56
-                }))
+            .filter(|ip| !is_excluded_for_qr(ip))
             .collect();
-        assert!(filtered.is_empty(), "sanity: no IP is excluded in this fixture");
-        let head = rank_with_classes(ips, &classes).into_iter().next();
+        assert!(!filtered.is_empty(), "sanity: at least the Ethernet IP survives the filter");
+        let head = rank_with_classes(filtered, &classes).into_iter().next();
         assert_eq!(picked, head);
         assert_eq!(picked, Some(ip("192.168.1.10")));
     }

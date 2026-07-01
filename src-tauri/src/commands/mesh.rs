@@ -164,16 +164,42 @@ pub async fn get_root_token() -> Result<String, String> {
 /// reuse the cached `(IPs, IfaceClass)` so we don't pay for a second
 /// `GetAdaptersAddresses` walk (issue #630). On cold start / no-snapshot, we
 /// walk fresh via `tauri::async_runtime::spawn_blocking` — a stuck
-/// `GetAdaptersAddresses` pins one blocking-pool thread instead of starving the
-/// Tokio worker pool (matches the convention in `http::interface_watcher`).
+/// `GetAdaptersAddresses` pins one blocking-pool thread (cheap, large pool)
+/// instead of starving the Tokio worker pool (matches the convention in
+/// `http::interface_watcher`). The `tokio::time::timeout` is reintroduced as a
+/// load-bearing safety net (#630 review): without it, a stuck adapter driver
+/// can keep `spawn_blocking` alive indefinitely, the QR modal's `Promise.all`
+/// never resolves, and the user sees an indefinite blank modal rather than the
+/// graceful `.catch(() => '192.168.1.x')` fallback. 5 s matches the historical
+/// band-aid (PR #104 / commit 410cee8) — long enough for a real adapter walk,
+/// short enough that a stuck filter driver produces a usable UX degradation.
 #[command]
 pub async fn get_local_ip() -> Result<String, String> {
     let (ips, classes) = if let Some(cached) = crate::http::local_classes_if_populated() {
         (crate::http::local_interface_ips(), cached)
     } else {
-        tauri::async_runtime::spawn_blocking(crate::http::interface_rank::enumerate_with_classes)
-            .await
-            .map_err(|e| format!("interface enumeration task panicked: {}", e))?
+        // `tokio::time::timeout` + `spawn_blocking` together: the blocking
+        // pool's stuck-thread cost is bounded by 5 s, after which the future
+        // returns `Err` and the wrapping `.catch(() => '192.168.1.x')` in
+        // RemoteAccessModal renders a placeholder rather than hanging. The
+        // blocking thread itself may stay stuck until its driver recovers
+        // (out of our hands) but the user's Tauri promise resolves.
+        let walk = tauri::async_runtime::spawn_blocking(
+            crate::http::interface_rank::enumerate_with_classes,
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(5), walk).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                return Err(format!("interface enumeration task panicked: {}", e));
+            }
+            Err(_elapsed) => {
+                return Err(
+                    "timeout enumerating interfaces (5s exceeded); \
+                     a stuck adapter driver may be blocking GetAdaptersAddresses"
+                        .to_string(),
+                );
+            }
+        }
     };
     crate::http::interface_rank::pick_best_lan(&ips, &classes)
         .map(|ip| ip.to_string())
