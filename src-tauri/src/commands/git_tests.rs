@@ -692,7 +692,7 @@ mod tests {
     /// first mesh) + 1 per TTL expiry, instead of 1 per mesh.
     ///
     /// The cache must live in `get_mesh_git_static`, NOT in
-    /// `commands::pr::check_gh_auth` itself: that command is also called by
+    /// `commands::github::check_gh_auth` itself: that command is also called by
     /// the mobile `/git/auth` HTTP route (`http/routes/git.rs:112`) and by
     /// `MeshPropertiesTab.tsx` when the user clicks "re-check", and both
     /// want a fresh value.
