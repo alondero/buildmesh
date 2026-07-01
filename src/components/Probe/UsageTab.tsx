@@ -32,6 +32,7 @@ import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { UsagePanel } from '../AppSettings/UsageRender';
+import { LoadingState } from '../shared/Spinner';
 
 export function UsageTab() {
   const [meters, setMeters] = useState<ProviderMeters[] | null>(null);
@@ -81,8 +82,8 @@ export function UsageTab() {
   // configured".
   if (meters === null) {
     return (
-      <div className="flex items-center justify-center h-full p-6 text-text-muted">
-        <span className="text-sm">Loading usage…</span>
+      <div className="flex items-center justify-center h-full p-6">
+        <LoadingState label="Loading usage…" />
       </div>
     );
   }

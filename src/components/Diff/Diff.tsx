@@ -26,7 +26,7 @@ const STATUS_META: Record<FileDiffStatus, StatusMeta> = {
   added: { letter: 'A', label: 'Added', color: 'text-accent-green' },
   modified: { letter: 'M', label: 'Modified', color: 'text-accent-amber' },
   deleted: { letter: 'D', label: 'Deleted', color: 'text-accent-red' },
-  renamed: { letter: 'R', label: 'Renamed', color: 'text-purple-400' },
+  renamed: { letter: 'R', label: 'Renamed', color: 'text-accent-violet' },
   untracked: { letter: '?', label: 'Untracked', color: 'text-text-muted' },
 };
 
@@ -127,7 +127,7 @@ export function FileDiffCard({
         onClick={() => setOpen((o) => !o)}
         className="sticky top-0 z-10 w-full flex items-center gap-2 px-2 py-1.5 bg-bg-surface hover:bg-bg-card transition-colors text-left border-b border-border-subtle"
       >
-        <span className="text-text-muted w-3 text-center text-[10px] flex-shrink-0">
+        <span className="text-text-muted w-3 text-center text-2xs flex-shrink-0">
           {open ? '▼' : '▶'}
         </span>
         <span
@@ -136,7 +136,7 @@ export function FileDiffCard({
         >
           {meta.letter}
         </span>
-        <span className="flex-1 truncate font-mono text-[11px] min-w-0">
+        <span className="flex-1 truncate font-mono text-xs min-w-0">
           {file.old_path && file.old_path !== file.path && (
             <span className="text-text-muted">
               {file.old_path} <span aria-hidden="true">→</span>{' '}
@@ -146,12 +146,12 @@ export function FileDiffCard({
           <span className="text-text-primary">{name}</span>
         </span>
         {file.additions > 0 && (
-          <span className="text-accent-green flex-shrink-0 font-mono text-[11px]">
+          <span className="text-accent-green flex-shrink-0 font-mono text-xs">
             +{file.additions}
           </span>
         )}
         {file.deletions > 0 && (
-          <span className="text-accent-red flex-shrink-0 font-mono text-[11px]">
+          <span className="text-accent-red flex-shrink-0 font-mono text-xs">
             -{file.deletions}
           </span>
         )}
