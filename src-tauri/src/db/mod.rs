@@ -27,6 +27,7 @@ mod agent_node_tests;
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -2693,45 +2694,189 @@ pub(crate) fn list_warm_worktrees_to_reconcile_inner(
 /// won't pick it up again (the `status='available'` filter blocks it) and
 /// the missing-dir scan (`list_warm_worktrees_to_reconcile` deliberately
 /// excludes `claimed` rows because their directory may back a live node)
-/// won't prune it either. This function closes that hole by pruning EVERY
-/// `claimed` row unconditionally — the only safe thing to do is drop the
-/// bookkeeping row without touching the filesystem (the dir is either an
-/// adopted live agent's worktree, OR a crashed-spawn orphan that the user
-/// can clean up by hand; either way the GC must not risk force-removing
-/// a working tree).
+/// won't prune it either. This function closes that hole.
 ///
-/// No age guard: a fresh `claimed` row is just as stuck as an old one if
-/// the `forget_after_spawn` delete fails. Called once from
+/// **#697 algorithm — per-row classification against the live session
+/// snapshot it receives (production: `PROCESS_REGISTRY.session_ids()`):**
+///
+/// 1. **Adopted** — a live session exists on the warm row's mesh. The
+///    spawn that claimed this row necessarily attached to that mesh, so
+///    a live session there is sufficient evidence to refuse teardown.
+///    Drop the row, **preserve** the directory. We deliberately do NOT
+///    gate on `agent_nodes.worktree_name` matching `preassigned_name`
+///    here — the #642.2 revert showed that gate fails open in the silent-
+///    UPDATE-failure corner case (`set_agent_node_worktree_name` errored,
+///    `agent_nodes.worktree_name` stays at the throwaway stage-1 slug,
+///    GC misclassifies the row as orphan and tears down the live CWD).
+///
+/// 2. **Crashed-spawn orphan** — no live session on the mesh AND the
+///    directory exists on disk. The spawn crashed mid-claim without
+///    `forget_after_spawn` firing (so the row is stuck at `claimed` and
+///    the directory is on disk with no agent to adopt it). Tear down the
+///    git worktree metadata via `git::worktree::remove_one_worktree`,
+///    then drop the row. This is the orphan leak #697 closes.
+///
+/// 3. **Mid-move / pre-missing** — no live session AND no directory on
+///    disk. The Issue/PR spawn moves the directory onto a `gh{N}-`/`pr{N}-`
+///    path (#612) before `forget_after_spawn` fires; if the spawn crashes
+///    between the move and the row drop, the original pool path is empty
+///    and the bookkeeping row is safe to drop with no fs action. The
+///    pre-#697 row-only GC also handled this case (and still does here).
+///
+/// **Why "any live session on the mesh" rather than "live session whose
+/// derived worktree path == warm.path":** the strict path-equality check
+/// is the algorithm the issue body sketches, but it inherits the #642.2
+/// data-loss bug — when `agent_nodes.worktree_name` is stale, the derived
+/// path doesn't match the warm row's `path`, the strict check classifies
+/// the row as orphan, and the GC tears down the LIVE agent's CWD. The
+/// `any session on this mesh` predicate is a strictly looser (and
+/// therefore safer) sufficient condition. The trade-off is more directory
+/// leaks if a spawn is mid-flight on a different row of the same mesh
+/// when GC runs — bounded by `claimed` rows per mesh, no data loss.
+///
+/// **No age guard:** a fresh `claimed` row is just as stuck as an old one
+/// if `forget_after_spawn` delete fails. Called once from
 /// `reconcile_on_startup` (step 1a, before the missing-dir scan).
-///
-/// **Issue #642.2 (REVERTED — see PR description):** a previous draft of
-/// this function classified each `claimed` row against `agent_nodes`
-/// (`worktree_name = preassigned_name`) and tore down dirs that looked
-/// orphan. The check is unsafe in the corner case where BOTH
-/// `set_agent_node_worktree_name` (best-effort in spawn.rs:1461) AND
-/// `forget_after_spawn` (best-effort in warm_pool.rs:320) silently fail
-/// — the agent's `worktree_name` stays at the throwaway stage-1 slug, the
-/// adoption check misses, the GC classifies the row as orphan, and
-/// `remove_one_worktree` destroys the LIVE agent's working tree. The
-/// pre-#642 behaviour is preserved: drop the row only, leave any on-disk
-/// directory alone. The orphan-dir leak from a crashed mid-claim spawn
-/// (a few `.claude/worktrees/<slug>/` dirs that never get cleaned up)
-/// is the trade-off; data loss is the alternative. A robust fix needs
-/// the `PROCESS_REGISTRY` lookup (live session check) rather than the
-/// DB-only check, which is out of scope for this PR.
 pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
+    // Snapshot live sessions ONCE before taking the DB lock. The call is
+    // cheap (a `Vec` clone over the registry's session-id set) and the
+    // snapshot is what the inner function uses to classify rows. Holding
+    // the snapshot outside the lock closes a tiny but real race: a spawn
+    // that register-then-dies between our snapshot and our iteration
+    // would otherwise intermittently flip a row from "adopted" to
+    // "orphan" mid-pass.
+    let live_session_ids = crate::agent::process::PROCESS_REGISTRY.session_ids();
     let db = get().lock().unwrap();
-    delete_orphaned_claimed_warm_worktrees_inner(&db)
+    delete_orphaned_claimed_warm_worktrees_inner(&db, &live_session_ids)
 }
 
 pub(crate) fn delete_orphaned_claimed_warm_worktrees_inner(
     conn: &Connection,
+    live_session_ids: &[i64],
 ) -> SqlResult<usize> {
-    let n = conn.execute(
-        "DELETE FROM warm_worktrees WHERE status = 'claimed'",
-        [],
+    // Read the full set of claimed rows up front, then drop the prepared
+    // statement so the loop below doesn't keep a statement handle alive
+    // across the `remove_one_worktree` shell-out (which can take seconds
+    // on a slow disk and would otherwise hold an `&mut Connection`
+    // borrow that blocks the agent_node lookup we issue against the same
+    // connection).
+    let mut stmt = conn.prepare(
+        "SELECT id, mesh_id, path FROM warm_worktrees WHERE status = 'claimed'",
     )?;
-    Ok(n)
+    let claimed: Vec<(i64, i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    if claimed.is_empty() {
+        return Ok(0);
+    }
+
+    // Which meshes currently have a live session? Build the lookup set
+    // from PROCESS_REGISTRY's session-id snapshot + agent_nodes.mesh_id.
+    // Returns `None` if the agent_nodes query errored (rather than an
+    // empty set) — an empty set would let the loop below tear down a
+    // live agent's CWD because we "couldn't see" any live sessions. With
+    // `None`, the loop falls back to row-only behaviour (the same shape
+    // as the pre-#697 GC: drop rows, leave the filesystem alone).
+    let live_mesh_ids = match live_mesh_ids_for(conn, live_session_ids) {
+        Some(set) => Some(set),
+        None => {
+            tracing::warn!(
+                "delete_orphaned_claimed_warm_worktrees_inner: could not resolve \
+                 live_mesh_ids ({} live session ids in snapshot); falling back to \
+                 row-only behaviour (no filesystem teardown) to be safe",
+                live_session_ids.len()
+            );
+            None
+        }
+    };
+
+    let mut deleted = 0;
+    for (id, mesh_id, path) in claimed {
+        let treat_as_orphan = match &live_mesh_ids {
+            // Couldn't query live sessions → be conservative. Even though
+            // there almost certainly is no live agent (startup reconcile
+            // runs before user-facing spawn), a transient DB error is not
+            // an excuse to destroy a working tree. Drop the row but leave
+            // the dir intact — the next reconcile (with a recovered DB)
+            // can retry the teardown.
+            None => false,
+            Some(live) => !live.contains(&mesh_id),
+        };
+        if treat_as_orphan {
+            // Branch 2: crashed-spawn orphan. Best-effort: a partial
+            // git-worktree state is acceptable to leak if the call fails
+            // (the next reconcile pass will retry — see #610 / #642.3
+            // for the same "best-effort" pattern). We never block the
+            // row drop on a filesystem failure: a stuck orphan row is
+            // strictly less harmful than not dropping it.
+            //
+            // Two-step teardown: `remove_one_worktree` is the polite
+            // path that clears `git worktree remove --force` metadata;
+            // if it returns Err (test fixture was a plain tempdir, OR
+            // production hit a locked handle / non-worktree state), the
+            // `remove_dir_all` fallback guarantees the on-disk leak
+            // actually closes. Order matters — `remove_one_worktree`
+            // first so a real git worktree loses its bookkeeping before
+            // the dir goes (which is what unblocks a future
+            // `git worktree add` for the same slug).
+            if crate::git::worktree::remove_one_worktree(&path).is_err()
+                && std::path::Path::new(&path).exists()
+            {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+        // Branch 1 (live session on this mesh) and Branch 3 (no dir on
+        // disk) both fall through to a row-only delete. Same for the
+        // conservative-fallback `treat_as_orphan = false` case.
+        conn.execute(
+            "DELETE FROM warm_worktrees WHERE id = ?1",
+            params![id],
+        )?;
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
+/// Resolve `live_session_ids` (`PROCESS_REGISTRY.session_ids()` in
+/// production) into the set of `mesh_id`s whose agents are currently live.
+/// Returns `None` on any query error so the caller can choose the safe
+/// fallback (row-only, no filesystem action). Returning an empty set
+/// here would be ambiguous — "no live sessions" and "I couldn't tell"
+/// are different facts and the caller's teardown decision depends on
+/// which one is true.
+///
+/// `SELECT DISTINCT mesh_id FROM agent_nodes WHERE id IN (...)` is one
+/// round-trip regardless of how many sessions are live. SQLite's variable
+/// cap (999 by default) is generous compared to realistic session
+/// counts; a future scale-up switch to a temp-table join would survive
+/// this limit transparently.
+fn live_mesh_ids_for(
+    conn: &Connection,
+    live_session_ids: &[i64],
+) -> Option<HashSet<i64>> {
+    if live_session_ids.is_empty() {
+        // An empty PROCESS_REGISTRY snapshot IS a known fact (not an
+        // error): no agents are currently running. Returning `Some(empty)`
+        // here is what tells the caller it's safe to consider every
+        // claimed row a candidate for orphan teardown.
+        return Some(HashSet::new());
+    }
+    let placeholders = vec!["?"; live_session_ids.len()].join(",");
+    let sql = format!(
+        "SELECT DISTINCT mesh_id FROM agent_nodes WHERE id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql).ok()?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(live_session_ids.iter()),
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()?;
+    let mesh_ids: HashSet<i64> = rows.filter_map(Result::ok).collect();
+    Some(mesh_ids)
 }
 
 /// How many `available` warm entries a mesh currently has. The pool worker
