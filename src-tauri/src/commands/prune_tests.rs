@@ -1239,3 +1239,117 @@ async fn prune_remote_tracking_returns_err_on_non_repo_path() {
         result
     );
 }
+
+// ── locked_prune_remote_tracking — per-Mesh sync_lock wrap (issue #709) ──
+//
+// `locked_prune_remote_tracking` must run inside
+// `services::sync_lock::with_mesh_sync_lock` keyed on `&worktree_path`
+// (the worktree's own path), so two concurrent prune-remote-tracking
+// clicks on the same worktree can't collide on `.git/FETCH_HEAD` /
+// `refs/remotes/<remote>/*.lock`. Without the wrap, the losing fetch
+// fails with "another git process" and the user sees a stale prune
+// result.
+//
+// Mirrors the wall-clock bound shape from
+// `git_sync_serializes_via_per_mesh_sync_lock_gh680`
+// (commands/git_tests.rs) and
+// `locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698`
+// (agent/spawn.rs). Holder enters the per-mesh lock and announces via
+// an AtomicUsize flag, then sleeps. Main thread spin-waits on the flag
+// (deterministic — no `thread::sleep` race), then times the locked
+// helper. With the wrap, the helper blocks ~450 ms waiting for the
+// holder; without, it runs concurrently and finishes in tens of ms.
+//
+// Why wall-clock (not `fetch_add`): the per-Mesh lock is correctly
+// implemented (issue #652 + `services::sync_lock` unit tests prove it),
+// so it *prevents* simultaneous critical-section entries — `max_concurrent
+// == 1` even on a working lock. The only signal that this helper shares
+// the same key is that it waits for the holder to release the lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn locked_prune_remote_tracking_serializes_via_per_mesh_sync_lock_gh709() {
+    use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    // Set up a minimal bare-remote + local-clone so `git fetch --prune`
+    // has a valid remote to talk to. Without an upstream, the prune
+    // fails before it ever hits the lock — we want the helper to reach
+    // the actual `git fetch --prune` shell-out so the wrap is the only
+    // thing keeping it serialised.
+    let bare = TempDir::new();
+    fs::create_dir_all(bare.path()).unwrap();
+    git2::Repository::init_bare(bare.path()).unwrap();
+
+    let seed = TempDir::new();
+    let _seed_repo = init_repo(seed.path());
+    run_git(seed.path(), &["branch", "-M", "main"]);
+    run_git(
+        seed.path(),
+        &["remote", "add", "origin", bare.path().to_str().unwrap()],
+    );
+    run_git(seed.path(), &["push", "-u", "origin", "main"]);
+
+    let local = TempDir::new();
+    run_git_clone(bare.path().to_str().unwrap(), local.path().to_str().unwrap());
+
+    // The lock key is the worktree's own path (NOT the parent mesh's
+    // path), matching the helper's signature. The holder thread keys
+    // on the same string so the test proves the helper uses this
+    // exact key — a regression that keyed on the parent mesh's path
+    // would let the holder and the helper race on different lock
+    // entries and the elapsed-time bound would slip to tens of ms.
+    let path_key = local.path_str();
+
+    // Holder enters the per-mesh lock and announces entry via
+    // `entered_flag` before sleeping, so the main thread can
+    // deterministically start timing only once the holder holds the
+    // lock (no `thread::sleep` race — CI jitter can't make
+    // `locked_prune_remote_tracking` sneak in first).
+    let entered_flag = std::sync::Arc::new(AtomicUsize::new(0));
+    let holder_path = path_key.clone();
+    let entered_holder = std::sync::Arc::clone(&entered_flag);
+    let holder = thread::spawn(move || {
+        crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+            entered_holder.store(1, AOrdering::SeqCst);
+            thread::sleep(Duration::from_millis(500));
+        });
+    });
+
+    // Spin-wait (bounded) for the holder to actually be inside the
+    // critical section. Cap at 2s so a hung holder surfaces as a test
+    // panic, not a forever-wait.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while entered_flag.load(AOrdering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "holder thread never entered the per-mesh lock"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    // Time `locked_prune_remote_tracking` (the new helper, NOT the
+    // Tauri command — we want to prove the helper's wrap directly so
+    // the test continues to pin the wrap if the command surface
+    // changes). The fetch is best-effort against a clean clone, so
+    // we don't care about the return value — only that the helper
+    // waited for the holder.
+    let start = Instant::now();
+    let _ = super::locked_prune_remote_tracking(&path_key);
+    let elapsed = start.elapsed();
+
+    holder.join().unwrap();
+
+    // With wrap: elapsed >= ~450 ms (`locked_prune_remote_tracking`
+    // waited for the holder). Without wrap: elapsed = tens of ms
+    // (the fetch ran concurrently with the holder's sleep). Bound is
+    // 400 ms — leaves 100 ms of slack for setup overhead and CI
+    // jitter on a busy box. Matches the slack used by the #680 and
+    // #698 sibling tests.
+    assert!(
+        elapsed >= Duration::from_millis(400),
+        "locked_prune_remote_tracking did not block on the per-mesh lock \
+         (elapsed = {:?}); issue #709 wrap is missing — concurrent prune \
+         clicks on the same worktree would race on .git/FETCH_HEAD",
+        elapsed,
+    );
+}
