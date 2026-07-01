@@ -489,6 +489,7 @@ fn register_agent(
     reader_alive: Arc<AtomicBool>,
     job: Option<crate::process_util::JobHandle>,
     spawn_start: std::time::Instant,
+    mesh_id: i64,
 ) {
     PROCESS_REGISTRY.insert(
         session_id,
@@ -513,6 +514,12 @@ fn register_agent(
             // inner Arc is needed (the reader thread doesn't share this
             // flag).
             first_user_input_logged: AtomicBool::new(false),
+            // Issue #634: stored at registration so `write_bytes` and the
+            // PTY read loop can record per-mesh activity without a DB
+            // lookup on every chunk. `mesh_id` was already resolved at
+            // `spawn_agent_inner:797` via `db::get_mesh_by_path(&node.path)`
+            // — the value is in scope here.
+            mesh_id,
         },
     );
 }
@@ -572,6 +579,7 @@ fn start_reader(
     reader_alive: Arc<AtomicBool>,
     is_plain_terminal: bool,
     spawn_start: std::time::Instant,
+    mesh_id: i64,
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -596,11 +604,15 @@ fn start_reader(
                     spawn_start.elapsed().as_millis()
                 );
             }
-            // Mark the app as active so the background warm-pool worker holds
-            // off its idle refills while an agent is actively producing output
-            // (issue #613 AC2) — a `git worktree add` must not compete with a
-            // live agent's I/O.
-            crate::services::pool_worker::note_activity();
+            // Mark THIS MESH as active so the background warm-pool worker
+            // holds off its idle refills for this mesh's pool while an agent
+            // is actively producing output (issue #613 AC2; issue #634 scopes
+            // the activity per-mesh so a chatty agent on mesh A doesn't
+            // starve mesh B's pool). `mesh_id` is captured from the spawn
+            // context at thread start — the closure outlives the agent's
+            // registry entry, so reading it from `PROCESS_REGISTRY` inside
+            // the closure would race with `kill_session`'s `remove`.
+            crate::services::pool_worker::note_activity_for_mesh(mesh_id);
 
             let text = String::from_utf8_lossy(data);
             crate::session_naming::on_output(session_id, &text);
@@ -999,11 +1011,10 @@ pub async fn spawn_agent_inner(
             // post-spawn maintenance task (at the end of this fn) run the
             // freshness pass, so refresh and refill share one fill-lock
             // acquisition instead of racing on two threads (issue #613 review).
-            ref_advanced_for_pool = matches!(
-                &sync_result,
-                Ok(crate::git::sync::FetchOutcome::Synced { .. })
-                    | Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. })
-            );
+            ref_advanced_for_pool = sync_result
+                .as_ref()
+                .map(|o| o.advanced_ref())
+                .unwrap_or(false);
             emit_sync_outcome_event(app, session_id, &node.path, sync_result);
 
             // Worktree adoption for PR-spawned nodes (issue #420, extended
@@ -1481,7 +1492,7 @@ pub async fn spawn_agent_inner(
         }
     }
     diag.checkpoint("before_register_agent");
-    register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start());
+    register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start(), mesh_id);
     tracing::info!("spawn_agent_inner: stored agent process");
     diag.checkpoint("after_register_agent");
 
@@ -1515,6 +1526,7 @@ pub async fn spawn_agent_inner(
         reader_alive,
         adapter.is_plain_terminal(),
         spawn_start,
+        mesh_id,
     );
 
     // 13b. Start natural-exit watcher (issue #287). On Windows ConPTY

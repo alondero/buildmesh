@@ -576,3 +576,60 @@ fn fetch_origin_skips_when_base_ref_remote_missing() {
         "missing base_ref remote must produce SkippedNoRemote, not an error toast"
     );
 }
+
+// ── Issue #634 — advanced_ref() predicate is single-sourced ────────────────
+//
+// The "did the fetch actually pull new commits" predicate is used by two
+// callers (the spawn path's `ref_advanced_for_pool` flag and the manual
+// `git_sync` command's freshness-pass trigger) and used to be a duplicated
+// `matches!(..., Synced | FetchedButDiverged)` at each site. After #634 the
+// predicate lives on the enums themselves — these tests pin the truth table
+// so a future variant addition forces an explicit `advanced_ref` decision
+// rather than silently miscategorising.
+
+/// Pin the `FetchOutcome::advanced_ref()` truth table. Only the two variants
+/// that fetched new commits return `true`; `UpToDate` and the two skip
+/// variants return `false`. A future variant addition must be added here
+/// explicitly — the compiler won't catch a missed case in a `matches!` arm
+/// at a remote call site, but it will catch a missed `match` arm in this
+/// exhaustive test.
+#[test]
+fn fetch_outcome_advanced_ref_table() {
+    use FetchOutcome::*;
+    assert!(Synced { new_commits: 1 }.advanced_ref());
+    assert!(FetchedButDiverged {
+        new_commits: 1,
+        reason: "x".into()
+    }
+    .advanced_ref());
+    assert!(!UpToDate.advanced_ref());
+    assert!(!SkippedDirty.advanced_ref());
+    assert!(!SkippedNoRemote.advanced_ref());
+}
+
+/// Pin the `SyncOutcome::advanced_ref()` truth table. `pub(crate)` — the
+/// manual `git_sync` Tauri command is the only consumer. The two
+/// error-shaped variants (`FetchFailed`, `RepoUnusable`) must return
+/// `false` — a failed fetch did not advance the ref, and kicking a
+/// freshness pass on a broken repo would just waste git shell-outs.
+#[test]
+fn sync_outcome_advanced_ref_table() {
+    use crate::git::sync::SyncOutcome::*;
+    assert!(Synced { new_commits: 1 }.advanced_ref());
+    assert!(FetchedButDiverged {
+        new_commits: 1,
+        reason: "x".into()
+    }
+    .advanced_ref());
+    assert!(!UpToDate.advanced_ref());
+    assert!(!SkippedDirty.advanced_ref());
+    assert!(!SkippedNoRemote.advanced_ref());
+    assert!(!FetchFailed {
+        reason: "x".into()
+    }
+    .advanced_ref());
+    assert!(!RepoUnusable {
+        reason: "x".into()
+    }
+    .advanced_ref());
+}

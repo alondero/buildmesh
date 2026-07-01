@@ -381,12 +381,11 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     // Kick a background freshness pass (serialized behind the pool fill lock)
     // to `git reset --hard` them onto the new commit. Fired only when new
     // commits actually arrived; `UpToDate` / skipped means nothing moved.
-    let ref_advanced = matches!(
-        &outcome,
-        crate::git::sync::SyncOutcome::Synced { .. }
-            | crate::git::sync::SyncOutcome::FetchedButDiverged { .. }
-    );
-    if ref_advanced {
+    // `SyncOutcome::advanced_ref()` is the single-sourced predicate that
+    // matches the spawn-time `FetchOutcome::advanced_ref()` — both kept in
+    // lockstep on `git::sync::SyncOutcome` / `git::sync::FetchOutcome`
+    // (issue #634).
+    if outcome.advanced_ref() {
         if let Ok(mesh) = crate::db::get_mesh_by_path(&path) {
             let mesh_id = mesh.id;
             std::thread::spawn(move || {
