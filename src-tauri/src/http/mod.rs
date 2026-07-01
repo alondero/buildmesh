@@ -768,6 +768,18 @@ fn percent_decode(s: &str) -> String {
 static INTERFACE_SNAPSHOT_OVERRIDE: std::sync::Mutex<Option<Vec<IpAddr>>> =
     std::sync::Mutex::new(None);
 
+/// Read the test seam at the entry points that need it. Returns the
+/// override when a test has installed one via `set_interface_enumerator_for_testing`,
+/// or `None` in production builds (the static starts as `None` and is never
+/// written outside tests). `pub(crate)` so `interface_rank::enumerate_with_classes`
+/// can short-circuit on the same flag.
+pub(crate) fn read_interface_override_for_test() -> Option<Vec<IpAddr>> {
+    INTERFACE_SNAPSHOT_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
+
 /// RAII guard returned by `set_interface_enumerator_for_testing`. Drops restore
 /// the override to the value it had before the guard was created, so test
 /// state never leaks to a later test that doesn't install its own override.
@@ -804,7 +816,10 @@ pub(crate) fn set_interface_enumerator_for_testing(
 /// Enumerate the host's interface IPs. Honours a test override if set; otherwise
 /// reads the system via `local_ip_address::list_afinet_netifas`. Failures log
 /// a warning and return an empty list — the bind path then sees no LAN
-/// interfaces, which is a safe degrade (loopback still binds).
+/// interfaces, which is a safe degrade (loopback still binds). Non-Windows
+/// only: on Windows, `interface_rank::enumerate_with_classes` goes straight
+/// to `GetAdaptersAddresses` and skips this helper entirely (issue #630).
+#[cfg(not(target_os = "windows"))]
 fn enumerate_interfaces() -> Vec<IpAddr> {
     let override_value = INTERFACE_SNAPSHOT_OVERRIDE
         .lock()
@@ -832,25 +847,65 @@ fn local_ips_lock() -> &'static parking_lot::RwLock<Vec<IpAddr>> {
     LOCAL_IPS.get_or_init(|| parking_lot::RwLock::new(Vec::new()))
 }
 
+/// The cached per-IP routing classification snapshot. Paired with `LOCAL_IPS`
+/// so the QR-display fallback (`commands::mesh::get_local_ip`) can short-circuit
+/// on a prior bind refresh — no second `GetAdaptersAddresses` syscall when the
+/// bind path has already walked the adapter table (issue #630).
+static LOCAL_CLASSES: OnceLock<parking_lot::RwLock<HashMap<IpAddr, interface_rank::IfaceClass>>> =
+    OnceLock::new();
+
+fn local_classes_lock(
+) -> &'static parking_lot::RwLock<HashMap<IpAddr, interface_rank::IfaceClass>> {
+    LOCAL_CLASSES.get_or_init(|| parking_lot::RwLock::new(HashMap::new()))
+}
+
+/// Reader paired with `local_interface_ips`. Returns `Some(map)` once
+/// `refresh_local_interface_ips` has populated the cache, `None` before.
+/// Cloned under read lock so the writer (`refresh_local_interface_ips`) never
+/// blocks the QR-fallback hot path.
+pub(crate) fn local_classes_if_populated()
+    -> Option<HashMap<IpAddr, interface_rank::IfaceClass>>
+{
+    let snapshot = local_classes_lock().read();
+    if snapshot.is_empty() {
+        None
+    } else {
+        Some(snapshot.clone())
+    }
+}
+
 /// Enumerate the host's interface IPs and replace the cached snapshot. Returns
 /// the freshly-enumerated list for immediate use by the caller (the bind path).
 /// A VPN or Wi-Fi adapter that appears AFTER the first enumeration is picked up
 /// the next time this runs — issue #585 lifts the `OnceLock` cache limitation.
 fn refresh_local_interface_ips() -> Vec<IpAddr> {
-    // Rank best-LAN-first so the realized-bind order (→ cert SANs →
-    // `exposed_interfaces`) leads with the interface the phone can actually
-    // reach. Without this the raw OS enumeration order leaks through and the QR's
-    // "first IPv4 TLS bind" pick can land on a VPN tunnel (e.g. NordLynx
-    // `10.5.0.2`) the phone has no route to. See `interface_rank`.
-    let snapshot = interface_rank::rank_interface_ips(enumerate_interfaces());
-    *local_ips_lock().write() = snapshot.clone();
-    snapshot
+    // Single walk on Windows (issue #630): `enumerate_with_classes` returns
+    // both the IP list and the per-IP routing classification from one
+    // `GetAdaptersAddresses` call. The bind path's ranking core consumes both,
+    // and the QR-fallback command (`get_local_ip`) reads the cached classes
+    // instead of doing its own walk. Rank best-LAN-first so the realized-bind
+    // order (→ cert SANs → `exposed_interfaces`) leads with the interface the
+    // phone can actually reach; without this the raw OS enumeration order
+    // leaks through and the QR's "first IPv4 TLS bind" pick can land on a VPN
+    // tunnel (e.g. NordLynx `10.5.0.2`) the phone has no route to.
+    let (ips, classes) = interface_rank::enumerate_with_classes();
+    let ranked = interface_rank::rank_with_classes(ips, &classes);
+    *local_ips_lock().write() = ranked.clone();
+    // Non-Windows + any `GetAdaptersAddresses` failure path returns an empty
+    // `classes` map. Skip the cache write in that case so `local_classes_if_populated`
+    // does not falsely report "populated" when we only know IPs.
+    if !classes.is_empty() {
+        *local_classes_lock().write() = classes;
+    }
+    ranked
 }
 
 /// The cached interface snapshot for the per-request Host guard. Cloned per
 /// call so the snapshot outlives any concurrent refresh — the hot path reads
-/// a stable view and never blocks the bind path's writer.
-fn local_interface_ips() -> Vec<IpAddr> {
+/// a stable view and never blocks the bind path's writer. `pub(crate)` so the
+/// QR-fallback (`commands::mesh::get_local_ip`) can share the bind snapshot
+/// on a hit instead of doing its own walk (issue #630).
+pub(crate) fn local_interface_ips() -> Vec<IpAddr> {
     local_ips_lock().read().clone()
 }
 

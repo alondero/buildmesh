@@ -58,6 +58,13 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 # crypto crate.
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 parking_lot = "0.12"
+# Non-Windows LAN/VPN enumeration (issue #501). Windows uses `GetAdaptersAddresses`
+# directly via `http::interface_rank::windows_impl` (inline FFI, no `windows-sys`
+# dep — matches `sandbox::restricted_token`'s convention); this crate is only
+# consulted on macOS/Linux and via the non-Windows branch of
+# `http::interface_rank::enumerate_with_classes`. Windows ranks gatewayed NICs
+# above idle tunnels; non-Windows ranks by RFC-1918 range heuristic (single
+# syscall, no Windows GetAdaptersAddresses call). See issue #630.
 local-ip-address = "0.6"
 
 # OS-level interface-change notifications for issue #591.

@@ -66,17 +66,37 @@ provider compiled in and no aws-lc-rs in the tree. We enable the `ring` provider
 and build every `ServerConfig`/`ClientConfig` with `builder_with_provider(ring)`
 so TLS never depends on a process-default provider.
 
-**7. The interface snapshot refreshes on each bind (issue #585).** The bind path
-calls `refresh_local_interface_ips` (which re-runs `local_ip_address::
-list_afinet_netifas` and replaces a `parking_lot::RwLock<Vec<IpAddr>>` cache)
-before constructing `bind_specs` and the TLS cert. A VPN or Wi-Fi adapter that
-connects **after** the first enumeration is therefore picked up on the next
-LAN-toggle rebind — no app restart. The per-request Host guard still reads the
-cached snapshot via a shared-lock + `Vec::clone`; it never pays for enumeration,
-which can stall for seconds behind a VPN/Docker stack on Windows. The old
-`0.0.0.0` wildcard bind (replaced in #501) had this for free — every interface
-the box held at the moment of `accept` was reachable — so the refresh is the
-smallest change that restores that reachability for per-interface TLS binds.
+**7. The interface snapshot refreshes on each bind (issue #585), and one walk
+produces both data sets (issue #630).** The bind path calls
+`refresh_local_interface_ips`, which delegates to
+`http::interface_rank::enumerate_with_classes`. On Windows that walks
+`GetAdaptersAddresses` **once**, returning both the unicast IP list AND the
+per-IP routing classification (`IfaceClass { has_gateway, is_physical }`).
+macOS/Linux fall back to `list_afinet_netifas` with an empty classes map (the
+range heuristic decides; the VPN-adapter trap is Windows-specific). The
+resulting IP list replaces a `parking_lot::RwLock<Vec<IpAddr>>` cache; the
+classes map lands in a sibling `RwLock<HashMap<IpAddr, IfaceClass>>` so the
+QR-display fallback (`get_local_ip`) can reuse them on a hit. Both caches
+together mean one bind = one `GetAdaptersAddresses` (was two, issue #630
+fix). A VPN or Wi-Fi adapter that connects **after** the first enumeration is
+picked up on the next LAN-toggle rebind — no app restart. The per-request
+Host guard still reads the cached snapshot via a shared-lock + `Vec::clone`; it
+never pays for enumeration, which can stall for seconds behind a VPN/Docker
+stack on Windows. The old `0.0.0.0` wildcard bind (replaced in #501) had this
+for free — every interface the box held at the moment of `accept` was
+reachable — so the refresh is the smallest change that restores that
+reachability for per-interface TLS binds.
+
+**7a. The QR-display fallback shares the bind-path snapshot (issue #630).**
+`commands::mesh::get_local_ip` is the Tauri command the QR modal polls for a
+display fallback when no LAN listener is bound (`status.exposed_interfaces`
+empty). It reads the cached `(IPs, IfaceClass)` from §7 when present — no
+second syscall — and falls back to a fresh `tauri::async_runtime::
+spawn_blocking` walk on cold start. Both paths funnel through the same
+`interface_rank::pick_best_lan` / `rank_with_classes` core, so the bind
+order and the display fallback cannot diverge. `10.0.0.x` consumer-router
+LANs (Apple Airport default, many ISP gateways) surface correctly —
+previously the fallback hard-excluded this range (#291 closed-out).
 
 **8. OS-level interface events drive the rebind (issue #591).** Even with the
 per-bind refresh in §7, the rebind only fires when something *triggers* it — a
