@@ -14,11 +14,18 @@ export const TOAST_MAX = 3;
 // the dedup-map we'd build off it) without bound.
 const KEY_MESSAGE_MAX = 200;
 
+// 'error' = something failed and needs attention (provider errors, store
+// errors). 'warning' = a non-blocking heads-up (sync drift, worktree cleanup
+// retry, resume hiccups). The distinction drives the toast's colour and label
+// so a benign sync notice no longer shouts "ERROR" in red.
+export type ToastSeverity = 'error' | 'warning';
+
 export interface Toast {
   id: number;
   provider: string;
   message: string;
   createdAt: number;
+  severity?: ToastSeverity;
 }
 
 export function createToastKey(toast: Pick<Toast, 'provider' | 'message'>): string {
@@ -43,8 +50,12 @@ export function dedupToasts(
   if (idx === -1) {
     return [...existing, incoming];
   }
+  // Replace keeps the id/createdAt-but-bumped so the React list stays
+  // stable and the auto-dismiss timer refreshes, but copies the incoming
+  // severity — a follow-up error shouldn't get downgraded to whatever
+  // level the toast originally arrived with.
   const next = existing.slice();
-  next[idx] = { ...existing[idx], createdAt: incoming.createdAt };
+  next[idx] = { ...existing[idx], createdAt: incoming.createdAt, severity: incoming.severity };
   return next;
 }
 
