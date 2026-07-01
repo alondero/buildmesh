@@ -44,31 +44,34 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
   return (
     <div className="relative" ref={dropdownRef}>
       <button
+        type="button"
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-sans font-semibold tracking-wide text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 hover:text-accent-cyan border border-accent-cyan/30 hover:border-accent-cyan/60 transition-colors shadow-sm"
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs font-sans font-semibold tracking-wide text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 hover:text-accent-cyan border border-accent-cyan/30 hover:border-accent-cyan/60 transition-colors shadow-sm"
       >
         <span>Build</span>
-        <span className="text-[8px] leading-none">▼</span>
+        <span className="text-2xs leading-none">▼</span>
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded shadow-lg z-50">
+        <div role="menu" className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded-md shadow-md z-50 animate-scale-in origin-top-right">
           <button
             onClick={handleBuild}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             {node.use_worktree ? 'Build from worktree' : 'Build'}
           </button>
           <button
             onClick={handleRun}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             {node.use_worktree ? 'Run from worktree' : 'Run'}
           </button>
           <div className="my-1 border-t border-border-default" />
           <button
             onClick={handleTerminal}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             {node.use_worktree ? 'Terminal in worktree' : 'Terminal'}
           </button>
