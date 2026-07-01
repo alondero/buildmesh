@@ -49,6 +49,7 @@ import {
   type DetectedProject,
   type ProjectPreset,
 } from '../../lib/projectPresets';
+import { LoadingState } from '../shared/Spinner';
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Not set' },
@@ -313,7 +314,7 @@ sandbox: config.sandbox,
   return (
     <div className="p-4 space-y-4">
       {loading ? (
-        <p className="text-xs text-text-muted text-center py-8">Loading…</p>
+        <LoadingState />
       ) : (
         <>
           <Field label="Name" htmlFor="mesh-prop-name">
@@ -501,7 +502,7 @@ sandbox: config.sandbox,
                   <button
                     type="button"
                     onClick={() => void applyPresetById(detected.preset_id!)}
-                    className="text-xs text-accent-cyan hover:text-accent-cyan/80 font-medium"
+                    className="text-xs text-accent-cyan hover:text-accent-cyan/80 font-medium transition-colors"
                   >
                     Apply preset
                   </button>

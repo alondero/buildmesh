@@ -24,6 +24,7 @@ import {
   TOAST_MAX,
   TOAST_TTL_MS,
   type Toast,
+  type ToastSeverity,
 } from './lib/toastUtils';
 import './App.css';
 
@@ -255,14 +256,14 @@ function App() {
 
   useEffect(() => {
     const unlisten = listen<{ provider: string; message: string }>('provider-error', (event) => {
-      addToast(event.payload.provider, event.payload.message);
+      addToast(event.payload.provider, event.payload.message, 'error');
     });
     return () => { unlisten.then((fn) => fn()); };
   }, [setToasts]);
 
   useEffect(() => {
     if (storeError) {
-      addToast('System', storeError);
+      addToast('System', storeError, 'error');
     }
   }, [storeError, setToasts]);
 
@@ -296,7 +297,7 @@ function App() {
 
   useEffect(() => {
     const unlisten = listen<{ node_id: number; error: string }>('resume-failed', (event) => {
-      addToast('Resume', `Node ${event.payload.node_id}: ${event.payload.error}`);
+      addToast('Resume', `Node ${event.payload.node_id}: ${event.payload.error}`, 'warning');
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
@@ -310,6 +311,7 @@ function App() {
         addToast(
           'Worktree',
           `Couldn't remove worktree for ${event.payload.node_name} — it'll be retried on next launch.`,
+          'warning',
         );
       },
     );
@@ -333,7 +335,7 @@ function App() {
       new_commits?: number;
       message: string;
     }>('mesh-sync-warning', (event) => {
-      addToast('Sync', event.payload.message);
+      addToast('Sync', event.payload.message, 'warning');
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
@@ -350,9 +352,9 @@ function App() {
     return () => clearInterval(interval);
   }, [toasts.length]);
 
-  const addToast = (provider: string, message: string) => {
+  const addToast = (provider: string, message: string, severity: ToastSeverity = 'error') => {
     const now = Date.now();
-    const incoming: ErrorToast = { id: now, provider, message, createdAt: now };
+    const incoming: ErrorToast = { id: now, provider, message, createdAt: now, severity };
     setToasts((prev) => applyToastCap(dedupToasts(prev, incoming, now, TOAST_DEDUP_TTL_MS), TOAST_MAX));
   };
 
@@ -362,41 +364,60 @@ function App() {
 
   if (!isReady) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-[#09090f]">
-        <div className="text-[#00d4ff] text-2xl animate-pulse">●</div>
+      <div
+        role="status"
+        aria-label="Loading Buildmesh"
+        className="flex h-screen w-screen items-center justify-center bg-bg-base"
+      >
+        <div className="text-accent-cyan text-2xl animate-pulse">●</div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#09090f] text-[#e0e0e0]">
+    <div className="flex h-screen w-screen overflow-hidden bg-bg-base text-text-primary">
       <Sidebar />
       <AgentNodeView />
       <ProbePanel />
 
       <WorktreeCloseDialog />
 
-      {/* Toast notifications */}
+      {/* Toast notifications. Each toast carries role="status" (implicit
+          aria-live=polite) so screen readers announce it on arrival without
+          moving focus — the container itself stays silent to avoid double
+          announcements. */}
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            className="bg-[#0d0d16] border border-[#ef4444]/50 text-white px-4 py-3 rounded flex items-start gap-2 min-w-[280px] max-w-[420px] shadow-lg"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="text-[10px] font-bold text-red-500 uppercase">{toast.provider} Error</div>
-              <div className="text-xs text-[#94a3b8] break-words">{toast.message}</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => dismissToast(toast.id)}
-              aria-label="Dismiss notification"
-              className="shrink-0 -m-1 p-1 rounded text-white/60 hover:text-white hover:bg-white/10 text-base leading-none"
+        {toasts.map((toast) => {
+          const isWarning = toast.severity === 'warning';
+          return (
+            <div
+              key={toast.id}
+              role="status"
+              className={`animate-slide-in-right bg-bg-surface border px-4 py-3 rounded-md flex items-start gap-2 min-w-[280px] max-w-[420px] shadow-md ${
+                isWarning ? 'border-status-warning/50' : 'border-status-error/50'
+              }`}
             >
-              ×
-            </button>
-          </div>
-        ))}
+              <div className="flex-1 min-w-0">
+                <div
+                  className={`text-2xs font-bold uppercase ${
+                    isWarning ? 'text-status-warning' : 'text-status-error'
+                  }`}
+                >
+                  {toast.provider}
+                </div>
+                <div className="text-xs text-text-secondary break-words">{toast.message}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => dismissToast(toast.id)}
+                aria-label="Dismiss notification"
+                className="shrink-0 -m-1 p-1 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 text-base leading-none transition-colors"
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -261,13 +261,13 @@ export function GitIssuesTab() {
           </div>
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 mb-2">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-status-error mb-2">
               <circle cx="12" cy="12" r="10"/>
               <line x1="15" y1="9" x2="9" y2="15"/>
               <line x1="9" y1="9" x2="15" y2="15"/>
             </svg>
-            <span className="text-xs text-red-400">Failed to load issues</span>
-            <span className="text-[10px] text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
+            <span className="text-xs text-status-error">Failed to load issues</span>
+            <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
           </div>
         ) : issues.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8">
@@ -354,7 +354,7 @@ export function GitIssuesTab() {
                               e.stopPropagation();
                               if (firstBlockerUrl) openUrl(firstBlockerUrl).catch(console.error);
                             }}
-                            className="mt-1 inline-flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors"
+                            className="mt-1 inline-flex items-center gap-1 text-status-error hover:text-status-error/80 transition-colors"
                           >
                             <svg
                               width="12"
@@ -370,7 +370,7 @@ export function GitIssuesTab() {
                               <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
                               <line x1="4" y1="22" x2="4" y2="15" />
                             </svg>
-                            <span className="text-[10px] font-medium leading-none">
+                            <span className="text-2xs font-medium leading-none">
                               Blocked by #{firstBlocker}
                             </span>
                           </button>

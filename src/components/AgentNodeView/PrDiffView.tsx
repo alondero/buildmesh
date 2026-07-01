@@ -27,6 +27,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getPrFiles, type PrFileEntry } from '../../lib/tauri';
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
 import { splitPath } from '../Diff/diffFormat';
+import { LoadingState } from '../shared/Spinner';
 
 interface PrDiffViewProps {
   /** The PR lens — `prNumber` and `filePath` (`''` for list view) drive the
@@ -39,7 +40,7 @@ const STATUS_META: Record<string, { letter: string; color: string }> = {
   added: { letter: 'A', color: 'text-accent-green' },
   modified: { letter: 'M', color: 'text-accent-amber' },
   deleted: { letter: 'D', color: 'text-accent-red' },
-  renamed: { letter: 'R', color: 'text-purple-400' },
+  renamed: { letter: 'R', color: 'text-accent-violet' },
 };
 
 function statusMeta(status: string) {
@@ -120,8 +121,8 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
   }
   if (files === null) {
     return (
-      <div className="h-full flex items-center justify-center text-text-muted text-xs">
-        Loading PR…
+      <div className="h-full flex items-center justify-center">
+        <LoadingState label="Loading PR…" />
       </div>
     );
   }
@@ -183,7 +184,7 @@ function PrFileList({
        *  a lie here (we're diffing head against the PR's base, but
        *  "vs base" overloads the term with the local merge-base meaning);
        *  "PR #N" is unambiguous and matches the chip users clicked. */}
-      <div className="sticky top-0 z-20 flex items-center gap-2 px-3 py-1.5 bg-bg-overlay border-b border-border-subtle text-[11px]">
+      <div className="sticky top-0 z-20 flex items-center gap-2 px-3 py-1.5 bg-bg-overlay border-b border-border-subtle text-xs">
         <span className="text-text-secondary font-medium">
           {files.length} {files.length === 1 ? 'file' : 'files'} in PR #{prNumber}
         </span>
@@ -215,7 +216,7 @@ function PrFileList({
               <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={file.status}>
                 {meta.letter}
               </span>
-              <span className="flex-1 truncate font-mono text-[11px] min-w-0">
+              <span className="flex-1 truncate font-mono text-xs min-w-0">
                 {file.previous_filename && file.previous_filename !== file.filename && (
                   <span className="text-text-muted">
                     {file.previous_filename} <span aria-hidden="true">→</span>{' '}
@@ -225,12 +226,12 @@ function PrFileList({
                 <span className="text-text-primary">{name}</span>
               </span>
               {file.additions > 0 && (
-                <span className="text-accent-green flex-shrink-0 font-mono text-[11px]">
+                <span className="text-accent-green flex-shrink-0 font-mono text-xs">
                   +{file.additions}
                 </span>
               )}
               {file.deletions > 0 && (
-                <span className="text-accent-red flex-shrink-0 font-mono text-[11px]">
+                <span className="text-accent-red flex-shrink-0 font-mono text-xs">
                   -{file.deletions}
                 </span>
               )}

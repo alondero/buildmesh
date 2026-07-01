@@ -116,7 +116,7 @@ export function ProbePanel() {
               </span>
               {activeMeshName && (
                 <span
-                  className="text-[11px] text-text-muted truncate min-w-0"
+                  className="text-xs text-text-muted truncate min-w-0"
                   title={activeMeshName}
                 >
                   {activeMeshName}

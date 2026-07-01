@@ -11,6 +11,7 @@ import type {
   RealizedBind,
 } from '../../lib/tauri';
 import { optimisticToggle } from '../../lib/optimisticToggle';
+import { Modal, ModalCloseButton } from '../shared/Modal';
 
 interface AppSettingsModalProps {
   onClose: () => void;
@@ -700,25 +701,25 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/70" />
+    <Modal
+      onClose={onClose}
+      labelledBy="app-settings-title"
+      maxWidth="max-w-4xl"
+      className="p-0 max-h-[85vh] flex flex-col overflow-hidden"
+    >
+      {/* Non-scrolling header: title + close stay reachable no matter how far
+          the settings body is scrolled. */}
+      <div className="shrink-0 flex items-start justify-between gap-4 px-10 pt-8 pb-4 border-b border-border-subtle">
+        <div>
+          <h2 id="app-settings-title" className="text-2xl font-semibold text-text-primary mb-1">Settings</h2>
+          <p className="text-base text-text-muted">
+            Buildmesh-wide defaults. Per-mesh values in Mesh Properties take precedence.
+          </p>
+        </div>
+        <ModalCloseButton onClose={onClose} label="Close settings" />
+      </div>
 
-      <div
-        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-10 max-w-4xl w-full max-h-[80vh] overflow-y-auto"
-        onClick={e => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          className="absolute top-5 right-5 text-text-muted hover:text-text-secondary text-3xl"
-        >
-          ×
-        </button>
-
-        <h2 className="text-2xl font-semibold text-text-primary mb-2">Settings</h2>
-        <p className="text-base text-text-muted mb-6">
-          Buildmesh-wide defaults. Per-mesh values in Mesh Properties take precedence.
-        </p>
-
+      <div className="flex-1 overflow-y-auto px-10 pb-10 pt-6">
         <div className="space-y-4">
           <label className="block text-lg font-medium text-text-secondary">
             Default provider
@@ -845,11 +846,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <div className="mt-4" data-testid="lan-realized-status">
               {exposedInterfaces.length === 0 ? (
                 <div
-                  className="flex items-start gap-2 bg-bg-card border border-yellow-500/40 rounded px-3 py-2"
+                  className="flex items-start gap-2 bg-bg-card border border-status-warning/40 rounded px-3 py-2"
                   data-testid="lan-exposure-warning"
                   role="alert"
                 >
-                  <span className="text-base text-yellow-200">
+                  <span className="text-base text-status-warning">
                     <span className="font-medium">No interfaces are actually exposed.</span>{' '}
                     The toggle is on, but the server didn’t bind any LAN address —
                     either this machine has no non-loopback interface, or the
@@ -875,7 +876,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   </ul>
                   {!tlsActive && (
                     <div
-                      className="mt-3 text-base text-yellow-200"
+                      className="mt-3 text-base text-status-warning"
                       data-testid="lan-tls-warning"
                       role="alert"
                     >
@@ -1015,6 +1016,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           </p>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

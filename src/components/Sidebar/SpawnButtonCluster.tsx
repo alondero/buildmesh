@@ -100,7 +100,7 @@ export function SpawnButtonCluster({
           onMouseEnter={refreshDefaultProvider}
           onFocus={refreshDefaultProvider}
           disabled={isDisabled}
-          className="flex items-center px-1.5 h-5 text-[12px] font-medium text-accent-cyan hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="flex items-center px-1.5 h-5 text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={isSpawning ? 'Spawning...' : addNodeTitle}
         >
           {isSpawning ? 'Spawning...' : '+'}
@@ -110,7 +110,7 @@ export function SpawnButtonCluster({
           data-testid="spawn-dropdown-toggle"
           onClick={(e) => { e.stopPropagation(); onToggleDropdown(); }}
           disabled={isDisabled}
-          className={`flex items-center px-1 h-5 text-[11px] hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
+          className={`flex items-center px-1 h-5 text-xs hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
           title="Choose provider"
         >
           ▾

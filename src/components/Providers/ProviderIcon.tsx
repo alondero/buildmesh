@@ -191,7 +191,7 @@ export function ProviderIcon({
       );
     }
     // Fallback: a neutral dot for unknown providers.
-    return <span aria-hidden="true" title={label} className={`${className} bg-gray-500 rounded-full inline-block shrink-0`} />;
+    return <span aria-hidden="true" title={label} className={`${className} bg-text-muted rounded-full inline-block shrink-0`} />;
   })();
 
   if (!withBackground) return inner;
