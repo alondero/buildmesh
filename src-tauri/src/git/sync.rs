@@ -604,6 +604,89 @@ pub fn commits_behind_upstream(repo: &git2::Repository) -> Result<u32, String> {
     Ok(behind)
 }
 
+// ── Per-Mesh sync_lock wrappers (issues #652, #680, #709 consolidation) ────
+//
+// All four per-Mesh `git fetch` / `git pull --ff-only` shell-out sites
+// (manual `git_sync`, spawn-time auto-sync, PR-spawn head fetch, worktree
+// prune) now route through a `locked_*` helper. Two of those helpers
+// live here (`locked_do_sync`, `locked_fetch_origin`); the other two
+// (`locked_fetch_pr_head` in `git::worktree::provision`,
+// `locked_prune_remote_tracking` in `commands::prune`) live with the
+// underlying shell-out they wrap, not with the lock primitive. Each
+// helper is the SINGLE point that calls
+// `services::sync_lock::with_mesh_sync_lock` for its underlying work,
+// so the lock-acquisition shape is auditable in one place per site
+// rather than scattered across `commands/git.rs`, `agent/spawn.rs`,
+// `git/worktree/provision.rs`, and `commands/prune.rs`.
+//
+// The bare helpers (`do_sync`, `fetch_origin`, `fetch_single_ref`,
+// `fetch_fork_head`, the prune shell-out) stay lock-free so their unit
+// tests don't need to coordinate with the global lock map — the locked
+// wrappers are tested separately (e.g.
+// `git_sync_serializes_via_per_mesh_sync_lock_gh680`,
+// `locked_fetch_pr_head_serializes_..._gh698`,
+// `locked_prune_remote_tracking_serializes_..._gh709`).
+//
+// Lock-key choice: keyed on the mesh's DB-stored path (the form stored
+// on `agent_nodes.path`) so the same row's contention map stays
+// consistent — two callers for one Mesh row share one lock entry
+// regardless of WSL vs host path remapping (the bare helpers internally
+// re-map via `env::to_host_path`; the lock key stays as the DB string).
+// The worktree prune is the exception — it keys on the worktree's own
+// path (see `commands::prune::locked_prune_remote_tracking` for the
+// rationale), so it uses a different lock entry than the mesh-scoped
+// helpers here.
+
+/// Wrap `do_sync` (the fetch+ff-pull algorithm) in the per-Mesh sync lock.
+///
+/// Issue #680 — manual `git_sync` Tauri command's inline wrap consolidated
+/// here so the lock-acquisition shape is identical to the spawn-time
+/// auto-sync's `locked_fetch_origin` and the PR-spawn's
+/// `locked_fetch_pr_head`. Keyed on `mesh_path` (the DB-stored canonical
+/// form, NOT `host_path`).
+pub(crate) fn locked_do_sync(
+    mesh_path: &str,
+    host_path: &str,
+    remote: &str,
+    branch: Option<&str>,
+) -> SyncOutcome {
+    crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
+        do_sync(host_path, remote, branch)
+    })
+}
+
+/// Wrap `fetch_origin` (the spawn-time auto-sync) in the per-Mesh sync lock
+/// AND run it on a blocking thread. Issue #652 — spawn-time auto-sync's
+/// inline `tokio::task::spawn_blocking` + `with_mesh_sync_lock` wrap
+/// consolidated here so the lock-acquisition shape is identical to the
+/// manual `git_sync`'s `locked_do_sync` and the PR-spawn's
+/// `locked_fetch_pr_head`.
+///
+/// The blocking-thread boundary moves with the wrap: a `git fetch` shell-out
+/// would otherwise pin a tokio worker for the duration of the network
+/// round-trip, so the consolidation can't drop the `spawn_blocking`. The
+/// `JoinError → FetchError::FetchFailed` mapping mirrors the prior inline
+/// behaviour at `agent::spawn::spawn_agent_inner` (#652) so the spawn path's
+/// error contract is unchanged.
+pub async fn locked_fetch_origin(
+    mesh_path: String,
+    base_ref: String,
+) -> Result<FetchOutcome, FetchError> {
+    tokio::task::spawn_blocking(move || {
+        crate::services::sync_lock::with_mesh_sync_lock(&mesh_path, || {
+            fetch_origin(&mesh_path, &base_ref)
+        })
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::warn!("locked_fetch_origin: sync task panicked: {}", e);
+        Err(FetchError::FetchFailed(format!(
+            "sync task panicked: {}",
+            e
+        )))
+    })
+}
+
 #[cfg(test)]
 #[path = "fetch_origin_tests.rs"]
 mod fetch_origin_tests;

@@ -970,22 +970,16 @@ pub async fn spawn_agent_inner(
             // (not try_lock-or-skip), so caller #2 waits for caller #1 to
             // populate the refs and then reuses them (its natural outcome
             // is UpToDate, which is correct).
-            let sync_result = tokio::task::spawn_blocking(move || {
-                crate::services::sync_lock::with_mesh_sync_lock(&root, || {
-                    crate::git::sync::fetch_origin(&root, &base_ref_owned)
-                })
-            })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "spawn_agent_inner: fetch_origin task panicked: {}",
-                    e
-                );
-                Err(crate::git::sync::FetchError::FetchFailed(format!(
-                    "sync task panicked: {}",
-                    e
-                )))
-            });
+            //
+            // Issue #709 — the wrap is consolidated into
+            // `git::sync::locked_fetch_origin` so the lock-acquisition
+            // shape is identical to the manual `git_sync`'s
+            // `locked_do_sync`, the PR-spawn's `locked_fetch_pr_head`,
+            // and the prune's `locked_prune_remote_tracking`. The
+            // `tokio::task::spawn_blocking` + `with_mesh_sync_lock`
+            // pair used to live inline here.
+            let sync_result =
+                crate::git::sync::locked_fetch_origin(root, base_ref_owned).await;
             let fetch_outcome: &'static str = match &sync_result {
                 Ok(crate::git::sync::FetchOutcome::Synced { .. }) => "ok:synced",
                 Ok(crate::git::sync::FetchOutcome::UpToDate) => "ok:up_to_date",

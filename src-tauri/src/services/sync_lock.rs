@@ -25,9 +25,17 @@
 //! `.git/refs/remotes/<remote>/<ref>.lock`, or — for the fork branch —
 //! the config files `git remote add/set-url` write.
 //!
-//! Out of scope (deliberate): the worktree prune's `git fetch` operates
-//! on a different worktree's `.git` and is best handled by its own
-//! helper.
+//! #709 added the worktree prune's `git fetch --prune` as the fourth and
+//! final per-Mesh shell-out to route through this lock (the
+//! `locked_prune_remote_tracking` helper at `commands::prune`), AND
+//! consolidated the four sites into a uniform `locked_*` helper shape:
+//! each underlying shell-out function (`do_sync`, `fetch_origin`,
+//! `fetch_single_ref` / `fetch_fork_head`, the prune shell-out) has a
+//! matching `locked_*` wrapper whose entire body is one
+//! `with_mesh_sync_lock(key, || work())` call. The wrap is auditable in
+//! one place per site rather than scattered across the call sites — and
+//! the next per-Mesh shell-out site added (the issue's "copy-paste
+//! trivial, not a new helper" AC) is a five-line `locked_*` function.
 //!
 //! The existing `services::pool_worker::FILL_LOCK` is `try_lock`-or-skip and
 //! is the wrong shape here — a *skipped* fetch would leave the spawn without

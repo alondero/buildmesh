@@ -200,21 +200,63 @@ fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
 /// frontend can show what happened (e.g. `"From <url>\n - [deleted]
 /// origin/feature-x"` when refs were dropped, or an empty/`"From <url>"`
 /// line when nothing changed). Issue #657.
+///
+/// Delegates to [`locked_prune_remote_tracking`] so the fetch acquires the
+/// per-Mesh sync lock and serialises against the auto-sync (`#652`),
+/// manual `git_sync` (`#680`), PR-spawn head fetch (`#698`), and any
+/// concurrent prune on the same worktree. Keyed on `&worktree_path` (the
+/// worktree's own path), matching the prune UI's input — the same key a
+/// second concurrent `prune_remote_tracking` call on the SAME worktree
+/// would use, so the two can't collide on `.git/FETCH_HEAD`.
 #[tauri::command]
 pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, String> {
-    let host_path = to_host_path(&worktree_path);
-    let output = crate::process_util::command_no_window("git")
-        .args(["fetch", "--prune"])
-        .current_dir(&host_path)
-        .output()
-        .map_err(|e| format!("failed to run git fetch --prune: {}", e))?;
+    locked_prune_remote_tracking(&worktree_path)
+}
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.status.success() {
-        Ok(stderr)
-    } else {
-        Err(stderr)
-    }
+/// Run `git fetch --prune` inside `services::sync_lock::with_mesh_sync_lock`
+/// so the worktree prune can't race against itself (issue #709 — the
+/// fourth and final per-Mesh git shell-out to land under the lock).
+///
+/// **Lock key is the worktree's own path** (`worktree_path`), NOT the
+/// parent mesh's `agent_nodes.path`. Rationale:
+///
+/// The contention scope for `git fetch --prune` from a worktree is the
+/// worktree's remote-tracking refs and the shared parent
+/// `.git/FETCH_HEAD`. Two concurrent prunes on different worktrees of
+/// the same mesh share the parent's `.git` and CAN race on `FETCH_HEAD`;
+/// the parent-mesh key would serialise those, but the per-worktree key
+/// only serialises prunes on the SAME worktree. The issue's author made
+/// this trade-off deliberately: the prune UI fires once per worktree
+/// (the user picks the worktree from a list), so same-worktree
+/// collisions are the realistic case. Cross-worktree collisions on the
+/// parent's `FET_HEAD` are guarded by the much narrower window that
+/// `git fetch --prune` opens (single refspec negotiation) versus the
+/// all-refs auto-sync fetch.
+///
+/// All four lock-wrap sites now use the same shape — `locked_*` helper +
+/// `with_mesh_sync_lock(key, || work())` — so adding a fifth site is
+/// copy-paste trivial rather than a new pattern.
+///
+/// The closure captures `worktree_path` by reference; the host-path
+/// conversion (`to_host_path`) happens once outside the closure so the
+/// closure body is the bare shell-out, mirroring `fetch_single_ref` /
+/// `locked_fetch_pr_head`'s closure shape.
+fn locked_prune_remote_tracking(worktree_path: &str) -> Result<String, String> {
+    let host_path = to_host_path(worktree_path);
+    crate::services::sync_lock::with_mesh_sync_lock(worktree_path, || {
+        let output = crate::process_util::command_no_window("git")
+            .args(["fetch", "--prune"])
+            .current_dir(&host_path)
+            .output()
+            .map_err(|e| format!("failed to run git fetch --prune: {}", e))?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if output.status.success() {
+            Ok(stderr)
+        } else {
+            Err(stderr)
+        }
+    })
 }
 
 // ── Internals (DB-free, unit-testable against real temp repos) ──────────────

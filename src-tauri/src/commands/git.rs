@@ -366,9 +366,15 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     // (the DB-stored canonical form, NOT `&host_path`) matches the
     // spawn-time caller in `agent::spawn`, which keys on `node.path` —
     // both call sites share one lock entry per Mesh row.
-    let outcome = crate::services::sync_lock::with_mesh_sync_lock(&path, || {
-        crate::git::sync::do_sync(&host_path, &remote, None)
-    });
+    //
+    // Issue #709 — the wrap is consolidated into
+    // `git::sync::locked_do_sync` (issue #680's helper) so the lock-
+    // acquisition shape is identical to the spawn-time
+    // `locked_fetch_origin`, the PR-spawn's `locked_fetch_pr_head`,
+    // and the prune's `locked_prune_remote_tracking`. The wrap body
+    // used to live inline here.
+    let outcome =
+        crate::git::sync::locked_do_sync(&path, &host_path, &remote, None);
 
     // Ref-freshness (issue #613 AC3): a manual Sync that pulled new commits
     // moved the mesh's base ref, so its warm pool entries are now stale.
