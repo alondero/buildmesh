@@ -102,6 +102,10 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
             // so any Instant + any fresh AtomicBool is correct here.
             spawn_start: std::time::Instant::now(),
             first_user_input_logged: AtomicBool::new(false),
+            // Issue #634: tests don't exercise the activity-recording
+            // hot path, so `0` is the sentinel — production code passes
+            // the real `db::get_mesh_by_path(&node.path).id` here.
+            mesh_id: 0,
         },
     );
 
@@ -324,6 +328,10 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
             // so any Instant + any fresh AtomicBool is correct here.
             spawn_start: std::time::Instant::now(),
             first_user_input_logged: AtomicBool::new(false),
+            // Issue #634: tests don't exercise the activity-recording
+            // hot path, so `0` is the sentinel — production code passes
+            // the real `db::get_mesh_by_path(&node.path).id` here.
+            mesh_id: 0,
         },
     );
 
@@ -413,6 +421,10 @@ fn windows_kill_session_closes_master() {
             // so any Instant + any fresh AtomicBool is correct here.
             spawn_start: std::time::Instant::now(),
             first_user_input_logged: AtomicBool::new(false),
+            // Issue #634: tests don't exercise the activity-recording
+            // hot path, so `0` is the sentinel — production code passes
+            // the real `db::get_mesh_by_path(&node.path).id` here.
+            mesh_id: 0,
         },
     );
 

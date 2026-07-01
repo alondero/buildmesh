@@ -305,8 +305,9 @@ pub fn run() {
             // `refill_after_claim`, so concurrent spawns can't trigger
             // overlapping `git worktree add` fills.
             //
-            // The handle is captured so `maintain_all_pools` can emit
-            // `pool-count-changed` from its inner drain/fill calls.
+            // The handle is captured so `drain_and_fill_for_mesh` (called per-mesh
+            // by the worker, not the legacy `maintain_all_pools` aggregator)
+            // can emit `pool-count-changed` from its inner drain/fill calls.
             services::pool_worker::start_background_worker(app.handle().clone());
 
             // Install panic hook that logs thread ID + backtrace on every panic

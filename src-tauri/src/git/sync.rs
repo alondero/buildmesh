@@ -64,6 +64,19 @@ pub enum FetchError {
     FetchFailed(String),
 }
 
+impl FetchOutcome {
+    /// True iff the fetch actually advanced the local ref. Only the two
+    /// variants that fetched new commits qualify — `UpToDate` and the
+    /// `Skipped*` variants did not move anything. Used by the spawn path
+    /// (issue #613 AC3) to decide whether to kick a freshness pass on the
+    /// warm pool, and by the manual `git_sync` command for the same
+    /// decision. Single-sourced here so the two sites stay in lockstep
+    /// (issue #634).
+    pub fn advanced_ref(&self) -> bool {
+        matches!(self, Self::Synced { .. } | Self::FetchedButDiverged { .. })
+    }
+}
+
 /// The shared outcome of a fetch+fast-forward pull sync, used by both
 /// the spawn-time auto-sync (`fetch_origin`) and the manual `git_sync`
 /// command. The two callers each map this to their own contract shape
@@ -103,6 +116,19 @@ pub(crate) enum SyncOutcome {
     /// proceed anyway since the worker's behaviour on a non-repo
     /// path is a separate concern.
     RepoUnusable { reason: String },
+}
+
+impl SyncOutcome {
+    /// Same predicate as [`FetchOutcome::advanced_ref`] — the two enums
+    /// map 1:1 (`fetch_origin` translates `SyncOutcome → FetchOutcome` at
+    /// `sync.rs:568-578`) but the manual `git_sync` command consumes
+    /// `SyncOutcome` directly, so this lives on both to keep the predicate
+    /// single-sourced (issue #634). Returns `false` for the two error-shaped
+    /// variants (`FetchFailed`, `RepoUnusable`) — neither advanced the ref,
+    /// and the caller can't usefully schedule a refresh pass on a failure.
+    pub(crate) fn advanced_ref(&self) -> bool {
+        matches!(self, Self::Synced { .. } | Self::FetchedButDiverged { .. })
+    }
 }
 
 /// The shared fetch+ff-pull algorithm used by the spawn-time auto-sync

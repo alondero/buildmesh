@@ -18,6 +18,14 @@ pub struct AgentProcess {
     /// (drop the `MasterPty`). See issue #300.
     pub master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     pub reader_alive: Arc<AtomicBool>,
+    /// Mesh this agent belongs to. Stored at registration time so the
+    /// PTY read/write hot paths (`write_bytes`, the `pump_pty_output`
+    /// closure in `agent::spawn::start_reader`) can record per-mesh
+    /// activity without a DB lookup on every chunk (issue #634).
+    /// `0` is the sentinel used by the test fixtures in
+    /// `tests/pty_spawn.rs`; production code always populates this with
+    /// a real `mesh_id` from `db::get_mesh_by_path(&node.path)`.
+    pub mesh_id: i64,
     /// Job Object containing the agent's whole process tree, when assignment
     /// succeeded (Windows only; `None` on failure → `kill_session` falls back to
     /// `taskkill`). Killing the job reaches detached descendants — e.g. a dev
@@ -98,11 +106,13 @@ impl AgentProcessRegistry {
         let mut writer = agent.writer.lock().unwrap();
         writer.write_all(data).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
-        // Mark the app as active so the background warm-pool worker holds off
-        // its idle refills while the user is typing into a terminal (issue
-        // #613 AC2). Recorded after a successful write so a failed PTY write
-        // doesn't count as activity.
-        crate::services::pool_worker::note_activity();
+        // Mark THIS MESH as active so the background warm-pool worker holds
+        // off its idle refills for this mesh's pool while the user is typing
+        // into the terminal (issue #613 AC2; issue #634 scopes the activity
+        // per-mesh so typing into mesh A's terminal doesn't prevent mesh B's
+        // pool from being refilled). Recorded after a successful write so a
+        // failed PTY write doesn't count as activity.
+        crate::services::pool_worker::note_activity_for_mesh(agent.mesh_id);
         // Emit the `first_user_input` checkpoint exactly once per session.
         // We do this AFTER a successful write+flush so a failed PTY write
         // (broken pipe, etc.) does NOT claim "user input accepted". The
