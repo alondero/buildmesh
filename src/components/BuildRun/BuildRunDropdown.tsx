@@ -45,14 +45,14 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-sans font-semibold tracking-wide text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 hover:text-accent-cyan border border-accent-cyan/30 hover:border-accent-cyan/60 transition-colors shadow-sm"
+        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-sans font-semibold tracking-wide text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 hover:text-accent-cyan border border-accent-cyan/30 hover:border-accent-cyan/60 transition-colors shadow-sm"
       >
         <span>Build</span>
         <span className="text-[8px] leading-none">▼</span>
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded shadow-lg z-50">
+        <div className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded-md shadow-lg z-50">
           <button
             onClick={handleBuild}
             className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"

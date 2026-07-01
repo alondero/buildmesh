@@ -558,7 +558,7 @@ export function GitPullRequestsTab() {
     <div className="flex flex-col h-full">
       <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-end gap-2">
         {/* Open / Closed segmented toggle */}
-        <div className="flex shrink-0 rounded overflow-hidden border border-border-subtle">
+        <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
           {(['open', 'closed'] as const).map((s) => (
             <button
               key={s}
@@ -659,7 +659,7 @@ export function GitPullRequestsTab() {
                                 onClick={() => handleMerge(pr)}
                                 aria-label={`Confirm squash merge of pull request #${pr.number}`}
                                 title="Confirm squash merge"
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
                               >
                                 <CheckIcon className="w-3.5 h-3.5" />
                                 <span>Confirm</span>
@@ -669,7 +669,7 @@ export function GitPullRequestsTab() {
                                 onClick={() => setConfirming(null)}
                                 aria-label={`Cancel merge of pull request #${pr.number}`}
                                 title="Cancel"
-                                className="p-1.5 rounded text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
+                                className="p-1.5 rounded-md text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
                               >
                                 <XIcon className="w-3.5 h-3.5" />
                               </button>
@@ -681,14 +681,14 @@ export function GitPullRequestsTab() {
                               disabled={merging !== null}
                               aria-label={`Merge pull request #${pr.number}`}
                               title="Merge pull request"
-                              className="p-1.5 rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                              className="p-1.5 rounded-md bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                             >
                               <GitMergeIcon className="w-3.5 h-3.5" />
                             </button>
                           ) : status.kind === 'checking' ? (
                             <span className="px-2 py-1 text-[10px] text-text-muted">Checking…</span>
                           ) : (
-                            <span className="px-2 py-1 text-[10px] rounded bg-bg-card text-text-muted" title="This pull request can't be merged">
+                            <span className="px-2 py-1 text-[10px] rounded bg-bg-card text-text-muted" title="This pull request can't be merged">{/* allow-bare-rounded — 10px status pill, no interaction */}
                               {status.label}
                             </span>
                           )}
@@ -745,7 +745,7 @@ export function GitPullRequestsTab() {
                           onClick={() => handleViewChanges(pr)}
                           aria-label={`View changes in PR #${pr.number}`}
                           title="Open the PR's diff in the center overlay"
-                          className="p-1.5 rounded text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
+                          className="p-1.5 rounded-md text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
                         >
                           <FileTextIcon className="w-3.5 h-3.5" />
                         </button>

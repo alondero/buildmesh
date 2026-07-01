@@ -36,7 +36,7 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
       aria-busy={isClosing}
       style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}40` }}
       className={`
-        pl-3 pr-1 py-1.5 rounded text-[12px] mb-0.5 flex items-center gap-2 group/node
+        pl-3 pr-1 py-1.5 rounded-md text-[12px] mb-0.5 flex items-center gap-2 group/node
         ${isClosing ? 'opacity-50 pointer-events-none cursor-default' : 'cursor-pointer'}
         ${isActive ? 'border border-accent-cyan/50' : 'hover:brightness-125 border border-transparent'}
       `}

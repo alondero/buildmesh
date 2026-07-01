@@ -368,10 +368,10 @@ export function AgentNodeView() {
                       Issue #668 — Alt+G (Win/Linux) / ⌘+G (macOS) is the new
                       maximize/restore toggle. Listed here so users discover it
                       before they ever open a mesh. */}
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘' : 'Ctrl'}+T</kbd> New agent node</p>
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘+⌥' : 'Ctrl+Alt'}+←/→/↑/↓</kbd> Traverse nodes</p>
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘' : 'Alt'}+G</kbd> Toggle grid / single view</p>
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">Esc</kbd> Close dialogs / exit maximized view</p>
+                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">{isMac ? '⌘' : 'Ctrl'}+T</kbd> New agent node</p>
+                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">{isMac ? '⌘+⌥' : 'Ctrl+Alt'}+←/→/↑/↓</kbd> Traverse nodes</p>
+                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">{isMac ? '⌘' : 'Alt'}+G</kbd> Toggle grid / single view</p>
+                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">Esc</kbd> Close dialogs / exit maximized view</p>
                 </div>
               </div>
             </div>

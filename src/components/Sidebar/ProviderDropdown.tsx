@@ -24,7 +24,7 @@ export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdo
   return (
     <div
       data-dropdown-for={meshId}
-      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded shadow-lg min-w-[200px] max-h-[400px] overflow-y-auto"
+      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-lg min-w-[200px] max-h-[400px] overflow-y-auto"
     >
       <GroupedProviderMenu providers={providers} onSelect={onSelect} />
     </div>

@@ -179,7 +179,7 @@ export function MeshItem({
                 onOpenPropertiesProbe(mesh.id);
               }}
               title={buildDriftTooltip(health)}
-              className="text-[11px] font-bold text-status-warning bg-status-warning-bg/15 hover:bg-status-warning-bg/30 rounded px-1.5 leading-[18px] transition-colors"
+              className="text-[11px] font-bold text-status-warning bg-status-warning-bg/15 hover:bg-status-warning-bg/30 rounded-md px-1.5 leading-[18px] transition-colors"
               aria-label="Mesh health issue"
             >
               !
@@ -218,7 +218,7 @@ export function MeshItem({
         </div>
       </div>
       {syncMessage && (
-        <div className="ml-2 mr-2 mb-1 px-2 py-1 rounded text-xs bg-bg-overlay border border-border-subtle text-text-secondary">
+        <div className="ml-2 mr-2 mb-1 px-2 py-1 rounded-md text-xs bg-bg-overlay border border-border-subtle text-text-secondary">
           {syncMessage}
         </div>
       )}
@@ -241,7 +241,7 @@ export function MeshItem({
       {/* Context menu — periphery actions */}
       {contextMenu && (
         <div
-          className="fixed bg-bg-overlay border border-border-default rounded shadow-lg z-[100] py-1 min-w-[180px]"
+          className="fixed bg-bg-overlay border border-border-default rounded-md shadow-lg z-[100] py-1 min-w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
         >

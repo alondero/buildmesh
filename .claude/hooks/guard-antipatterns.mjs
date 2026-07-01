@@ -48,6 +48,45 @@ const RULES = [
       "Route path conversion through env::to_host_path instead of hand-building paths here — " +
       "if this really is the right place, add `// allow-wsl-path` on that line.",
   },
+  {
+    // Issue #733 — bare `rounded` (Tailwind's default 0.25rem) reads from a
+    // different token than `rounded-md` (`--radius-md`). They render at the
+    // same 4px today, but if `--radius-md` is ever retuned bare `rounded`
+    // won't follow. Always reach for the explicit size (rounded-md, rounded-sm,
+    // rounded-lg, rounded-full, etc.) so the value is token-bound.
+    //
+    // The negative lookahead excludes `rounded-full`/`-sm`/`-md`/`-lg`/`-xl`/
+    // `-2xl`/`-3xl`/`-none`/`-pill` so legitimate sizes aren't flagged.
+    id: "bare-rounded-in-component",
+    appliesTo: (path) =>
+      /(^|\/)src\/components\//.test(path) && /\.(tsx?|jsx?)$/.test(path),
+    pattern: /\brounded\b(?![-])/,
+    allow: "allow-bare-rounded",
+    message:
+      "Bare `rounded` in src/components bypasses the `--radius-md` token — it " +
+      "renders 4px today but won't follow a future `--radius-md` retune. Use " +
+      "`rounded-md` for control elements, or `rounded-sm`/`-lg`/`-full` for " +
+      "intentionally distinct sizes. Bare `rounded` is allowed only on " +
+      "intentionally smallest-radius decorative chips/status dots — add " +
+      "`// allow-bare-rounded` on that line if this is one of them.",
+  },
+  {
+    // Bare directional `rounded-r` / `rounded-l` / `rounded-t` / `rounded-b`
+    // and their corner variants are the same token-system bug as bare
+    // `rounded` — they need a size suffix (e.g. `rounded-r-md`). The
+    // negative lookahead already excludes `rounded-r-md` etc.
+    id: "bare-rounded-directional-in-component",
+    appliesTo: (path) =>
+      /(^|\/)src\/components\//.test(path) && /\.(tsx?|jsx?)$/.test(path),
+    pattern:
+      /\brounded-(r|l|t|b|tl|tr|bl|br)\b(?![-](?:sm|md|lg|xl|2xl|3xl|none|pill|full)\b)/,
+    allow: "allow-bare-rounded",
+    message:
+      "Bare directional `rounded-r` / `-l` / `-t` / `-b` / `-tl` / `-tr` / " +
+      "`-bl` / `-br` in src/components bypasses the `--radius-md` token. Use " +
+      "`rounded-r-md` (etc.) so the radius follows future token retunes. " +
+      "Add `// allow-bare-rounded` if this is intentionally smallest-radius.",
+  },
 ];
 
 export function checkContentViolations(filePath, newText) {

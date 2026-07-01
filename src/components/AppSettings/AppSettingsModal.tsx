@@ -128,7 +128,7 @@ export function AccountCard({
               <button
                 onClick={confirmRemove}
                 disabled={busy}
-                className="px-3 py-1 bg-status-error text-white text-sm rounded hover:bg-status-error/90 disabled:opacity-50"
+                className="px-3 py-1 bg-status-error text-white text-sm rounded-md hover:bg-status-error/90 disabled:opacity-50"
                 aria-label={`Confirm remove ${account.name}`}
               >
                 Yes
@@ -136,7 +136,7 @@ export function AccountCard({
               <button
                 onClick={() => setConfirmingRemove(false)}
                 disabled={busy}
-                className="px-3 py-1 bg-bg-card text-text-secondary text-sm rounded hover:bg-bg-card/70 disabled:opacity-50"
+                className="px-3 py-1 bg-bg-card text-text-secondary text-sm rounded-md hover:bg-bg-card/70 disabled:opacity-50"
                 aria-label={`Cancel remove ${account.name}`}
               >
                 No
@@ -146,7 +146,7 @@ export function AccountCard({
             <button
               onClick={() => setConfirmingRemove(true)}
               disabled={busy}
-              className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded hover:bg-status-error/25 disabled:opacity-50"
+              className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
               aria-label={`Remove ${account.name}`}
               title={`Remove ${account.name}`}
             >
@@ -174,7 +174,7 @@ export function AccountCard({
               value={draft.api_key ?? ''}
               onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
               placeholder="Enter API key..."
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} API key`}
             />
           </div>
@@ -185,7 +185,7 @@ export function AccountCard({
               value={draft.base_url ?? ''}
               onChange={e => setDraft({ ...draft, base_url: e.target.value || null })}
               placeholder="https://api.example.com/anthropic"
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} base URL`}
             />
           </div>
@@ -203,7 +203,7 @@ export function AccountCard({
                     value={draft.model_tiers[key] ?? ''}
                     onChange={e => setTier(key, e.target.value)}
                     placeholder="model id"
-                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                     aria-label={`${account.name} ${label} model`}
                   />
                 </div>
@@ -215,7 +215,7 @@ export function AccountCard({
             <select
               value={draft.billing_mode}
               onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} billing mode`}
             >
               <option value="plan">Plan / subscription (percentage)</option>
@@ -226,7 +226,7 @@ export function AccountCard({
             <button
               onClick={saveDraft}
               disabled={busy}
-              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
             >
               {busy ? 'Saving...' : 'Save'}
             </button>
@@ -270,7 +270,7 @@ export function AddCustomProviderForm({
         value={name}
         onChange={e => setName(e.target.value)}
         placeholder="Name (e.g. DeepSeek via Claude Code)"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider name"
       />
       <input
@@ -278,7 +278,7 @@ export function AddCustomProviderForm({
         value={baseUrl}
         onChange={e => setBaseUrl(e.target.value)}
         placeholder="Base URL (https://api.deepseek.com/anthropic)"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider base URL"
       />
       <input
@@ -286,7 +286,7 @@ export function AddCustomProviderForm({
         value={apiKey}
         onChange={e => setApiKey(e.target.value)}
         placeholder="API key"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider API key"
       />
       <div className="flex gap-3">
@@ -296,7 +296,7 @@ export function AddCustomProviderForm({
           // URL + key it can't reach its endpoint, and the spawn menu only shows
           // keyed providers — a keyless add would save a row that never appears.
           disabled={busy || !name.trim() || !baseUrl.trim() || !apiKey.trim()}
-          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
         >
           {busy ? 'Adding...' : 'Add provider'}
         </button>
@@ -730,7 +730,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             value={selected}
             disabled={!loaded || saving}
             onChange={e => handleSave(e.target.value)}
-            className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           >
             <option value={NO_OVERRIDE}>Anthropic (built-in default)</option>
             {providers.map(p => (
@@ -845,7 +845,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <div className="mt-4" data-testid="lan-realized-status">
               {exposedInterfaces.length === 0 ? (
                 <div
-                  className="flex items-start gap-2 bg-bg-card border border-yellow-500/40 rounded px-3 py-2"
+                  className="flex items-start gap-2 bg-bg-card border border-yellow-500/40 rounded-md px-3 py-2"
                   data-testid="lan-exposure-warning"
                   role="alert"
                 >
@@ -911,7 +911,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           {coordEnabled && (
             <div className="mt-4 border border-border-subtle rounded-lg p-5">
-              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded px-3 py-2 mb-4">
+              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded-md px-3 py-2 mb-4">
                 <span className="text-base text-text-secondary">
                   Anyone who can reach this machine on the LAN <span className="font-medium">and</span>{' '}
                   holds the token can read your node statuses. The token is shown once, when
@@ -925,12 +925,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   readOnly
                   value={coordToken ?? (coordHasToken ? '••••••••  (a token has already been minted)' : '')}
                   placeholder="No token yet — generate one to copy"
-                  className="flex-1 bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base font-mono text-text-primary focus:outline-none focus:border-accent-cyan"
+                  className="flex-1 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base font-mono text-text-primary focus:outline-none focus:border-accent-cyan"
                 />
                 {coordToken && (
                   <button
                     onClick={handleCopyToken}
-                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30"
+                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
                   >
                     {coordCopied ? 'Copied!' : 'Copy'}
                   </button>
@@ -938,7 +938,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                 <button
                   onClick={handleGenerateToken}
                   disabled={coordBusy}
-                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
+                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
                 >
                   {coordBusy ? 'Working…' : coordHasToken ? 'Regenerate token' : 'Generate token'}
                 </button>
@@ -982,13 +982,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                       <button
                         onClick={() => handleRevokeDevice(device.id)}
                         disabled={revokingId === device.id}
-                        className="px-4 py-2 bg-status-error text-white text-base rounded hover:bg-status-error/90 disabled:opacity-50"
+                        className="px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90 disabled:opacity-50"
                       >
                         {revokingId === device.id ? 'Revoking…' : 'Confirm revoke'}
                       </button>
                       <button
                         onClick={() => setConfirmingRevokeId(null)}
-                        className="px-4 py-2 bg-bg-card text-text-secondary text-base rounded hover:bg-border-subtle"
+                        className="px-4 py-2 bg-bg-card text-text-secondary text-base rounded-md hover:bg-border-subtle"
                       >
                         Cancel
                       </button>
@@ -996,7 +996,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   ) : (
                     <button
                       onClick={() => setConfirmingRevokeId(device.id)}
-                      className="px-4 py-2 bg-status-error/15 text-status-error text-base rounded hover:bg-status-error/25 whitespace-nowrap"
+                      className="px-4 py-2 bg-status-error/15 text-status-error text-base rounded-md hover:bg-status-error/25 whitespace-nowrap"
                     >
                       Revoke
                     </button>

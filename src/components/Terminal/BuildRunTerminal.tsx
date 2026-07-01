@@ -68,7 +68,7 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
         </span>
         <button
           onClick={handleClose}
-          className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-overlay transition-colors text-[10px]"
+          className="w-4 h-4 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-overlay transition-colors text-[10px]"
           title="Close build/run terminal"
         >
           ×

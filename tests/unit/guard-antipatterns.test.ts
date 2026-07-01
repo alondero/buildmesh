@@ -104,6 +104,86 @@ describe("checkContentViolations (regression — existing rules still fire)", ()
   });
 });
 
+// Issue #733 — bare `rounded` in src/components bypasses the `--radius-md`
+// token. The guard must block new bare-rounded writes while preserving the
+// escape hatch and the legitimate size-suffixed variants.
+describe("checkContentViolations — bare-rounded rules (#733)", () => {
+  it("blocks bare `rounded` in a component className", () => {
+    const v = checkContentViolations(
+      "src/components/Sidebar/MeshItem.tsx",
+      'className="flex items-center gap-2 px-2 py-1 rounded text-xs bg-bg-overlay"',
+    );
+    expect(v.join()).toContain("bare-rounded-in-component");
+  });
+
+  it("blocks bare `rounded-r` (bare directional) in a component className", () => {
+    const v = checkContentViolations(
+      "src/components/Sidebar/Pagination.tsx",
+      'className="px-2 py-1 rounded-r text-xs bg-bg-card"',
+    );
+    expect(v.join()).toContain("bare-rounded-directional-in-component");
+  });
+
+  it("allows `rounded-md` in a component className (already token-bound)", () => {
+    const v = checkContentViolations(
+      "src/components/Sidebar/MeshItem.tsx",
+      'className="flex items-center gap-2 px-2 py-1 rounded-md text-xs bg-bg-overlay"',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows `rounded-r-md` in a component className (directional already sized)", () => {
+    const v = checkContentViolations(
+      "src/components/Sidebar/Pagination.tsx",
+      'className="px-2 py-1 rounded-r-md text-xs bg-bg-card"',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows the full set of token-bound rounded sizes", () => {
+    const sizes = ["sm", "md", "lg", "xl", "2xl", "3xl", "full", "none", "pill"];
+    for (const size of sizes) {
+      const v = checkContentViolations(
+        "src/components/Sidebar/MeshItem.tsx",
+        `className="p-2 rounded-${size}"`,
+      );
+      expect(v, `rounded-${size} should not be flagged`).toHaveLength(0);
+    }
+  });
+
+  it("allows bare `rounded` with the `// allow-bare-rounded` escape comment", () => {
+    const v = checkContentViolations(
+      "src/components/Probe/WorktreeManagerTab.tsx",
+      'className={`px-1 py-px rounded text-[9px] ${color}`} // allow-bare-rounded — 9px status badge',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows bare `rounded-r` with the `// allow-bare-rounded` escape comment", () => {
+    const v = checkContentViolations(
+      "src/components/Sidebar/Pagination.tsx",
+      'className="px-2 py-1 rounded-r text-xs" // allow-bare-rounded',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("does NOT police bare `rounded` outside src/components (mobile + Rust)", () => {
+    // The bug is specific to the React component layer where Tailwind reads
+    // the --radius-md token; mobile uses inline styles and Rust is unrelated.
+    const mobile = checkContentViolations(
+      "src/mobile/screens/NodeList.tsx",
+      "borderRadius: 4,",
+    );
+    expect(mobile).toHaveLength(0);
+
+    const rust = checkContentViolations(
+      "src-tauri/src/agent/spawn.rs",
+      'let radius = "rounded";',
+    );
+    expect(rust).toHaveLength(0);
+  });
+});
+
 describe("collectNewText", () => {
   it("reads Write content, Edit new_string, and MultiEdit edits", () => {
     expect(collectNewText({ content: "a" })).toBe("a");

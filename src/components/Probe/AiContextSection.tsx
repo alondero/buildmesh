@@ -58,7 +58,7 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
 
   if (prUrl) {
     return (
-      <div className="rounded border border-green-400/30 bg-green-400/10 p-3">
+      <div className="rounded-md border border-green-400/30 bg-green-400/10 p-3">
         <p className="text-xs text-green-400 font-medium mb-1">Portability PR created!</p>
         <a
           href={prUrl}
@@ -73,7 +73,7 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
   }
 
   return (
-    <div className="rounded border border-[#2a2a2a] p-3 space-y-2">
+    <div className="rounded-md border border-[#2a2a2a] p-3 space-y-2">
       <p className="text-xs font-medium text-[#e0e0e0]">AI context portability</p>
 
       <div className="space-y-0.5 text-[11px] text-[#9ca3af]">
@@ -119,7 +119,7 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
             <button
               onClick={handleCreate}
               disabled={submitting}
-              className="w-full bg-accent-cyan/10 hover:bg-accent-cyan/20 text-accent-cyan text-xs py-1.5 rounded transition-colors disabled:opacity-50"
+              className="w-full bg-accent-cyan/10 hover:bg-accent-cyan/20 text-accent-cyan text-xs py-1.5 rounded-md transition-colors disabled:opacity-50"
             >
               {submitting ? 'Creating PR…' : 'Make AI context portable'}
             </button>

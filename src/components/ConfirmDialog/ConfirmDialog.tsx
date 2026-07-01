@@ -19,13 +19,13 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfi
         <div className="flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary border border-border-subtle rounded transition-colors"
+            className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary border border-border-subtle rounded-md transition-colors"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            className="px-3 py-1.5 text-xs text-white bg-status-error/80 hover:bg-status-error rounded transition-colors"
+            className="px-3 py-1.5 text-xs text-white bg-status-error/80 hover:bg-status-error rounded-md transition-colors"
           >
             {confirmLabel}
           </button>

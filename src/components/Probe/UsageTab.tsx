@@ -146,7 +146,7 @@ export function UsageTab() {
       {error && (
         <div
           role="alert"
-          className="mx-3 mt-2 px-3 py-2 bg-bg-card border border-status-warning/40 rounded text-xs text-status-warning"
+          className="mx-3 mt-2 px-3 py-2 bg-bg-card border border-status-warning/40 rounded-md text-xs text-status-warning"
         >
           {error}
         </div>

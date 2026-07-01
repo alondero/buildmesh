@@ -163,7 +163,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <button
           onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
-          className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+          className="w-4 h-4 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
           // Issue #668 — surface the Alt+G / ⌘+G shortcut in the button
           // tooltip so discoverability isn't gated on the header double-click
           // or the empty-state splash.
@@ -182,7 +182,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         </button>
         <button
           onClick={handleClose}
-          className="w-4 h-4 flex items-center justify-center rounded text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors text-[10px]"
+          className="w-4 h-4 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors text-[10px]"
           title="Close agent node"
         >
           ×

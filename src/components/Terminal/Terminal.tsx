@@ -430,7 +430,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
       )}
 
       {searchOpen && (
-        <div className="absolute top-1 right-1 z-50 flex items-center gap-1 bg-bg-card border border-border-default rounded px-2 py-1 shadow-lg">
+        <div className="absolute top-1 right-1 z-50 flex items-center gap-1 bg-bg-card border border-border-default rounded-md px-2 py-1 shadow-lg">
           <input
             ref={searchInputRef}
             type="text"
@@ -448,7 +448,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
       {contextMenu && (
         <div
-          className="fixed bg-bg-card border border-border-default rounded shadow-lg z-[100] py-1 min-w-[160px]"
+          className="fixed bg-bg-card border border-border-default rounded-md shadow-lg z-[100] py-1 min-w-[160px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}

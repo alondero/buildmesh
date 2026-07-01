@@ -141,7 +141,7 @@ export function ProbeRow({
     <div
       data-issue-row={dataAttr === 'issue' ? rowKey : undefined}
       data-pr-row={dataAttr === 'pr' ? rowKey : undefined}
-      className="flex flex-col gap-1 px-2 py-2 rounded hover:bg-bg-card transition-colors"
+      className="flex flex-col gap-1 px-2 py-2 rounded-md hover:bg-bg-card transition-colors"
     >
       <div className="flex items-start gap-2">
         {/* Left column — clickable to expand/collapse. The title
