@@ -183,19 +183,6 @@ pub struct PrFileEntry {
     pub status: String,
 }
 
-/// Check whether the user has a valid GitHub token (env var or gh config).
-///
-/// Every command in this module talks to the GitHub REST API (blocking HTTP);
-/// `(async)` moves them to a worker thread so a slow or offline network never
-/// freezes the main thread (which would stall the whole UI and all other IPC).
-#[command(async)]
-pub fn check_gh_auth() -> bool {
-    match GitHubClient::new() {
-        Ok(client) => client.check_auth(),
-        Err(_) => false,
-    }
-}
-
 /// Get open GitHub issues for a mesh.
 /// Returns an empty list if the mesh has no GitHub remote (or any error
 /// resolving one), with a `warn!` capturing the reason. The modal degrades

@@ -609,7 +609,7 @@ pub struct MeshGitStatic {
 }
 
 /// Compute the static trio in one IPC. `check_gh_auth` is composed
-/// (delegated to the existing `commands::pr::check_gh_auth`) so the
+/// (delegated to the existing `commands::github::check_gh_auth`) so the
 /// mobile `/git/auth` HTTP route and `MeshPropertiesTab.tsx` keep using
 /// the same source of truth — the snapshot just bundles it with the
 /// repo-only fields the panel needs.
@@ -617,7 +617,7 @@ pub struct MeshGitStatic {
 /// The gh-auth call is wrapped in a process-global TTL'd cache (see
 /// [`check_gh_auth_cached`]) so a user with N meshes pays one gh
 /// round-trip per TTL window instead of N. The cache lives HERE, not in
-/// `commands::pr::check_gh_auth` itself, because that command is also
+/// `commands::github::check_gh_auth` itself, because that command is also
 /// called by the mobile `/git/auth` HTTP route and by
 /// `MeshPropertiesTab.tsx` on a user-triggered re-check — both want a
 /// fresh value, not a 30s-stale snapshot.
@@ -674,7 +674,7 @@ static GH_AUTH_CACHE: OnceCell<Mutex<(Instant, bool)>> = OnceCell::new();
 /// other state (matches the convention in `http/mod.rs::SNAPSHOT_COUNTER`).
 static GH_AUTH_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
-/// Cached wrapper around `commands::pr::check_gh_auth()`. Returns the
+/// Cached wrapper around `commands::github::check_gh_auth()`. Returns the
 /// cached value when the TTL hasn't expired; otherwise re-invokes the
 /// underlying command and refreshes the cache.
 ///
@@ -698,7 +698,7 @@ fn check_gh_auth_cached() -> bool {
     let now = Instant::now();
     let mut guard = cell.lock().expect("gh-auth cache mutex poisoned");
     if now.duration_since(guard.0) >= GH_AUTH_CACHE_TTL {
-        guard.1 = crate::commands::pr::check_gh_auth();
+        guard.1 = crate::commands::github::check_gh_auth();
         guard.0 = now;
         GH_AUTH_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     }

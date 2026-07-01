@@ -476,7 +476,6 @@ pub fn run() {
             commands::pr::create_pr,
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
-            commands::pr::check_gh_auth,
             commands::pr::create_pr_for_mesh,
             commands::agent::create_pr_node,
             commands::pr::get_repo_issues,
@@ -485,6 +484,9 @@ pub fn run() {
             commands::pr::get_pr_mergeability,
             commands::pr::get_prs_mergeability,
             commands::pr::get_pr_files,
+            // General GitHub auth (issue #433 — moved out of `commands::pr`:
+            // no PR call sites, used by git/mobile/UI auth checks).
+            commands::github::check_gh_auth,
             // AI context portability
             commands::ai_context::detect_ai_context,
             commands::ai_context::create_ai_context_portability_pr,

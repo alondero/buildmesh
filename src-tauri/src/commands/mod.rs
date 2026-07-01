@@ -15,6 +15,7 @@ pub mod diff;
 pub mod file_tree;
 pub mod file_watcher;
 pub mod frontend_log;
+pub mod github;
 pub mod git;
 #[cfg(test)]
 pub mod git_tests;
