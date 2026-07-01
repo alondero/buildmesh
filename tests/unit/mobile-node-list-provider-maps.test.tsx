@@ -95,7 +95,7 @@ describe("NodeRow avatar", () => {
     expect(avatar).toBeTruthy();
     const span = avatar!.querySelector("span");
     expect(span).toBeTruthy();
-    expect(span!.className).toContain("bg-gray-500");
+    expect(span!.className).toContain("bg-text-muted");
     // Unknown providers get a neutral chip background.
     const inlineStyle = (avatar as HTMLElement).style.background;
     expect(inlineStyle).toBe(hexToRgbString("#555"));
