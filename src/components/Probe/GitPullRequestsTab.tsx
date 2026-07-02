@@ -565,10 +565,10 @@ export function GitPullRequestsTab() {
               type="button"
               onClick={() => setStateFilter(s)}
               aria-pressed={stateFilter === s}
-              className={`px-2 py-0.5 text-[10px] font-medium capitalize transition-colors ${
+              className={`px-2 py-0.5 text-2xs font-medium capitalize transition-colors ${
                 stateFilter === s
                   ? 'bg-accent-cyan/20 text-accent-cyan'
-                  : 'text-text-muted hover:text-text-secondary'
+                  : 'text-text-muted hover:text-text-secondary hover:bg-bg-card'
               }`}
             >
               {s}
@@ -585,13 +585,13 @@ export function GitPullRequestsTab() {
           </div>
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 mb-2">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-status-error mb-2">
               <circle cx="12" cy="12" r="10"/>
               <line x1="15" y1="9" x2="9" y2="15"/>
               <line x1="9" y1="9" x2="15" y2="15"/>
             </svg>
-            <span className="text-xs text-red-400">Failed to load pull requests</span>
-            <span className="text-[10px] text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
+            <span className="text-xs text-status-error">Failed to load pull requests</span>
+            <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
           </div>
         ) : prs.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8">
@@ -686,9 +686,9 @@ export function GitPullRequestsTab() {
                               <GitMergeIcon className="w-3.5 h-3.5" />
                             </button>
                           ) : status.kind === 'checking' ? (
-                            <span className="px-2 py-1 text-[10px] text-text-muted">Checking…</span>
+                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse">Checking…</span>
                           ) : (
-                            <span className="px-2 py-1 text-[10px] rounded bg-bg-card text-text-muted" title="This pull request can't be merged">
+                            <span className="px-2 py-1 text-2xs rounded bg-bg-card text-text-muted" title="This pull request can't be merged">
                               {status.label}
                             </span>
                           )}
@@ -765,10 +765,10 @@ export function GitPullRequestsTab() {
                     // which was almost certainly accidental anyway).
                     <>
                       {rowError && (
-                        <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowError}</p>
+                        <p className="text-2xs text-status-error mt-1 max-w-[260px]">{rowError}</p>
                       )}
                       {rowSpawnError && (
-                        <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowSpawnError}</p>
+                        <p className="text-2xs text-status-error mt-1 max-w-[260px]">{rowSpawnError}</p>
                       )}
                     </>
                   }

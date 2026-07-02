@@ -172,16 +172,16 @@ export function ScratchpadTab() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-end px-3 py-1 text-[11px] text-text-muted h-6 shrink-0">
+      <div className="flex items-center justify-end px-3 py-1 text-xs text-text-muted h-6 shrink-0">
         {loadError !== null && (
-          <span className="text-red-400" title={loadError}>
+          <span className="text-status-error" title={loadError}>
             Load failed
           </span>
         )}
         {loadError === null && status === 'saving' && <span>Saving…</span>}
         {loadError === null && status === 'saved' && <span>Saved</span>}
         {loadError === null && status === 'error' && (
-          <span className="text-red-400">Save failed</span>
+          <span className="text-status-error">Save failed</span>
         )}
       </div>
       <textarea

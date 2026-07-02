@@ -59,7 +59,7 @@ export function NodeCard({ node, isActive, onActivate, onBuildRun, buildRunOpen,
     <div
       ref={setRefs}
       onClick={() => { if (!isActive) onActivate(node.id); }}
-      className={`relative flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-colors ${borderClass} ${isDragging ? 'opacity-40' : ''}`}
+      className={`relative flex-1 flex flex-col bg-bg-card border-2 rounded-sm overflow-hidden group transition-[color,background-color,border-color,opacity] ${borderClass} ${isDragging ? 'opacity-40' : ''}`}
     >
       <GridNodeHeader
         node={node}

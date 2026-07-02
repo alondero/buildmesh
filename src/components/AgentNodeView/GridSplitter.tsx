@@ -87,6 +87,11 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
     const startPos = axis === 'col' ? e.clientX : e.clientY;
     const startSizes = axis === 'col' ? [...colWidthsRef.current[row]] : [...rowHeightsRef.current];
     dragRef.current = { axis, row, index, startPos, startSizes, containerSize: size };
+    // Lock the resize cursor and suppress text selection for the whole drag —
+    // without this the cursor flips back to default whenever the pointer
+    // crosses a pane (the 2-pane path in AgentNodeView already does this).
+    document.body.style.cursor = axis === 'col' ? 'col-resize' : 'row-resize';
+    document.body.style.userSelect = 'none';
   }, []);
 
   useEffect(() => {
@@ -127,6 +132,8 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
     const handleMouseUp = () => {
       if (dragRef.current) {
         dragRef.current = null;
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
         const meshId = selectedMeshIdRef.current;
         if (meshId != null) {
@@ -145,6 +152,11 @@ export function GridSplitter({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen 
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       if (rafId !== null) cancelAnimationFrame(rafId);
+      if (dragRef.current) {
+        // Unmounted mid-drag — don't leave a resize cursor stuck on <body>.
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      }
     };
   }, []);
 
