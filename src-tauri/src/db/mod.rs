@@ -19,6 +19,9 @@ mod sandbox_tests;
 mod device_session_tests;
 
 #[cfg(test)]
+mod drive_idempotency_tests;
+
+#[cfg(test)]
 mod warm_pool_tests;
 
 #[cfg(test)]
@@ -37,6 +40,15 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version.
 ///
+// v23 — Coordinator drive idempotency ledger (issue #320, ADR-0008 §6):
+// add the `coordinator_drive_prompts` table so a Coordinator retrying a
+// timed-out `POST /nodes/{id}/prompt` over a flaky network never lands the
+// prompt twice. Each row records the honest verdict under a caller-supplied
+// idempotency key, scoped to the node it drove; a duplicate `(node_id, key)`
+// replays the recorded verdict instead of re-sending. A brand-new table needs
+// no data migration — `CREATE TABLE IF NOT EXISTS` in `init` materializes it
+// for every DB; the version bump just records the shape moved forward.
+//
 /// v22 — Per-mesh pre-spawn pool size (issue #611): add the
 /// `meshes.pre_spawn_pool_size` INTEGER column (0 = feature off,
 /// 1..5 = target). The pool worker (issue #609 / v21) previously
@@ -71,7 +83,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 22;
+const SCHEMA_VERSION: i32 = 23;
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
@@ -138,6 +150,20 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             last_ip TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- Coordinator drive idempotency ledger (issue #320, ADR-0008 §6). One
+        -- row per (node, caller-supplied key) the Coordinator drove: it records
+        -- the honest verdict so a retry with the same key replays that verdict
+        -- rather than sending the prompt a second time. Scoped by node so a key
+        -- accidentally reused across two nodes still drives each once. No data
+        -- migration — a fresh table, materialized here for every DB.
+        CREATE TABLE IF NOT EXISTS coordinator_drive_prompts (
+            node_id INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (node_id, idempotency_key)
         );
 
         -- Pre-spawn Worktree Pool (issue #609, PRD #608). One row per
@@ -1368,6 +1394,67 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
         Some(stored) => Ok(stored == hash_token(token)),
         None => Ok(false),
     }
+}
+
+// --- Coordinator drive idempotency ledger (issue #320, ADR-0008 §6) ---
+//
+// A Coordinator on a flaky network retries a timed-out drive; the caller-supplied
+// idempotency key lets Buildmesh recognise the retry and replay the original
+// verdict instead of sending the prompt twice. The store deals in the verdict's
+// wire string (`"delivered"`/`"unverified"`) so this layer never depends on the
+// `coordinator::drive` module — the drive side owns the string↔enum mapping.
+// Lock-once + `_inner(&Connection)` so the logic is unit-testable in memory.
+
+/// The verdict recorded under `(node_id, key)`, or `None` if that key is new for
+/// the node. `None` means "go drive"; `Some` means "replay this, do not re-send".
+/// A genuine read error (`Err`) is *propagated, never swallowed*: the caller must
+/// be able to tell "this key is new" from "I couldn't check", because on a retry
+/// the difference is deliver-again versus fail-safe (issue #320 review).
+pub fn lookup_drive_prompt_verdict(node_id: i64, key: &str) -> SqlResult<Option<String>> {
+    let db = get().lock().unwrap();
+    lookup_drive_prompt_verdict_inner(&db, node_id, key)
+}
+
+pub fn lookup_drive_prompt_verdict_inner(
+    conn: &Connection,
+    node_id: i64,
+    key: &str,
+) -> SqlResult<Option<String>> {
+    // Only "no such row" is `Ok(None)` (= key never seen → go drive). Any other
+    // error (IO, lock, corruption) propagates so the drive path can fail safe
+    // rather than mistake an unreadable ledger for "not delivered yet".
+    match conn.query_row(
+        "SELECT verdict FROM coordinator_drive_prompts
+             WHERE node_id = ?1 AND idempotency_key = ?2",
+        params![node_id, key],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(verdict) => Ok(Some(verdict)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Record the verdict a drive produced under its idempotency key. `INSERT OR
+/// IGNORE` keeps the *first* verdict authoritative: a racing duplicate that also
+/// slipped through the lookup cannot overwrite the original the retry will replay.
+pub fn record_drive_prompt_verdict(node_id: i64, key: &str, verdict: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    record_drive_prompt_verdict_inner(&db, node_id, key, verdict)
+}
+
+pub fn record_drive_prompt_verdict_inner(
+    conn: &Connection,
+    node_id: i64,
+    key: &str,
+    verdict: &str,
+) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO coordinator_drive_prompts (node_id, idempotency_key, verdict)
+         VALUES (?1, ?2, ?3)",
+        params![node_id, key, verdict],
+    )?;
+    Ok(())
 }
 
 // --- Persistent device sessions (issue #502, PRD #494) ---
