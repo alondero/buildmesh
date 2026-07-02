@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import type { Mesh } from '../../stores/meshStore';
@@ -103,6 +103,17 @@ export function MeshItem({
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Issue #735 — viewport clamping + ARIA menu keyboard navigation.
+  // The menu container ref lets us measure its rendered size for clamping;
+  // the item refs hold the menuitem buttons so arrow keys can move focus
+  // between them (roving tabindex). The trigger ref remembers the row that
+  // opened the menu so Escape can return focus there.
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  // Indices of the five context-menu items (mirrors render order below).
+  const MENU_ITEM_COUNT = 5;
   const { branchStatus, refresh: refreshBranchStatus } = useGitBranchStatus(mesh.path);
   const { health } = useMeshHealth(mesh.id, mesh.path);
   const behind = branchStatus?.behind ?? 0;
@@ -124,6 +135,16 @@ export function MeshItem({
     }
   };
 
+  // Issue #735 — close the menu and return focus to the trigger. Used by
+  // Escape and any menuitem click so the user's focus stays predictable
+  // across menu interactions. The `requestAnimationFrame` runs after the
+  // unmount so the trigger ref is still attached when the focus() lands.
+  const closeContextMenu = () => {
+    const trigger = triggerRef.current;
+    setContextMenu(null);
+    requestAnimationFrame(() => trigger?.focus());
+  };
+
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -132,9 +153,63 @@ export function MeshItem({
 
   useEffect(() => {
     if (!contextMenu) return;
-    const handleClick = () => setContextMenu(null);
+    const handleClick = () => closeContextMenu();
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setContextMenu(null);
+      // WAI-ARIA menu contract: keystrokes only apply while focus is
+      // inside the menu. The document-level listener would otherwise
+      // hijack arrow / Home / End typed elsewhere on the page. We check
+      // `document.activeElement` (not `e.target`) because in jsdom tests
+      // events are dispatched on `document` while focus is on a menuitem.
+      const menu = menuRef.current;
+      const active = document.activeElement;
+      if (menu && active instanceof Node && !menu.contains(active)) return;
+
+      // Issue #735 — WAI-ARIA menu keyboard pattern: Escape closes
+      // (returning focus to the trigger), arrow keys move focus between
+      // menuitems with wrap-around, Home/End jump to ends, Tab/Shift+Tab
+      // moves focus out of the menu and closes it.
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeContextMenu();
+        return;
+      }
+      if (e.key === 'Tab') {
+        // WAI-ARIA menu: Tab leaves the menu and closes it (a modal menu
+        // would trap focus, but `role="menu"` is a non-modal popover).
+        // Don't preventDefault — let the browser move focus normally.
+        closeContextMenu();
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveIndex((i) => {
+          const next = (i + 1) % MENU_ITEM_COUNT;
+          menuItemRefs.current[next]?.focus();
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveIndex((i) => {
+          const next = (i - 1 + MENU_ITEM_COUNT) % MENU_ITEM_COUNT;
+          menuItemRefs.current[next]?.focus();
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'Home') {
+        e.preventDefault();
+        setActiveIndex(0);
+        menuItemRefs.current[0]?.focus();
+        return;
+      }
+      if (e.key === 'End') {
+        e.preventDefault();
+        setActiveIndex(MENU_ITEM_COUNT - 1);
+        menuItemRefs.current[MENU_ITEM_COUNT - 1]?.focus();
+        return;
+      }
     };
     document.addEventListener('mousedown', handleClick);
     document.addEventListener('keydown', handleKeyDown);
@@ -144,10 +219,52 @@ export function MeshItem({
     };
   }, [contextMenu]);
 
+  // Issue #735 — viewport clamping. Runs after the menu mounts so we can
+  // read its rendered size; pushes the position back into state if it
+  // would overflow the right or bottom edge. `useLayoutEffect` keeps the
+  // adjustment off-screen so the user never sees the over-large position.
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const MARGIN = 4;
+    // Compute the deltas needed to bring the rect inside the viewport;
+    // only apply when an actual overflow exists.
+    const overX = rect.right - (vw - MARGIN);
+    const overY = rect.bottom - (vh - MARGIN);
+    if (overX <= 0 && overY <= 0) return;
+    const nextX = Math.max(MARGIN, contextMenu.x - (overX > 0 ? overX : 0));
+    const nextY = Math.max(MARGIN, contextMenu.y - (overY > 0 ? overY : 0));
+    // No-op guard — without this, a stubbed `getBoundingClientRect` that
+    // doesn't track the rendered position can put us in an infinite setState
+    // loop (effect re-fires because the state object identity changes).
+    if (nextX === contextMenu.x && nextY === contextMenu.y) return;
+    setContextMenu({ x: nextX, y: nextY });
+  }, [contextMenu]);
+
+  // Issue #735 — on open, reset the roving index and move focus to the
+  // first menuitem so keyboard nav starts somewhere. `useLayoutEffect`
+  // (not `useEffect` + setTimeout) — the layout effect fires synchronously
+  // after the menu commits, so subsequent arrow-key presses don't race
+  // against a deferred focus call clobbering them.
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    setActiveIndex(0);
+    menuItemRefs.current[0]?.focus();
+  }, [contextMenu !== null]);
+
   return (
     <div ref={setNodeRef} style={style} className="mb-1 group/mesh">
       {/* Mesh header — double height with color accent */}
       <div
+        ref={triggerRef}
+        // Issue #735 — `tabIndex={-1}` makes the row programmatically
+        // focusable so the per-mesh menu can return focus to its trigger
+        // on Escape, without putting the row in the natural Tab order.
+        tabIndex={-1}
         className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${meshColor.border} ${
           isSelected ? 'bg-bg-card' : 'hover:bg-bg-card/50'
         }`}
@@ -167,6 +284,7 @@ export function MeshItem({
             ⋮⋮
           </span>
           <span
+            id={`mesh-item-name-${mesh.id}`}
             className="font-sans font-semibold text-sm text-text-primary truncate flex-1"
           >
             {mesh.name}
@@ -241,12 +359,24 @@ export function MeshItem({
       {/* Context menu — periphery actions */}
       {contextMenu && (
         <div
+          ref={menuRef}
+          // Issue #735 — WAI-ARIA `menu` role; `aria-labelledby` points at
+          // the mesh-name span added above so screen readers can announce
+          // the menu's accessible name. Viewport clamping happens in the
+          // `useLayoutEffect` above; `style={{ top, left }}` reflects the
+          // potentially-repositioned coordinates.
+          role="menu"
+          aria-labelledby={`mesh-item-name-${mesh.id}`}
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button
-            onClick={() => { setContextMenu(null); onOpenPropertiesProbe(mesh.id); }}
+            ref={(el) => { menuItemRefs.current[0] = el; }}
+            // Roving tabindex — only the active item is in the Tab order.
+            role="menuitem"
+            tabIndex={activeIndex === 0 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenPropertiesProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -256,7 +386,10 @@ export function MeshItem({
             Properties
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenFilesProbe(); }}
+            ref={(el) => { menuItemRefs.current[1] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 1 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenFilesProbe(); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -265,7 +398,10 @@ export function MeshItem({
             File Explorer
           </button>
           <button
-            onClick={() => { setContextMenu(null); handleSync(); }}
+            ref={(el) => { menuItemRefs.current[2] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 2 ? 0 : -1}
+            onClick={() => { closeContextMenu(); handleSync(); }}
             disabled={syncing}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50"
           >
@@ -278,7 +414,10 @@ export function MeshItem({
             {syncing ? 'Syncing...' : 'Sync Latest'}
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenSessionHistoryProbe(mesh.id); }}
+            ref={(el) => { menuItemRefs.current[3] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 3 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenSessionHistoryProbe(mesh.id); }}
             title="Archived Nodes"
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
@@ -289,7 +428,10 @@ export function MeshItem({
             Archive
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenIssuesProbe(mesh.id); }}
+            ref={(el) => { menuItemRefs.current[4] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 4 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenIssuesProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
