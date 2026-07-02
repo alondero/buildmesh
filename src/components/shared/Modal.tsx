@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 
 interface ModalProps {
   onClose: () => void;
@@ -253,15 +253,18 @@ export function Modal({
 }
 
 /** The standard close “×” for modal headers — labelled, hover state, red-shift on hover. */
-export function ModalCloseButton({ onClose, label = 'Close' }: { onClose: () => void; label?: string }) {
-  return (
-    <button
-      type="button"
-      onClick={onClose}
-      aria-label={label}
-      className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 transition-colors text-xl leading-none"
-    >
-      ×
-    </button>
-  );
-}
+export const ModalCloseButton = forwardRef<HTMLButtonElement, { onClose: () => void; label?: string }>(
+  function ModalCloseButton({ onClose, label = 'Close' }, ref) {
+    return (
+      <button
+        ref={ref}
+        type="button"
+        onClick={onClose}
+        aria-label={label}
+        className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 transition-colors text-xl leading-none"
+      >
+        ×
+      </button>
+    );
+  },
+);

@@ -458,13 +458,13 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
             disabled={!instRef.current?.term.hasSelection()}
             className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
           >
-            Copy <span className="float-right text-text-muted">{isMac ? '⌘C' : 'Ctrl+C'}</span>
+            Copy <span className="float-right text-text-muted">{isMac ? '⌘C' : 'Ctrl+Shift+C'}</span>
           </button>
           <button
             onClick={handlePaste}
             className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
-            Paste <span className="float-right text-text-muted">{isMac ? '⌘V' : 'Ctrl+V'}</span>
+            Paste <span className="float-right text-text-muted">{isMac ? '⌘V' : 'Ctrl+Shift+V'}</span>
           </button>
           <div className="border-t border-border-default my-0.5" />
           <button

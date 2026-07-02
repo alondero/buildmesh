@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { isTextInputFocused } from '../../src/lib/focusGuard';
+import { isTextInputFocused, isTerminalFocused } from '../../src/lib/focusGuard';
 
 /**
  * Regression tests for the focus-guard around the Alt+G / Cmd+G toggle
@@ -101,5 +101,66 @@ describe('isTextInputFocused', () => {
     capture.focus();
     expect(isTextInputFocused()).toBe(false);
     capture.remove();
+  });
+});
+
+/**
+ * Regression tests for the inverse-direction guard added for issue #731:
+ * the `?`-key cheatsheet toggle wants to NOT fire when the user is typing
+ * in an agent terminal (the `?` is content for the agent, not a help
+ * request). This is the opposite policy from Alt+G, which DOES want to
+ * fire from a terminal prompt.
+ */
+describe('isTerminalFocused', () => {
+  let previouslyFocused: Element | null;
+
+  beforeEach(() => {
+    previouslyFocused = document.activeElement;
+    if (document.body && document.body.focus) document.body.focus();
+  });
+
+  afterEach(() => {
+    if (previouslyFocused instanceof HTMLElement) {
+      previouslyFocused.focus();
+    }
+  });
+
+  it('returns true for xterm.js\'s hidden helper textarea (the policy case)', () => {
+    const helper = document.createElement('textarea');
+    helper.className = 'xterm-helper-textarea';
+    helper.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(helper);
+    helper.focus();
+    expect(isTerminalFocused()).toBe(true);
+    helper.remove();
+  });
+
+  it('returns true for an xterm helper even without aria-hidden (className fallback)', () => {
+    const helper = document.createElement('textarea');
+    helper.className = 'xterm-helper-textarea';
+    document.body.appendChild(helper);
+    helper.focus();
+    expect(isTerminalFocused()).toBe(true);
+    helper.remove();
+  });
+
+  it('returns false for a plain textarea (NOT an xterm helper)', () => {
+    const ta = document.createElement('textarea');
+    document.body.appendChild(ta);
+    ta.focus();
+    expect(isTerminalFocused()).toBe(false);
+    ta.remove();
+  });
+
+  it('returns false for an input element', () => {
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    input.focus();
+    expect(isTerminalFocused()).toBe(false);
+    input.remove();
+  });
+
+  it('returns false when nothing is focused (body)', () => {
+    expect(isTerminalFocused()).toBe(false);
   });
 });
