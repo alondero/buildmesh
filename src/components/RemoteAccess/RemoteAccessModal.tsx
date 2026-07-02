@@ -286,7 +286,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 <img
                   src={qrDataUrl}
                   alt="QR Code to connect"
-                  className="w-96 h-96 rounded border border-border-subtle"
+                  className="w-96 h-96 rounded-md border border-border-subtle"
                 />
                 <div className="mt-2 text-base text-text-secondary font-medium font-mono">
                   {host}
@@ -301,7 +301,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 <img
                   src={installQrDataUrl}
                   alt="QR Code to install Buildmesh root CA"
-                  className="w-96 h-96 rounded border border-border-subtle"
+                  className="w-96 h-96 rounded-md border border-border-subtle"
                 />
                 <div className="mt-2 text-sm text-text-muted text-center">
                   Scan with your phone to install the root CA.
@@ -345,7 +345,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 </div>
                 <div
                   data-testid="remote-access-cert-fingerprint"
-                  className="text-xs font-mono text-text-secondary break-all bg-bg-base/40 rounded px-2 py-1"
+                  className="text-xs font-mono text-text-secondary break-all bg-bg-base/40 rounded-md px-2 py-1"
                 >
                   {certStatus.root_fingerprint_sha256}
                 </div>
@@ -360,7 +360,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 {showReinstall && (
                   <div
                     data-testid="remote-access-cert-reinstall"
-                    className="mt-2 text-xs text-text-muted border border-border-subtle rounded p-3 space-y-2"
+                    className="mt-2 text-xs text-text-muted border border-border-subtle rounded-md p-3 space-y-2"
                   >
                     {installUrl && (
                       <div>
@@ -369,7 +369,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                         </div>
                         <code
                           data-testid="remote-access-cert-install-url"
-                          className="block font-mono break-all bg-bg-base/40 rounded px-2 py-1 text-text-secondary"
+                          className="block font-mono break-all bg-bg-base/40 rounded-md px-2 py-1 text-text-secondary"
                         >
                           {installUrl}
                         </code>
@@ -387,14 +387,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                       <div className="flex items-start gap-2">
                         <code
                           data-testid="remote-access-cert-path"
-                          className="flex-1 font-mono break-all bg-bg-base/40 rounded px-2 py-1 text-text-secondary"
+                          className="flex-1 font-mono break-all bg-bg-base/40 rounded-md px-2 py-1 text-text-secondary"
                         >
                           {certStatus.cert_path ?? ''}
                         </code>
                         <button
                           data-testid="remote-access-cert-copy"
                           onClick={handleCopyCertPath}
-                          className="shrink-0 px-2 py-1 rounded bg-border-subtle hover:bg-border-default text-text-secondary"
+                          className="shrink-0 px-2 py-1 rounded-md bg-border-subtle hover:bg-border-default text-text-secondary"
                           type="button"
                         >
                           {certPathCopied ? 'Copied!' : 'Copy'}

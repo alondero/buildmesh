@@ -226,7 +226,7 @@ function TreeNode({
     <div>
       <div
         className={`
-          flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer
+          flex items-center gap-1 px-2 py-0.5 rounded-md cursor-pointer
           hover:bg-bg-card transition-colors
           ${isSelected ? 'bg-bg-overlay' : ''}
         `}

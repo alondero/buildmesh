@@ -249,7 +249,7 @@ export function ArchivedNodesTab() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Filter by message, branch, or worktree…"
-          className="w-full bg-bg-card border border-border-default rounded px-3 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan"
+          className="w-full bg-bg-card border border-border-default rounded-md px-3 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan"
           autoFocus
         />
       </div>
@@ -287,7 +287,7 @@ export function ArchivedNodesTab() {
             {filtered.map(session => (
               <div
                 key={session.session_id}
-                className="flex items-center gap-2 px-2 py-2 rounded hover:bg-bg-card transition-colors"
+                className="flex items-center gap-2 px-2 py-2 rounded-md hover:bg-bg-card transition-colors"
               >
                 <div className="flex-1 min-w-0">
                   <div className="text-sm text-text-primary truncate">{session.first_message}</div>
@@ -310,7 +310,7 @@ export function ArchivedNodesTab() {
                     type="button"
                     onClick={() => handleDefaultResume(session)}
                     disabled={resuming !== null}
-                    className="px-2.5 py-1 text-xs font-medium rounded-l bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="px-2.5 py-1 text-xs font-medium rounded-l-md bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     {resuming === session.session_id ? 'Resuming…' : 'Resume'}
                   </button>
@@ -322,7 +322,7 @@ export function ArchivedNodesTab() {
                     aria-label="Choose provider to resume with"
                     aria-haspopup="menu"
                     aria-expanded={openDropdown === session.session_id}
-                    className="px-1.5 py-1 text-xs font-medium rounded-r border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="px-1.5 py-1 text-xs font-medium rounded-r-md border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     ▾
                   </button>

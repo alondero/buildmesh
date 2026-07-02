@@ -189,7 +189,7 @@ function HarnessCard({
             return (
               <li
                 key={p.provider_id}
-                className="flex items-center gap-3 border border-border-subtle rounded px-3 py-2"
+                className="flex items-center gap-3 border border-border-subtle rounded-md px-3 py-2"
                 data-testid={`pairing-${p.harness_id}-${p.provider_id}`}
               >
                 <ProviderIcon providerId={p.provider_id} className="h-5 w-5" />
@@ -206,7 +206,7 @@ function HarnessCard({
                   <button
                     onClick={() => detach(p.provider_id)}
                     disabled={busy}
-                    className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded hover:bg-status-error/25 disabled:opacity-50"
+                    className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
                     aria-label={`Detach ${accountName(p.provider_id)} from ${harness.label}`}
                   >
                     Detach
@@ -233,7 +233,7 @@ function HarnessCard({
               <select
                 value={selected}
                 onChange={(e) => setSelected(e.target.value)}
-                className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                 aria-label={`Provider to attach to ${harness.label}`}
               >
                 <option value="">Select a provider…</option>
@@ -253,7 +253,7 @@ function HarnessCard({
                     value={key}
                     onChange={(e) => setKey(e.target.value)}
                     placeholder="Enter API key…"
-                    className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                    className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                     aria-label={`${accountName(selected)} API key`}
                   />
                 </div>
@@ -264,7 +264,7 @@ function HarnessCard({
                   // A keyless provider needs a key to reach its endpoint, so gate
                   // Attach on the inline key when the provider has none stored.
                   disabled={busy || !selected || (needsKey && !key.trim())}
-                  className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+                  className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
                 >
                   {busy ? 'Attaching…' : 'Attach'}
                 </button>

@@ -420,7 +420,7 @@ sandbox: config.sandbox,
                 if (!mountedRef.current) return;
                 await saveName(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
@@ -430,7 +430,7 @@ sandbox: config.sandbox,
               type="text"
               value={activeMeshPath}
               readOnly
-              className="w-full bg-bg-surface border border-border-subtle rounded px-2 py-1.5 text-xs text-text-secondary font-mono"
+              className="w-full bg-bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-xs text-text-secondary font-mono"
             />
           </Field>
 
@@ -458,7 +458,7 @@ sandbox: config.sandbox,
                 await saveModel(e.target.value);
               }}
               placeholder="e.g., opus-4, sonnet-4"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
@@ -474,7 +474,7 @@ sandbox: config.sandbox,
                 setForm((p) => ({ ...p, effort: e.target.value }));
                 await saveEffort(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               {EFFORT_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -492,7 +492,7 @@ sandbox: config.sandbox,
                 setForm((p) => ({ ...p, defaultProvider: e.target.value }));
                 await saveDefaultProvider(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               <option value="">&lt;Default&gt; ({appWideDefault})</option>
               {/* Issue #575 / ADR-0016 — group the Spawn Options by their
@@ -572,7 +572,7 @@ sandbox: config.sandbox,
               onChange={(e) => {
                 if (e.target.value) void applyPresetById(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               <option value="">Choose a preset to fill Build/Run…</option>
               {PROJECT_PRESETS.map((p) => (
@@ -586,7 +586,7 @@ sandbox: config.sandbox,
             {detected?.preset_id &&
               !form.buildCommand.trim() &&
               !form.runCommand.trim() && (
-                <div className="mt-2 flex items-start gap-2 bg-accent-cyan/5 border border-accent-cyan/30 rounded px-2 py-1.5">
+                <div className="mt-2 flex items-start gap-2 bg-accent-cyan/5 border border-accent-cyan/30 rounded-md px-2 py-1.5">
                   <span className="text-xs text-text-secondary flex-1">
                     Looks like a{' '}
                     <span className="text-text-primary">{detected.label}</span>{' '}
@@ -614,7 +614,7 @@ sandbox: config.sandbox,
                 await saveBuildCommand(e.target.value);
               }}
               placeholder="e.g., npm run build — type to override, or pick a preset above"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
@@ -629,7 +629,7 @@ sandbox: config.sandbox,
                 await saveRunCommand(e.target.value);
               }}
               placeholder="e.g., npm run dev — type to override, or pick a preset above"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
@@ -644,7 +644,7 @@ sandbox: config.sandbox,
             <button
               type="button"
               onClick={() => setShowDeleteConfirm(true)}
-              className="w-full bg-status-error/10 hover:bg-status-error/20 text-status-error text-xs font-medium py-2 rounded transition-colors"
+              className="w-full bg-status-error/10 hover:bg-status-error/20 text-status-error text-xs font-medium py-2 rounded-md transition-colors"
             >
               Delete Mesh
             </button>

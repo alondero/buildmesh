@@ -142,7 +142,7 @@ export function ProjectFilesTab() {
           onClick={handleOpenInFileManager}
           aria-label="Open in file explorer"
           title="Open in file explorer"
-          className="p-1 rounded text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors flex-shrink-0 ml-1"
+          className="p-1 rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors flex-shrink-0 ml-1"
         >
           <FolderOpenIcon className="w-3.5 h-3.5" />
         </button>

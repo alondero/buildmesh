@@ -93,7 +93,7 @@ export function SpawnButtonCluster({
 
   return (
     <div className="relative">
-      <div className="flex items-center rounded border border-accent-cyan/30 overflow-hidden">
+      <div className="flex items-center rounded-md border border-accent-cyan/30 overflow-hidden">
         <button
           data-testid="spawn-default"
           onClick={(e) => { e.stopPropagation(); onSpawnDefault(e.altKey); }}
