@@ -880,7 +880,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
           under the trailing icon instead of pushing it out of the card. */}
       <div className="flex items-center justify-between gap-2">
         <span
-          className="text-2xs font-mono text-text-muted truncate flex-1 min-w-0"
+          className="text-2xs font-mono text-text-secondary truncate flex-1 min-w-0"
           title={repo.path}
         >
           {repo.path}
@@ -985,12 +985,12 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                         <Badge color="bg-bg-overlay text-text-muted" text="clean" />
                       )}
                       {(b.ahead > 0 || b.behind > 0) && (
-                        <span className="text-2xs font-mono text-text-muted">
+                        <span className="text-2xs font-mono text-text-secondary">
                           ↑{b.ahead} ↓{b.behind}
                         </span>
                       )}
                       {b.last_commit_date && (
-                        <span className="text-2xs text-text-muted">
+                        <span className="text-2xs text-text-secondary">
                           {formatDate(b.last_commit_date)}
                         </span>
                       )}
@@ -1052,7 +1052,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                     <span className="text-text-primary truncate flex-1 min-w-0">
                       {name}
                       {w.branch && (
-                        <span className="text-text-muted"> · {w.branch}</span>
+                        <span className="text-text-secondary"> · {w.branch}</span>
                       )}
                     </span>
                     <span className="flex items-center gap-1 flex-shrink-0">
@@ -1119,7 +1119,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
             {repo.remote_tracking_branches.map((name) => (
               <div
                 key={name}
-                className="text-2xs font-mono text-text-muted px-1 truncate"
+                className="text-2xs font-mono text-text-secondary px-1 truncate"
               >
                 {name}
               </div>

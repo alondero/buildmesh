@@ -8,6 +8,14 @@
  * behaviour). Because the bar stays visible while collapsed, the panel can
  * always be reopened after the header's close button hides the body.
  *
+ * The body width is **horizontally resizable** (issue #724) via a separator
+ * handle on the body's left edge. Default 360px, clamped to [240, 720];
+ * the chosen width persists across launches via localStorage. The bounds
+ * are wider than the sidebar's [192, 480] because the dock's primary job
+ * is reviewing diffs (`AgentReviewPanel` uses ~104px of fixed-width gutter
+ * per line — see `Diff.tsx` `DiffLineRow`), and narrower than the center
+ * workspace needs to stay useful on common laptop resolutions.
+ *
  * Tab bodies land incrementally as follow-up issues under #372 complete:
  *   - #376: `ProjectFilesTab` (📁) and `AgentChangesTab` (🔍)
  *   - #377: `WorktreeManagerTab` (🌳) — health recovery + branch / worktree
@@ -19,8 +27,10 @@
  * the dock is useful from day one.
  */
 
+import { useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
+import { useProbeResize, PROBE_PANEL_BOUNDS } from './useProbeResize';
 import { ProjectFilesTab } from './ProjectFilesTab';
 import { AgentChangesTab } from './AgentChangesTab';
 import { MeshPropertiesTab } from './MeshPropertiesTab';
@@ -63,13 +73,27 @@ const PROBE_TABS: ProbeTabDef[] = [
   { tab: 'scratchpad', icon: '📝', label: 'Scratch Pad', short: 'Notes' },
 ];
 
-const PROBE_BODY_WIDTH = 360;
-
 export function ProbePanel() {
   const probeOpen = useUIStore((s) => s.probeOpen);
   const probeTab = useUIStore((s) => s.probeTab);
   const setProbeTab = useUIStore((s) => s.setProbeTab);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
+  // Issue #724 — the panel is now horizontally resizable (default 360px,
+  // clamped 240–720). The shared `useResizable` hook's valueRef pattern
+  // (issue #301) prevents the second-drag stale-closure jump; the wrapper
+  // hook adds localStorage persistence so the chosen width survives a
+  // relaunch. The handle lives on a `relative` outer wrapper (not inside
+  // the overflow-hidden section) so the `-left-1` extension actually
+  // reaches the gap with the center workspace instead of being clipped.
+  const { width: bodyWidth, isResizing, handleMouseDown, setWidth: setBodyWidth } = useProbeResize();
+  // Mirror bodyWidth into a ref so the keyboard handler reads the latest
+  // value on every keydown — the same stale-closure anti-pattern
+  // useResizable's valueRef guards against for the drag path. Without
+  // this, auto-repeat arrow keys (held) call setBodyWidth with the same
+  // stale bodyWidth N times before React commits, collapsing the rapid
+  // expansion into a single +8 step per render.
+  const bodyWidthRef = useRef(bodyWidth);
+  bodyWidthRef.current = bodyWidth;
   // The dock header surfaces the active mesh name as a subheading on every
   // tab, so each tab body stays free of redundant path/name chrome. The
   // hook degrades to `null` in the empty state; we render nothing in that
@@ -94,12 +118,71 @@ export function ProbePanel() {
   return (
     <div className="flex h-full shrink-0 bg-bg-surface">
       {probeOpen && (
-        <section
-          role="region"
-          aria-label="Probe panel"
-          className="flex flex-col h-full overflow-hidden border-l border-border-subtle"
-          style={{ width: PROBE_BODY_WIDTH }}
+        // Outer wrapper is `relative` but does NOT carry `overflow-hidden` —
+        // the handle's `-left-1` extension must reach into the gap with the
+        // center workspace to deliver the documented 10px hit zone. The
+        // inner section owns the overflow-hidden + the border so the dock's
+        // scroll content doesn't escape. (Same outer/inner split as the
+        // sidebar's resize handle.)
+        <div
+          className="relative shrink-0"
+          style={{ width: bodyWidth }}
         >
+          {/* Resize handle — issue #724. Sits on the LEFT edge of the body
+              (which is the inner edge of a right-side dock) and is keyboard-
+              accessible via the WAI-ARIA APG separator pattern (Arrow keys
+              step, Shift = 4× step, PageUp/Down = 10× step, Home/End jump
+              to min/max). The 10px hit zone (`w-2.5`) extends 4px into the
+              gap with the center workspace via `-left-1`; the 2px visible
+              line (`after:w-0.5`) is centred at the panel's actual border
+              so the affordance reads as part of the dock. Reads the latest
+              width through `bodyWidthRef` (not the closed-over state) so
+              auto-repeat keydowns see the post-commit value on the next
+              event — mirrors useResizable's valueRef pattern. */}
+          <div
+            onMouseDown={handleMouseDown}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize probe panel"
+            aria-valuenow={bodyWidth}
+            aria-valuemin={PROBE_PANEL_BOUNDS.MIN_WIDTH}
+            aria-valuemax={PROBE_PANEL_BOUNDS.MAX_WIDTH}
+            tabIndex={0}
+            onKeyDown={(e) => {
+              // Drag-LEFT grows the panel (handle tracks cursor, panel's
+              // right edge is fixed by the activity bar — see useProbeResize
+              // for the geometry). Read the latest width through the ref
+              // so auto-repeat doesn't collapse rapid presses into one
+              // commit. setWidth clamps internally to PROBE_PANEL_BOUNDS.
+              const current = bodyWidthRef.current;
+              const min = PROBE_PANEL_BOUNDS.MIN_WIDTH;
+              const max = PROBE_PANEL_BOUNDS.MAX_WIDTH;
+              const small = e.shiftKey ? 32 : 8;
+              const large = e.shiftKey ? max - min : 80;
+              let next: number | null = null;
+              switch (e.key) {
+                case 'ArrowLeft':  next = Math.min(max, current + small); break;
+                case 'ArrowRight': next = Math.max(min, current - small); break;
+                case 'PageUp':     next = Math.min(max, current + large); break;
+                case 'PageDown':   next = Math.max(min, current - large); break;
+                case 'Home':       next = max; break;
+                case 'End':        next = min; break;
+              }
+              if (next !== null) {
+                setBodyWidth(next);
+                e.preventDefault();
+              }
+            }}
+            className={`absolute top-0 -left-1 w-2.5 h-full cursor-col-resize z-10 outline-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent-cyan after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
+              isResizing ? 'after:bg-accent-cyan/60' : 'after:bg-transparent hover:after:bg-accent-cyan/40'
+            }`}
+          />
+
+          <section
+            role="region"
+            aria-label="Probe panel"
+            className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
+          >
           {/* Header — active tab label (title) + active mesh name
               (subheading) + collapse button. The subheading replaces the
               directory-path strip the Issues / PRs tabs used to render
@@ -116,7 +199,7 @@ export function ProbePanel() {
               </span>
               {activeMeshName && (
                 <span
-                  className="text-xs text-text-muted truncate min-w-0"
+                  className="text-xs text-text-secondary truncate min-w-0"
                   title={activeMeshName}
                 >
                   {activeMeshName}
@@ -149,7 +232,8 @@ export function ProbePanel() {
           <div className="flex-1 overflow-y-auto">
             <ProbeTabBody tab={probeTab} />
           </div>
-        </section>
+          </section>
+        </div>
       )}
 
       {/* Activity bar — always visible so the dock can be reopened after close */}

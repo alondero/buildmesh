@@ -608,3 +608,242 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
     expect(useUIStore.getState().probeOpen).toBe(false);
   });
 });
+
+// Save-feedback (issue #729) — `MeshPropertiesTab` was the only probe tab
+// without a Saving…/Saved/Save failed indicator, and its blur handlers
+// produced unhandled rejections on IPC failure (the field still showed
+// the user's unsaved text with no message). These tests pin the fix:
+//   - successful writes flip the global SaveIndicator to "Saved"
+//   - a rejected write flips it to "Save failed" with the error message
+//     (the unhandled-rejection path is gone — the catch lives inside
+//      the save hook, the IPC promise resolves cleanly)
+//   - the field's text is preserved after a failed save (acceptance
+//     criterion: don't revert on failure)
+//   - a slow save from the outgoing mesh does NOT surface its result
+//     on the new mesh (review finding #1; the `wrappedSave` adapter
+//     discards late results on mesh-switch)
+//   - a re-saved-then-resolved write clears the prior "Save failed"
+//
+// The third test ("does NOT leak an unhandled rejection…") attaches its
+// own per-test `unhandledrejection` listener because there is no
+// project-wide listener for jsdom-emitted promise rejections. The
+// listener captures the rejection reason and the test fails if any
+// rejection lands.
+describe('MeshPropertiesTab — save feedback (issue #729)', () => {
+  // The store has only one mesh configured by `beforeEach` in the outer
+  // suite (MESH = id 42, name "demo"). For the mesh-switch test we
+  // need a second mesh to switch INTO.
+  const MESH_B: Mesh = {
+    ...MESH,
+    id: 99,
+    name: 'other',
+    path: '/repos/other',
+  };
+
+  function rejectNextColumnWrite(message: string) {
+    let armed = true;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (armed && cmd === 'update_mesh_column') {
+        armed = false;
+        return Promise.reject(new Error(message));
+      }
+      if (cmd === 'list_providers') {
+        return Promise.resolve([
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+        ]);
+      }
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project')
+        return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context')
+        return Promise.resolve({
+          claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false,
+          skill_count: 0, agents_skills_exists: false,
+        });
+      if (cmd === 'get_mesh_health')
+        return Promise.resolve({
+          is_dirty: false, is_drifted: false, unpushed_ahead: 0,
+          base_branch_holder: null, local_base_branch: 'main',
+          current_branch: 'main', current_short_sha: 'abc1234', authenticated: false,
+        });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+  }
+
+  it('shows a global "Saved" indicator after a successful blur save', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'sonnet-4');
+    fireEvent.blur(model);
+
+    // Wait for the save's transition: Saving… → Saved. The save itself
+    // is fire-and-await'd inside onBlur, so the indicator resolves once
+    // the IPC's `.then` runs.
+    expect(await screen.findByText('Saved')).toBeTruthy();
+    // And the IPC fired with the right payload.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 42, column: 'model', value: 'sonnet-4',
+      });
+    });
+  });
+
+  it('shows "Save failed: <message>" and keeps the field\'s text when the IPC rejects', async () => {
+    const user = userEvent.setup();
+    rejectNextColumnWrite('boom-model-save');
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'sonnet-4');
+    fireEvent.blur(model);
+
+    // The error message surfaces in the global banner. The "Save failed:"
+    // prefix is part of the indicator copy so the user distinguishes it
+    // from any other surface; the rest is the rejection's `.message`.
+    expect(await screen.findByText(/Save failed.*boom-model-save/)).toBeTruthy();
+
+    // The field's text is preserved — the user typed "sonnet-4" and we
+    // did NOT snap back to the loaded value ("opus-4"). Matching the
+    // acceptance criterion: "keep the field's text" on error.
+    expect(model.value).toBe('sonnet-4');
+  });
+
+  it('does NOT leak an unhandled rejection on a failing blur save', async () => {
+    const user = userEvent.setup();
+    let captured: unknown = null;
+    const listener = (ev: PromiseRejectionEvent) => {
+      captured = ev.reason;
+      ev.preventDefault();
+    };
+    // Listen on the actual `unhandledrejection` channel so a leak lands
+    // in `captured` even if the tab's component tree ate the warning.
+    window.addEventListener('unhandledrejection', listener);
+
+    rejectNextColumnWrite('boom-leak-test');
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'opus-4-fail');
+    fireEvent.blur(model);
+
+    // Wait past the awaited IPC + the next microtask boundary.
+    await waitFor(() => {
+      expect(screen.queryByText(/Save failed/)).toBeTruthy();
+    });
+
+    // Give the event loop a tick to dispatch any leaked rejection.
+    await new Promise((r) => setTimeout(r, 0));
+    if (captured !== null) {
+      throw new Error(
+        `Unhandled rejection detected: ${captured instanceof Error ? captured.message : String(captured)}`,
+      );
+    }
+    window.removeEventListener('unhandledrejection', listener);
+  });
+
+  it('discards a stale save result when the user switches meshes mid-flight (review finding #1)', async () => {
+    const user = userEvent.setup();
+    // Register Mesh B so the sidebar can switch to it. The store's
+    // beforeEach wires Mesh (id 42) as the selected mesh; we add B
+    // alongside without unselecting A.
+    useMeshStore.setState({
+      meshes: [MESH, MESH_B],
+      meshesById: new Map<number, Mesh>([
+        [MESH.id, MESH],
+        [MESH_B.id, MESH_B],
+      ]),
+      selectedMeshId: MESH.id,
+    });
+    // Make the FIRST `update_mesh_column` reject on the slow side
+    // (returns after a small delay) so we have time to switch meshes
+    // before the rejection lands.
+    let armed = true;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (armed && cmd === 'update_mesh_column') {
+        armed = false;
+        return new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('boom-after-switch')), 50),
+        );
+      }
+      if (cmd === 'list_providers') {
+        return Promise.resolve([
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+        ]);
+      }
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project') return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context') return Promise.resolve({ claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false, skill_count: 0, agents_skills_exists: false });
+      if (cmd === 'get_mesh_health') return Promise.resolve({ is_dirty: false, is_drifted: false, unpushed_ahead: 0, base_branch_holder: null, local_base_branch: 'main', current_branch: 'main', current_short_sha: 'abc1234', authenticated: false });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+
+    await openPropertiesTab();
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'mesh-a-edit');
+    fireEvent.blur(model);
+
+    // Switch to mesh B before the 50ms-delayed rejection lands. The
+    // SaveIndicator's `useEffect([activeMeshId])` reset already wipes
+    // the indicator to idle; the `wrappedSave` mesh-switch guard must
+    // additionally stop the late reject() from re-applying "Save failed".
+    await act(async () => {
+      useMeshStore.getState().selectMesh(MESH_B.id);
+    });
+
+    // Wait long enough for the 50ms-delayed rejection to fire AND for
+    // the post-resolve setState to flush.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // The indicator must NOT show "Save failed: boom-after-switch" —
+    // that error belongs to mesh A's edit, not to mesh B's view.
+    expect(screen.queryByText(/Save failed.*boom-after-switch/)).toBeNull();
+    // And the `console.error` from the adapter's stale-rejection path
+    // is the only visible trace of the failure (the indicator stays clean).
+  });
+
+  it('clears the previous "Save failed" indicator when a subsequent save succeeds', async () => {
+    const user = userEvent.setup();
+    rejectNextColumnWrite('first-failure');
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'fail-then-succeed');
+    fireEvent.blur(model);
+
+    expect(await screen.findByText(/Save failed/)).toBeTruthy();
+
+    // Re-arm — the next `update_mesh_column` will succeed (the next
+    // blur on the same field). Default mock resolver returns `{}`, which
+    // the IPC treats as a clean resolution.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'update_mesh_column') return Promise.resolve();
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project') return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context') return Promise.resolve({ claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false, skill_count: 0, agents_skills_exists: false });
+      if (cmd === 'get_mesh_health') return Promise.resolve({ is_dirty: false, is_drifted: false, unpushed_ahead: 0, base_branch_holder: null, local_base_branch: 'main', current_branch: 'main', current_short_sha: 'abc1234', authenticated: false });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    // Avoid the auto-clear of "saved" racing this assertion — we just
+    // want to confirm the error copy disappears, not test the timer.
+    // (The timer is independently covered in `useSaveStatus` tests.)
+
+    await user.clear(model);
+    await user.type(model, 'recovered');
+    fireEvent.blur(model);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Save failed/)).toBeNull();
+    });
+  });
+});

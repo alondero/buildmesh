@@ -26,9 +26,10 @@
  * `context: { type: 'agent' | 'mesh' | 'userConfig' }` discriminator, with
  * its own resize handle, header, and close button — all of which are
  * unnecessary inside the Probe, where the dock already supplies the
- * header and the body width is fixed by `PROBE_BODY_WIDTH`. Lifting the
- * two child sections into a small dedicated component keeps the Probe
- * decoupled from the legacy panel's state machine.
+ * header and the body width is driven by `useProbeResize` (issue #724,
+ * 240-720px clamp, localStorage-persisted). Lifting the two child
+ * sections into a small dedicated component keeps the Probe decoupled
+ * from the legacy panel's state machine.
  */
 
 import { useState } from 'react';
@@ -131,7 +132,7 @@ export function ProjectFilesTab() {
           the legacy FileExplorerPanel close button stays out. */}
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-border-subtle">
         <span
-          className="text-xs font-mono text-text-muted truncate flex-1 min-w-0"
+          className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0"
           title={activePath}
         >
           {activePath}

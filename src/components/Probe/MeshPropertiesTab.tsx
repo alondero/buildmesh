@@ -30,6 +30,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
 import { groupByHarness } from '../../lib/groups';
@@ -232,36 +233,114 @@ sandbox: config.sandbox,
   // refresh because the `useMeshHealth` cache the sidebar consumes is
   // already refetched by its own GIT_CHANGED / focus invalidate path
   // (and `meshes` column writes don't change git health anyway).
+  //
+  // Issue #729 — every save goes through `saveStatus` so the top-of-tab
+  // "Saving… / Saved / Save failed" indicator tracks the most-recent
+  // write. We keep one hook instance for the tab (rather than one per
+  // field) because (a) issue AC says "and/or" — a single global
+  // indicator satisfies it, and (b) the tab has 7 auto-save fields,
+  // and 7 stacked tiny indicators would compete for the same attention
+  // as the form below them. The hook clears the prior error before
+  // each save and surfaces the rejection's `.message` on fail.
+  const saveStatus = useSaveStatus();
+
+  // Reset the indicator on mesh-switch so a stale "Save failed" from
+  // the outgoing mesh doesn't bleed onto the incoming mesh's form. A
+  // bare useEffect that tracks `activeMeshId` is sufficient — the
+  // hook's own reset() cancels the pending saved→idle timer cleanly.
+  useEffect(() => {
+    saveStatus.reset();
+  }, [activeMeshId, saveStatus.reset]);
+
+  // Ref mirror of `activeMeshId` so the IPC-`.then`/`.catch` in
+  // `wrappedSave` can read the CURRENT mesh id at resolve time, not
+  // the closure-captured value from the render where the IPC was
+  // fired. Without this, a slow save from the outgoing mesh would
+  // still see `activeMeshId === saveMeshId` (both are the stale value
+  // from the previous render) and surface its error on the new mesh
+  // — review finding #1.
+  const activeMeshIdRef = useRef(activeMeshId);
+  useEffect(() => {
+    activeMeshIdRef.current = activeMeshId;
+  }, [activeMeshId]);
+
+  /**
+   * Internal save wrapper. Drives the state machine on every IPC
+   * outcome, and on rejection surfaces the rejection's `.message`
+   * (previously swallowed — the issue's "don't swallow failures"
+   * complaint). The user's input value is intentionally NOT reverted
+   * on a failure (matching the existing `saveSandbox` optimistic rule
+   * and the issue AC "keep the field's text").
+   *
+   * Mesh-switch guard (review finding #1): we capture `activeMeshId`
+   * at the moment the IPC starts, then check it on resolve/reject
+   * via the ref (NOT the closure-captured prop — that would always
+   * equal the value at fire time, never the current one). If the user
+   * switched meshes while the IPC was in flight, the result belongs
+   * to the OUTGOING mesh, not the one the user is looking at —
+   * surfacing "Save failed" or "Saved" on the new mesh would be wrong.
+   * Same defensive pattern as `ScratchpadTab.tsx:158-168` (`if
+   * (pending.meshId === activeMeshId)`). The `saveStatus.reset()` in
+   * the `useEffect([activeMeshId])` above already clears the
+   * indicator on switch, but it cannot stop the IPC's later
+   * `.then`/`.catch` from re-applying state — this guard is the
+   * second line of defence.
+   */
+  const wrappedSave = async (op: () => Promise<void>) => {
+    const saveMeshId = activeMeshIdRef.current;
+    saveStatus.start();
+    try {
+      await op();
+      if (activeMeshIdRef.current !== saveMeshId) return;
+      saveStatus.success();
+    } catch (e) {
+      if (activeMeshIdRef.current !== saveMeshId) {
+        // Audit trail only — the user is looking at a different
+        // mesh's form; the indicator stays clean.
+        console.error('Mesh property save failed after mesh switch:', e);
+        return;
+      }
+      // Console.error preserves the audit trail in buildmesh.log for
+      // the dev / bug-report path; the rendered banner shows the same
+      // message to the user so the cause is actionable.
+      console.error('Mesh property save failed:', e);
+      saveStatus.fail(e);
+    }
+  };
+
   const saveName = async (name: string) => {
     if (activeMeshId === null) return;
-    if (name !== mesh?.name) {
-      await updateMeshName(activeMeshId, name);
+    if (name === mesh?.name) {
+      // No-op write: skip the IPC and avoid a false "Saved" flicker
+      // that would briefly show success for a no-op.
+      return;
     }
+    await wrappedSave(() => updateMeshName(activeMeshId, name));
   };
 
   const saveModel = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'model', value || '');
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'model', value || ''));
   };
 
   const saveEffort = async (value: string) => {
     if (activeMeshId === null || !value) return;
-    await updateMeshColumn(activeMeshId, 'effort', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'effort', value));
   };
 
   const saveBuildCommand = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'build_command', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'build_command', value));
   };
 
   const saveRunCommand = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'run_command', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'run_command', value));
   };
 
   const saveDefaultProvider = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'default_provider', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'default_provider', value));
   };
 
 // Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
@@ -272,16 +351,18 @@ sandbox: config.sandbox,
   const saveSandbox = async (value: boolean) => {
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, sandbox: value }));
-    await updateMeshSandbox(activeMeshId, value);
+    await wrappedSave(() => updateMeshSandbox(activeMeshId, value));
   };
 
   const applyPreset = async (preset: ProjectPreset) => {
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, buildCommand: preset.build, runCommand: preset.run }));
-    await Promise.all([
-      updateMeshColumn(activeMeshId, 'build_command', preset.build),
-      updateMeshColumn(activeMeshId, 'run_command', preset.run),
-    ]);
+    await wrappedSave(async () => {
+      await Promise.all([
+        updateMeshColumn(activeMeshId, 'build_command', preset.build),
+        updateMeshColumn(activeMeshId, 'run_command', preset.run),
+      ]);
+    });
   };
 
   const applyPresetById = async (id: string) => {
@@ -313,6 +394,18 @@ sandbox: config.sandbox,
 
   return (
     <div className="p-4 space-y-4">
+      {/* Issue #729 — global SaveIndicator at the top of the tab.
+          Renders the current `saveStatus`: "Saving…" mid-write,
+          "Saved" after a successful write (auto-clearing), or
+          "Save failed: <message>" when the IPC rejects. The banner
+          sits above the form so a failed write is visible without
+          scrolling; empty / idle state is suppressed so the UI stays
+          quiet when nothing is happening. */}
+      <SaveIndicator
+        status={saveStatus.status}
+        error={saveStatus.error}
+        onDismiss={saveStatus.reset}
+      />
       {loading ? (
         <LoadingState />
       ) : (
@@ -337,7 +430,7 @@ sandbox: config.sandbox,
               type="text"
               value={activeMeshPath}
               readOnly
-              className="w-full bg-bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-xs text-text-muted font-mono"
+              className="w-full bg-bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-xs text-text-secondary font-mono"
             />
           </Field>
 
@@ -593,6 +686,66 @@ function Field({ label, htmlFor, hint, children }: FieldProps) {
         {hint && <span className="text-text-muted/60"> ({hint})</span>}
       </label>
       {children}
+    </div>
+  );
+}
+
+interface SaveIndicatorProps {
+  status: 'idle' | 'saving' | 'saved' | 'error';
+  error: string | null;
+  onDismiss: () => void;
+}
+
+/**
+ * Issue #729 — visible feedback for the auto-save handlers below.
+ * Renders a one-line, status-coloured bar at the top of the tab:
+ *
+ *   idle     → nothing (suppressed to keep the form uncluttered)
+ *   saving   → "Saving…" in muted text
+ *   saved    → "Saved" in success-coloured text (auto-clears inside the hook)
+ *   error    → "Save failed: <message>" in error-coloured text, with a
+ *              dismiss button. The hook's `error` carries the rejection's
+ *              `.message` (stringified for non-Error shapes).
+ *
+ * Single fixed-height slot keeps the form below from jumping when
+ * status flips between `error` and `idle`. The dismiss button is
+ * only present on `error` (the other states auto-clear via the
+ * hook's `savedClearMs` or simply transition to `idle`).
+ */
+function SaveIndicator({ status, error, onDismiss }: SaveIndicatorProps) {
+  // Always render the slot so the form below doesn't reflow on each
+  // transition. `min-h-7` matches the height of a one-line tall pill
+  // (28px) so the Saved/Saving rows don't visibly jump into the slot.
+  // The idle branch is empty — the min-h itself holds the vertical
+  // space without an invisible char needing a screen-reader skip.
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="mesh-save-indicator"
+      className="min-h-7 flex items-center justify-between text-xs rounded px-2 py-1"
+    >
+      {status === 'saving' && (
+        <span className="text-text-muted">Saving…</span>
+      )}
+      {status === 'saved' && (
+        <span className="text-status-success">Saved</span>
+      )}
+      {status === 'error' && (
+        <>
+          <span className="text-status-error break-words flex-1">
+            Save failed{error ? `: ${error}` : ''}
+          </span>
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label="Dismiss save error"
+            className="ml-2 text-status-error/70 hover:text-status-error text-[11px]"
+          >
+            ✕
+          </button>
+        </>
+      )}
     </div>
   );
 }
