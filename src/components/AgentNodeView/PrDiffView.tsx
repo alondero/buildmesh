@@ -218,11 +218,11 @@ function PrFileList({
               </span>
               <span className="flex-1 truncate font-mono text-xs min-w-0">
                 {file.previous_filename && file.previous_filename !== file.filename && (
-                  <span className="text-text-muted">
+                  <span className="text-text-secondary">
                     {file.previous_filename} <span aria-hidden="true">→</span>{' '}
                   </span>
                 )}
-                <span className="text-text-muted">{dir}</span>
+                <span className="text-text-secondary">{dir}</span>
                 <span className="text-text-primary">{name}</span>
               </span>
               {file.additions > 0 && (

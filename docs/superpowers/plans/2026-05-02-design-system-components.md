@@ -2,6 +2,17 @@
 
 > **For agentic workers:** Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Historical plan — not authoritative.** This document records the
+> tokens chosen on 2026-05-02. Current authoritative values live in
+> `src/App.css` and are regression-pinned by
+> `tests/unit/theme-tokens-contrast.test.ts`. Amendments:
+> - Issue #732 (2026-07-02): `--color-text-muted` bumped from `#4a5568`
+>   to `#7a8492` (was 2.6:1 on `bg-base` / `bg-surface` — fails WCAG AA
+>   body text; now 5.2:1 / 5.1:1). The `text-[#4a5568]` recipe lines
+>   below (Task 1 status.ts, Task 2 Sidebar.tsx) describe the original
+>   migration, not the current state — they were updated in place during
+>   the modernization pass.
+
 **Goal:** Apply the design system's visual language to existing React components without changing data model or architecture. Colors, typography, borders, and spacing updated to match the design system token values.
 
 **Architecture:** Changes are purely cosmetic — updating inline color values, CSS classes, and Tailwind utilities to match design system tokens. The existing data model (projects/sessions) is preserved. No component structure changes.

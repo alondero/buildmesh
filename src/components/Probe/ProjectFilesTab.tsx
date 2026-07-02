@@ -131,7 +131,7 @@ export function ProjectFilesTab() {
           the legacy FileExplorerPanel close button stays out. */}
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-border-subtle">
         <span
-          className="text-xs font-mono text-text-muted truncate flex-1 min-w-0"
+          className="text-xs font-mono text-text-secondary truncate flex-1 min-w-0"
           title={activePath}
         >
           {activePath}

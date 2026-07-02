@@ -430,7 +430,7 @@ sandbox: config.sandbox,
               type="text"
               value={activeMeshPath}
               readOnly
-              className="w-full bg-bg-surface border border-border-subtle rounded px-2 py-1.5 text-xs text-text-muted font-mono"
+              className="w-full bg-bg-surface border border-border-subtle rounded px-2 py-1.5 text-xs text-text-secondary font-mono"
             />
           </Field>
 

@@ -20,13 +20,13 @@ export function WorktreeCloseDialog() {
   const riskText = riskParts.length > 0 ? riskParts.join(' and ') : 'work that may not be recoverable';
 
   return (
-    <Modal onClose={() => choose('cancel')} labelledBy="worktree-close-title" maxWidth="max-w-md">
+<Modal onClose={() => choose('cancel')} labelledBy="worktree-close-title" maxWidth="max-w-md">
       <h2 id="worktree-close-title" className="text-sm font-semibold text-text-primary mb-2">Remove agent worktree &amp; branch?</h2>
-      <p className="text-xs text-text-muted mb-2">
+      <p className="text-xs text-text-secondary mb-2">
         {pending.nodeName} has {riskText}. Removing also deletes its local branch.
       </p>
       {pending.safety.worktree_path && (
-        <p className="text-xs font-mono text-text-muted bg-bg-card border border-border-subtle rounded-md px-2 py-1 mb-5 break-all">
+        <p className="text-xs font-mono text-text-secondary bg-bg-card border border-border-subtle rounded-md px-2 py-1 mb-5 break-all">
           {pending.safety.worktree_path}
         </p>
       )}
