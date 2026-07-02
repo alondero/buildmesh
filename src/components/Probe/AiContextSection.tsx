@@ -58,8 +58,8 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
 
   if (prUrl) {
     return (
-      <div className="rounded-md border border-green-400/30 bg-green-400/10 p-3">
-        <p className="text-xs text-green-400 font-medium mb-1">Portability PR created!</p>
+      <div className="rounded-md border border-status-success/30 bg-status-success-bg p-3">
+        <p className="text-xs text-status-success font-medium mb-1">Portability PR created!</p>
         <a
           href={prUrl}
           target="_blank"
@@ -73,48 +73,48 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
   }
 
   return (
-    <div className="rounded-md border border-[#2a2a2a] p-3 space-y-2">
-      <p className="text-xs font-medium text-[#e0e0e0]">AI context portability</p>
+    <div className="rounded-md border border-border-default p-3 space-y-2">
+      <p className="text-xs font-medium text-text-primary">AI context portability</p>
 
-      <div className="space-y-0.5 text-[11px] text-[#9ca3af]">
+      <div className="space-y-0.5 text-xs text-text-secondary">
         {status.claude_md_exists && (
           <div className="flex items-center gap-2">
-            <span className="font-mono text-[#d1d5db]">CLAUDE.md</span>
+            <span className="font-mono text-text-primary">CLAUDE.md</span>
             <span>→</span>
-            <span className="font-mono text-[#d1d5db]">AGENTS.md</span>
+            <span className="font-mono text-text-primary">AGENTS.md</span>
             {status.agents_md_exists ? (
-              <span className="text-green-400">✓</span>
+              <span className="text-status-success">✓</span>
             ) : (
-              <span className="text-[#6b7280]">(will create)</span>
+              <span className="text-text-muted">(will create)</span>
             )}
           </div>
         )}
         {status.skills_dir_exists && (
           <div className="flex items-center gap-2">
-            <span className="font-mono text-[#d1d5db]">.claude/skills</span>
+            <span className="font-mono text-text-primary">.claude/skills</span>
             <span>→</span>
-            <span className="font-mono text-[#d1d5db]">.agents/skills</span>
+            <span className="font-mono text-text-primary">.agents/skills</span>
             {status.agents_skills_exists ? (
-              <span className="text-green-400">✓</span>
+              <span className="text-status-success">✓</span>
             ) : (
-              <span className="text-[#6b7280]">(will create, {status.skill_count} skills)</span>
+              <span className="text-text-muted">(will create, {status.skill_count} skills)</span>
             )}
           </div>
         )}
       </div>
 
       {!needsWork ? (
-        <p className="text-[10px] text-green-400">Already portable — Codex, OpenCode &amp; Antigravity can read this context.</p>
+        <p className="text-2xs text-status-success">Already portable — Codex, OpenCode &amp; Antigravity can read this context.</p>
       ) : (
         <>
-          <p className="text-[10px] text-[#6b7280] leading-snug">
+          <p className="text-2xs text-text-muted leading-snug">
             Opens a PR adding the above as git symlinks. Note: a symlink checked out on Windows
             without Developer Mode becomes a plain text file; macOS/Linux and Windows+Dev Mode
             resolve it correctly.
           </p>
-          {error && <p className="text-[10px] text-red-400">{error}</p>}
+          {error && <p className="text-2xs text-status-error">{error}</p>}
           {!isAuthenticated ? (
-            <span className="text-[10px] text-[#ef4444]">Run `gh auth login` first</span>
+            <span className="text-2xs text-status-error">Run `gh auth login` first</span>
           ) : (
             <button
               onClick={handleCreate}

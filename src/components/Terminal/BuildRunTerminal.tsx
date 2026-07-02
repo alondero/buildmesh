@@ -63,12 +63,12 @@ export function BuildRunTerminal({ sessionId, mode = 'build', useWorktree = true
   return (
     <div className="flex flex-col flex-1 overflow-hidden bg-bg-overlay border-t border-border-default">
       <div className="flex items-center justify-between px-2 py-1 bg-bg-base border-b border-border-default">
-        <span className="text-[10px] font-mono text-text-muted">
+        <span className="text-2xs font-mono text-text-muted">
           {modeLabel(mode)}{useWorktree ? ': worktree' : ''}
         </span>
         <button
           onClick={handleClose}
-          className="w-4 h-4 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-overlay transition-colors text-[10px]"
+          className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-status-error hover:bg-status-error-bg transition-colors text-xs" type="button" aria-label="Close build/run terminal"
           title="Close build/run terminal"
         >
           ×

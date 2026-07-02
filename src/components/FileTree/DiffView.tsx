@@ -22,7 +22,7 @@ export function DiffView({ diff }: DiffViewProps) {
       {diff.files.map((file) => (
         <div key={file.path}>
           <div className="sticky top-0 bg-bg-overlay border-b border-border-subtle">
-            <div className="px-3 py-1.5 text-[10px] text-text-muted">
+            <div className="px-3 py-1.5 text-2xs text-text-muted">
               {file.path}
             </div>
           </div>

@@ -25,10 +25,11 @@ if (files.length === 0) {
 }
 
 // Lines whose bare `rounded` is intentionally smallest-radius and survives the sweep.
-// We match a unique enough substring of the className.
+// We match a unique enough substring of the className. Keep these in sync with
+// tests/unit/radii-audit.test.ts ALLOWED_BARE_ROUNDED.
 const KEEP_FRAGMENTS = [
-  "px-1 py-px rounded text-[9px]", // WorktreeManagerTab Badge
-  "px-2 py-1 text-[10px] rounded bg-bg-card text-text-muted", // GitPullRequestsTab "can't merge"
+  "px-1 py-px rounded text-2xs", // WorktreeManagerTab Badge (was text-[9px] pre-#733 modernization)
+  "px-2 py-1 text-2xs rounded bg-bg-card text-text-muted", // GitPullRequestsTab "can't merge" (was text-[10px])
 ];
 
 // 1. Bare directional: `rounded-r`, `rounded-l`, `rounded-t`, `rounded-b`,

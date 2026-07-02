@@ -88,7 +88,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
           <span
             aria-hidden="true"
             title="Drag to reorder, or onto another node to swap"
-            className="text-text-muted text-[11px] leading-none opacity-0 group-hover:opacity-60 transition-opacity select-none"
+            className="text-text-muted text-xs leading-none opacity-0 group-hover:opacity-60 transition-opacity select-none"
           >
             ⠿
           </span>
@@ -97,19 +97,19 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 drop-shadow-sm" />
         <span
           onPointerDown={(e) => e.stopPropagation()}
-          className="text-[12px] font-semibold text-text-primary truncate font-sans drop-shadow-sm"
+          className="text-sm font-semibold text-text-primary truncate font-sans drop-shadow-sm"
         >
           <InlineEditableText
             value={node.name}
             onCommit={(next) => renameAgentNode(node.id, next)}
-            className="text-[12px] font-semibold text-text-primary font-sans drop-shadow-sm"
-          /> <span className="text-text-secondary font-normal">{meshLabel}</span>
+            className="text-sm font-semibold text-text-primary font-sans drop-shadow-sm"
+          /> <span className="text-xs text-text-secondary font-normal">{meshLabel}</span>
         </span>
         <span
           title={node.use_worktree
             ? 'Agent runs in a git worktree'
             : 'Agent runs in the repository root'}
-          className={`text-[10px] font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none whitespace-nowrap drop-shadow-sm ${
+          className={`text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none whitespace-nowrap drop-shadow-sm ${
             node.use_worktree
               ? 'bg-bg-overlay/70 text-text-muted ring-1 ring-inset ring-border-subtle'
               : 'bg-accent-cyan/15 text-accent-cyan ring-1 ring-inset ring-accent-cyan/40 font-semibold'
@@ -121,7 +121,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
           <span
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); setActiveNode(node.id); openProbeTab('review'); }}
-            className="text-[11px] font-mono font-semibold cursor-pointer flex items-center gap-1.5 drop-shadow-sm hover:brightness-125"
+            className="text-xs font-mono font-semibold cursor-pointer flex items-center gap-1.5 drop-shadow-sm hover:brightness-125"
             title="Click to see changes"
           >
             {/* Each count carries its own semantic colour so added / modified / deleted
@@ -129,13 +129,13 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
                 so the eye lands on the changes that exist. When this node owns the
                 agent file-explorer panel the whole chip flips to cyan as a selection
                 cue, matching the panel border. */}
-            <span className={isPanelNode ? 'text-accent-cyan' : summary.added ? 'text-green-400' : 'text-text-muted'}>
+            <span className={isPanelNode ? 'text-accent-cyan' : summary.added ? 'text-accent-green' : 'text-text-muted'}>
               +{summary.added}
             </span>
-            <span className={isPanelNode ? 'text-accent-cyan' : summary.modified ? 'text-amber-400' : 'text-text-muted'}>
+            <span className={isPanelNode ? 'text-accent-cyan' : summary.modified ? 'text-accent-amber' : 'text-text-muted'}>
               ~{summary.modified}
             </span>
-            <span className={isPanelNode ? 'text-accent-cyan' : summary.deleted ? 'text-red-400' : 'text-text-muted'}>
+            <span className={isPanelNode ? 'text-accent-cyan' : summary.deleted ? 'text-accent-red' : 'text-text-muted'}>
               -{summary.deleted}
             </span>
           </span>
@@ -153,7 +153,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
               openUrl(openPr.url).catch(console.error);
             }}
             title={openPr.draft ? `Draft · ${openPr.title}` : openPr.title}
-            className="text-[10px] font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-green-400/10 text-green-400 ring-1 ring-inset ring-green-400/30 drop-shadow-sm hover:brightness-125 transition-colors"
+            className="text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 drop-shadow-sm hover:brightness-125 transition-colors"
           >
             PR #{openPr.number}
           </span>
@@ -163,7 +163,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
         <button
           onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
-          className="w-4 h-4 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+          className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-[color,background-color,opacity] opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
           // Issue #668 — surface the Alt+G / ⌘+G shortcut in the button
           // tooltip so discoverability isn't gated on the header double-click
           // or the empty-state splash.
@@ -181,9 +181,11 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
           )}
         </button>
         <button
+          type="button"
           onClick={handleClose}
-          className="w-4 h-4 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-colors text-[10px]"
+          className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-status-error hover:bg-status-error-bg transition-colors text-xs"
           title="Close agent node"
+          aria-label="Close agent node"
         >
           ×
         </button>

@@ -54,7 +54,7 @@ function HarnessRow({ provider }: { provider: ProviderInfo }) {
       <span
         {...attributes}
         {...listeners}
-        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-[10px] select-none"
+        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none"
         title="Drag to reorder"
         aria-label={`Reorder ${provider.label}`}
       >

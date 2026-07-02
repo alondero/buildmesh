@@ -359,7 +359,7 @@ export function AgentNodeView() {
                   </svg>
                   Add Mesh
                 </button>
-                <div className="mt-8 text-[11px] text-text-muted font-mono space-y-1">
+                <div className="mt-8 text-xs text-text-muted font-mono space-y-1">
                   {/* Modifier prefix follows the platform convention used elsewhere
                       (Terminal.tsx context menu, README): ⌘ on macOS, Ctrl on
                       Windows/Linux. The arrow glyphs (←/→/↑/↓) read identically

@@ -161,13 +161,13 @@ export function MeshItem({
           <span
             {...attributes}
             {...listeners}
-            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-[10px] select-none"
+            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none"
             title="Drag to reorder"
           >
             ⋮⋮
           </span>
           <span
-            className="font-sans font-semibold text-[15px] text-text-primary truncate flex-1"
+            className="font-sans font-semibold text-sm text-text-primary truncate flex-1"
           >
             {mesh.name}
           </span>
@@ -179,7 +179,7 @@ export function MeshItem({
                 onOpenPropertiesProbe(mesh.id);
               }}
               title={buildDriftTooltip(health)}
-              className="text-[11px] font-bold text-status-warning bg-status-warning-bg/15 hover:bg-status-warning-bg/30 rounded-md px-1.5 leading-[18px] transition-colors"
+              className="text-xs font-bold text-status-warning bg-status-warning/15 hover:bg-status-warning/30 rounded-md px-1.5 leading-[18px] transition-colors"
               aria-label="Mesh health issue"
             >
               !
@@ -187,7 +187,7 @@ export function MeshItem({
           )}
           {behind > 0 && (
             <span
-              className="text-[11px] font-semibold text-status-warning leading-none tabular-nums"
+              className="text-xs font-semibold text-status-warning leading-none tabular-nums"
               title={`${behind} commit${behind === 1 ? '' : 's'} behind upstream`}
             >
               ↓{behind}
@@ -241,7 +241,7 @@ export function MeshItem({
       {/* Context menu — periphery actions */}
       {contextMenu && (
         <div
-          className="fixed bg-bg-overlay border border-border-default rounded-md shadow-lg z-[100] py-1 min-w-[180px]"
+          className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
         >

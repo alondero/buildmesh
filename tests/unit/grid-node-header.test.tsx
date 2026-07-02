@@ -81,16 +81,16 @@ describe('GridNodeHeader git-summary chip', () => {
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
     const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
 
-    expect(getByText('+3').className).toContain('text-green-400');
-    expect(getByText('~2').className).toContain('text-amber-400');
-    expect(getByText('-1').className).toContain('text-red-400');
+    expect(getByText('+3').className).toContain('text-accent-green');
+    expect(getByText('~2').className).toContain('text-accent-amber');
+    expect(getByText('-1').className).toContain('text-accent-red');
   });
 
   it('mutes zero counts so the eye is drawn to the non-zero changes', () => {
     summaryMock.mockReturnValue({ total: 3, added: 3, modified: 0, deleted: 0 });
     const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
 
-    expect(getByText('+3').className).toContain('text-green-400');
+    expect(getByText('+3').className).toContain('text-accent-green');
     expect(getByText('~0').className).toContain('text-text-muted');
     expect(getByText('-0').className).toContain('text-text-muted');
   });
@@ -125,9 +125,9 @@ describe('GridNodeHeader git-summary chip', () => {
     useAgentNodeStore.setState({ activeNodeId: 999 /* not this node */ });
     const { getByText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
 
-    expect(getByText('+3').className).toContain('text-green-400');
-    expect(getByText('~2').className).toContain('text-amber-400');
-    expect(getByText('-1').className).toContain('text-red-400');
+    expect(getByText('+3').className).toContain('text-accent-green');
+    expect(getByText('~2').className).toContain('text-accent-amber');
+    expect(getByText('-1').className).toContain('text-accent-red');
   });
 });
 
@@ -271,7 +271,7 @@ describe('GridNodeHeader PR chip', () => {
     const chip = getByText('PR #123');
 
     // Green "open" semantic (matches the rest of the chip family)
-    expect(chip.className).toContain('text-green-400');
+    expect(chip.className).toContain('text-accent-green');
     expect(chip.className).toContain('cursor-pointer');
     // Titlebar chip pattern
     expect(chip.className).toContain('rounded-full');

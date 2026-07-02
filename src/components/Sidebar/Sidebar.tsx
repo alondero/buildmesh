@@ -124,7 +124,12 @@ export function Sidebar() {
     <div className="relative flex h-full" style={{ width }}>
       <div
         onMouseDown={handleMouseDown}
-        className={`absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-accent-cyan/30 ${isResizing ? 'bg-accent-cyan/50' : 'bg-transparent'} transition-colors z-10`}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        className={`absolute top-0 -right-1 w-2.5 h-full cursor-col-resize z-10 after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
+          isResizing ? 'after:bg-accent-cyan/60' : 'after:bg-transparent hover:after:bg-accent-cyan/40'
+        }`}
       />
 
       <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
@@ -132,9 +137,11 @@ export function Sidebar() {
         <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
           <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
           <button
+            type="button"
             onClick={() => setAppSettingsOpen(true)}
-            className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
+            className="ml-auto p-1 rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors"
             title="Settings"
+            aria-label="Open settings"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3"/>
@@ -142,9 +149,11 @@ export function Sidebar() {
             </svg>
           </button>
           <button
+            type="button"
             onClick={() => setRemoteAccessOpen(true)}
-            className="text-accent-cyan hover:text-accent-blue transition-colors"
+            className="p-1 rounded-md text-accent-cyan hover:text-accent-blue hover:bg-bg-card transition-colors"
             title="Remote access"
+            aria-label="Open remote access"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
@@ -164,9 +173,18 @@ export function Sidebar() {
         <div className="flex-1 overflow-y-auto">
           <div className="p-2">
             {meshes.length === 0 ? (
-              <p className="text-[11px] text-text-muted px-2 py-4 text-center font-sans">
-                No meshes yet. Click + New mesh to get started.
-              </p>
+              <div className="flex flex-col items-center gap-3 px-2 py-8 text-center">
+                <p className="text-xs text-text-muted font-sans">
+                  No meshes yet. Add a repository to start orchestrating agents.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => addMesh()}
+                  className="px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors"
+                >
+                  + New mesh
+                </button>
+              </div>
             ) : (
               <DndContext onDragEnd={handleDragEnd}>
                 <SortableContext items={meshes.map(p => p.id)} strategy={verticalListSortingStrategy}>
@@ -201,7 +219,7 @@ export function Sidebar() {
         {/* Add mesh */}
         <button
           onClick={() => addMesh()}
-          className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-[12px] font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
+          className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"/>

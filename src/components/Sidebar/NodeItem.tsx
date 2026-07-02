@@ -36,12 +36,11 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
       aria-busy={isClosing}
       style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}40` }}
       className={`
-        pl-3 pr-1 py-1.5 rounded-md text-[12px] mb-0.5 flex items-center gap-2 group/node
+        pl-3 pr-1 py-1.5 rounded-md text-sm mb-0.5 flex items-center gap-2 group/node
         ${isClosing ? 'opacity-50 pointer-events-none cursor-default' : 'cursor-pointer'}
         ${isActive ? 'border border-accent-cyan/50' : 'hover:brightness-125 border border-transparent'}
       `}
     >
-      <span className="text-text-muted cursor-grab active:cursor-grabbing text-[10px] opacity-0 group-hover/node:opacity-100 transition-opacity">⋮⋮</span>
       <span
         className={`${config.color} inline-flex h-3 w-3 shrink-0 items-center justify-center text-xs leading-none`}
         title={config.label}
@@ -52,18 +51,20 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
       <InlineEditableText
         value={node.name}
         onCommit={(next) => renameAgentNode(node.id, next)}
-        className="flex-1 truncate text-text-secondary font-sans text-left"
+        className="flex-1 truncate text-text-primary font-sans text-left text-sm"
       />
       {showRestart && (
         <button
+          type="button"
           onClick={(e) => {
             e.stopPropagation();
             spawnAgent(node.id, node.provider).catch((err) => {
               console.error('[NodeItem] Restart failed:', err);
             });
           }}
-          className="text-text-muted hover:text-status-warning text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
+          className="text-text-muted hover:text-status-warning text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
           title="Restart agent"
+          aria-label={`Restart ${node.name}`}
         >
           ↻
         </button>
@@ -78,9 +79,11 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
         </span>
       ) : (
         <button
+          type="button"
           onClick={onDelete}
-          className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100"
+          className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
           title="Delete node"
+          aria-label={`Delete ${node.name}`}
         >
           ×
         </button>

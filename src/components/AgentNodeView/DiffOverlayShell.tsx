@@ -76,7 +76,11 @@ export function DiffOverlayShell({
   }, [activeNodeId, selectedMeshId, diff.nodeId, diff.meshId, onClose]);
 
   return (
-    <div className="absolute inset-0 z-30 flex flex-col bg-bg-base">
+    <div
+      role="dialog"
+      aria-label={modeLabel.title}
+      className="absolute inset-0 z-30 flex flex-col bg-bg-base animate-fade-in"
+    >
       <div className="flex items-center gap-3 px-3 py-2 border-b border-border-subtle bg-bg-surface shrink-0">
         <button
           type="button"
@@ -100,7 +104,7 @@ export function DiffOverlayShell({
         </button>
         <div className="flex items-baseline gap-2 min-w-0">{breadcrumb}</div>
         <span
-          className="ml-auto text-text-muted text-[11px] shrink-0"
+          className="ml-auto text-text-muted text-xs shrink-0"
           title={modeLabel.title}
         >
           {modeLabel.text}

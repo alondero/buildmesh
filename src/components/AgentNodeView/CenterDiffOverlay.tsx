@@ -41,6 +41,7 @@ import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
 import { Diff } from '../Diff/Diff';
 import { PrDiffView } from './PrDiffView';
 import { DiffOverlayShell } from './DiffOverlayShell';
+import { LoadingState } from '../shared/Spinner';
 
 interface CenterDiffOverlayProps {
   /** The file + lens to render. The parent only mounts us when this is
@@ -88,7 +89,7 @@ export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
                 >
                   {diff.filePath}
                 </span>
-                <span className="text-text-muted text-[11px] shrink-0">in</span>
+                <span className="text-text-muted text-xs shrink-0">in</span>
               </>
             )}
             <span
@@ -97,7 +98,7 @@ export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
             >
               {prLabel}
             </span>
-            <span className="text-text-muted text-[11px] shrink-0">in</span>
+            <span className="text-text-muted text-xs shrink-0">in</span>
             <span
               className="text-text-secondary text-xs font-medium truncate"
               title={parentLabel}
@@ -168,7 +169,7 @@ export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
           >
             {diff.filePath}
           </span>
-          <span className="text-text-muted text-[11px] shrink-0">in</span>
+          <span className="text-text-muted text-xs shrink-0">in</span>
           <span
             className="text-text-secondary text-xs font-medium truncate"
             title={parentLabel}
@@ -183,8 +184,8 @@ export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
           {error}
         </div>
       ) : files === null ? (
-        <div className="h-full flex items-center justify-center text-text-muted text-xs">
-          Loading diff…
+        <div className="h-full flex items-center justify-center">
+          <LoadingState label="Loading diff…" />
         </div>
       ) : (
         <Diff files={files} />

@@ -263,13 +263,13 @@ export function ArchivedNodesTab() {
           </div>
         ) : error ? (
           <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 mb-2">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-status-error mb-2">
               <circle cx="12" cy="12" r="10"/>
               <line x1="15" y1="9" x2="9" y2="15"/>
               <line x1="9" y1="9" x2="15" y2="15"/>
             </svg>
-            <span className="text-xs text-red-400">Failed to discover sessions</span>
-            <span className="text-[10px] text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
+            <span className="text-xs text-status-error">Failed to discover sessions</span>
+            <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8">
@@ -293,13 +293,13 @@ export function ArchivedNodesTab() {
                   <div className="text-sm text-text-primary truncate">{session.first_message}</div>
                   <div className="flex items-center gap-2 mt-0.5">
                     {session.branch && (
-                      <span className="text-[10px] text-accent-cyan font-mono">{session.branch}</span>
+                      <span className="text-2xs text-accent-cyan font-mono">{session.branch}</span>
                     )}
                     {session.worktree_name && (
-                      <span className="text-[10px] text-accent-purple font-mono">{session.worktree_name}</span>
+                      <span className="text-2xs text-accent-violet font-mono">{session.worktree_name}</span>
                     )}
                     {session.timestamp && (
-                      <span className="text-[10px] text-text-muted">{timeAgo(session.timestamp)}</span>
+                      <span className="text-2xs text-text-muted">{timeAgo(session.timestamp)}</span>
                     )}
                   </div>
                 </div>
@@ -307,6 +307,7 @@ export function ArchivedNodesTab() {
                 {/* Split resume button */}
                 <div className="relative flex shrink-0" onMouseDown={e => e.stopPropagation()}>
                   <button
+                    type="button"
                     onClick={() => handleDefaultResume(session)}
                     disabled={resuming !== null}
                     className="px-2.5 py-1 text-xs font-medium rounded-l-md bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
@@ -314,9 +315,13 @@ export function ArchivedNodesTab() {
                     {resuming === session.session_id ? 'Resuming…' : 'Resume'}
                   </button>
                   <button
+                    type="button"
                     onClick={() => setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)}
                     disabled={resuming !== null}
                     title="Choose provider"
+                    aria-label="Choose provider to resume with"
+                    aria-haspopup="menu"
+                    aria-expanded={openDropdown === session.session_id}
                     className="px-1.5 py-1 text-xs font-medium rounded-r-md border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     ▾
@@ -324,7 +329,7 @@ export function ArchivedNodesTab() {
                   {openDropdown === session.session_id && (
                     <div
                       data-dropdown-for={session.session_id}
-                      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-lg min-w-[200px] max-h-[320px] overflow-y-auto"
+                      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-h-[320px] overflow-y-auto animate-scale-in origin-top-right"
                     >
                       <GroupedProviderMenu
                         providers={resumableProviders}

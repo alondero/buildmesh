@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import * as api from '../../lib/tauri';
+import { Modal, ModalCloseButton } from '../shared/Modal';
 import type { NetworkStatus } from '../../types/generated/NetworkStatus';
 import type { CertChainStatus } from '../../types/generated/CertChainStatus';
 
@@ -205,23 +206,12 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/70" />
+    <Modal onClose={onClose} labelledBy="remote-access-title" maxWidth="max-w-lg" className="p-8">
+        <div className="absolute top-5 right-5">
+          <ModalCloseButton onClose={onClose} label="Close remote access" />
+        </div>
 
-      {/* Modal */}
-      <div
-        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-8 max-w-lg w-full"
-        onClick={e => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          className="absolute top-5 right-5 text-text-muted hover:text-text-secondary text-3xl"
-        >
-          ×
-        </button>
-
-        <h2 className="text-2xl font-semibold text-text-primary mb-2">Remote Access</h2>
+        <h2 id="remote-access-title" className="text-2xl font-semibold text-text-primary mb-2">Remote Access</h2>
         <p className="text-base text-text-muted mb-6">
           Scan with your phone camera to connect.
         </p>
@@ -447,7 +437,6 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
             Make sure your phone is on the same network as this computer.
           </p>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

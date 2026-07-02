@@ -8,6 +8,7 @@ import {
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { statusMeta } from '../Diff/Diff';
+import { LoadingState } from '../shared/Spinner';
 
 /** Lucide-style glyphs for the tree rows. */
 function ChevronRightIcon({ className }: { className?: string }) {
@@ -136,8 +137,8 @@ export function FileTree({
 
   if (loadingState || gitLoading) {
     return (
-      <div className="flex items-center justify-center h-20 text-text-muted text-xs">
-        Loading...
+      <div className="flex items-center justify-center h-20">
+        <LoadingState label="Loading files…" />
       </div>
     );
   }

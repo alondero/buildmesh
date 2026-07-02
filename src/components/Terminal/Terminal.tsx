@@ -410,8 +410,8 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
       onWheel={handleWheel}
     >
       {isDragging && (
-        <div className="absolute inset-0 bg-cyan-500/10 border-2 border-dashed border-cyan-500 rounded-lg flex items-center justify-center z-50 pointer-events-none">
-          <span className="text-cyan-400 text-sm font-medium">Drop file to paste path</span>
+        <div className="absolute inset-0 bg-accent-cyan/10 border-2 border-dashed border-accent-cyan rounded-lg flex items-center justify-center z-50 pointer-events-none">
+          <span className="text-accent-cyan text-sm font-medium">Drop file to paste path</span>
         </div>
       )}
 
@@ -423,14 +423,14 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
           }}
           aria-label="Jump to latest output"
           data-testid="jump-to-bottom"
-          className="absolute bottom-3 right-3 z-30 flex items-center gap-1 px-2.5 py-1 rounded-full bg-bg-card border border-border-default text-[11px] text-accent-cyan shadow-lg hover:bg-bg-base hover:border-accent-cyan transition-colors"
+          className="absolute bottom-3 right-3 z-30 flex items-center gap-1 px-2.5 py-1 rounded-full bg-bg-card border border-border-default text-xs text-accent-cyan shadow-lg hover:bg-bg-base hover:border-accent-cyan transition-colors"
         >
           <span aria-hidden="true">↓</span> Latest
         </button>
       )}
 
       {searchOpen && (
-        <div className="absolute top-1 right-1 z-50 flex items-center gap-1 bg-bg-card border border-border-default rounded-md px-2 py-1 shadow-lg">
+        <div className="absolute top-1 right-1 z-50 flex items-center gap-1 bg-bg-card border border-border-default rounded-md px-2 py-1 shadow-md animate-fade-in">
           <input
             ref={searchInputRef}
             type="text"
@@ -438,17 +438,17 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
             onChange={handleSearchChange}
             onKeyDown={handleSearchKeyDown}
             placeholder="Find..."
-            className="bg-transparent text-[11px] text-text-primary outline-none w-36 placeholder:text-text-muted"
+            className="bg-transparent text-xs text-text-primary outline-none w-36 placeholder:text-text-muted"
           />
-          <button onClick={handleSearchPrev} className="text-text-muted hover:text-accent-cyan text-[11px] px-1" title="Previous (Shift+Enter)">&#9650;</button>
-          <button onClick={handleSearchNext} className="text-text-muted hover:text-accent-cyan text-[11px] px-1" title="Next (Enter)">&#9660;</button>
-          <button onClick={() => { setSearchOpen(false); instRef.current?.term.focus(); }} className="text-text-muted hover:text-accent-cyan text-[11px] px-1" title="Close (Esc)">&#10005;</button>
+          <button type="button" onClick={handleSearchPrev} className="text-text-muted hover:text-accent-cyan text-xs px-1 transition-colors" title="Previous (Shift+Enter)" aria-label="Previous match">&#9650;</button>
+          <button type="button" onClick={handleSearchNext} className="text-text-muted hover:text-accent-cyan text-xs px-1 transition-colors" title="Next (Enter)" aria-label="Next match">&#9660;</button>
+          <button type="button" onClick={() => { setSearchOpen(false); instRef.current?.term.focus(); }} className="text-text-muted hover:text-status-error text-xs px-1 transition-colors" title="Close (Esc)" aria-label="Close search">&#10005;</button>
         </div>
       )}
 
       {contextMenu && (
         <div
-          className="fixed bg-bg-card border border-border-default rounded-md shadow-lg z-[100] py-1 min-w-[160px]"
+          className="fixed bg-bg-card border border-border-default rounded-md shadow-md z-[100] py-1 min-w-[160px] animate-scale-in origin-top-left"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
           onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
@@ -456,26 +456,26 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
           <button
             onClick={handleCopy}
             disabled={!instRef.current?.term.hasSelection()}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
           >
             Copy <span className="float-right text-text-muted">{isMac ? '⌘C' : 'Ctrl+C'}</span>
           </button>
           <button
             onClick={handlePaste}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             Paste <span className="float-right text-text-muted">{isMac ? '⌘V' : 'Ctrl+V'}</span>
           </button>
           <div className="border-t border-border-default my-0.5" />
           <button
             onClick={handleSelectAll}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             Select All <span className="float-right text-text-muted">{isMac ? '⌘A' : 'Ctrl+Shift+A'}</span>
           </button>
           <button
             onClick={handleFind}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             Find... <span className="float-right text-text-muted">{isMac ? '⌘F' : 'Ctrl+Shift+F'}</span>
           </button>
@@ -485,7 +485,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
               <button
                 onClick={handleHandover}
                 disabled={!instRef.current?.term.hasSelection()}
-                className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
+                className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors disabled:text-text-muted disabled:cursor-default disabled:hover:bg-transparent"
               >
                 Handover to new Node [{handoverProviderLabel}]
               </button>
@@ -494,7 +494,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
           <div className="border-t border-border-default my-0.5" />
           <button
             onClick={handleClear}
-            className="w-full px-3 py-1.5 text-left text-[11px] text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
+            className="w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-base hover:text-accent-cyan transition-colors"
           >
             Clear Terminal <span className="float-right text-text-muted">{isMac ? '⌘K' : 'Ctrl+Shift+K'}</span>
           </button>

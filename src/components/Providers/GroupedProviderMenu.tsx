@@ -83,7 +83,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className }: 
                     launch, not a Proxied child — particularly useful
                     for the bare-Claude subscription in a host with
                     no other Claude-compatible accounts. */}
-                <span className="text-[9px] uppercase tracking-wider text-text-faint">harness</span>
+                <span className="text-2xs uppercase tracking-wider text-text-muted">harness</span>
               </button>
             )}
             {proxiedChildren.length > 0 && (

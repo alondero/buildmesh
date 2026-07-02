@@ -131,7 +131,7 @@ export function ProjectFilesTab() {
           the legacy FileExplorerPanel close button stays out. */}
       <div className="flex items-center justify-between px-2 py-1.5 border-b border-border-subtle">
         <span
-          className="text-[11px] font-mono text-text-muted truncate flex-1 min-w-0"
+          className="text-xs font-mono text-text-muted truncate flex-1 min-w-0"
           title={activePath}
         >
           {activePath}
@@ -154,7 +154,7 @@ export function ProjectFilesTab() {
       <div className="border-b border-border-subtle">
         <button
           onClick={() => setFileTreeExpanded(!fileTreeExpanded)}
-          className="w-full flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-text-secondary hover:bg-bg-card transition-colors"
+          className="w-full flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-card transition-colors"
         >
           <span
             className={`w-3 h-3 flex items-center justify-center text-text-muted transition-transform ${

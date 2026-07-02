@@ -25,17 +25,20 @@ const COMPONENTS_ROOT = join(process.cwd(), "src", "components");
 const ALLOWED_BARE_ROUNDED = [
   {
     file: "Probe/WorktreeManagerTab.tsx",
-    // 9px status Badge — `rounded` is intentional, no interaction.
-    requiredClasses: ["px-1", "py-px", "rounded", "text-[9px]"],
+    // 2xs status Badge — `rounded` is intentional, no interaction.
+    // Token was `text-[9px]` pre-#733 modernization; now `text-2xs`
+    // (the new `--font-size-2xs` token, same 10px value).
+    requiredClasses: ["px-1", "py-px", "rounded", "text-2xs"],
     escape: "allow-bare-rounded",
   },
   {
     file: "Probe/GitPullRequestsTab.tsx",
-    // 10px "this PR can't be merged" status pill — no interaction.
+    // 2xs "this PR can't be merged" status pill — no interaction.
+    // Token was `text-[10px]` pre-#733 modernization; now `text-2xs`.
     requiredClasses: [
       "px-2",
       "py-1",
-      "text-[10px]",
+      "text-2xs",
       "rounded",
       "bg-bg-card",
       "text-text-muted",

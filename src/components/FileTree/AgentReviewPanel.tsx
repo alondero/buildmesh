@@ -7,6 +7,7 @@ import {
 import { useGitPathInvalidation } from '../../hooks/useGitPathInvalidation';
 import { Diff, diffTotals } from '../Diff/Diff';
 import { FileTree } from './FileTree';
+import { LoadingState } from '../shared/Spinner';
 
 interface AgentReviewPanelProps {
   /** Agent node whose changes-since-branching we review (merge-base, ADR 0005). */
@@ -77,8 +78,8 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center text-text-muted text-xs">
-        Loading changes…
+      <div className="flex-1 flex items-center justify-center">
+        <LoadingState label="Loading changes…" />
       </div>
     );
   }
@@ -96,7 +97,7 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
   return (
     <div className="flex-1 min-h-0 overflow-auto">
       {/* Summary bar — stays pinned while the diff scrolls underneath. */}
-      <div className="sticky top-0 z-20 flex items-center gap-2 px-3 py-1.5 bg-bg-overlay border-b border-border-subtle text-[11px]">
+      <div className="sticky top-0 z-20 flex items-center gap-2 px-3 py-1.5 bg-bg-overlay border-b border-border-subtle text-xs">
         <span className="text-text-secondary font-medium">
           {totals.files} {totals.files === 1 ? 'file' : 'files'} changed
         </span>
@@ -130,9 +131,9 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
       {/* Browse the full tree to open any (even unchanged) file in the editor. */}
       <button
         onClick={() => setTreeOpen(!treeOpen)}
-        className="w-full flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-text-secondary hover:bg-bg-card transition-colors border-b border-border-subtle"
+        className="w-full flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-card transition-colors border-b border-border-subtle"
       >
-        <span className="text-text-muted w-3 text-center text-[10px]">
+        <span className="text-text-muted w-3 text-center text-2xs">
           {treeOpen ? '▼' : '▶'}
         </span>
         <span className="flex-1 text-left">File Tree</span>
