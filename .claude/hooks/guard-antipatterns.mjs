@@ -68,24 +68,26 @@ const RULES = [
       "`rounded-md` for control elements, or `rounded-sm`/`-lg`/`-full` for " +
       "intentionally distinct sizes. Bare `rounded` is allowed only on " +
       "intentionally smallest-radius decorative chips/status dots — add " +
-      "`// allow-bare-rounded` on that line if this is one of them.",
+      "`{/* allow-bare-rounded */}` on that line if this is one of them.",
   },
   {
     // Bare directional `rounded-r` / `rounded-l` / `rounded-t` / `rounded-b`
     // and their corner variants are the same token-system bug as bare
-    // `rounded` — they need a size suffix (e.g. `rounded-r-md`). The
-    // negative lookahead already excludes `rounded-r-md` etc.
+    // `rounded` — they need a size suffix (e.g. `rounded-r-md`) or an
+    // arbitrary value (`rounded-r-[6px]`). The negative lookahead
+    // excludes both forms.
     id: "bare-rounded-directional-in-component",
     appliesTo: (path) =>
       /(^|\/)src\/components\//.test(path) && /\.(tsx?|jsx?)$/.test(path),
     pattern:
-      /\brounded-(r|l|t|b|tl|tr|bl|br)\b(?![-](?:sm|md|lg|xl|2xl|3xl|none|pill|full)\b)/,
+      /\brounded-(r|l|t|b|tl|tr|bl|br)\b(?![-](?:sm|md|lg|xl|2xl|3xl|none|pill|full)\b|-\[)/,
     allow: "allow-bare-rounded",
     message:
       "Bare directional `rounded-r` / `-l` / `-t` / `-b` / `-tl` / `-tr` / " +
       "`-bl` / `-br` in src/components bypasses the `--radius-md` token. Use " +
-      "`rounded-r-md` (etc.) so the radius follows future token retunes. " +
-      "Add `// allow-bare-rounded` if this is intentionally smallest-radius.",
+      "`rounded-r-md` (etc.) or `rounded-r-[6px]` (arbitrary value) so the " +
+      "radius is explicit. Add `{/* allow-bare-rounded */}` if this is " +
+      "intentionally smallest-radius.",
   },
 ];
 

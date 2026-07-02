@@ -95,8 +95,9 @@ const openInExplorer = async (path: string) => {
 const Badge = ({ color, text, title }: { color: string; text: string; title?: string }) => (
   <span
     title={title}
-    className={`px-1 py-px rounded text-[9px] font-medium leading-none ${color}`} /* allow-bare-rounded — 9px status badge, no interaction */
+    className={`px-1 py-px rounded text-[9px] font-medium leading-none ${color}`} /* allow-bare-rounded */
   >
+    {/* 9px status badge — intentionally smallest radius, no interaction */}
     {text}
   </span>
 );

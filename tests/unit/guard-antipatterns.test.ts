@@ -140,6 +140,16 @@ describe("checkContentViolations — bare-rounded rules (#733)", () => {
     expect(v).toHaveLength(0);
   });
 
+  it("allows `rounded-r-[6px]` in a component className (arbitrary value)", () => {
+    // The bare rule already allows `rounded-[6px]` arbitrary values, so
+    // the directional rule must too — consistency check.
+    const v = checkContentViolations(
+      "src/components/Sidebar/Pagination.tsx",
+      'className="px-2 py-1 rounded-r-[6px] text-xs bg-bg-card"',
+    );
+    expect(v).toHaveLength(0);
+  });
+
   it("allows the full set of token-bound rounded sizes", () => {
     const sizes = ["sm", "md", "lg", "xl", "2xl", "3xl", "full", "none", "pill"];
     for (const size of sizes) {
