@@ -114,7 +114,7 @@ export function ShortcutCheatsheet({ open, onClose }: ShortcutCheatsheetProps) {
  */
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
-    <kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default text-xs text-text-muted font-mono">
+    <kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default text-xs text-text-muted font-mono">
       {children}
     </kbd>
   );

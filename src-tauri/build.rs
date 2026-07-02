@@ -1,4 +1,12 @@
 fn main() {
+    // Without these Cargo only re-runs build.rs when this file itself
+    // changes, so a `git pull` between builds leaves the embedded SHA
+    // stale. .git/packed-refs covers fresh clones; .git/refs/heads/<b>
+    // covers the common dev case; .git/HEAD covers detached HEAD.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
+    println!("cargo:rerun-if-changed=.git/refs");
+
     let git_sha = std::process::Command::new("git")
         .args(["describe", "--always", "--dirty"])
         .output()

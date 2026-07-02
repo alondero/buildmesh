@@ -37,7 +37,7 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       return (
         <div className="flex h-screen w-screen items-center justify-center bg-bg-base text-text-primary p-8">
-          <div className="max-w-2xl w-full bg-bg-surface border border-status-error/50 rounded p-6 space-y-4">
+          <div className="max-w-2xl w-full bg-bg-surface border border-status-error/50 rounded-md p-6 space-y-4">
             <div className="flex items-center gap-2">
               <div className="text-status-error text-2xl">⚠</div>
               <h1 className="text-xl font-semibold">Buildmesh hit a render error</h1>
@@ -45,13 +45,13 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="text-sm text-text-secondary">
               The UI crashed. Details have been written to <code className="text-accent-cyan">buildmesh.log</code>.
             </div>
-            <pre className="text-xs text-text-primary bg-bg-base border border-border-subtle rounded p-3 overflow-auto max-h-64">
+            <pre className="text-xs text-text-primary bg-bg-base border border-border-subtle rounded-md p-3 overflow-auto max-h-64">
               {this.state.error.name}: {this.state.error.message}
               {this.state.error.stack ? `\n\n${this.state.error.stack}` : ''}
             </pre>
             <button
               onClick={this.handleReload}
-              className="px-4 py-2 bg-accent-cyan text-text-inverse rounded hover:bg-accent-cyan/85 font-medium"
+              className="px-4 py-2 bg-accent-cyan text-text-inverse rounded-md hover:bg-accent-cyan/85 font-medium"
             >
               Reload
             </button>

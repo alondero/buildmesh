@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
@@ -38,10 +38,19 @@ export function AccountCard({
   account,
   onSave,
   onRemove,
+  onDirtyChange,
 }: {
   account: ProviderAccount;
   onSave: (account: ProviderAccount) => Promise<boolean>;
   onRemove?: (id: string) => Promise<void>;
+  /**
+   * Fires with `true` when the editable draft diverges from the saved
+   * `account`, and `false` when they match again (or when the card
+   * unmounts). The parent aggregates these signals across the modal so a
+   * stray backdrop click can prompt before destroying half-typed credentials
+   * (issue #730).
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<ProviderAccount>(account);
   const [showCreds, setShowCreds] = useState(false);
@@ -54,6 +63,31 @@ export function AccountCard({
   // Re-sync the editable draft when the parent reloads accounts (e.g. after save).
   useEffect(() => setDraft(account), [account]);
   useEffect(() => setConfirmingRemove(false), [account.id]);
+
+  // Dirty = any editable field diverges from the saved account. The card is
+  // the only place that knows what was edited; the parent just sees a
+  // boolean. We compare each tier individually rather than JSON.stringify
+  // the whole record — cheaper and clearer about which field is dirty.
+  const isDirty = useMemo(() => {
+    if (draft.api_key !== account.api_key) return true;
+    if (draft.base_url !== account.base_url) return true;
+    if (draft.billing_mode !== account.billing_mode) return true;
+    if (draft.enabled !== account.enabled) return true;
+    for (const k of Object.keys(account.model_tiers) as (keyof ProviderAccount['model_tiers'])[]) {
+      if (draft.model_tiers[k] !== account.model_tiers[k]) return true;
+    }
+    return false;
+  }, [draft, account]);
+  // Track the last reported value so we only fire onDirtyChange when the
+  // dirty flag actually flips. The parent re-renders a lot, which would
+  // otherwise re-fire the effect (onDirtyChange is a new inline arrow on
+  // each render) and cause spurious setDirtySites calls.
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const isCustom = !BUILTIN_PROVIDER_IDS.includes(account.id);
   // Self-authenticating harnesses (Anthropic/Codex/Antigravity) hold no creds in
@@ -129,7 +163,7 @@ export function AccountCard({
               <button
                 onClick={confirmRemove}
                 disabled={busy}
-                className="px-3 py-1 bg-status-error text-white text-sm rounded hover:bg-status-error/90 disabled:opacity-50"
+                className="px-3 py-1 bg-status-error text-white text-sm rounded-md hover:bg-status-error/90 disabled:opacity-50"
                 aria-label={`Confirm remove ${account.name}`}
               >
                 Yes
@@ -137,7 +171,7 @@ export function AccountCard({
               <button
                 onClick={() => setConfirmingRemove(false)}
                 disabled={busy}
-                className="px-3 py-1 bg-bg-card text-text-secondary text-sm rounded hover:bg-bg-card/70 disabled:opacity-50"
+                className="px-3 py-1 bg-bg-card text-text-secondary text-sm rounded-md hover:bg-bg-card/70 disabled:opacity-50"
                 aria-label={`Cancel remove ${account.name}`}
               >
                 No
@@ -147,7 +181,7 @@ export function AccountCard({
             <button
               onClick={() => setConfirmingRemove(true)}
               disabled={busy}
-              className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded hover:bg-status-error/25 disabled:opacity-50"
+              className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
               aria-label={`Remove ${account.name}`}
               title={`Remove ${account.name}`}
             >
@@ -175,7 +209,7 @@ export function AccountCard({
               value={draft.api_key ?? ''}
               onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
               placeholder="Enter API key..."
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} API key`}
             />
           </div>
@@ -186,7 +220,7 @@ export function AccountCard({
               value={draft.base_url ?? ''}
               onChange={e => setDraft({ ...draft, base_url: e.target.value || null })}
               placeholder="https://api.example.com/anthropic"
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} base URL`}
             />
           </div>
@@ -204,7 +238,7 @@ export function AccountCard({
                     value={draft.model_tiers[key] ?? ''}
                     onChange={e => setTier(key, e.target.value)}
                     placeholder="model id"
-                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                     aria-label={`${account.name} ${label} model`}
                   />
                 </div>
@@ -216,7 +250,7 @@ export function AccountCard({
             <select
               value={draft.billing_mode}
               onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} billing mode`}
             >
               <option value="plan">Plan / subscription (percentage)</option>
@@ -227,7 +261,7 @@ export function AccountCard({
             <button
               onClick={saveDraft}
               disabled={busy}
-              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
             >
               {busy ? 'Saving...' : 'Save'}
             </button>
@@ -242,14 +276,27 @@ export function AccountCard({
 export function AddCustomProviderForm({
   onAdd,
   onCancel,
+  onDirtyChange,
 }: {
   onAdd: (name: string, baseUrl: string, apiKey: string) => Promise<void>;
   onCancel: () => void;
+  /** Dirty = any of name / baseUrl / apiKey is non-empty. See issue #730. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState(false);
+
+  const isDirty = name.trim() !== '' || baseUrl.trim() !== '' || apiKey.trim() !== '';
+  // Only fire on dirty-state FLIPS, not on every parent re-render (see
+  // AccountCard's matching comment for the rationale).
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const submit = async () => {
     setBusy(true);
@@ -271,7 +318,7 @@ export function AddCustomProviderForm({
         value={name}
         onChange={e => setName(e.target.value)}
         placeholder="Name (e.g. DeepSeek via Claude Code)"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider name"
       />
       <input
@@ -279,7 +326,7 @@ export function AddCustomProviderForm({
         value={baseUrl}
         onChange={e => setBaseUrl(e.target.value)}
         placeholder="Base URL (https://api.deepseek.com/anthropic)"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider base URL"
       />
       <input
@@ -287,7 +334,7 @@ export function AddCustomProviderForm({
         value={apiKey}
         onChange={e => setApiKey(e.target.value)}
         placeholder="API key"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider API key"
       />
       <div className="flex gap-3">
@@ -297,7 +344,7 @@ export function AddCustomProviderForm({
           // URL + key it can't reach its endpoint, and the spawn menu only shows
           // keyed providers — a keyless add would save a row that never appears.
           disabled={busy || !name.trim() || !baseUrl.trim() || !apiKey.trim()}
-          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
         >
           {busy ? 'Adding...' : 'Add provider'}
         </button>
@@ -352,6 +399,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [exposedInterfaces, setExposedInterfaces] = useState<RealizedBind[]>(
     [],
   );
+
+  // Modal-wide dirty aggregator (issue #730). Every child that can be edited
+  // (AccountCard, AddCustomProviderForm, HarnessConfigList) reports via
+  // `onDirtyChange(site, dirty)`; the Set's size feeds the Modal's `dirty`
+  // prop so a stray Escape or backdrop click is intercepted by the inline
+  // "Discard unsaved changes?" banner. The function-form setDirtySites
+  // bails out when the site is already in the right state, so re-fires from
+  // a non-memoised child callback are cheap.
+  const [dirtySites, setDirtySites] = useState<Set<string>>(new Set());
+  const siteDirtyChange = useCallback((site: string, dirty: boolean) => {
+    setDirtySites(prev => {
+      if (dirty) {
+        if (prev.has(site)) return prev;
+        const next = new Set(prev);
+        next.add(site);
+        return next;
+      }
+      if (!prev.has(site)) return prev;
+      const next = new Set(prev);
+      next.delete(site);
+      return next;
+    });
+  }, []);
 
   // Issue #581: mirror `providers` and `selected` into refs so the
   // optimistic rollback handlers below read the *latest* committed value
@@ -588,6 +658,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
   const handleRemoveAccount = async (id: string) => {
     setError(null);
+    // Clear the dirty site for the card being removed BEFORE the await —
+    // the form's own useEffect has no unmount cleanup, so if we wait for
+    // the network round-trip the user could trigger a backdrop click that
+    // surfaces the discard banner over a now-empty modal. Issue #730
+    // code-review catch.
+    siteDirtyChange(`account-${id}`, false);
     try {
       await api.removeProviderAccount(id);
       const [accountList, providerList] = await Promise.all([
@@ -628,7 +704,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       models: [],
     });
     // Keep the form open (with the user's entries) if the backend rejected it.
-    if (ok) setAddingCustom(false);
+    if (ok) {
+      // Clear the dirty site before unmounting — the form's useEffect has no
+      // unmount cleanup, so without this the modal would stay in dirty mode
+      // for the rest of the session (issue #730 code-review catch).
+      siteDirtyChange('add-custom-form', false);
+      setAddingCustom(false);
+    }
   };
 
   // Flip the master kill-switch. Optimistic, with rollback on failure so the
@@ -706,6 +788,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       labelledBy="app-settings-title"
       maxWidth="max-w-4xl"
       className="p-0 max-h-[85vh] flex flex-col overflow-hidden"
+      dirty={dirtySites.size > 0}
+      dirtyMessage="Discard unsaved changes to your settings?"
     >
       {/* Non-scrolling header: title + close stay reachable no matter how far
           the settings body is scrolled. */}
@@ -731,7 +815,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             value={selected}
             disabled={!loaded || saving}
             onChange={e => handleSave(e.target.value)}
-            className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           >
             <option value={NO_OVERRIDE}>Anthropic (built-in default)</option>
             {providers.map(p => (
@@ -773,6 +857,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             accounts={accounts}
             onAttach={handleAttachProvider}
             onDetach={handleDetachProvider}
+            onDirtyChange={siteDirtyChange}
           />
         </div>
 
@@ -799,12 +884,24 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                 account={account}
                 onSave={handleSaveAccount}
                 onRemove={handleRemoveAccount}
+                onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}
               />
             ))}
           </div>
 
           {addingCustom ? (
-            <AddCustomProviderForm onAdd={handleAddCustom} onCancel={() => setAddingCustom(false)} />
+            <AddCustomProviderForm
+              onAdd={handleAddCustom}
+              onCancel={() => {
+                // The form's useEffect has no unmount cleanup, so the parent
+                // has to clear the dirty site before unmounting the form.
+                // Otherwise the modal stays in dirty mode for the rest of
+                // the session. Issue #730 code-review catch.
+                siteDirtyChange('add-custom-form', false);
+                setAddingCustom(false);
+              }}
+              onDirtyChange={d => siteDirtyChange('add-custom-form', d)}
+            />
           ) : (
             <button
               onClick={() => setAddingCustom(true)}
@@ -846,7 +943,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <div className="mt-4" data-testid="lan-realized-status">
               {exposedInterfaces.length === 0 ? (
                 <div
-                  className="flex items-start gap-2 bg-bg-card border border-status-warning/40 rounded px-3 py-2"
+                  className="flex items-start gap-2 bg-bg-card border border-status-warning/40 rounded-md px-3 py-2"
                   data-testid="lan-exposure-warning"
                   role="alert"
                 >
@@ -912,7 +1009,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           {coordEnabled && (
             <div className="mt-4 border border-border-subtle rounded-lg p-5">
-              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded px-3 py-2 mb-4">
+              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded-md px-3 py-2 mb-4">
                 <span className="text-base text-text-secondary">
                   Anyone who can reach this machine on the LAN <span className="font-medium">and</span>{' '}
                   holds the token can read your node statuses. The token is shown once, when
@@ -926,12 +1023,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   readOnly
                   value={coordToken ?? (coordHasToken ? '••••••••  (a token has already been minted)' : '')}
                   placeholder="No token yet — generate one to copy"
-                  className="flex-1 bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base font-mono text-text-primary focus:outline-none focus:border-accent-cyan"
+                  className="flex-1 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base font-mono text-text-primary focus:outline-none focus:border-accent-cyan"
                 />
                 {coordToken && (
                   <button
                     onClick={handleCopyToken}
-                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30"
+                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
                   >
                     {coordCopied ? 'Copied!' : 'Copy'}
                   </button>
@@ -939,7 +1036,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                 <button
                   onClick={handleGenerateToken}
                   disabled={coordBusy}
-                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
+                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
                 >
                   {coordBusy ? 'Working…' : coordHasToken ? 'Regenerate token' : 'Generate token'}
                 </button>
@@ -983,13 +1080,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                       <button
                         onClick={() => handleRevokeDevice(device.id)}
                         disabled={revokingId === device.id}
-                        className="px-4 py-2 bg-status-error text-white text-base rounded hover:bg-status-error/90 disabled:opacity-50"
+                        className="px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90 disabled:opacity-50"
                       >
                         {revokingId === device.id ? 'Revoking…' : 'Confirm revoke'}
                       </button>
                       <button
                         onClick={() => setConfirmingRevokeId(null)}
-                        className="px-4 py-2 bg-bg-card text-text-secondary text-base rounded hover:bg-border-subtle"
+                        className="px-4 py-2 bg-bg-card text-text-secondary text-base rounded-md hover:bg-border-subtle"
                       >
                         Cancel
                       </button>
@@ -997,7 +1094,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   ) : (
                     <button
                       onClick={() => setConfirmingRevokeId(device.id)}
-                      className="px-4 py-2 bg-status-error/15 text-status-error text-base rounded hover:bg-status-error/25 whitespace-nowrap"
+                      className="px-4 py-2 bg-status-error/15 text-status-error text-base rounded-md hover:bg-status-error/25 whitespace-nowrap"
                     >
                       Revoke
                     </button>

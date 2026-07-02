@@ -12,10 +12,14 @@
   --color-bg-selection: #1a2a3a;
   --color-bg-highlight: rgba(0, 212, 255, 0.06);
 
-  /* Text */
+  /* Text. --color-text-muted was bumped from #4a5568 → #7a8492 to clear
+     WCAG AA body-text on bg-base / bg-surface (5.2:1 / 5.1:1) while
+     staying subordinate to --color-text-secondary (7.7:1). The
+     regression test that pins this contract lives in
+     tests/unit/theme-tokens-contrast.test.ts. See issue #732. */
   --color-text-primary: #e2e8f0;
   --color-text-secondary: #94a3b8;
-  --color-text-muted: #4a5568;
+  --color-text-muted: #7a8492;
   --color-text-inverse: #09090f;
 
   /* Accent — Electric Cyan/Blue */

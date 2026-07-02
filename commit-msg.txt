@@ -1,0 +1,38 @@
+merge: main → gh733 (resolve #733 sweep + design-system token renames)
+
+Brings the radii sweep forward onto the design-system modernization
+landed on main (--radius-md still 4px; the rename was the
+`text-[Npx]` → `text-{xs,2xs}` consolidation, not a radii change).
+
+Conflict resolution strategy
+----------------------------
+- **Non-allowlist files (13):** took main's version, then re-ran
+  `scripts/issue-733-sweep.mjs` to re-apply the `rounded` → `rounded-md`
+  conversion that main didn't carry. 38 additional replacements.
+- **Allowlist files (2):** WorktreeManagerTab.tsx + GitPullRequestsTab.tsx.
+  Kept bare `rounded` on the two decorative chips (the entire point of
+  the allowlist), updated the className tokens to main's new
+  `text-2xs` (was `text-[9px]` / `text-[10px]` pre-#733), and kept the
+  `/* allow-bare-rounded */` escape comments.
+
+Test allowlist + sweep script
+-----------------------------
+- `tests/unit/radii-audit.test.ts` — updated `requiredClasses` to use
+  `text-2xs` (the new token) for both allowlist sites, with a comment
+  noting the token was `text-[Npx]` pre-#733.
+- `scripts/issue-733-sweep.mjs` — updated `KEEP_FRAGMENTS` to use
+  `text-2xs` so a future re-run of the sweep won't re-convert the
+  allowlist sites. (The first post-merge re-run DID convert them
+  because the old KEEP_FRAGMENT used `text-[9px]`, which no longer
+  matched the post-modernization `text-2xs`. Caught by the audit
+  test, reverted, sweep script updated to prevent recurrence.)
+
+Verification
+------------
+- 1137 / 1137 unit tests pass (was 1119; +18 from main's design-system
+  modernization tests)
+- `tsc --noEmit` clean
+- Guard sanity-tested via stdin: bare `rounded` blocked (exit 2),
+  escape comment passes (exit 0)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
