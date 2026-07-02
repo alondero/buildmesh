@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import type { ProviderAccount, ProviderPairing, ApiSurface } from '../../lib/tauri';
 
@@ -38,6 +38,7 @@ export function HarnessConfigList({
   accounts,
   onAttach,
   onDetach,
+  onDirtyChange,
 }: {
   harnesses: ProxyHarness[];
   compatibleByHarness: Record<string, ProviderAccount[]>;
@@ -47,6 +48,12 @@ export function HarnessConfigList({
   accounts: ProviderAccount[];
   onAttach: (harnessId: string, providerId: string, apiKey: string | null) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  /**
+   * Forwarded to each card so the parent can aggregate the modal-wide dirty
+   * signal (issue #730). Each card's form opens independently; any one
+   * having a half-typed key or a selected provider counts as dirty.
+   */
+  onDirtyChange?: (harnessId: string, dirty: boolean) => void;
 }) {
   const accountName = (id: string) => accounts.find((a) => a.id === id)?.name ?? id;
   const isKeyed = (id: string) => {
@@ -84,6 +91,7 @@ export function HarnessConfigList({
           isKeyed={isKeyed}
           onAttach={onAttach}
           onDetach={onDetach}
+          onDirtyChange={onDirtyChange ? (d) => onDirtyChange(harness.id, d) : undefined}
         />
       ))}
     </div>
@@ -99,6 +107,7 @@ function HarnessCard({
   isKeyed,
   onAttach,
   onDetach,
+  onDirtyChange,
 }: {
   harness: ProxyHarness;
   compatible: ProviderAccount[];
@@ -108,6 +117,9 @@ function HarnessCard({
   isKeyed: (id: string) => boolean;
   onAttach: (harnessId: string, providerId: string, apiKey: string | null) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  /** Dirty = the inline "Add proxied provider" form is open AND has a
+   *  selection or a half-typed key. See issue #730. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState('');
@@ -118,6 +130,18 @@ function HarnessCard({
   // Offer only compatible providers not already attached to this harness.
   const offerable = compatible.filter((a) => !attachedIds.has(a.id));
   const needsKey = selected !== '' && !isKeyed(selected);
+
+  // Dirty when the inline form is open and the user has entered either a
+  // provider selection or a half-typed key. The form opens empty (just the
+  // "+ Add proxied provider" button) — that's not dirty.
+  const isDirty = adding && (selected !== '' || key.trim() !== '');
+  // Only fire on dirty-state FLIPS — see AccountCard's comment.
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const reset = () => {
     setAdding(false);

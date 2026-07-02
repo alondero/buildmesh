@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
@@ -38,10 +38,19 @@ export function AccountCard({
   account,
   onSave,
   onRemove,
+  onDirtyChange,
 }: {
   account: ProviderAccount;
   onSave: (account: ProviderAccount) => Promise<boolean>;
   onRemove?: (id: string) => Promise<void>;
+  /**
+   * Fires with `true` when the editable draft diverges from the saved
+   * `account`, and `false` when they match again (or when the card
+   * unmounts). The parent aggregates these signals across the modal so a
+   * stray backdrop click can prompt before destroying half-typed credentials
+   * (issue #730).
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<ProviderAccount>(account);
   const [showCreds, setShowCreds] = useState(false);
@@ -54,6 +63,31 @@ export function AccountCard({
   // Re-sync the editable draft when the parent reloads accounts (e.g. after save).
   useEffect(() => setDraft(account), [account]);
   useEffect(() => setConfirmingRemove(false), [account.id]);
+
+  // Dirty = any editable field diverges from the saved account. The card is
+  // the only place that knows what was edited; the parent just sees a
+  // boolean. We compare each tier individually rather than JSON.stringify
+  // the whole record — cheaper and clearer about which field is dirty.
+  const isDirty = useMemo(() => {
+    if (draft.api_key !== account.api_key) return true;
+    if (draft.base_url !== account.base_url) return true;
+    if (draft.billing_mode !== account.billing_mode) return true;
+    if (draft.enabled !== account.enabled) return true;
+    for (const k of Object.keys(account.model_tiers) as (keyof ProviderAccount['model_tiers'])[]) {
+      if (draft.model_tiers[k] !== account.model_tiers[k]) return true;
+    }
+    return false;
+  }, [draft, account]);
+  // Track the last reported value so we only fire onDirtyChange when the
+  // dirty flag actually flips. The parent re-renders a lot, which would
+  // otherwise re-fire the effect (onDirtyChange is a new inline arrow on
+  // each render) and cause spurious setDirtySites calls.
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const isCustom = !BUILTIN_PROVIDER_IDS.includes(account.id);
   // Self-authenticating harnesses (Anthropic/Codex/Antigravity) hold no creds in
@@ -242,14 +276,27 @@ export function AccountCard({
 export function AddCustomProviderForm({
   onAdd,
   onCancel,
+  onDirtyChange,
 }: {
   onAdd: (name: string, baseUrl: string, apiKey: string) => Promise<void>;
   onCancel: () => void;
+  /** Dirty = any of name / baseUrl / apiKey is non-empty. See issue #730. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState(false);
+
+  const isDirty = name.trim() !== '' || baseUrl.trim() !== '' || apiKey.trim() !== '';
+  // Only fire on dirty-state FLIPS, not on every parent re-render (see
+  // AccountCard's matching comment for the rationale).
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const submit = async () => {
     setBusy(true);
@@ -352,6 +399,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [exposedInterfaces, setExposedInterfaces] = useState<RealizedBind[]>(
     [],
   );
+
+  // Modal-wide dirty aggregator (issue #730). Every child that can be edited
+  // (AccountCard, AddCustomProviderForm, HarnessConfigList) reports via
+  // `onDirtyChange(site, dirty)`; the Set's size feeds the Modal's `dirty`
+  // prop so a stray Escape or backdrop click is intercepted by the inline
+  // "Discard unsaved changes?" banner. The function-form setDirtySites
+  // bails out when the site is already in the right state, so re-fires from
+  // a non-memoised child callback are cheap.
+  const [dirtySites, setDirtySites] = useState<Set<string>>(new Set());
+  const siteDirtyChange = useCallback((site: string, dirty: boolean) => {
+    setDirtySites(prev => {
+      if (dirty) {
+        if (prev.has(site)) return prev;
+        const next = new Set(prev);
+        next.add(site);
+        return next;
+      }
+      if (!prev.has(site)) return prev;
+      const next = new Set(prev);
+      next.delete(site);
+      return next;
+    });
+  }, []);
 
   // Issue #581: mirror `providers` and `selected` into refs so the
   // optimistic rollback handlers below read the *latest* committed value
@@ -588,6 +658,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
   const handleRemoveAccount = async (id: string) => {
     setError(null);
+    // Clear the dirty site for the card being removed BEFORE the await —
+    // the form's own useEffect has no unmount cleanup, so if we wait for
+    // the network round-trip the user could trigger a backdrop click that
+    // surfaces the discard banner over a now-empty modal. Issue #730
+    // code-review catch.
+    siteDirtyChange(`account-${id}`, false);
     try {
       await api.removeProviderAccount(id);
       const [accountList, providerList] = await Promise.all([
@@ -628,7 +704,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       models: [],
     });
     // Keep the form open (with the user's entries) if the backend rejected it.
-    if (ok) setAddingCustom(false);
+    if (ok) {
+      // Clear the dirty site before unmounting — the form's useEffect has no
+      // unmount cleanup, so without this the modal would stay in dirty mode
+      // for the rest of the session (issue #730 code-review catch).
+      siteDirtyChange('add-custom-form', false);
+      setAddingCustom(false);
+    }
   };
 
   // Flip the master kill-switch. Optimistic, with rollback on failure so the
@@ -706,6 +788,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       labelledBy="app-settings-title"
       maxWidth="max-w-4xl"
       className="p-0 max-h-[85vh] flex flex-col overflow-hidden"
+      dirty={dirtySites.size > 0}
+      dirtyMessage="Discard unsaved changes to your settings?"
     >
       {/* Non-scrolling header: title + close stay reachable no matter how far
           the settings body is scrolled. */}
@@ -773,6 +857,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             accounts={accounts}
             onAttach={handleAttachProvider}
             onDetach={handleDetachProvider}
+            onDirtyChange={siteDirtyChange}
           />
         </div>
 
@@ -799,12 +884,24 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                 account={account}
                 onSave={handleSaveAccount}
                 onRemove={handleRemoveAccount}
+                onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}
               />
             ))}
           </div>
 
           {addingCustom ? (
-            <AddCustomProviderForm onAdd={handleAddCustom} onCancel={() => setAddingCustom(false)} />
+            <AddCustomProviderForm
+              onAdd={handleAddCustom}
+              onCancel={() => {
+                // The form's useEffect has no unmount cleanup, so the parent
+                // has to clear the dirty site before unmounting the form.
+                // Otherwise the modal stays in dirty mode for the rest of
+                // the session. Issue #730 code-review catch.
+                siteDirtyChange('add-custom-form', false);
+                setAddingCustom(false);
+              }}
+              onDirtyChange={d => siteDirtyChange('add-custom-form', d)}
+            />
           ) : (
             <button
               onClick={() => setAddingCustom(true)}
