@@ -199,7 +199,7 @@ function HarnessCard({
                     <span className="ml-2 text-sm text-accent-cyan">{SURFACE_LABEL[p.surface]}</span>
                   </div>
                   {p.base_url && (
-                    <div className="text-sm text-text-muted truncate font-mono">{p.base_url}</div>
+                    <div className="text-sm text-text-secondary truncate font-mono">{p.base_url}</div>
                   )}
                 </div>
                 {detachable ? (

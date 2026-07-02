@@ -138,11 +138,11 @@ export function FileDiffCard({
         </span>
         <span className="flex-1 truncate font-mono text-xs min-w-0">
           {file.old_path && file.old_path !== file.path && (
-            <span className="text-text-muted">
+            <span className="text-text-secondary">
               {file.old_path} <span aria-hidden="true">→</span>{' '}
             </span>
           )}
-          <span className="text-text-muted">{dir}</span>
+          <span className="text-text-secondary">{dir}</span>
           <span className="text-text-primary">{name}</span>
         </span>
         {file.additions > 0 && (

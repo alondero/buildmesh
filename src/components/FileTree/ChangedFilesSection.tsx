@@ -108,7 +108,7 @@ export function ChangedFilesSection({
                 <span className={`font-bold w-3 flex-shrink-0 ${statusColors[file.status] ?? 'text-text-muted'}`}>
                   {statusPrefix[file.status] ?? '?'}
                 </span>
-                <span className="flex-1 truncate text-text-muted">{file.path}</span>
+                <span className="flex-1 truncate text-text-secondary">{file.path}</span>
                 <span className="text-accent-green flex-shrink-0">+{file.additions}</span>
                 <span className="text-accent-red flex-shrink-0">-{file.deletions}</span>
               </button>
