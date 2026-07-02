@@ -6,11 +6,12 @@ import { Sidebar } from './components/Sidebar/Sidebar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
+import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
-import { isTextInputFocused } from './lib/focusGuard';
+import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { arrowTargetIndex } from './lib/gridTraversal';
 import { toggleGridMaximize } from './lib/gridShortcuts';
 import { isMac } from './lib/platform';
@@ -34,6 +35,11 @@ const createNodeGuard = createShortcutGuard(300);
 // burst of toggles, short enough that a deliberate second press feels
 // responsive.
 const toggleMaximizeGuard = createShortcutGuard(300);
+// Cooldown for the ?-key cheatsheet toggle (issue #731). Belt-and-braces
+// against accidental double-taps (e.g. finger-roll on the keyboard) firing
+// the modal twice within 300 ms; the `e.repeat` guard inside the handler
+// is the primary defense against OS autorepeat (held `?`).
+const cheatsheetGuard = createShortcutGuard(300);
 
 type ErrorToast = Toast;
 
@@ -44,6 +50,11 @@ function App() {
 
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
   const [isReady, setIsReady] = useState(false);
+  // Cheatsheet open state (issue #731). The <ShortcutCheatsheet> component
+  // mounts only while true, which is what arms the <Modal>-owned Escape
+  // listener — otherwise Escape would be stolen from agent terminals in
+  // the grid. Same mount/unmount discipline as WorktreeCloseDialog.
+  const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
 
   // Track window focus state for conditional shortcut handling
   const isFocusedRef = useRef(false);
@@ -254,6 +265,47 @@ function App() {
     return () => window.removeEventListener('shortcut-triggered', handleShortcut);
   }, []);
 
+  // ?-key cheatsheet toggle (issue #731). Plain window keydown listener
+  // (NOT a Tauri global-shortcut registration) for two reasons:
+  //
+  //   1. The `?` key is shifted on US layouts and unmodified on some
+  //      European layouts — registering it as a Tauri global-shortcut
+  //      would tie us to a single key-shape string per platform and force
+  //      two registrations. A window keydown listener matches `e.key`
+  //      semantically, which is what the user means.
+  //
+  //   2. The listener is intentionally NOT in the Tauri global-shortcut
+  //      list, so a focused xterm terminal sees the keystroke first
+  //      (terminals are the only place the user might want to type `?`
+  //      as a literal character).
+  //
+  // Three early-exit guards protect the user's keystroke:
+  //   - `e.repeat`: a held `?` autorepeats at ~30 Hz after ~500 ms on
+  //     Windows; without this guard the modal flickers open/closed for
+  //     as long as the user keeps the key down.
+  //   - `isTerminalFocused()`: typing `?` in an agent terminal is the
+  //     user asking the agent a question — the `?` is content, not a
+  //     help request. This is the inverse of the `isTextInputFocused`
+  //     xterm carve-out used by Alt+G (which DOES want to fire from a
+  //     terminal prompt).
+  //   - `isTextInputFocused()`: catches inline-renames, the terminal
+  //     search box, and any future text input — same as the other
+  //     handlers.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '?') return;
+      if (e.repeat) return;
+      if (isTerminalFocused()) return;
+      if (isTextInputFocused()) return;
+      e.preventDefault();
+      cheatsheetGuard(async () => {
+        setCheatsheetOpen(open => !open);
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   useEffect(() => {
     const unlisten = listen<{ provider: string; message: string }>('provider-error', (event) => {
       addToast(event.payload.provider, event.payload.message, 'error');
@@ -381,6 +433,7 @@ function App() {
       <ProbePanel />
 
       <WorktreeCloseDialog />
+      <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
 
       {/* Toast notifications. Each toast carries role="status" (implicit
           aria-live=polite) so screen readers announce it on arrival without
