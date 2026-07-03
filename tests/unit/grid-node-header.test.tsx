@@ -250,6 +250,87 @@ describe('GridNodeHeader maximize (#65)', () => {
   });
 });
 
+/**
+ * The close + maximize buttons used to render with `opacity-0
+ * group-hover:opacity-100` and `text-text-muted`, so against the per-mesh
+ * tinted header background they were effectively invisible until the user
+ * hovered over the row. Each control now carries a `bg-bg-base/60` surface
+ * plus a 1px border (matching BuildRunDropdown's trigger) so they read at
+ * rest, and use `text-text-primary` so the icon shape is legible against
+ * the mesh tint instead of fading into it.
+ */
+describe('GridNodeHeader close + expand controls (icon visibility)', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    useUIStore.setState({ maximizedNodeId: null });
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+  });
+
+  it('the maximize button is visible at rest (no opacity-0) and has a button surface', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const button = getByLabelText('Maximize agent node');
+    const cls = button.className;
+    // Regression guard for the "invisible until hover" bug: the control
+    // must NOT be hidden at rest.
+    expect(cls).not.toMatch(/\bopacity-0\b/);
+    expect(cls).not.toMatch(/\bgroup-hover:opacity-100\b/);
+    // Surface treatment — the dark fill pops against the mesh-tinted header.
+    expect(cls).toContain('bg-bg-base/60');
+    expect(cls).toContain('border');
+    expect(cls).toContain('border-border-default');
+    // Use a fully-visible text colour so the icon shape reads against the
+    // mesh tint, not a near-invisible grey.
+    expect(cls).toContain('text-text-primary');
+    expect(cls).not.toContain('text-text-muted');
+  });
+
+  it('the close button is visible at rest (no opacity-0) and has a button surface', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const button = getByLabelText('Close agent node');
+    const cls = button.className;
+    expect(cls).not.toMatch(/\bopacity-0\b/);
+    expect(cls).not.toMatch(/\bgroup-hover:opacity-100\b/);
+    expect(cls).toContain('bg-bg-base/60');
+    expect(cls).toContain('border');
+    expect(cls).toContain('border-border-default');
+    expect(cls).toContain('text-text-primary');
+    expect(cls).not.toContain('text-text-muted');
+  });
+
+  it('keeps the cyan hover treatment on the maximize button so the intent still reads', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const cls = getByLabelText('Maximize agent node').className;
+    // Hover must still flip to the cyan accent — that's what signals
+    // "this is the maximise command" at a glance.
+    expect(cls).toContain('hover:text-accent-cyan');
+    expect(cls).toContain('hover:bg-accent-cyan');
+  });
+
+  it('keeps the red hover treatment on the close button so the destructive intent reads', () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const cls = getByLabelText('Close agent node').className;
+    expect(cls).toContain('hover:text-status-error');
+    expect(cls).toContain('hover:bg-status-error-bg');
+  });
+
+  it('maximise + close share the same h-7 w-7 surface as BuildRunDropdown for visual balance', () => {
+    // Pinned here so a future tweak to GridNodeHeader keeps the maximise
+    // and close surface matching BuildRunDropdown's. The Build-side
+    // counterpart lives in build-run-dropdown.test.tsx — that file mocks
+    // nothing about BuildRunDropdown, so the assertion can hit the real DOM.
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    for (const label of ['Maximize agent node', 'Close agent node']) {
+      const cls = getByLabelText(label).className;
+      expect(cls).toMatch(/\bh-7\b/);
+      expect(cls).toMatch(/\bw-7\b/);
+      expect(cls).toContain('bg-bg-base/60');
+      expect(cls).toContain('border-border-default');
+    }
+  });
+});
+
 describe('GridNodeHeader PR chip', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });

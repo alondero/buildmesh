@@ -235,7 +235,11 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
           <>
             <button
               onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
-              className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-[color,background-color,opacity] opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+              // Always-visible button surface (was opacity-0 until hover — invisible
+              // against the mesh tint). Same `h-7` + `bg-bg-base/60 + border` as
+              // BuildRunDropdown so the trio reads as one control group; hover
+              // tint flips to cyan, matching the maximise semantic.
+              className="w-7 h-7 flex items-center justify-center rounded-md bg-bg-base/60 border border-border-default text-text-primary hover:text-accent-cyan hover:bg-accent-cyan/15 hover:border-accent-cyan/60 transition-colors"
               // Issue #668 — surface the Alt+G / ⌘+G shortcut in the button
               // tooltip so discoverability isn't gated on the header double-click
               // or the empty-state splash.
@@ -243,11 +247,11 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
               aria-label={isMaximized ? 'Restore grid layout' : 'Maximize agent node'}
             >
               {isMaximized ? (
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
                 </svg>
               ) : (
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
                 </svg>
               )}
@@ -255,7 +259,10 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             <button
               type="button"
               onClick={handleClose}
-              className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-status-error hover:bg-status-error-bg transition-colors text-xs"
+              // Same surface treatment as the maximise button so the close icon
+              // reads at rest, not just on hover. Hover flips to the error
+              // semantic so the destructive intent is unmistakable.
+              className="w-7 h-7 flex items-center justify-center rounded-md bg-bg-base/60 border border-border-default text-text-primary hover:text-status-error hover:bg-status-error-bg hover:border-status-error/60 transition-colors text-base leading-none"
               title="Close agent node"
               aria-label="Close agent node"
             >
@@ -267,6 +274,11 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
           // and `compact` widths where both would crowd the title out.
           // Same two actions (Maximize/Restore + Close) with identical
           // tooltips/aria-labels so semantics are width-agnostic.
+          // NOTE: <KebabActions> still uses the pre-#756 `text-text-muted
+          // opacity-0` pattern at narrow widths — the always-visible surface
+          // treatment introduced in this PR is intentionally scoped to the
+          // inline trio so we don't bloat scope. Tracking the analogous
+          // kebab-trigger fix separately (issue TBD).
           <KebabActions
             isMaximized={isMaximized}
             toggleShortcutHint={toggleShortcutHint}
