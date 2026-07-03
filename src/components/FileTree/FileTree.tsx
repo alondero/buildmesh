@@ -7,7 +7,7 @@ import {
 } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
-import { statusMeta } from '../Diff/Diff';
+import { fileDiffStatusMeta as statusMeta } from '../../lib/status';
 import { LoadingState } from '../shared/Spinner';
 
 /** Lucide-style glyphs for the tree rows. */
