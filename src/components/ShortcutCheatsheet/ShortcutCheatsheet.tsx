@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import {
   groupedShortcutEntries,
@@ -35,24 +35,18 @@ const GROUP_DESCRIPTIONS: Record<ShortcutGroup, string> = {
  * and the `?`-key window listener; this component is the visible half.
  */
 export function ShortcutCheatsheet({ open, onClose }: ShortcutCheatsheetProps) {
-  const closeBtnRef = useRef<HTMLButtonElement>(null);
-
-  // Focus the close button on mount, overriding the <Modal> primitive's
-  // default of focusing the panel. Issue #731 acceptance criterion:
-  // "focus the close button by default" — the user just opened this
-  // dialog, the only useful action is to close it, so the close button
-  // is the right default target. Enter / Space then dismisses.
+  // Ref pointing at the close button. Passed to <Modal> as `defaultFocusRef`
+  // so the modal focuses the close button on mount — Issue #731 acceptance
+  // criterion "focus the close button by default": the user just opened
+  // this dialog, the only useful action is to close it, so the close
+  // button is the right default target. Enter / Space then dismisses.
   //
-  // The Modal's effect runs first (child effects fire before parent
-  // effects in React) and moves focus to the panel; this effect then
-  // moves focus to the close button. The focus trap inside the Modal
-  // then keys off whatever the first focusable in the panel is — that
-  // happens to be the close button now, so Tab from the close button
-  // goes nowhere (the rest of the rows are non-focusable text).
-  useEffect(() => {
-    if (!open) return;
-    closeBtnRef.current?.focus();
-  }, [open]);
+  // Issue #748: replaced the earlier `useEffect` that focused the close
+  // button (the Modal's effect focused the panel first, then this effect
+  // overrode it — order-dependent and child-effect-before-parent-effect
+  // fragile). The Modal now exposes `defaultFocusRef` so the focus target
+  // is set declaratively in JSX, with no effect ordering to reason about.
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
 
   if (!open) return null;
 
@@ -64,6 +58,7 @@ export function ShortcutCheatsheet({ open, onClose }: ShortcutCheatsheetProps) {
       labelledBy="shortcut-cheatsheet-title"
       maxWidth="max-w-md"
       className="p-0"
+      defaultFocusRef={closeBtnRef}
     >
       <div className="flex items-start justify-between gap-4 px-5 pt-5 pb-3 border-b border-border-subtle">
         <div>

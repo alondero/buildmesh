@@ -7,7 +7,7 @@ import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
-import { isMac } from '../../lib/platform';
+import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
@@ -342,19 +342,30 @@ export function AgentNodeView() {
                   Add Mesh
                 </button>
                 <div className="mt-8 text-xs text-text-muted font-mono space-y-1">
-                  {/* Modifier prefix follows the platform convention used elsewhere
-                      (Terminal.tsx context menu, README): ⌘ on macOS, Ctrl on
-                      Windows/Linux. The arrow glyphs (←/→/↑/↓) read identically
-                      across platforms and match the key names bound by Tauri's
-                      global-shortcut plugin.
+                  {/* Issue #748: the splash now sources its rows from
+                      SHORTCUT_CATALOG (entries flagged `splash: true`) instead
+                      of hand-coding five inline strings. A future catalog edit
+                      (e.g. renaming `?` to `Ctrl+/`) now propagates here
+                      automatically — the previous hand-coded version would
+                      silently drift.
+
+                      Modifier prefix follows the platform convention used
+                      elsewhere (Terminal.tsx context menu, README): ⌘ on macOS,
+                      Ctrl on Windows/Linux. The arrow glyphs (←/→/↑/↓) read
+                      identically across platforms and match the key names
+                      bound by Tauri's global-shortcut plugin.
+
                       Issue #668 — Alt+G (Win/Linux) / ⌘+G (macOS) is the new
                       maximize/restore toggle. Listed here so users discover it
                       before they ever open a mesh. */}
-                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">{isMac ? '⌘' : 'Ctrl'}+T</kbd> New agent node</p>
-                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">{isMac ? '⌘+⌥' : 'Ctrl+Alt'}+←/→/↑/↓</kbd> Traverse nodes</p>
-                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">{isMac ? '⌘' : 'Alt'}+G</kbd> Toggle grid / single view</p>
-                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">?</kbd> Show all keyboard shortcuts</p>
-                  <p><kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">Esc</kbd> Close dialogs / exit maximized view</p>
+                  {SHORTCUT_CATALOG.filter(e => e.splash).map(entry => (
+                    <p key={entry.action}>
+                      <kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">
+                        {shortcutLabel(entry)}
+                      </kbd>
+                      {' '}{entry.description}
+                    </p>
+                  ))}
                 </div>
               </div>
             </div>

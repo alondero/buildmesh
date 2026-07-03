@@ -87,6 +87,42 @@ describe('shortcutCatalog', () => {
     expect(actions.has('delete-mesh')).toBe(false);
     expect(actions.has('open-debug')).toBe(false);
   });
+
+  it('flags the empty-state splash subset (issue #748)', () => {
+    // The empty-state splash in AgentNodeView.tsx renders one row per
+    // entry flagged `splash: true`. Pin the exact set so a refactor that
+    // accidentally drops one (e.g. when deleting an entry) is caught here
+    // instead of leaving a hole in the user-facing discoverability hint.
+    const splashActions = SHORTCUT_CATALOG.filter(e => e.splash).map(e => e.action).sort();
+    expect(splashActions).toEqual([
+      'arrow-down',
+      'arrow-left',
+      'arrow-right',
+      'arrow-up',
+      'close-modal',
+      'new-agent',
+      'open-cheatsheet',
+      'toggle-maximize-grid',
+    ]);
+  });
+
+  it('does not flag terminal-only shortcuts in the splash (splash is the discoverability hint, not the full catalog)', () => {
+    // Terminal zoom / copy / paste / find / clear shortcuts are bound on
+    // focused xterm instances, not on the empty-state splash. The splash
+    // appears BEFORE any agent has spawned, so none of those actions are
+    // meaningful to advertise there yet. Regression guard against a
+    // refactor that blanket-flags every catalog entry with `splash: true`.
+    const splashActions = new Set(
+      SHORTCUT_CATALOG.filter(e => e.splash).map(e => e.action),
+    );
+    const terminalOnly = [
+      'zoom-reset', 'zoom-in', 'zoom-out',
+      'term-copy', 'term-paste', 'term-select-all', 'term-find', 'term-clear',
+    ];
+    for (const action of terminalOnly) {
+      expect(splashActions.has(action), `${action} should NOT be splash`).toBe(false);
+    }
+  });
 });
 
 describe('shortcutLabel', () => {
