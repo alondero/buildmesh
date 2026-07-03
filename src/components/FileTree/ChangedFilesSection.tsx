@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { diffFileAgainstHead, type DiffResult } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
+import { fileDiffStatusMeta } from '../../lib/status';
 
 /** Lucide chevron-right, rotated 90° when the section is expanded.
  *  Matches the FileTree rows' chevron — keeps the probe body's expand
@@ -30,22 +31,6 @@ interface ChangedFilesSectionProps {
   /** Called with the file's relative path and freshly-loaded diff. */
   onChangedFileSelect: (path: string, diff: DiffResult) => void;
 }
-
-const statusColors: Record<string, string> = {
-  added: 'text-accent-green',
-  modified: 'text-accent-amber',
-  deleted: 'text-accent-red',
-  renamed: 'text-accent-violet',
-  untracked: 'text-text-muted',
-};
-
-const statusPrefix: Record<string, string> = {
-  added: 'A',
-  modified: 'M',
-  deleted: 'D',
-  renamed: 'R',
-  untracked: '?',
-};
 
 export function ChangedFilesSection({
   rootPath,
@@ -93,7 +78,9 @@ export function ChangedFilesSection({
           ) : files.length === 0 ? (
             <div className="px-3 py-1.5 text-text-muted text-xs">No changes</div>
           ) : (
-            files.map((file) => (
+            files.map((file) => {
+              const meta = fileDiffStatusMeta(file.status);
+              return (
               <button
                 key={file.path}
                 onClick={() => handleClick(file.path)}
@@ -105,14 +92,15 @@ export function ChangedFilesSection({
                 `}
                 style={{ paddingLeft: 20 }}
               >
-                <span className={`font-bold w-3 flex-shrink-0 ${statusColors[file.status] ?? 'text-text-muted'}`}>
-                  {statusPrefix[file.status] ?? '?'}
+                <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
+                  {meta.letter}
                 </span>
                 <span className="flex-1 truncate text-text-secondary">{file.path}</span>
                 <span className="text-accent-green flex-shrink-0">+{file.additions}</span>
                 <span className="text-accent-red flex-shrink-0">-{file.deletions}</span>
               </button>
-            ))
+              );
+            })
           )}
         </div>
       )}

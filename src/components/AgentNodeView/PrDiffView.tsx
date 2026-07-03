@@ -21,12 +21,19 @@
  * The component owns its own fetch + loading state because the
  * CenterDiffOverlay parent is intentionally source-agnostic — it sees
  * `DiffContext` and just routes.
+ *
+ * Issue #725: the patch body now flows through the same `<HunkBlock>` that
+ * the desktop review surface uses (via `parsePatchIntoHunks`), so the
+ * gutter widths and `/15` accent-fill opacity are uniform across all diff
+ * surfaces.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getPrFiles, type PrFileEntry } from '../../lib/tauri';
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
-import { splitPath } from '../Diff/diffFormat';
+import { fileDiffStatusMeta } from '../../lib/status';
+import { splitPath, parsePatchIntoHunks } from '../Diff/diffFormat';
+import { HunkBlock } from '../Diff/Diff';
 import { LoadingState } from '../shared/Spinner';
 
 interface PrDiffViewProps {
@@ -34,37 +41,6 @@ interface PrDiffViewProps {
    *  fetch / render. `meshId` is preserved by the caller so the overlay's
    *  auto-close (different mesh selected) still works. */
   diff: DiffContext;
-}
-
-const STATUS_META: Record<string, { letter: string; color: string }> = {
-  added: { letter: 'A', color: 'text-accent-green' },
-  modified: { letter: 'M', color: 'text-accent-amber' },
-  deleted: { letter: 'D', color: 'text-accent-red' },
-  renamed: { letter: 'R', color: 'text-accent-violet' },
-};
-
-function statusMeta(status: string) {
-  // GitHub returns a small fixed set; anything else (e.g. "copied" /
-  // "changed" / "unchanged") surfaces as a muted "modified"-style badge
-  // rather than rendering blank.
-  return STATUS_META[status] ?? { letter: 'M', color: 'text-text-muted' };
-}
-
-type PatchLineKind = 'add' | 'remove' | 'context' | 'hunk';
-
-/** Classify one line of a unified diff (the `+`/`-`/` ` convention). The
- *  `@@` hunk header gets its own kind so we can render it in the muted
- *  hunk-header style instead of mistaking it for an empty context line. */
-function classifyPatchLine(raw: string): { kind: PatchLineKind; content: string } {
-  if (raw.startsWith('@@')) return { kind: 'hunk', content: raw };
-  if (raw.startsWith('+')) return { kind: 'add', content: raw.slice(1) };
-  if (raw.startsWith('-')) return { kind: 'remove', content: raw.slice(1) };
-  if (raw.startsWith('\\')) {
-    // `\ No newline at end of file` — GitHub's terminator marker, very
-    // common. Render as a dimmed "no newline" line rather than a context row.
-    return { kind: 'context', content: raw };
-  }
-  return { kind: 'context', content: raw.startsWith(' ') ? raw.slice(1) : raw };
 }
 
 export function PrDiffView({ diff }: PrDiffViewProps) {
@@ -204,7 +180,7 @@ function PrFileList({
 
       <div>
         {files.map((file) => {
-          const meta = statusMeta(file.status);
+          const meta = fileDiffStatusMeta(file.status);
           const { dir, name } = splitPath(file.filename);
           return (
             <button
@@ -213,7 +189,7 @@ function PrFileList({
               onClick={() => onSelectFile(file.filename)}
               className="w-full flex items-center gap-2 px-3 py-1.5 bg-bg-surface hover:bg-bg-card transition-colors text-left border-b border-border-subtle"
             >
-              <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={file.status}>
+              <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
                 {meta.letter}
               </span>
               <span className="flex-1 truncate font-mono text-xs min-w-0">
@@ -244,9 +220,10 @@ function PrFileList({
 }
 
 /** Single-file patch view — line-by-line +/−/context rendering of
- *  GitHub's unified diff text. No syntect here (we don't ship the syntax
- *  highlighter to the frontend), but the layout matches the existing
- *  `<DiffLineRow>` for a familiar feel. */
+ *  GitHub's unified diff text. Issue #725: the body now flows through the
+ *  shared `<HunkBlock>` from `<Diff>`, so PR diffs pick up the canonical
+ *  `w-10` gutters and `/15` accent-fill opacity the desktop review surface
+ *  uses (the previous bespoke renderer used just a `w-4` marker column). */
 function PrPatch({ file }: { file: PrFileEntry }) {
   // A binary file: GitHub omits `patch` (we send "" via #[serde(default)]).
   // Render an "Binary file" placeholder rather than a blank pane.
@@ -258,48 +235,13 @@ function PrPatch({ file }: { file: PrFileEntry }) {
     );
   }
 
-  const lines = file.patch.split('\n');
-  // GitHub patches often end with a trailing newline, which produces an
-  // extra empty string after the split. Drop it so we don't render a blank
-  // trailing row.
-  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  const hunks = parsePatchIntoHunks(file.patch);
 
   return (
     <div className="font-mono text-xs leading-5">
-      {lines.map((raw, i) => {
-        const { kind, content } = classifyPatchLine(raw);
-        if (kind === 'hunk') {
-          return (
-            <div
-              key={i}
-              className="px-2 py-0.5 bg-bg-overlay/60 text-text-muted select-none"
-            >
-              {content}
-            </div>
-          );
-        }
-        const bg =
-          kind === 'add'
-            ? 'bg-accent-green/15'
-            : kind === 'remove'
-              ? 'bg-accent-red/15'
-              : '';
-        const markerColor =
-          kind === 'add'
-            ? 'text-accent-green'
-            : kind === 'remove'
-              ? 'text-accent-red'
-              : 'text-text-muted/40';
-        const markerChar = kind === 'add' ? '+' : kind === 'remove' ? '-' : ' ';
-        return (
-          <div key={i} className={`flex ${bg}`}>
-            <span className={`w-4 text-center select-none flex-shrink-0 ${markerColor}`}>
-              {markerChar}
-            </span>
-            <span className="whitespace-pre flex-1 px-2">{content}</span>
-          </div>
-        );
-      })}
+      {hunks.map((hunk, i) => (
+        <HunkBlock key={i} hunk={hunk} last={i === hunks.length - 1} />
+      ))}
     </div>
   );
 }

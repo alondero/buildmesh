@@ -39,6 +39,16 @@ export interface ShortcutEntry {
   winKey: string;
   /** macOS key label, e.g. "⌘+T" or "⌘+G" or "⌘+⌥+←". */
   macKey: string;
+  /**
+   * True if this entry should also be surfaced in the empty-state splash
+   * (AgentNodeView's "no mesh loaded" discoverability hint). Issue #748:
+   * the splash used to hand-code five kbd rows that duplicated catalog
+   * entries, so a future rename (e.g. `?` → `Ctrl+/`) would silently
+   * drift. Marking entries with `splash: true` makes the catalog the
+   * single source of truth for both surfaces. The catalog test pins
+   * which entries are splash so a refactor that drops one is caught.
+   */
+  splash?: boolean;
 }
 
 /**
@@ -89,6 +99,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'New agent node',
     winKey: 'Ctrl+T',
     macKey: '⌘+T',
+    splash: true,
   },
   {
     action: 'open-cheatsheet',
@@ -96,6 +107,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'Show this cheatsheet',
     winKey: '?',
     macKey: '?',
+    splash: true,
   },
 
   // --- Grid (window-global) -----------------------------------------------
@@ -105,6 +117,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'Toggle grid / single view',
     winKey: 'Alt+G',
     macKey: '⌘+G',
+    splash: true,
   },
   {
     action: 'arrow-left',
@@ -112,6 +125,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'Move focus left (wrap within row)',
     winKey: 'Ctrl+Alt+←',
     macKey: '⌘+⌥+←',
+    splash: true,
   },
   {
     action: 'arrow-right',
@@ -119,6 +133,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'Move focus right (wrap within row)',
     winKey: 'Ctrl+Alt+→',
     macKey: '⌘+⌥+→',
+    splash: true,
   },
   {
     action: 'arrow-up',
@@ -126,6 +141,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'Move focus up (no-op at top edge)',
     winKey: 'Ctrl+Alt+↑',
     macKey: '⌘+⌥+↑',
+    splash: true,
   },
   {
     action: 'arrow-down',
@@ -133,6 +149,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'Move focus down (no-op at bottom edge)',
     winKey: 'Ctrl+Alt+↓',
     macKey: '⌘+⌥+↓',
+    splash: true,
   },
 
   // --- Terminal (window-level or xterm-only) ------------------------------
@@ -206,6 +223,7 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     description: 'Close current dialog or exit maximized view',
     winKey: 'Esc',
     macKey: 'Esc',
+    splash: true,
   },
 ];
 
@@ -228,15 +246,31 @@ export interface GroupedShortcuts {
 /**
  * Bucket the catalog by group, in display order, dropping any group that
  * has no entries. The cheatsheet renders one section per bucket.
+ *
+ * Implementation note (issue #748): single-pass reduce over the catalog
+ * rather than the previous `GROUP_ORDER.map(g => catalog.filter(...))`
+ * pattern. With the 16 shipped shortcuts the difference is invisible
+ * (~68 comparisons vs. ~16), but this helper sets the pattern for future
+ * `groupByX` helpers — `O(entries)` instead of `O(groups × entries)` keeps
+ * the helper correct when the catalog grows past ~50 entries. Empty
+ * groups are simply absent from the buckets object; we walk `GROUP_ORDER`
+ * at the end to preserve display order.
  */
 export function groupedShortcutEntries(
   catalog: ReadonlyArray<ShortcutEntry> = SHORTCUT_CATALOG,
 ): GroupedShortcuts[] {
-  const out: GroupedShortcuts[] = [];
-  for (const group of GROUP_ORDER) {
-    const entries = catalog.filter(e => e.group === group);
-    if (entries.length === 0) continue;
-    out.push({ group, title: GROUP_TITLES[group], entries });
-  }
-  return out;
+  const buckets = catalog.reduce<Partial<Record<ShortcutGroup, ShortcutEntry[]>>>(
+    (acc, entry) => {
+      (acc[entry.group] ??= []).push(entry);
+      return acc;
+    },
+    {},
+  );
+  return GROUP_ORDER
+    .map(group => {
+      const entries = buckets[group];
+      if (!entries || entries.length === 0) return null;
+      return { group, title: GROUP_TITLES[group], entries };
+    })
+    .filter((g): g is GroupedShortcuts => g !== null);
 }

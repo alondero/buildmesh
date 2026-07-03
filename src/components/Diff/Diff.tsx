@@ -1,76 +1,73 @@
 import { useState } from 'react';
-import type { DiffHunk, DiffLine, FileDiff, FileDiffStatus } from '../../lib/tauri';
+import type { DiffHunk, DiffLine, FileDiff } from '../../lib/tauri';
+import { fileDiffStatusMeta } from '../../lib/status';
 import { splitPath } from './diffFormat';
 
 /**
  * Shared diff renderer: a GitHub-style stacked, unified, syntax-highlighted
  * view. One `<FileDiffCard>` per changed file, each collapsible, with a hunk
  * header (`@@ … @@`) between change regions and per-line highlighting fed by
- * the backend's `lines_highlighted`. Used by the desktop review panel; mobile
- * keeps its own layout.
+ * the backend's `lines_highlighted`. Used by the desktop review panel and
+ * the PR diff overlay (`PrDiffView` reuses `<DiffLineList>` + `<HunkBlock>`
+ * to render GitHub's raw `patch` text through the same body — issue #725).
+ *
+ * The `w-10` gutters and `/15` accent-fill opacity are the canonical visual
+ * contract — every other diff surface matches them.
  */
 
-interface StatusMeta {
-  letter: string;
-  label: string;
-  /** Tailwind text colour token for the badge. */
-  color: string;
-}
+/** Canonical `+`/`-` background opacity. Issue #725 picked this to match the
+ *  header summary tokens (vs `/10` which DiffView used before being deleted). */
+export const DIFF_LINE_BG = {
+  add: 'bg-accent-green/15',
+  remove: 'bg-accent-red/15',
+} as const;
 
-// Mirrors the status vocabulary shared with `GitStatus.status`. The function
-// accepts any `string` (the generated `FileDiff.status` is `string`, not the
-// narrower hand-written `FileDiffStatus | ''` it replaced — see ADR-0009
-// "wider unions lose narrowing"); the table-lookup + `?? modified` fallback
-// handles anything the vocabulary doesn't cover.
-const STATUS_META: Record<FileDiffStatus, StatusMeta> = {
-  added: { letter: 'A', label: 'Added', color: 'text-accent-green' },
-  modified: { letter: 'M', label: 'Modified', color: 'text-accent-amber' },
-  deleted: { letter: 'D', label: 'Deleted', color: 'text-accent-red' },
-  renamed: { letter: 'R', label: 'Renamed', color: 'text-accent-violet' },
-  untracked: { letter: '?', label: 'Untracked', color: 'text-text-muted' },
-};
+/** Canonical gutter width — w-10 for line numbers + w-4 for the marker. */
+export const DIFF_GUTTER_WIDTH = 'w-10';
 
-export function statusMeta(status: string): StatusMeta {
-  return STATUS_META[status as FileDiffStatus] ?? STATUS_META.modified;
-}
+/**
+ * Re-export under the historical `statusMeta` name so callers that imported
+ * it from `'../Diff/Diff'` (FileTree.tsx) keep working without a churn
+ * rename pass. The canonical home is `lib/status.ts` — new callers should
+ * import `fileDiffStatusMeta` from there directly.
+ */
+export { fileDiffStatusMeta as statusMeta } from '../../lib/status';
 
 /** A stable DOM id so a file-list can scroll a card into view. */
 export function diffCardId(path: string): string {
   return `diff-file-${path}`;
 }
 
-function lineClasses(type: DiffLine['line_type']): string {
-  switch (type) {
-    case 'add':
-      return 'bg-accent-green/15';
-    case 'remove':
-      return 'bg-accent-red/15';
-    default:
-      return '';
-  }
+function lineBg(type: DiffLine['line_type']): string {
+  if (type === 'add') return DIFF_LINE_BG.add;
+  if (type === 'remove') return DIFF_LINE_BG.remove;
+  return '';
 }
 
 function marker(type: DiffLine['line_type']): string {
   return type === 'add' ? '+' : type === 'remove' ? '-' : ' ';
 }
 
-function DiffLineRow({ line, html }: { line: DiffLine; html?: string }) {
+function markerColor(type: DiffLine['line_type']): string {
+  if (type === 'add') return 'text-accent-green';
+  if (type === 'remove') return 'text-accent-red';
+  return 'text-text-muted/40';
+}
+
+/** One row of a diff: line-number gutters, +/- marker, content (optionally
+ *  pre-highlighted HTML). Exported so `PrDiffView` renders PR raw patches
+ *  through the same body and inherits the canonical gutter + bg opacity. */
+export function DiffLineRow({ line, html }: { line: DiffLine; html?: string }) {
   return (
-    <div className={`flex ${lineClasses(line.line_type)}`}>
-      <span className="w-10 px-1 text-right text-text-muted/50 select-none flex-shrink-0">
+    <div className={`flex ${lineBg(line.line_type)}`}>
+      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted/50 select-none flex-shrink-0`}>
         {line.old_num ?? ''}
       </span>
-      <span className="w-10 px-1 text-right text-text-muted/50 select-none flex-shrink-0">
+      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted/50 select-none flex-shrink-0`}>
         {line.new_num ?? ''}
       </span>
       <span
-        className={`w-4 text-center select-none flex-shrink-0 ${
-          line.line_type === 'add'
-            ? 'text-accent-green'
-            : line.line_type === 'remove'
-              ? 'text-accent-red'
-              : 'text-text-muted/40'
-        }`}
+        className={`w-4 text-center select-none flex-shrink-0 ${markerColor(line.line_type)}`}
       >
         {marker(line.line_type)}
       </span>
@@ -88,7 +85,11 @@ function DiffLineRow({ line, html }: { line: DiffLine; html?: string }) {
   );
 }
 
-function HunkBlock({ hunk, last }: { hunk: DiffHunk; last: boolean }) {
+/** A hunk: `@@ … @@` header + the lines it covers. Exported so `PrDiffView`
+ *  can package a section of its raw patch text into a `HunkBlock` and render
+ *  it through the same body — `PrPatch` builds `DiffLine[]` per `@@` group
+ *  and threads them through here. */
+export function HunkBlock({ hunk, last }: { hunk: DiffHunk; last: boolean }) {
   return (
     <div className={last ? '' : 'border-b border-border-subtle'}>
       <div className="px-2 py-0.5 bg-bg-overlay/60 text-text-muted select-none">
@@ -114,7 +115,7 @@ export function FileDiffCard({
   onOpenFile?: (path: string) => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  const meta = statusMeta(file.status);
+  const meta = fileDiffStatusMeta(file.status);
   const { dir, name } = splitPath(file.path);
 
   return (

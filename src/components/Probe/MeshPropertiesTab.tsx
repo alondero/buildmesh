@@ -723,7 +723,7 @@ function SaveIndicator({ status, error, onDismiss }: SaveIndicatorProps) {
       role="status"
       aria-live="polite"
       data-testid="mesh-save-indicator"
-      className="min-h-7 flex items-center justify-between text-xs rounded px-2 py-1"
+      className="min-h-7 flex items-center justify-between text-xs rounded-md px-2 py-1"
     >
       {status === 'saving' && (
         <span className="text-text-muted">Saving…</span>
