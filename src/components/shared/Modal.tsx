@@ -231,7 +231,7 @@ export function Modal({
                 type="button"
                 onClick={handleCancelDiscard}
                 data-testid="modal-discard-cancel"
-                className="px-3 py-1 text-sm rounded bg-bg-card text-text-secondary hover:bg-border-subtle"
+                className="px-3 py-1 text-sm rounded-md bg-bg-card text-text-secondary hover:bg-border-subtle"
               >
                 {cancelLabel}
               </button>
@@ -239,7 +239,7 @@ export function Modal({
                 type="button"
                 onClick={handleConfirmDiscard}
                 data-testid="modal-discard-confirm"
-                className="px-3 py-1 text-sm rounded bg-status-error text-white hover:bg-status-error/90"
+                className="px-3 py-1 text-sm rounded-md bg-status-error text-white hover:bg-status-error/90"
               >
                 {discardLabel}
               </button>
