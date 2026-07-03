@@ -1,4 +1,13 @@
-import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+  type Ref,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 
 interface ModalProps {
   onClose: () => void;
@@ -28,6 +37,16 @@ interface ModalProps {
   discardLabel?: string;
   /** Override the Keep editing button label. */
   cancelLabel?: string;
+  /**
+   * Override the element that receives focus when the modal mounts. Defaults
+   * to the panel itself (`tabIndex={-1}`). Issue #748: lets any consumer
+   * pick a focusable target (a header close button, a primary CTA, the
+   * first form field) without coupling to `<ModalCloseButton>`'s chrome or
+   * any other specific child. The ref MUST be pointing at a focusable
+   * element at mount time — if it isn't (e.g. the consumer hasn't attached
+   * the ref yet), the modal falls back to the panel.
+   */
+  defaultFocusRef?: RefObject<HTMLElement | null>;
   children: ReactNode;
 }
 
@@ -61,6 +80,7 @@ export function Modal({
   dirtyMessage,
   discardLabel = 'Discard changes',
   cancelLabel = 'Keep editing',
+  defaultFocusRef,
   children,
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -99,7 +119,13 @@ export function Modal({
 
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
-    panelRef.current?.focus();
+    // Issue #748: `defaultFocusRef` lets consumers pick a different focus
+    // target than the panel. The ref is attached during the children's
+    // render (which happens before this effect runs), so the consumer's
+    // element is mounted by the time we read it. Falls back to the
+    // panel itself when the consumer doesn't pass a ref (preserves the
+    // existing behaviour for every modal that doesn't opt in).
+    (defaultFocusRef?.current ?? panelRef.current)?.focus();
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
@@ -252,19 +278,36 @@ export function Modal({
   );
 }
 
-/** The standard close “×” for modal headers — labelled, hover state, red-shift on hover. */
-export const ModalCloseButton = forwardRef<HTMLButtonElement, { onClose: () => void; label?: string }>(
-  function ModalCloseButton({ onClose, label = 'Close' }, ref) {
-    return (
-      <button
-        ref={ref}
-        type="button"
-        onClick={onClose}
-        aria-label={label}
-        className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 transition-colors text-xl leading-none"
-      >
-        ×
-      </button>
-    );
-  },
-);
+/**
+ * The standard close "×" for modal headers — labelled, hover state, red-shift on hover.
+ *
+ * Issue #748: used to be wrapped in `forwardRef` so `<ShortcutCheatsheet>`
+ * could override the Modal's default focus target. Replaced by the
+ * `<Modal defaultFocusRef>` prop, which lets any consumer target an
+ * arbitrary focusable element. React 19 accepts `ref` as a regular prop on
+ * function components natively, so no wrapper is needed — consumers that
+ * still want a handle on the button can pass `<ModalCloseButton ref={...} />`
+ * directly (e.g. the cheatsheet uses this to point the Modal at the close
+ * button via `defaultFocusRef`).
+ */
+export function ModalCloseButton({
+  onClose,
+  label = 'Close',
+  ref,
+}: {
+  onClose: () => void;
+  label?: string;
+  ref?: Ref<HTMLButtonElement>;
+}) {
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={onClose}
+      aria-label={label}
+      className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 transition-colors text-xl leading-none"
+    >
+      ×
+    </button>
+  );
+}

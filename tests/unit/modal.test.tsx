@@ -9,6 +9,7 @@
  * form is not silently destroyed by a stray backdrop click or Escape.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { useRef } from 'react';
 import { render, cleanup, fireEvent } from '@testing-library/react';
 import { Modal } from '../../src/components/shared/Modal';
 
@@ -121,6 +122,46 @@ describe('Modal', () => {
     first.focus();
     fireEvent.keyDown(getByRole('dialog'), { key: 'Tab', shiftKey: true });
     expect(document.activeElement).toBe(last);
+  });
+});
+
+describe('Modal defaultFocusRef (issue #748)', () => {
+  // Consumer-supplied ref pattern. The ref points at an arbitrary focusable
+  // child (here: a CTA button rendered alongside other content). The modal
+  // focuses that child instead of the panel — the rationale: the consumer
+  // picks the focus target that matches its acceptance criteria (close
+  // button, primary action, first form field, etc.) without coupling to
+  // the modal's chrome.
+  it('focuses the element referenced by defaultFocusRef instead of the panel', () => {
+    function Harness() {
+      const ctaRef = useRef<HTMLButtonElement>(null);
+      return (
+        <Modal onClose={() => {}} ariaLabel="t" defaultFocusRef={ctaRef}>
+          <p>body</p>
+          <button type="button" ref={ctaRef}>primary action</button>
+        </Modal>
+      );
+    }
+    const { getByText, getByRole } = render(<Harness />);
+    const cta = getByText('primary action') as HTMLButtonElement;
+    expect(document.activeElement).toBe(cta);
+    // The panel must NOT have been focused instead — pinning the contract
+    // that defaultFocusRef actually overrides, not augments.
+    expect(document.activeElement).not.toBe(getByRole('dialog'));
+  });
+
+  it('falls back to the panel when defaultFocusRef points at nothing', () => {
+    // Consumer wires the prop but the ref hasn't attached yet (e.g. the
+    // element is conditionally rendered). The modal must still focus
+    // somewhere — falling back to the panel is the existing behaviour
+    // and the safest default (panel itself is focusable via tabIndex=-1).
+    const emptyRef = { current: null };
+    const { getByRole } = render(
+      <Modal onClose={() => {}} ariaLabel="t" defaultFocusRef={emptyRef}>
+        <p>body</p>
+      </Modal>,
+    );
+    expect(document.activeElement).toBe(getByRole('dialog'));
   });
 });
 
