@@ -5,6 +5,10 @@
  * divider so it doesn't get conflated with the one-shot build/run commands,
  * and the label adapts to the worktree context (the same way Build/Run do)
  * so the user can tell at a glance which directory the shell will land in.
+ *
+ * The trigger button is now an icon-only wrench + chevron (matching the
+ * close + expand buttons in GridNodeHeader for a balanced trio). Title-bar
+ * space shrinks ~34 px and the menu items keep their original labels.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, fireEvent, screen } from '@testing-library/react';
@@ -25,31 +29,54 @@ const NODE: AgentNode = {
 };
 
 /**
- * The dropdown's trigger button and its first menu item both display "Build",
- * which trips up `getByText` queries once the menu is open. Scope queries to
- * the menu container (the wrapper rendered with `data-testid` we add below)
- * so we can target the menu items unambiguously.
+ * The trigger is icon-only and identified by `aria-label` rather than its
+ * old "Build" text label. Using the accessible name (instead of any visible
+ * label) keeps this helper robust against future label/icon tweaks as long
+ * as the aria-label contract holds.
  */
 function openMenu() {
-  // The trigger is the FIRST button containing "Build" — there is no other
-  // button until the menu opens, so getAllByText returns [trigger].
-  const [trigger] = screen.getAllByText('Build');
-  fireEvent.click(trigger);
+  fireEvent.click(screen.getByLabelText('Open build menu'));
 }
 
 describe('BuildRunDropdown', () => {
+  it('hides the "Build" word from the trigger and uses an accessible name', () => {
+    const onBuildRun = vi.fn();
+    render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+
+    // No "Build" text on the trigger — it should not exist before the menu
+    // opens. After openMenu() below, the only "Build" matches are the menu
+    // item, never the trigger.
+    expect(screen.queryByText('Build')).toBeNull();
+    expect(screen.getByLabelText('Open build menu')).toBeTruthy();
+
+    openMenu();
+    // Now there IS one "Build" — the menu item, not the trigger.
+    expect(screen.getAllByText('Build')).toHaveLength(1);
+  });
+
+  it('trigger matches the close + maximise trio surface (h-7 + bg + border)', () => {
+    // The trio lives on a single row in GridNodeHeader. The close + expand
+    // asserts live in grid-node-header.test.tsx (where BuildRunDropdown is
+    // mocked to null for unrelated git-summary-chip tests); the Build-side
+    // counterpart has to live here where BuildRunDropdown is the real DOM.
+    // Note: the trio shares HEIGHT (h-7), not width — Build is content-width
+    // (wrench + chevron), while close + maximise are fixed square w-7 h-7.
+    const onBuildRun = vi.fn();
+    render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+
+    const cls = screen.getByLabelText('Open build menu').className;
+    expect(cls).toMatch(/\bh-7\b/);
+    expect(cls).toContain('bg-bg-base/60');
+    expect(cls).toContain('border-border-default');
+  });
+
   it('renders Build, Run, and Terminal items when the menu is open (worktrees off)', () => {
     const onBuildRun = vi.fn();
     render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
 
     openMenu();
 
-    // After open: trigger (index 0) and three menu items. The menu items
-    // are the second occurrence of "Build", the only "Run", and the only
-    // "Terminal" — the trigger "Build" stays unique, so queryAllByText on
-    // the labels gives us the menu items directly.
-    const builds = screen.getAllByText('Build');
-    expect(builds).toHaveLength(2);
+    expect(screen.getByText('Build')).toBeTruthy();
     expect(screen.getByText('Run')).toBeTruthy();
     expect(screen.getByText('Terminal')).toBeTruthy();
   });
@@ -68,9 +95,8 @@ describe('BuildRunDropdown', () => {
     expect(screen.getByText('Build from worktree')).toBeTruthy();
     expect(screen.getByText('Run from worktree')).toBeTruthy();
     expect(screen.getByText('Terminal in worktree')).toBeTruthy();
-    // The trigger button still says "Build" (it's the always-visible
-    // label), but the menu items must use the suffixed form — there
-    // should be NO bare "Run"/"Terminal" menu items.
+    // The menu items must use the suffixed form — there should be NO
+    // bare "Run"/"Terminal" menu items.
     expect(screen.queryByText('Run')).toBeNull();
     expect(screen.queryByText('Terminal')).toBeNull();
   });
@@ -90,10 +116,7 @@ describe('BuildRunDropdown', () => {
     render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
 
     openMenu();
-    // Pick the menu-item "Build" (the second occurrence, since the
-    // trigger is first in the DOM).
-    const [, menuBuild] = screen.getAllByText('Build');
-    fireEvent.click(menuBuild);
+    fireEvent.click(screen.getByText('Build'));
     expect(onBuildRun).toHaveBeenLastCalledWith(NODE.id, 'build');
 
     openMenu();

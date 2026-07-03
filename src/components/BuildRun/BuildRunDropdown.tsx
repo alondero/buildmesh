@@ -48,10 +48,24 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
         onClick={() => setIsOpen(!isOpen)}
         aria-haspopup="menu"
         aria-expanded={isOpen}
-        className="flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs font-sans font-semibold tracking-wide text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 hover:text-accent-cyan border border-accent-cyan/30 hover:border-accent-cyan/60 transition-colors shadow-sm"
+        aria-label="Open build menu"
+        title="Build / Run / Terminal"
+        // Icon-only trigger — saves ~34 px vs the former "Build ▼" pill,
+        // and reads as a peer of the close + expand buttons because all
+        // three share `h-7` + bg-bg-base/60 + border-border-default with no
+        // shadow, so the trio looks like one control group against the
+        // mesh-tinted header.
+        className="flex items-center gap-0.5 h-7 px-1.5 rounded-md bg-bg-base/60 border border-border-default text-accent-cyan hover:bg-accent-cyan/15 hover:border-accent-cyan/60 transition-colors"
       >
-        <span>Build</span>
-        <span className="text-2xs leading-none">▼</span>
+        {/* Wrench — "build / tools" semantic, the common IDE shorthand for
+            the "execute build or run" family. 12 px matches the close /
+            expand icon sizes so the three controls are visually balanced. */}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+        </svg>
+        <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="opacity-70">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
       </button>
 
       {isOpen && (
