@@ -1,10 +1,11 @@
-import { useMemo } from 'react';
+import { useMemo, useRef, useState, useEffect, useLayoutEffect } from 'react';
 import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { useGitSummary } from '../../hooks/useGitSummary';
 import { useOpenPr } from '../../hooks/useOpenPr';
+import { useResizeWidth } from '../../hooks/useResizeWidth';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
@@ -20,6 +21,35 @@ interface GridNodeHeaderProps {
   /// reorder/swap drag handle. Undefined when dragging is disabled (e.g. the
   /// maximized solo view, or in isolation tests).
   dragHandleProps?: Record<string, unknown>;
+}
+
+// Responsive tier breakpoints (issue #736). Ordered highest → lowest so the
+// first match wins; the `$` last clause keeps the type narrow in JS so
+// downstream switches don't need a default branch.
+//
+// Why these specific values rather than the Tailwind v4 container defaults
+// (`xs 320 / sm 384 / md 448 / lg 512 / xl 576`)? The agent-node header sits
+// inside a pane set by the GridSplitter / ResizablePanes and can run as narrow
+// as ~150 px. A 320 px floor would force every node in a 2-pane layout to start
+// in `compact`, so the breakpoints step down to match the actual minimum
+// layout (Build ▼ + kebab fits in ~155 px) and stagger in chips once per
+// hierarchy level.
+export type HeaderTier = 'xl' | 'wide' | 'medium' | 'slim' | 'compact';
+
+export const HEADER_TIER_BREAKPOINTS: Record<Exclude<HeaderTier, 'compact'>, number> = {
+  xl: 640,    // diff summary joins the row
+  wide: 500,  // PR chip joins the row
+  medium: 380, // worktree/root pill joins the row; inline close+max replace kebab
+  slim: 280,  // mesh label joins the row; kebab stays
+};
+// `compact` is the implicit floor (`< HEADER_TIER_BREAKPOINTS.slim`).
+
+export function getHeaderTier(width: number): HeaderTier {
+  if (width >= HEADER_TIER_BREAKPOINTS.xl) return 'xl';
+  if (width >= HEADER_TIER_BREAKPOINTS.wide) return 'wide';
+  if (width >= HEADER_TIER_BREAKPOINTS.medium) return 'medium';
+  if (width >= HEADER_TIER_BREAKPOINTS.slim) return 'slim';
+  return 'compact';
 }
 
 export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHeaderProps) {
@@ -52,6 +82,27 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   const meshesById = useMeshStore(state => state.meshesById);
   const meshColor = getMeshColor(node.mesh_id);
 
+  // Issue #736 — measure the rendered header width and bucket it into a tier
+  // that decides which chips render and whether the close/max buttons live
+  // inline or inside a kebab menu. The hook starts at `Infinity` so the
+  // initial render shows everything until the ResizeObserver reports; on
+  // shrunken panes the worst case is one flash of "wide" before the tier
+  // drops on the next frame.
+  const headerRef = useRef<HTMLDivElement>(null);
+  const width = useResizeWidth(headerRef);
+  const tier = getHeaderTier(width);
+  // Convenience booleans for readability — avoids noisy `tier === 'xl' || tier === 'wide'`
+  // chains at every chip.
+  const showSummary = tier === 'xl';
+  const showPr = tier === 'xl' || tier === 'wide';
+  const showWorktree = tier === 'xl' || tier === 'wide' || tier === 'medium';
+  const showMeshLabel = tier !== 'compact';
+  // The worktree pill and the inline close+max buttons appear at the same
+  // tiers because both compete for the same horizontal real estate — any
+  // future tier shift on one should land on the other. Aliasing here makes
+  // that coupling explicit instead of inviting two booleans to drift.
+  const showInlineActions = showWorktree;
+
   const handleClose = async (e: React.MouseEvent) => {
     e.stopPropagation();
     await deleteAgentNode(node.id);
@@ -80,10 +131,18 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
       title={isMaximized
         ? `Double-click or press ${toggleShortcutHint} to restore grid`
         : `Double-click or press ${toggleShortcutHint} to maximize`}
-      className={`flex items-center justify-between px-2.5 py-1.5 border-b border-border-default ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
+      // Issue #736 — `data-tier` is the test seam: jsdom can't observe the
+      // actual visibility of a container-query CSS rule, but the JS state
+      // driving the render branches sets `data-tier` on the root, so tests
+      // can pin which chip is present at each breakpoint by reading the
+      // attribute. Production can also use it as a CSS hook if needed.
+      data-tier={tier}
+      data-testid="grid-node-header"
+      ref={headerRef}
+      className={`flex items-center justify-between px-2.5 py-1.5 border-b border-border-default gap-2 ${dragHandleProps ? 'cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}40` }}
     >
-      <div className="flex items-center gap-2 overflow-hidden">
+      <div className="flex items-center gap-2 overflow-hidden flex-1 min-w-0">
         {dragHandleProps && (
           <span
             aria-hidden="true"
@@ -93,35 +152,46 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             ⠿
           </span>
         )}
-        <span className={`w-1.5 h-1.5 rounded-full ${getStatusConfig(node.status).bgColor}`} />
-        <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 drop-shadow-sm" />
+        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${getStatusConfig(node.status).bgColor}`} />
+        <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 drop-shadow-sm flex-shrink-0" />
         <span
           onPointerDown={(e) => e.stopPropagation()}
-          className="text-sm font-semibold text-text-primary truncate font-sans drop-shadow-sm"
+          className="text-sm font-semibold text-text-primary truncate font-sans drop-shadow-sm min-w-0"
         >
           <InlineEditableText
             value={node.name}
             onCommit={(next) => renameAgentNode(node.id, next)}
             className="text-sm font-semibold text-text-primary font-sans drop-shadow-sm"
-          /> <span className="text-xs text-text-secondary font-normal">{meshLabel}</span>
+          />
+          {/* Mesh label is the lowest-priority ID-only second string — the
+              title must remain legible at every tier, so it's the first
+              thing dropped under compaction. Conditional render shifts the
+              title horizontally on tier change; a future iteration could
+              place it on a second line under the title if the jitter
+              becomes user-visible. */}
+          {showMeshLabel && (
+            <span className="text-xs text-text-secondary font-normal"> {meshLabel}</span>
+          )}
         </span>
-        <span
-          title={node.use_worktree
-            ? 'Agent runs in a git worktree'
-            : 'Agent runs in the repository root'}
-          className={`text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none whitespace-nowrap drop-shadow-sm ${
-            node.use_worktree
-              ? 'bg-bg-overlay/70 text-text-muted ring-1 ring-inset ring-border-subtle'
-              : 'bg-accent-cyan/15 text-accent-cyan ring-1 ring-inset ring-accent-cyan/40 font-semibold'
-          }`}
-        >
-          {node.use_worktree ? 'worktree' : 'root'}
-        </span>
-        {summary && (
+        {showWorktree && (
+          <span
+            title={node.use_worktree
+              ? 'Agent runs in a git worktree'
+              : 'Agent runs in the repository root'}
+            className={`text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none whitespace-nowrap drop-shadow-sm flex-shrink-0 ${
+              node.use_worktree
+                ? 'bg-bg-overlay/70 text-text-muted ring-1 ring-inset ring-border-subtle'
+                : 'bg-accent-cyan/15 text-accent-cyan ring-1 ring-inset ring-accent-cyan/40 font-semibold'
+            }`}
+          >
+            {node.use_worktree ? 'worktree' : 'root'}
+          </span>
+        )}
+        {showSummary && summary && (
           <span
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); setActiveNode(node.id); openProbeTab('review'); }}
-            className="text-xs font-mono font-semibold cursor-pointer flex items-center gap-1.5 drop-shadow-sm hover:brightness-125"
+            className="text-xs font-mono font-semibold cursor-pointer flex items-center gap-1.5 drop-shadow-sm hover:brightness-125 flex-shrink-0"
             title="Click to see changes"
           >
             {/* Each count carries its own semantic colour so added / modified / deleted
@@ -145,7 +215,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             returns null for the common cases: no auth, no PR, non-GitHub
             origin, unborn branch). Tooltip carries the PR title; if the PR
             is a draft, the tooltip is suffixed so the user knows. */}
-        {openPr && (
+        {showPr && openPr && (
           <span
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
@@ -153,43 +223,256 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
               openUrl(openPr.url).catch(console.error);
             }}
             title={openPr.draft ? `Draft · ${openPr.title}` : openPr.title}
-            className="text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 drop-shadow-sm hover:brightness-125 transition-colors"
+            className="text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-green/10 text-accent-green ring-1 ring-inset ring-accent-green/30 drop-shadow-sm hover:brightness-125 transition-colors flex-shrink-0"
           >
             PR #{openPr.number}
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
+      <div className="flex items-center gap-1.5 flex-shrink-0" onPointerDown={(e) => e.stopPropagation()}>
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />
-        <button
-          onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
-          className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-[color,background-color,opacity] opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-          // Issue #668 — surface the Alt+G / ⌘+G shortcut in the button
-          // tooltip so discoverability isn't gated on the header double-click
-          // or the empty-state splash.
-          title={isMaximized ? `Restore grid (or ${toggleShortcutHint})` : `Maximize (or ${toggleShortcutHint})`}
-          aria-label={isMaximized ? 'Restore grid layout' : 'Maximize agent node'}
-        >
-          {isMaximized ? (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
-            </svg>
-          ) : (
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
-            </svg>
-          )}
-        </button>
-        <button
-          type="button"
-          onClick={handleClose}
-          className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-status-error hover:bg-status-error-bg transition-colors text-xs"
-          title="Close agent node"
-          aria-label="Close agent node"
-        >
-          ×
-        </button>
+        {showInlineActions ? (
+          <>
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
+              className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-base transition-[color,background-color,opacity] opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+              // Issue #668 — surface the Alt+G / ⌘+G shortcut in the button
+              // tooltip so discoverability isn't gated on the header double-click
+              // or the empty-state splash.
+              title={isMaximized ? `Restore grid (or ${toggleShortcutHint})` : `Maximize (or ${toggleShortcutHint})`}
+              aria-label={isMaximized ? 'Restore grid layout' : 'Maximize agent node'}
+            >
+              {isMaximized ? (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
+                </svg>
+              ) : (
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
+                </svg>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={handleClose}
+              className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-status-error hover:bg-status-error-bg transition-colors text-xs"
+              title="Close agent node"
+              aria-label="Close agent node"
+            >
+              ×
+            </button>
+          </>
+        ) : (
+          // Kebab menu — replaces the inline close+max buttons at `slim`
+          // and `compact` widths where both would crowd the title out.
+          // Same two actions (Maximize/Restore + Close) with identical
+          // tooltips/aria-labels so semantics are width-agnostic.
+          <KebabActions
+            isMaximized={isMaximized}
+            toggleShortcutHint={toggleShortcutHint}
+            onToggleMaximized={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
+            onClose={handleClose}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Compact kebab menu for the right-side header actions. Single-use
+ * component — the agent-node header is the only call site, so we
+ * inline it here instead of elevating a generic KebabMenu primitive to
+ * `src/components/shared/`. If a second consumer ever wants the same
+ * shape, lift it then; pattern-match first.
+ *
+ * Closes on Escape, outside click, or item activation. Reuses the same
+ * WAI-ARIA conventions the sidebar's MeshItem menu applies (issue #735):
+ * role=menu / role=menuitem / aria-labelledby on the trigger, focus
+ * returns to the trigger on close.
+ *
+ * Why `fixed` positioning rather than `absolute`? The kebab lives
+ * inside `<NodeCard>` whose `overflow-hidden` would clip a popover
+ * that escapes the card (e.g. when the menu needs to drop *below*
+ * the bottom edge of the row). Fixed coordinates are viewport-scoped
+ * and unaffected by ancestor overflow. Anchor to the trigger by
+ * snapshotting its `getBoundingClientRect` on the toggle click.
+ */
+interface KebabActionsProps {
+  isMaximized: boolean;
+  toggleShortcutHint: string;
+  onToggleMaximized: (e: React.MouseEvent) => void;
+  onClose: (e: React.MouseEvent) => void;
+}
+
+const KEBAB_MIN_WIDTH = 160;
+const KEBAB_GAP = 4;
+
+function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onClose }: KebabActionsProps) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // Stable id linking the trigger to the menu for the WAI-ARIA
+  // disclosure pattern (aria-controls). Each header instance owns one
+  // kebab, so a module-scoped counter is enough.
+  const menuIdRef = useRef(`grid-node-kebab-menu-${Math.random().toString(36).slice(2, 9)}`);
+  const menuId = menuIdRef.current;
+  const itemCount = 2;
+  const closeAndReturnFocus = () => {
+    const trigger = triggerRef.current;
+    setOpen(false);
+    requestAnimationFrame(() => trigger?.focus());
+  };
+
+  const handleToggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setOpen((o) => !o);
+  };
+
+  // Outside click + Escape close. Same `document`-vs-`window` jsdom
+  // caveat as `MeshItem` (issue #735): tests dispatch on `document`,
+  // not `window`, because in jsdom the two are independent targets.
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      const menu = menuRef.current;
+      const trigger = triggerRef.current;
+      if (menu && !menu.contains(e.target as Node) && trigger && !trigger.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const focusSibling = (currentIdx: number, dir: 1 | -1) => {
+      const next = (currentIdx + dir + itemCount) % itemCount;
+      menuItemRefs.current[next]?.focus();
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeAndReturnFocus();
+        return;
+      }
+      if (e.key === 'Tab') {
+        // Non-modal popover (matches MeshItem, #735): Tab leaves the
+        // menu and closes it; the browser moves focus to the next
+        // tabbable element naturally.
+        setOpen(false);
+        return;
+      }
+      // ArrowDown/ArrowUp traverse menuitems with wrap-around, mirroring
+      // the MeshItem WAI-ARIA pattern (#735). Wrap matters even at two
+      // items so the contract holds if a third is added.
+      const items = menuItemRefs.current;
+      const activeIdx = items.findIndex((el) => el === document.activeElement);
+      if (e.key === 'ArrowDown' && activeIdx >= 0) {
+        e.preventDefault();
+        focusSibling(activeIdx, 1);
+        return;
+      }
+      if (e.key === 'ArrowUp' && activeIdx >= 0) {
+        e.preventDefault();
+        focusSibling(activeIdx, -1);
+        return;
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open]);
+
+  // Anchor + viewport-clamp in a single layout pass: read the trigger
+  // rect, place the menu's right edge under the trigger's right edge,
+  // then nudge back inside the viewport if it overflows. No `pos`
+  // state — every layout effect re-reads the live rect, which keeps a
+  // re-render (e.g. node name edit) from briefly flashing the menu at
+  // a stale anchored position.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const menu = menuRef.current;
+    const trigger = triggerRef.current;
+    if (!menu || !trigger) return;
+    const r = trigger.getBoundingClientRect();
+    const top = r.bottom + KEBAB_GAP;
+    const left = r.right - KEBAB_MIN_WIDTH;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const MARGIN = 4;
+    const clampedLeft = Math.max(MARGIN, Math.min(left, vw - KEBAB_MIN_WIDTH - MARGIN));
+    const clampedTop = Math.max(MARGIN, top);
+    menu.style.top = `${clampedTop}px`;
+    menu.style.left = `${clampedLeft}px`;
+    // If the menu's rendered height would push it off the bottom, raise
+    // it above the trigger instead. `vh - clampedTop` is the room left
+    // below; if the menu's `offsetHeight` exceeds that, flip up.
+    const roomBelow = vh - clampedTop - MARGIN;
+    if (menu.offsetHeight > roomBelow) {
+      const aboveTop = r.top - KEBAB_GAP - menu.offsetHeight;
+      if (aboveTop >= MARGIN) menu.style.top = `${aboveTop}px`;
+    }
+  }, [open]);
+
+  // Autofocus the first menuitem on open (WAI-ARIA menu contract).
+  useLayoutEffect(() => {
+    if (open) menuItemRefs.current[0]?.focus();
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={handleToggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        aria-label="Agent node actions"
+        title="Agent node actions"
+        className="w-5 h-5 flex items-center justify-center rounded-md text-text-muted hover:text-text-primary hover:bg-bg-base transition-[color,background-color] opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <circle cx="12" cy="5" r="1.2" fill="currentColor" />
+          <circle cx="12" cy="12" r="1.2" fill="currentColor" />
+          <circle cx="12" cy="19" r="1.2" fill="currentColor" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          id={menuId}
+          role="menu"
+          aria-label="Agent node actions"
+          className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-right z-[100] py-1"
+          style={{ top: 0, left: 0, minWidth: KEBAB_MIN_WIDTH }}
+        >
+          <button
+            ref={(el) => { menuItemRefs.current[0] = el; }}
+            role="menuitem"
+            onClick={(e) => { closeAndReturnFocus(); onToggleMaximized(e); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              {isMaximized ? (
+                <path d="M9 9H4m0 0V4m0 5 6-6m5 16v-5m0 0h5m-5 0 6 6M9 15H4m0 0v5m0-5 6 6m5-16V4m0 0h5m-5 0 6 6" />
+              ) : (
+                <path d="M15 3h6m0 0v6m0-6-7 7M9 21H3m0 0v-6m0 6 7-7" />
+              )}
+            </svg>
+            {isMaximized ? `Restore grid (${toggleShortcutHint})` : `Maximize (${toggleShortcutHint})`}
+          </button>
+          <button
+            ref={(el) => { menuItemRefs.current[1] = el; }}
+            role="menuitem"
+            onClick={(e) => { closeAndReturnFocus(); onClose(e); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <span className="text-text-muted" aria-hidden="true">×</span>
+            Close agent node
+          </button>
+        </div>
+      )}
+    </>
   );
 }
