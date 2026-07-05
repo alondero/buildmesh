@@ -511,6 +511,16 @@ mod tests {
     fn note_activity_for_mesh_overwrites_prior_timestamp() {
         const MESH_D: i64 = 600_001;
         note_activity_for_mesh(MESH_D);
+        // Sleep BEFORE the first read so the prior instant visibly differs
+        // from the read's `Instant::now()` — two consecutive `note + read`
+        // calls can land in the same CPU instruction stream under load and
+        // produce equal `Instant::now()` reads on Windows, which would
+        // tautologically fail the `second_idle < first_idle` assertion
+        // below (`0 < 0`). 20 ms is well above the noise floor for
+        // back-to-back `Instant::now()` reads under test-suite contention
+        // and well below `IDLE_SILENCE`, matching the existing intent of
+        // the 50 ms sleep.
+        std::thread::sleep(Duration::from_millis(20));
         let first_idle = idle_duration_for_mesh(MESH_D);
         // Sleep enough that the prior instant would visibly differ from
         // a fresh one. 50 ms is well above the spawn-resolution floor

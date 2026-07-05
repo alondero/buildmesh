@@ -2,7 +2,7 @@
 
 use crate::preferences::{self, HarnessProfile, ProviderAccount};
 use crate::services::usage::{self, ProviderMeters, ProviderUsage};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::command;
 
 /// Provider ids Buildmesh can actually fetch usage for. A visible account whose
@@ -70,27 +70,132 @@ fn poll_ids(accounts: &[ProviderAccount], profiles: &[HarnessProfile]) -> Vec<St
         .collect()
 }
 
+/// The keyed provider ids that have a non-empty resolved API key configured
+/// (account-level, with the legacy `prefs.minimax_api_key` fallback for
+/// MiniMax). Read once per `get_provider_meters` call and threaded into
+/// [`assemble_meters`] so the gate can distinguish "credential configured"
+/// (keep the row, even if the API rejected the key) from "no credential at
+/// all" (drop the row). Reading the legacy fields and `*_api_key_resolved()`
+/// helpers here keeps `assemble_meters` pure for unit tests — callers pass
+/// the resolved set in.
+fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
+    let mut configured = HashSet::new();
+    let has_key = |id: &str| -> bool {
+        match id {
+            "minimax" => preferences::minimax_api_key_resolved().is_some_and(|k| !k.is_empty()),
+            "kimi" => preferences::kimi_api_key_resolved().is_some_and(|k| !k.is_empty()),
+            "openrouter" => preferences::openrouter_api_key_resolved().is_some_and(|k| !k.is_empty()),
+            // Custom (Generic) Claude-compatible providers store the key on
+            // the account itself — no legacy flat field.
+            other => accounts
+                .iter()
+                .find(|a| a.id == other)
+                .and_then(|a| a.api_key.as_deref())
+                .is_some_and(|k| !k.is_empty()),
+        }
+    };
+    for id in ["minimax", "kimi", "openrouter"] {
+        if has_key(id) {
+            configured.insert(id.to_string());
+        }
+    }
+    // Custom Generic providers keyed on the api_key field.
+    for account in accounts {
+        if !FETCHABLE.contains(&account.id.as_str())
+            && account.api_key.as_deref().is_some_and(|k| !k.is_empty())
+        {
+            configured.insert(account.id.clone());
+        }
+    }
+    configured
+}
+
 /// Build the Providers-page rows from the gated account set and a map of
 /// already-fetched usages (keyed by provider id). Pure so the detection-gating +
 /// usage-tracked derivation is unit-tested without touching the network: only
 /// visible accounts appear (an uninstalled native harness is dropped entirely),
-/// `usage` is populated for tracked providers, and a Generic provider gets
-/// `usage_tracked = false` with no usage.
+/// `usage` is populated for tracked providers with confirmed credentials, and a
+/// Generic provider gets `usage_tracked = false` with no usage.
+///
+/// **No-credential gate.** A row is dropped entirely when the provider is
+/// enabled + tracked AND has no credential configured AND the fetcher
+/// returned `usage.logged_in == false`. This honours the user contract for
+/// the glanceable Probe surface: "If we haven't added credentials for a
+/// provider I shouldn't see the usage meter for that provider at all."
+///
+/// Why condition on the configured-key set rather than just
+/// `usage.logged_in`? Because Kimi (`services::usage.rs:564-566`) and
+/// OpenRouter (`services::usage.rs:662-664`) both return
+/// `logged_in = false` on HTTP 401/403 — i.e. when the user's stored key
+/// has been revoked, expired, or mistyped. Conflating "no credential" with
+/// "credential is bad" would silently drop the row for those users with
+/// no in-tab signal to re-enter their key. By gating on the *account-level*
+/// key presence (the `configured_keys` parameter), the row stays visible
+/// when the key exists but the API rejected it — `<UsagePanel>` renders
+/// the existing "Invalid API key" copy (UsageRender.tsx:115) and the user
+/// has a path back to Settings.
+///
+/// Two cases intentionally bypass this gate:
+///
+/// 1. **Disabled provider.** A user who explicitly disabled a provider must
+///    keep the card so they can re-enable. We include with `usage = None`
+///    so `<UsagePanel>` renders "Disabled" (UsageRender.tsx:96).
+/// 2. **Generic untracked provider.** A custom Claude-compatible provider
+///    has no usage fetcher by definition; the "Usage not tracked" card is
+///    informative UX telling the user why. Included with `usage_tracked:
+///    false` so the UI can render that copy.
+///
+/// The `?` operator on `usages.get(&a.id)` is a defensive guard: every id
+/// returned by [`poll_ids`] is fanned out via `cached_or_fetch` and
+/// inserted into the map, but a future refactor that decouples fetch
+/// dispatch from map insertion would otherwise re-introduce a silent
+/// drop. We drop the row in that case (matches the "polled but no data
+/// arrived" semantics of a transient fetch failure that didn't produce
+/// even a `logged_out` envelope).
 fn assemble_meters(
     accounts: &[ProviderAccount],
     profiles: &[HarnessProfile],
     usages: &HashMap<String, ProviderUsage>,
+    configured_keys: &HashSet<String>,
 ) -> Vec<ProviderMeters> {
     accounts
         .iter()
         .filter(|a| account_visible(a, profiles))
-        .map(|a| {
+        .filter_map(|a| {
             let tracked = usage_tracked(&a.id);
-            ProviderMeters {
+            // Disabled: keep the card so the user can re-enable.
+            if !a.enabled {
+                return Some(ProviderMeters {
+                    provider: a.id.clone(),
+                    usage_tracked: tracked,
+                    usage: None,
+                });
+            }
+            // Generic untracked: keep the "Usage not tracked" card.
+            if !tracked {
+                return Some(ProviderMeters {
+                    provider: a.id.clone(),
+                    usage_tracked: false,
+                    usage: None,
+                });
+            }
+            // Enabled + tracked: drop iff no credential is configured AND
+            // the fetcher could not authenticate. The configured_keys set
+            // lets us distinguish "no key" (drop) from "key present but
+            // API rejected it" (keep — see the docstring for the user-
+            // visible reason). For native self-auth providers, the
+            // fetcher's `logged_in = false` already correlates with "no
+            // credential on disk" with acceptable accuracy; we still
+            // honour configured_keys for any future keyed native flows.
+            let usage = usages.get(&a.id)?;
+            if !usage.logged_in && !configured_keys.contains(&a.id) {
+                return None;
+            }
+            Some(ProviderMeters {
                 provider: a.id.clone(),
                 usage_tracked: tracked,
-                usage: if tracked { usages.get(&a.id).cloned() } else { None },
-            }
+                usage: Some(usage.clone()),
+            })
         })
         .collect()
 }
@@ -148,6 +253,10 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
     let profiles = preferences::harness_profiles();
     let accounts = preferences::provider_accounts();
     let ids = poll_ids(&accounts, &profiles);
+    // Resolve once which keyed providers have a credential configured —
+    // threaded into the gate so a 401/403 from Kimi/OpenRouter doesn't
+    // silently hide the row (see `assemble_meters` docstring).
+    let configured_keys = configured_keyed_providers(&accounts);
 
     // Each fetch is a blocking HTTP round-trip to a different vendor; running
     // them serially made the panel wait for the sum of all of them. Fan out on
@@ -170,7 +279,7 @@ pub async fn get_provider_meters(force_refresh: bool) -> Result<Vec<ProviderMete
         usages.insert(id, usage);
     }
 
-    Ok(assemble_meters(&accounts, &profiles, &usages))
+    Ok(assemble_meters(&accounts, &profiles, &usages, &configured_keys))
 }
 
 #[command]
@@ -308,7 +417,7 @@ mod tests {
         usages.insert("anthropic".to_string(), usage("anthropic"));
         usages.insert("minimax".to_string(), usage("minimax"));
 
-        let rows = assemble_meters(&accounts, &claude, &usages);
+        let rows = assemble_meters(&accounts, &claude, &usages, &HashSet::new());
         let ids: Vec<_> = rows.iter().map(|r| r.provider.as_str()).collect();
         assert_eq!(ids, vec!["anthropic", "minimax", "deepseek"]);
 
@@ -326,7 +435,12 @@ mod tests {
         // Disabling a detected provider hides its meter (not polled) but keeps its
         // card so the user can re-enable it — the row stays, with usage None.
         let claude = vec![profile("claude", "anthropic")];
-        let rows = assemble_meters(&[account("anthropic", false)], &claude, &HashMap::new());
+        let rows = assemble_meters(
+            &[account("anthropic", false)],
+            &claude,
+            &HashMap::new(),
+            &HashSet::new(),
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "anthropic");
         assert!(rows[0].usage_tracked);
@@ -340,8 +454,151 @@ mod tests {
         // single row — there's one account, so it's counted once.
         let profiles = vec![profile("claude", "anthropic"), profile("claude-alt", "anthropic")];
         let accounts = vec![account("anthropic", true)];
-        let rows = assemble_meters(&accounts, &profiles, &HashMap::new());
+        // The no-credential gate now requires a logged-in usage entry for
+        // the row to surface; an empty usages map would drop it (matching
+        // the user contract for unconfigured providers).
+        let mut usages = HashMap::new();
+        usages.insert("anthropic".to_string(), usage("anthropic"));
+        let rows = assemble_meters(&accounts, &profiles, &usages, &HashSet::new());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "anthropic");
+    }
+
+    // ── No-credential gate (user contract: "I shouldn't see a meter for a
+    //    provider I haven't added credentials for") ────────────────────────
+
+    fn logged_out_usage(provider: &str) -> ProviderUsage {
+        ProviderUsage {
+            provider: provider.to_string(),
+            logged_in: false,
+            windows: Vec::new(),
+            balance: None,
+            detail: None,
+            error: Some(format!("No API key configured for {provider}")),
+        }
+    }
+
+    #[test]
+    fn assemble_meters_drops_enabled_keyed_provider_without_credentials() {
+        // User contract: "If we haven't added credentials for a provider I
+        // shouldn't see the usage meter for that provider at all in the
+        // usage Probe pane." A fresh user has every built-in enabled but
+        // no API keys; MiniMax/OpenRouter must NOT show up as "No API key"
+        // cards on the glance surface.
+        let mut usages = HashMap::new();
+        usages.insert("minimax".to_string(), logged_out_usage("minimax"));
+        usages.insert("openrouter".to_string(), logged_out_usage("openrouter"));
+        let rows = assemble_meters(
+            &[account("minimax", true), account("openrouter", true)],
+            &[],
+            &usages,
+            &HashSet::new(),
+        );
+        assert!(
+            rows.is_empty(),
+            "keyed providers without credentials must be dropped, got: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_meters_drops_enabled_native_provider_when_not_logged_in() {
+        // Same contract for self-auth native providers: if the credential
+        // file is absent (e.g. user hasn't run `claude login` yet) the
+        // meter row must be dropped, not rendered as "Not logged in".
+        // Detection gating already excludes uninstalled harnesses; this
+        // is the second half — exclude detected-but-not-logged-in.
+        let claude = vec![profile("claude", "anthropic")];
+        let mut usages = HashMap::new();
+        usages.insert("anthropic".to_string(), logged_out_usage("anthropic"));
+        let rows = assemble_meters(
+            &[account("anthropic", true)],
+            &claude,
+            &usages,
+            &HashSet::new(),
+        );
+        assert!(
+            rows.is_empty(),
+            "native providers without credentials must be dropped, got: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_meters_keeps_keyed_provider_with_rejected_key() {
+        // CRITICAL regression guard (code review finding [0]): Kimi and
+        // OpenRouter return `logged_in = false` on HTTP 401/403 — i.e.
+        // when the stored key has been revoked, expired, or mistyped. A
+        // naive `drop_on_logged_in_false` gate would silently hide the row
+        // for those users with no in-tab signal to re-enter their key.
+        // The configured_keys parameter lets us keep the row when the
+        // account HAS a key configured (so <UsagePanel> can render the
+        // existing "Invalid API key" copy and the user has a path back
+        // to Settings).
+        let mut usages = HashMap::new();
+        usages.insert("kimi".to_string(), logged_out_usage("kimi"));
+        usages.insert("openrouter".to_string(), logged_out_usage("openrouter"));
+        let mut configured_keys = HashSet::new();
+        configured_keys.insert("kimi".to_string());
+        configured_keys.insert("openrouter".to_string());
+        let rows = assemble_meters(
+            &[account("kimi", true), account("openrouter", true)],
+            &[],
+            &usages,
+            &configured_keys,
+        );
+        assert_eq!(
+            rows.len(),
+            2,
+            "keyed providers WITH a configured key must keep their row even when the API rejected the key (got: {rows:?})"
+        );
+        let ids: Vec<&str> = rows.iter().map(|r| r.provider.as_str()).collect();
+        assert!(ids.contains(&"kimi"));
+        assert!(ids.contains(&"openrouter"));
+        // The logged_out usage is forwarded so the UI can render
+        // "Invalid API key" — the user-facing discoverability signal.
+        for row in &rows {
+            assert!(!row.usage.as_ref().unwrap().logged_in);
+            assert!(row.usage.as_ref().unwrap().error.is_some());
+        }
+    }
+
+    #[test]
+    fn assemble_meters_drops_enabled_tracked_provider_missing_from_usages_map() {
+        // Regression guard for the `?` operator branch: a polled provider
+        // whose entry is absent from `usages` (e.g. a transient fetch
+        // failure that didn't even produce a `logged_out` envelope) is
+        // dropped silently rather than rendered as "Unable to load usage
+        // data". Without this test, a future refactor that swapped `?`
+        // back to `usages.get(&a.id).cloned()` would silently reintroduce
+        // the stale "Unable to load usage data" fallback path.
+        let rows = assemble_meters(
+            &[account("minimax", true)],
+            &[],
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        assert!(
+            rows.is_empty(),
+            "enabled+tracked with no usages entry must be dropped, got: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn assemble_meters_keeps_disabled_keyed_provider_as_a_card() {
+        // Regression guard for the Settings-side "Disabled" card. A user
+        // who explicitly disables a keyed provider still needs its card
+        // visible so they can re-enable — but the meter row carries
+        // `usage = None` so <UsagePanel> renders "Disabled" (not "No API
+        // key"). This is the orthogonal axis to the no-credential gate:
+        // disabled = "user choice, keep the card", no-credential = "drop
+        // entirely".
+        let rows = assemble_meters(
+            &[account("minimax", false)],
+            &[],
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].provider, "minimax");
+        assert!(rows[0].usage.is_none(), "disabled card carries no usage");
     }
 }
