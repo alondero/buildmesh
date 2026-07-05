@@ -47,7 +47,16 @@ const DIFF: DiffResult = {
     {
       path: 'src/app.ts',
       hunks: [
-        { old_start: 1, old_lines: 1, new_start: 1, new_lines: 2, lines: ['-old', '+new'] },
+        {
+          old_start: 1,
+          old_lines: 1,
+          new_start: 1,
+          new_lines: 2,
+          lines: [
+            { line_type: 'remove', content: 'old', old_num: 1, new_num: null },
+            { line_type: 'add', content: 'new', old_num: null, new_num: 2 },
+          ],
+        },
       ],
     },
   ],
@@ -116,21 +125,25 @@ describe('AgentChangesTab (#376)', () => {
     });
   });
 
-  it('collapses the probe when a file is opened (avoids showing the same diff twice)', async () => {
+  it('collapses the originating FileDiffCard so the diff is not shown twice (#758)', async () => {
     // Agent Changes renders each changed file as an expanded FileDiffCard by
     // default, so the right-hand probe is already showing the diff inline.
-    // Without the collapse, opening the centre overlay would leave BOTH the
-    // expanded card AND the overlay displaying the same diff. The component
-    // collapses the probe so the centre overlay is the single source of truth.
+    // Without a collapse on the originating card, opening the centre overlay
+    // would leave BOTH the expanded card AND the overlay displaying the same
+    // diff. FileDiffCard collapses itself when its "open in centre" button
+    // fires; the probe stays open (other cards remain expanded), so #379's
+    // "probe stays open and interactive" contract holds uniformly.
     render(<AgentChangesTab />);
+
+    // Sanity: the diff body is visible before the click (defaultOpen=true).
+    await screen.findByText('new');
 
     const openBtn = await screen.findByRole('button', {
       name: /open src\/app\.ts in the center diff overlay/i,
     });
     fireEvent.click(openBtn);
 
-    // Sanity: the overlay still opens — collapsing the probe is purely a UX
-    // choice, not a regression of #379's "open in centre" wiring.
+    // Overlay opens — #379 wiring preserved.
     expect(useUIStore.getState().activeDiffFile).toEqual({
       filePath: 'src/app.ts',
       rootPath: NODE.path,
@@ -138,6 +151,11 @@ describe('AgentChangesTab (#376)', () => {
       meshId: MESH.id,
       source: 'base',
     });
-    expect(useUIStore.getState().probeOpen).toBe(false);
+
+    // Probe stays open — #379 contract preserved for Agent Changes too.
+    expect(useUIStore.getState().probeOpen).toBe(true);
+
+    // The originating card collapsed; its diff body is no longer in the DOM.
+    expect(screen.queryByText('new')).toBeNull();
   });
 });

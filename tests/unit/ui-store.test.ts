@@ -72,43 +72,6 @@ describe('useUIStore', () => {
       });
     });
 
-    describe('setProbeOpen', () => {
-      // Explicit open/close for callers that know which side they want (e.g.
-      // AgentChangesTab closes the probe after opening a file in the centre
-      // overlay). `toggleProbe` would flip in the wrong direction if called
-      // when the panel was already closed, so this setter is the safer
-      // primitive — and it short-circuits the no-op write.
-      it('opens a closed panel', () => {
-        useUIStore.setState({ probeOpen: false });
-        useUIStore.getState().setProbeOpen(true);
-        expect(useUIStore.getState().probeOpen).toBe(true);
-      });
-
-      it('closes an open panel', () => {
-        useUIStore.setState({ probeOpen: true });
-        useUIStore.getState().setProbeOpen(false);
-        expect(useUIStore.getState().probeOpen).toBe(false);
-      });
-
-      it('is a no-op when the panel is already in the requested state', () => {
-        useUIStore.setState({ probeOpen: true });
-        useUIStore.getState().setProbeOpen(true);
-        expect(useUIStore.getState().probeOpen).toBe(true);
-      });
-
-      it('does not allocate a state object when the value would not change', () => {
-        // The guard short-circuits before touching `set`, so a no-op call
-        // must not bump the store's change counter. This is the property
-        // AgentChangesTab relies on for the burst-of-clicks case (file
-        // watcher refresh re-fires the click handler).
-        useUIStore.setState({ probeOpen: false });
-        const before = useUIStore.getState();
-        useUIStore.getState().setProbeOpen(false);
-        const after = useUIStore.getState();
-        expect(after).toBe(before);
-      });
-    });
-
     describe('setProbeTab', () => {
       it('changes the active tab', () => {
         useUIStore.getState().setProbeTab('review');

@@ -27,7 +27,6 @@ import { useUIStore } from '../../stores/uiStore';
 export function AgentChangesTab() {
   const { activeNodeId, activePath, activeMeshId } = useProbeContext();
   const openDiff = useUIStore((s) => s.openDiff);
-  const setProbeOpen = useUIStore((s) => s.setProbeOpen);
 
   // ProbeTabBody gates on `activeNodeId !== null` (and a selected mesh) before
   // mounting this component, so the guard is a type-narrowing convenience
@@ -35,17 +34,12 @@ export function AgentChangesTab() {
   if (activeNodeId === null || activePath === null || activeMeshId === null) return null;
 
   // Clicking a file's "open in center" button pops it into the spacious
-  // overlay.
-  //
-  // Agent Changes is the only probe tab that renders expanded diff cards by
-  // default (FileDiffCard with defaultOpen=true), so without this collapse
-  // the same diff would be visible in TWO places at once: the expanded
-  // FileDiffCard in the right-hand probe AND the centre overlay. Closing
-  // the probe keeps the overlay as the single source of truth. The collapse
-  // is scoped to this tab — `uiStore.openDiff` still keeps the probe open
-  // for callers that don't have this duplication (Project Files, PR Files,
-  // PrDiffView drill-in).
-  const handleOpenFile = (filePath: string) => {
+  // overlay. We capture the focused node/mesh as the lens so the overlay
+  // auto-closes if the user later focuses a different node or project.
+  // FileDiffCard collapses itself in response to this callback (issue #758),
+  // so the inline expanded diff and the overlay don't render the same diff
+  // twice.
+  const handleOpenFile = (filePath: string) =>
     openDiff({
       filePath,
       rootPath: activePath,
@@ -53,8 +47,6 @@ export function AgentChangesTab() {
       meshId: activeMeshId,
       source: 'base',
     });
-    setProbeOpen(false);
-  };
 
   return (
     <AgentReviewPanel nodeId={activeNodeId} rootPath={activePath} onOpenFile={handleOpenFile} />
