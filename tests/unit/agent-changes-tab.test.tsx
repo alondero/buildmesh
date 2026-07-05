@@ -115,4 +115,29 @@ describe('AgentChangesTab (#376)', () => {
       source: 'base',
     });
   });
+
+  it('collapses the probe when a file is opened (avoids showing the same diff twice)', async () => {
+    // Agent Changes renders each changed file as an expanded FileDiffCard by
+    // default, so the right-hand probe is already showing the diff inline.
+    // Without the collapse, opening the centre overlay would leave BOTH the
+    // expanded card AND the overlay displaying the same diff. The component
+    // collapses the probe so the centre overlay is the single source of truth.
+    render(<AgentChangesTab />);
+
+    const openBtn = await screen.findByRole('button', {
+      name: /open src\/app\.ts in the center diff overlay/i,
+    });
+    fireEvent.click(openBtn);
+
+    // Sanity: the overlay still opens — collapsing the probe is purely a UX
+    // choice, not a regression of #379's "open in centre" wiring.
+    expect(useUIStore.getState().activeDiffFile).toEqual({
+      filePath: 'src/app.ts',
+      rootPath: NODE.path,
+      nodeId: NODE.id,
+      meshId: MESH.id,
+      source: 'base',
+    });
+    expect(useUIStore.getState().probeOpen).toBe(false);
+  });
 });

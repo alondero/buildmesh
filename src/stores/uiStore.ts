@@ -66,6 +66,7 @@ interface UIState {
   // the overlay's auto-close when the focused node or selected mesh changes.
   activeDiffFile: DiffContext | null;
   toggleProbe: () => void;
+  setProbeOpen: (open: boolean) => void;
   setProbeTab: (tab: ProbeTab) => void;
   // Open the probe on a specific tab, opening the panel if it's collapsed.
   // The "click active tab to collapse" UX is left to ProbePanel's own
@@ -93,6 +94,17 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   toggleProbe: () => {
     set({ probeOpen: !get().probeOpen });
+  },
+
+  // Explicit open/close for callers that know which side they want — e.g.
+  // AgentChangesTab collapses the probe on file-open (the expanded diff
+  // card would otherwise duplicate the centre overlay). `toggleProbe` would
+  // silently flip in the wrong direction if called when the panel was
+  // already closed, so the explicit setter is the safer primitive.
+  setProbeOpen: (open: boolean) => {
+    if (get().probeOpen !== open) {
+      set({ probeOpen: open });
+    }
   },
 
   setProbeTab: (tab: ProbeTab) => {
