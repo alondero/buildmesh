@@ -36,6 +36,9 @@ export function AgentChangesTab() {
   // Clicking a file's "open in center" button pops it into the spacious
   // overlay. We capture the focused node/mesh as the lens so the overlay
   // auto-closes if the user later focuses a different node or project.
+  // FileDiffCard collapses itself in response to this callback (issue #758),
+  // so the inline expanded diff and the overlay don't render the same diff
+  // twice.
   const handleOpenFile = (filePath: string) =>
     openDiff({
       filePath,

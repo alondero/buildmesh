@@ -160,6 +160,13 @@ export function FileDiffCard({
           // Rendered as a sibling — nesting a <button> inside the header
           // button is invalid HTML and breaks click handling. `stopPropagation`
           // keeps the expand from also toggling the card's collapse.
+          //
+          // On click: collapse THIS card before delegating to the parent.
+          // The centre overlay is about to render the same diff at full
+          // width, so leaving the inline card expanded would show two copies
+          // at once (issue #758). Other cards stay expanded, so the probe
+          // remains a navigable file list — preserves #379's "probe stays
+          // open and interactive" contract uniformly across all probe tabs.
           <span
             role="button"
             tabIndex={0}
@@ -167,12 +174,14 @@ export function FileDiffCard({
             title="Open in center workspace"
             onClick={(e) => {
               e.stopPropagation();
+              setOpen(false);
               onOpenFile(file.path);
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 e.stopPropagation();
+                setOpen(false);
                 onOpenFile(file.path);
               }
             }}
