@@ -315,7 +315,17 @@ pub(crate) fn do_fetch_only(
     // Step 2: skip if dirty. Fail-closed: a corrupt index or perm
     // denied on .git is treated as dirty rather than as a clean
     // green light to fetch into a state we couldn't read.
-    if crate::git::primitives::is_dirty(&repo).unwrap_or(true) {
+    //
+    // We use `is_dirty_mirrors_git_status` here (not the strict `is_dirty`)
+    // because the user's contract at the fetch gate is "is my tree dirty iff
+    // `git status` says so". `git status` honours `submodule.<path>.ignore`
+    // from `.git/config`, so a mesh with dirty submodules whose user has set
+    // `submodule.X.ignore = dirty` (very common in N64-recomp-style projects
+    // with build artifacts inside submodules) would otherwise be falsely
+    // blocked here. The strict helper is correct for the data-safety gates
+    // (close_safety, restore_to_base, prune badging) — see the helper's
+    // docstring for the use-site split.
+    if crate::git::primitives::is_dirty_mirrors_git_status(&repo).unwrap_or(true) {
         tracing::info!(
             "do_fetch_only: {} has uncommitted changes; skipping",
             host_path
