@@ -933,15 +933,44 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
 
 #[command]
 pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
-    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
-
-    if data.bytes().any(|b| b == b'\n' || b == b'\r')
-        && !should_skip_attention_signals(session_id)
-    {
-        db::update_agent_node_status(session_id, SessionStatus::Running).ok();
+    // Offload to the blocking pool — the PTY write (`write_all` + `flush`,
+    // can park on a full pipe) plus a DB read + UPDATE in the same body
+    // would otherwise pin a Tauri async worker for the full call. See the
+    // [`crate::commands::run_blocking`] seam (introduced for GitHub/git
+    // probes in #761) for the convention.
+    let should_signal =
+        crate::commands::run_blocking("write_to_agent", move || {
+            write_to_agent_blocking(session_id, data)
+        })
+        .await?;
+    if should_signal {
         let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
     }
     Ok(())
+}
+
+/// Sync core for [`write_to_agent`]. Offloaded to the blocking pool by the
+/// async wrapper above; kept `pub(crate)` so the mobile HTTP routes under
+/// `src/http/` can call it directly when an equivalent endpoint is added
+/// (the same forward-compat reason every other `*_blocking` core here is
+/// `pub(crate)`). Returns `Ok(true)` when the caller should emit
+/// `attention-cleared`.
+///
+/// PTY write happens first; a failed write must NOT claim "user input
+/// accepted" — the reader thread's exit-detector would see no signal for
+/// the dead child, and the status flip would land on a session that
+/// never received the byte.
+pub(crate) fn write_to_agent_blocking(
+    session_id: i64,
+    data: String,
+) -> Result<bool, String> {
+    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
+    let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
+        && !should_skip_attention_signals(session_id);
+    if should_signal {
+        db::update_agent_node_status(session_id, SessionStatus::Running).ok();
+    }
+    Ok(should_signal)
 }
 
 /// Returns true if a newline in `write_to_agent` should NOT flip the
@@ -2131,5 +2160,21 @@ mod tests {
                 "legacy id {id:?} resolves to Anthropic (issue #538) and must be resumable"
             );
         }
+    }
+
+    // Regression test for the sync core: an unregistered session must short-
+    // circuit on the PTY write before the DB read. Without the `?` ordering
+    // the unit-test DB-not-initialised panic surfaces as a test failure.
+    // The full PTY-write + DB-update path needs a registered agent
+    // (real `portable_pty` handles) and is covered by integration tests.
+
+    #[test]
+    fn write_to_agent_blocking_unknown_session_short_circuits_before_db() {
+        let result = write_to_agent_blocking(999_999_999, "x".to_string());
+        let err = result.expect_err("unknown session must surface an error");
+        assert!(
+            err.contains("Agent not running"),
+            "expected 'Agent not running' error, got {err:?}"
+        );
     }
 }
