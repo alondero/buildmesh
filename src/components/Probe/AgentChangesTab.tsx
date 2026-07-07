@@ -21,6 +21,7 @@
  */
 
 import { AgentReviewPanel } from '../FileTree/AgentReviewPanel';
+import { PathHeader } from '../shared/PathHeader';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 
@@ -48,7 +49,16 @@ export function AgentChangesTab() {
       source: 'base',
     });
 
+  // PathHeader must sit outside the scroll context so it stays pinned
+  // at the top while diffs scroll underneath.
   return (
-    <AgentReviewPanel nodeId={activeNodeId} rootPath={activePath} onOpenFile={handleOpenFile} />
+    <div className="flex flex-col h-full overflow-hidden">
+      <PathHeader path={activePath} />
+      <AgentReviewPanel
+        nodeId={activeNodeId}
+        rootPath={activePath}
+        onOpenFile={handleOpenFile}
+      />
+    </div>
   );
 }

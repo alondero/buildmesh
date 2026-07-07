@@ -125,6 +125,23 @@ describe('AgentChangesTab (#376)', () => {
     });
   });
 
+// Wiring pin: PathHeader is mounted and uses the focused node's worktree
+  // (not the mesh root), matching project-files-tab.test.tsx:136.
+  it('renders an "Open in file explorer" button that calls open_in_file_manager with the active node path', async () => {
+    render(<AgentChangesTab />);
+
+    const openButton = screen.getByRole('button', { name: /open in file explorer/i });
+    expect(openButton.querySelector('svg')).toBeTruthy();
+
+    fireEvent.click(openButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('open_in_file_manager', {
+        path: NODE.path,
+      });
+    });
+  });
+
   it('collapses the originating FileDiffCard so the diff is not shown twice (#758)', async () => {
     // Agent Changes renders each changed file as an expanded FileDiffCard by
     // default, so the right-hand probe is already showing the diff inline.
