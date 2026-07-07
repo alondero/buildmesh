@@ -437,6 +437,17 @@ export type { OpenPr };
 export const getOpenPrForNode = (nodeId: number) =>
   _invoke<OpenPr | null>('get_open_pr_for_node', { nodeId });
 
+/** Return the `https://github.com/{owner}/{repo}` web URL for a mesh's
+ *  `origin` remote, or `null` when the origin isn't a GitHub URL (or the
+ *  mesh has no origin at all). The return is intentionally a plain
+ *  `string | null` — no generated wire type — so the IPC contract stays
+ *  a single string (issue #359's "no hand-declared TS interface for a
+ *  Rust wire type" rule is preserved trivially). Consumed by the mesh
+ *  context menu's "View on GitHub" item and by the Issues / PRs probe
+ *  headers' GitHub buttons. */
+export const getGitHubUrlForMesh = (meshId: number) =>
+  _invoke<string | null>('get_github_url_for_mesh', { meshId });
+
 // GitHub Issues — `GitHubIssue` is generated from the Rust struct
 // (src-tauri/src/commands/pr.rs) into src/types/generated/; see top import.
 // Re-exported here so existing `import { GitHubIssue } from '../lib/tauri'`

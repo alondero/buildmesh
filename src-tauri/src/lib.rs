@@ -485,6 +485,7 @@ pub fn run() {
             commands::pr::get_pr_mergeability,
             commands::pr::get_prs_mergeability,
             commands::pr::get_pr_files,
+            commands::pr::get_github_url_for_mesh,
             // General GitHub auth (issue #433 — moved out of `commands::pr`:
             // no PR call sites, used by git/mobile/UI auth checks).
             commands::github::check_gh_auth,

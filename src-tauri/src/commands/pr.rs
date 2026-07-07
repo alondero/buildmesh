@@ -673,6 +673,43 @@ pub(crate) fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>,
     }
 }
 
+/// Derive the `https://github.com/{owner}/{repo}` web URL for a local
+/// repo path. Returns `Ok(None)` when the path isn't a repo, has no
+/// `origin` remote, or the remote isn't a `github.com` URL — these are
+/// all the same outcome for the consumer (no GitHub link to show), so
+/// collapsing them keeps the IPC surface simple. `Err(_)` is reserved
+/// for actual git/libgit2 failures that should bubble up.
+///
+/// Pure helper extracted from `get_github_url_for_mesh` so the wire
+/// command is one line and the path → URL derivation is unit-testable
+/// against a `tempdir` without standing up a DB or Tauri runtime.
+pub(crate) fn github_url_for_path(path: &str) -> Result<Option<String>, String> {
+    Ok(resolve_owner_repo(path)?
+        .map(|(owner, repo)| format!("https://github.com/{}/{}", owner, repo)))
+}
+
+/// Return the `https://github.com/{owner}/{repo}` URL for a mesh's
+/// `origin` remote, or `None` if the origin isn't a GitHub URL (or the
+/// mesh has no origin at all). Thin wrapper around
+/// [`github_url_for_path`] for the contexts that only need the web URL
+/// (mesh context menu, probe header GitHub buttons) and would otherwise
+/// pay for the GitHubClient construction that the other `commands::pr`
+/// functions do.
+///
+/// Sync `#[command]` (not `async`) — `github_url_for_path` only does
+/// local git2 work, so the bounded tokio worker pool doesn't need to
+/// carry this. Matches the lesson in
+/// `[[buildmesh-overnight-freeze-reqwest-no-timeout]]`: keep
+/// synchronous local work off the async pool. If a future call site
+/// needs to hit the GitHub HTTP API for the URL (e.g. resolving a
+/// redirect to a renamed repo), the new path must go through
+/// `GitHubClient` with a `reqwest::Client` that has a real timeout.
+#[command]
+pub fn get_github_url_for_mesh(mesh_id: i64) -> Result<Option<String>, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    github_url_for_path(&mesh.path)
+}
+
 /// Parse a GitHub PR URL into (owner, repo, pr_number).
 fn parse_pr_url(url: &str) -> Option<(String, String, i64)> {
     let rest = url.strip_prefix("https://github.com/")?;
@@ -1212,6 +1249,55 @@ mod tests {
         // and the public accessor surfaces the original error wording
         let err = info.owner_repo().unwrap_err();
         assert!(err.contains("unrecognized remote URL"), "got: {}", err);
+    }
+
+    // ----- github_url_for_path (Issue: View on GitHub context-menu item) -----
+    //
+    // The helper is pure and takes a path string, so the tests don't need
+    // a DB or Tauri runtime — they reuse the `init_repo_with_origin` /
+    // `init_repo_unborn` helpers above. Three cases pin the wire
+    // contract the frontend relies on:
+    //   - GitHub origin (HTTPS) → `Some("https://github.com/owner/repo")`
+    //   - Non-GitHub origin → `None` (the menu item is hidden)
+    //   - No origin at all → `None` (the menu item is hidden)
+    // Plus a sanity check on the `.git` suffix and SSH form, mirroring
+    // the existing `parse_owner_repo` tests at lines 1092–1112.
+
+    #[test]
+    fn github_url_for_path_https_origin() {
+        let (_guard, path) = init_repo_with_origin("https://github.com/alondero/buildmesh.git");
+        let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
+        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+    }
+
+    #[test]
+    fn github_url_for_path_ssh_origin() {
+        let (_guard, path) = init_repo_with_origin("git@github.com:alondero/buildmesh.git");
+        let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
+        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+    }
+
+    #[test]
+    fn github_url_for_path_no_dot_git_suffix() {
+        let (_guard, path) = init_repo_with_origin("https://github.com/foo/bar");
+        let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
+        // The .git trim lives inside `parse_owner_repo`; pin the wire
+        // shape so a future refactor that re-adds the suffix is caught.
+        assert_eq!(url, Some("https://github.com/foo/bar".to_string()));
+    }
+
+    #[test]
+    fn github_url_for_path_non_github_origin_is_none() {
+        let (_guard, path) = init_repo_with_origin("https://gitlab.com/alondero/buildmesh.git");
+        let url = github_url_for_path(&path).expect("non-github origin should not error");
+        assert_eq!(url, None, "GitLab URLs must collapse to None so the menu hides the item");
+    }
+
+    #[test]
+    fn github_url_for_path_no_origin_is_none() {
+        let (_guard, path) = init_repo_with_commit();
+        let url = github_url_for_path(&path).expect("no origin should not error");
+        assert_eq!(url, None, "repos with no origin remote must collapse to None");
     }
 
     /// The agent's HEAD is on the worktree's branch (NOT the mesh root's branch).

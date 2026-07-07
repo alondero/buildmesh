@@ -69,10 +69,12 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { useUIStore } from '../../stores/uiStore';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
+import { SafeLink } from '../shared/SafeLink';
 
 type StateFilter = 'open' | 'closed';
 
@@ -237,6 +239,14 @@ export function GitPullRequestsTab() {
   // drops its setState instead of clobbering the new run's result. Used
   // by `handleMerge` to refetch after a successful squash-merge (issue #349).
   const [reloadKey, setReloadKey] = useState(0);
+
+  // "View on GitHub" header button — resolves the active mesh's
+  // `origin` to a `https://github.com/{owner}/{repo}/pulls` URL.
+  // Mirror of GitIssuesTab's hook call; both tabs share the same
+  // per-mesh cache so the IPC is deduped when the user toggles
+  // between the two probes on the same mesh.
+  const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
+  const pullsListUrl = githubUrl ? `${githubUrl}/pulls` : '';
 
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
@@ -557,6 +567,19 @@ export function GitPullRequestsTab() {
   return (
     <div className="flex flex-col h-full">
       <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-end gap-2">
+        {/* "View on GitHub" — opens the repo's PR list. Prepended to
+            the left of the Open/Closed toggle so the two controls read
+            as a unit on the right edge of the row. `SafeLink` falls
+            back to an inert <span> when the URL is empty (non-GitHub
+            mesh), so the layout stays stable across meshes. */}
+        <SafeLink
+          url={pullsListUrl}
+          ariaLabel="Open this repo's pull requests list on GitHub"
+          title="Open this repo's pull requests list on GitHub"
+          className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+        >
+          View on GitHub ↗
+        </SafeLink>
         {/* Open / Closed segmented toggle */}
         <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
           {(['open', 'closed'] as const).map((s) => (
