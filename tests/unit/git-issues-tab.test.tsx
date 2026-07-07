@@ -732,12 +732,19 @@ describe('GitIssuesTab (#378)', () => {
     expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/issues');
   });
 
-  it('renders an inert label (no link) when the mesh has no GitHub origin', async () => {
+  it('renders an inert label (no link, no link-style cursor) when the mesh has no GitHub origin', async () => {
     // `get_github_url_for_mesh` returns `null` for non-GitHub meshes
-    // (GitLab origin, no origin, etc.) — SafeLink collapses to a
-    // <span> so the layout stays stable and the user can't click a
-    // dead link. Pin the safe-fallback shape: a span with the label
-    // text but no `href` and no `aria-label` (both are link semantics).
+    // (GitLab origin, no origin, etc.). SafeLink falls back to a
+    // <span> for the "View on GitHub ↗" affordance — but a previous
+    // implementation applied the caller's link-styling classes
+    // verbatim, so the empty case LOOKED like a clickable link (cyan
+    // + hover) right next to working controls, and clicking did
+    // nothing. That was the user-reported "links aren't links"
+    // regression on the Issues probe header. The fix strips the
+    // link-styling tokens at the SafeLink level — pin the
+    // empty-URL shape here so a future regression that re-applies
+    // the cyan/hover classes to the fallback is caught at the seam
+    // that is most directly named in the user's bug report.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
@@ -747,17 +754,15 @@ describe('GitIssuesTab (#378)', () => {
     });
     render(<GitIssuesTab />);
 
-    // Wait for the tab to render (issues are loaded), then find the
-    // SafeLink fallback. `findByText` matches the label text; we then
-    // assert the rendered element is a SPAN, not an A.
     await screen.findByText('Fix the wobble');
     const fallback = await screen.findByText(/View on GitHub/);
     expect(fallback.tagName).toBe('SPAN');
-    // The text-bearing element itself must not carry an href (a
-    // parent <a> would still let the click reach openUrl).
     expect(fallback.getAttribute('href')).toBeNull();
-    // And no link-style aria-label on the span — see SafeLink's
-    // "title and aria-label deliberately OMITTED" comment.
     expect(fallback.getAttribute('aria-label')).toBeNull();
+    // The user-reported "links aren't links" pin — visually inert,
+    // no link-style className escapes through.
+    expect(fallback.className).not.toMatch(/text-accent-cyan/);
+    expect(fallback.className).not.toMatch(/cursor-pointer/);
+    expect(fallback.className).toMatch(/cursor-default/);
   });
 });

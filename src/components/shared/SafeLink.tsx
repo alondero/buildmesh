@@ -35,12 +35,32 @@
  * harmless no-op — stopPropagation on an event with no other listener
  * is free.
  *
- * `<span>` fallback styling
- * -------------------------
- * The span uses the same `className` as the `<a>`, so callers can pass
- * a single class string and both renders look identical when the URL
- * is missing — important for layout stability (the title row doesn't
- * reflow when the URL arrives late).
+ * Empty-URL span is INERT, not styled like a link
+ * ------------------------------------------------
+ * The fallback `<span>` keeps the caller's `children` (so e.g.
+ * `ProbeRow` still shows the issue title as plain text when an issue
+ * has no `url`) and the layout-relevant Tailwind tokens (text size,
+ * font weight, padding, truncation, min-w-0/flex-1), but **strips**
+ * the link-styling tokens (`text-accent-cyan`, `hover:underline`,
+ * `hover:text-accent-cyan/*`, `transition-colors`, `cursor-pointer`)
+ * and replaces them with `cursor-default` so the span reads as inert
+ * text. Without this, every empty-URL fallback rendered an exact copy
+ * of the working link's cyan-with-hover styling and clicking it did
+ * nothing (the user-reported "links aren't links" regression on the
+ * GitIssuesTab / GitPullRequestsTab probe headers). The class-name
+ * strip is a deliberately narrow regex, not a CSS parser — adding
+ * new link-styling tokens is opt-in via the regex below, so a future
+ * visual regression shows up as either a missed strip (looks clickable)
+ * or an over-strip (something layout-only gets removed and the row
+ * reflows). The "does NOT style the empty-URL fallback as a clickable
+ * link" test pins the narrow set above.
+ *
+ * `title` and `aria-label` are still deliberately OMITTED in the
+ * fallback branch. Both are link semantics: `title` produces a "this
+ * is a link to X" hover tooltip that would mislead users into
+ * clicking non-clickable text; `aria-label` makes screen readers
+ * announce the element as a control that opens GitHub when it
+ * doesn't.
  */
 
 import { type ReactNode } from 'react';
@@ -48,18 +68,21 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 
 export interface SafeLinkProps {
   /**
-   * The external URL. The empty string (`''`) falls back to a `<span>`
-   * (no link). Anything non-empty renders an `<a>` — callers are
-   * responsible for not passing nonsense values like `'#'` or
-   * `'javascript:void(0)'`.
+   * The external URL. The empty string (`''`) falls back to a
+   * text-only `<span>` (children preserved, link-styling stripped —
+   * see the "Empty-URL span is INERT" note in the file header). Any
+   * non-empty value renders an `<a>` — callers are responsible for
+   * not passing nonsense values like `'#'` or `'javascript:void(0)'`.
    */
   url: string;
   /** Link body. Text for the title variant, an icon glyph for the ↗ variant. */
   children: ReactNode;
   /**
-   * Tailwind classes. Applied to both the `<a>` (URL set) and the
-   * fallback `<span>` (empty URL) so layout is identical between the
-   * two cases.
+   * Tailwind classes. Applied to the `<a>` as-is. In the empty-URL
+   * `<span>` fallback, layout tokens are kept and link-styling tokens
+   * (`text-accent-*`, `hover:text-accent-*`, `hover:underline`,
+   * `transition-colors`, `cursor-pointer`) are dropped — see file
+   * header.
    */
   className?: string;
   /** Accessible name for icon-only variants. Strongly recommended when children is not text. */
@@ -68,23 +91,36 @@ export interface SafeLinkProps {
   title?: string;
 }
 
+/**
+ * Drop the visual markers that signal "this is a link" from a
+ * caller's `className`. Layout tokens (text-sm, ml-1, truncate,
+ * min-w-0, flex-1, font-medium, etc.) pass through unchanged so the
+ * span doesn't reflow when the URL resolves.
+ *
+ * Keep this regex in sync with the "does NOT style the empty-URL
+ * fallback as a clickable link" test in `safe-link.test.tsx` — a new
+ * link-styling token added at a call site that's NOT in the regex
+ * will silently make the fallback look clickable again (the user-
+ * reported "links aren't links" regression we're fixing here).
+ */
+function stripLinkStyling(className: string | undefined): string {
+  if (!className) return '';
+  return className
+    .split(/\s+/)
+    .filter((token) => !/^(text-accent-|hover:text-accent-|hover:underline|transition-colors|cursor-pointer)/.test(token))
+    .join(' ');
+}
+
 export function SafeLink({ url, children, className, ariaLabel, title }: SafeLinkProps) {
   if (url === '') {
-    // Empty-URL guard — see file header. The `<span>` carries the same
-    // className as the `<a>` so callers can rely on identical layout
-    // whether or not the URL is set. No `href`, no click handler — a
-    // future regression that adds `onClick={openUrl(url)}` here would
-    // be caught by the "does not call openUrl when empty-URL fallback
-    // is clicked" test.
-    //
-    // `title` and `aria-label` are deliberately OMITTED in this branch.
-    // Both are link semantics: `title` produces a "this is a link to X"
-    // hover tooltip that would mislead users into clicking non-clickable
-    // text; `aria-label` makes screen readers announce the element as
-    // a control that opens GitHub when it doesn't. The pre-refactor
-    // code rendered a plain `<span>` with neither attribute — preserved
-    // here so an empty-URL title looks like inert text, not a dead link.
-    return <span className={className}>{children}</span>;
+    // File header documents why the className is stripped; the
+    // children are preserved so ProbeRow's empty-url titles still
+    // read as plain text instead of vanishing entirely.
+    return (
+      <span className={`${stripLinkStyling(className)} cursor-default`.trim()}>
+        {children}
+      </span>
+    );
   }
 
   return (
