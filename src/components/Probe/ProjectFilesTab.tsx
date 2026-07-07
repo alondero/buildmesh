@@ -99,8 +99,6 @@ export function ProjectFilesTab() {
 
   return (
     <div className="flex-1 overflow-auto">
-      {/* Path + open-in-explorer. The probe dock owns `closeProbe`, so
-          the legacy FileExplorerPanel close button stays out. */}
       <PathHeader path={activePath} />
       <ChangedFilesSection
         rootPath={activePath}

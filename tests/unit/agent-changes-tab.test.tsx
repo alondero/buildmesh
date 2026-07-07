@@ -116,16 +116,11 @@ describe('AgentChangesTab (#376)', () => {
     });
   });
 
-  // Mirror of project-files-tab.test.tsx:136 — pin that the Changes probe
-  // surfaces the same path + open-in-explorer affordance, using the shared
-  // PathHeader. Both probes must call `open_in_file_manager` with the
-  // focused node's worktree so the user lands in the right folder.
+  // Wiring pin: PathHeader is mounted and uses the focused node's worktree
+  // (not the mesh root), matching project-files-tab.test.tsx:136.
   it('renders an "Open in file explorer" button that calls open_in_file_manager with the active node path', async () => {
     render(<AgentChangesTab />);
 
-    // PathHeader renders synchronously — no need to wait on AgentReviewPanel's
-    // diff fetch just to find the button. (The PathHeader contract is pinned
-    // by tests/unit/path-header.test.tsx; this test pins the wiring.)
     const openButton = screen.getByRole('button', { name: /open in file explorer/i });
     expect(openButton.querySelector('svg')).toBeTruthy();
 

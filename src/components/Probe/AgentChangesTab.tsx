@@ -46,12 +46,8 @@ export function AgentChangesTab() {
       source: 'base',
     });
 
-  // The wrapper has h-full + overflow-hidden so it fills the probe body
-  // (which has a defined height from being flex-1 in a flex column) and
-  // becomes its own bounded context. PathHeader takes its natural height
-  // at the top and stays visible while the user scrolls; AgentReviewPanel
-  // below provides its own overflow-auto + sticky summary bar inside the
-  // remaining space (its root has `flex-1 min-h-0 overflow-auto`).
+  // PathHeader must sit outside the scroll context so it stays pinned
+  // at the top while diffs scroll underneath.
   return (
     <div className="flex flex-col h-full overflow-hidden">
       <PathHeader path={activePath} />

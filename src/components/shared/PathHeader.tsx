@@ -1,29 +1,16 @@
 /**
- * PathHeader — header strip showing a directory path with an "open in
- * file explorer" affordance.
- *
- * Used by the Probe Panel's Files and Changes tabs to surface the focused
- * agent node's worktree path (or the mesh root with no node focused) and
- * give the user a one-click jump into the OS file manager.
- *
- * DOM contract (pinned by tests/unit/project-files-tab.test.tsx and
- * tests/unit/path-header.test.tsx):
- *   - The path text uses a mono font and `truncate` with a `title` attribute
- *     so the full path is reachable via hover tooltip.
- *   - The action is a real `<button>` with aria-label="Open in file explorer"
- *     and contains an `<svg>` glyph — pin the SVG so the glyph can't be
- *     silently replaced with text/emoji.
- *   - Clicking fires `open_in_file_manager` via the Tauri IPC seam with
- *     `path` as the directory.
+ * Header strip showing the active directory path + a one-click jump to
+ * the OS file manager. Shared between the Probe Panel's Files and Changes
+ * tabs so the chrome (mono-font path, folder-open button) lives in one
+ * place — WorktreeManagerTab's per-row copies are a planned future
+ * consumer (needs `aria-label` + `data-testid` extensions first).
  */
 import { openInFileManager } from '../../lib/tauri';
 
 interface PathHeaderProps {
-  /** Directory to display and to pass to `open_in_file_manager`. */
   path: string;
 }
 
-/** Lucide folder-open. */
 function FolderOpenIcon({ className }: { className?: string }) {
   return (
     <svg
