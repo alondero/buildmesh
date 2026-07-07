@@ -1263,11 +1263,14 @@ describe('GitPullRequestsTab', () => {
     expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/pulls');
   });
 
-  it('renders an inert label (no link) when the mesh has no GitHub origin', async () => {
-    // Mirrors the same test in git-issues-tab.test.tsx: a null URL
-    // collapses SafeLink to a <span> with no href / no link-style
-    // aria-label. The Open/Closed toggle must still render — the
-    // header layout is identical regardless of GitHub availability.
+  it('renders an inert label (no link, no link-style cursor) when the mesh has no GitHub origin', async () => {
+    // Mirrors the same test in git-issues-tab.test.tsx. A null URL
+    // collapses SafeLink to a <span> with the link-styling tokens
+    // stripped — see the "Empty-URL span is INERT" note in SafeLink's
+    // file header. Pin the empty-URL shape here so a future
+    // regression that re-applies the cyan/hover classes to the
+    // fallback is caught at the seam named in the user's "links
+    // aren't links" bug report.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
       if (cmd === 'get_prs_mergeability') {
@@ -1285,6 +1288,10 @@ describe('GitPullRequestsTab', () => {
     expect(fallback.tagName).toBe('SPAN');
     expect(fallback.getAttribute('href')).toBeNull();
     expect(fallback.getAttribute('aria-label')).toBeNull();
+    // User-reported "links aren't links" pin — visually inert.
+    expect(fallback.className).not.toMatch(/text-accent-cyan/);
+    expect(fallback.className).not.toMatch(/cursor-pointer/);
+    expect(fallback.className).toMatch(/cursor-default/);
     // The Open/Closed toggle must keep working — pin it so a future
     // refactor that breaks the header row when githubUrl is null
     // doesn't pass vacuously.
