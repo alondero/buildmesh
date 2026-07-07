@@ -706,15 +706,17 @@ mod tests {
         // path. `is_git_repo` will be `false` for all of them, but the
         // gh-auth branch runs unconditionally (a non-git dir can still have
         // `gh` configured), which is exactly the path we're caching.
-        let r1 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-1".to_string())
+        // Exercise the sync core directly (the async `#[command]` wrapper
+        // just offloads this onto the blocking pool via `run_blocking`).
+        let r1 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-1".to_string())
             .expect("first call should succeed");
-        let r2 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-2".to_string())
+        let r2 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-2".to_string())
             .expect("second call should succeed");
-        let r3 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-3".to_string())
+        let r3 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-3".to_string())
             .expect("third call should succeed");
-        let r4 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-4".to_string())
+        let r4 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-4".to_string())
             .expect("fourth call should succeed");
-        let r5 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-5".to_string())
+        let r5 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-5".to_string())
             .expect("fifth call should succeed");
 
         // All 5 must agree on the process-wide gh-auth state. The value
@@ -790,7 +792,7 @@ mod tests {
         let _ = make_repo_with_origin_head(_repo.path(), "develop");
 
         let snapshot =
-            crate::commands::git::get_mesh_git_static(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_mesh_git_static_blocking(_repo.path().to_string_lossy().into_owned())
                 .expect("snapshot should succeed for a valid repo");
 
         assert!(
@@ -811,7 +813,7 @@ mod tests {
         fs::create_dir_all(dir.path()).unwrap();
 
         let snapshot =
-            crate::commands::git::get_mesh_git_static(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_mesh_git_static_blocking(dir.path().to_string_lossy().into_owned())
                 .expect("non-repo path must not error");
 
         assert!(!snapshot.is_git_repo);

@@ -78,9 +78,19 @@ pub fn detect_ai_context(mesh_path: String) -> Result<AiContextStatus, String> {
 /// Build the portability commit and open a PR for review.
 ///
 /// Returns the GitHub PR URL on success.
-// `(async)` — git object writes plus a GitHub network round-trip; off the main thread.
-#[command(async)]
-pub fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, String> {
+#[command]
+pub async fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, String> {
+    // git object writes + `git push` + a GitHub REST round-trip — all blocking,
+    // so run on the blocking pool rather than a Tauri async worker (see the
+    // overnight-freeze investigation and [`crate::commands::run_blocking`]).
+    crate::commands::run_blocking("create_ai_context_portability_pr", move || {
+        create_ai_context_portability_pr_blocking(mesh_id)
+    })
+    .await
+}
+
+/// Sync core for [`create_ai_context_portability_pr`].
+fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let host_path = to_host_path(&mesh.path);
     let root = Path::new(&host_path);
