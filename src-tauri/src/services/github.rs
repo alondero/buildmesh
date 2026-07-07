@@ -4,6 +4,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -576,6 +577,30 @@ impl CollaboratorPermission {
     }
 }
 
+/// Max time to establish a TCP+TLS connection to the GitHub API.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Max time for a whole request (connect + send + receive body). Without a
+/// finite bound here, a half-open connection (laptop sleep/resume, dropped
+/// Wi-Fi) parks the calling thread *forever* — the probe UI spins endlessly
+/// and the thread never frees. The command layer offloads these calls onto
+/// the blocking pool (`crate::commands::run_blocking`), so the bound protects
+/// a blocking-pool thread rather than a tokio worker; either way an unbounded
+/// call is a resource leak — see the overnight-freeze investigation.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Build the blocking HTTP client with bounded timeouts. Extracted as a seam
+/// so the timeout wiring is regression-tested against a never-responding
+/// server (`github_client_request_times_out_when_server_never_responds`).
+fn build_http_client(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+}
+
 /// A lightweight GitHub API client.
 pub struct GitHubClient {
     client: Client,
@@ -586,8 +611,7 @@ impl GitHubClient {
     /// Create a new client, resolving the token from environment or gh config.
     pub fn new() -> Result<Self, GitHubError> {
         let token = resolve_token()?;
-        let client = Client::builder()
-            .build()
+        let client = build_http_client(HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT)
             .map_err(GitHubError::Http)?;
         Ok(Self { client, token })
     }
@@ -1087,6 +1111,60 @@ pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for the overnight-freeze bug: a GitHub probe against a
+    /// server that accepts the TCP connection but never sends a response (a
+    /// half-open connection after laptop sleep / dropped Wi-Fi) must *error
+    /// out*, not hang forever. A hung blocking request parks a Tauri tokio
+    /// worker permanently; enough of them starve the pool and every async
+    /// command (agent keystrokes, other probes) stops responding while the
+    /// UI stays alive.
+    ///
+    /// The guard thread + `recv_timeout` turns a *hang* into a test
+    /// *failure*: without the client's `.timeout(...)` the `send()` never
+    /// returns, `recv_timeout` elapses, and we panic with a clear message
+    /// instead of wedging CI.
+    #[test]
+    fn github_client_request_times_out_when_server_never_responds() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Acceptor: accept the connection and hold it open without ever
+        // writing a response, so only the request timeout can end the call.
+        thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        // Short timeouts keep the test fast; this exercises the same builder
+        // wiring `GitHubClient::new` uses.
+        let client = build_http_client(Duration::from_secs(5), Duration::from_secs(1))
+            .expect("build client");
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = client.get(format!("http://{addr}/")).send();
+            let _ = tx.send(result.is_err());
+        });
+
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(true) => { /* request timed out and returned Err — correct */ }
+            Ok(false) => panic!("request unexpectedly succeeded against a silent server"),
+            Err(_) => panic!(
+                "client.send() did not return within 10s against a never-responding \
+                 server — the HTTP client has no request timeout, so a stalled probe \
+                 would park a tokio worker forever (worker-starvation freeze)"
+            ),
+        }
+    }
 
     #[test]
     fn test_parse_owner_repo_https() {

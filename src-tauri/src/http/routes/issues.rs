@@ -9,7 +9,11 @@ pub async fn list(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
 ) {
-    match crate::commands::pr::get_repo_issues(mesh_id) {
+    // Await the async command wrapper (not the `*_blocking` core): this route
+    // runs inside `tauri::async_runtime::spawn` (http/mod.rs), so calling the
+    // blocking core directly would park a Tauri worker. The wrapper offloads to
+    // the blocking pool via `run_blocking`.
+    match crate::commands::pr::get_repo_issues(mesh_id).await {
         Ok(issues) => {
             let body = serde_json::to_string(&issues).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;

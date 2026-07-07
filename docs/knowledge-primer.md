@@ -30,6 +30,9 @@ Anthropic and Minimax use `cwrap` spawned via `cmd.exe /c` — **not** direct. A
 ### Database Pattern
 Use `_inner` helper functions that accept `&Connection` to avoid mutex deadlocks. Public functions lock once and pass the connection through. See `src-tauri/src/db/mod.rs`.
 
+### Command Threading (blocking work must not touch the async worker pool)
+A `#[command]` on an `async fn` **and** `#[command(async)]` on a sync `fn` both run on Tauri's bounded tokio worker pool (≈ CPU cores). Only a plain sync `#[command] fn` runs off it. So a command that does a **blocking network call** (`reqwest::blocking`, `git fetch`/`git pull` shell-out) or slow libgit2 walk on the async runtime **parks a worker for the whole duration**; enough of them stuck at once starves the pool and every other async command (agent keystrokes, probes) stops being polled while the UI stays alive — the class of bug behind the overnight-freeze (issue: see the reqwest-timeout + spawn-blocking fixes in `commands/pr.rs`, `commands/github.rs`, `services/github.rs`). Convention: give each such command a **plain-sync core (`*_blocking`)** and a thin `#[command] async fn` wrapper that offloads it via `crate::commands::run_blocking(label, || core(..))` (which threads it through `tauri::async_runtime::spawn_blocking`). The mobile HTTP routes (`http/routes/*`) are **not** a separate pool — `http/mod.rs` spawns each connection on the same `tauri::async_runtime`, so a route that calls a `*_blocking` core directly still parks a worker; routes are `async fn`, so they must **`.await` the async command wrapper** (e.g. `get_repo_issues(id).await`), letting it offload. Only reach for a `*_blocking` core from a genuinely synchronous context (e.g. `check_gh_auth_cached`, itself run inside `run_blocking`). Also give any blocking network client a finite `.timeout(..)` (`GitHubClient` uses `build_http_client`) so a half-open connection can't hang forever.
+
 ### Shared Rust↔TS Types (wire-shape source of truth)
 Wire types that cross the Tauri `invoke` boundary **or** the mobile HTTP server are generated from Rust with [`ts-rs`](https://github.com/Aleph-Alpha/ts-rs), not hand-declared in TS. The Rust struct is the single source of truth (issue #359).
 
@@ -47,6 +50,7 @@ Wire types that cross the Tauri `invoke` boundary **or** the mobile HTTP server 
 - ❌ Pass Linux paths (e.g. `/home/user/`) to non-WSL APIs — causes "file not found"
 - ❌ Spawn cwrap directly without `cmd.exe /c` on Windows — ConPTY breaks
 - ❌ Lock the DB mutex in nested calls — causes deadlocks
+- ❌ Do blocking network / git-shell-out / slow-libgit2 work directly on an `async fn` (or `#[command(async)]`) command — it parks a tokio worker and, at scale, starves the pool (UI stays alive, keystrokes + probes hang). Use the `*_blocking` sync-core + `run_blocking` wrapper; see *Command Threading*
 - ❌ Hand-declare a TS interface for a Rust wire type, or hand-edit a file in `src/types/generated/` — derive `TS` on the Rust struct and import the generated type instead (issue #359)
 - ❌ Ship `<a target="_blank">` for an external URL — Tauri 2's WebView is not a browser, the click is silently dropped without the `core:webview:allow-create-webview-window` capability (which we don't grant). Keep the `href`/`target`/`rel` and route the `onClick` through `openUrl()` from `@tauri-apps/plugin-opener` (e.g. `src/components/SessionView/GridNodeHeader.tsx:145`). The right-click "Open in browser" path still works, which makes the bug look like a click-handler issue — it isn't.
 

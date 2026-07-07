@@ -340,6 +340,18 @@ pub struct GitSyncResult {
 /// here to recover the pre-#274 latency if user feedback warrants.
 #[command]
 pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
+    // `do_sync` shells out to `git fetch`/`git pull` (a network round-trip
+    // with no client-side timeout) behind a blocking per-Mesh mutex — that
+    // must run on the blocking pool, not a Tauri async worker, or a stalled
+    // fetch parks the worker (see the overnight-freeze investigation and
+    // [`crate::commands::run_blocking`]).
+    crate::commands::run_blocking("git_sync", move || git_sync_blocking(path)).await
+}
+
+/// Sync core for [`git_sync`]. Plain fn so the async command can offload it to
+/// the blocking pool; also keeps the git_tests call shape (`.await` on the
+/// command) intact.
+fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
     let host_path = to_host_path(&path);
 
     // Resolve the remote the same way `git fetch` (no args) used to:
@@ -627,20 +639,32 @@ pub struct MeshGitStatic {
 /// `MeshPropertiesTab.tsx` on a user-triggered re-check — both want a
 /// fresh value, not a 30s-stale snapshot.
 ///
-/// `#[command(async)]` (not bare `#[command]`) dispatches the whole
-/// call to a worker thread: the `check_gh_auth` delegation does a
-/// blocking HTTPS GET to `https://api.github.com/user` (~100–500 ms),
-/// and we don't want that round-trip blocking the main thread (which
-/// would freeze the UI and stall every other IPC — see the trio's
-/// doc-comment at `check_gh_auth` for the same rationale).
+/// Offloaded to the blocking pool via `run_blocking`: the
+/// `check_gh_auth` delegation does a blocking HTTPS GET to
+/// `https://api.github.com/user` (bounded by the client request
+/// timeout), and this command fires on every sidebar mesh mount —
+/// running it on a Tauri async worker would park that worker for the
+/// call's duration and, across several simultaneous mounts, starve the
+/// pool (see *Command Threading* in `docs/knowledge-primer.md`). The
+/// sync core `get_mesh_git_static_blocking` stays directly callable
+/// (the cache-behaviour tests exercise it without a runtime).
 ///
 /// Never returns an error: a non-repo path yields `is_git_repo = false`
 /// with the auth check still attempted (a non-git directory can still
 /// have `gh` configured) and `default_branch = "main"`. That matches
 /// the hook's prior short-circuit (`if (!repoOk) return;`) and keeps the
 /// UI contract identical.
-#[command(async)]
-pub fn get_mesh_git_static(mesh_path: String) -> Result<MeshGitStatic, String> {
+#[command]
+pub async fn get_mesh_git_static(mesh_path: String) -> Result<MeshGitStatic, String> {
+    crate::commands::run_blocking("get_mesh_git_static", move || {
+        get_mesh_git_static_blocking(mesh_path)
+    })
+    .await
+}
+
+/// Sync core for [`get_mesh_git_static`] — see its doc for the offload
+/// rationale.
+pub(crate) fn get_mesh_git_static_blocking(mesh_path: String) -> Result<MeshGitStatic, String> {
     // Open once and reuse the handle for both `is_git_repo` and
     // `default_branch` (#431 — eliminates the pre-refactor double-open).
     let repo = git2::Repository::open(&mesh_path).ok();
@@ -703,7 +727,7 @@ fn check_gh_auth_cached() -> bool {
     let now = Instant::now();
     let mut guard = cell.lock().expect("gh-auth cache mutex poisoned");
     if now.duration_since(guard.0) >= GH_AUTH_CACHE_TTL {
-        guard.1 = crate::commands::github::check_gh_auth();
+        guard.1 = crate::commands::github::check_gh_auth_blocking();
         guard.0 = now;
         GH_AUTH_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     }
