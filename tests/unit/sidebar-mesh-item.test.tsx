@@ -66,6 +66,7 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     onSelectProvider: vi.fn(),
     onOpenFilesProbe: vi.fn(),
     onOpenPropertiesProbe: vi.fn(),
+    onOpenWorktreesProbe: vi.fn(),
     // Issue #378 — the right-click "GitHub Issues" / "Archive" entries route
     // through the Probe Panel via the new probe-tab handlers. The legacy
     // `onOpenGitHubIssues` / `onOpenSessionBrowser` props are gone; the
@@ -218,9 +219,12 @@ describe('MeshItem', () => {
     expect(props.onOpenPropertiesProbe).toHaveBeenCalledWith(3);
   });
 
-  it('routes the drift `!` badge to the Probe Panel (issue #375)', async () => {
-    // Force the drift health snapshot so the badge renders, then click
-    // it and assert the new probe-routing handler fires.
+  it('routes the drift `!` badge to the Worktree Manager probe (issue #767)', async () => {
+    // Issue #767 — the badge previously opened the ⚙️ Mesh Properties
+    // tab (issue #375), but the recovery actions (Restore/Free the
+    // hostage branch, prune remote-tracking refs) live on the 🌳
+    // Worktree Manager tab. The right-click "Properties" item still
+    // routes to ⚙️; only the badge moves.
     vi.mocked(invoke).mockImplementation((cmd: string) =>
       cmd === 'get_mesh_health'
         ? Promise.resolve({
@@ -238,7 +242,34 @@ describe('MeshItem', () => {
     const { props } = renderMeshItem();
     const badge = await screen.findByLabelText('Mesh health issue');
     await userEvent.click(badge);
-    expect(props.onOpenPropertiesProbe).toHaveBeenCalledWith(3);
+    expect(props.onOpenWorktreesProbe).toHaveBeenCalledWith(3);
+  });
+
+  // Companion to the drift case above: the badge's predicate is an OR
+  // (`is_drifted || base_branch_holder !== null`). Pre-#767 both branches
+  // routed to Properties (a dead-end for the hostage case), so this gap
+  // didn't matter; post-#767 they share a destination, but a regression
+  // that breaks rendering when only the hostage branch is set would now
+  // slip past CI. Lock both halves of the OR.
+  it('routes the hostage-branch `!` badge to the Worktree Manager probe (issue #767)', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'get_mesh_health'
+        ? Promise.resolve({
+            is_dirty: false,
+            is_drifted: false,
+            unpushed_ahead: 0,
+            base_branch_holder: { path: '/tmp/other-wt', name: 'other-wt', is_active: true },
+            local_base_branch: 'main',
+            current_branch: 'main',
+            current_short_sha: 'abc1234',
+            authenticated: false,
+          })
+        : Promise.resolve({}),
+    );
+    const { props } = renderMeshItem();
+    const badge = await screen.findByLabelText('Mesh health issue');
+    await userEvent.click(badge);
+    expect(props.onOpenWorktreesProbe).toHaveBeenCalledWith(3);
   });
 
   it('renders a sync button in the header to the left of the Add Node form', async () => {
