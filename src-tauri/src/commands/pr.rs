@@ -188,8 +188,15 @@ pub struct PrFileEntry {
 /// resolving one), with a `warn!` capturing the reason. The modal degrades
 /// gracefully — see [`resolve_github_owner_repo`] for the error wording the
 /// sibling spawn endpoint surfaces directly.
-#[command(async)]
-pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
+#[command]
+pub async fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
+    crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id)).await
+}
+
+/// Sync core for [`get_repo_issues`]. Kept as a plain fn so the mobile HTTP
+/// route (`http::routes::issues`) can call it directly; the Tauri command
+/// wraps it in `spawn_blocking` (see [`crate::commands::run_blocking`]).
+pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
 
@@ -233,8 +240,14 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
 /// the mesh has no GitHub origin, so the panel renders an empty state rather
 /// than an error. Mergeability is fetched separately per PR — see
 /// [`get_pr_mergeability`] — because the list endpoint omits it.
-#[command(async)]
-pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+#[command]
+pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+    crate::commands::run_blocking("get_repo_pulls", move || get_repo_pulls_blocking(mesh_id, state)).await
+}
+
+/// Sync core for [`get_repo_pulls`] — see [`get_repo_issues_blocking`] for the
+/// split rationale.
+pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
     // Only ever forward a known filter to GitHub; anything unexpected falls
     // back to "open" rather than letting an arbitrary string reach the API.
     let state = if state == "closed" { "closed" } else { "open" };
@@ -269,8 +282,16 @@ pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullReque
 /// Get a single PR's mergeability for a mesh's repo. The panel calls this once
 /// per open PR after the list loads. `mergeable` is `null`/`None` while GitHub
 /// computes the merge — surfaced as-is so the UI can show a "checking" state.
-#[command(async)]
-pub fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
+#[command]
+pub async fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
+    crate::commands::run_blocking("get_pr_mergeability", move || {
+        get_pr_mergeability_blocking(mesh_id, pr_number)
+    })
+    .await
+}
+
+/// Sync core for [`get_pr_mergeability`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_pr_mergeability_blocking(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
@@ -306,8 +327,19 @@ pub fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeabilit
 /// probe leaves the row in 'Checking…' rather than falsely claiming
 /// conflicts; the next list reload retries"`). The next list reload retries
 /// from scratch, and a successful retry overwrites the error entry.
-#[command(async)]
-pub fn get_prs_mergeability(
+#[command]
+pub async fn get_prs_mergeability(
+    mesh_id: i64,
+    pr_numbers: Vec<i64>,
+) -> Result<Vec<PrMergeabilityEntry>, String> {
+    crate::commands::run_blocking("get_prs_mergeability", move || {
+        get_prs_mergeability_blocking(mesh_id, pr_numbers)
+    })
+    .await
+}
+
+/// Sync core for [`get_prs_mergeability`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_prs_mergeability_blocking(
     mesh_id: i64,
     pr_numbers: Vec<i64>,
 ) -> Result<Vec<PrMergeabilityEntry>, String> {
@@ -405,8 +437,13 @@ where
 /// colour +/−/context rows in place. Mirrors the other PR commands:
 /// resolves owner/repo via the mesh's `origin` remote, hits the GitHub
 /// REST API, and forwards the HTTP error verbatim.
-#[command(async)]
-pub fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+#[command]
+pub async fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+    crate::commands::run_blocking("get_pr_files", move || get_pr_files_blocking(mesh_id, pr_number)).await
+}
+
+/// Sync core for [`get_pr_files`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
@@ -426,8 +463,17 @@ pub fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, St
 }
 
 /// Create a PR for the node
-#[command(async)]
-pub fn create_pr(
+#[command]
+pub async fn create_pr(
+    session_id: i64,
+    title: String,
+    body: String,
+) -> Result<String, String> {
+    crate::commands::run_blocking("create_pr", move || create_pr_blocking(session_id, title, body)).await
+}
+
+/// Sync core for [`create_pr`] — see [`get_repo_issues_blocking`].
+pub(crate) fn create_pr_blocking(
     session_id: i64,
     title: String,
     body: String,
@@ -452,8 +498,21 @@ pub fn create_pr(
 
 /// Create a PR directly from a mesh directory path (no node required).
 /// Detects the current branch via git2, then creates a PR targeting `base_branch`.
-#[command(async)]
-pub fn create_pr_for_mesh(
+#[command]
+pub async fn create_pr_for_mesh(
+    mesh_path: String,
+    title: String,
+    body: String,
+    base_branch: String,
+) -> Result<String, String> {
+    crate::commands::run_blocking("create_pr_for_mesh", move || {
+        create_pr_for_mesh_blocking(mesh_path, title, body, base_branch)
+    })
+    .await
+}
+
+/// Sync core for [`create_pr_for_mesh`] — see [`get_repo_issues_blocking`].
+pub(crate) fn create_pr_for_mesh_blocking(
     mesh_path: String,
     title: String,
     body: String,
@@ -475,8 +534,13 @@ pub fn create_pr_for_mesh(
 
 /// Merge a PR (squash + delete branch).
 /// Accepts a full GitHub PR URL like `https://github.com/owner/repo/pull/123`.
-#[command(async)]
-pub fn merge_pr(pr_url: String) -> Result<String, String> {
+#[command]
+pub async fn merge_pr(pr_url: String) -> Result<String, String> {
+    crate::commands::run_blocking("merge_pr", move || merge_pr_blocking(pr_url)).await
+}
+
+/// Sync core for [`merge_pr`] — see [`get_repo_issues_blocking`].
+pub(crate) fn merge_pr_blocking(pr_url: String) -> Result<String, String> {
     let (owner, repo, pr_number) = parse_pr_url(&pr_url)
         .ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
 
@@ -521,8 +585,13 @@ pub struct OpenPr {
 ///   - GitHub has no open PR for that branch (the common case)
 ///
 /// Returns `Err(_)` only for true internal failures (DB lookup blows up, etc.).
-#[command(async)]
-pub fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
+#[command]
+pub async fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
+    crate::commands::run_blocking("get_open_pr_for_node", move || get_open_pr_for_node_blocking(node_id)).await
+}
+
+/// Sync core for [`get_open_pr_for_node`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_open_pr_for_node_blocking(node_id: i64) -> Result<Option<OpenPr>, String> {
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| e.to_string())?;
 

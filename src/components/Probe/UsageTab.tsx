@@ -160,8 +160,9 @@ export function UsageTab() {
       >
         {rows.length === 0 ? (
           <div className="text-center py-8 text-text-muted text-xs">
-            No usage meters available. Enable a provider in Settings to see
-            its quota or balance here.
+            No usage meters available. Add credentials for a provider in
+            Settings (API key for MiniMax/Kimi/OpenRouter, or log in to
+            Claude/Codex/Antigravity's CLI) to see its quota or balance here.
           </div>
         ) : (
           rows.map(({ meter, account }) => (

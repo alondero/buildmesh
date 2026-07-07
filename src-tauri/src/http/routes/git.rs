@@ -109,7 +109,9 @@ pub async fn diff(
 /// `GET /api/gh/auth` — whether `gh auth status` is happy on this host.
 /// Used to gate the mobile "Create PR" button.
 pub async fn gh_auth(lines: &mut tokio::io::BufStream<MaybeTls>) {
-    let ok = crate::commands::github::check_gh_auth();
+    // Await the async wrapper so the blocking auth HTTPS GET runs on the
+    // blocking pool, not this route's Tauri async-runtime worker.
+    let ok = crate::commands::github::check_gh_auth().await;
     let body = serde_json::to_string(&serde_json::json!({ "ok": ok }))
         .unwrap_or_else(|_| "{}".to_string());
     let _ = request::write_json(lines, "200 OK", &body).await;
