@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { DndContext } from '@dnd-kit/core';
@@ -8,6 +8,19 @@ import { MeshItem } from '../../src/components/Sidebar/MeshItem';
 import type { Mesh } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
 import type { SpawnOption } from '../../src/lib/groups';
+
+// `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS. Mock it
+// at file scope so the new "View on GitHub" click test (and any
+// future tests that need to assert the click route) can spy on the
+// call. `vi.hoisted` so the mock factory can capture the spy ref
+// before the `vi.mock` call hoists the module replacement — same
+// pattern as git-issues-tab.test.tsx:33-38.
+const { openUrlMock } = vi.hoisted(() => ({
+  openUrlMock: vi.fn<[], Promise<void>>().mockResolvedValue(undefined),
+}));
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: openUrlMock,
+}));
 
 const MESH: Mesh = {
   id: 3,
@@ -78,6 +91,36 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
 }
 
 describe('MeshItem', () => {
+  beforeEach(() => {
+    // Reset the file-scoped openUrl mock between tests so a per-test
+    // `mockImplementationOnce` from a sibling doesn't leak into the
+    // next "View on GitHub" click test (and silently mask an
+    // assertion failure). Mirrors git-issues-tab.test.tsx:124-126.
+    openUrlMock.mockReset();
+    openUrlMock.mockResolvedValue(undefined);
+    // Reset the global `invoke` mock implementation so per-test
+    // `mockImplementation` calls (e.g. the URL-returning mock the
+    // "View on GitHub" tests install) don't leak into the next
+    // sibling — without this, the pre-existing keyboard-nav tests
+    // (which assume 5 menuitems) see a 6-item menu because the
+    // previous test's URL mock is still active. `mockReset` wipes
+    // the implementation AND call history, so we re-apply the
+    // default `Promise.resolve({})` afterwards. `vi.clearAllMocks`
+    // in the global setup only clears history, not implementation.
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockImplementation((_cmd: string) => Promise.resolve({}));
+  });
+
+  // RTL doesn't auto-unmount in this vitest setup, so the previous
+  // render's DOM (with its own context menu + keydown listener) would
+  // still be in the document — `getAllByRole('[role="menuitem"]')`
+  // then returns 2× the items and ArrowDown's focus lands on the
+  // wrong element. The PR-tab test file does the same. Mirrors
+  // git-pull-requests-tab.test.tsx:181-183.
+  afterEach(() => {
+    cleanup();
+  });
+
   it('renders the mesh name and a drag handle', () => {
     renderMeshItem();
     expect(screen.getByText('my-mesh')).toBeTruthy();
@@ -295,6 +338,10 @@ describe('MeshItem', () => {
     }
 
     it('marks the menu container with role="menu" and each item with role="menuitem"', () => {
+      // The mock returns no `get_github_url_for_mesh` resolution, so
+      // the new "View on GitHub" item is conditionally hidden — the
+      // menu shape stays at the pre-#758 5-item form. A follow-up
+      // test pins the 6-item form when the URL is available.
       renderMeshItem();
       openContextMenu();
       const menu = document.querySelector('[role="menu"]')!;
@@ -308,6 +355,82 @@ describe('MeshItem', () => {
       expect(items[2].textContent).toMatch(/Sync Latest/);
       expect(items[3].textContent).toMatch(/Archive/);
       expect(items[4].textContent).toMatch(/GitHub Issues/);
+    });
+
+    it('adds a "View on GitHub" item as the 6th menuitem when the mesh has a GitHub origin', async () => {
+      // Wire `get_github_url_for_mesh` to resolve a URL so the
+      // conditional render in MeshItem shows the new item. The test
+      // also re-asserts the base 5 items in render order so a future
+      // refactor that shuffles the menu doesn't break this contract.
+      vi.mocked(invoke).mockImplementation((cmd: string) => {
+        if (cmd === 'get_github_url_for_mesh') {
+          return Promise.resolve('https://github.com/acme/my-mesh');
+        }
+        return Promise.resolve({});
+      });
+      renderMeshItem();
+      openContextMenu();
+
+      // Wait for the hook's IPC to resolve and the conditional item
+      // to mount — `findByText` is the async query that retries.
+      await screen.findByText('View on GitHub');
+      const items = document.querySelectorAll('[role="menuitem"]');
+      expect(items).toHaveLength(6);
+      expect(items[0].textContent).toMatch(/Properties/);
+      expect(items[1].textContent).toMatch(/File Explorer/);
+      expect(items[2].textContent).toMatch(/Sync Latest/);
+      expect(items[3].textContent).toMatch(/Archive/);
+      expect(items[4].textContent).toMatch(/GitHub Issues/);
+      expect(items[5].textContent).toMatch(/View on GitHub/);
+    });
+
+    it('hides "View on GitHub" when the mesh has no GitHub origin (returns null)', async () => {
+      // The default `Promise.resolve({})` for unhandled commands
+      // satisfies the contract "no URL" — the hook collapses to
+      // `url === null` and the conditional render drops the item.
+      // Pin the explicit-null branch too: a future refactor that
+      // changes the IPC to throw on non-GitHub meshes would shift
+      // the test to the error branch and would no longer match
+      // `Promise.resolve(null)` here.
+      vi.mocked(invoke).mockImplementation((cmd: string) => {
+        if (cmd === 'get_github_url_for_mesh') return Promise.resolve(null);
+        return Promise.resolve({});
+      });
+      renderMeshItem();
+      openContextMenu();
+
+      // Give the IPC a tick to resolve, then assert the item is
+      // absent. `queryByText` returns null (not throws) for absent
+      // elements, so a small wait + query is enough.
+      await waitFor(() => {
+        expect(screen.queryByText('View on GitHub')).toBeNull();
+      });
+      const items = document.querySelectorAll('[role="menuitem"]');
+      expect(items).toHaveLength(5);
+    });
+
+    it('clicking "View on GitHub" opens the resolved URL via openUrl', async () => {
+      // The click must go through `openUrl` (Tauri 2's `target="_blank"`
+      // is silently dropped without an explicit capability we don't
+      // grant). The file-scoped `openUrlMock` (set up at the top of
+      // this file via `vi.hoisted` + `vi.mock('@tauri-apps/plugin-opener')`)
+      // captures the call — same pattern as git-issues-tab.test.tsx.
+      vi.mocked(invoke).mockImplementation((cmd: string) => {
+        if (cmd === 'get_github_url_for_mesh') {
+          return Promise.resolve('https://github.com/acme/my-mesh');
+        }
+        return Promise.resolve({});
+      });
+      renderMeshItem();
+      openContextMenu();
+
+      const item = await screen.findByText('View on GitHub');
+      await userEvent.click(item);
+
+      // Pin the full URL — the menu must pass the bare repo URL
+      // (NOT `{base}/issues` — that's the Issues probe's destination).
+      // The mesh context menu is the repo-home affordance.
+      expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/my-mesh');
     });
 
     it('labels the menu with the mesh name via aria-labelledby', () => {

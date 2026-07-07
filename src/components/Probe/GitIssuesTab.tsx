@@ -67,9 +67,11 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
+import { SafeLink } from '../shared/SafeLink';
 
 /**
  * Build the human-readable tooltip text for the blocked-by flag.
@@ -98,7 +100,7 @@ function buildBlockedByTooltip(
 }
 
 export function GitIssuesTab() {
-  const { activeMeshId } = useProbeContext();
+  const { activeMeshId, activeMeshPath } = useProbeContext();
   // `getDefaultProvider` is mesh-scoped — the only call that needs the
   // meshId directly, since it resolves the per-mesh > app-wide > default
   // precedence chain server-side.
@@ -139,6 +141,14 @@ export function GitIssuesTab() {
     () => new Map(issues.map(i => [i.number, i])),
     [issues],
   );
+
+  // "View on GitHub" header button — resolves the active mesh's
+  // `origin` to a `https://github.com/{owner}/{repo}/issues` URL.
+  // `null` for non-GitHub meshes falls through to SafeLink's inert
+  // `<span>` (no link, no dead click). The hook's dual-key cache
+  // dedupes the IPC across mount + mesh switches within the session.
+  const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
+  const issuesListUrl = githubUrl ? `${githubUrl}/issues` : '';
 
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
@@ -253,6 +263,23 @@ export function GitIssuesTab() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Per-tab header row — mirrors the PRs tab's header so the dock
+          visually agrees across the two GitHub tabs. The shared
+          <ProbePanel> header above the body shows the mesh name, so we
+          don't repeat it here; this row is just the "View on GitHub"
+          list-link affordance. `SafeLink` falls back to a non-link
+          <span> when the URL is empty (non-GitHub mesh), so the layout
+          stays stable whether or not the URL has resolved. */}
+      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-end gap-2">
+        <SafeLink
+          url={issuesListUrl}
+          ariaLabel="Open this repo's issues list on GitHub"
+          title="Open this repo's issues list on GitHub"
+          className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+        >
+          View on GitHub ↗
+        </SafeLink>
+      </div>
       <div className="flex-1 overflow-y-auto p-2">
         {loading ? (
           <div className="flex flex-col items-center justify-center py-8 gap-3">

@@ -1,6 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getMeshColor } from '../../lib/meshColors';
@@ -8,6 +9,7 @@ import { gitSync } from '../../lib/tauri';
 import type { MeshHealth } from '../../lib/tauri';
 import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
+import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
 import type { SpawnOption } from '../../lib/groups';
@@ -112,8 +114,22 @@ export function MeshItem({
   const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const triggerRef = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
-  // Indices of the five context-menu items (mirrors render order below).
-  const MENU_ITEM_COUNT = 5;
+  // View on GitHub — only shown when the mesh's `origin` resolves to a
+  // github.com URL. The hook fires the IPC on mount so by the time the
+  // user right-clicks the value is in the cache; non-GitHub meshes get
+  // `url === null` and the menu item is simply not rendered.
+  const { url: githubUrl } = useMeshGitHubUrl(mesh.id, mesh.path);
+  // Render-time item count: 5 always-present items + the conditional
+  // 6th when the mesh has a GitHub origin. Keyboard-nav handlers and
+  // the `End` jump read this so a non-GitHub mesh's menu correctly
+  // wraps at 5 and a GitHub mesh's wraps at 6.
+  const itemCount = 5 + (githubUrl ? 1 : 0);
+  // Mirror `itemCount` into a ref so the keydown handler reads the
+  // LIVE count on every keystroke (the handler's effect deps are
+  // `[contextMenu]`, not `itemCount`, so without this the closure
+  // would freeze at the count that was current when the menu opened).
+  const itemCountRef = useRef(itemCount);
+  itemCountRef.current = itemCount;
   const { branchStatus, refresh: refreshBranchStatus } = useGitBranchStatus(mesh.path);
   const { health } = useMeshHealth(mesh.id, mesh.path);
   const behind = branchStatus?.behind ?? 0;
@@ -183,7 +199,7 @@ export function MeshItem({
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         setActiveIndex((i) => {
-          const next = (i + 1) % MENU_ITEM_COUNT;
+          const next = (i + 1) % itemCountRef.current;
           menuItemRefs.current[next]?.focus();
           return next;
         });
@@ -192,7 +208,7 @@ export function MeshItem({
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         setActiveIndex((i) => {
-          const next = (i - 1 + MENU_ITEM_COUNT) % MENU_ITEM_COUNT;
+          const next = (i - 1 + itemCountRef.current) % itemCountRef.current;
           menuItemRefs.current[next]?.focus();
           return next;
         });
@@ -206,8 +222,9 @@ export function MeshItem({
       }
       if (e.key === 'End') {
         e.preventDefault();
-        setActiveIndex(MENU_ITEM_COUNT - 1);
-        menuItemRefs.current[MENU_ITEM_COUNT - 1]?.focus();
+        const last = itemCountRef.current - 1;
+        setActiveIndex(last);
+        menuItemRefs.current[last]?.focus();
         return;
       }
     };
@@ -441,6 +458,34 @@ export function MeshItem({
             </svg>
             GitHub Issues
           </button>
+          {/* "View on GitHub" — only rendered when the mesh has a
+              github.com origin (conditional render so non-GitHub meshes
+              keep their 5-item menu and the keyboard-nav count in
+              `itemCount` stays accurate). The arrow-out-of-a-box icon
+              matches the `↗` glyph used in the rest of the codebase
+              (SafeLink, GridNodeHeader's open-PR chip). The click goes
+              through `openUrl()` per the knowledge primer's anti-pattern
+              note (Tauri 2 silently drops `target="_blank"` without an
+              explicit capability we don't grant). */}
+          {githubUrl && (
+            <button
+              ref={(el) => { menuItemRefs.current[5] = el; }}
+              role="menuitem"
+              tabIndex={activeIndex === 5 ? 0 : -1}
+              onClick={() => {
+                closeContextMenu();
+                openUrl(githubUrl).catch(console.error);
+              }}
+              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                <polyline points="15 3 21 3 21 9"/>
+                <line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              View on GitHub
+            </button>
+          )}
         </div>
       )}
     </div>
