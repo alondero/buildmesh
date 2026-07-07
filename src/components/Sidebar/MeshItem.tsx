@@ -64,12 +64,19 @@ interface MeshItemProps {
   onOpenSessionHistoryProbe: (meshId: number) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
   /**
-   * Issue #375 — the right-click "Properties" item and the drift `!` badge
-   * both jump straight to the Probe Panel on the ⚙️ Mesh Properties tab.
-   * The handler is responsible for selecting the mesh (so `useProbeContext`
-   * resolves to the right row) before flipping the probe open.
+   * Issue #375 — the right-click "Properties" item jumps to the Probe
+   * Panel on the ⚙️ Mesh Properties tab. The handler is responsible for
+   * selecting the mesh (so `useProbeContext` resolves to the right row)
+   * before flipping the probe open.
    */
   onOpenPropertiesProbe: (meshId: number) => void;
+  /**
+   * Issue #767 — the drift `!` badge routes to the 🌳 Worktree Manager
+   * tab (where the HealthBlock + Restore/Free actions live), not to
+   * the ⚙️ Properties tab. The Properties tab is purely configuration
+   * and has no recovery controls.
+   */
+  onOpenWorktreesProbe: (meshId: number) => void;
 }
 
 export function MeshItem({
@@ -90,6 +97,7 @@ export function MeshItem({
   onOpenSessionHistoryProbe,
   getDefaultProvider,
   onOpenPropertiesProbe,
+  onOpenWorktreesProbe,
 }: MeshItemProps) {
   const {
     setNodeRef,
@@ -311,7 +319,7 @@ export function MeshItem({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                onOpenPropertiesProbe(mesh.id);
+                onOpenWorktreesProbe(mesh.id);
               }}
               title={buildDriftTooltip(health)}
               className="text-xs font-bold text-status-warning bg-status-warning/15 hover:bg-status-warning/30 rounded-md px-1.5 leading-[18px] transition-colors"

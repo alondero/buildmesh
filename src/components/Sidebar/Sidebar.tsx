@@ -73,13 +73,25 @@ export function Sidebar() {
   const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
   const handleToggleDropdown = (mesh: Mesh) => setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
 
-  // Issue #375 — the right-click "Properties" entry and the drift `!` badge
-  // both open the Probe Panel on the ⚙️ Mesh Properties tab. We select the
-  // mesh first so `useProbeContext` resolves to the right row, then flip the
-  // probe open.
+  // Issue #375 — the right-click "Properties" entry opens the Probe
+  // Panel on the ⚙️ Mesh Properties tab. We select the mesh first so
+  // `useProbeContext` resolves to the right row, then flip the probe open.
+  // Issue #767 split out the drift `!` badge (see handleOpenWorktreesProbe
+  // below) — the two intents ("edit config" vs "fix the drift") must
+  // not share a handler.
   const handleOpenPropertiesProbe = (meshId: number) => {
     selectMesh(meshId);
     openProbeTab('properties');
+  };
+
+  // Issue #767 — the drift `!` badge in the sidebar opens the Probe
+  // Panel on the 🌳 Worktree Manager tab, where the HealthBlock's
+  // Restore/Free actions live. The badge's intent is "your mesh is
+  // drifted and needs recovery"; the Properties tab has no such
+  // controls, so routing there (the pre-#767 behaviour) was a dead-end.
+  const handleOpenWorktreesProbe = (meshId: number) => {
+    selectMesh(meshId);
+    openProbeTab('worktrees');
   };
 
   // Issue #378 — the right-click "GitHub Issues" and "Archive" entries
@@ -200,6 +212,7 @@ export function Sidebar() {
                       onSelectProvider={handleSelectProvider}
                       onOpenFilesProbe={() => openProbeTab('files')}
                       onOpenPropertiesProbe={handleOpenPropertiesProbe}
+                      onOpenWorktreesProbe={handleOpenWorktreesProbe}
                       onOpenIssuesProbe={handleOpenIssuesProbe}
                       onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
                       meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id)}
