@@ -11,6 +11,7 @@ import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
+import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { arrowTargetIndex } from './lib/gridTraversal';
 import { toggleGridMaximize } from './lib/gridShortcuts';
@@ -40,6 +41,13 @@ const toggleMaximizeGuard = createShortcutGuard(300);
 // the modal twice within 300 ms; the `e.repeat` guard inside the handler
 // is the primary defense against OS autorepeat (held `?`).
 const cheatsheetGuard = createShortcutGuard(300);
+// Leading-edge throttle (DIFFERENT primitive from the guards above —
+// block-all vs first-press-passes-then-rate-limit) for the arrow-traversal
+// handler below. 200ms = ~5 moves/sec on a held key; 100ms snappier than the
+// 300ms cooldowns because navigation benefits from responsiveness, while
+// still comfortably catching the OS autorepeat flood (~30 Hz Windows,
+// ~15 Hz macOS).
+const arrowThrottle = createKeyRepeatThrottle(200);
 
 type ErrorToast = Toast;
 
@@ -230,6 +238,10 @@ function App() {
       // guard is a no-op when an agent terminal has focus — exactly what we
       // want.
       if (isTextInputFocused()) return;
+      // Throttle sits BELOW the focus guard: a held arrow inside a rename box
+      // must not consume the budget, or the user's next real traversal press
+      // (after they tab out of the input) would also be blocked.
+      if (!arrowThrottle()) return;
       const direction: ArrowDirection = action.slice('arrow-'.length) as ArrowDirection;
 
       // Phase 1: if a node is maximized, the first arrow press restores the
