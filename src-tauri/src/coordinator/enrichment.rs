@@ -94,7 +94,7 @@ fn scrub_tail(tail: TranscriptTail) -> TranscriptTail {
 ///
 /// Uses the **bounded** reader (issue #341): a digest only needs the last
 /// assistant message, so this parses just the tail bytes of the transcript
-/// rather than the whole file. For a `GET /nodes` poll over many cwrap nodes
+/// rather than the whole file. For a `GET /nodes` poll over many Claude Code nodes
 /// with long histories that turns N full-file parses into N bounded ones. The
 /// full-tail [`transcript_tail`] is reserved for the on-demand `/log` drill-in.
 pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {

@@ -2,7 +2,7 @@
 
 /**
  * Per-tier Claude model overrides for a Claude-compatible provider account
- * (issue #567 — restores the cwrap capability).
+ * (issue #567 — restores the Claude Code model-tier capability).
  *
  * Claude Code asks its backend for several model *aliases*: a primary, a cheap
  * "small/fast" model for background tasks (titles, etc.), and the Sonnet / Opus

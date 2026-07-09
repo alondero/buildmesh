@@ -131,8 +131,8 @@ pub fn wrap(
                 // can add hundreds of ms (modules, prompt frameworks) to *every*
                 // agent spawn. This shell only needs to relay the agent CLI's
                 // ANSI output through ConPTY — it never touches profile state,
-                // and the agent binary (cwrap/node/claude) is resolved from the
-                // process environment's PATH, not the profile.
+                // and the agent binary is resolved from the process
+                // environment's PATH, not the profile.
                 c.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encoded]);
                 c
             }
@@ -216,17 +216,17 @@ mod tests {
                     2. Buildmesh-wide default\n\
                     3. Anthropic (hardcoded fallback)";
         let args = vec!["--anthropic".to_string(), "--prefill".to_string(), body.to_string()];
-        let cmd_str = format_powershell_command("cwrap", &args);
+        let cmd_str = format_powershell_command("claude", &args);
 
         // Must start with the call operator so PowerShell treats it as command invocation.
         assert!(cmd_str.starts_with("& "), "command must use PowerShell call operator: {}", cmd_str);
 
         // The binary and every arg must be wrapped in single quotes. After the
-        // leading `& 'cwrap' `, there must be no bare newline outside of a quoted
+        // leading `& 'claude' `, there must be no bare newline outside of a quoted
         // string — i.e. every newline in the prefill stays inside the single-quoted
         // arg, not at the top level of the script.
         let after_call = cmd_str.strip_prefix("& ").unwrap();
-        assert!(after_call.starts_with("'cwrap'"), "binary must be single-quoted: {}", cmd_str);
+        assert!(after_call.starts_with("'claude'"), "binary must be single-quoted: {}", cmd_str);
 
         // The prefill body's newlines must appear inside a single-quoted region —
         // i.e. between an odd-numbered ' and the next '. We verify by checking
@@ -246,7 +246,7 @@ mod tests {
     #[test]
     fn format_powershell_command_escapes_embedded_single_quotes() {
         let args = vec!["--prefill".to_string(), "it's a test".to_string()];
-        let cmd_str = format_powershell_command("cwrap", &args);
+        let cmd_str = format_powershell_command("claude", &args);
         assert!(cmd_str.contains("'it''s a test'"), "expected doubled-quote escaping, got: {}", cmd_str);
     }
 }

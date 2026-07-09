@@ -12,7 +12,7 @@
  *   • Display name (auto-save on blur, syncs the meshStore)
  *   • Directory (read-only — derived from the mesh row)
  *   • AI context portability (delegated to `<AiContextSection>`)
- *   • Default cwrap model
+ *   • Default Claude Code model
  *   • Effort level (low/medium/high/xhigh/max)
  *   • Default provider
  *   • Project preset (auto-fill build / run)
@@ -445,7 +445,7 @@ sandbox: config.sandbox,
 
           <Field
             label="Model"
-            hint="cwrap only"
+            hint="Claude Code only"
             htmlFor="mesh-prop-model"
           >
             <input
@@ -464,7 +464,7 @@ sandbox: config.sandbox,
 
           <Field
             label="Effort"
-            hint="cwrap only"
+            hint="Claude Code only"
             htmlFor="mesh-prop-effort"
           >
             <select
