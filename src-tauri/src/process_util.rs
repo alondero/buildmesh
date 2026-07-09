@@ -1,6 +1,7 @@
 //! Utility for spawning background processes without a visible console window on Windows.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -22,6 +23,81 @@ pub fn command_no_window(program: &str) -> Command {
     {
         cmd
     }
+}
+
+/// Run a `Command` to completion with a wall-clock timeout. If the child
+/// hasn't exited by `timeout`, it is killed and reaped, and the function
+/// returns an `Err`.
+///
+/// This exists for the issue #762 follow-up: `git fetch` / `git pull`
+/// shell-outs can wedge indefinitely on a half-open connection (laptop
+/// sleep/resume, dropped Wi-Fi). Even on the blocking pool (which has
+/// ~512 threads, so pool exhaustion is unlikely), a wedged subprocess
+/// still leaks a thread forever. The bound here is the resource-leak
+/// backstop — the request-side [`crate::services::github`] HTTP client
+/// also has its own `.timeout()` for the actual network round-trip, but
+/// a stuck `git fetch` shell-out bypasses that.
+///
+/// **Why polling instead of `tokio::time::timeout`:** the caller (e.g.
+/// [`crate::git::sync::do_sync`]) runs on the blocking pool under a
+/// per-Mesh mutex, NOT on a tokio worker, so async timeouts aren't
+/// available. Polling `try_wait` with a 100ms tick is precise enough for
+/// the minute-scale timeouts we use here (a 30s tolerance is well within
+/// the 100ms tick) and avoids pulling in an extra dependency.
+///
+/// **Pipe-buffer caveat:** the child must have its stdout/stderr piped
+/// (caller's responsibility — the helper pipes them automatically). If
+/// either pipe fills (~64KB on Linux) the child blocks on write and we
+/// never see it exit; polling kills it on deadline anyway, but the exit
+/// is from the timeout rather than the natural completion. `git fetch`
+/// / `git pull` output is well under the pipe limit so this is fine in
+/// practice.
+pub fn run_command_with_timeout(
+    mut cmd: Command,
+    op_name: &str,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn {op_name}: {e}"))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break, // exited — fall through to wait_with_output
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Kill the process tree on timeout, not just the direct
+                    // child. `git fetch` over HTTPS routinely spawns
+                    // `git-credential-manager` (or `ssh-askpass` over SSH)
+                    // as a separate process — `child.kill()` only signals
+                    // the immediate child, leaving the helper alive and
+                    // confusing the user's next spawn (ghost auth dialogs).
+                    // `kill_process_tree` walks the tree on Windows via
+                    // `taskkill /F /T`; on Unix it's a no-op because
+                    // closing the PTY master already `SIGHUP`s the
+                    // foreground process group.
+                    kill_process_tree(child.id());
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{op_name} timed out after {}s",
+                        timeout.as_secs()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(format!("{op_name} try_wait failed: {e}"));
+            }
+        }
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|e| format!("{op_name} wait_with_output failed: {e}"))
 }
 
 /// Forcefully terminate a process and all of its descendants.
@@ -208,5 +284,123 @@ impl Drop for JobHandle {
         unsafe {
             job_ffi::CloseHandle(self.handle as job_ffi::Handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression tests for [`run_command_with_timeout`] (issue #762).
+    //!
+    //! The pre-#762 shell-outs (`git fetch`, `git pull --ff-only`, `gh auth
+    //! token`) had no wall-clock bound — a wedged subprocess leaked a
+    //! blocking-pool thread indefinitely. The fix wraps each shell-out in
+    //! `run_command_with_timeout` which polls `try_wait` and `kill`s the
+    //! child on deadline. These tests guard the bound itself: a hang
+    //! becomes a deterministic `Err(_)` rather than a CI freeze.
+    //!
+    //! **Cross-platform:** the tests use the OS-native "sleep then exit"
+    //! helper (`timeout` on Windows, `sleep` on Unix) so they don't depend
+    //! on POSIX-only tools. Each test runs the helper with a short timeout
+    //! and asserts the `Err` arrives within (timeout + slack) so a
+    //! regression that turns the bound into a no-op (e.g. someone
+    //! accidentally removes the `kill()` call) fails the test instead of
+    //! hanging the test runner.
+
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A command that hangs for ~N seconds before exiting.
+    ///
+    /// On Windows, `ping -n N 127.0.0.1` sends one echo per second
+    /// (so `-n 30` takes ~29 seconds; we never wait the full duration
+    /// because the test's timeout fires first). On Unix, `sleep N` is
+    /// the obvious choice.
+    ///
+    /// `timeout /T /NOBREAK` was tried first but it exits immediately
+    /// on Windows when stdin isn't redirected from a console — the
+    /// "Input redirection is not supported" error short-circuits
+    /// before the timer starts. `ping` has no such constraint.
+    fn hang_cmd(secs: u64) -> Command {
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = command_no_window("ping");
+            // `-n N` issues N echo requests at 1-second intervals.
+            c.args(["-n", &secs.to_string(), "127.0.0.1"]);
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut c = command_no_window("sleep");
+            c.arg(secs.to_string());
+            c
+        }
+    }
+
+    #[test]
+    fn run_command_with_timeout_kills_long_running_child() {
+        // Spawn a child that would happily run for 30 seconds. The 1s
+        // timeout must fire and the helper must return Err. Without the
+        // bound, this test would hang the suite for ~30s.
+        let start = Instant::now();
+        let result = run_command_with_timeout(hang_cmd(30), "test hang", Duration::from_secs(1));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "expected timeout Err, got {result:?}");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("timed out") && msg.contains("test hang"),
+            "error must identify the operation and the timeout, got: {msg}"
+        );
+        // Bound verification: the kill fires within the deadline + a small
+        // slack (we sleep 100ms between polls). 2s is generous enough to
+        // absorb CI noise but tight enough that a "no bound" regression
+        // (e.g. someone replaces `kill()` with a no-op) fails this.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "expected kill within ~1s, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_returns_output_when_child_exits_early() {
+        // A child that exits before the deadline must produce a normal
+        // `Ok(Output)` — the helper is NOT a kill-on-everything wrapper,
+        // just a deadline guard.
+        #[cfg(not(target_os = "windows"))]
+        let cmd = {
+            let mut c = command_no_window("sleep");
+            c.arg("0");
+            c
+        };
+        #[cfg(target_os = "windows")]
+        let cmd = {
+            // `ping -n 1` takes ~1s; using `cmd /c exit 0` for a true
+            // instant exit (no console noise).
+            let mut c = command_no_window("cmd");
+            c.args(["/c", "exit", "0"]);
+            c
+        };
+        let result = run_command_with_timeout(cmd, "test quick exit", Duration::from_secs(5));
+        assert!(
+            result.is_ok(),
+            "early-exit child should return Ok, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_command_with_timeout_surfaces_spawn_failure() {
+        // A non-existent program must return Err immediately, NOT block on
+        // the timeout. This guards against a regression that wraps the
+        // timeout around the spawn too.
+        let cmd = command_no_window("this-binary-definitely-does-not-exist-1234567890");
+        let start = Instant::now();
+        let result = run_command_with_timeout(cmd, "spawn-fail test", Duration::from_secs(5));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "missing binary should be Err, got {result:?}");
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "spawn failure must short-circuit, took {elapsed:?}"
+        );
     }
 }

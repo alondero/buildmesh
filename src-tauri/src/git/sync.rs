@@ -17,7 +17,8 @@
 
 use crate::env::to_host_path;
 use crate::git::primitives;
-use crate::process_util::command_no_window;
+use crate::process_util::{command_no_window, run_command_with_timeout};
+use std::time::Duration;
 
 /// Outcome of a single `fetch_origin` invocation. The variants let the
 /// caller (spawn.rs) decide whether to surface a warning toast without
@@ -111,6 +112,17 @@ pub(crate) enum SyncOutcome {
     /// failure, or remote deleted between the has-remote check and
     /// the fetch). Carries stderr.
     FetchFailed { reason: String },
+    /// `git pull --ff-only` (Step 6) timed out — distinct from
+    /// [`FetchedButDiverged`] (pull RAN and was rejected) and from
+    /// [`FetchFailed`] (the FETCH step failed, no commits arrived).
+    /// A pull timeout means commits were fetched but the fast-forward
+    /// couldn't apply in time — usually a half-open connection on the
+    /// post-fetch socket. Carries the timeout error so the UI can
+    /// render a "stuck pull" toast without falsely reporting "fetched
+    /// N but diverged" (issue #762 review — pre-#762 the pull path
+    /// only had spawn-failure / non-zero-exit; the timeout made the
+    /// diverged variant misclassify a network hang).
+    PullTimedOut { new_commits: u32, reason: String },
     /// The path isn't a usable git repository. Unusual — a Mesh
     /// without a repo is a misconfiguration — but spawn / sync
     /// proceed anyway since the worker's behaviour on a non-repo
@@ -177,12 +189,13 @@ pub(crate) fn do_sync(
     host_path: &str,
     remote: &str,
     branch: Option<&str>,
+    timeout: Duration,
 ) -> SyncOutcome {
     // Steps 1-4: open + dirty-check + has-remote + `git fetch`. The
     // helper returns the same `SyncOutcome` variants we would have
     // returned inline, so the early return is a literal rename of the
     // old Step 1-4 ladder.
-    if let Err(outcome) = do_fetch_only(host_path, remote, branch) {
+    if let Err(outcome) = do_fetch_only(host_path, remote, branch, timeout) {
         return outcome;
     }
 
@@ -232,21 +245,29 @@ pub(crate) fn do_sync(
     // the load-bearing part of the issue-#213 fix: a user's global
     // `pull.rebase=true` would otherwise turn this into a rebase and
     // write conflict markers on a diverged history.
+    //
+    // **Timeout (issue #762):** `git pull` shares the half-open-connection
+    // risk with `git fetch` (Step 4). Same `FETCH_TIMEOUT` bound.
     tracing::info!(
         "do_sync: running git pull --ff-only --no-rebase ({} new commit{} behind)",
         new_commits,
         if new_commits == 1 { "" } else { "s" }
     );
-    let pull_output = match command_no_window("git")
+    let mut pull_builder = command_no_window("git");
+    pull_builder
         .args(["pull", "--ff-only", "--no-rebase"])
-        .current_dir(host_path)
-        .output()
-    {
+        .current_dir(host_path);
+    let pull_output = match run_command_with_timeout(pull_builder, "git pull", timeout) {
         Ok(o) => o,
         Err(e) => {
-            return SyncOutcome::FetchedButDiverged {
+            // Timeout / spawn-failure / wait-failure on the pull — distinct
+            // from `FetchedButDiverged` (pull ran and was rejected due to
+            // real local divergence). The `advanced_ref()` predicate must
+            // NOT fire here so the warm-pool doesn't see a phantom ref
+            // advance (issue #762 review).
+            return SyncOutcome::PullTimedOut {
                 new_commits,
-                reason: format!("git pull --ff-only failed to start: {}", e),
+                reason: e,
             };
         }
     };
@@ -294,6 +315,7 @@ pub(crate) fn do_fetch_only(
     host_path: &str,
     remote: &str,
     branch: Option<&str>,
+    timeout: Duration,
 ) -> Result<(), SyncOutcome> {
     // Step 1: open the repo. If the path isn't a git repo, the helper
     // bails with the same `RepoUnusable` variant `do_sync` would have
@@ -348,6 +370,13 @@ pub(crate) fn do_fetch_only(
     // branch keeps cold-spawn latency down on repos with hundreds of
     // refs (the spawn-time call site always passes a branch; the
     // manual `git_sync` passes `None` for the all-refs default).
+    //
+    // **Timeout (issue #762):** `git fetch` can wedge indefinitely on a
+    // half-open connection. `run_command_with_timeout` kills the child
+    // and returns `Err` if it overruns `FETCH_TIMEOUT`. The wrapped
+    // `FetchFailed { reason }` carries the timeout string to the toast
+    // so the user can distinguish a network hang from a real fetch
+    // failure.
     tracing::info!(
         "do_fetch_only: running git fetch {} {} in {}",
         remote,
@@ -359,13 +388,16 @@ pub(crate) fn do_fetch_only(
     if let Some(b) = branch {
         fetch_builder.arg(b);
     }
-    let fetch_output = match fetch_builder.current_dir(host_path).output() {
+    fetch_builder.current_dir(host_path);
+    let fetch_output = match run_command_with_timeout(
+        fetch_builder,
+        "git fetch",
+        timeout,
+    ) {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!("do_fetch_only: failed to spawn git fetch: {}", e);
-            return Err(SyncOutcome::FetchFailed {
-                reason: e.to_string(),
-            });
+            tracing::warn!("do_fetch_only: {}", e);
+            return Err(SyncOutcome::FetchFailed { reason: e });
         }
     };
     if !fetch_output.status.success() {
@@ -384,6 +416,33 @@ pub(crate) fn do_fetch_only(
 
     Ok(())
 }
+
+/// Wall-clock timeout for `git fetch` / `git pull` shell-outs in the
+/// manual `git_sync` path. Sized for the all-refs manual fetch (a slow
+/// refspec negotiation can take 7–36s on the project's 250-branch
+/// remote); 5 minutes is generous headroom while still bounding
+/// "stuck forever". The `gh auth token` and HTTP-client timeouts in
+/// `services::github` are much shorter (30s) — `git fetch` is allowed
+/// more headroom because the ref negotiation can dominate.
+const MANUAL_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Wall-clock timeout for the spawn-time auto-sync (`fetch_origin`) and
+/// for `git pull --ff-only` after a successful fetch. The spawn path has
+/// a tight latency budget (`SpawnTimer` checkpoints, target ~2s cold
+/// spawn) so 5 minutes is far too long — a wedged spawn-time fetch would
+/// hold the per-Mesh `sync_lock` for the entire window with no UI
+/// feedback. 30s matches the HTTP-client read timeout in
+/// `services::github::HTTP_REQUEST_TIMEOUT` so a half-open connection
+/// aborts at the same threshold from both directions (issue #762 review).
+pub(crate) const SPAWN_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Back-compat alias — [`do_fetch_only`] and [`do_sync`] (which are
+/// shared between the manual `git_sync` and the spawn-time
+/// `fetch_origin` paths) historically used the manual-path 5-minute
+/// cap. Renaming would touch every call site for no semantic gain, so we
+/// alias instead. New call sites that need per-path timeouts should
+/// pass [`MANUAL_FETCH_TIMEOUT`] or [`SPAWN_FETCH_TIMEOUT`] explicitly.
+pub(crate) const FETCH_TIMEOUT: Duration = MANUAL_FETCH_TIMEOUT;
 
 /// Derive the remote name from a configured `base_ref` string, if the
 /// string form names one. Pure string parsing — no repo, no I/O — so
@@ -600,13 +659,31 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
     // Delegate to the shared helper. The mapping from `SyncOutcome`
     // back to `FetchOutcome` / `FetchError` is 1:1 — the variants
     // were chosen so the spawn-time contract is a literal rename.
-    let outcome = do_sync(&host_root, &remote_name, fetch_branch.as_deref());
+    //
+    // Uses [`SPAWN_FETCH_TIMEOUT`] (30s) instead of the manual-path
+    // 5-min cap — a hung spawn-time fetch holds the per-Mesh sync_lock
+    // for the duration; 30s matches the HTTP read timeout in
+    // `services::github` (issue #762 review).
+    let outcome = do_sync(
+        &host_root,
+        &remote_name,
+        fetch_branch.as_deref(),
+        SPAWN_FETCH_TIMEOUT,
+    );
     Ok(match outcome {
         SyncOutcome::SkippedDirty => FetchOutcome::SkippedDirty,
         SyncOutcome::SkippedNoRemote => FetchOutcome::SkippedNoRemote,
         SyncOutcome::UpToDate => FetchOutcome::UpToDate,
         SyncOutcome::Synced { new_commits } => FetchOutcome::Synced { new_commits },
         SyncOutcome::FetchedButDiverged { new_commits, reason } => {
+            FetchOutcome::FetchedButDiverged { new_commits, reason }
+        }
+        SyncOutcome::PullTimedOut { new_commits, reason } => {
+            // Treat the spawn-time pull timeout as a soft divergence:
+            // commits ARE on the remote-tracking ref but the working tree
+            // didn't fast-forward. The spawn proceeds from local HEAD
+            // (same as a real divergence) and the caller surfaces a
+            // warning toast.
             FetchOutcome::FetchedButDiverged { new_commits, reason }
         }
         SyncOutcome::FetchFailed { reason } => return Err(FetchError::FetchFailed(reason)),
@@ -687,7 +764,7 @@ pub(crate) fn locked_do_sync(
     branch: Option<&str>,
 ) -> SyncOutcome {
     crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
-        do_sync(host_path, remote, branch)
+        do_sync(host_path, remote, branch, MANUAL_FETCH_TIMEOUT)
     })
 }
 

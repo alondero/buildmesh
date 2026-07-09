@@ -551,9 +551,22 @@ pub(crate) fn merge_pr_blocking(pr_url: String) -> Result<String, String> {
 
 // PR-spawn commands live in `commands/agent.rs` next to `create_issue_node`.
 
-/// Get the current branch for a node
-#[command(async)]
-pub fn get_current_branch(session_id: i64) -> Result<String, String> {
+/// Get the current branch for a node.
+///
+/// Thin async wrapper; see [`crate::commands::git::get_git_branch_status`]
+/// for the offload rationale. `repo_info` (a libgit2 walk over the working
+/// tree) can take hundreds of ms on a large repo and must not park a Tauri
+/// tokio worker.
+#[command]
+pub async fn get_current_branch(session_id: i64) -> Result<String, String> {
+    crate::commands::run_blocking("get_current_branch", move || {
+        get_current_branch_blocking(session_id)
+    })
+    .await
+}
+
+/// Sync core for [`get_current_branch`].
+pub(crate) fn get_current_branch_blocking(session_id: i64) -> Result<String, String> {
     let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 

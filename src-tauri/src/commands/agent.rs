@@ -270,7 +270,12 @@ async fn spawn_new_agent_impl(
         crate::preferences::default_provider(),
     );
 
-    let branch = crate::commands::git::get_default_branch(mesh.path.clone());
+    // `.await` the async wrapper, NOT call the sync core directly — these
+    // sites are `async fn` so the caller is on a Tauri tokio worker, and a
+    // direct `_blocking` call would park that worker on a `Repository::open`
+    // (issue #762 review). The wrapper offloads onto the blocking pool.
+    let branch = crate::commands::git::get_default_branch(mesh.path.clone())
+        .await;
 
     let node = crate::services::agent_node::create(
         mesh.id,
@@ -451,7 +456,15 @@ pub fn create_issue_node(
         mesh.default_provider.clone(),
         crate::preferences::default_provider(),
     );
-    let branch = crate::commands::git::get_default_branch(mesh.path.clone());
+    // Sync `#[command]` IPC — body runs on Tauri's tokio worker pool
+    // without our wrapping. Adding `.await` to a sync fn is a syntax
+    // error, so use the sync core directly here. `create_issue_node` is
+    // stage-1 of the spawn flow (returns ~20ms after creating the row),
+    // and the repo-open is bounded by the IPC dispatch latency budget.
+    // The async `spawn_new_agent_impl` path above (where the offload
+    // matters) does `.await` the wrapper (issue #762 review).
+    let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
+        .unwrap_or_else(|_| "main".to_string());
 
     let node = crate::services::agent_node::create_pending(
         mesh.id,

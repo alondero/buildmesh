@@ -487,7 +487,7 @@ mod tests {
         fs::write(_repo.path().join("new.txt"), "x\ny\nz\n").unwrap();
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         let entry = find_status(&statuses, "new.txt");
@@ -507,7 +507,7 @@ mod tests {
         fs::write(_repo.path().join("edit.txt"), "a\nB\nc\nd\n").unwrap();
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         let entry = find_status(&statuses, "edit.txt");
@@ -527,7 +527,7 @@ mod tests {
         fs::remove_file(_repo.path().join("gone.txt")).unwrap();
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         let entry = find_status(&statuses, "gone.txt");
@@ -542,7 +542,7 @@ mod tests {
         let _ = init_git_repo(_repo.path());
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         assert!(statuses.is_empty(), "clean repo has no changed files: {statuses:?}");
@@ -556,7 +556,7 @@ mod tests {
         fs::create_dir_all(dir.path()).unwrap();
 
         let result =
-            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
                 .unwrap();
         assert!(result.is_none(), "non-git dir should return None");
     }
@@ -568,7 +568,7 @@ mod tests {
         run_git(repo_dir.path(), &["branch", "-M", "main"]);
 
         let status =
-            crate::commands::git::get_git_branch_status(repo_dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(repo_dir.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("repo with a commit should report a branch");
 
@@ -588,7 +588,7 @@ mod tests {
         // get_git_branch_status returns Ok(None) for an unborn HEAD (the existing
         // path in get_git_branch_status short-circuits on `repo.head()` Err).
         let result =
-            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
                 .unwrap();
         assert!(result.is_none(), "unborn HEAD should return None");
     }
@@ -622,7 +622,7 @@ mod tests {
         run_git(local.path(), &["fetch", "origin"]);
 
         let status =
-            crate::commands::git::get_git_branch_status(local.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(local.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("clone should report a branch");
 
@@ -648,7 +648,7 @@ mod tests {
         commit_staged(&local_repo, "add local change");
 
         let status =
-            crate::commands::git::get_git_branch_status(local.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(local.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("repo should report a branch");
 
@@ -671,7 +671,7 @@ mod tests {
         repo.set_head_detached(head_oid).unwrap();
 
         let status =
-            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("detached HEAD on a commit should still report a status");
 

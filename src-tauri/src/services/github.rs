@@ -587,6 +587,28 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// a blocking-pool thread rather than a tokio worker; either way an unbounded
 /// call is a resource leak — see the overnight-freeze investigation.
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-request timeout for **mutating** GitHub calls
+/// ([`GitHubClient::create_pull_request`], [`GitHubClient::merge_pull_request`]).
+///
+/// Read-side calls (issues/PRs listings, repo queries) use the client-level
+/// `HTTP_REQUEST_TIMEOUT` (30s) because they're cheap and bounded by GitHub's
+/// pagination guarantees. Write-side calls can take *much* longer on a
+/// congested network — a `create_pr` that triggers GitHub's CI hook
+/// initialisation can take 60–90s on the project's main repo, and `merge_pr`
+/// has to wait for any required status checks to clear. A 30s cap there
+/// aborts slow-but-progressing writes and forces the user to retry, risking
+/// a **duplicate PR** (issue #762). 180s is generous headroom while still
+/// bounding "stuck forever" — the underlying TLS read/write half still has
+/// the connect-timeout backstop at 10s, so a hard network failure aborts
+/// promptly and only legitimate progress extends the window.
+///
+/// **Retry/idempotency caveat:** the caller is responsible for not
+/// re-invoking `create_pr` on a transient failure unless it can confirm
+/// the previous attempt didn't succeed (e.g. by checking `find_open_pr_for_branch`
+/// first). The current caller (`commands::pr::create_pr_for_mesh`) doesn't
+/// pre-check — a 180s timeout keeps the retry window manageable, and the
+/// user-visible "PR was created" success path is preserved.
+const HTTP_WRITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Build the blocking HTTP client with bounded timeouts. Extracted as a seam
 /// so the timeout wiring is regression-tested against a never-responding
@@ -733,6 +755,7 @@ impl GitHubClient {
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
             .json(&CreatePr { title, body, head, base })
+            .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
         let status = resp.status();
@@ -910,6 +933,7 @@ impl GitHubClient {
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
             .json(&MergePr { merge_method: "squash" })
+            .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
         let status = resp.status();
@@ -932,11 +956,17 @@ impl GitHubClient {
             "https://api.github.com/repos/{}/{}/pulls/{}",
             owner, repo, pr_number
         );
+        // Post-merge read: the merge already succeeded, so this GET is
+        // best-effort. The 30s default would otherwise abort the function
+        // with `Err` even though GitHub confirms the merge — use the write
+        // timeout so a slow followup can't undo a successful merge in the
+        // caller's view (issue #762 review).
         let pr_resp = self.client
             .get(&pr_url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
+            .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
         if pr_resp.status().is_success() {
@@ -997,12 +1027,30 @@ fn resolve_token() -> Result<String, GitHubError> {
     Err(GitHubError::NoToken)
 }
 
+/// Wall-clock timeout for the `gh auth token` shell-out. The CLI typically
+/// returns in <100ms (it reads from keyring/credential manager on disk);
+/// 5s is generous headroom for a slow disk while still bounding
+/// "filesystem hung" → resource leak on the blocking pool (issue #762).
+const GH_AUTH_TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Retrieve token via `gh auth token` (works when token is in secure storage).
+///
+/// **Timeout (issue #762):** the previous implementation called
+/// `Command::output()` with no bound. If the `gh` subprocess hung (waiting
+/// on a stuck keyring prompt, paused WSL interop, etc.) the calling
+/// blocking-pool thread leaked indefinitely. The `GH_AUTH_TOKEN_TIMEOUT`
+/// bound kills the child and returns `None` so the caller falls through
+/// to its `Err(GitHubError::NoToken)` error path — same observable
+/// behaviour as a missing-token user, which the UI already handles.
 fn run_gh_auth_token() -> Option<String> {
-    let output = command_no_window("gh")
-        .args(["auth", "token"])
-        .output()
-        .ok()?;
+    let mut cmd = command_no_window("gh");
+    cmd.args(["auth", "token"]);
+    let output = crate::process_util::run_command_with_timeout(
+        cmd,
+        "gh auth token",
+        GH_AUTH_TOKEN_TIMEOUT,
+    )
+    .ok()?;
 
     if !output.status.success() {
         return None;

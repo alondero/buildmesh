@@ -122,11 +122,25 @@ pub struct GitBranchStatus {
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list HEAD..@{u}`: the
 /// brace syntax is silently mangled by `Command::args` on Windows
 /// (see commands/prune.rs for the same pattern).
-// `(async)` runs the command on a worker thread: git2 work (repo open, status
-// walk, diffs) can take hundreds of ms on large repos, and a bare `#[command]`
-// would execute it on the main thread, stalling the UI and every other IPC call.
-#[command(async)]
-pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
+///
+/// Thin async wrapper that offloads the libgit2 work onto the blocking pool
+/// (issue #762 — `#[command(async)]` would park a Tauri tokio worker; WSL UNC
+/// paths with a paused VM can make `open_from_host_path` stall). The sync
+/// core [`get_git_branch_status_blocking`] stays directly callable so the
+/// mobile `/git/branch` HTTP route can `.await` it through here.
+#[command]
+pub async fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
+    crate::commands::run_blocking("get_git_branch_status", move || {
+        get_git_branch_status_blocking(path)
+    })
+    .await
+}
+
+/// Sync core for [`get_git_branch_status`]. See its doc for the offload
+/// rationale.
+pub(crate) fn get_git_branch_status_blocking(
+    path: String,
+) -> Result<Option<GitBranchStatus>, String> {
     let repo = match primitives::open_from_host_path(&path) {
         Ok(r) => r,
         Err(_) => return Ok(None),
@@ -171,8 +185,15 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 
 /// Get git status for a directory — returns list of changed files with per-file
 /// line additions/deletions for all uncommitted changes.
-#[command(async)]
-pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload rationale.
+#[command]
+pub async fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
+    crate::commands::run_blocking("get_git_status", move || get_git_status_blocking(path)).await
+}
+
+/// Sync core for [`get_git_status`].
+pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, String> {
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
@@ -220,9 +241,16 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
     Ok(changed_files)
 }
 
-/// Get aggregate git change summary for a directory
-#[command(async)]
-pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
+/// Get aggregate git change summary for a directory.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload rationale.
+#[command]
+pub async fn get_git_summary(path: String) -> Result<GitSummary, String> {
+    crate::commands::run_blocking("get_git_summary", move || get_git_summary_blocking(path)).await
+}
+
+/// Sync core for [`get_git_summary`].
+pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, String> {
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
@@ -283,13 +311,30 @@ pub(crate) fn default_branch_from_repo(repo: &Repository) -> String {
 /// Get the default branch name for the remote named "origin".
 /// Reads the local symbolic ref (populated by clone/fetch) to avoid a network round-trip.
 /// Falls back to "main" if no remote is configured or HEAD ref is missing.
-#[command(async)]
-pub fn get_default_branch(path: String) -> String {
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload rationale.
+/// **Preserves the pre-#762 contract** of returning `String` directly (with
+/// `"main"` as the fallback), so `spawn.rs` / `agent.rs` callers continue to
+/// treat the return value as infallible. The `Result`-flavoured sync core
+/// is `pub(crate)` for callers that want the distinction (and for tests).
+#[command]
+pub async fn get_default_branch(path: String) -> String {
+    crate::commands::run_blocking("get_default_branch", move || {
+        get_default_branch_blocking(path)
+    })
+    .await
+    .unwrap_or_else(|_| "main".to_string())
+}
+
+/// Sync core for [`get_default_branch`]. Returns `Ok("main")` on any open
+/// failure so the async wrapper can preserve its infallible contract; the
+/// `Err` variant is reserved for genuine worker-pool join errors.
+pub(crate) fn get_default_branch_blocking(path: String) -> Result<String, String> {
     let repo = match Repository::open(&path) {
         Ok(r) => r,
-        Err(_) => return "main".to_string(),
+        Err(_) => return Ok("main".to_string()),
     };
-    default_branch_from_repo(&repo)
+    Ok(default_branch_from_repo(&repo))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -459,6 +504,22 @@ fn sync_outcome_to_git_sync_result(
                 reason
             ),
         },
+        SyncOutcome::PullTimedOut { new_commits, reason } => GitSyncResult {
+            fetched: true,
+            pulled: false,
+            new_commits,
+            // Distinct wording from `FetchedButDiverged` so the user can
+            // tell a network hang apart from a real history divergence
+            // (issue #762 review). The 5-min `FETCH_TIMEOUT` cap is what
+            // surfaced this; pre-#762 the pull path could only fail via
+            // spawn-error or non-zero-exit.
+            message: format!(
+                "Fetched {} new commit{} but pull timed out: {}",
+                new_commits,
+                if new_commits == 1 { "" } else { "s" },
+                reason
+            ),
+        },
         SyncOutcome::FetchFailed { reason } => GitSyncResult {
             fetched: false,
             pulled: false,
@@ -507,8 +568,20 @@ pub struct FreeResult {
 /// `BranchesWorktreesSection`. The active-paths list is sourced from
 /// the live agent-nodes table so the holder's `is_active` reflects
 /// whether a real agent is using the worktree.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale. The libgit2 status walk + holder lookup can take hundreds
+/// of ms on a large repo and must not park a Tauri tokio worker.
 #[command]
 pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
+    crate::commands::run_blocking("get_mesh_health", move || {
+        get_mesh_health_blocking(mesh_id)
+    })
+    .await
+}
+
+/// Sync core for [`get_mesh_health`].
+pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
@@ -538,6 +611,12 @@ pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
 ///
 /// On success, emits a `git-changed` event for the mesh path so the
 /// sidebar `!` badge clears and the file explorer refreshes.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale. The mesh row is resolved ONCE up front and the derived
+/// `host_path` + `local_base` are passed into the blocking core, so the
+/// core doesn't pay for a second `db::get_mesh_by_id` (or `to_host_path`
+/// call). The emit payload after `run_blocking` reuses the same values.
 #[command]
 pub async fn restore_mesh_to_base(
     mesh_id: i64,
@@ -546,10 +625,35 @@ pub async fn restore_mesh_to_base(
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
-    let repo = Repository::open(&host_path)
-        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
     let local_base = health::parse_local_branch(&mesh.base_ref)
         .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
+
+    let host_path_for_emit = host_path.clone();
+    let result =
+        crate::commands::run_blocking("restore_mesh_to_base", move || {
+            restore_mesh_to_base_blocking(host_path, local_base)
+        })
+        .await?;
+    // Emit only on success — a failing restore never refreshes the panel.
+    let _ = app.emit(
+        "git-changed",
+        serde_json::json!({
+            "path": host_path_for_emit,
+            "internal_path": host_path_for_emit,
+        }),
+    );
+    Ok(result)
+}
+
+/// Sync core for [`restore_mesh_to_base`]. Takes the already-resolved
+/// `host_path` + `local_base` so the wrapper's DB lookup is the only one
+/// paid per invocation (issue #762 review).
+pub(crate) fn restore_mesh_to_base_blocking(
+    host_path: String,
+    local_base: String,
+) -> Result<RestoreResult, String> {
+    let repo = Repository::open(&host_path)
+        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
 
     let moved = health::restore_to_base_impl(&repo, &local_base)?;
     let message = if moved {
@@ -557,12 +661,6 @@ pub async fn restore_mesh_to_base(
     } else {
         format!("already on {}", local_base)
     };
-
-    // Notify the frontend so the badge clears and the panel refreshes.
-    let _ = app.emit(
-        "git-changed",
-        serde_json::json!({ "path": host_path, "internal_path": host_path }),
-    );
 
     Ok(RestoreResult { restored: moved, message })
 }
@@ -575,6 +673,13 @@ pub async fn restore_mesh_to_base(
 ///
 /// On success, emits a `git-changed` event for the freed worktree's path
 /// so any open panel re-fetches.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale. The mesh row is resolved ONCE up front and the derived
+/// `mesh_host_path` + `local_base` are passed into the blocking core so
+/// the core doesn't pay for a second `db::get_mesh_by_id`. The freed
+/// worktree's `host_path` is the command's `worktree_path` arg (host-
+/// mapped) — the core doesn't need to compute it.
 #[command]
 pub async fn free_base_branch(
     mesh_id: i64,
@@ -583,11 +688,15 @@ pub async fn free_base_branch(
 ) -> Result<FreeResult, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh_host_path = to_host_path(&mesh.path);
     let local_base = health::parse_local_branch(&mesh.base_ref)
         .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
-
     let host_wt_path = to_host_path(&worktree_path);
-    let detached_at_sha = health::free_base_branch_impl(&host_wt_path, &local_base)?;
+
+    let result = crate::commands::run_blocking("free_base_branch", move || {
+        free_base_branch_blocking(host_wt_path, local_base)
+    })
+    .await?;
 
     // Notify the frontend so the panel refreshes. The freed worktree's
     // `path` is what `get_git_prune_info` and the worktree list use to
@@ -595,10 +704,22 @@ pub async fn free_base_branch(
     let _ = app.emit(
         "git-changed",
         serde_json::json!({
-            "path": to_host_path(&mesh.path),
-            "internal_path": host_wt_path,
+            "path": mesh_host_path,
+            "internal_path": to_host_path(&worktree_path),
         }),
     );
+
+    Ok(result)
+}
+
+/// Sync core for [`free_base_branch`]. Takes the already-resolved
+/// `host_wt_path` + `local_base` so the wrapper's DB lookup is the only
+/// one paid per invocation (issue #762 review).
+pub(crate) fn free_base_branch_blocking(
+    host_wt_path: String,
+    local_base: String,
+) -> Result<FreeResult, String> {
+    let detached_at_sha = health::free_base_branch_impl(&host_wt_path, &local_base)?;
 
     Ok(FreeResult { detached_at_sha })
 }

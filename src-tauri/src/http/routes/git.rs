@@ -4,6 +4,14 @@
 //! summary in the header, and an inline diff for each tapped file. All
 //! routes resolve against the agent node's worktree (its `path` column),
 //! so they work whether the agent runs in-place or in a `git worktree`.
+//!
+//! **Threading model (issue #762):** every backing Tauri command was moved
+//! onto the blocking pool via `crate::commands::run_blocking`. The routes
+//! here `.await` the async wrapper so the actual libgit2 work runs on
+//! `tauri::async_runtime::spawn_blocking`'s pool rather than the bounded
+//! tokio worker pool — mirroring the desktop fix and keeping mobile
+//! sessions from parking their accept-loop worker on a stalled
+//! `Repository::open` (e.g. WSL UNC path with paused VM).
 
 use crate::db;
 use crate::http::request;
@@ -19,7 +27,7 @@ pub async fn status(
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
     };
-    match crate::commands::git::get_git_status(node.path) {
+    match crate::commands::git::get_git_status(node.path).await {
         Ok(status) => {
             let body = serde_json::to_string(&status).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -39,7 +47,7 @@ pub async fn summary(
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
     };
-    match crate::commands::git::get_git_summary(node.path) {
+    match crate::commands::git::get_git_summary(node.path).await {
         Ok(summary) => {
             let body = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -55,7 +63,7 @@ pub async fn branch(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
-    match crate::commands::pr::get_current_branch(agent_id) {
+    match crate::commands::pr::get_current_branch(agent_id).await {
         Ok(name) => {
             let body = serde_json::to_string(&serde_json::json!({ "branch": name }))
                 .unwrap_or_else(|_| "{}".to_string());
