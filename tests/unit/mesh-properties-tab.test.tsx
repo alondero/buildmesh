@@ -137,9 +137,11 @@ describe('MeshPropertiesTab (issue #375)', () => {
   it('renders the config form when the ⚙️ tab is open and a mesh is selected', async () => {
     await openPropertiesTab();
 
-    // Config fields that the new tab must keep. Model / Effort carry a
-    // "(cwrap only)" hint next to the visible label, so the regex lets
-    // the matcher accept the trailing hint without us hard-coding it.
+    // Config fields that the new tab must keep. The label regex anchors
+    // at the start with `\b` because the Field component renders the
+    // visible label + hint as one accessible name inside `<label>`
+    // (e.g. "Model (Claude Code only)"); the open end lets the suffix
+    // pass through so a future hint rewrite doesn't break the matcher.
     expect(await screen.findByLabelText('Name')).toBeTruthy();
     expect(screen.getByLabelText('Directory')).toBeTruthy();
     expect(screen.getByLabelText(/^Model\b/)).toBeTruthy();

@@ -309,10 +309,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Windows direct execution (no cwrap, no bash): cwrap-backed providers reach
-    // claude.exe directly. These pin the direct composition. Windows-only:
-    // the direct recipe is gated on a Windows host and the cwrap recipe is retired.
-    // (GH: absorb cwrap into buildmesh.)
+    // Windows direct execution (no wrapper, no bash): Claude-compatible
+    // providers (Anthropic, MiniMax, Kimi) reach claude.exe directly. These
+    // pin the direct composition. Windows-only: the direct recipe is gated
+    // on a Windows host. Replaces the `cwrap → bash → claude.exe` chain
+    // that PR #531 absorbed into buildmesh — see
+    // `sandbox::spawn::tests::repro_claude_exit_in_sandbox` for the live
+    // AppContainer repro of why that chain can't run sandboxed.
     // -----------------------------------------------------------------------
 
     /// Anthropic on the Windows-native path spawns `claude.exe` directly.
@@ -424,7 +427,7 @@ mod tests {
     }
 
     /// Regression guard: even with sandbox OFF, the Windows-native Anthropic spawn
-    /// now goes to claude.exe directly instead of PowerShell/cwrap.
+    /// now goes to claude.exe directly instead of through PowerShell.
     #[cfg(target_os = "windows")]
     #[test]
     fn anthropic_unsandboxed_windows_spawns_claude_exe_directly() {
@@ -757,11 +760,11 @@ mod tests {
         assert_eq!(prefill_ws, prefill, "whitespace title trims like empty");
     }
 
-    /// On a Windows-native host a cwrap provider is launched through
+    /// On a Windows-native host a Claude-compatible provider is launched through
     /// `powershell.exe -NoLogo -NoProfile -EncodedCommand <base64>`. The
     /// `-NoProfile` flag is load-bearing for spawn latency: without it every
     /// agent spawn first runs the user's PowerShell profile (modules, prompt
-    /// frameworks) before cwrap, adding hundreds of ms per node. This shell
+    /// frameworks) before claude, adding hundreds of ms per node. This shell
     /// only relays ANSI output, so the profile is dead weight.
     #[cfg(not(target_os = "macos"))]
     #[test]

@@ -54,7 +54,7 @@ pub enum BillingMode {
 }
 
 /// Per-tier Claude model overrides for a Claude-compatible provider account
-/// (issue #567 — restores the cwrap capability).
+/// (issue #567 — restores the Claude Code model-tier capability).
 ///
 /// Claude Code asks its backend for several model *aliases*: a primary, a cheap
 /// "small/fast" model for background tasks (titles, etc.), and the Sonnet / Opus
@@ -624,7 +624,7 @@ pub fn is_claude_compatible_id(id: &str) -> bool {
 ///
 /// **OpenAI-surface URLs are best-effort and unverified on this host** (no
 /// `codex` binary + provider OpenAI key to exercise them, issue #576); the
-/// Anthropic-surface URLs match the long-standing `cwrap`/account defaults and
+/// Anthropic-surface URLs match the long-standing Claude Code account defaults and
 /// are exercised end-to-end. Live Codex verification is tracked as a follow-up.
 pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
     let anthropic_tiers = |default: &str, fast: &str| ModelTiers {
@@ -827,7 +827,7 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
         .collect()
 }
 
-/// MiniMax's cwrap-parity default tier map. **Single source** consumed by
+/// MiniMax's Claude-Code-parity default tier map. **Single source** consumed by
 /// (issue #571):
 /// - [`default_provider_accounts`] — the per-account `model_tiers` field
 /// - [`first_class_surfaces`] for `"minimax"` — the Anthropic surface tier
@@ -843,7 +843,7 @@ pub(crate) fn minimax_default_tiers() -> ModelTiers {
     }
 }
 
-/// Kimi's cwrap-parity default tier map. **Single source** consumed by
+/// Kimi's Claude-Code-parity default tier map. **Single source** consumed by
 /// [`default_provider_accounts`]. The Anthropic surface in
 /// [`first_class_surfaces`] for `"kimi"` intentionally does NOT consume this
 /// — the surface uses a different layout (k2.6 on sonnet vs the account's
@@ -1972,7 +1972,7 @@ mod tests {
         assert!(by_id("openrouter").claude_compatible);
         assert!(!by_id("anthropic").claude_compatible);
         assert!(!by_id("codex").claude_compatible);
-        // MiniMax + Kimi ship the cwrap base URL + per-tier map so a key is all
+        // MiniMax + Kimi ship the cwrap launcher's base URL + per-tier map so a key is all
         // the user needs to add. OpenRouter ships its API base URL + empty
         // per-tier map so the user picks provider/model per slot.
         assert_eq!(by_id("minimax").base_url.as_deref(), Some("https://api.minimax.io/anthropic"));
@@ -2267,7 +2267,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_minimax_account_reproduces_cwrap_model_routing() {
+    fn builtin_minimax_account_reproduces_claude_code_model_routing() {
         // The regression that motivated this change: a keyed MiniMax must pin the
         // full per-tier model map (byte-for-byte cwrap parity) so Claude Code never
         // sends a `claude-opus-*` slug to MiniMax.
@@ -2286,7 +2286,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_kimi_account_reproduces_cwrap_model_routing() {
+    fn builtin_kimi_account_reproduces_claude_code_model_routing() {
         let mut kimi = default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
         kimi.api_key = Some("sk-moon".to_string());
         let env = provider_account_env(Some(&kimi));
@@ -2317,10 +2317,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_provider_env_for_keyed_builtin_minimax_injects_cwrap_env() {
+    fn resolve_provider_env_for_keyed_builtin_minimax_injects_claude_code_env() {
         // The real spawn path: a node stored with provider="minimax" resolves the
         // built-in MiniMax account (merged with the user's stored key) and gets the
-        // full cwrap model routing — the end-to-end fix for "can't spawn MiniMax".
+        // full Claude Code model routing — the end-to-end fix for "can't spawn MiniMax".
         with_temp_dir(|_| {
             let mut prefs = AppPreferences::default();
             // Store only the key; base_url + tiers come from the code default.
@@ -2363,7 +2363,7 @@ mod tests {
     fn first_class_surfaces_publishes_both_surfaces_for_minimax() {
         let surfaces = first_class_surfaces("minimax");
         let by = |s: ApiSurface| surfaces.iter().find(|e| e.surface == s).unwrap();
-        // Anthropic surface matches the long-standing cwrap/account default.
+        // Anthropic surface matches the long-standing Claude Code account default.
         assert_eq!(by(ApiSurface::Anthropic).base_url, "https://api.minimax.io/anthropic");
         assert_eq!(by(ApiSurface::Anthropic).model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
         // OpenAI surface (best-effort) carries the v1 endpoint and a single model.
