@@ -3,11 +3,20 @@
 //! already-open `&Repository`; the thin `#[command]` adapters that open the repo
 //! and emit events stay in commands/git.rs. See ADR 0007.
 
+use std::time::Duration;
+
 use git2::Repository;
 
 use crate::git::primitives;
 use crate::models::{HoldingWorktree, MeshHealth};
 use crate::process_util::command_no_window;
+
+/// Wall-clock timeout for the `git checkout` shell-out in
+/// [`restore_to_base_impl`]. `checkout` is purely local (no network), so
+/// 30s is generous headroom while still bounding the "stuck on
+/// `.git/index.lock`" case — the diff's subprocess-timeout pass missed
+/// this call site on the first sweep (issue #762 review).
+const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Derive the local branch name from a configured `base_ref` string.
 ///
@@ -366,11 +375,16 @@ pub(crate) fn restore_to_base_impl(
         .ok_or_else(|| "repo has no working directory".to_string())?
         .to_string_lossy()
         .to_string();
-    let output = command_no_window("git")
+    let mut checkout_builder = command_no_window("git");
+    checkout_builder
         .args(["checkout", base_branch])
-        .current_dir(&host_path)
-        .output()
-        .map_err(|e| format!("failed to run git checkout: {}", e))?;
+        .current_dir(&host_path);
+    let output = crate::process_util::run_command_with_timeout(
+        checkout_builder,
+        "git checkout",
+        CHECKOUT_TIMEOUT,
+    )
+    .map_err(|e| format!("failed to run git checkout: {}", e))?;
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }

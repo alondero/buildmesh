@@ -137,7 +137,13 @@ pub(crate) fn fetch_single_ref(project_root: &str, head_ref: &str) -> bool {
     // but without the count-behind / pull tail. `Ok(())` covers every fetch-
     // succeeded case (UpToDate / Synced / FetchedButDiverged in `do_sync`'s
     // world); every `Err` variant maps to `false` per the wrapper contract.
-    crate::git::sync::do_fetch_only(&host_root, "origin", Some(head_ref)).is_ok()
+    crate::git::sync::do_fetch_only(
+        &host_root,
+        "origin",
+        Some(head_ref),
+        crate::git::sync::SPAWN_FETCH_TIMEOUT,
+    )
+    .is_ok()
 }
 
 /// The alias used for a fork remote (issue #443). `fork-<login>` is

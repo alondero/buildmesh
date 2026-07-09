@@ -92,7 +92,14 @@ fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) ->
     // so a non-repo / unconfigured mesh path still resolves to
     // "origin/main" — preserving pre-fix behaviour and never blocking the
     // spawn.
-    let branch = crate::commands::git::get_default_branch(mesh_path.to_string());
+    //
+    // Called from the synchronous spawn path — use the sync core directly
+    // (issue #762). The blocking pool offload that the async wrapper
+    // provides is irrelevant for this single repo-open + symbolic-ref read;
+    // the small wall-clock cost is well within the spawn budget and the
+    // outer spawn task already runs on a blocking-pool thread.
+    let branch = crate::commands::git::get_default_branch_blocking(mesh_path.to_string())
+        .unwrap_or_else(|_| "main".to_string());
     format!("origin/{}", branch)
 }
 
