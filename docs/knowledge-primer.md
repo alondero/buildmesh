@@ -10,7 +10,8 @@
 - `src-tauri/src/` — Rust backend (commands/, db/, env/, git/, models/). All direct `git2` access lives in `git/` — `primitives` (dirty/ahead-behind/short-sha/head-branch), `worktree` (Worktree Node create/inspect/remove), `sync` (auto-sync), `health` (mesh drift/hostage/recovery); `commands/git.rs` & `prune.rs` are thin `#[command]` adapters over it (ADR 0007). `env/` is path + Windows/WSL conversion only.
 - `tests/unit/` — Vitest unit tests
 - `tests/integration/` — Vitest integration tests
-- `tests/e2e/` — Playwright e2e (requires app running on port 1991)
+- `tests/e2e/` — Playwright e2e (requires app running on port 1991; boots `tauri dev` on the **base** identity — collides with a running stable hub, so not for autonomous agents)
+- `scripts/ui-shot.mjs` — ad-hoc UI verification + screenshots: Playwright attaches over CDP to the real dev-profile window (`scripts\run-dev.ps1 -CdpPort 9223`); see `.claude/skills/verify-ui/skill.md`
 - `docs/adr/` — Architecture Decision Records
 
 ## Key Conventions

@@ -39,4 +39,5 @@ Hooks enforce the rules above so a slip is caught, not just documented:
 - Domain language and mental model: `CONTEXT.md`
 - DB schema: source of truth is `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`.
 - Verification: `/verify` — see `.claude/skills/verify/skill.md`
+- UI changes: `/verify-ui` — drive the real dev-profile window (Playwright over CDP) + before/after PR screenshots; see `.claude/skills/verify-ui/skill.md`
 - Issues (`alondero/buildmesh`): `docs/agents/issue-tracker.md`; triage labels: `docs/agents/triage-labels.md`

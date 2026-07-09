@@ -11,6 +11,8 @@ The user invoked `/verify`, `/verify quick`, `/verify standard`, `/verify full`,
 
 Distinct from `/use`: `/use` is a human-in-the-loop launch-and-watch. `/verify` is autonomous — it runs checks, fixes what fails, and returns a pass/fail report.
 
+Sibling skill: if the change is **visible in the UI**, follow up with `/verify-ui` — it drives the real dev-profile window via Playwright-over-CDP and captures before/after screenshots for the PR.
+
 ## Tiers
 
 Default tier is **standard**. Parse the first argument:
@@ -86,6 +88,7 @@ Seed entries — pattern-match the failure against these first before diagnosing
 - **Terminal panes stack vertically when switching meshes / projects** → `detach()` is not removing `term.element` from its parent before reuse. Fix: explicit `element.parentNode?.removeChild(element)` in detach. Memory: `buildmesh-terminal-container-reuse-bug`.
 - **Agent spawn fails with `--model` argument missing** → empty-string `model` (a blank `meshes.model` column, originally surfaced when the value came from a `mesh.toml` `[agent] model = ""` line) is being passed as `--model ""`. Fix: `.is_empty()` guard before adding the arg in the spawn code. Memory: `buildmesh-model-empty-string-bug`.
 - **`gh pr create` fails with "No commits between X and X"** → current branch equals base ref, and `--head` was passed. Fix: skip `--head` when `current_branch == base_ref`. Memory: `buildmesh-pr-same-branch-fix`.
+- **~20 `git::worktree` / `agent::spawn` / `commands::pr` tests fail with `failed to resolve path '/home/<user>/AppData/...'`** → a non-Git-for-Windows `git.exe` (e.g. devkitPro's MSYS2 git) is first in PATH and writes POSIX-style worktree gitdir paths Windows libgit2 can't resolve. Fix: run via `scripts\check.ps1` (pins `C:\Program Files\Git\cmd` first since 2026-07-09) or prepend it to PATH manually.
 - **Playwright e2e times out waiting for `http://localhost:1420`** → a stale `tauri dev` process from a previous run is bound but unhealthy. Fix: `Stop-Process -Name node -Force` (kills Vite) and `Stop-Process -Name buildmesh -Force` (kills the dev exe), then re-run.
 - **`vitest run tests/integration` fails with "ECONNREFUSED 127.0.0.1:1991"** → an integration test is hitting the HTTP test bridge instead of the mocked `invoke()`. Likely a test using `invokeViaHttp` from `tests/e2e/utils/tauri-http.ts`. Fix: that test belongs in `tests/e2e/`, not `tests/integration/`; move it or run it inside Playwright.
 
