@@ -1,6 +1,13 @@
 # Builds and launches the DEV profile (buildmesh-dev) so it runs side-by-side
 # with the stable hub (buildmesh) without interrupting its agents. This is what
-# /use and /verify call. It only ever touches buildmesh-dev — never the hub.
+# /use, /verify and /verify-ui call. It only ever touches buildmesh-dev — never
+# the hub.
+#
+# -CdpPort <n>: expose the WebView2 window over the Chrome DevTools Protocol on
+# 127.0.0.1:<n> so Playwright can attach to the REAL app window (drive the DOM,
+# take screenshots) — see scripts/ui-shot.mjs and the /verify-ui skill.
+# Convention: 9223 for agent UI verification. 0 (default) = off.
+param([int]$CdpPort = 0)
 $ErrorActionPreference = "Stop"
 
 Set-Location "$PSScriptRoot\.."
@@ -49,8 +56,20 @@ if (Test-Path $LogPath) {
     $BeforeLines = (Get-Content $LogPath).Count
 }
 
-# 5. Launch raw binary
-$proc = Start-Process $Binary -PassThru
+# 5. Launch raw binary. The WebView2 loader reads the env var at app start;
+#    it must be set only for the launch (not the build) and cleared after so
+#    it never leaks into unrelated WebView2 processes started from this shell.
+if ($CdpPort -gt 0) {
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$CdpPort"
+    Write-Output "CDP enabled on 127.0.0.1:$CdpPort"
+}
+try {
+    $proc = Start-Process $Binary -PassThru
+} finally {
+    if ($CdpPort -gt 0) {
+        Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+    }
+}
 Write-Output "Launched PID: $($proc.Id)"
 
 # 6. Verify via log

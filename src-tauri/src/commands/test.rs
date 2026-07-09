@@ -18,7 +18,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const TEST_SERVER_PORT: u16 = 1991;
-const _TEST_SERVER_ADDR: &str = "::"; // Kept as documentation; actual binding uses IpAddr::new
 
 static TEST_SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -52,19 +51,26 @@ pub fn is_test_server_running() -> bool {
     TEST_SERVER_RUNNING.load(Ordering::SeqCst)
 }
 
+/// Listen addresses for the test server: one IPv4, one IPv6 (Windows requires
+/// explicit binding to each address family). Loopback ONLY — the bridge
+/// executes real backend commands with no auth, and a wildcard bind would
+/// both expose it to the LAN and trigger a Windows Firewall consent prompt
+/// on every freshly-built exe path (one per worktree). See
+/// `tests::test_server_binds_loopback_only`.
+fn listen_addrs(port: u16) -> (SocketAddr, SocketAddr) {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    (
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
+    )
+}
+
 /// Start the HTTP test server. Uses `tauri::async_runtime::spawn` so the task
 /// runs on the Tauri-managed tokio runtime, not the global one.
 pub fn start_test_server(app_handle: AppHandle, port_offset: u16) {
-    // Windows requires explicit binding to each address family.
-    // We bind to 0.0.0.0 (IPv4) first, then spawn a separate task for [::] (IPv6).
-    use std::net::{IpAddr, SocketAddr};
-
     // Dev profile binds 2991 so it never contends with the stable hub's 1991.
     let port = TEST_SERVER_PORT + port_offset;
-    let ipv4_addr: IpAddr = "0.0.0.0".parse().unwrap();
-    let ipv6_addr: IpAddr = "::".parse().unwrap();
-    let addr_ipv4 = SocketAddr::new(ipv4_addr, port);
-    let addr_ipv6 = SocketAddr::new(ipv6_addr, port);
+    let (addr_ipv4, addr_ipv6) = listen_addrs(port);
 
     tauri::async_runtime::spawn(async move {
         // Primary: IPv4 listener (required for 127.0.0.1 access)
@@ -78,12 +84,12 @@ pub fn start_test_server(app_handle: AppHandle, port_offset: u16) {
         };
 
         TEST_SERVER_RUNNING.store(true, Ordering::SeqCst);
-        tracing::info!("[test_server] HTTP test server listening on http://0.0.0.0:{} (IPv4)", port);
+        tracing::info!("[test_server] HTTP test server listening on http://127.0.0.1:{} (IPv4)", port);
 
         // Optional: also listen on IPv6 for localhost over IPv6
         let app_ipv6 = app_handle.clone();
         let _ = TcpListener::bind(addr_ipv6).await.map(|listener_ipv6| {
-            tracing::info!("[test_server] HTTP test server also listening on http://[::]:{} (IPv6)", port);
+            tracing::info!("[test_server] HTTP test server also listening on http://[::1]:{} (IPv6)", port);
             tauri::async_runtime::spawn(async move {
                 loop {
                     match listener_ipv6.accept().await {
@@ -481,5 +487,25 @@ fn handle_get_root_token() -> String {
     match crate::db::get_or_create_root_token() {
         Ok(token) => JsonRpcResponse::success(&serde_json::json!({ "token": token })),
         Err(e) => JsonRpcResponse::error(&e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The test bridge exposes real backend commands with no auth. It must
+    /// never listen on a routable interface: a wildcard bind (0.0.0.0 / ::)
+    /// lets anyone on the LAN invoke commands, and on Windows it triggers a
+    /// firewall consent prompt for every freshly-built exe path (one per
+    /// worktree). Every local consumer (Playwright's tauri-http.ts,
+    /// scripts/ui-shot.mjs) connects via 127.0.0.1.
+    #[test]
+    fn test_server_binds_loopback_only() {
+        let (v4, v6) = listen_addrs(1991);
+        assert!(v4.ip().is_loopback(), "IPv4 test-server bind must be loopback, got {}", v4.ip());
+        assert!(v6.ip().is_loopback(), "IPv6 test-server bind must be loopback, got {}", v6.ip());
+        assert_eq!(v4.port(), 1991);
+        assert_eq!(v6.port(), 1991);
     }
 }
