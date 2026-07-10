@@ -1,9 +1,24 @@
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { getStatusConfig } from '../../lib/status';
+import type { SessionStatus } from '../../types/generated/SessionStatus';
 import { getMeshColor } from '../../lib/meshColors';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
+
+// Issue #776 — Regenerate is the entry point for the new "restart this
+// node" flow wired up in ticket 03 of #774. We disable it (rather than
+// hide it) for statuses where a fresh `spawn_agent` IPC would race the
+// in-flight spawn or, in the `archived`/`suspended` cases, the backend
+// would reject it. Greyed-out is more discoverable than hidden and lets
+// the tooltip explain *why* the action is unavailable.
+const REGENERATE_DISABLED_STATUSES: readonly SessionStatus[] = [
+  'spawning',
+  'pending',
+  'archived',
+  'suspended',
+];
 
 interface NodeItemProps {
   node: AgentNode;
@@ -28,11 +43,154 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
   // spawnAgent passes `cli_session_id` as the resume argument, so a
   // click re-attempts the same --resume the failed auto-resume tried.
   const showRestart = node.status === 'error';
+
+  // Issue #776 — right-click context menu (Regenerate entry point).
+  // Mirrors the MeshItem menu infrastructure (issue #735): the menu
+  // container ref drives viewport clamping + ARIA keyboard-nav scoping,
+  // the trigger ref lets Escape / outside-click restore focus to the
+  // row, and the menuitem refs hold the buttons so arrow keys can move
+  // focus between them with the roving tabindex pattern.
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  // Render-time item count: 1 in v1 (Regenerate only). Kept as a
+  // constant + ref so ticket 03's submenu addition only widens the
+  // constant — the keyboard-nav handler reads `itemCountRef` to avoid
+  // stale-closure bugs if the count ever changes mid-open.
+  const itemCount = 1;
+  const itemCountRef = useRef(itemCount);
+  itemCountRef.current = itemCount;
+
+  const isRegenerateDisabled = REGENERATE_DISABLED_STATUSES.includes(node.status);
+
+  // Close and return focus to the row that opened the menu. Used by
+  // Escape and any menuitem click so the user's focus stays
+  // predictable across menu interactions. The `requestAnimationFrame`
+  // runs after the unmount so the trigger ref is still attached when
+  // the focus() lands.
+  const closeContextMenu = () => {
+    const trigger = triggerRef.current;
+    setContextMenu(null);
+    requestAnimationFrame(() => trigger?.focus());
+  };
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => closeContextMenu();
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // WAI-ARIA menu contract: keystrokes only apply while focus is
+      // inside the menu. The document-level listener would otherwise
+      // hijack arrow / Home / End typed elsewhere on the page. We
+      // check `document.activeElement` (not `e.target`) because in
+      // jsdom tests events are dispatched on `document` while focus is
+      // on a menuitem.
+      const menu = menuRef.current;
+      const active = document.activeElement;
+      if (menu && active instanceof Node && !menu.contains(active)) return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeContextMenu();
+        return;
+      }
+      if (e.key === 'Tab') {
+        // WAI-ARIA menu: Tab leaves the menu and closes it (a modal
+        // menu would trap focus, but `role="menu"` is a non-modal
+        // popover). Don't preventDefault — let the browser move
+        // focus normally.
+        closeContextMenu();
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveIndex((i) => {
+          const next = (i + 1) % itemCountRef.current;
+          menuItemRefs.current[next]?.focus();
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveIndex((i) => {
+          const next = (i - 1 + itemCountRef.current) % itemCountRef.current;
+          menuItemRefs.current[next]?.focus();
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'Home') {
+        e.preventDefault();
+        setActiveIndex(0);
+        menuItemRefs.current[0]?.focus();
+        return;
+      }
+      if (e.key === 'End') {
+        e.preventDefault();
+        const last = itemCountRef.current - 1;
+        setActiveIndex(last);
+        menuItemRefs.current[last]?.focus();
+        return;
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [contextMenu]);
+
+  // Issue #776 — viewport clamping. Runs after the menu mounts so we
+  // can read its rendered size; pushes the position back into state if
+  // it would overflow the right or bottom edge. `useLayoutEffect` keeps
+  // the adjustment off-screen so the user never sees the over-large
+  // position. The no-op guard prevents a stubbed
+  // `getBoundingClientRect` (which doesn't track the rendered
+  // position) from putting us in an infinite setState loop.
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const MARGIN = 4;
+    const overX = rect.right - (vw - MARGIN);
+    const overY = rect.bottom - (vh - MARGIN);
+    if (overX <= 0 && overY <= 0) return;
+    const nextX = Math.max(MARGIN, contextMenu.x - (overX > 0 ? overX : 0));
+    const nextY = Math.max(MARGIN, contextMenu.y - (overY > 0 ? overY : 0));
+    if (nextX === contextMenu.x && nextY === contextMenu.y) return;
+    setContextMenu({ x: nextX, y: nextY });
+  }, [contextMenu]);
+
+  // Issue #776 — on open, reset the roving index and move focus to the
+  // first menuitem so keyboard nav starts somewhere. `useLayoutEffect`
+  // (not `useEffect` + setTimeout) — fires synchronously after commit
+  // so subsequent arrow-key presses don't race a deferred focus call.
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    setActiveIndex(0);
+    menuItemRefs.current[0]?.focus();
+  }, [contextMenu !== null]);
+
   return (
     <div
+      ref={triggerRef}
       data-session-item
       data-session-id={node.id}
+      // `tabIndex={-1}` makes the row programmatically focusable so
+      // the menu can return focus to its trigger on Escape, without
+      // putting the row in the natural Tab order.
+      tabIndex={-1}
       onClick={isClosing ? undefined : onSelect}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setContextMenu({ x: e.clientX, y: e.clientY });
+      }}
       aria-busy={isClosing}
       style={{ backgroundColor: isActive ? undefined : `${meshColor.hex}40` }}
       className={`
@@ -49,6 +207,11 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
       </span>
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />
       <InlineEditableText
+        // `id` anchors the menu's `aria-labelledby` to a name-only
+        // span (not the whole row, whose textContent would include
+        // icons + the inline menu). Mirrors MeshItem's
+        // `mesh-item-name-${id}` (issue #735).
+        id={`node-item-name-${node.id}`}
         value={node.name}
         onCommit={(next) => renameAgentNode(node.id, next)}
         className="flex-1 truncate text-text-primary font-sans text-left text-sm"
@@ -87,6 +250,70 @@ export function NodeItem({ node, meshColor, isActive, onSelect, onDelete }: Node
         >
           ×
         </button>
+      )}
+
+      {/* Issue #776 — context menu (Regenerate entry point).
+          `onMouseDown stopPropagation` keeps row clicks from bubbling
+          to the document-level close handler when the user clicks an
+          item (otherwise the click would close the menu AND fire the
+          row's `onSelect`). */}
+      {contextMenu && (
+        <div
+          ref={menuRef}
+          role="menu"
+          aria-labelledby={`node-item-name-${node.id}`}
+          className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <button
+            ref={(el) => { menuItemRefs.current[0] = el; }}
+            // Roving tabindex — only the active item is in the Tab
+            // order. The Regenerate item is disabled for the four
+            // "race-the-spawn / backend-rejects" statuses (see
+            // `REGENERATE_DISABLED_STATUSES`); the click handler
+            // short-circuits as a second guard so a programmatic
+            // .click() doesn't bypass the disabled state.
+            role="menuitem"
+            tabIndex={activeIndex === 0 ? 0 : -1}
+            disabled={isRegenerateDisabled}
+            onClick={() => {
+              if (isRegenerateDisabled) return;
+              closeContextMenu();
+              // v1 placeholder — ticket 03 of #774 replaces this with a
+              // submenu (the ▸ glyph already signals one). The click
+              // currently invokes the same `spawnAgent` the inline ↻
+              // button uses (which respects `cli_session_id` for a
+              // resume), so the IPC contract is at least consistent
+              // even before the submenu lands.
+              spawnAgent(node.id, node.provider).catch((err) => {
+                console.error('[NodeItem] Regenerate failed:', err);
+              });
+            }}
+            title={
+              isRegenerateDisabled
+                // Use the raw status name rather than `config.label`
+                // so `archived` (which falls back to `idle` in
+                // STATUS_CONFIG) reads as "archived" to the user
+                // instead of the misleading "idle".
+                ? `Regenerate unavailable while ${node.status}`
+                : 'Regenerate this agent node'
+            }
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+              <path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+              <path d="M3 21v-5h5"/>
+            </svg>
+            Regenerate
+            {/* ▸ marks this as a submenu entry point — the submenu is
+                wired in ticket 03 of #774. Spacer pushes the glyph
+                to the right edge to match the WAI-ARIA pattern. */}
+            <span aria-hidden="true" className="ml-auto">▸</span>
+          </button>
+        </div>
       )}
     </div>
   );
