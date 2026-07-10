@@ -8,6 +8,14 @@ interface InlineEditableTextProps {
   style?: React.CSSProperties;
   maxLength?: number;
   ariaLabel?: string;
+  /// Optional DOM id for the display-state span. Mirrors MeshItem's
+  /// `mesh-item-name-${id}` pattern so a host row's context-menu
+  /// `aria-labelledby` points at a name-only element (not the whole
+  /// row, whose textContent includes icons + inline actions + the
+  /// menu itself). Only applied in display state — the input swaps
+  /// its own accessible name from `ariaLabel`, and a stale id would
+  /// mis-label the edit field.
+  id?: string;
 }
 
 /**
@@ -32,6 +40,7 @@ export function InlineEditableText({
   style,
   maxLength = 80,
   ariaLabel = 'Rename',
+  id,
 }: InlineEditableTextProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -105,6 +114,7 @@ export function InlineEditableText({
 
   return (
     <span
+      id={id}
       role="button"
       tabIndex={0}
       aria-label={ariaLabel}
