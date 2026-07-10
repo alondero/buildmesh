@@ -305,6 +305,23 @@ describe('minRefetchIntervalMs — freshness window on bus invalidation', () => 
     expect(client.read(7)).toBeUndefined();
   });
 
+  it('invalidate() clears the freshness stamp — a bus event after manual invalidation notifies', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    // Manual invalidation says "no longer authoritative" — the window must
+    // not keep suppressing bus notifications while the cache sits empty.
+    client.invalidate(7);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
   it('createPathKeyedCache honours the window too', async () => {
     vi.useFakeTimers();
     const client = createPathKeyedCache<string>({

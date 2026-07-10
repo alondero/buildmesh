@@ -415,6 +415,10 @@ function createInternalClient<K, V>(
     invalidate(key) {
       cache.delete(key);
       pending.delete(key);
+      // An explicit invalidation says the value is no longer authoritative:
+      // drop the freshness stamp so the `minRefetchIntervalMs` window can't
+      // keep suppressing bus notifications while the cache sits empty.
+      lastFetchedAt.delete(key);
     },
 
     subscribeOn(key, path, onInvalidate) {
