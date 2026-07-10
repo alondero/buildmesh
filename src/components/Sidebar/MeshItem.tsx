@@ -373,6 +373,11 @@ export function MeshItem({
           node={node}
           meshColor={meshColor}
           isActive={activeNodeId === node.id}
+          // Issue #774 — the Regenerate submenu shows every available
+          // Spawn Option as a picker; threading `providerList` keeps the
+          // submenu visually consistent with `ProviderDropdown` (same
+          // harness-grouped render, same icons).
+          providerList={providerList}
           onSelect={() => {
             setActiveNode(node.id);
             selectMesh(node.mesh_id);

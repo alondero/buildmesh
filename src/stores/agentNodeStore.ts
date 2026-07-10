@@ -83,6 +83,12 @@ interface AgentNodeState {
   swapAgentNodes: (aId: number, bId: number) => Promise<void>;
   setActiveNode: (id: number | null) => void;
   spawnAgent: (nodeId: number, provider: string, rows?: number, cols?: number) => Promise<void>;
+  /// Issue #774 — swap a node's Model Provider. The backend preserves
+  /// worktree / branch / name / position; only `provider` changes. The
+  /// returned `AgentNode` reflects the post-swap state (the backend has
+  /// already updated the row), so the caller can patch the local entry
+  /// without an extra `fetchAgentNodes` round-trip on the happy path.
+  regenerateAgentNode: (nodeId: number, newProviderId: string) => Promise<AgentNode>;
   spawnHandoverAgent: (meshId: number, prefill: string, provider?: string) => Promise<AgentNode>;
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
@@ -422,6 +428,30 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // store-side catch keeps doing two things the wrapper does not: it
       // surfaces the error on `state.error` for the UI to render, and it
       // re-throws so the caller's catch can react.
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  regenerateAgentNode: async (nodeId, newProviderId) => {
+    try {
+      // The backend's returned `AgentNode` is the pre-spawn snapshot
+      // (services::agent_node::regenerate reloads after the provider
+      // UPDATE but BEFORE `spawn_agent_inner` mutates status / captures
+      // `cli_session_id` / fires the `agent-spawned` event). A local
+      // patch from that snapshot would clobber the event-driven state
+      // — match `spawnAgent`'s pattern below and refetch instead. The
+      // refetch reads the DB, which `spawn_agent_inner` has already
+      // written, so the new `provider` / `cli_session_id` / `status`
+      // all line up.
+      await api.regenerateAgentNode(nodeId, newProviderId);
+      await get().fetchAgentNodes();
+      const updated = get().agentNodes.find((n) => n.id === nodeId);
+      if (!updated) {
+        throw new Error(`regenerate_agent_node: node ${nodeId} not found after refetch`);
+      }
+      return updated;
+    } catch (e) {
       set({ error: String(e) });
       throw e;
     }
