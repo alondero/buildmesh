@@ -244,32 +244,50 @@ fn build_hunk(group: &[DiffLine], highlight_path: &str) -> DiffHunk {
 }
 
 /// Diff two files on disk
+// Offloaded via `run_blocking` (issue #762 convention): file reads + the
+// line diff + three syntect highlight passes per hunk are CPU/IO work that
+// would otherwise park a Tauri async worker.
 #[command]
 pub async fn diff_files(
     old_path: String,
     new_path: String,
 ) -> Result<DiffResult, String> {
-    let old_content = fs::read_to_string(&old_path).unwrap_or_default();
-    let new_content = fs::read_to_string(&new_path).unwrap_or_default();
-    let lines = compute_file_diff(&old_content, &new_content);
-    let groups = group_into_hunks(&lines, CONTEXT_LINES);
-    let hunks = groups
-        .iter()
-        .map(|g| build_hunk(g, &new_path))
-        .collect();
+    crate::commands::run_blocking("diff_files", move || {
+        let old_content = fs::read_to_string(&old_path).unwrap_or_default();
+        let new_content = fs::read_to_string(&new_path).unwrap_or_default();
+        let lines = compute_file_diff(&old_content, &new_content);
+        let groups = group_into_hunks(&lines, CONTEXT_LINES);
+        let hunks = groups
+            .iter()
+            .map(|g| build_hunk(g, &new_path))
+            .collect();
 
-    Ok(DiffResult {
-        files: vec![FileDiff {
-            path: new_path,
-            hunks,
-            ..Default::default()
-        }],
+        Ok(DiffResult {
+            files: vec![FileDiff {
+                path: new_path,
+                hunks,
+                ..Default::default()
+            }],
+        })
     })
+    .await
 }
 
 /// Diff a single file against HEAD
+// Offloaded via `run_blocking`: repo open + tree lookup + highlighting.
 #[command]
 pub async fn diff_file_against_head(
+    session_path: String,
+    file_path: String,
+) -> Result<DiffResult, String> {
+    crate::commands::run_blocking("diff_file_against_head", move || {
+        diff_file_against_head_blocking(session_path, file_path)
+    })
+    .await
+}
+
+/// Sync core for [`diff_file_against_head`].
+fn diff_file_against_head_blocking(
     session_path: String,
     file_path: String,
 ) -> Result<DiffResult, String> {
@@ -468,27 +486,40 @@ fn node_base_ref(node: &crate::models::AgentNode) -> String {
 
 /// Diff every file an Agent Node changed since it branched (ADR 0005). One call
 /// returns the whole change set the review panel renders as a stacked view.
+// Offloaded via `run_blocking`: `diff_against_base` walks the whole working
+// directory with libgit2, reads every changed file, and runs three syntect
+// highlight passes per hunk — seconds of CPU on a busy worktree. The review
+// panel re-fetches it on every `git-changed` event while an agent edits, so
+// an inline body is the single biggest pool-parker in the app (the
+// #761/#762 starvation class: UI alive, keystrokes and probes frozen).
 #[command]
 pub async fn diff_node_against_base(node_id: i64) -> Result<DiffResult, String> {
-    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    let base_ref = node_base_ref(&node);
-    diff_against_base(&crate::env::node_working_path(&node).host_path, &base_ref, None)
+    crate::commands::run_blocking("diff_node_against_base", move || {
+        let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+        let base_ref = node_base_ref(&node);
+        diff_against_base(&crate::env::node_working_path(&node).host_path, &base_ref, None)
+    })
+    .await
 }
 
 /// Diff a single file of an Agent Node against its merge-base — the per-file
 /// entry point the mobile changes view taps into.
+// Offloaded via `run_blocking` — same rationale as `diff_node_against_base`.
 #[command]
 pub async fn diff_node_file_against_base(
     node_id: i64,
     file_path: String,
 ) -> Result<DiffResult, String> {
-    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    let base_ref = node_base_ref(&node);
-    diff_against_base(
-        &crate::env::node_working_path(&node).host_path,
-        &base_ref,
-        Some(&file_path),
-    )
+    crate::commands::run_blocking("diff_node_file_against_base", move || {
+        let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+        let base_ref = node_base_ref(&node);
+        diff_against_base(
+            &crate::env::node_working_path(&node).host_path,
+            &base_ref,
+            Some(&file_path),
+        )
+    })
+    .await
 }
 
 #[cfg(test)]

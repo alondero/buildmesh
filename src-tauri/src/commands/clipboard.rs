@@ -6,9 +6,16 @@
 
 use tauri::command;
 
-// `(async)` — spawns `pbpaste` on macOS; keep the wait off the main thread.
-#[command(async)]
-pub fn read_clipboard() -> Result<String, String> {
+// Offloaded via `run_blocking` (issue #762 convention): `pbpaste` is a
+// subprocess we *wait on* (`.output()`), which would otherwise park a
+// bounded tokio worker for the whole clipboard read.
+#[command]
+pub async fn read_clipboard() -> Result<String, String> {
+    crate::commands::run_blocking("read_clipboard", read_clipboard_blocking).await
+}
+
+/// Sync core for [`read_clipboard`].
+fn read_clipboard_blocking() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         let output = std::process::Command::new("pbpaste")

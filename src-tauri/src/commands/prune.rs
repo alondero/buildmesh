@@ -14,8 +14,23 @@ use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
 /// Discover all local branches, worktrees, and remote-tracking branches for
 /// the repo(s) in a mesh. MVP: the mesh path is treated as a single repo.
+// Offloaded via `run_blocking` (issue #762 convention): the enumeration walks
+// every local branch, worktree, and remote-tracking ref with libgit2 — and the
+// squash-merge detection can compute up to `SQUASH_SCAN_CAP` patch-ids — which
+// on a large repo parks a Tauri async worker for the whole walk. The Worktree
+// Manager tab re-fetches this on every `git-changed` event, so at agent-edit
+// rates an inline body starves the pool (the #761/#762 freeze class).
 #[tauri::command]
 pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, String> {
+    crate::commands::run_blocking("get_git_prune_info", move || {
+        get_git_prune_info_blocking(mesh_id)
+    })
+    .await
+}
+
+/// Sync core for [`get_git_prune_info`] — plain fn so the command can offload
+/// it to the blocking pool.
+fn get_git_prune_info_blocking(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
@@ -58,20 +73,25 @@ pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, S
 /// node in `/repo1` that happens to be on its own `feature-a`. The UI
 /// already disables the row's checkbox as the primary defence; this
 /// is belt-and-braces.
+// Offloaded via `run_blocking`: branch deletion rewrites refs on disk with
+// libgit2 — filesystem work that must not run inline on a Tauri async worker.
 #[tauri::command]
 pub async fn delete_branches(
     mesh_id: i64,
     worktree_path: String,
     branch_names: Vec<String>,
 ) -> Result<(), String> {
-    let nodes = db::list_agent_nodes_by_mesh(mesh_id)
-        .map_err(|e| format!("failed to list agent nodes: {}", e))?;
-    let active_branches = active_node_branches(&nodes);
-    delete_branches_in_repo(
-        &to_host_path(&worktree_path),
-        &branch_names,
-        &active_branches,
-    )
+    crate::commands::run_blocking("delete_branches", move || {
+        let nodes = db::list_agent_nodes_by_mesh(mesh_id)
+            .map_err(|e| format!("failed to list agent nodes: {}", e))?;
+        let active_branches = active_node_branches(&nodes);
+        delete_branches_in_repo(
+            &to_host_path(&worktree_path),
+            &branch_names,
+            &active_branches,
+        )
+    })
+    .await
 }
 
 fn delete_branches_in_repo(
@@ -148,9 +168,16 @@ fn delete_branches_in_repo(
 /// loses the warm-path latency win. The Worktree Manager UI also
 /// disables the row's checkbox as the primary defence; this backend
 /// check is defence-in-depth.
+// Offloaded via `run_blocking`: each removal is a recursive directory delete
+// (potentially gigabytes of node_modules/target) plus a libgit2 prune — on a
+// Tauri async worker that parks the pool for the whole delete, which on
+// Windows can run tens of seconds.
 #[tauri::command]
 pub async fn delete_worktrees(worktree_paths: Vec<String>) -> Result<(), String> {
-    remove_worktrees(&worktree_paths)
+    crate::commands::run_blocking("delete_worktrees", move || {
+        remove_worktrees(&worktree_paths)
+    })
+    .await
 }
 
 fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
@@ -208,9 +235,16 @@ fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
 /// worktree's own path), matching the prune UI's input — the same key a
 /// second concurrent `prune_remote_tracking` call on the SAME worktree
 /// would use, so the two can't collide on `.git/FETCH_HEAD`.
+// Offloaded via `run_blocking`: the core is a network `git fetch --prune`
+// (no client-side timeout) that additionally *waits on the blocking per-Mesh
+// sync lock* — inline on a Tauri async worker either of those parks the
+// worker for the duration (the overnight-freeze class, #761/#762).
 #[tauri::command]
 pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, String> {
-    locked_prune_remote_tracking(&worktree_path)
+    crate::commands::run_blocking("prune_remote_tracking", move || {
+        locked_prune_remote_tracking(&worktree_path)
+    })
+    .await
 }
 
 /// Run `git fetch --prune` inside `services::sync_lock::with_mesh_sync_lock`
