@@ -283,6 +283,12 @@ export const spawnAgent = (
   cols?: number,
 ) => _invoke('spawn_agent', { sessionId, provider, resume, rows, cols });
 
+// Issue #774 / #775 — swap a node's Model Provider. The worktree,
+// branch, name, and position are preserved; only `provider` changes. The
+// backend decides resume vs fresh from the new provider's harness.
+export const regenerateAgentNode = (nodeId: number, newProviderId: string) =>
+  _invoke<AgentNode>('regenerate_agent_node', { nodeId, newProviderId });
+
 export const killAgent = (sessionId: number) =>
   _invoke('kill_agent', { sessionId });
 

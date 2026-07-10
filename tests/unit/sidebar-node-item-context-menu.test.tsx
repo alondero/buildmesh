@@ -23,6 +23,8 @@ import userEvent from '@testing-library/user-event';
 import { NodeItem } from '../../src/components/Sidebar/NodeItem';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { getMeshColor } from '../../src/lib/meshColors';
+import type { SpawnOption } from '../../src/lib/groups';
+import { colorClassForProvider } from '../../src/lib/groups';
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
@@ -47,14 +49,37 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
+/**
+ * Build a Spawn Option for the picker submenu. Defaults carry just
+ * enough for `groupByHarness` to bucket it under its `group_key` and
+ * for the row's `data-spawn-*` attributes to be useful to tests.
+ */
+function makeProvider(
+  id: string,
+  overrides: Partial<SpawnOption> = {},
+): SpawnOption {
+  return {
+    id,
+    label: id,
+    icon: null,
+    harness_id: id,
+    provider_id: id,
+    is_proxied: false,
+    group_key: id,
+    color: colorClassForProvider(id),
+    ...overrides,
+  };
+}
+
 const meshColor = getMeshColor(1);
 
-function renderNode(node: AgentNode = makeNode()) {
+function renderNode(node: AgentNode = makeNode(), providerList?: SpawnOption[]) {
   return render(
     <NodeItem
       node={node}
       meshColor={meshColor}
       isActive={false}
+      providerList={providerList}
       onSelect={vi.fn()}
       onDelete={vi.fn()}
     />,
@@ -93,10 +118,18 @@ describe('NodeItem context menu (issue #776)', () => {
       error: null,
       closingNodeIds: new Set(),
     });
-    // Spy on the store's `spawnAgent` so the click test can assert the
-    // call without going through the Tauri `invoke` mock — the store
-    // method is the public surface NodeItem uses.
-    vi.spyOn(useAgentNodeStore.getState(), 'spawnAgent').mockResolvedValue(undefined);
+    // Spy on the store's `regenerateAgentNode` so the picker-click
+    // tests can assert the call without going through the Tauri
+    // `invoke` mock — the store method is the public surface
+    // NodeItem uses. The mock returns a minimal `AgentNode` so the
+    // caller's `agentNodes.find` after `fetchAgentNodes` doesn't
+    // trip on `undefined`.
+    vi.spyOn(useAgentNodeStore.getState(), 'regenerateAgentNode').mockImplementation(
+      async (nodeId, newProviderId) => {
+        const existing = useAgentNodeStore.getState().agentNodes.find(n => n.id === nodeId);
+        return { ...(existing ?? makeNode()), provider: newProviderId } as AgentNode;
+      },
+    );
   });
 
   // RTL doesn't auto-unmount in this vitest setup, so the previous
@@ -195,31 +228,43 @@ describe('NodeItem context menu (issue #776)', () => {
     });
   });
 
-  it('clicking the Regenerate item closes the menu and invokes spawnAgent with (nodeId, provider)', async () => {
-    // Pre-populate the store so spawnAgent's lookup of `cli_session_id`
-    // (production behaviour mirrored from node-item-restart-button.test.tsx:86-87)
-    // doesn't find an empty agentNodes array.
-    const node = makeNode({ id: 77, status: 'idle' });
-    useAgentNodeStore.setState({ agentNodes: [node] });
-    renderNode(node);
+  it('clicking the Regenerate item opens the provider-picker submenu (#774)', async () => {
+    // Issue #774 / ticket 03 — the Regenerate row is no longer a
+    // click-to-fire button; it's a submenu trigger that opens the
+    // provider picker. The actual `regenerate_agent_node` call moves
+    // to "clicking a provider in the picker".
+    const node = makeNode({ id: 77, status: 'idle', provider: 'anthropic' });
+    renderNode(node, [makeProvider('claude', { is_proxied: false })]);
     openContextMenu();
 
-    await userEvent.click(screen.getByText(/Regenerate/));
+    // `getByText(/Regenerate/)` matches the text node inside the
+    // button; `.closest('button')` walks up to the actual button so
+    // userEvent.click fires the React onClick (the SVG inside the
+    // button is `pointer-events` neutral in jsdom and would otherwise
+    // absorb the synthetic click).
+    const trigger = screen.getByText(/Regenerate/).closest('button')!;
+    await userEvent.click(trigger);
 
-    // Menu closes.
+    // Menu stays open (submenu trigger shouldn't dismiss the menu)…
     await waitFor(() => {
-      expect(document.querySelector('[role="menu"]')).toBeNull();
+      expect(document.querySelector('[role="menu"]')).toBeTruthy();
     });
-    // spawnAgent receives the node id + provider so the backend can
-    // resume (or restart, for fresh-spawn nodes) the agent.
-    expect(useAgentNodeStore.getState().spawnAgent).toHaveBeenCalledTimes(1);
-    expect(useAgentNodeStore.getState().spawnAgent).toHaveBeenCalledWith(77, 'anthropic');
+    // …and the picker submenu renders with the candidate providers.
+    const submenu = screen.getByTestId('regenerate-submenu');
+    expect(submenu).toBeTruthy();
+    expect(submenu.textContent).toMatch(/claude/i);
+    // `regenerateAgentNode` must NOT fire on a trigger click — only
+    // a picker-row click invokes the IPC.
+    expect(useAgentNodeStore.getState().regenerateAgentNode).not.toHaveBeenCalled();
   });
 
   // Status-gating — Regenerate must be DISABLED for the four "race or
-  // reject" statuses so a click can't fire a doomed `spawn_agent` IPC.
-  // Greyed-out is preferred over hidden for discoverability: the user
+  // reject" statuses so a click can't fire a doomed `regenerate_agent_node`
+  // IPC. Greyed-out is preferred over hidden for discoverability: the user
   // sees the action exists, with a tooltip explaining why it's blocked.
+  // Each test passes a populated `providerList` so the "no alternate
+  // providers" gate (#774) doesn't mask the status gate under test.
+  const alternateProvider = [makeProvider('claude', { group_key: 'claude', harness_id: 'claude' })];
   describe('Regenerate disabled-state by status', () => {
     it.each([
       ['spawning'],
@@ -227,7 +272,7 @@ describe('NodeItem context menu (issue #776)', () => {
       ['archived'],
       ['suspended'],
     ] as const)('renders Regenerate as disabled when status is "%s"', (status) => {
-      renderNode(makeNode({ status }));
+      renderNode(makeNode({ status }), alternateProvider);
       openContextMenu();
       const item = screen.getByText(/Regenerate/).closest('button')!;
       expect(item.hasAttribute('disabled')).toBe(true);
@@ -242,14 +287,14 @@ describe('NodeItem context menu (issue #776)', () => {
     it.each(['running', 'idle', 'awaiting_input', 'error'] as const)(
       'renders Regenerate as enabled when status is "%s"',
       (status) => {
-        renderNode(makeNode({ status }));
+        renderNode(makeNode({ status }), alternateProvider);
         openContextMenu();
         const item = screen.getByText(/Regenerate/).closest('button')!;
         expect(item.hasAttribute('disabled')).toBe(false);
       },
     );
 
-    it('clicking a disabled Regenerate does NOT invoke spawnAgent', async () => {
+    it('clicking a disabled Regenerate does NOT invoke regenerateAgentNode', async () => {
       // Defense in depth: the HTML `disabled` attribute already blocks
       // clicks in real browsers, but a programmatic `.click()` (or a
       // future refactor that drops the attribute) must still be
@@ -257,8 +302,7 @@ describe('NodeItem context menu (issue #776)', () => {
       // guard. Pin the guard so the IPC can't fire from a forbidden
       // status.
       const node = makeNode({ id: 88, status: 'spawning' });
-      useAgentNodeStore.setState({ agentNodes: [node] });
-      renderNode(node);
+      renderNode(node, alternateProvider);
       openContextMenu();
 
       const item = screen.getByText(/Regenerate/).closest('button')!;
@@ -266,7 +310,7 @@ describe('NodeItem context menu (issue #776)', () => {
       // fire a raw click to exercise the handler-side guard.
       fireEvent.click(item);
 
-      expect(useAgentNodeStore.getState().spawnAgent).not.toHaveBeenCalled();
+      expect(useAgentNodeStore.getState().regenerateAgentNode).not.toHaveBeenCalled();
     });
   });
 
@@ -371,6 +415,229 @@ describe('NodeItem context menu (issue #776)', () => {
       await new Promise((r) => setTimeout(r, 10));
       expect(menu.style.top).toBe(before.top);
       expect(menu.style.left).toBe(before.left);
+    });
+  });
+
+  // Issue #774 / ticket 03 — Regenerate's provider-picker submenu.
+  // Mirrors `GroupedProviderMenu`'s shape (harness headers + proxied
+  // children) so the picker is visually consistent with the rest of
+  // the spawn surface.
+  describe('Regenerate submenu (issue #774 / ticket 03)', () => {
+    /** Open the parent context menu and click Regenerate so the
+     *  submenu's hover/click toggle fires. Returns the submenu node
+     *  so individual tests can query rows inside it. */
+    async function openSubmenu(node: AgentNode = makeNode(), providers?: SpawnOption[]) {
+      renderNode(node, providers);
+      openContextMenu();
+      // Same `.closest('button')` walk as the v1 "Regenerate" test —
+      // userEvent.click on the bare text node would otherwise hit the
+      // SVG (which jsdom marks non-interactive) and miss the React
+      // onClick handler on the button.
+      const trigger = screen.getByText(/Regenerate/).closest('button')!;
+      await userEvent.click(trigger);
+      await waitFor(() => {
+        expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+      });
+      return screen.getByTestId('regenerate-submenu');
+    }
+
+    it('renders one row per non-current provider, grouped by harness', async () => {
+      const node = makeNode({ provider: 'anthropic' });
+      await openSubmenu(node, [
+        // current — must be excluded from the picker
+        makeProvider('anthropic', { label: 'Anthropic', group_key: 'anthropic', harness_id: 'anthropic' }),
+        // a sibling harness with native + proxied children
+        makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
+        makeProvider('claude-minimax', {
+          id: 'claude-minimax', label: 'Claude Code · Minimax',
+          group_key: 'claude', harness_id: 'claude',
+          is_proxied: true, provider_id: 'minimax',
+        }),
+        // another harness
+        makeProvider('kimi', { label: 'Kimi', group_key: 'kimi', harness_id: 'kimi' }),
+      ]);
+
+      const submenu = screen.getByTestId('regenerate-submenu');
+      // Three harness groups (anthropic excluded).
+      expect(submenu.querySelectorAll('[data-spawn-group]')).toHaveLength(2);
+      // claude group carries its harness header + proxied child.
+      const claudeGroup = submenu.querySelector('[data-spawn-group="claude"]')!;
+      expect(claudeGroup.querySelectorAll('[data-spawn-id]')).toHaveLength(2);
+      // Total picker rows = 3 (claude + claude-minimax + kimi).
+      expect(submenu.querySelectorAll('[role="menuitem"]')).toHaveLength(3);
+      // Current provider MUST NOT appear in the picker.
+      expect(submenu.querySelector('[data-spawn-id="anthropic"]')).toBeNull();
+    });
+
+    it('clicking a picker row invokes regenerateAgentNode(nodeId, providerId) and closes the menu', async () => {
+      const node = makeNode({ id: 91, provider: 'anthropic', status: 'idle' });
+      await openSubmenu(node, [
+        makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+        makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
+      ]);
+
+      await userEvent.click(screen.getByText(/Claude Code/));
+
+      // IPC fires with the chosen provider id (NOT the current one).
+      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledTimes(1);
+      expect(useAgentNodeStore.getState().regenerateAgentNode).toHaveBeenCalledWith(91, 'claude');
+      // The whole menu (parent + submenu) closes.
+      await waitFor(() => {
+        expect(document.querySelector('[role="menu"]')).toBeNull();
+      });
+    });
+
+    it('renders an empty-state message when no other providers are available', async () => {
+      const node = makeNode({ provider: 'anthropic' });
+      await openSubmenu(node, [
+        // Only the current provider — nothing to offer.
+        makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+      ]);
+      const empty = screen.getByTestId('regenerate-submenu-empty');
+      expect(empty).toBeTruthy();
+      expect(empty.textContent).toMatch(/no other providers/i);
+      expect(screen.queryByRole('menuitem', { name: /anthropic/i })).toBeNull();
+    });
+
+    it('disables the trigger when providerList is empty', () => {
+      // The picker would have nothing to offer (every provider IS the
+      // current one), so the trigger is disabled and a click does
+      // nothing — covered by the "no alternate providers" test above,
+      // but pinned here too for the empty-list edge case.
+      renderNode(makeNode(), []);
+      openContextMenu();
+      const trigger = screen.getByText(/Regenerate/).closest('button')!;
+      expect(trigger.hasAttribute('disabled')).toBe(true);
+      expect(trigger.getAttribute('title')).toMatch(/no other providers/i);
+    });
+
+    it('keeps the picker closed until the trigger is hovered or clicked', () => {
+      // The submenu's `aria-expanded` mirrors the open state, so
+      // screen readers announce the parent as collapsed until the
+      // user interacts. Click here so the picker flips open.
+      renderNode(makeNode(), [
+        makeProvider('claude', { group_key: 'claude', harness_id: 'claude' }),
+      ]);
+      openContextMenu();
+      const trigger = screen.getByText(/Regenerate/).closest('button')!;
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      expect(trigger.getAttribute('aria-haspopup')).toBe('menu');
+      // Picker not yet in the DOM.
+      expect(document.querySelector('[data-testid="regenerate-submenu"]')).toBeNull();
+    });
+
+    it('does not invoke regenerateAgentNode when the trigger is disabled', async () => {
+      // Issue #774 — disabled-for-status gating propagates to the
+      // submenu. The trigger is greyed-out, the picker never opens,
+      // and a programmatic .click() can't bypass the guard.
+      const node = makeNode({ status: 'archived' });
+      renderNode(node, [
+        makeProvider('claude', { group_key: 'claude', harness_id: 'claude' }),
+      ]);
+      openContextMenu();
+
+      const trigger = screen.getByText(/Regenerate/).closest('button')!;
+      fireEvent.click(trigger);
+
+      expect(screen.queryByTestId('regenerate-submenu')).toBeNull();
+      expect(useAgentNodeStore.getState().regenerateAgentNode).not.toHaveBeenCalled();
+    });
+
+    it('greys out the trigger when the mesh has no alternate providers (#774)', () => {
+      // The picker excludes the node's current provider, so a mesh
+      // whose only option is the current one would render an empty
+      // submenu — the trigger must be disabled instead so the user
+      // sees the affordance exists with a tooltip explaining why.
+      const node = makeNode({ provider: 'anthropic' });
+      renderNode(node, [
+        makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+      ]);
+      openContextMenu();
+      const trigger = screen.getByText(/Regenerate/).closest('button')!;
+      expect(trigger.hasAttribute('disabled')).toBe(true);
+      expect(trigger.getAttribute('title')).toMatch(/no other providers/i);
+    });
+
+    describe('keyboard navigation (#774)', () => {
+      it('ArrowRight on the trigger opens the picker and focuses the first provider', async () => {
+        renderNode(
+          makeNode({ provider: 'anthropic' }),
+          [
+            makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+            makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
+            makeProvider('kimi', { label: 'Kimi', group_key: 'kimi', harness_id: 'kimi' }),
+          ],
+        );
+        openContextMenu();
+        // Trigger has focus on open (the existing v1 roving-tabindex
+        // behavior). Fire ArrowRight on the document (the keydown
+        // handler is attached there).
+        fireEvent.keyDown(document, { key: 'ArrowRight' });
+
+        await waitFor(() => {
+          expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+        });
+        // First provider row (the claude group is rendered first
+        // since `groupByHarness` walks the input order — anthropic is
+        // excluded, claude comes next).
+        await waitFor(() => {
+          const firstItem = screen.getByTestId('regenerate-submenu')
+            .querySelector<HTMLButtonElement>('[role="menuitem"]');
+          expect(document.activeElement).toBe(firstItem);
+        });
+      });
+
+      it('ArrowLeft inside the picker closes it and returns focus to the trigger', async () => {
+        renderNode(
+          makeNode({ provider: 'anthropic' }),
+          [
+            makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+            makeProvider('claude', { group_key: 'claude', harness_id: 'claude' }),
+          ],
+        );
+        openContextMenu();
+        fireEvent.keyDown(document, { key: 'ArrowRight' });
+        await waitFor(() => {
+          expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+        });
+
+        fireEvent.keyDown(document, { key: 'ArrowLeft' });
+
+        await waitFor(() => {
+          expect(screen.queryByTestId('regenerate-submenu')).toBeNull();
+        });
+        const trigger = screen.getByText(/Regenerate/).closest('button')!;
+        await waitFor(() => {
+          expect(document.activeElement).toBe(trigger);
+        });
+      });
+
+      it('ArrowDown inside the picker advances through the flat provider list with wrap', async () => {
+        renderNode(
+          makeNode({ provider: 'anthropic' }),
+          [
+            makeProvider('anthropic', { group_key: 'anthropic', harness_id: 'anthropic' }),
+            makeProvider('claude', { label: 'Claude Code', group_key: 'claude', harness_id: 'claude' }),
+            makeProvider('kimi', { label: 'Kimi', group_key: 'kimi', harness_id: 'kimi' }),
+          ],
+        );
+        openContextMenu();
+        fireEvent.keyDown(document, { key: 'ArrowRight' });
+        await waitFor(() => {
+          expect(screen.getByTestId('regenerate-submenu')).toBeTruthy();
+        });
+
+        // claude → kimi → wrap back to claude
+        const items = () => Array.from(
+          screen.getByTestId('regenerate-submenu').querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+        );
+        expect(document.activeElement).toBe(items()[0]);
+        fireEvent.keyDown(document, { key: 'ArrowDown' });
+        expect(document.activeElement).toBe(items()[1]);
+        fireEvent.keyDown(document, { key: 'ArrowDown' });
+        // Wrap-around: kimi → claude.
+        expect(document.activeElement).toBe(items()[0]);
+      });
     });
   });
 });
