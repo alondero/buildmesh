@@ -357,6 +357,7 @@ pub fn run() {
             commands::agent_node::get_worktree_close_safety,
             commands::agent_node::rename_agent_node,
             commands::agent_node::update_agent_node_positions,
+            commands::agent_node::regenerate_agent_node,
             // Mesh (renamed from `*_project` to `*_mesh`).
             commands::mesh::add_mesh,
             commands::mesh::create_mesh,
