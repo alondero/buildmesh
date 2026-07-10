@@ -145,6 +145,34 @@ pub async fn rename_agent_node(
     Ok(())
 }
 
+/// Swap an agent node's Model Provider (issue #774 / #775). The
+/// worktree, branch, name, position, and all other state are preserved;
+/// the new agent resumes from the existing `cli_session_id` when both
+/// providers share the same Agent Harness and the new adapter supports
+/// resume, else starts fresh. Cross-harness swaps are allowed (the user
+/// may pick any Spawn Option) but always start fresh — the existing
+/// `cli_session_id` is bound to the old harness's session format.
+///
+/// Frontend trigger: right-click context menu on `NodeItem` (see
+/// ticket #776). UI flow: confirmation dialog for running nodes
+/// (ticket #778). Returns the updated `AgentNode` on success so the
+/// caller's store can patch the local entry without a refetch; on
+/// failure the caller gets an `Err` (the `provider` column has
+/// already been updated at that point — the user can retry, and the
+/// local store stays on the old provider). The existing
+/// `agent-spawned` event from `spawn_agent_inner` drives PTY /
+/// resize sync on the frontend.
+#[command]
+pub async fn regenerate_agent_node(
+    node_id: i64,
+    new_provider_id: String,
+    app: tauri::AppHandle,
+) -> Result<crate::models::AgentNode, String> {
+    services::agent_node::regenerate(node_id, &new_provider_id, &app)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_rename_name;

@@ -2105,6 +2105,27 @@ pub fn set_agent_node_worktree_name(id: i64, worktree_name: &str) -> SqlResult<(
     Ok(())
 }
 
+/// Update an agent node's `provider` column. Used by the Regenerate
+/// command (issue #774 / #775) to swap a node's Model Provider on
+/// respawn. Stores the opaque harness/profile id verbatim — the
+/// resolver shim normalises to a `Provider` enum at the spawn seam,
+/// so the caller can pass either a bare `harness` id or a composite
+/// `<harness>:<provider_id>` Spawn Option id (issue #575). The
+/// underlying SQL is a plain one-column UPDATE; passing the same
+/// value the column already carries rewrites the row to itself,
+/// which is harmless (the trigger is a Regenerate, not a hot loop)
+/// and avoids the need for an `AND provider <> ?1` guard that could
+/// silently drop a real rewrite if the comparison string ever drifted
+/// from the column's storage form.
+pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE agent_nodes SET provider = ?1 WHERE id = ?2",
+        params![provider, id],
+    )?;
+    Ok(())
+}
+
 pub fn get_agent_node_by_id(id: i64) -> SqlResult<AgentNode> {
     let db = get().lock().unwrap();
     get_agent_node_by_id_inner(&db, id)

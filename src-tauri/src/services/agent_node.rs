@@ -1,20 +1,36 @@
 //! Agent Node service — creation, deletion, and lifecycle orchestration
 
+use crate::agent::provider::parse_spawn_option_id;
+use crate::agent::spawn::{spawn_agent_inner, SpawnOptions};
 use crate::db;
 use crate::env;
 use crate::git::worktree::{self, WorktreeCloseSafety};
 use crate::models::{AgentNode, PendingWorktreeRemoval, SessionStatus};
+use crate::preferences::resolve_harness_provider;
 
 /// Error type for agent node service operations
 #[derive(Debug)]
 pub enum AgentNodeError {
     Db(rusqlite::Error),
+    /// Node's `SessionStatus` was not eligible for the requested
+    /// operation (e.g. `regenerate` rejects `Spawning` / `Pending` /
+    /// `Archived` / `Suspended`). The wrapped string is the user-
+    /// facing reason.
+    Status(String),
+    /// A backend orchestrator call (`spawn_agent_inner` today, but
+    /// the variant is intentionally generic so future downstream
+    /// calls share the path) failed. The wrapped string is the
+    /// underlying error message verbatim, so the frontend's toast
+    /// surfaces the same text the Tauri command returns.
+    Backend(String),
 }
 
 impl std::fmt::Display for AgentNodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AgentNodeError::Db(e) => write!(f, "{}", e),
+            AgentNodeError::Status(e) => write!(f, "{}", e),
+            AgentNodeError::Backend(e) => write!(f, "{}", e),
         }
     }
 }
@@ -404,6 +420,152 @@ fn process_removals(
         }
     }
     failures
+}
+
+/// Validate that a node's status is eligible for regeneration.
+///
+/// Allowed: `Idle`, `AwaitingInput`, `Error`, `Running` — the node has
+/// a process (live or recently-live) we can kill and replace.
+/// Rejected: `Spawning` / `Pending` (another spawn is in flight) and
+/// `Archived` / `Suspended` (the node is closed or awaiting app-
+/// restart resume).
+///
+/// Extracted from the #775 spec (step 2) so the orchestrator and the
+/// tests share one source of truth.
+pub fn validate_status_eligible(status: SessionStatus) -> Result<(), String> {
+    match status {
+        SessionStatus::Idle
+        | SessionStatus::AwaitingInput
+        | SessionStatus::Error
+        | SessionStatus::Running => Ok(()),
+        _ => Err(format!(
+            "regenerate unavailable: node is in {} state (must be idle, awaiting_input, error, or running)",
+            status.to_db_str()
+        )),
+    }
+}
+
+/// Decide whether to pass the existing `cli_session_id` to the new
+/// agent's spawn as a `--resume` arg, or start a fresh session.
+///
+/// Continue iff ALL of:
+///   * the new provider's adapter has `supports_resume() == true`
+///     (the executor accepts the resume flag);
+///   * the new provider shares the same Agent Harness as the old —
+///     the existing `cli_session_id` is bound to the old harness's
+///     session format (Claude Code UUIDs are not Codex session ids,
+///     so a cross-harness resume would land on a session the new
+///     harness can't read);
+///   * the node actually has a `cli_session_id` to resume from.
+///
+/// Pure — extracted from `regenerate` so the rule is unit-testable
+/// without Tauri or a real DB. The harness comparison uses the
+/// leading `harness_id` part of the composite id
+/// (`<harness>:<provider_id>`, issue #575): `claude:minimax` and
+/// `claude:openrouter` share the `claude` harness, so a swap between
+/// them continues the session.
+pub fn decide_resume(
+    old_provider: &str,
+    new_provider: &str,
+    cli_session_id: Option<&str>,
+) -> Option<String> {
+    let (old_harness, _) = parse_spawn_option_id(old_provider);
+    let (new_harness, _) = parse_spawn_option_id(new_provider);
+    let same_harness = old_harness == new_harness;
+    let new_provider_enum = resolve_harness_provider(new_provider);
+    if same_harness && new_provider_enum.adapter().supports_resume() {
+        cli_session_id.map(String::from)
+    } else {
+        None
+    }
+}
+
+/// Regenerate an agent node: swap its Model Provider, kill the live
+/// process, and respawn. The worktree, branch, name, position, and
+/// all other state are preserved; only the `provider` column changes.
+///
+/// The same-harness check lives inside [`decide_resume`] — the user
+/// may pick any Spawn Option (cross-harness is allowed), but the
+/// existing `cli_session_id` is only portable across a same-harness
+/// swap, so a cross-harness swap always starts fresh. The "right
+/// handoff" for a cross-harness regenerate is up to the user (e.g.
+/// a context file already in the worktree that the new agent can
+/// read).
+///
+/// On spawn failure the `provider` column has already been updated —
+/// the user can retry. Mirrors the pre-existing spawn flow's behaviour
+/// for a fresh `spawn_agent` (the row is in `Error` state and the
+/// user retries the spawn manually).
+pub async fn regenerate(
+    node_id: i64,
+    new_provider: &str,
+    app: &tauri::AppHandle,
+) -> Result<AgentNode, AgentNodeError> {
+    // 1. Read the current node (capture the old provider before the
+    //    update so `decide_resume` can compare harness ids).
+    let node = db::get_agent_node_by_id(node_id)?;
+    let old_provider = node.provider.clone();
+
+    // 2. Validate status eligibility. Reject mid-spawn and closed
+    //    states up front so we never leave a half-killed process
+    //    behind.
+    if let Err(e) = validate_status_eligible(node.status) {
+        return Err(AgentNodeError::Status(e));
+    }
+
+    // 3. Kill the live process. `kill_agent` is idempotent — a no-op
+    //    when no process is registered, and it also resets session-
+    //    naming buffers (`session_naming::reset_buffers` internally)
+    //    and clears HTTP scrollback, matching the frontend's "kill"
+    //    path.
+    //
+    //    The explicit call is load-bearing: `spawn_agent_inner`'s
+    //    `is_agent_already_running` short-circuit at spawn.rs:743
+    //    returns early without killing or respawning if a process
+    //    is still registered, which would leave the OLD process
+    //    alive with the NEW provider in the DB. `spawn_agent_inner`
+    //    re-kills at its own step 2 (spawn.rs:751) but only after
+    //    that short-circuit doesn't fire.
+    //
+    //    Errors are ignored: `kill_agent` returns Err only from the
+    //    trailing `db::update_agent_node_status(... Idle)` — the
+    //    registry side effects (`kill_session` + `remove`) are
+    //    already in place. The new spawn sets the status correctly
+    //    anyway.
+    let _ = crate::commands::agent::kill_agent(node_id).await;
+
+    // 4. Update the `provider` column. The next `spawn_agent_inner`
+    //    call reads `node.provider` for backend env resolution
+    //    (`preferences::resolve_provider_env(&node.provider)`,
+    //    spawn.rs:1399) and preflight, so the new value must land
+    //    BEFORE we hand off to the spawn pipeline.
+    db::set_agent_node_provider(node_id, new_provider)?;
+
+    // 5. Reload the node so the spawn call sees the new provider.
+    let node = db::get_agent_node_by_id(node_id)?;
+
+    // 6. Decide resume mode and call `spawn_agent_inner`. We preload
+    //    the node (`opts.node = Some(node)`) so the spawn pipeline
+    //    skips its own DB read at step 3 (spawn.rs:755-762).
+    let resume = decide_resume(&old_provider, new_provider, node.cli_session_id.as_deref());
+    let new_provider_enum = resolve_harness_provider(new_provider);
+
+    spawn_agent_inner(
+        app,
+        SpawnOptions {
+            session_id: node_id,
+            provider: new_provider_enum,
+            resume,
+            rows: 24,
+            cols: 80,
+            prefill: None,
+            node: Some(node.clone()),
+        },
+    )
+    .await
+    .map_err(AgentNodeError::Backend)?;
+
+    Ok(node)
 }
 
 #[cfg(test)]
@@ -858,5 +1020,149 @@ mod tests {
             None,
             None,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regenerate (issue #775) — validation + resume-decision surface.
+    //
+    // The two pure helpers (`validate_status_eligible`, `decide_resume`) own
+    // the new logic. The async `regenerate` orchestrator is exercised end-
+    // to-end via the Playwright e2e suite and the manual smoke test, so the
+    // unit tests here stay focused on the rules the orchestrator composes.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_status_eligible_allows_running_idle_awaiting_error() {
+        // The four "process is or was running" states — these are the
+        // cases where a kill + respawn makes sense.
+        for status in [
+            SessionStatus::Running,
+            SessionStatus::Idle,
+            SessionStatus::AwaitingInput,
+            SessionStatus::Error,
+        ] {
+            assert!(
+                validate_status_eligible(status).is_ok(),
+                "expected {status:?} to be eligible, got: {:?}",
+                validate_status_eligible(status),
+            );
+        }
+    }
+
+    #[test]
+    fn validate_status_eligible_rejects_spawning_pending_archived_suspended() {
+        // The four "no process to swap" states — reject at the boundary.
+        for status in [
+            SessionStatus::Spawning,
+            SessionStatus::Pending,
+            SessionStatus::Archived,
+            SessionStatus::Suspended,
+        ] {
+            assert!(
+                validate_status_eligible(status).is_err(),
+                "expected {status:?} to be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn validate_status_eligible_message_includes_status() {
+        // The error message must name the rejected state so the frontend
+        // toast (or a dev grepping `buildmesh.log`) can tell *why* the
+        // regenerate was refused without a stack trace.
+        let err = validate_status_eligible(SessionStatus::Spawning).unwrap_err();
+        assert!(
+            err.contains("spawning"),
+            "error must mention the rejected status, got: {err}",
+        );
+    }
+
+    #[test]
+    fn decide_resume_continues_same_harness_with_session_id() {
+        // Same harness, supports resume, has session id → continue.
+        assert_eq!(
+            decide_resume("claude:minimax", "claude:openrouter", Some("uuid-abc")),
+            Some("uuid-abc".to_string()),
+        );
+        // Native → proxied within the same harness is also a continue.
+        assert_eq!(
+            decide_resume("claude", "claude:minimax", Some("uuid-abc")),
+            Some("uuid-abc".to_string()),
+        );
+    }
+
+    #[test]
+    fn decide_resume_starts_fresh_when_no_session_id() {
+        // Same harness, supports resume, but no captured session id
+        // (e.g. the agent was killed before the reader caught one).
+        assert_eq!(
+            decide_resume("claude:minimax", "claude:openrouter", None),
+            None,
+        );
+    }
+
+    #[test]
+    fn decide_resume_starts_fresh_on_cross_harness() {
+        // The load-bearing case: a Claude → Codex swap with a Claude
+        // session id must NOT resume — the UUID isn't a valid Codex
+        // session id. Without this, the new agent would crash on
+        // startup with "Conversation not found" and the user would
+        // lose the work.
+        assert_eq!(
+            decide_resume("claude:minimax", "codex", Some("uuid-abc")),
+            None,
+            "cross-harness swaps must not pass the old session id to the new harness",
+        );
+        // And the reverse: Codex → Claude with a Codex id also fresh.
+        assert_eq!(
+            decide_resume("codex", "claude:minimax", Some("codex-session-xyz")),
+            None,
+        );
+    }
+
+    #[test]
+    fn decide_resume_starts_fresh_when_new_provider_lacks_resume() {
+        // The OpenCode adapter doesn't support resume. Even a same-
+        // harness OpenCode → OpenCode swap is fresh.
+        assert_eq!(
+            decide_resume("opencode", "opencode", Some("oc-session")),
+            None,
+            "a same-harness swap to a non-resumable adapter must start fresh",
+        );
+    }
+
+    #[test]
+    fn set_agent_node_provider_persists_and_round_trips() {
+        // Issue #775 — the Regenerate command mutates `agent_nodes.provider`
+        // to swap the Model Provider on respawn. Verify the column write
+        // persists and reads back the new value, and that a re-write is
+        // idempotent (the function comment claims it as a property).
+        let mesh_id = fresh_mesh();
+        let node = create(
+            mesh_id,
+            "/tmp/buildmesh_provider_test",
+            "main",
+            Some("anthropic"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("seed node should succeed");
+        assert_eq!(node.provider, "anthropic");
+
+        db::set_agent_node_provider(node.id, "claude:minimax")
+            .expect("set_agent_node_provider should succeed");
+        let reloaded = db::get_agent_node_by_id(node.id)
+            .expect("get_agent_node_by_id should succeed");
+        assert_eq!(
+            reloaded.provider, "claude:minimax",
+            "provider column must round-trip through the UPDATE",
+        );
+
+        // Idempotent — a no-op write should still succeed.
+        db::set_agent_node_provider(node.id, "claude:minimax")
+            .expect("idempotent write should succeed");
     }
 }
