@@ -68,21 +68,26 @@ fn read_dir_recursive(path: &Path, base_path: &str, host_base: &str, depth: usiz
 }
 
 /// List a directory as a tree structure
-// `(async)` — a recursive directory walk on a worker thread, not the main thread.
-#[command(async)]
-pub fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode, String> {
-    let host_path = env::to_host_path(&path);
-    let path_obj = Path::new(&host_path);
+// Offloaded via `run_blocking` (issue #762 convention): `#[command(async)]`
+// ran the recursive walk on a *bounded tokio* worker, parking it for the
+// whole traversal — slow on big trees and pathological on WSL UNC paths.
+#[command]
+pub async fn list_directory(path: String, max_depth: Option<usize>) -> Result<FileNode, String> {
+    crate::commands::run_blocking("list_directory", move || {
+        let host_path = env::to_host_path(&path);
+        let path_obj = Path::new(&host_path);
 
-    if !path_obj.exists() {
-        return Err(format!("Path does not exist: {} (mapped from {})", host_path, path));
-    }
-    if !path_obj.is_dir() {
-        return Err(format!("Path is not a directory: {}", host_path));
-    }
+        if !path_obj.exists() {
+            return Err(format!("Path does not exist: {} (mapped from {})", host_path, path));
+        }
+        if !path_obj.is_dir() {
+            return Err(format!("Path is not a directory: {}", host_path));
+        }
 
-    let depth = max_depth.unwrap_or(3);
-    Ok(read_dir_recursive(path_obj, &path, &host_path, 0, depth))
+        let depth = max_depth.unwrap_or(3);
+        Ok(read_dir_recursive(path_obj, &path, &host_path, 0, depth))
+    })
+    .await
 }
 
 /// Convert a guest/internal path to host-readable absolute path
@@ -92,9 +97,15 @@ pub fn to_host_path(path: String) -> String {
 }
 
 /// Open a file in the system default editor (VS Code)
-// `(async)` — spawns an external process; keep that latency off the main thread.
-#[command(async)]
-pub fn open_in_editor(path: String) -> Result<(), String> {
+// Offloaded via `run_blocking`: process creation on a loaded Windows box can
+// take tens of ms — cheap, but no reason to park a bounded tokio worker.
+#[command]
+pub async fn open_in_editor(path: String) -> Result<(), String> {
+    crate::commands::run_blocking("open_in_editor", move || open_in_editor_blocking(path)).await
+}
+
+/// Sync core for [`open_in_editor`].
+fn open_in_editor_blocking(path: String) -> Result<(), String> {
     let host_path = env::to_host_path(&path);
 
     #[cfg(target_os = "windows")]
@@ -120,9 +131,17 @@ pub fn open_in_editor(path: String) -> Result<(), String> {
 /// the user's default file manager on Linux). The path must point to a
 /// directory — opening a file in a file manager isn't useful and would render
 /// the parent folder instead, which is surprising.
-// `(async)` — spawns an external process; keep that latency off the main thread.
-#[command(async)]
-pub fn open_in_file_manager(path: String) -> Result<(), String> {
+// Offloaded via `run_blocking` — same rationale as `open_in_editor`.
+#[command]
+pub async fn open_in_file_manager(path: String) -> Result<(), String> {
+    crate::commands::run_blocking("open_in_file_manager", move || {
+        open_in_file_manager_blocking(path)
+    })
+    .await
+}
+
+/// Sync core for [`open_in_file_manager`].
+fn open_in_file_manager_blocking(path: String) -> Result<(), String> {
     let host_path = env::to_host_path(&path);
     let path_obj = Path::new(&host_path);
 
@@ -208,7 +227,9 @@ mod tests {
     #[test]
     fn test_open_in_file_manager_rejects_missing_path() {
         // A path that cannot exist anywhere — should fail before any spawn.
-        let result = open_in_file_manager(
+        // Exercises the `_blocking` core directly (the command is now a thin
+        // `run_blocking` wrapper, issue #762 convention).
+        let result = open_in_file_manager_blocking(
             "Z:\\definitely-not-a-real-buildmesh-path-12345".to_string(),
         );
         assert!(result.is_err());
@@ -220,7 +241,7 @@ mod tests {
         // cargo's manifest is a file, not a directory — opening it in a file
         // manager would render the parent (surprising), so we reject.
         let manifest = env!("CARGO_MANIFEST_DIR").to_string() + "\\Cargo.toml";
-        let result = open_in_file_manager(manifest);
+        let result = open_in_file_manager_blocking(manifest);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("is not a directory"));
     }

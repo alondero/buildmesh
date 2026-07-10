@@ -10,6 +10,13 @@ import { getOpenPrForNode, type OpenPr } from '../lib/tauri';
 const prClient = createDualKeyCache<number, OpenPr>({
   fetcher: getOpenPrForNode,
   name: 'useOpenPr',
+  // Every agent file-write fires GIT_CHANGED, but the fetcher is a live
+  // GitHub API call — without a freshness window a busy agent burns
+  // thousands of requests/hour into the rate limit re-fetching a PR state
+  // that changes rarely. 60s caps that at one request per node per minute.
+  // Manual `refresh()` is not gated, so create/merge flows can force an
+  // immediate re-fetch when they wire it up (the v1.1 noted below).
+  minRefetchIntervalMs: 60_000,
 });
 
 /**

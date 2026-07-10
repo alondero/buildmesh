@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { emit } from '@tauri-apps/api/event';
 import {
   createDualKeyCache,
@@ -234,5 +234,125 @@ describe('createDualKeyCache — bus dispatch is scoped to the owning client', (
     await emit('git-changed', { path: '/repoA' });
     expect(cb).toHaveBeenCalledTimes(1);
     expect(pathClient.read('/repoA')).toBeUndefined();
+  });
+});
+
+describe('minRefetchIntervalMs — freshness window on bus invalidation', () => {
+  // Fake timers drive Date.now() so the window boundary is exact.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a matching event inside the window neither evicts nor notifies', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    vi.advanceTimersByTime(29_999);
+    await emit('git-changed', { path: '/repo' });
+
+    expect(cb).not.toHaveBeenCalled();
+    expect(client.read(7)).toBe('fresh');
+  });
+
+  it('a matching event after the window evicts and notifies as usual', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    vi.advanceTimersByTime(30_000);
+    await emit('git-changed', { path: '/repo' });
+
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('a key that has never fetched successfully is not gated', async () => {
+    vi.useFakeTimers();
+    // No refresh() — there is no lastFetchedAt stamp, so the event must
+    // notify (the subscriber may be waiting for its first load trigger).
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn(),
+      minRefetchIntervalMs: 30_000,
+    });
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('manual invalidate() is NOT gated — an explicit eviction always wins', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    expect(client.read(7)).toBe('fresh');
+
+    client.invalidate(7); // inside the window
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('invalidate() clears the freshness stamp — a bus event after manual invalidation notifies', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    // Manual invalidation says "no longer authoritative" — the window must
+    // not keep suppressing bus notifications while the cache sits empty.
+    client.invalidate(7);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('createPathKeyedCache honours the window too', async () => {
+    vi.useFakeTimers();
+    const client = createPathKeyedCache<string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh('/repo');
+    const cb = vi.fn();
+    client.subscribe('/repo', cb);
+
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).not.toHaveBeenCalled();
+    expect(client.read('/repo')).toBe('fresh');
+
+    vi.advanceTimersByTime(30_000);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read('/repo')).toBeUndefined();
+  });
+
+  it('defaults to 0 — every matching event evicts (original behaviour)', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    await emit('git-changed', { path: '/repo' }); // zero ms later
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
   });
 });

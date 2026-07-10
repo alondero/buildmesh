@@ -85,9 +85,36 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
 const SCHEMA_VERSION: i32 = 23;
 
+/// Apply the per-connection pragmas every Buildmesh connection needs.
+///
+/// - `journal_mode=WAL`: the default rollback journal creates/deletes a
+///   journal file and double-fsyncs on *every* commit — with the whole DB
+///   behind one `Mutex`, each attention flip or status write stalls every
+///   other DB caller for the full fsync dance (worst on Windows, where
+///   antivirus scanning inflates file-create latency). WAL appends to one
+///   log instead. The mode is persistent in the DB file, but setting it is
+///   idempotent so we apply it on every init.
+/// - `synchronous=NORMAL`: the WAL-recommended pairing — one fsync per
+///   checkpoint rather than per commit; WAL guarantees the DB stays
+///   consistent after a crash (at most the last commits are lost, which for
+///   status flips is fine — startup reconciles agent state anyway).
+/// - `busy_timeout=5000`: if any second connection ever touches the file
+///   (e.g. a dev-profile instance pointed at the same dir by mistake), fail
+///   after 5s of retrying instead of an instant `SQLITE_BUSY`.
+fn apply_connection_pragmas(conn: &Connection) -> SqlResult<()> {
+    // `journal_mode` returns the resulting mode as a row, so it needs
+    // `query_row`, not `execute` (rusqlite errors on rows from execute).
+    let _mode: String =
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    Ok(())
+}
+
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     let conn = Connection::open(db_path)?;
+    apply_connection_pragmas(&conn)?;
 
     // Ensure app_settings exists first (needed by migrate_if_needed to check version)
     conn.execute_batch(

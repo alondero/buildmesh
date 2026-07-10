@@ -48,11 +48,32 @@ describe('useOpenPr', () => {
 
     // The PR changed on GitHub (e.g. opened/retitled); the next fetch returns B.
     mockInvoke.mockResolvedValue(PR_B);
+    // Jump past the client's minRefetchIntervalMs freshness window (60s) —
+    // inside it, bus events intentionally serve the cache (rate-limit guard).
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
     await act(async () => {
       await emit('git-changed', { path: GIT_PATH });
     });
 
     await waitFor(() => expect(result.current.pr).toEqual(PR_B));
+    nowSpy.mockRestore();
+  });
+
+  it('serves the cache (no refetch) for GIT_CHANGED inside the 60s freshness window', async () => {
+    mockInvoke.mockResolvedValue(PR_A);
+    const { result } = renderHook(() => useOpenPr(7, GIT_PATH));
+    await waitFor(() => expect(result.current.pr).toEqual(PR_A));
+
+    // Every agent file-write fires GIT_CHANGED; within the window the hook
+    // must NOT burn a GitHub API call per event.
+    const callsBefore = mockInvoke.mock.calls.length;
+    mockInvoke.mockResolvedValue(PR_B);
+    await act(async () => {
+      await emit('git-changed', { path: GIT_PATH });
+    });
+
+    expect(mockInvoke.mock.calls.length).toBe(callsBefore);
+    expect(result.current.pr).toEqual(PR_A);
   });
 
   it('serves the cache (no second IPC call) when a second subscriber mounts', async () => {
@@ -80,6 +101,8 @@ describe('useOpenPr', () => {
     await waitFor(() => expect(result.current.pr).toEqual(PR_A));
 
     mockInvoke.mockResolvedValue(PR_B);
+    // Past the freshness window so the bus event reaches the subscriber.
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 61_000);
     await act(async () => {
       await emit('git-changed', {
         // UNC form the WSL host_path produces — should be normalized away
@@ -90,5 +113,6 @@ describe('useOpenPr', () => {
     });
 
     await waitFor(() => expect(result.current.pr).toEqual(PR_B));
+    nowSpy.mockRestore();
   });
 });

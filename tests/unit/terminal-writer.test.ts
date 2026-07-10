@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TerminalWriter } from '../../src/components/Terminal/TerminalWriter';
+import { TerminalWriter, MAX_PENDING_BYTES } from '../../src/components/Terminal/TerminalWriter';
 
 describe('TerminalWriter', () => {
   let writer: TerminalWriter;
@@ -169,6 +169,62 @@ describe('TerminalWriter', () => {
       } finally {
         vi.unstubAllGlobals();
       }
+    });
+  });
+
+  describe('pending-buffer cap', () => {
+    // Chromium suspends requestAnimationFrame while the window is hidden or
+    // minimized, so the scheduler never fires and chunks accumulate for as
+    // long as agents keep streaming — overnight that's unbounded memory and
+    // a giant freeze-inducing flush on restore. The writer must cap the
+    // backlog by dropping the OLDEST chunks (they'd scroll straight out of
+    // xterm's finite scrollback anyway).
+
+    it('drops oldest chunks once pending bytes exceed the cap', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      const chunk = new Uint8Array(1024).fill(65); // 'A'
+      const chunksToOverflow = Math.ceil(MAX_PENDING_BYTES / chunk.byteLength) + 5;
+      for (let i = 0; i < chunksToOverflow; i++) {
+        writer.append(1, chunk);
+      }
+
+      expect(writer.pendingBytes(1)).toBeLessThanOrEqual(MAX_PENDING_BYTES);
+      expect(writer.pendingBytes(1)).toBeGreaterThan(0);
+    });
+
+    it('keeps the newest data when overflowing', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      writer.append(1, 'old-'.repeat(MAX_PENDING_BYTES / 4)); // fills the cap alone
+      writer.append(1, 'NEWEST');
+
+      flush();
+      expect(writeFn).toHaveBeenCalled();
+      const written = writeFn.mock.calls.map(c => String(c[0])).join('');
+      expect(written.endsWith('NEWEST')).toBe(true);
+    });
+
+    it('never drops the only pending chunk, even if oversized', () => {
+      const writeFn = vi.fn();
+      writer.register(1, writeFn);
+
+      const oversized = 'x'.repeat(MAX_PENDING_BYTES + 100);
+      writer.append(1, oversized);
+
+      flush();
+      expect(writeFn).toHaveBeenCalledWith(oversized);
+    });
+
+    it('pending byte accounting survives a flush cycle', () => {
+      writer.register(1, vi.fn());
+      writer.append(1, 'abcde');
+      flush();
+      expect(writer.pendingBytes(1)).toBe(0);
+      writer.append(1, 'xyz');
+      expect(writer.pendingBytes(1)).toBe(3);
     });
   });
 

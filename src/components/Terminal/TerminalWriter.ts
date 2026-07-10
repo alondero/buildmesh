@@ -3,9 +3,27 @@ export type TerminalWriteData = string | Uint8Array;
 type WriteFn = (data: TerminalWriteData) => void;
 type SchedulerFn = (cb: () => void) => void;
 
+/**
+ * Cap on unflushed bytes buffered per node. The flush scheduler is
+ * requestAnimationFrame, which Chromium suspends while the window is hidden
+ * or minimized — so with agents streaming output overnight the pending
+ * buffer would otherwise grow without bound, and restoring the window would
+ * feed the whole backlog to xterm in one freeze-inducing write. 4 MiB
+ * comfortably exceeds what xterm's 10k-line scrollback can retain, so
+ * dropping older chunks past the cap loses nothing the user could scroll
+ * back to. Full-screen agent TUIs redraw on their next frame, which repairs
+ * any escape sequence a drop may have severed.
+ */
+export const MAX_PENDING_BYTES = 4 * 1024 * 1024;
+
 interface BufferEntry {
   chunks: TerminalWriteData[];
+  pendingBytes: number;
   frameRequested: boolean;
+}
+
+function byteLength(data: TerminalWriteData): number {
+  return typeof data === 'string' ? data.length : data.byteLength;
 }
 
 function isByteChunk(data: TerminalWriteData): data is Uint8Array {
@@ -44,7 +62,7 @@ export class TerminalWriter {
   }
 
   register(nodeId: number, writeFn: WriteFn): void {
-    this.entries.set(nodeId, { chunks: [], frameRequested: false });
+    this.entries.set(nodeId, { chunks: [], pendingBytes: 0, frameRequested: false });
     this.writeFns.set(nodeId, writeFn);
   }
 
@@ -57,6 +75,14 @@ export class TerminalWriter {
     const entry = this.entries.get(nodeId);
     if (!entry) return;
     entry.chunks.push(data);
+    entry.pendingBytes += byteLength(data);
+    // Enforce the cap by dropping the OLDEST chunks — never the one just
+    // appended (`length > 1` guard), so a single oversized chunk still
+    // flushes whole. See MAX_PENDING_BYTES for why the cap exists.
+    while (entry.pendingBytes > MAX_PENDING_BYTES && entry.chunks.length > 1) {
+      const dropped = entry.chunks.shift()!;
+      entry.pendingBytes -= byteLength(dropped);
+    }
     this.scheduleFlush(nodeId, entry);
   }
 
@@ -69,6 +95,7 @@ export class TerminalWriter {
         const writeFn = this.writeFns.get(nodeId);
         const chunks = coalesceChunks(entry.chunks);
         entry.chunks = [];
+        entry.pendingBytes = 0;
         for (const chunk of chunks) {
           writeFn?.(chunk);
         }
@@ -82,8 +109,6 @@ export class TerminalWriter {
   }
 
   pendingBytes(nodeId: number): number {
-    return this.entries.get(nodeId)?.chunks.reduce((sum, chunk) => {
-      return sum + (typeof chunk === 'string' ? chunk.length : chunk.byteLength);
-    }, 0) ?? 0;
+    return this.entries.get(nodeId)?.pendingBytes ?? 0;
   }
 }
