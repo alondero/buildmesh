@@ -40,6 +40,21 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version.
 ///
+// v24 — Warm pool on by default (ADR 0020, spawn-latency work): a new
+// mesh now defaults to `pre_spawn_pool_size = 1` (one pre-warmed worktree)
+// instead of 0, and a ONE-TIME backfill flips existing worktree-enabled
+// meshes still at 0 to 1. The pool is the single biggest click-to-terminal
+// win (sub-500ms adopt vs multi-second cold checkout) and its lifecycle
+// has been hardened across #609–#653, so opt-out is the right polarity.
+// Deliberate trade-off: a user who explicitly set 0 pre-v24 is
+// indistinguishable from one who never touched the field, so the backfill
+// overrides both — once. The Worktrees Probe still sets it back to 0.
+// Ordering constraint: the `pre_spawn_pool_size` column is added by an
+// `ensure_*` net AFTER `migrate_if_needed` runs, so the backfill lives in
+// [`ensure_pool_default_backfill`] gated on its own app_settings flag
+// (crash-safe: the flag is written only after the UPDATE commits), not in
+// the version-gated migration ladder.
+//
 // v23 — Coordinator drive idempotency ledger (issue #320, ADR-0008 §6):
 // add the `coordinator_drive_prompts` table so a Coordinator retrying a
 // timed-out `POST /nodes/{id}/prompt` over a flaky network never lands the
@@ -83,7 +98,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 23;
+const SCHEMA_VERSION: i32 = 24;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -240,10 +255,16 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
 ensure_mesh_sandbox(&conn)?;
     // v22 — Per-mesh pre-spawn pool target (issue #611). The column
     // doesn't exist on pre-v22 DBs; the safety net backfills it on every
-    // init so existing rows read `0` (= pool off, preserving the v21
-    // hardcoded-target behaviour until the user opts in via the
-    // Worktrees Probe). Idempotent via `ensure_column`'s pragma check.
+    // init. Since v24 the column default (and the one-time backfill below)
+    // is `1` — pool ON by default; the Worktrees Probe sets `0` to opt out.
     ensure_mesh_pre_spawn_pool_size(&conn)?;
+    // v24 — one-time flip of existing worktree-enabled meshes from the old
+    // pool-off default (0) to the new default (1). Must run AFTER
+    // `ensure_mesh_pre_spawn_pool_size` (the column may have been created
+    // just now on an upgrading DB). Gated on its own app_settings flag so
+    // a crash between the version bump and this UPDATE can't skip it, and
+    // so a user's LATER explicit 0 is never overridden again.
+    ensure_pool_default_backfill(&conn)?;
     // v21 — Pre-spawn Worktree Pool (issue #609). The `warm_worktrees` table
     // is created inline above (it's a new table, not a column add), so this
     // safety net only needs to ensure it exists on a DB whose schema_version
@@ -621,20 +642,68 @@ pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
 /// boundary (`update_mesh_pool_size`), not here — this column is the
 /// typed integer the worker reads.
 ///
-/// Off by default (`0`): pre-v22 rows opt out of the pool, matching
-/// their pre-v22 behaviour (no pool entries). The user opts in via the
-/// Worktrees Probe's ConfigurationCard → "Pre-spawn warm worktrees"
-/// toggle (issue #611). No backfill needed — every pre-v22 mesh
-/// defaults to "pool off".
+/// ON by default (`1`) since v24 (ADR 0020) — the pool is the largest
+/// spawn-latency win and its lifecycle is hardened, so opt-out is the
+/// right polarity. The user opts out via the Worktrees Probe's
+/// ConfigurationCard → "Pre-spawn warm worktrees" toggle (issue #611).
+/// Pre-v24 rows (whose column was ALTER-added with the old `DEFAULT 0`)
+/// are flipped once by [`ensure_pool_default_backfill`].
 pub(crate) fn ensure_mesh_pre_spawn_pool_size(conn: &Connection) -> SqlResult<()> {
+    // DEFAULT 1 since v24 (ADR 0020): pool ON by default. A DB whose column
+    // was added by a pre-v24 build keeps its ALTER-time DEFAULT 0 — that's
+    // what `ensure_pool_default_backfill` and `create_mesh`'s explicit
+    // insert value are for.
     if ensure_column(
         conn,
         "meshes",
         "pre_spawn_pool_size",
-        "INTEGER NOT NULL DEFAULT 0",
+        "INTEGER NOT NULL DEFAULT 1",
     )? {
         tracing::warn!("ensure_mesh_pre_spawn_pool_size: added missing column");
     }
+    Ok(())
+}
+
+/// One-time v24 backfill (ADR 0020): flip worktree-enabled meshes still on
+/// the old pool-off default (`pre_spawn_pool_size = 0`) to the new default
+/// of 1 pre-warmed worktree. Runs at most once per DB, gated on the
+/// `pool_default_backfill_v24` app_settings flag — written only AFTER the
+/// UPDATE succeeds, so a crash mid-init retries next launch, and a user
+/// who sets a mesh back to 0 afterwards is never overridden again.
+///
+/// Worktree-disabled meshes are left at 0: the pool is meaningless for
+/// them, and leaving them untouched means enabling worktrees later starts
+/// from an explicit choice in the Worktrees Probe rather than a surprise
+/// background checkout.
+pub(crate) fn ensure_pool_default_backfill(conn: &Connection) -> SqlResult<()> {
+    let done: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key = 'pool_default_backfill_v24'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if done {
+        return Ok(());
+    }
+    let updated = conn.execute(
+        "UPDATE meshes
+         SET pre_spawn_pool_size = 1
+         WHERE COALESCE(pre_spawn_pool_size, 0) = 0
+           AND COALESCE(use_worktree, 1) = 1",
+        [],
+    )?;
+    if updated > 0 {
+        tracing::info!(
+            "ensure_pool_default_backfill: enabled the pre-spawn pool (size 1) on {} mesh(es); \
+             opt out per-mesh via the Worktrees Probe",
+            updated
+        );
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('pool_default_backfill_v24', '1')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1905,9 +1974,13 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
         |row| row.get(0),
     )?;
 
+    // `pre_spawn_pool_size = 1` is written explicitly (not left to the
+    // column default) because a DB upgraded from pre-v24 still carries the
+    // ALTER-time `DEFAULT 0` — new meshes must get the pool-on default
+    // regardless of when the DB was created (ADR 0020).
     db.execute(
-        "INSERT INTO meshes (name, path, layout, position, use_worktree, base_ref)
-         VALUES (?1, ?2, 'grid', ?3, 1, 'origin/main')",
+        "INSERT INTO meshes (name, path, layout, position, use_worktree, base_ref, pre_spawn_pool_size)
+         VALUES (?1, ?2, 'grid', ?3, 1, 'origin/main', 1)",
         params![name, path, next_position],
     )?;
     let id = db.last_insert_rowid();

@@ -60,6 +60,24 @@ pub(crate) const TICK_FAST: Duration = Duration::from_secs(2);
 /// (a stale-row GC / a stale pool still gets seen within 30 s).
 pub(crate) const TICK_SLOW: Duration = Duration::from_secs(30);
 
+/// Minimum gap between background sync *attempts* for one mesh (ADR 0020).
+/// The worker fetches each idle mesh's base ref on this cadence so the mesh
+/// (and its warm pool, via `on_fetch_completed`) stays continuously fresh —
+/// which is what lets the spawn path skip its own blocking fetch whenever
+/// the last *success* is younger than `fetch_freshness::SPAWN_FETCH_TTL`
+/// (5 min). Three minutes leaves a full-interval margin inside the TTL, so
+/// in steady state a spawn virtually never fetches. Gated on the ATTEMPT
+/// stamp (not success) so an offline machine retries once per interval
+/// instead of once per tick.
+pub(crate) const BACKGROUND_SYNC_INTERVAL: Duration = Duration::from_secs(180);
+
+/// Pure gate for the background mesh sync — `true` when enough time has
+/// passed since the last fetch attempt for this mesh. Split out so the
+/// cadence rule is unit-testable without sleeping, like `is_idle_enough`.
+pub(crate) fn should_background_sync(time_since_attempt: Duration) -> bool {
+    time_since_attempt >= BACKGROUND_SYNC_INTERVAL
+}
+
 /// Number of consecutive no-op passes before the worker backs off from
 /// `TICK_FAST` to `TICK_SLOW`. Three no-op passes at 2 s = 6 s of nothing-
 /// changed — well below the worst-case staleness we care about, so
@@ -298,6 +316,52 @@ pub fn start_background_worker(app: tauri::AppHandle) {
                     // — a chatty mesh A keeps only mesh A non-idle.
                     if !is_idle_enough(idle_duration_for_mesh(mesh.id), IDLE_SILENCE) {
                         continue;
+                    }
+                    // Background mesh sync (ADR 0020): keep the idle mesh's
+                    // base ref continuously fresh so the spawn path can skip
+                    // its blocking fetch (freshness TTL) and so warm pool
+                    // entries never sit on a days-old SHA between spawns.
+                    // Runs BEFORE the fill so a pool entry cut this pass is
+                    // cut from the just-fetched ref. Deliberately NOT under
+                    // the fill lock — the fetch serializes on the per-Mesh
+                    // sync lock instead (same lock every other fetch path
+                    // takes); `on_fetch_completed` takes the fill lock
+                    // itself for the reset pass. Best-effort: a failure is
+                    // logged and retried next interval; the attempt stamp
+                    // (written inside `locked_fetch_origin_blocking`) is
+                    // what rate-limits offline retries to one per interval.
+                    if should_background_sync(
+                        crate::services::fetch_freshness::time_since_attempt(&mesh.path),
+                    ) {
+                        let base_ref = crate::agent::spawn::resolve_base_ref_for_spawn(
+                            &mesh.path,
+                            Some(mesh.base_ref.as_str()),
+                        );
+                        match crate::git::sync::locked_fetch_origin_blocking(
+                            &mesh.path,
+                            &base_ref,
+                        ) {
+                            Ok(outcome) => {
+                                if outcome.advanced_ref() {
+                                    tracing::info!(
+                                        "pool_worker: background sync advanced {} for mesh {}; refreshing warm pool",
+                                        base_ref,
+                                        mesh.id
+                                    );
+                                    crate::services::warm_pool::on_fetch_completed(mesh.id);
+                                }
+                            }
+                            Err(e) => {
+                                // INFO, not WARN: an offline laptop hits this
+                                // every interval and it's fully self-healing.
+                                tracing::info!(
+                                    "pool_worker: background sync for mesh {} failed (retry in {}s): {:?}",
+                                    mesh.id,
+                                    BACKGROUND_SYNC_INTERVAL.as_secs(),
+                                    e
+                                );
+                            }
+                        }
                     }
                     // Wrap the call in a closure so we can observe the
                     // `try_lock` outcome independently of the drain
@@ -568,6 +632,47 @@ mod tests {
         // And a real mesh_id after a sentinel still works as expected.
         note_activity_for_mesh(700_001);
         assert!(!is_idle_enough(idle_duration_for_mesh(700_001), IDLE_SILENCE));
+    }
+
+    // ---- should_background_sync (ADR 0020 background mesh sync cadence) ----
+
+    #[test]
+    fn background_sync_fires_for_a_never_attempted_mesh() {
+        // `fetch_freshness::time_since_attempt` returns Duration::MAX for a
+        // mesh with no recorded attempt — the first idle tick must sync it.
+        assert!(should_background_sync(Duration::MAX));
+    }
+
+    #[test]
+    fn background_sync_respects_the_interval() {
+        assert!(
+            !should_background_sync(Duration::from_secs(10)),
+            "a mesh attempted 10s ago must NOT be re-fetched — one attempt per interval"
+        );
+        assert!(
+            !should_background_sync(BACKGROUND_SYNC_INTERVAL - Duration::from_secs(1)),
+            "just inside the interval still waits"
+        );
+        assert!(
+            should_background_sync(BACKGROUND_SYNC_INTERVAL),
+            "at the interval boundary the sync fires"
+        );
+    }
+
+    /// The whole point of the background sync is that its cadence fits
+    /// inside the spawn path's freshness TTL with margin: if the interval
+    /// ever grew past the TTL, a steadily-idle mesh would oscillate between
+    /// fresh and stale and spawns would randomly pay the fetch again.
+    #[test]
+    fn background_sync_interval_fits_inside_the_spawn_fetch_ttl() {
+        assert!(
+            BACKGROUND_SYNC_INTERVAL * 3 / 2
+                <= crate::services::fetch_freshness::SPAWN_FETCH_TTL,
+            "keep BACKGROUND_SYNC_INTERVAL well inside SPAWN_FETCH_TTL (currently {}s vs {}s) — \
+             the worker needs slack (slow ticks, sync-lock waits) to re-stamp before the TTL lapses",
+            BACKGROUND_SYNC_INTERVAL.as_secs(),
+            crate::services::fetch_freshness::SPAWN_FETCH_TTL.as_secs()
+        );
     }
 
     // ---- next_tick (adaptive backoff, issue #634) ----

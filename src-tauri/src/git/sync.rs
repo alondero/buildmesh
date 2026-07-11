@@ -66,6 +66,17 @@ pub enum FetchError {
 }
 
 impl FetchOutcome {
+    /// True iff the fetch step reached the remote and completed — the
+    /// spawn-time twin of [`SyncOutcome::fetched_ok`]. Used to stamp the
+    /// per-Mesh fetch-freshness registry so a subsequent spawn within
+    /// `fetch_freshness::SPAWN_FETCH_TTL` can skip its own fetch.
+    pub(crate) fn fetched_ok(&self) -> bool {
+        matches!(
+            self,
+            Self::UpToDate | Self::Synced { .. } | Self::FetchedButDiverged { .. }
+        )
+    }
+
     /// True iff the fetch actually advanced the local ref. Only the two
     /// variants that fetched new commits qualify — `UpToDate` and the
     /// `Skipped*` variants did not move anything. Used by the spawn path
@@ -131,6 +142,26 @@ pub(crate) enum SyncOutcome {
 }
 
 impl SyncOutcome {
+    /// True iff the fetch step itself reached the remote and completed —
+    /// the remote-tracking refs are now current, regardless of whether new
+    /// commits arrived or the parent's checkout could fast-forward. This is
+    /// the predicate the per-Mesh fetch-freshness stamp
+    /// (`services::fetch_freshness::note_success`) keys on: a worktree cut
+    /// after any of these outcomes is cut from up-to-date refs.
+    ///
+    /// `PullTimedOut` counts — the FETCH succeeded; only the working-tree
+    /// fast-forward hung. `Skipped*` do NOT count (no fetch ran), and the
+    /// two error variants obviously don't.
+    pub(crate) fn fetched_ok(&self) -> bool {
+        matches!(
+            self,
+            Self::UpToDate
+                | Self::Synced { .. }
+                | Self::FetchedButDiverged { .. }
+                | Self::PullTimedOut { .. }
+        )
+    }
+
     /// Same predicate as [`FetchOutcome::advanced_ref`] — the two enums
     /// map 1:1 (`fetch_origin` translates `SyncOutcome → FetchOutcome` at
     /// `sync.rs:568-578`) but the manual `git_sync` command consumes
@@ -776,9 +807,14 @@ pub(crate) fn locked_do_sync(
     remote: &str,
     branch: Option<&str>,
 ) -> SyncOutcome {
-    crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
+    let outcome = crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
         do_sync(host_path, remote, branch, MANUAL_FETCH_TIMEOUT)
-    })
+    });
+    // Stamp the per-Mesh fetch-freshness registry so a spawn shortly after
+    // a manual Sync click skips its own fetch (the user just synced — the
+    // refs can't be fresher). Keyed on `mesh_path`, matching the lock key.
+    stamp_fetch_freshness(mesh_path, &outcome.fetched_ok());
+    outcome
 }
 
 /// Wrap `fetch_origin` (the spawn-time auto-sync) in the per-Mesh sync lock
@@ -810,6 +846,14 @@ pub async fn locked_fetch_origin(
             SPAWN_SYNC_LOCK_TIMEOUT,
             || fetch_origin(&mesh_path, &base_ref),
         )
+        .map(|inner| {
+            // Stamp the per-Mesh fetch-freshness registry from the bounded-
+            // wait's outcome (ADR 0020): a spawn that won the lock and ran
+            // the fetch must record both attempt + (when reached) success,
+            // matching the policy `stamp_fetch_freshness` enforces.
+            stamp_fetch_freshness(&mesh_path, &inner.as_ref().map(|o| o.fetched_ok()).unwrap_or(false));
+            inner
+        })
         .unwrap_or_else(|| {
             tracing::warn!(
                 "locked_fetch_origin: gave up waiting {}s for the mesh sync lock on {}; \
@@ -817,9 +861,13 @@ pub async fn locked_fetch_origin(
                 SPAWN_SYNC_LOCK_TIMEOUT.as_secs(),
                 mesh_path
             );
+            // Bounded-timeout path: stamp the attempt so the background
+            // worker backs off, but NOT a success — the spawn-time skip
+            // stays conservative because we never actually ran a fetch.
+            crate::services::fetch_freshness::note_attempt(&mesh_path);
             Err(FetchError::FetchFailed(format!(
                 "another sync for this mesh is still running (waited {}s)",
-                SPAWN_SYNC_LOCK_TIMEOUT.as_secs()
+                SPAWN_SYNC_LOCK_TIMEOUT.as_secs(),
             )))
         })
     })
@@ -831,6 +879,44 @@ pub async fn locked_fetch_origin(
             e
         )))
     })
+}
+
+/// Synchronous core of [`locked_fetch_origin`] — the per-Mesh-locked
+/// spawn-style auto-sync, callable from an already-blocking context (the
+/// background mesh-sync pass in `services::pool_worker` runs on its own OS
+/// thread, so the async wrapper's `spawn_blocking` offload would be
+/// pointless there). Follows the `*_blocking` core + thin async wrapper
+/// convention (see *Command Threading* in the knowledge primer).
+///
+/// Uses the unbounded `with_mesh_sync_lock` — the worker thread is the one
+/// doing the sync, so it has nothing to queue against (a second concurrent
+/// attempt on the same mesh is rate-limited by `should_background_sync`).
+/// Stamps the per-Mesh fetch-freshness registry on every call: the attempt
+/// unconditionally (so the background worker rate-limits retries when
+/// offline), the success only when the fetch actually reached the remote
+/// (so the spawn-time skip never trusts a failed sync).
+pub fn locked_fetch_origin_blocking(
+    mesh_path: &str,
+    base_ref: &str,
+) -> Result<FetchOutcome, FetchError> {
+    let result = crate::services::sync_lock::with_mesh_sync_lock(mesh_path, || {
+        fetch_origin(mesh_path, base_ref)
+    });
+    stamp_fetch_freshness(mesh_path, &result.as_ref().map(|o| o.fetched_ok()).unwrap_or(false));
+    result
+}
+
+/// Stamp the per-Mesh fetch-freshness registry from a sync outcome's
+/// `fetched_ok()` predicate. Both locked sync wrappers funnel through this
+/// so the policy ("attempt unconditionally; success only when the fetch
+/// actually reached the remote") lives in one place — a future
+/// "consider fetched_only_after_full_pull as success" change is one-line,
+/// not two.
+fn stamp_fetch_freshness(mesh_path: &str, fetched_ok: &bool) {
+    crate::services::fetch_freshness::note_attempt(mesh_path);
+    if *fetched_ok {
+        crate::services::fetch_freshness::note_success(mesh_path);
+    }
 }
 
 #[cfg(test)]
@@ -850,31 +936,14 @@ mod tests {
 
     #[test]
     fn parse_remote_accepts_origin_slash_main() {
-        // The buildmesh DB default.
         assert_eq!(
             parse_remote_for_base_ref("origin/main"),
-            Some("origin".to_string())
+            Some("origin".to_string()),
         );
     }
 
     #[test]
     fn parse_remote_accepts_upstream_slash_branch() {
-        // The headline case from issue #276: a Mesh that points at
-        // a project-of-record upstream, not the user's personal fork.
-        assert_eq!(
-            parse_remote_for_base_ref("upstream/main"),
-            Some("upstream".to_string())
-        );
-        assert_eq!(
-            parse_remote_for_base_ref("upstream/develop"),
-            Some("upstream".to_string())
-        );
-    }
-
-    #[test]
-    fn parse_remote_keeps_remote_for_nested_branch() {
-        // "upstream/feature/auth" — the remote is `upstream`; the
-        // branch (with its slashes) doesn't change the remote.
         assert_eq!(
             parse_remote_for_base_ref("upstream/feature/auth"),
             Some("upstream".to_string())

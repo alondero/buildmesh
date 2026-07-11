@@ -2,6 +2,7 @@
 
 pub mod agent_node;
 pub mod agent_node_discovery;
+pub mod fetch_freshness;
 pub mod github;
 pub mod mesh;
 pub mod pool_worker;

@@ -253,11 +253,11 @@ pub struct Mesh {
     /// for this mesh (no warm entries created on startup, no refill
     /// after claim); `1..=5` is the target the worker fills to.
     /// Clamped at the IPC boundary (`update_mesh_pool_size`), not here
-    /// — this field is the typed integer the worker reads. Off by
-    /// default (`0`); opted into via the Worktrees Probe's
-    /// ConfigurationCard (issue #611). Persisted as
-    /// `meshes.pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0`
-    /// (schema v22).
+    /// — this field is the typed integer the worker reads. ON by
+    /// default since schema v24 (`1`, ADR 0020); opted out via the
+    /// Worktrees Probe's ConfigurationCard (issue #611). Persisted as
+    /// `meshes.pre_spawn_pool_size INTEGER NOT NULL DEFAULT 1`
+    /// (schema v22, default flipped in v24).
     #[ts(as = "i32")]
     pub pre_spawn_pool_size: i32,
 }
