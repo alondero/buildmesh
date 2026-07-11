@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
@@ -69,6 +69,13 @@ beforeEach(() => {
   mockInvoke.mockResolvedValue(HEALTH_A);
 });
 
+// Restore the per-test `Date.now` spies (the freshness-window jumps) so a
+// jump in one test can't leak into a test that relies on real time.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+
 describe('useMeshHealth — dual-key shape integration', () => {
   // Pins the dual-key + bus wiring: the hook must call `get_mesh_health`
   // with the meshId, mount-fetch on render, and serve the value back.
@@ -90,6 +97,11 @@ describe('useMeshHealth — dual-key shape integration', () => {
     expect(callsTo('get_mesh_health')).toBe(1);
 
     // The Mesh drifted (HEAD moved to feature/x, 3 commits unpushed).
+    // Jump Date.now() past the client's freshness window (see
+    // minRefetchIntervalMs) so this test keeps asserting the
+    // immediate-refetch path — inside the window, bus events are absorbed
+    // into a trailing refetch (same pattern as use-open-pr.test.ts).
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(HEALTH_DRIFTED);
     await act(async () => {
       await emit('git-changed', { path: MESH_PATH });
@@ -110,6 +122,11 @@ describe('useMeshHealth — dual-key shape integration', () => {
     await waitFor(() => expect(result.current.health).toEqual(HEALTH_A));
     expect(callsTo('get_mesh_health')).toBe(1);
 
+    // Jump Date.now() past the client's freshness window (see
+    // minRefetchIntervalMs) so this test keeps asserting the
+    // immediate-refetch path — inside the window, bus events are absorbed
+    // into a trailing refetch (same pattern as use-open-pr.test.ts).
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(HEALTH_DRIFTED);
     await act(async () => {
       await emit('git-changed', {
@@ -130,6 +147,11 @@ describe('useMeshHealth — dual-key shape integration', () => {
     const { result } = renderHook(() => useMeshHealth(7, MESH_PATH));
     await waitFor(() => expect(result.current.health).toEqual(HEALTH_A));
 
+    // Jump Date.now() past the client's freshness window (see
+    // minRefetchIntervalMs) so this test keeps asserting the
+    // immediate-refetch path — inside the window, bus events are absorbed
+    // into a trailing refetch (same pattern as use-open-pr.test.ts).
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(HEALTH_DRIFTED);
     await act(async () => {
       await emit('git-changed', {

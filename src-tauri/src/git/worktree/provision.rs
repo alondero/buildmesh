@@ -180,7 +180,7 @@ pub(crate) fn fetch_fork_head(
     head_repo_clone_url: &str,
     head_ref: &str,
 ) -> bool {
-    use crate::process_util::command_no_window;
+    use crate::process_util::git_command;
     let host_root = crate::env::to_host_path(project_root);
     let alias = fork_remote_alias(head_repo_owner);
     tracing::info!(
@@ -196,7 +196,7 @@ pub(crate) fn fetch_fork_head(
     // clone URL. If it doesn't, `remote add` registers it. This avoids
     // parsing `git remote add`'s non-zero stderr for the "already exists"
     // signal — easier to read, and works on every git version.
-    let mut get_url = command_no_window("git");
+    let mut get_url = git_command();
     get_url.arg("remote").arg("get-url").arg(&alias);
     let existing = get_url
         .current_dir(&host_root)
@@ -207,7 +207,7 @@ pub(crate) fn fetch_fork_head(
 
     let url_matches = existing.as_deref() == Some(head_repo_clone_url);
     if !url_matches {
-        let mut cmd = command_no_window("git");
+        let mut cmd = git_command();
         if existing.is_some() {
             cmd.arg("remote").arg("set-url").arg(&alias).arg(head_repo_clone_url);
             tracing::info!("fetch_fork_head: updating remote {} URL", alias);
@@ -242,12 +242,21 @@ pub(crate) fn fetch_fork_head(
         head_ref,
         host_root
     );
-    let mut cmd = command_no_window("git");
+    let mut cmd = git_command();
     cmd.arg("fetch").arg(&alias).arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
+    cmd.current_dir(&host_root);
+    // Bounded like `fetch_single_ref`'s `do_fetch_only` call: this is a
+    // network fetch on the spawn path, run under the per-Mesh sync lock —
+    // a half-open connection must abort at the spawn budget, not wedge
+    // the lock (and every later spawn on this mesh) indefinitely.
+    let output = match crate::process_util::run_command_with_timeout(
+        cmd,
+        "git fetch (fork head)",
+        crate::git::sync::SPAWN_FETCH_TIMEOUT,
+    ) {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!("fetch_fork_head: failed to spawn git fetch: {}", e);
+            tracing::warn!("fetch_fork_head: {}", e);
             return false;
         }
     };
@@ -298,13 +307,29 @@ pub(crate) fn locked_fetch_pr_head(
     head_repo_owner: Option<&str>,
     head_repo_clone_url: Option<&str>,
 ) -> bool {
-    crate::services::sync_lock::with_mesh_sync_lock(project_root, || {
-        match (head_repo_owner, head_repo_clone_url) {
+    // Bounded wait, matching `locked_fetch_origin`: a PR spawn must not
+    // queue for minutes behind a wedged manual sync holding this mesh's
+    // lock. On timeout we return `false`, which the spawn orchestrator
+    // already handles as "head unfetchable" — it falls back to the mesh's
+    // base_ref and raises the `pr_head_unfetchable` toast (ADR 0001).
+    crate::services::sync_lock::try_with_mesh_sync_lock_timeout(
+        project_root,
+        crate::git::sync::SPAWN_SYNC_LOCK_TIMEOUT,
+        || match (head_repo_owner, head_repo_clone_url) {
             (Some(owner), Some(clone_url)) => {
                 fetch_fork_head(project_root, owner, clone_url, head_ref)
             }
             _ => fetch_single_ref(project_root, head_ref),
-        }
+        },
+    )
+    .unwrap_or_else(|| {
+        tracing::warn!(
+            "locked_fetch_pr_head: gave up waiting {}s for the mesh sync lock on {}; \
+             falling back to base_ref",
+            crate::git::sync::SPAWN_SYNC_LOCK_TIMEOUT.as_secs(),
+            project_root
+        );
+        false
     })
 }
 
@@ -326,12 +351,12 @@ pub(crate) fn locked_fetch_pr_head(
 /// `git rev-parse` accepts both the short and the fully-qualified
 /// `refs/remotes/origin/...` form.
 pub(crate) fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Option<String> {
-    use crate::process_util::command_no_window;
+    use crate::process_util::git_command;
     let host_root = crate::env::to_host_path(project_root);
     // Read the symbolic SHA in one shot — `git rev-parse` exits non-zero
     // (and produces no stdout) when the ref doesn't exist, so we don't
     // need a separate "is this a ref?" probe first.
-    let mut cmd = command_no_window("git");
+    let mut cmd = git_command();
     cmd.arg("rev-parse").arg(remote_ref);
     let output = cmd.current_dir(&host_root).output().ok()?;
     if !output.status.success() {
@@ -468,8 +493,8 @@ fn checkout_worktree_to_base(
 /// future fix (arg quoting, lock-retry) lands for both callers at once; the
 /// deliberate flag differences (`-B` vs `-b`) stay explicit at the call sites.
 fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
-    use crate::process_util::command_no_window;
-    let mut cmd = command_no_window("git");
+    use crate::process_util::git_command;
+    let mut cmd = git_command();
     cmd.arg("-C").arg(host_path).arg("checkout").args(args);
     let output = cmd
         .output()

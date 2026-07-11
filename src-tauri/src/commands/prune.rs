@@ -278,11 +278,20 @@ pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, Stri
 fn locked_prune_remote_tracking(worktree_path: &str) -> Result<String, String> {
     let host_path = to_host_path(worktree_path);
     crate::services::sync_lock::with_mesh_sync_lock(worktree_path, || {
-        let output = crate::process_util::command_no_window("git")
+        // `run_command_with_timeout` (not a bare `.output()`) — this is a
+        // network-facing fetch under the sync lock; a half-open connection
+        // would otherwise wedge the blocking-pool thread AND the lock
+        // forever (the issue #762 class). Same 5-minute manual-path cap as
+        // the manual `git_sync`'s fetch.
+        let mut prune_builder = crate::process_util::git_command();
+        prune_builder
             .args(["fetch", "--prune"])
-            .current_dir(&host_path)
-            .output()
-            .map_err(|e| format!("failed to run git fetch --prune: {}", e))?;
+            .current_dir(&host_path);
+        let output = crate::process_util::run_command_with_timeout(
+            prune_builder,
+            "git fetch --prune",
+            std::time::Duration::from_secs(300),
+        )?;
 
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if output.status.success() {

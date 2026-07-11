@@ -93,7 +93,7 @@ fn add_worktree_impl(
         .ok_or_else(|| "cannot add a worktree to a bare repository".to_string())?;
 
     // `command_no_window` applies CREATE_NO_WINDOW on Windows (no per-OS cfg here).
-    let mut cmd = crate::process_util::command_no_window("git");
+    let mut cmd = crate::process_util::git_command();
     cmd.arg("-C").arg(workdir).arg("worktree").arg("add");
     if use_branched {
         cmd.arg("-b").arg(branch_name);
@@ -270,7 +270,7 @@ pub fn move_git_worktree(
         return Err(format!("git worktree move target already exists: {}", new));
     }
 
-    let mut cmd = crate::process_util::command_no_window("git");
+    let mut cmd = crate::process_util::git_command();
     cmd.arg("-C")
         .arg(&host_root)
         .arg("worktree")
@@ -304,7 +304,7 @@ pub fn move_git_worktree(
 pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String> {
     let host = to_host_path(worktree_path);
 
-    let mut cmd = crate::process_util::command_no_window("git");
+    let mut cmd = crate::process_util::git_command();
     cmd.arg("-C")
         .arg(&host)
         .arg("reset")

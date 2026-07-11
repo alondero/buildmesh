@@ -547,7 +547,7 @@ fn read_warm_head_sha(worktree_path: &str) -> Option<String> {
 /// un-flagged `git.exe` would briefly steal foreground focus from buildmesh's
 /// WebView2, disrupting the user's terminal view (issue #665).
 fn read_warm_head_sha_cmd(worktree_path: &str) -> std::process::Command {
-    let mut cmd = crate::process_util::command_no_window("git");
+    let mut cmd = crate::process_util::git_command();
     cmd.arg("-C")
         .arg(worktree_path)
         .arg("rev-parse")

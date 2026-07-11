@@ -9,7 +9,7 @@ use git2::Repository;
 
 use crate::git::primitives;
 use crate::models::{HoldingWorktree, MeshHealth};
-use crate::process_util::command_no_window;
+use crate::process_util::git_command;
 
 /// Wall-clock timeout for the `git checkout` shell-out in
 /// [`restore_to_base_impl`]. `checkout` is purely local (no network), so
@@ -375,7 +375,7 @@ pub(crate) fn restore_to_base_impl(
         .ok_or_else(|| "repo has no working directory".to_string())?
         .to_string_lossy()
         .to_string();
-    let mut checkout_builder = command_no_window("git");
+    let mut checkout_builder = git_command();
     checkout_builder
         .args(["checkout", base_branch])
         .current_dir(&host_path);

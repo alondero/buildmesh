@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
@@ -56,6 +56,12 @@ beforeEach(async () => {
   mockInvoke.mockReset();
 });
 
+// Restore the per-test `Date.now` spies (the freshness-window jumps) so a
+// jump in one test can't leak into a test that relies on real time.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('useGitBranchStatus', () => {
   it('fetches the branch status on mount', async () => {
     mockInvoke.mockResolvedValue(STATUS_A);
@@ -73,6 +79,11 @@ describe('useGitBranchStatus', () => {
 
     // The user ran `git fetch` in an external terminal — the next fetch
     // returns the up-to-date behind count.
+    // The client now rate-bounds bus-driven refetches with a freshness
+    // window (minRefetchIntervalMs) — inside it, events are absorbed into a
+    // trailing refetch. Jump Date.now() past the window so this test keeps
+    // asserting the immediate-refetch path (same pattern as use-open-pr).
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(STATUS_B);
     await act(async () => {
       await emit('git-changed', { path: MESH_PATH });
@@ -104,6 +115,11 @@ describe('useGitBranchStatus', () => {
     const { result } = renderHook(() => useGitBranchStatus(MESH_PATH));
     await waitFor(() => expect(result.current.branchStatus).toEqual(STATUS_A));
 
+    // The client now rate-bounds bus-driven refetches with a freshness
+    // window (minRefetchIntervalMs) — inside it, events are absorbed into a
+    // trailing refetch. Jump Date.now() past the window so this test keeps
+    // asserting the immediate-refetch path (same pattern as use-open-pr).
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(STATUS_B);
     await act(async () => {
       await emit('git-changed', {
@@ -124,6 +140,11 @@ describe('useGitBranchStatus', () => {
     const { result } = renderHook(() => useGitBranchStatus(MESH_PATH));
     await waitFor(() => expect(result.current.branchStatus).toEqual(STATUS_A));
 
+    // The client now rate-bounds bus-driven refetches with a freshness
+    // window (minRefetchIntervalMs) — inside it, events are absorbed into a
+    // trailing refetch. Jump Date.now() past the window so this test keeps
+    // asserting the immediate-refetch path (same pattern as use-open-pr).
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     mockInvoke.mockResolvedValue(STATUS_B);
     await act(async () => {
       await emit('git-changed', {
@@ -137,6 +158,7 @@ describe('useGitBranchStatus', () => {
   });
 
   it('does NOT refetch when GIT_CHANGED fires for an unrelated path', async () => {
+
     mockInvoke.mockResolvedValue(STATUS_A);
     const { result } = renderHook(() => useGitBranchStatus(MESH_PATH));
     await waitFor(() => expect(result.current.branchStatus).toEqual(STATUS_A));

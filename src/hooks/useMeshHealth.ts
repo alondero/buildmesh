@@ -9,6 +9,12 @@ import { getMeshHealth, type MeshHealth } from '../lib/tauri';
 const healthClient = createDualKeyCache<number, MeshHealth>({
   fetcher: getMeshHealth,
   name: 'useMeshHealth',
+  // The health snapshot walks the mesh root AND every worktree (drift,
+  // hostage, dirty, ahead checks) — the most expensive GIT_CHANGED consumer
+  // by far, feeding a sidebar badge that doesn't need sub-second updates.
+  // 5s caps it; the trailing refetch keeps the badge converging on the
+  // settled state after an edit burst.
+  minRefetchIntervalMs: 5_000,
 });
 
 /**

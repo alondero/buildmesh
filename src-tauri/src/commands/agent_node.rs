@@ -95,8 +95,15 @@ pub async fn update_agent_node_positions(updates: Vec<(i64, i64)>) -> Result<(),
 /// Check whether the node's worktree can be removed safely on close.
 #[command]
 pub async fn get_worktree_close_safety(node_id: i64) -> Result<WorktreeCloseSafety, String> {
-    services::agent_node::get_worktree_close_safety(node_id)
-        .map_err(|e| e.to_string())
+    // Offload: the safety check runs a full `git status` walk plus an
+    // ahead/behind graph walk on the node's worktree (`worktree::close_safety`)
+    // — seconds on a large repo, and the frontend awaits it on every node
+    // close while showing a spinner. Running it inline parked a Tauri async
+    // worker for the duration (the Command Threading anti-pattern).
+    crate::commands::run_blocking("get_worktree_close_safety", move || {
+        services::agent_node::get_worktree_close_safety(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Trim and validate a user-supplied rename. Returns the canonical (trimmed)

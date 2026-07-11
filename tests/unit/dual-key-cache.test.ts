@@ -243,7 +243,7 @@ describe('minRefetchIntervalMs — freshness window on bus invalidation', () => 
     vi.useRealTimers();
   });
 
-  it('a matching event inside the window neither evicts nor notifies', async () => {
+  it('a matching event inside the window neither evicts nor notifies immediately', async () => {
     vi.useFakeTimers();
     const client = createDualKeyCache<number, string>({
       fetcher: vi.fn().mockResolvedValue('fresh'),
@@ -256,6 +256,59 @@ describe('minRefetchIntervalMs — freshness window on bus invalidation', () => 
     vi.advanceTimersByTime(29_999);
     await emit('git-changed', { path: '/repo' });
 
+    expect(cb).not.toHaveBeenCalled();
+    expect(client.read(7)).toBe('fresh');
+
+    // …but the settled state still lands: a trailing evict+notify fires
+    // when the window expires (1ms later), so a burst that ends inside
+    // the window can never leave the panel permanently stale.
+    vi.advanceTimersByTime(1);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('a burst of suppressed events coalesces into ONE trailing notify', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    // Five events, all inside the window — an agent streaming edits.
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(1_000);
+      await emit('git-changed', { path: '/repo' });
+    }
+    expect(cb).not.toHaveBeenCalled();
+
+    // The single trailing refetch fires at window expiry (30s after the
+    // fetch, i.e. 25s after the last event) — once, not five times.
+    vi.advanceTimersByTime(25_000);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('a successful refresh cancels the pending trailing refetch', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    vi.advanceTimersByTime(1_000);
+    await emit('git-changed', { path: '/repo' }); // suppressed → trailing armed
+
+    // A manual refresh (user clicked Refresh) already delivers the state
+    // the suppressed event described — the trailing timer must be
+    // cancelled, or it would evict this fresh value one window later.
+    await client.refresh(7);
+    vi.advanceTimersByTime(60_000);
     expect(cb).not.toHaveBeenCalled();
     expect(client.read(7)).toBe('fresh');
   });
@@ -336,9 +389,15 @@ describe('minRefetchIntervalMs — freshness window on bus invalidation', () => 
     expect(cb).not.toHaveBeenCalled();
     expect(client.read('/repo')).toBe('fresh');
 
+    // Advancing past the window fires the trailing refetch armed by the
+    // suppressed event above (one notify)…
     vi.advanceTimersByTime(30_000);
-    await emit('git-changed', { path: '/repo' });
     expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read('/repo')).toBeUndefined();
+
+    // …and with the stamp cleared, the next bus event notifies normally.
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(2);
     expect(client.read('/repo')).toBeUndefined();
   });
 

@@ -17,7 +17,7 @@
 
 use crate::env::to_host_path;
 use crate::git::primitives;
-use crate::process_util::{command_no_window, run_command_with_timeout};
+use crate::process_util::{git_command, run_command_with_timeout};
 use std::time::Duration;
 
 /// Outcome of a single `fetch_origin` invocation. The variants let the
@@ -253,7 +253,7 @@ pub(crate) fn do_sync(
         new_commits,
         if new_commits == 1 { "" } else { "s" }
     );
-    let mut pull_builder = command_no_window("git");
+    let mut pull_builder = git_command();
     pull_builder
         .args(["pull", "--ff-only", "--no-rebase"])
         .current_dir(host_path);
@@ -383,7 +383,7 @@ pub(crate) fn do_fetch_only(
         branch.unwrap_or("(all refs)"),
         host_path
     );
-    let mut fetch_builder = command_no_window("git");
+    let mut fetch_builder = git_command();
     fetch_builder.arg("fetch").arg(remote);
     if let Some(b) = branch {
         fetch_builder.arg(b);
@@ -443,6 +443,19 @@ pub(crate) const SPAWN_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// alias instead. New call sites that need per-path timeouts should
 /// pass [`MANUAL_FETCH_TIMEOUT`] or [`SPAWN_FETCH_TIMEOUT`] explicitly.
 pub(crate) const FETCH_TIMEOUT: Duration = MANUAL_FETCH_TIMEOUT;
+
+/// How long a *spawn-path* caller waits for the per-Mesh sync lock before
+/// giving up and proceeding from local HEAD. The lock's other holders are
+/// the manual `git_sync` (up to [`MANUAL_FETCH_TIMEOUT`] for the fetch plus
+/// the same again for the pull), another spawn's auto-sync (up to
+/// [`SPAWN_FETCH_TIMEOUT`] × 2), and the prune's `fetch --prune`. 45s
+/// comfortably covers the legitimate case (a healthy predecessor sync on a
+/// slow remote — measured 7–36s on a 250-branch repo) while capping the
+/// pathological one (a wedged manual sync holding the lock for minutes) at
+/// well under the old unbounded wait. On timeout the spawn emits the
+/// existing `mesh-sync-warning` toast and continues — ADR 0001's
+/// best-effort contract.
+pub(crate) const SPAWN_SYNC_LOCK_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Derive the remote name from a configured `base_ref` string, if the
 /// string form names one. Pure string parsing — no repo, no I/O — so
@@ -786,8 +799,28 @@ pub async fn locked_fetch_origin(
     base_ref: String,
 ) -> Result<FetchOutcome, FetchError> {
     tokio::task::spawn_blocking(move || {
-        crate::services::sync_lock::with_mesh_sync_lock(&mesh_path, || {
-            fetch_origin(&mesh_path, &base_ref)
+        // Bounded wait (not the unbounded `with_mesh_sync_lock`): the
+        // spawn path must never queue for minutes behind a wedged manual
+        // sync — see [`SPAWN_SYNC_LOCK_TIMEOUT`]. A `None` (lock still
+        // held at the deadline) maps to `FetchFailed`, which the spawn
+        // orchestrator already surfaces as a non-fatal `mesh-sync-warning`
+        // toast and then proceeds from local HEAD (ADR 0001).
+        crate::services::sync_lock::try_with_mesh_sync_lock_timeout(
+            &mesh_path,
+            SPAWN_SYNC_LOCK_TIMEOUT,
+            || fetch_origin(&mesh_path, &base_ref),
+        )
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "locked_fetch_origin: gave up waiting {}s for the mesh sync lock on {}; \
+                 spawning from local HEAD",
+                SPAWN_SYNC_LOCK_TIMEOUT.as_secs(),
+                mesh_path
+            );
+            Err(FetchError::FetchFailed(format!(
+                "another sync for this mesh is still running (waited {}s)",
+                SPAWN_SYNC_LOCK_TIMEOUT.as_secs()
+            )))
         })
     })
     .await

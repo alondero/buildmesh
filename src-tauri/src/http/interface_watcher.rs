@@ -178,7 +178,11 @@ async fn polling_event_loop(tx: mpsc::Sender<()>) {
         // wedged DB reads as "off" rather than blocking the watcher. We
         // still refresh `last` so an interface change during a LAN-off
         // window doesn't produce a stale diff when the user re-enables.
-        if !super::lan_exposure_enabled().unwrap_or(false) {
+        // `crate::db`, not `super` — the setting lives on `app_settings`
+        // (`db::lan_exposure_enabled`); the old `super::` path never existed
+        // and only compiled because this whole fn is `cfg(not(windows))`
+        // and the project is built on Windows.
+        if !crate::db::lan_exposure_enabled().unwrap_or(false) {
             last = sorted_snapshot();
             continue;
         }

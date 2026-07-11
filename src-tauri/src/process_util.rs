@@ -25,6 +25,32 @@ pub fn command_no_window(program: &str) -> Command {
     }
 }
 
+/// Create a `git` `Command` that can never stall on an interactive prompt.
+///
+/// Buildmesh is a GUI app: there is no terminal attached to a `git fetch` /
+/// `git pull` shell-out, so a remote that wants credentials would normally
+/// make git (or git-credential-manager) sit waiting on input that can never
+/// arrive. The child then burns the entire `run_command_with_timeout` budget
+/// (30s on the spawn path, 300s on the manual-sync path) — and because the
+/// network-facing shell-outs run under the per-Mesh sync lock, every spawn
+/// for that mesh queues behind the wedged prompt. Failing fast turns
+/// "new nodes take minutes" into an immediate `mesh-sync-warning` toast and
+/// a spawn from local HEAD.
+///
+/// - `GIT_TERMINAL_PROMPT=0` — git errors out instead of prompting on the
+///   terminal (`fatal: could not read Username ...`).
+/// - `GCM_INTERACTIVE=never` — git-credential-manager returns a failure
+///   instead of popping a (possibly hidden) auth dialog.
+///
+/// Both are no-ops for local-only operations (`worktree add`, `checkout`,
+/// `reset`), so every git shell-out routes through here for uniformity.
+pub fn git_command() -> Command {
+    let mut cmd = command_no_window("git");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GCM_INTERACTIVE", "never");
+    cmd
+}
+
 /// Run a `Command` to completion with a wall-clock timeout. If the child
 /// hasn't exited by `timeout`, it is killed and reaped, and the function
 /// returns an `Err`.
@@ -384,6 +410,37 @@ mod tests {
         assert!(
             result.is_ok(),
             "early-exit child should return Ok, got {result:?}"
+        );
+    }
+
+    /// `git_command` must disable every interactive-prompt channel: a
+    /// GUI app's git shell-out that prompts for credentials wedges for the
+    /// full `run_command_with_timeout` budget while holding the per-Mesh
+    /// sync lock — the "new nodes take minutes" failure mode. Asserting
+    /// the env pairs here means a refactor that reverts to a bare
+    /// `command_no_window("git")` fails a test instead of re-introducing
+    /// the hang.
+    #[test]
+    fn git_command_disables_interactive_prompts() {
+        let cmd = git_command();
+        let envs: std::collections::HashMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().to_string(),
+                    v.map(|v| v.to_string_lossy().to_string()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs.get("GIT_TERMINAL_PROMPT"),
+            Some(&Some("0".to_string())),
+            "git must error out instead of prompting on a terminal it doesn't have"
+        );
+        assert_eq!(
+            envs.get("GCM_INTERACTIVE"),
+            Some(&Some("never".to_string())),
+            "git-credential-manager must fail fast instead of popping an auth dialog"
         );
     }
 

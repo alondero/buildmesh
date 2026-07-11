@@ -16,7 +16,7 @@
 
 use crate::db;
 use crate::env::to_host_path;
-use crate::process_util::command_no_window;
+use crate::process_util::git_command;
 use crate::services::github::{self, GitHubClient};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
@@ -140,7 +140,7 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
     // this core already runs on one. `run_command_with_timeout` kills the
     // child on the 5-min `FETCH_TIMEOUT` budget — same cap as `git fetch`
     // because push-side waits are dominated by the network + remote receive.
-    let mut push_builder = command_no_window("git");
+    let mut push_builder = git_command();
     push_builder
         .args(["push", "origin", &branch_name])
         .current_dir(&host_path);
