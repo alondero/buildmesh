@@ -76,7 +76,13 @@ pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_sec
 /// Extracted from `spawn_agent_inner` so the regression test in
 /// `mod tests` can call it directly without standing up the full async /
 /// PTY / DB machinery — the call site is a single expression.
-fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) -> String {
+///
+/// `pub(crate)` so the background mesh sync (`services::pool_worker`)
+/// resolves its fetch target through the exact same 3-tier chain the spawn
+/// uses — a worker that fetched a literal `origin/main` on a repo whose
+/// default branch is `master` would fail every pass and never satisfy the
+/// spawn-time freshness TTL.
+pub(crate) fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) -> String {
     const COALESCE_DEFAULT: &str = "origin/main";
     let user_set = config_base_ref.filter(|b| b.trim() != COALESCE_DEFAULT);
     if let Some(b) = user_set {
@@ -977,52 +983,74 @@ pub async fn spawn_agent_inner(
             // against `upstream` rather than hardcoded `origin`. We move
             // `base_ref` into the closure because `spawn_blocking` needs
             // a `'static` closure.
-            let root = node.path.clone();
-            let base_ref_owned = base_ref.to_string();
-            timer.checkpoint("before_fetch_origin");
-            diag.git_event("fetch_origin", "start");
-            // Issue #652 — per-Mesh serialization. Without this lock, N
-            // concurrent spawns against the same Mesh race on
-            // .git/FETCH_HEAD, .git/index.lock, and refs/heads/<branch>.lock:
-            // one git fetch wins, the others fail with "another git process"
-            // and the spawn lands on a stale ref. The lock is *blocking*
-            // (not try_lock-or-skip), so caller #2 waits for caller #1 to
-            // populate the refs and then reuses them (its natural outcome
-            // is UpToDate, which is correct).
-            //
-            // Issue #709 — the wrap is consolidated into
-            // `git::sync::locked_fetch_origin` so the lock-acquisition
-            // shape is identical to the manual `git_sync`'s
-            // `locked_do_sync`, the PR-spawn's `locked_fetch_pr_head`,
-            // and the prune's `locked_prune_remote_tracking`. The
-            // `tokio::task::spawn_blocking` + `with_mesh_sync_lock`
-            // pair used to live inline here.
-            let sync_result =
-                crate::git::sync::locked_fetch_origin(root, base_ref_owned).await;
-            let fetch_outcome: &'static str = match &sync_result {
-                Ok(crate::git::sync::FetchOutcome::Synced { .. }) => "ok:synced",
-                Ok(crate::git::sync::FetchOutcome::UpToDate) => "ok:up_to_date",
-                Ok(crate::git::sync::FetchOutcome::SkippedDirty) => "skip:dirty",
-                Ok(crate::git::sync::FetchOutcome::SkippedNoRemote) => "skip:no_remote",
-                Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. }) => "ok:diverged",
-                Err(_) => "err",
-            };
-            diag.git_event("fetch_origin", fetch_outcome);
-            timer.checkpoint("after_fetch_origin");
-            // Ref-freshness (issue #613 AC3): if the fetch actually pulled new
-            // commits, the mesh's base ref has moved, so any OTHER warm pool
-            // entries for this mesh are now parked on a stale SHA and must be
-            // `git reset --hard`ed onto the new commit. Only `Synced` /
-            // `FetchedButDiverged` advance the ref — `UpToDate` / skipped means
-            // nothing moved. We record the fact here and let the single
-            // post-spawn maintenance task (at the end of this fn) run the
-            // freshness pass, so refresh and refill share one fill-lock
-            // acquisition instead of racing on two threads (issue #613 review).
-            ref_advanced_for_pool = sync_result
-                .as_ref()
-                .map(|o| o.advanced_ref())
-                .unwrap_or(false);
-            emit_sync_outcome_event(app, session_id, &node.path, sync_result);
+            // Freshness skip (ADR 0020): the background mesh sync in
+            // `services::pool_worker` (and any recent spawn / manual Sync)
+            // stamps `services::fetch_freshness` on every successful fetch.
+            // When the mesh was synced within `SPAWN_FETCH_TTL`, this whole
+            // network round-trip is redundant — the remote-tracking ref the
+            // worktree is cut from is already current to within minutes —
+            // so we skip it and the spawn goes straight to provisioning.
+            // `ref_advanced_for_pool` stays false: whichever path recorded
+            // the fresh fetch already ran the warm-pool freshness pass.
+            // The manual Sync button remains the "I need the latest RIGHT
+            // NOW" override — it fetches unconditionally.
+            if crate::services::fetch_freshness::spawn_can_skip_fetch(&node.path) {
+                tracing::info!(
+                    "spawn_agent_inner: skipping auto-sync for session {} — mesh {} was synced {}s ago (< TTL)",
+                    session_id,
+                    node.path,
+                    crate::services::fetch_freshness::time_since_success(&node.path).as_secs()
+                );
+                timer.checkpoint("fetch_origin_skipped_fresh");
+                diag.git_event("fetch_origin", "skip:fresh");
+            } else {
+                let root = node.path.clone();
+                let base_ref_owned = base_ref.to_string();
+                timer.checkpoint("before_fetch_origin");
+                diag.git_event("fetch_origin", "start");
+                // Issue #652 — per-Mesh serialization. Without this lock, N
+                // concurrent spawns against the same Mesh race on
+                // .git/FETCH_HEAD, .git/index.lock, and refs/heads/<branch>.lock:
+                // one git fetch wins, the others fail with "another git process"
+                // and the spawn lands on a stale ref. The lock is *blocking*
+                // (not try_lock-or-skip), so caller #2 waits for caller #1 to
+                // populate the refs and then reuses them (its natural outcome
+                // is UpToDate, which is correct).
+                //
+                // Issue #709 — the wrap is consolidated into
+                // `git::sync::locked_fetch_origin` so the lock-acquisition
+                // shape is identical to the manual `git_sync`'s
+                // `locked_do_sync`, the PR-spawn's `locked_fetch_pr_head`,
+                // and the prune's `locked_prune_remote_tracking`. The
+                // `tokio::task::spawn_blocking` + `with_mesh_sync_lock`
+                // pair used to live inline here.
+                let sync_result =
+                    crate::git::sync::locked_fetch_origin(root, base_ref_owned).await;
+                let fetch_outcome: &'static str = match &sync_result {
+                    Ok(crate::git::sync::FetchOutcome::Synced { .. }) => "ok:synced",
+                    Ok(crate::git::sync::FetchOutcome::UpToDate) => "ok:up_to_date",
+                    Ok(crate::git::sync::FetchOutcome::SkippedDirty) => "skip:dirty",
+                    Ok(crate::git::sync::FetchOutcome::SkippedNoRemote) => "skip:no_remote",
+                    Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. }) => "ok:diverged",
+                    Err(_) => "err",
+                };
+                diag.git_event("fetch_origin", fetch_outcome);
+                timer.checkpoint("after_fetch_origin");
+                // Ref-freshness (issue #613 AC3): if the fetch actually pulled new
+                // commits, the mesh's base ref has moved, so any OTHER warm pool
+                // entries for this mesh are now parked on a stale SHA and must be
+                // `git reset --hard`ed onto the new commit. Only `Synced` /
+                // `FetchedButDiverged` advance the ref — `UpToDate` / skipped means
+                // nothing moved. We record the fact here and let the single
+                // post-spawn maintenance task (at the end of this fn) run the
+                // freshness pass, so refresh and refill share one fill-lock
+                // acquisition instead of racing on two threads (issue #613 review).
+                ref_advanced_for_pool = sync_result
+                    .as_ref()
+                    .map(|o| o.advanced_ref())
+                    .unwrap_or(false);
+                emit_sync_outcome_event(app, session_id, &node.path, sync_result);
+            } // end freshness-gated fetch_origin block
 
             // Worktree adoption for PR-spawned nodes (issue #420, extended
             // by #443 for fork PRs). When the node carries a `source_pr`,

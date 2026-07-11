@@ -28,7 +28,8 @@ mod tests {
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
         count_droppable_warm_entries_for_mesh_inner,
         delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktrees_for_mesh_inner,
-        ensure_mesh_pre_spawn_pool_size, ensure_warm_worktables_table,
+        ensure_mesh_pre_spawn_pool_size, ensure_pool_default_backfill,
+        ensure_warm_worktables_table,
         insert_warm_worktree_inner, is_warm_pool_path_inner,
         warm_pool_claims_path_inner,
         list_oldest_warm_entries_for_mesh_inner,
@@ -1589,6 +1590,103 @@ mod tests {
         assert!(
             !warm_pool_claims_path_inner(&conn, &p).unwrap(),
             "after the row is dropped, the path must no longer be claimed — the next drain proceeds"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // v24 pool-default-on backfill (ADR 0020). One-time flip of
+    // worktree-enabled meshes from the old pool-off default (0) to the new
+    // default (1), gated on the `pool_default_backfill_v24` flag.
+    // -------------------------------------------------------------------
+
+    /// Build a v22-era DB with three meshes covering the backfill's
+    /// decision table: worktree-enabled at 0 (flips), worktree-disabled at
+    /// 0 (stays), worktree-enabled with an explicit size (stays).
+    fn v22_schema_for_backfill() -> Connection {
+        let conn = v20_schema_with_mesh(true); // mesh 1: use_worktree=1
+        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
+        ensure_warm_worktables_table(&conn).unwrap();
+        // The v22-era default was 0 — simulate rows that predate v24.
+        conn.execute("UPDATE meshes SET pre_spawn_pool_size = 0 WHERE id = 1", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO meshes (name, path, use_worktree, pre_spawn_pool_size)
+             VALUES ('no-wt', '/repo/no-wt', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meshes (name, path, use_worktree, pre_spawn_pool_size)
+             VALUES ('sized', '/repo/sized', 1, 3)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn pool_size_for(conn: &Connection, path: &str) -> i64 {
+        conn.query_row(
+            "SELECT pre_spawn_pool_size FROM meshes WHERE path = ?1",
+            rusqlite::params![path],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn backfill_enables_pool_only_for_worktree_enabled_zero_meshes() {
+        let conn = v22_schema_for_backfill();
+        ensure_pool_default_backfill(&conn).unwrap();
+        assert_eq!(
+            pool_size_for(&conn, "/repo/m"),
+            1,
+            "a worktree-enabled mesh on the old 0 default must flip to 1"
+        );
+        assert_eq!(
+            pool_size_for(&conn, "/repo/no-wt"),
+            0,
+            "a worktree-disabled mesh stays at 0 — the pool is meaningless for it"
+        );
+        assert_eq!(
+            pool_size_for(&conn, "/repo/sized"),
+            3,
+            "an explicitly-sized pool must never be touched"
+        );
+    }
+
+    /// The flag makes the backfill strictly one-time: a user who opts a
+    /// mesh back OUT (sets 0) after the flip must never be overridden on a
+    /// later startup — that would make the Worktrees Probe's off switch
+    /// useless.
+    #[test]
+    fn backfill_runs_at_most_once_per_db() {
+        let conn = v22_schema_for_backfill();
+        ensure_pool_default_backfill(&conn).unwrap();
+        // User opts back out.
+        conn.execute("UPDATE meshes SET pre_spawn_pool_size = 0 WHERE path = '/repo/m'", [])
+            .unwrap();
+        // Every subsequent init re-calls the ensure — it must be a no-op.
+        ensure_pool_default_backfill(&conn).unwrap();
+        assert_eq!(
+            pool_size_for(&conn, "/repo/m"),
+            0,
+            "a post-backfill explicit 0 must survive later startups (flag-gated one-time)"
+        );
+    }
+
+    /// A brand-new v24 DB gets the column with DEFAULT 1, so a mesh row
+    /// inserted without naming the column lands pool-on. Pins the
+    /// `ensure_column` default that `create_mesh`'s explicit value mirrors.
+    #[test]
+    fn fresh_column_default_is_pool_on() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
+        // The fixture mesh predates the column add — it reads the ALTER
+        // default.
+        assert_eq!(
+            pool_size_for(&conn, "/repo/m"),
+            1,
+            "the v24 column default is 1 (pool on); pre-v24 DBs are covered by the backfill"
         );
     }
 }
