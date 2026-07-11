@@ -1014,6 +1014,19 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
 
 #[command]
 pub async fn kill_agent(session_id: i64) -> Result<(), String> {
+    // Offload to the blocking pool: `kill_session` shells out to
+    // `taskkill /F /T` on Windows (a synchronous `.output()` wait) and then
+    // joins the PTY reader thread with a bounded 2s timeout — up to several
+    // seconds parked on a Tauri async worker per call. This command runs on
+    // every node close AND at step 2 of every spawn (`spawn_agent_inner`
+    // kills stale processes first), so leaving it inline is exactly the
+    // pool-starvation class from the Command Threading convention.
+    crate::commands::run_blocking("kill_agent", move || kill_agent_blocking(session_id)).await
+}
+
+/// Sync core for [`kill_agent`] — see the `*_blocking` + `run_blocking`
+/// convention in `commands/mod.rs`.
+pub(crate) fn kill_agent_blocking(session_id: i64) -> Result<(), String> {
     crate::session_naming::reset_buffers(session_id);
     PROCESS_REGISTRY.kill_session(session_id);
     PROCESS_REGISTRY.remove(&session_id);

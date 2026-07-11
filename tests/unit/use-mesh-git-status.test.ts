@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
@@ -48,6 +48,13 @@ beforeEach(() => {
   // requires a per-test reset.
 });
 
+// Restore the per-test `Date.now` spies (the freshness-window jumps) so a
+// jump in one test can't leak into a test that relies on real time.
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+
 describe('useMeshGitStatus', () => {
   it('fetches repo state, auth, branch, and files on mount', async () => {
     const { result } = renderHook(() => useMeshGitStatus(MESH_PATH));
@@ -65,6 +72,11 @@ describe('useMeshGitStatus', () => {
     await waitFor(() => expect(result.current?.isGitRepo).toBe(true));
     await waitFor(() => expect(callsTo('get_git_status')).toBe(1));
 
+    // Jump Date.now() past the client's freshness window (see
+    // minRefetchIntervalMs) so this test keeps asserting the
+    // immediate-refetch path — inside the window, bus events are absorbed
+    // into a trailing refetch (same pattern as use-open-pr.test.ts).
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     await act(async () => {
       await emit('git-changed', { path: MESH_PATH });
     });
@@ -85,6 +97,11 @@ describe('useMeshGitStatus', () => {
     await waitFor(() => expect(result.current?.isGitRepo).toBe(true));
     await waitFor(() => expect(callsTo('get_git_status')).toBe(1));
 
+    // Jump Date.now() past the client's freshness window (see
+    // minRefetchIntervalMs) so this test keeps asserting the
+    // immediate-refetch path — inside the window, bus events are absorbed
+    // into a trailing refetch (same pattern as use-open-pr.test.ts).
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     await act(async () => {
       await emit('git-changed', {
         path: WORKTREE_PATH,
@@ -233,6 +250,11 @@ describe('useMeshGitStatus', () => {
       return Promise.resolve(undefined);
     });
 
+    // Jump Date.now() past the client's freshness window (see
+    // minRefetchIntervalMs) so this test keeps asserting the
+    // immediate-refetch path — inside the window, bus events are absorbed
+    // into a trailing refetch (same pattern as use-open-pr.test.ts).
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10_000);
     await act(async () => {
       await emit('git-changed', { path: MESH_PATH });
     });

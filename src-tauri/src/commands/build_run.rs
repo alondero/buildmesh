@@ -185,6 +185,21 @@ pub async fn build_run(
     mode: BuildRunMode,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Offload: the body opens the repo with git2 (worktree-registration
+    // check — a stat-heavy walk on large repos / WSL UNC paths) and then
+    // opens a ConPTY + spawns a shell. Both are blocking calls that must
+    // not park a Tauri async worker (Command Threading convention).
+    crate::commands::run_blocking("build_run", move || build_run_blocking(node_id, mode, app))
+        .await
+}
+
+/// Sync core for [`build_run`] — see the `*_blocking` + `run_blocking`
+/// convention in `commands/mod.rs`.
+fn build_run_blocking(
+    node_id: i64,
+    mode: BuildRunMode,
+    app: AppHandle,
+) -> Result<(), String> {
     // 1. Get agent node (node.path == mesh.path for all nodes)
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;

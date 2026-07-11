@@ -9,6 +9,11 @@ import { getGitBranchStatus, type GitBranchStatus } from '../lib/tauri';
 const branchStatusClient = createPathKeyedCache<GitBranchStatus>({
   fetcher: getGitBranchStatus,
   name: 'gitBranchStatus',
+  // Ahead/behind + short-SHA walk. Branch state changes far less often than
+  // file contents, but every agent file-write fires GIT_CHANGED — 3s bounds
+  // the refetch rate; the trailing refetch keeps the chip converging on the
+  // settled state.
+  minRefetchIntervalMs: 3_000,
 });
 
 /**

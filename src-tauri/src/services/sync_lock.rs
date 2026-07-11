@@ -129,6 +129,64 @@ where
     f()
 }
 
+/// Like [`with_mesh_sync_lock`], but gives up after `timeout` instead of
+/// waiting indefinitely. Returns `Some(f())` if the lock was acquired
+/// within the deadline, `None` if the current holder didn't release in time.
+///
+/// Why this exists: the spawn-time auto-sync and the PR-head fetch used to
+/// wait *unboundedly* on this lock. A manual Sync click (`git_sync` — up to
+/// 300s fetch timeout plus 300s pull timeout under the same lock) or a
+/// wedged remote could therefore stall every new-node spawn on that mesh
+/// for many minutes: the "new nodes take minutes or never start" failure
+/// mode. The spawn path's sync is best-effort by contract (ADR 0001:
+/// always proceed from local HEAD on any sync failure), so a bounded wait
+/// that degrades to the existing `mesh-sync-warning` toast is strictly
+/// better than queueing behind a stuck sync.
+///
+/// `std::sync::Mutex` has no timed lock on stable, so this polls
+/// `try_lock` on a 100ms tick — the same pattern (and justification) as
+/// `process_util::run_command_with_timeout`. Callers run on the blocking
+/// pool, so sleeping the polling thread is fine. Poison recovery matches
+/// [`with_mesh_sync_lock`].
+pub fn try_with_mesh_sync_lock_timeout<F, R>(
+    mesh_path: &str,
+    timeout: std::time::Duration,
+    f: F,
+) -> Option<R>
+where
+    F: FnOnce() -> R,
+{
+    let arc_mutex = {
+        let mut map = match MESH_LOCKS.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        map.entry(mesh_path.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match arc_mutex.try_lock() {
+            Ok(_guard) => return Some(f()),
+            // A poisoned lock means a prior holder panicked mid-sync; the
+            // guarded unit `()` has no state to corrupt, so proceed — same
+            // policy as the blocking acquire above.
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                let _guard = poisoned.into_inner();
+                return Some(f());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +355,92 @@ mod tests {
 
         let s = with_mesh_sync_lock("mesh://return-value", || "hello".to_string());
         assert_eq!(s, "hello");
+    }
+
+    // ── try_with_mesh_sync_lock_timeout (bounded spawn-path wait) ──────────
+
+    /// Uncontended: the closure runs and its value round-trips.
+    #[test]
+    fn timeout_variant_runs_when_lock_is_free() {
+        let result = try_with_mesh_sync_lock_timeout(
+            "mesh://timeout-free",
+            Duration::from_secs(1),
+            || 7_i32,
+        );
+        assert_eq!(result, Some(7));
+    }
+
+    /// The headline regression for the "new nodes take minutes or never
+    /// start" failure mode: a spawn-path caller must give up (return
+    /// `None`, closure NOT run) when another sync holds the mesh lock past
+    /// the deadline, instead of queueing behind it indefinitely.
+    #[test]
+    fn timeout_variant_gives_up_when_holder_outlives_deadline() {
+        const KEY: &str = "mesh://timeout-held";
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        // Holder: takes the lock and keeps it until told to release —
+        // stands in for a wedged manual `git_sync`.
+        let holder = thread::spawn(move || {
+            with_mesh_sync_lock(KEY, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("holder never acquired the lock");
+
+        let start = Instant::now();
+        let mut ran = false;
+        let result =
+            try_with_mesh_sync_lock_timeout(KEY, Duration::from_millis(300), || ran = true);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "must give up while the lock is held");
+        assert!(!ran, "the closure must NOT run when the deadline expires");
+        // Bound check: gave up near the deadline (generous slack for CI),
+        // not after some multi-second internal retry.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "gave up too slowly: {elapsed:?}"
+        );
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // Once released, the same key acquires again.
+        let after = try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(1), || 1_i32);
+        assert_eq!(after, Some(1), "lock must be reusable after release");
+    }
+
+    /// A caller that starts while the lock is held but whose deadline
+    /// outlives the holder acquires once the holder releases — the bounded
+    /// wait is a wait, not a `try_lock`-or-skip.
+    #[test]
+    fn timeout_variant_acquires_when_holder_releases_in_time() {
+        const KEY: &str = "mesh://timeout-releases";
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+
+        let holder = thread::spawn(move || {
+            with_mesh_sync_lock(KEY, || {
+                started_tx.send(()).unwrap();
+                // Short hold — well inside the waiter's deadline.
+                thread::sleep(Duration::from_millis(200));
+            });
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("holder never acquired the lock");
+
+        let result =
+            try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(5), || 99_i32);
+        assert_eq!(
+            result,
+            Some(99),
+            "waiter with headroom must acquire after the holder releases"
+        );
+        holder.join().unwrap();
     }
 }

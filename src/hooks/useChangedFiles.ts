@@ -16,6 +16,11 @@ import { getGitStatus, type GitStatus } from '../lib/tauri';
 export const gitStatusClient = createPathKeyedCache<GitStatus[]>({
   fetcher: getGitStatus,
   name: 'gitStatus',
+  // Full `git status` walk shared by three consumers. Bound the
+  // GIT_CHANGED-driven refetch rate while an agent streams edits (the
+  // backend coalescer already caps events at ~2/s; this caps the walks at
+  // one per 2s). The primitive's trailing refetch lands the settled state.
+  minRefetchIntervalMs: 2_000,
 });
 
 /**
