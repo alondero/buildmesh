@@ -348,7 +348,13 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
 
 /// The trimmed, non-empty worktree name iff the node runs in a worktree — the
 /// single definition of "does this Agent Node have a Worktree Node dir".
-fn worktree_segment(node: &AgentNode) -> Option<&str> {
+///
+/// `pub(crate)` so command handlers that need to validate a worktree (e.g.
+/// `commands::build_run` feeding the name into `validate_worktree_exists`'s
+/// git2 worktree-list compare) read the SAME trimmed value the canonical
+/// resolver consumed. Re-reading `node.worktree_name` directly bypasses the
+/// trim invariant; reaching for `worktree_segment` keeps it in one place.
+pub(crate) fn worktree_segment(node: &AgentNode) -> Option<&str> {
     if !node.use_worktree {
         return None;
     }
