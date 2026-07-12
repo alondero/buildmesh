@@ -756,6 +756,217 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Parse the `Content-Length` request header, defaulting to `0` when it's
+/// absent or unparseable. One home for what used to be copy-pasted at every
+/// body-reading route.
+fn content_length(headers: &str) -> usize {
+    request::extract_header_value(headers, "Content-Length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Complete the WebSocket handshake on an already-authorized upgrade: derive the
+/// `Sec-WebSocket-Accept` key, write the `101 Switching Protocols` response, and
+/// hand back the framed stream. Returns `None` (after writing the matching error
+/// status) when the client omitted `Sec-WebSocket-Key` or the socket died
+/// mid-handshake. Shared by both `/ws/*` upgrades — only the ticket-consume,
+/// target binding, and spawned handler differ between them.
+async fn ws_upgrade(
+    mut lines: tokio::io::BufStream<MaybeTls>,
+    headers: &str,
+) -> Option<WebSocketStream<MaybeTls>> {
+    let Some(ws_key) = request::extract_header_value(headers, "Sec-WebSocket-Key") else {
+        let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+        return None;
+    };
+    let accept_key = derive_accept_key(ws_key.as_bytes());
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Accept: {}\r\n\
+         \r\n",
+        accept_key
+    );
+    let mut stream = lines.into_inner();
+    if stream.write_all(response.as_bytes()).await.is_err() {
+        return None;
+    }
+    if stream.flush().await.is_err() {
+        return None;
+    }
+    Some(WebSocketStream::from_raw_socket(stream, Role::Server, None).await)
+}
+
+/// How a [`Route`] matches a request path and captures its integer id(s).
+enum RouteMatch {
+    /// The path must equal this literal exactly.
+    Exact(&'static str),
+    /// `prefix{id}suffix` — one integer segment (e.g. `/api/agents/{id}/diff`).
+    OneId {
+        prefix: &'static str,
+        suffix: &'static str,
+    },
+    /// `prefix{id1}mid{id2}suffix` — two integer segments (e.g.
+    /// `/api/meshes/{id}/pulls/{n}/merge`).
+    TwoId {
+        prefix: &'static str,
+        mid: &'static str,
+        suffix: &'static str,
+    },
+}
+
+impl RouteMatch {
+    /// Match `path_without_query`, returning the captured ids on success. The
+    /// two-tuple is `(first_id, second_id)`; an `Exact` route captures neither,
+    /// a `OneId` route the first, a `TwoId` route both. A non-integer segment
+    /// fails the match (reusing `path_segment_id`'s numeric parse), so a
+    /// malformed id falls through to the catch-all rather than reaching a
+    /// handler.
+    fn captures(&self, path: &str) -> Option<(Option<i64>, Option<i64>)> {
+        match self {
+            RouteMatch::Exact(p) => (path == *p).then_some((None, None)),
+            RouteMatch::OneId { prefix, suffix } => {
+                path_segment_id(path, prefix, suffix).map(|id| (Some(id), None))
+            }
+            RouteMatch::TwoId {
+                prefix,
+                mid,
+                suffix,
+            } => path_two_segment_ids(path, prefix, mid, suffix).map(|(a, b)| (Some(a), Some(b))),
+        }
+    }
+}
+
+/// One homogeneous route: which handler runs for each `Handler` variant is
+/// resolved by [`dispatch_route`], keeping this table pure data.
+#[derive(Clone, Copy)]
+enum Handler {
+    AdminDevices,
+    AdminRevoke,
+    CoordinatorNodes,
+    CoordinatorLog,
+    CoordinatorPrompt,
+    NodesCreate,
+    PrCreate,
+    PrMerge,
+    ImportResume,
+    IssuesSpawn,
+    GitStatus,
+    GitSummary,
+    GitBranch,
+    GitDiff,
+    GhAuth,
+    AgentNodesDiscover,
+    IssuesList,
+    PullsList,
+    PrMergeability,
+}
+
+/// A declaratively-routed request: method + path shape + the auth scope the
+/// dispatch loop enforces before the handler runs.
+struct Route {
+    method: &'static str,
+    m: RouteMatch,
+    scope: auth::RequiredScope,
+    handler: Handler,
+}
+
+/// The homogeneous routes — every one is `guard(scope) -> handler`, with no
+/// bespoke response headers or stream hijack. This table is the single
+/// scope-audit surface for them; the specials (WS upgrades, `/api/session`,
+/// `/api/ws-ticket`, the `/admin/*` catch-all, assets, the SPA shell) are
+/// declared in `SPECIAL_ROUTES` below for the same audit, but dispatched by
+/// their own explicit branches because they need bespoke behaviour. Order is
+/// preserved from the original if-chain; the only load-bearing constraint is
+/// that `/admin/devices*` precede the `/admin/*` catch-all, which it does
+/// because the loop runs before that special.
+const ROUTES: &[Route] = &[
+    Route { method: "GET", m: RouteMatch::Exact("/admin/devices"), scope: auth::RequiredScope::Admin, handler: Handler::AdminDevices },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/admin/devices/", suffix: "/revoke" }, scope: auth::RequiredScope::Admin, handler: Handler::AdminRevoke },
+    Route { method: "GET", m: RouteMatch::Exact("/nodes"), scope: auth::RequiredScope::CoordinatorRead, handler: Handler::CoordinatorNodes },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/log" }, scope: auth::RequiredScope::CoordinatorRead, handler: Handler::CoordinatorLog },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/prompt" }, scope: auth::RequiredScope::CoordinatorWrite, handler: Handler::CoordinatorPrompt },
+    Route { method: "POST", m: RouteMatch::Exact("/api/nodes/create"), scope: auth::RequiredScope::Admin, handler: Handler::NodesCreate },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/pr" }, scope: auth::RequiredScope::Admin, handler: Handler::PrCreate },
+    Route { method: "POST", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/pulls/", suffix: "/merge" }, scope: auth::RequiredScope::Admin, handler: Handler::PrMerge },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/agent-nodes/import-and-resume" }, scope: auth::RequiredScope::Admin, handler: Handler::ImportResume },
+    Route { method: "POST", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/issues/", suffix: "/spawn" }, scope: auth::RequiredScope::Admin, handler: Handler::IssuesSpawn },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/status" }, scope: auth::RequiredScope::Admin, handler: Handler::GitStatus },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/summary" }, scope: auth::RequiredScope::Admin, handler: Handler::GitSummary },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/branch" }, scope: auth::RequiredScope::Admin, handler: Handler::GitBranch },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/diff" }, scope: auth::RequiredScope::Admin, handler: Handler::GitDiff },
+    Route { method: "GET", m: RouteMatch::Exact("/api/gh/auth"), scope: auth::RequiredScope::Admin, handler: Handler::GhAuth },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/agent-nodes/discover" }, scope: auth::RequiredScope::Admin, handler: Handler::AgentNodesDiscover },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/issues" }, scope: auth::RequiredScope::Admin, handler: Handler::IssuesList },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/pulls" }, scope: auth::RequiredScope::Admin, handler: Handler::PullsList },
+    Route { method: "GET", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/pulls/", suffix: "/mergeability" }, scope: auth::RequiredScope::Admin, handler: Handler::PrMergeability },
+];
+
+/// Run a homogeneous route's handler. The dispatch loop has already enforced
+/// `route.scope`; this match owns the per-route arity (which id, which query
+/// param, whether it reads a body) so [`ROUTES`] can stay pure data. Each arm
+/// preserves the exact behaviour of the original inline branch — including the
+/// two JSON-string producers (written via `write_json`) and the `/nodes/{id}/log`
+/// `Some -> 200 / None -> 404` split.
+async fn dispatch_route(
+    handler: Handler,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
+    ids: (Option<i64>, Option<i64>),
+    path_with_query: &str,
+    headers: &str,
+) {
+    let id0 = ids.0.unwrap_or(0);
+    let id1 = ids.1.unwrap_or(0);
+    match handler {
+        Handler::AdminDevices => {
+            let _ = request::write_json(lines, "200 OK", &routes::admin::list_devices_json()).await;
+        }
+        Handler::AdminRevoke => routes::admin::revoke(lines, id0).await,
+        Handler::CoordinatorNodes => {
+            let _ = request::write_json(lines, "200 OK", &routes::coordinator::list_nodes_json()).await;
+        }
+        Handler::CoordinatorLog => {
+            let tail = tail_param(path_with_query);
+            match routes::coordinator::log_json(id0, tail) {
+                Some(body) => {
+                    let _ = request::write_json(lines, "200 OK", &body).await;
+                }
+                None => {
+                    let _ = request::write_status_only(lines, "404 Not Found").await;
+                }
+            }
+        }
+        Handler::CoordinatorPrompt => {
+            routes::coordinator::prompt(lines, id0, content_length(headers)).await
+        }
+        Handler::NodesCreate => routes::nodes::create(lines, content_length(headers)).await,
+        Handler::PrCreate => routes::pr::create(lines, id0, content_length(headers)).await,
+        Handler::PrMerge => routes::pr::merge(lines, id0, id1, content_length(headers)).await,
+        Handler::ImportResume => {
+            routes::agent_nodes::import_and_resume(lines, id0, content_length(headers)).await
+        }
+        Handler::IssuesSpawn => {
+            routes::issues::spawn(lines, id0, id1, content_length(headers)).await
+        }
+        Handler::GitStatus => routes::git::status(lines, id0).await,
+        Handler::GitSummary => routes::git::summary(lines, id0).await,
+        Handler::GitBranch => routes::git::branch(lines, id0).await,
+        Handler::GitDiff => {
+            let file_path = query_param(path_with_query, "path").unwrap_or_default();
+            routes::git::diff(lines, id0, &file_path).await;
+        }
+        Handler::GhAuth => routes::git::gh_auth(lines).await,
+        Handler::AgentNodesDiscover => routes::agent_nodes::discover(lines, id0).await,
+        Handler::IssuesList => routes::issues::list(lines, id0).await,
+        Handler::PullsList => {
+            let state = query_param(path_with_query, "state").unwrap_or_default();
+            routes::pr::list_pulls(lines, id0, &state).await;
+        }
+        Handler::PrMergeability => routes::pr::get_mergeability(lines, id0, id1).await,
+    }
+}
+
 /// Snapshot override for `enumerate_interfaces`. `None` means "use the system
 /// call"; tests install a deterministic value so they can simulate a VPN
 /// adapter appearing later in the session (issue #585). The override is read
@@ -994,27 +1205,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                 return;
             }
         };
-        let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
-            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+        let Some(ws_stream) = ws_upgrade(lines, &headers).await else {
             return;
         };
-        let accept_key = derive_accept_key(ws_key.as_bytes());
-        let response = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Connection: Upgrade\r\n\
-             Upgrade: websocket\r\n\
-             Sec-WebSocket-Accept: {}\r\n\
-             \r\n",
-            accept_key
-        );
-        let mut stream = lines.into_inner();
-        if stream.write_all(response.as_bytes()).await.is_err() {
-            return;
-        }
-        if stream.flush().await.is_err() {
-            return;
-        }
-        let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
         tracing::info!("/ws/events client connected");
         tauri::async_runtime::spawn(ws::handle_events_ws_connection(ws_stream, device_id));
         return;
@@ -1058,30 +1251,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
             }
         };
 
-        let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
-            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+        let Some(ws_stream) = ws_upgrade(lines, &headers).await else {
             return;
         };
-
-        let accept_key = derive_accept_key(ws_key.as_bytes());
-        let response = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Connection: Upgrade\r\n\
-             Upgrade: websocket\r\n\
-             Sec-WebSocket-Accept: {}\r\n\
-             \r\n",
-            accept_key
-        );
-
-        let mut stream = lines.into_inner();
-        if stream.write_all(response.as_bytes()).await.is_err() {
-            return;
-        }
-        if stream.flush().await.is_err() {
-            return;
-        }
-
-        let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
         tracing::info!("WebSocket connected for node {}", node_id);
         tauri::async_runtime::spawn(ws::handle_ws_connection(ws_stream, node_id, device_id));
         return;
@@ -1100,9 +1272,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // 204 No Content so the SPA's fetch resolves cleanly. Matched before
     // `/api/*` so a debug POST never gets confused for a real API call.
     if method == "POST" && path_without_query == "/__debug/log" {
-        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let content_length = content_length(&headers);
         if content_length <= 64 * 1024 {
             let mut body_bytes = vec![0u8; content_length];
             if content_length == 0 || lines.read_exact(&mut body_bytes).await.is_ok() {
@@ -1218,34 +1388,25 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // GET /admin/devices — list paired devices for the "Authorized Devices"
-    // panel (issue #502). Admin-only; the first real operation in the namespace
-    // #500 reserved. Matched before the `/admin/*` catch-all below.
-    if method == "GET" && path_without_query == "/admin/devices" {
-        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-            .await
-            .is_none()
-        {
-            return;
-        }
-        let _ = request::write_json(&mut lines, "200 OK", &routes::admin::list_devices_json()).await;
-        return;
-    }
-
-    // POST /admin/devices/{id}/revoke — revoke a device and kick its live socket
-    // (issue #502). Admin-only.
-    if method == "POST" {
-        if let Some(device_id) =
-            path_segment_id(&path_without_query, "/admin/devices/", "/revoke")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
+    // Table-driven dispatch for the homogeneous routes (guard -> handler). One
+    // loop enforces each route's scope and captures its id(s) once, then
+    // `dispatch_route` runs the handler; the `ROUTES` table is the single
+    // scope-audit surface for them. Placed here so `/admin/devices*` is matched
+    // before the `/admin/*` catch-all special below — the one load-bearing
+    // ordering constraint. The specials that follow (session, ws-ticket,
+    // attention, assets, SPA) match distinct paths no table route claims.
+    for route in ROUTES {
+        if route.method == method {
+            if let Some(ids) = route.m.captures(&path_without_query) {
+                if auth::guard(&mut lines, &headers, route.scope)
+                    .await
+                    .is_none()
+                {
+                    return;
+                }
+                dispatch_route(route.handler, &mut lines, ids, &path_with_query, &headers).await;
                 return;
             }
-            routes::admin::revoke(&mut lines, device_id).await;
-            return;
         }
     }
 
@@ -1338,9 +1499,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         // its `{ surface, node_id }` arrives in the request body. A missing or
         // malformed target is a 400 — we never mint a ticket that could never
         // match an upgrade.
-        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let content_length = content_length(&headers);
         if content_length > 8 * 1024 {
             let _ = request::write_status_only(&mut lines, "413 Content Too Large").await;
             return;
@@ -1374,69 +1533,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // Coordinator read API (ADR-0008): GET /nodes — spine-only Node Digests.
-    // Distinct from the mobile `/api/nodes`: it authenticates with the
-    // off-by-default, read-scoped coordinator token (NOT the root token), so a
-    // disabled API or a missing/wrong token is rejected here. Loopback/LAN
-    // binding is inherited from the embedded server; no internet port is opened.
-    if method == "GET" && path_without_query == "/nodes" {
-        if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorRead)
-            .await
-            .is_none()
-        {
-            return;
-        }
-        let body = routes::coordinator::list_nodes_json();
-        let _ = request::write_json(&mut lines, "200 OK", &body).await;
-        return;
-    }
-
-    // Coordinator read API (ADR-0008): GET /nodes/{id}/log?tail=N — the
-    // on-demand drill-in returning a node's raw recent transcript turns. Same
-    // read-scoped token as GET /nodes. An unknown node id is a 404; every other
-    // degrade (no session, missing/unreadable transcript) is a 200 carrying a
-    // typed unavailable envelope, so a Coordinator never sees a bare error.
-    if method == "GET" {
-        if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/log") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorRead)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let tail = tail_param(&path_with_query);
-            match routes::coordinator::log_json(node_id, tail) {
-                Some(body) => {
-                    let _ = request::write_json(&mut lines, "200 OK", &body).await;
-                }
-                None => {
-                    let _ = request::write_status_only(&mut lines, "404 Not Found").await;
-                }
-            }
-            return;
-        }
-    }
-
-    // Coordinator drive API (ADR-0008 §5, issue #319): POST /nodes/{id}/prompt —
-    // write a prompt into a live node's PTY and return an honest verdict.
-    // Authenticated with the DRIVE-scoped token (a read-only token is rejected
-    // here) behind the drive kill-switch; both sit under the coordinator master
-    // switch, so disabling the surface disables drive too.
-    if method == "POST" {
-        if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/prompt") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorWrite)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::coordinator::prompt(&mut lines, node_id, content_length).await;
-            return;
-        }
-    }
+    // (Coordinator GET /nodes, GET /nodes/{id}/log, and POST /nodes/{id}/prompt
+    // are dispatched by the ROUTES table loop above, with their CoordinatorRead
+    // / CoordinatorWrite scopes declared there.)
 
     // Attention webhook: POST /api/attention/{session_id}
     // Called by Claude Code's Stop hook — no token required, so the handler
@@ -1447,216 +1546,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // POST /api/nodes/create
-    if method == "POST" && path_without_query == "/api/nodes/create" {
-        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-            .await
-            .is_none()
-        {
-            return;
-        }
-        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        routes::nodes::create(&mut lines, content_length).await;
-        return;
-    }
-
-    // POST /api/meshes/{id}/pr — create a GitHub PR for the mesh's branch.
-    if method == "POST" {
-        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pr") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::pr::create(&mut lines, mesh_id, content_length).await;
-            return;
-        }
-        // POST /api/meshes/{id}/pulls/{n}/merge — merge a PR (issue #422).
-        // Pairs with the GET `/pulls/{n}/mergeability` route; the GET
-        // branch (which checks the longer suffix first) handles the auth
-        // gate for the read path, and this branch owns the write path.
-        if let Some((mesh_id, pr_number)) = path_two_segment_ids(
-            &path_without_query,
-            "/api/meshes/",
-            "/pulls/",
-            "/merge",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::pr::merge(&mut lines, mesh_id, pr_number, content_length).await;
-            return;
-        }
-        // POST /api/meshes/{id}/agent-nodes/import-and-resume
-        if let Some(mesh_id) = path_segment_id(
-            &path_without_query,
-            "/api/meshes/",
-            "/agent-nodes/import-and-resume",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::agent_nodes::import_and_resume(&mut lines, mesh_id, content_length).await;
-            return;
-        }
-        // POST /api/meshes/{mid}/issues/{inum}/spawn
-        if let Some((mesh_id, issue_number)) = path_two_segment_ids(
-            &path_without_query,
-            "/api/meshes/",
-            "/issues/",
-            "/spawn",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::issues::spawn(&mut lines, mesh_id, issue_number, content_length).await;
-            return;
-        }
-    }
-
-    // GET /api/agents/{id}/git/{status|summary|branch} and /api/agents/{id}/diff
-    if method == "GET" {
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/status")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::status(&mut lines, agent_id).await;
-            return;
-        }
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/summary")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::summary(&mut lines, agent_id).await;
-            return;
-        }
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/branch")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::branch(&mut lines, agent_id).await;
-            return;
-        }
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/diff") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let file_path = query_param(&path_with_query, "path").unwrap_or_default();
-            routes::git::diff(&mut lines, agent_id, &file_path).await;
-            return;
-        }
-        if path_without_query == "/api/gh/auth" {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::gh_auth(&mut lines).await;
-            return;
-        }
-        // GET /api/meshes/{id}/agent-nodes/discover
-        if let Some(mesh_id) = path_segment_id(
-            &path_without_query,
-            "/api/meshes/",
-            "/agent-nodes/discover",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::agent_nodes::discover(&mut lines, mesh_id).await;
-            return;
-        }
-        // GET /api/meshes/{id}/issues
-        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/issues") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::issues::list(&mut lines, mesh_id).await;
-            return;
-        }
-        // GET /api/meshes/{id}/pulls?state=open|closed — list PRs (issue #422).
-        // Mirrors the issues route above; the `state` query param defaults
-        // to "open" inside the handler.
-        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pulls") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let state = query_param(&path_with_query, "state").unwrap_or_default();
-            routes::pr::list_pulls(&mut lines, mesh_id, &state).await;
-            return;
-        }
-        // GET /api/meshes/{id}/pulls/{n}/mergeability — per-PR enrichment
-        // (issue #422). The POST `/merge` route lives in its own `method
-        // == "POST"` branch below, so a GET to this URL can never
-        // collide with it; the two-segment helper also rejects the
-        // cross-suffix case (`/merge` with `/mergeability` suffix) via
-        // its numeric-only parse, so dispatch is safe regardless of the
-        // order the two GET-side PR routes are listed in.
-        if let Some((mesh_id, pr_number)) = path_two_segment_ids(
-            &path_without_query,
-            "/api/meshes/",
-            "/pulls/",
-            "/mergeability",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::pr::get_mergeability(&mut lines, mesh_id, pr_number).await;
-            return;
-        }
-    }
+    // (The homogeneous /api mobile routes — nodes/create, meshes PR/merge/
+    // import-and-resume/issues-spawn, and the GET agent-git / mesh reads —
+    // are dispatched by the ROUTES table loop above.)
 
     // GET /assets/* — bundled mobile assets (JS/CSS/etc). Public, like the SPA
     // shell (issue #500): the static bundle holds no secrets and is identical
@@ -2140,6 +2032,151 @@ mod tests {
             get_request("/api/meshes/1/pulls/42/merge").await,
             401
         );
+    }
+
+    /// Drive one request with an explicit method and no credentials, returning
+    /// the status code. Generalises `get_request` so the table-driven routes can
+    /// be exercised with their declared method (a POST route must be tested as a
+    /// POST, not smuggled through the GET `/api/*` catch-all).
+    async fn request_status(method: &str, path: &str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            method, path
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("request hung")
+            .expect("read failed");
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Fill a `RouteMatch` with concrete integer ids to get a request path.
+    fn sample_path(m: &RouteMatch) -> String {
+        match m {
+            RouteMatch::Exact(p) => p.to_string(),
+            RouteMatch::OneId { prefix, suffix } => format!("{}1{}", prefix, suffix),
+            RouteMatch::TwoId { prefix, mid, suffix } => format!("{}1{}2{}", prefix, mid, suffix),
+        }
+    }
+
+    /// Render a `RouteMatch` as a stable pattern string for the golden snapshot.
+    /// Two-id captures get distinct placeholders (`{mesh_id}` / `{pr_number}` or
+    /// `{mesh_id}` / `{issue_number}`) so the audit surface distinguishes them —
+    /// the dispatcher reads them as `id0`/`id1`, but a snapshot that reads
+    /// `{id}/{id}` would mislead anyone reading the scope table.
+    fn pattern_str(m: &RouteMatch) -> String {
+        match m {
+            RouteMatch::Exact(p) => p.to_string(),
+            RouteMatch::OneId { prefix, suffix } => format!("{}{{id}}{}", prefix, suffix),
+            RouteMatch::TwoId { prefix, mid, suffix } => {
+                let (left, right) = if *mid == "/pulls/" {
+                    ("{mesh_id}", "{pr_number}")
+                } else {
+                    ("{mesh_id}", "{issue_number}")
+                };
+                format!("{}{}{}{}{}", prefix, left, mid, right, suffix)
+            }
+        }
+    }
+
+    /// Enforcement: every homogeneous route is guarded. Driving each with its
+    /// declared method and NO credentials must short-circuit to 401 before any
+    /// handler runs (coordinator routes are off-by-default in the test binary, so
+    /// they also 401). This one parametric test subsumes the per-route
+    /// `*_requires_token` cases — a new ROUTES entry is covered automatically, so
+    /// a route can't ship unguarded. (The 403 wrong-scope path needs a seeded DB
+    /// and stays covered by the coordinator integration tests.)
+    #[tokio::test]
+    async fn every_table_route_requires_credentials() {
+        for route in ROUTES {
+            let path = sample_path(&route.m);
+            let status = request_status(route.method, &path).await;
+            assert_eq!(
+                status, 401,
+                "{} {} must reject an uncredentialed request with 401",
+                route.method, path
+            );
+        }
+    }
+
+    /// Golden snapshot of the whole HTTP surface's auth scopes — the ROUTES table
+    /// (dispatched by the loop) plus the specials (dispatched by their own
+    /// branches, listed here so the scope audit lives in one place). Any added,
+    /// removed, or rescoped route fails this test loudly, forcing a deliberate
+    /// review of the security surface.
+    #[test]
+    fn route_table_scope_snapshot() {
+        let table: Vec<String> = ROUTES
+            .iter()
+            .map(|r| format!("{} {} -> {:?}", r.method, pattern_str(&r.m), r.scope))
+            .collect();
+        // Specials are not in ROUTES (they need bespoke dispatch), but their
+        // scopes are audited here alongside the table.
+        let specials = "\
+GET /ws/events -> WsTicket
+GET /ws/terminal/{id} -> WsTicket
+POST /__debug/log -> Public
+GET /__certs/status -> Public
+GET /install-cert.der -> Public
+* /admin/* -> Admin (catch-all, 404 on authorized)
+POST /api/session -> Public (credential path)
+POST /api/ws-ticket -> Admin
+POST /api/attention/{id} -> Public (loopback-verified)
+GET /assets/* -> Public
+GET /v2 -> Public (301 redirect)
+GET /api/* -> Admin (mobile read catch-all)
+ANY / -> Public (SPA shell)";
+        let actual = format!("{}\n---specials---\n{}", table.join("\n"), specials);
+        let expected = "\
+GET /admin/devices -> Admin
+POST /admin/devices/{id}/revoke -> Admin
+GET /nodes -> CoordinatorRead
+GET /nodes/{id}/log -> CoordinatorRead
+POST /nodes/{id}/prompt -> CoordinatorWrite
+POST /api/nodes/create -> Admin
+POST /api/meshes/{id}/pr -> Admin
+POST /api/meshes/{mesh_id}/pulls/{pr_number}/merge -> Admin
+POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin
+POST /api/meshes/{mesh_id}/issues/{issue_number}/spawn -> Admin
+GET /api/agents/{id}/git/status -> Admin
+GET /api/agents/{id}/git/summary -> Admin
+GET /api/agents/{id}/git/branch -> Admin
+GET /api/agents/{id}/diff -> Admin
+GET /api/gh/auth -> Admin
+GET /api/meshes/{id}/agent-nodes/discover -> Admin
+GET /api/meshes/{id}/issues -> Admin
+GET /api/meshes/{id}/pulls -> Admin
+GET /api/meshes/{mesh_id}/pulls/{pr_number}/mergeability -> Admin
+---specials---
+GET /ws/events -> WsTicket
+GET /ws/terminal/{id} -> WsTicket
+POST /__debug/log -> Public
+GET /__certs/status -> Public
+GET /install-cert.der -> Public
+* /admin/* -> Admin (catch-all, 404 on authorized)
+POST /api/session -> Public (credential path)
+POST /api/ws-ticket -> Admin
+POST /api/attention/{id} -> Public (loopback-verified)
+GET /assets/* -> Public
+GET /v2 -> Public (301 redirect)
+GET /api/* -> Admin (mobile read catch-all)
+ANY / -> Public (SPA shell)";
+        assert_eq!(actual, expected);
     }
 
     #[test]

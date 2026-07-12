@@ -97,8 +97,12 @@ A per-Mesh toggle (off by default) that confines an Agent Node's execution proce
 _Avoid_: jail, container (it is not a container), isolation mode
 
 **Changed Files Section**:
-A distinct view in the File Explorer Panel listing modified files with their addition/deletion line counts.
+The desktop File Explorer Panel's distinct view listing modified files with their addition/deletion line counts, sourced from the working-tree `get_git_status` (HEAD-relative, uncommitted-only). For the mobile Changes view's full since-branch set, see **Node Change Set**.
 _Avoid_: Modified files list
+
+**Node Change Set**:
+The set of files an **Agent Node** changed since it branched from its **Base Ref** — committed *and* uncommitted work — diffed against the merge-base of the node's `HEAD` and `base_ref` (ADR-0005). One baseline resolves it (`resolve_base_tree`), and both readers hang off that one seam: the file-list (`node_changed_files` / `node_changed_summary`) and the per-file diff (`diff_node_file_against_base`), so a node's mobile Changes tree, its header counts, and its tapped diffs always agree on what "changed" means. Distinct from the HEAD-relative working-tree status the desktop **Changed Files Section** shows for an arbitrary path.
+_Avoid_: diff set, review set, changed files (ambiguous with the desktop HEAD-relative view).
 
 **Drifted root**:
 A Mesh whose root HEAD is not on the Base Ref's branch (e.g. the user parked the root on `feat/x` and forgot) — or is detached on a non-base commit. Surfaces as an amber `!` badge in the sidebar; one-click fix is "Restore root to base" in the mesh properties panel.
