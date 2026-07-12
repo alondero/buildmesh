@@ -17,17 +17,18 @@ use crate::db;
 use crate::http::request;
 use crate::http::MaybeTls;
 
-/// `GET /api/agents/{id}/git/status` — full file-by-file status. Empty list
-/// for a clean tree.
+/// `GET /api/agents/{id}/git/status` — the file-by-file tree of everything the
+/// node changed since it branched (ADR 0005), so it agrees with the per-file
+/// `/diff` endpoint below. Empty list for a node with no changes since base.
 pub async fn status(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
-    let Ok(node) = db::get_agent_node_by_id(agent_id) else {
+    if db::get_agent_node_by_id(agent_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
-    };
-    match crate::commands::git::get_git_status(node.path).await {
+    }
+    match crate::commands::diff::node_changed_files(agent_id).await {
         Ok(status) => {
             let body = serde_json::to_string(&status).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -38,16 +39,18 @@ pub async fn status(
     }
 }
 
-/// `GET /api/agents/{id}/git/summary` — `{added, modified, deleted}` counts.
+/// `GET /api/agents/{id}/git/summary` — `{total, added, modified, deleted}`
+/// counts, folded from the same since-branch list as `/git/status` so the
+/// header and the tree agree.
 pub async fn summary(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
-    let Ok(node) = db::get_agent_node_by_id(agent_id) else {
+    if db::get_agent_node_by_id(agent_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
-    };
-    match crate::commands::git::get_git_summary(node.path).await {
+    }
+    match crate::commands::diff::node_changed_summary(agent_id).await {
         Ok(summary) => {
             let body = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
