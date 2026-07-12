@@ -398,7 +398,18 @@ fn diff_against_base(
     let base_tree = resolve_base_tree(&repo, base_ref);
 
     let mut opts = git2::DiffOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true);
+    // Keep these options in lockstep with `changed_files_against_base` so the
+    // file-list and the per-file diff never disagree on what counts as a
+    // change (the whole point of the ADR-0005 seam). `show_untracked_content`
+    // makes an untracked file's empty/zero-byte content visible to the diff
+    // walker — without it, an empty untracked file would be invisible to
+    // `diff_against_base` (no tree entry to diff against) yet present in the
+    // list (whose statuses walk handles empty content). Pinning this in
+    // `changed_files_zero_byte_untracked_agrees_with_diff` keeps both readers
+    // in sync if the option set ever changes.
+    opts.include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .show_untracked_content(true);
     if let Some(p) = only {
         // Reject path traversal at the core so every caller inherits it — the
         // desktop IPC path and the mobile /diff route both land here. The HTTP
@@ -703,6 +714,50 @@ mod tests {
             files.iter().any(|f| f.path == "base.txt" && f.status == "modified"),
             "an uncommitted edit since base must appear in the list; got {:?}",
             files
+        );
+    }
+
+    /// The list and the per-file diff must agree on what "changed" means — the
+    /// whole point of the `resolve_base_tree` seam. A zero-byte untracked file
+    /// was a real disagreement point: it would be invisible to a diff that
+    /// doesn't set `show_untracked_content`, yet visible to the status walk.
+    /// Both readers now set the option; this test pins the agreement so a
+    /// future opts change can't silently re-introduce the mismatch.
+    #[test]
+    fn changed_files_and_diff_agree_on_zero_byte_untracked() {
+        let dir = TestDir::new("zero_byte_untracked_agreement");
+        let repo = init_repo_with_commit(dir.path(), &[("base.txt", "base\n")]);
+        let base_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference("refs/remotes/origin/main", base_oid, false, "test")
+            .unwrap();
+        // Empty untracked file: would be invisible to a diff without
+        // `show_untracked_content`; must appear in both readers.
+        std::fs::write(dir.path().join("empty.rs"), b"").unwrap();
+
+        let list_paths: std::collections::HashSet<String> = changed_files_against_base(&repo, "origin/main")
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        let diff_paths: std::collections::HashSet<String> = diff_against_base(
+            dir.path().to_str().unwrap(),
+            "origin/main",
+            None,
+        )
+        .unwrap()
+        .files
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+        assert!(
+            list_paths.contains("empty.rs"),
+            "empty untracked file must appear in the since-branch list; got {:?}",
+            list_paths
+        );
+        assert!(
+            diff_paths.contains("empty.rs"),
+            "empty untracked file must appear in the per-file diff; got {:?}",
+            diff_paths
         );
     }
 
