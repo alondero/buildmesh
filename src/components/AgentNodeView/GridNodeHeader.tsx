@@ -11,7 +11,9 @@ import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
+import { FolderOpenIcon } from '../shared/FolderOpenIcon';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 
 interface GridNodeHeaderProps {
@@ -109,6 +111,19 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   };
 
   const gitPath = getNodeGitPath(node);
+
+  // Silent on failure — worktree rows can go stale between renders and a
+  // toast storm on every click is worse UX than a quiet console line.
+  // Same precedent as `WorktreeManagerTab.openInExplorer`.
+  const handleOpenInExplorer = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!gitPath) return;
+    try {
+      await openInFileManager(gitPath);
+    } catch (err) {
+      console.error('Failed to open folder in file manager:', err);
+    }
+  };
   const { summary } = useGitSummary(gitPath || null);
   const { pr: openPr } = useOpenPr(node.id, gitPath || null);
 
@@ -234,6 +249,22 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
         {showInlineActions ? (
           <>
             <button
+              type="button"
+              onClick={handleOpenInExplorer}
+              // Surface matches maximise/close (`bg-bg-base/60` + border)
+              // so the trio reads as one control group against the mesh
+              // tint. Cyan hover deliberately reuses `PathHeader`'s
+              // accent — one verb, one accent, throughout the app.
+              // Tooltip includes the resolved path because worktree
+              // nodes open into a non-obvious `.claude/worktrees/<name>`
+              // subdir, not the mesh root.
+              className="w-7 h-7 flex items-center justify-center rounded-md bg-bg-base/60 border border-border-default text-text-primary hover:text-accent-cyan hover:bg-accent-cyan/15 hover:border-accent-cyan/60 transition-colors"
+              title={gitPath ? `Open in file explorer (${gitPath})` : 'Open in file explorer'}
+              aria-label="Open in file explorer"
+            >
+              <FolderOpenIcon className="w-3.5 h-3.5" />
+            </button>
+            <button
               onClick={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
               // Always-visible button surface (was opacity-0 until hover — invisible
               // against the mesh tint). Same `h-7` + `bg-bg-base/60 + border` as
@@ -270,10 +301,10 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             </button>
           </>
         ) : (
-          // Kebab menu — replaces the inline close+max buttons at `slim`
-          // and `compact` widths where both would crowd the title out.
-          // Same two actions (Maximize/Restore + Close) with identical
-          // tooltips/aria-labels so semantics are width-agnostic.
+          // Kebab menu — replaces the inline trio at `slim` and `compact`
+          // widths where all three would crowd the title out. Same three
+          // actions (Reveal in Explorer + Maximize/Restore + Close) with
+          // identical tooltips/aria-labels so semantics are width-agnostic.
           // NOTE: <KebabActions> still uses the pre-#756 `text-text-muted
           // opacity-0` pattern at narrow widths — the always-visible surface
           // treatment introduced in this PR is intentionally scoped to the
@@ -284,6 +315,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             toggleShortcutHint={toggleShortcutHint}
             onToggleMaximized={(e) => { e.stopPropagation(); toggleMaximizedNode(node.id); }}
             onClose={handleClose}
+            onOpenInExplorer={handleOpenInExplorer}
           />
         )}
       </div>
@@ -315,12 +347,13 @@ interface KebabActionsProps {
   toggleShortcutHint: string;
   onToggleMaximized: (e: React.MouseEvent) => void;
   onClose: (e: React.MouseEvent) => void;
+  onOpenInExplorer: (e: React.MouseEvent) => void;
 }
 
 const KEBAB_MIN_WIDTH = 160;
 const KEBAB_GAP = 4;
 
-function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onClose }: KebabActionsProps) {
+function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onClose, onOpenInExplorer }: KebabActionsProps) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -330,7 +363,9 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
   // kebab, so a module-scoped counter is enough.
   const menuIdRef = useRef(`grid-node-kebab-menu-${Math.random().toString(36).slice(2, 9)}`);
   const menuId = menuIdRef.current;
-  const itemCount = 2;
+  // Reveal-in-explorer joined the existing maximize/close pair (#736);
+  // bump count so arrow navigation wraps at three.
+  const itemCount = 3;
   const closeAndReturnFocus = () => {
     const trigger = triggerRef.current;
     setOpen(false);
@@ -462,6 +497,15 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
           <button
             ref={(el) => { menuItemRefs.current[0] = el; }}
             role="menuitem"
+            onClick={(e) => { closeAndReturnFocus(); onOpenInExplorer(e); }}
+            className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+          >
+            <FolderOpenIcon className="w-3 h-3" />
+            Open in file explorer
+          </button>
+          <button
+            ref={(el) => { menuItemRefs.current[1] = el; }}
+            role="menuitem"
             onClick={(e) => { closeAndReturnFocus(); onToggleMaximized(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
@@ -475,7 +519,7 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
             {isMaximized ? `Restore grid (${toggleShortcutHint})` : `Maximize (${toggleShortcutHint})`}
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[1] = el; }}
+            ref={(el) => { menuItemRefs.current[2] = el; }}
             role="menuitem"
             onClick={(e) => { closeAndReturnFocus(); onClose(e); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"

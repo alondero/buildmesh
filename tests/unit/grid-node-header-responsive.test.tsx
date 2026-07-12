@@ -112,6 +112,17 @@ const { openUrlMock } = vi.hoisted(() => ({
 }));
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: openUrlMock }));
 
+// Mirror the lib/tauri mock from `grid-node-header.test.tsx` so the
+// kebab's new "Reveal in file explorer" item doesn't dispatch a real
+// IPC during the responsive suite.
+const { openInFileManagerMock } = vi.hoisted(() => ({
+  openInFileManagerMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../src/lib/tauri', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
+  return { ...actual, openInFileManager: openInFileManagerMock };
+});
+
 // Imported AFTER mocks so it sees the stubbed BuildRunDropdown etc.
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
 
@@ -400,20 +411,44 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       prMock.mockReturnValue(null);
     });
 
-    it('opens on click and reveals Maximize + Close items', () => {
+    it('opens on click and reveals Reveal + Maximize + Close items', () => {
+      // The trio is rendered inline above the kebab threshold; below it,
+      // all three fold into the menu so the title isn't squeezed out.
+      // Kebab item order matches the inline layout by DOM position:
+      // Open in file explorer (0), Maximize/Restore (1), Close (2) —
+      // same alignment as the visible trio.
       const { root } = renderHeader(200);
       const trigger = screen.getByLabelText('Agent node actions');
       fireEvent.click(trigger);
-      // Menu items: 'Maximize (Alt+G)' / 'Maximize (⌘+G)' and 'Close agent node'.
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu).toBeTruthy();
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(2);
-      // The Maximize label includes the platform-specific shortcut hint.
+      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(3);
       const items = menu.querySelectorAll('[role="menuitem"]');
-      expect(items[0].textContent!.toLowerCase()).toMatch(/maximize|restore grid/);
-      expect(items[1].textContent).toContain('Close agent node');
+      expect(items[0].textContent).toContain('Open in file explorer');
+      expect(items[1].textContent!.toLowerCase()).toMatch(/maximize|restore grid/);
+      expect(items[2].textContent).toContain('Close agent node');
       // sanity: the trigger is in the DOM and the menu is its descendant tree
       expect(root.contains(trigger)).toBe(true);
+    });
+
+    it('opening the "Open in file explorer" item invokes openInFileManager with the resolved path', () => {
+      // The kebab fires the same handler as the inline button — they
+      // differ only in their mount tier, not their semantics. The IPC
+      // contract (root vs worktree resolution) is asserted in
+      // grid-node-header.test.tsx; here we pin the kebab routes
+      // through the same wrapper rather than its own private copy.
+      openInFileManagerMock.mockClear();
+      const node = { ...NODE, use_worktree: true, worktree_name: 'kebab-feat' };
+      render(<GridNodeHeader node={node} onBuildRun={() => {}} />);
+      // Drive the responsive tier below the kebab threshold (compact =
+      // < 280px) so the kebab, not the inline trio, is what renders.
+      fireResize(screen.getByTestId('grid-node-header'), 200);
+      fireEvent.click(screen.getByLabelText('Agent node actions'));
+      const menu = document.querySelector('[role="menu"]')!;
+      const items = menu.querySelectorAll('[role="menuitem"]');
+      // Reveal is the first item in the kebab, mirroring the inline layout.
+      fireEvent.click(items[0]);
+      expect(openInFileManagerMock).toHaveBeenCalledWith('/repo/.claude/worktrees/kebab-feat');
     });
 
     it('toggles Maximize from the kebab item', () => {
@@ -449,8 +484,10 @@ describe('GridNodeHeader responsive behaviour (issue #736)', () => {
       const menu = document.querySelector('[role="menu"]')!;
       expect(menu.textContent?.toLowerCase()).toMatch(/restore grid/);
       expect(menu.textContent?.toLowerCase()).not.toMatch(/^.*maximize/);
-      // Still a menu of two actions.
-      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(2);
+      // Still a menu of three actions: Reveal + Maximize/Restore + Close
+      // (the inline Reveal button folds into the kebab at this tier
+      // too, so its count lives here as well as on the inline path).
+      expect(menu.querySelectorAll('[role="menuitem"]')).toHaveLength(3);
       // Sanity: render did not unmount.
       expect(root.isConnected).toBe(true);
     });
