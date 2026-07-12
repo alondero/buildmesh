@@ -6,6 +6,7 @@ pub mod autopilot;
 mod commands;
 mod coordinator;
 mod db;
+mod diagnostics;
 mod env;
 mod git;
 mod http;
@@ -220,10 +221,23 @@ pub fn run() {
                 Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
             }
 
-            // Set up file-based logging with tracing
+            // Set up file-based logging with tracing.
+            //
+            // Size-bounded, NOT `rolling::never`: a long multi-node session at
+            // `debug` level (esp. during a build storm) would otherwise grow a
+            // single `buildmesh.log` without bound — a disk-fill risk, and a
+            // log that eventually eats the disk is the opposite of a
+            // diagnostic. `diagnostics::main_log_writer` rotates by BYTES at a
+            // fixed cap while keeping the file's name `buildmesh.log`: the
+            // `/use`, `/verify`, `/verify-ui` skills and `scripts/*log*.ps1`
+            // tail that exact path, so a time-based appender (which renames to
+            // `buildmesh.YYYY-MM-DD-HH.log`) would break them AND fail to bound
+            // a single hour's size. Wrapped in `non_blocking` so log writes
+            // never block the async runtime.
             let log_dir = app_dir.join("logs");
             std::fs::create_dir_all(&log_dir)?;
-            let file_appender = tracing_appender::rolling::never(&log_dir, "buildmesh.log");
+            let file_appender = diagnostics::main_log_writer(&log_dir)
+                .expect("failed to open rotating buildmesh.log");
             let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
             tracing_subscriber::fmt()
                 .with_writer(non_blocking)
@@ -309,6 +323,14 @@ pub fn run() {
             // by the worker, not the legacy `maintain_all_pools` aggregator)
             // can emit `pool-count-changed` from its inner drain/fill calls.
             services::pool_worker::start_background_worker(app.handle().clone());
+
+            // Always-on resource diagnostics (issue: background-refresh grind).
+            // A low-frequency sampler writes process vitals (memory, handles,
+            // threads, live child processes) + per-subsystem counters to a
+            // dedicated, size-bounded `logs/diagnostics.log` the user can hand
+            // back after a session degrades. Off the hot path; opt out with
+            // `BUILDMESH_DIAG=0`, retune with `BUILDMESH_DIAG_INTERVAL_MS`.
+            diagnostics::start_sampler(log_dir.clone());
 
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();

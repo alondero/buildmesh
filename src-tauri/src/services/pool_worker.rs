@@ -337,12 +337,18 @@ pub fn start_background_worker(app: tauri::AppHandle) {
                             &mesh.path,
                             Some(mesh.base_ref.as_str()),
                         );
+                        // Timed so the diagnostics sampler records how long the
+                        // background fetch takes — a climbing `last_ms` while
+                        // the machine grinds points at a stalling network path.
+                        let sync_started = Instant::now();
                         match crate::git::sync::locked_fetch_origin_blocking(
                             &mesh.path,
                             &base_ref,
                         ) {
                             Ok(outcome) => {
-                                if outcome.advanced_ref() {
+                                let advanced = outcome.advanced_ref();
+                                crate::diagnostics::record_bg_sync(advanced, sync_started.elapsed());
+                                if advanced {
                                     tracing::info!(
                                         "pool_worker: background sync advanced {} for mesh {}; refreshing warm pool",
                                         base_ref,
@@ -352,6 +358,7 @@ pub fn start_background_worker(app: tauri::AppHandle) {
                                 }
                             }
                             Err(e) => {
+                                crate::diagnostics::record_bg_sync_failure(sync_started.elapsed());
                                 // INFO, not WARN: an offline laptop hits this
                                 // every interval and it's fully self-healing.
                                 tracing::info!(
