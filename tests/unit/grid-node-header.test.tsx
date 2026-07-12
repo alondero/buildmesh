@@ -41,6 +41,21 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: openUrlMock,
 }));
 
+// Stub the openInFileManager IPC wrapper. Spread the real module via
+// `importOriginal` so any other named export added to lib/tauri in the
+// future (none used by GridNodeHeader today) keeps working — we only
+// pin this one call. The IPC failure modes the command returns (path
+// missing / not a directory) are exercised in src-tauri's own tests;
+// here we just assert wiring: the click resolves the path through
+// `getNodeGitPath` and hands it to the IPC layer.
+const { openInFileManagerMock } = vi.hoisted(() => ({
+  openInFileManagerMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('../../src/lib/tauri', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
+  return { ...actual, openInFileManager: openInFileManagerMock };
+});
+
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
 
 const NODE: AgentNode = {
@@ -429,5 +444,150 @@ describe('GridNodeHeader PR chip', () => {
     const chip = container.querySelector('[title^="Draft"]');
     expect(chip).toBeTruthy();
     expect(chip!.getAttribute('title')).toBe('Draft · WIP PR chip');
+  });
+});
+
+/**
+ * Reveal-in-explorer (issue: agent node header → file manager).
+ *
+ * The header exposes a folder-icon button between `BuildRunDropdown` and
+ * maximise that calls `open_in_file_manager` (Tauri command) for the
+ * agent's canonical working directory. The IPC does its own WSL→host
+ * translation in `src-tauri/src/commands/file_tree.rs`, so the React
+ * side just hands it the same `getNodeGitPath(node)` it already uses
+ * for git-summary subscriptions.
+ *
+ * Tests cover three concerns:
+ *   1. The button is always rendered (the trio is one control group,
+ *      gated by `showInlineActions`, never conditionally hidden).
+ *   2. The click resolves the path through `getNodeGitPath` — the
+ *      working-tree node resolves to the worktree subdir, the root-mode
+ *      node resolves to the mesh root.
+ *   3. Errors from the IPC are swallowed (`console.error`, no reject),
+ *      matching the precedent in `WorktreeManagerTab.openInExplorer`
+ *      and avoiding a toast storm when a worktree row is stale.
+ */
+describe('GridNodeHeader reveal-in-explorer action', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    useUIStore.setState({ maximizedNodeId: null });
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+    openInFileManagerMock.mockReset();
+    openInFileManagerMock.mockResolvedValue(undefined);
+  });
+
+  it('renders a folder-icon button with the expected aria-label', () => {
+    // Same label as `<PathHeader>` — one verb, one announcement across
+    // the app (review caught this when both used different strings).
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(getByLabelText('Open in file explorer')).toBeTruthy();
+  });
+
+  it('shares the inline trio surface treatment (bg-bg-base/60 + border, 7×7)', () => {
+    // Mirrors the surface pinning in `close + expand controls` describe
+    // above, so a future tweak keeps the trio reading as one control
+    // group rather than a tacked-on folder icon.
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const cls = getByLabelText('Open in file explorer').className;
+    expect(cls).toMatch(/\bw-7\b/);
+    expect(cls).toMatch(/\bh-7\b/);
+    expect(cls).toContain('bg-bg-base/60');
+    expect(cls).toContain('border-border-default');
+    expect(cls).toContain('text-text-primary');
+    // Visibility regression guard — the same opacity-0 bug that hit
+    // maximise/close must not reappear here.
+    expect(cls).not.toMatch(/\bopacity-0\b/);
+    expect(cls).not.toMatch(/\bgroup-hover:opacity-100\b/);
+  });
+
+  it('uses an accent-cyan hover matching the existing PathHeader precedent', () => {
+    // Hover treatment deliberately reuses `<PathHeader>`'s `accent-cyan`
+    // so the verb reads the same wherever the user encounters it
+    // (review caught a divergent blue here previously).
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const cls = getByLabelText('Open in file explorer').className;
+    expect(cls).toContain('hover:text-accent-cyan');
+    // And it MUST NOT collide with the close button's error semantic.
+    expect(cls).not.toContain('status-error');
+  });
+
+  it('sits to the left of the maximise button in DOM order', () => {
+    // The placement was a user request: "between the build and maximise
+    // icons". (BuildRunDropdown is stubbed to render null in this file,
+    // so we anchor layout purely on the inline trio.)
+    const { getByLabelText, container } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const all = Array.from(container.querySelectorAll('button'));
+    const revealIndex = all.indexOf(getByLabelText('Open in file explorer'));
+    const maxIndex = all.indexOf(getByLabelText('Maximize agent node'));
+    expect(revealIndex).toBeLessThan(maxIndex);
+  });
+
+  it('passes the mesh root to openInFileManager when the node runs in root mode', () => {
+    // `use_worktree: false` ⇒ `getNodeGitPath` returns the mesh root
+    // verbatim. Verify the click handler resolves the same path the
+    // git-summary chip subscribes to — otherwise the user opens a
+    // different folder than the one git status is reporting on.
+    const node: AgentNode = { ...NODE, use_worktree: false };
+    const { getByLabelText } = render(<GridNodeHeader node={node} onBuildRun={() => {}} />);
+    fireEvent.click(getByLabelText('Open in file explorer'));
+    expect(openInFileManagerMock).toHaveBeenCalledWith('/repo');
+  });
+
+  it('passes the worktree subdir when the node runs in a worktree', () => {
+    // `use_worktree: true` ⇒ `getNodeGitPath` returns
+    // `<mesh>/.claude/worktrees/<name>`. The user expects to be dropped
+    // into the same directory the agent is editing, not the parent.
+    const node: AgentNode = { ...NODE, use_worktree: true, worktree_name: 'feature-x' };
+    const { getByLabelText } = render(<GridNodeHeader node={node} onBuildRun={() => {}} />);
+    fireEvent.click(getByLabelText('Open in file explorer'));
+    expect(openInFileManagerMock).toHaveBeenCalledWith('/repo/.claude/worktrees/feature-x');
+  });
+
+  it('falls back to the mesh root when a worktree-mode node has no worktree_name', () => {
+    // Defensive: `getNodeGitPath` falls back when worktree_name is null
+    // (the row can be published before the worktree is provisioned);
+    // pin the fallback here so a future "throw if no worktree" change
+    // in the path helper doesn't silently break reveal.
+    const node: AgentNode = { ...NODE, use_worktree: true, worktree_name: null };
+    const { getByLabelText } = render(<GridNodeHeader node={node} onBuildRun={() => {}} />);
+    fireEvent.click(getByLabelText('Open in file explorer'));
+    expect(openInFileManagerMock).toHaveBeenCalledWith('/repo');
+  });
+
+  it('tool-tip surfaces the resolved path so users know which folder will open', () => {
+    // Worktree nodes in particular open into a non-obvious subdir; the
+    // tooltip is the only affordance that previews the destination
+    // before the click.
+    const node: AgentNode = { ...NODE, use_worktree: true, worktree_name: 'feature-x' };
+    const { getByLabelText } = render(<GridNodeHeader node={node} onBuildRun={() => {}} />);
+    const btn = getByLabelText('Open in file explorer');
+    expect(btn.getAttribute('title')).toBe(
+      'Open in file explorer (/repo/.claude/worktrees/feature-x)',
+    );
+  });
+
+  it('swallows IPC errors with console.error (no unhandled rejection)', async () => {
+    // The Tauri command rejects with `"Path does not exist"` when the
+    // worktree has been pruned between renders — exactly the case
+    // WorktreeManagerTab.openInExplorer handles by silencing. If we
+    // let it bubble here, every stale-row click would land an unhandled
+    // rejection in the console. Verify the regression guard.
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    openInFileManagerMock.mockRejectedValueOnce('Path does not exist: /old/worktree');
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+
+    // Click is sync; the handler catches and console.errors. If the
+    // try/catch were ever removed, the rejected promise would surface
+    // as an unhandled rejection — Vitest reports those as failures.
+    fireEvent.click(getByLabelText('Open in file explorer'));
+    // Drain microtasks so the rejection observer would have fired.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(errSpy).toHaveBeenCalledWith(
+      'Failed to open folder in file manager:',
+      expect.stringContaining('Path does not exist'),
+    );
+    errSpy.mockRestore();
   });
 });
