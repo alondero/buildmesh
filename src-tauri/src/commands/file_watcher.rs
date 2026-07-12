@@ -12,6 +12,14 @@ use tauri::{command, Emitter};
 static WATCHERS: once_cell::sync::Lazy<Arc<Mutex<HashMap<i64, RecommendedWatcher>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+/// Number of agent nodes currently being watched — the per-node recursive
+/// watcher gauge read by the diagnostics sampler. Reads the live map length so
+/// it can't drift from a separate counter; a poisoned lock reads as 0 rather
+/// than panicking the sampler.
+pub fn active_watcher_count() -> usize {
+    WATCHERS.lock().map(|m| m.len()).unwrap_or(0)
+}
+
 /// Minimum spacing between `git-changed` emits while filesystem events keep
 /// arriving, and the quiet gap that ends a burst. 500ms preserves the
 /// pre-existing "at most ~2 refreshes per second while an agent works"
@@ -105,6 +113,7 @@ pub fn watch_agent_node(
             .name(format!("git-changed-coalescer-{}", node_id))
             .spawn(move || {
                 run_coalescer(rx, EMIT_INTERVAL, || {
+                    crate::diagnostics::record_git_changed_emit();
                     let _ = app_handle.emit("git-changed", serde_json::json!({
                         "path": &watch_path,
                         "internal_path": &internal_path
@@ -137,6 +146,7 @@ pub fn watch_agent_node(
             .map_err(|e| e.to_string())?;
         // Emit an immediate GIT_CHANGED so any pre-existing uncommitted changes
         // are reflected without waiting for the next file write.
+        crate::diagnostics::record_git_changed_emit();
         let _ = app_handle_outer.emit("git-changed", serde_json::json!({
             "path": &watch_path,
             "internal_path": &internal_path

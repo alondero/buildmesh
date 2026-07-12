@@ -108,6 +108,10 @@ pub fn run_command_with_timeout(
                     kill_process_tree(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Surface the wedge to the diagnostics timeline: a climbing
+                    // count is the signature of a stalling network path leaking
+                    // (then killing) subprocesses.
+                    crate::diagnostics::record_git_subprocess_timeout();
                     return Err(format!(
                         "{op_name} timed out after {}s",
                         timeout.as_secs()
