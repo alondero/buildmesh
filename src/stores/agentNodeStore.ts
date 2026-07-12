@@ -54,6 +54,19 @@ export function setWorktreeCloseActionResolverForTests(resolver?: WorktreeCloseA
   worktreeCloseActionResolver = resolver ?? defaultWorktreeCloseActionResolver;
 }
 
+// A pending "send input at time T" schedule (issue #785), e.g. the
+// SchedulingPopover's "remind me in 5m" / "at usage reset" actions. Keyed by
+// node ID in `schedules` — one active schedule per node.
+export interface ScheduledTask {
+  nodeId: number;
+  targetTime: number;
+  // Empty string is the "just hit Enter" sentinel — the SchedulingPopover uses
+  // it for the "at usage reset" preset to wake the agent without new content.
+  message: string;
+  label: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
 interface AgentNodeState {
   agentNodes: AgentNode[];
   activeNodeId: number | null;
@@ -64,6 +77,11 @@ interface AgentNodeState {
   // the row, so we flag the node here the instant the user clicks and let
   // NodeItem show a spinner instead of looking frozen.
   closingNodeIds: Set<number>;
+  // Pending "send input at time T" schedules (issue #785), keyed by node ID.
+  // One active schedule per node — a new `scheduleInput` cancels the prior
+  // timer, and `deleteAgentNode` cancels the schedule outright so a stray
+  // timeout can't fire `sendToAgent` against a deleted node.
+  schedules: Record<number, ScheduledTask>;
 
   // Derived getters
   getActiveNode: () => AgentNode | null;
@@ -94,6 +112,11 @@ interface AgentNodeState {
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
   writeToAgent: (nodeId: number, data: string) => Promise<void>;
   initAttentionListeners: () => Promise<void>;
+  /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
+  /// after `delayMs`. Replaces any existing schedule for the node — only one
+  /// pending send per node at a time (issue #785).
+  scheduleInput: (nodeId: number, delayMs: number, message: string, label: string) => void;
+  cancelSchedule: (nodeId: number) => void;
 }
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
@@ -102,6 +125,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   loading: false,
   error: null,
   closingNodeIds: new Set(),
+  schedules: {},
 
   getActiveNode: () => {
     const { agentNodes, activeNodeId } = get();
@@ -240,6 +264,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     // (common while the safety check makes the row look unresponsive) must not
     // fire a duplicate safety/kill/delete round-trip.
     if (get().closingNodeIds.has(id)) return;
+
+    // A scheduled send outlives the node it targets otherwise — cancel it
+    // up front so a stray timeout can't fire `sendToAgent` for a deleted node.
+    get().cancelSchedule(id);
 
     // Flag the node closing *synchronously* so the click registers instantly.
     // We can't drop the row yet — the safety check below decides whether to
@@ -492,5 +520,40 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     } catch (e) {
       set({ error: String(e) });
     }
+  },
+
+  scheduleInput: (nodeId, delayMs, message, label) => {
+    get().cancelSchedule(nodeId);
+
+    const timeoutId = setTimeout(() => {
+      set((state) => {
+        const next = { ...state.schedules };
+        delete next[nodeId];
+        return { schedules: next };
+      });
+      if (message === '') {
+        get().writeToAgent(nodeId, '\n');
+      } else {
+        get().sendToAgent(nodeId, message);
+      }
+    }, delayMs);
+
+    set((state) => ({
+      schedules: {
+        ...state.schedules,
+        [nodeId]: { nodeId, targetTime: Date.now() + delayMs, message, label, timeoutId },
+      },
+    }));
+  },
+
+  cancelSchedule: (nodeId) => {
+    const existing = get().schedules[nodeId];
+    if (!existing) return;
+    clearTimeout(existing.timeoutId);
+    set((state) => {
+      const next = { ...state.schedules };
+      delete next[nodeId];
+      return { schedules: next };
+    });
   },
 }));
