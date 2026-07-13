@@ -1,4 +1,6 @@
 import {
+  createContext,
+  useContext,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -8,6 +10,14 @@ import {
   type Ref,
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
+
+// Lets `<ModalCloseButton>` (rendered inside the consumer's children) route
+// its click through the Modal's dirty-aware close instead of closing
+// unconditionally, so the header × honours the unsaved-changes guard the
+// same way Escape and backdrop-click do (issue #808). `null` when a
+// ModalCloseButton is used outside a Modal — it then falls back to its own
+// `onClose` prop.
+const ModalCloseContext = createContext<(() => void) | null>(null);
 
 interface ModalProps {
   onClose: () => void;
@@ -22,13 +32,13 @@ interface ModalProps {
   /** Set false for flows where a stray backdrop click would destroy input. */
   closeOnBackdrop?: boolean;
   /**
-   * When true, Escape and backdrop-click do NOT immediately close — they
-   * surface an inline "Discard unsaved changes?" banner with Keep editing /
-   * Discard buttons. Keep editing restores focus to the field the user was
-   * in (captured at the moment of the close attempt); Discard calls
-   * `onClose`. The header close button (`<ModalCloseButton>`) always closes
-   * immediately — only the stray-click / Escape paths get the safety net.
-   * Issue #730.
+   * When true, Escape, backdrop-click, and the header close button
+   * (`<ModalCloseButton>`) do NOT immediately close — they surface an inline
+   * "Discard unsaved changes?" banner with Keep editing / Discard buttons.
+   * Keep editing restores focus to the field the user was in (captured at
+   * the moment of the close attempt); Discard calls `onClose`. The header ×
+   * routes through the same guard via `ModalCloseContext` (issue #808) so it
+   * no longer discards silently. Issue #730.
    */
   dirty?: boolean;
   /** Banner copy when `dirty` and the user tries to close. */
@@ -219,6 +229,21 @@ export function Modal({
     onClose();
   };
 
+  // Dirty-aware close for the header × (issue #808). Provided to
+  // `<ModalCloseButton>` via context so the most obvious close target honours
+  // the same unsaved-changes guard as Escape/backdrop instead of discarding
+  // silently. A no-op while the banner is already up (its own buttons decide);
+  // a passthrough to `onClose` when the modal isn't dirty.
+  const requestClose = () => {
+    if (confirmingDiscard) return;
+    if (dirty) {
+      lastFocusRef.current = document.activeElement as HTMLElement | null;
+      setConfirmingDiscard(true);
+      return;
+    }
+    onClose();
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
@@ -272,7 +297,9 @@ export function Modal({
             </div>
           </div>
         )}
-        {children}
+        <ModalCloseContext.Provider value={requestClose}>
+          {children}
+        </ModalCloseContext.Provider>
       </div>
     </div>
   );
@@ -299,11 +326,15 @@ export function ModalCloseButton({
   label?: string;
   ref?: Ref<HTMLButtonElement>;
 }) {
+  // When rendered inside a <Modal>, route the click through the Modal's
+  // dirty-aware close so the × honours the unsaved-changes guard (issue #808).
+  // Outside a Modal, fall back to the caller's own onClose.
+  const requestClose = useContext(ModalCloseContext);
   return (
     <button
       ref={ref}
       type="button"
-      onClick={onClose}
+      onClick={requestClose ?? onClose}
       aria-label={label}
       className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 transition-colors text-xl leading-none"
     >
