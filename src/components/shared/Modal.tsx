@@ -36,9 +36,12 @@ interface ModalProps {
    * (`<ModalCloseButton>`) do NOT immediately close — they surface an inline
    * "Discard unsaved changes?" banner with Keep editing / Discard buttons.
    * Keep editing restores focus to the field the user was in (captured at
-   * the moment of the close attempt); Discard calls `onClose`. The header ×
-   * routes through the same guard via `ModalCloseContext` (issue #808) so it
-   * no longer discards silently. Issue #730.
+   * the moment of the close attempt); only the explicit Discard button calls
+   * `onClose`. While the banner is up, a second Escape or backdrop-click
+   * dismisses it (Keep editing) rather than confirming the discard — the
+   * reflexive "press Escape to dismiss a prompt" gesture maps to the safe
+   * option, never to destroying the user's work. The header × routes through
+   * the same guard via `ModalCloseContext`. Issues #730, #808.
    */
   dirty?: boolean;
   /** Banner copy when `dirty` and the user tries to close. */
@@ -139,12 +142,22 @@ export function Modal({
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
-      if (dirtyRef.current && !confirmingDiscardRef.current) {
+      if (confirmingDiscardRef.current) {
+        // Banner already showing — Escape dismisses the prompt (Keep editing),
+        // it must NOT confirm the discard. Reflexively pressing Escape to
+        // dismiss a confirmation is the near-universal OS gesture, and it maps
+        // to the SAFE option; only the explicit Discard button abandons the
+        // edits (issue #808). Restore focus to where the user was.
+        setConfirmingDiscard(false);
+        requestAnimationFrame(() => lastFocusRef.current?.focus?.());
+        return;
+      }
+      if (dirtyRef.current) {
         lastFocusRef.current = document.activeElement as HTMLElement | null;
         setConfirmingDiscard(true);
         return;
       }
-      // Banner already showing, or not dirty — Escape falls through to close.
+      // Not dirty — Escape closes.
       onClose();
     };
     window.addEventListener('keydown', onKey);
@@ -202,7 +215,13 @@ export function Modal({
   // stopPropagation is the discriminator.
   const handleBackdropClick = () => {
     if (!closeOnBackdrop) return;
-    if (dirty && !confirmingDiscard) {
+    if (confirmingDiscard) {
+      // Banner is up — a stray backdrop click dismisses the prompt (Keep
+      // editing), it must not confirm the discard (issue #808).
+      handleCancelDiscard();
+      return;
+    }
+    if (dirty) {
       setConfirmingDiscard(true);
       return;
     }
