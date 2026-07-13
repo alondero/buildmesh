@@ -98,7 +98,9 @@ describe("NodeList", () => {
     // status label.
     const attention = screen.getByTestId("attention-section");
     expect(attention.textContent).toContain("node-3");
-    expect(attention.textContent).toContain("needs input");
+    // Shared status vocab (issue #815) — matches desktop's `STATUS_CONFIG`
+    // label, not mobile's old bespoke "needs input" copy.
+    expect(attention.textContent).toContain("Needs attention");
     // …and it appears EXACTLY ONCE overall — it must NOT also be rendered
     // under its mesh bucket (regression for the duplicate-row bug, #807).
     expect(screen.getAllByTestId("node-3")).toHaveLength(1);
