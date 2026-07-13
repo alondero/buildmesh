@@ -5,6 +5,9 @@ import { SpawnButtonCluster } from './SpawnButtonCluster';
 interface NodeCreationFormProps {
   mesh: Mesh;
   isDropdownOpen: boolean;
+  /** A spawn for this mesh is in flight — forwarded to the cluster so the
+   *  `+` shows "Spawning…" and both buttons disable (guards double-spawn). */
+  isSpawning?: boolean;
   providers: SpawnOption[];
   onToggleDropdown: (mesh: Mesh) => void;
   onSelectProvider: (mesh: Mesh, providerId: string, useWorktree?: boolean) => void;
@@ -21,6 +24,7 @@ interface NodeCreationFormProps {
 export function NodeCreationForm({
   mesh,
   isDropdownOpen,
+  isSpawning,
   providers,
   onToggleDropdown,
   onSelectProvider,
@@ -40,6 +44,7 @@ export function NodeCreationForm({
       providers={providers}
       meshId={mesh.id}
       isOpen={isDropdownOpen}
+      isSpawning={isSpawning}
       onToggleDropdown={() => onToggleDropdown(mesh)}
       onSpawnDefault={handleSpawnDefault}
       onSelectProvider={(providerId, altKey) =>

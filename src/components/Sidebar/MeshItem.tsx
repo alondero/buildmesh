@@ -41,6 +41,9 @@ interface MeshItemProps {
   mesh: Mesh;
   isSelected: boolean;
   isDropdownOpen: boolean;
+  /** A spawn for this mesh is in flight — the `+ ▾` cluster shows
+   *  "Spawning…" and disables to prevent duplicate nodes. */
+  isSpawning: boolean;
   providerList: SpawnOption[];
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
@@ -83,6 +86,7 @@ export function MeshItem({
   mesh,
   isSelected,
   isDropdownOpen,
+  isSpawning,
   providerList,
   onSelectMesh,
   onNewNode,
@@ -353,6 +357,7 @@ export function MeshItem({
           <NodeCreationForm
             mesh={mesh}
             isDropdownOpen={isDropdownOpen}
+            isSpawning={isSpawning}
             providers={providerList}
             onToggleDropdown={onNewNode}
             onSelectProvider={onSelectProvider}

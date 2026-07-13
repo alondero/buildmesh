@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -61,6 +61,14 @@ export function Sidebar() {
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
+  // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
+  // round-trip that includes worktree setup — seconds on a large repo).
+  // The ref is the synchronous authority (guards a double-click that lands
+  // in the same frame before the disabled state has re-rendered); the state
+  // drives the render.
+  const spawningMeshRef = useRef<Set<number>>(new Set());
+  const [spawningMeshIds, setSpawningMeshIds] = useState<Set<number>>(new Set());
 
   // Close the provider dropdown when clicking outside of it.
   // Issue #492 — migrated to the shared `useClickOutside` hook. The
@@ -109,12 +117,21 @@ export function Sidebar() {
 
   const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
     setOpenDropdownFor(null);
+    // Guard against a double-spawn: if a spawn for this mesh is already in
+    // flight, ignore the click (the button is also disabled once the state
+    // re-renders, but the ref covers the same-frame race).
+    if (spawningMeshRef.current.has(mesh.id)) return;
+    spawningMeshRef.current.add(mesh.id);
+    setSpawningMeshIds(new Set(spawningMeshRef.current));
     // The create→activate→select-mesh dance + its rollback contract live in
     // selectProviderForMesh (issue #283); this handler stays a thin UI shim.
     try {
       await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree);
     } catch (e) {
       console.error('Failed to create node:', e);
+    } finally {
+      spawningMeshRef.current.delete(mesh.id);
+      setSpawningMeshIds(new Set(spawningMeshRef.current));
     }
   };
 
@@ -206,6 +223,7 @@ export function Sidebar() {
                       mesh={mesh}
                       isSelected={selectedMeshId === mesh.id}
                       isDropdownOpen={openDropdownFor === mesh.id}
+                      isSpawning={spawningMeshIds.has(mesh.id)}
                       providerList={providerData}
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleToggleDropdown}
