@@ -9,6 +9,13 @@ export type SessionStatus =
   | 'error'
   | 'suspended';
 
+// `hex` mirrors the resolved value of each entry's Tailwind `color` token
+// (see the `--color-*` custom properties in `src/App.css`) as a literal
+// hex string. Desktop consumes `color`/`bgColor`/`dot` directly as Tailwind
+// classes; the mobile SPA (`src/mobile/`) doesn't run Tailwind and renders
+// status dots/bars via inline `style`, so it reads `hex`/`label` off this
+// same record instead of keeping its own hand-picked palette + label copy
+// (issue #815) — one status vocabulary for every spawn/status surface.
 export const STATUS_CONFIG = {
   // Stage-2 in progress; visually pulses so the user sees liveness.
   pending: {
@@ -16,6 +23,7 @@ export const STATUS_CONFIG = {
     bgColor: 'bg-text-muted animate-pulse-fast',
     dot: '◌',
     label: 'Starting…',
+    hex: '#7a8492',
   },
   // Issue #654 — agent launched but the 3s early-exit window hasn't elapsed.
   // Visually mirrors `pending`; conditional promotion to Running fires next.
@@ -24,36 +32,46 @@ export const STATUS_CONFIG = {
     bgColor: 'bg-text-muted animate-pulse-fast',
     dot: '◌',
     label: 'Starting…',
+    hex: '#7a8492',
   },
   running: {
     color: 'status-running',
     bgColor: 'bg-accent-cyan',
     dot: '●',
     label: 'Running',
+    hex: '#00d4ff',
   },
   idle: {
     color: 'status-idle',
     bgColor: 'bg-accent-cyan',
     dot: '○',
     label: 'Idle',
+    // Same cyan as `running` — desktop distinguishes idle/running by the
+    // dot glyph (○ vs ●) and label, not color. Intentional; see `.status-idle`
+    // in App.css, which resolves to `--color-accent-cyan` rather than the
+    // unused `--color-status-idle` token.
+    hex: '#00d4ff',
   },
   awaiting_input: {
     color: 'status-waiting animate-pulse-fast',
     bgColor: 'bg-status-warning animate-pulse-fast',
     dot: '●',
     label: 'Needs attention',
+    hex: '#f59e0b',
   },
   error: {
     color: 'status-error',
     bgColor: 'bg-status-error',
     dot: '✗',
     label: 'Error',
+    hex: '#ef4444',
   },
   suspended: {
     color: 'text-violet',
     bgColor: 'bg-accent-violet',
     dot: '⏸',
     label: 'Suspended',
+    hex: '#8b5cf6',
   },
 } as const;
 
