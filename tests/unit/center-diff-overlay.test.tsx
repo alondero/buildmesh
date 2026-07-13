@@ -170,6 +170,32 @@ describe('CenterDiffOverlay (#379)', () => {
     });
   });
 
+  it('survives the diff source flipping base→pr on a live instance (Rules of Hooks, issue #803)', async () => {
+    // The Probe stays interactive, so a user with a base/head diff open can
+    // click a PR in the Probe — `activeDiffFile` flips source on the SAME
+    // mounted overlay. Before #803, the head/base body declared more hooks
+    // than the PR body, so this re-render threw "rendered fewer hooks than
+    // during the previous render" and white-screened the workspace.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'diff_node_file_against_base') return Promise.resolve(DIFF);
+      if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);
+      if (cmd === 'get_pr_files') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    const { rerender } = render(<CenterDiffOverlay diff={BASE_CTX} />);
+    await screen.findByText('src/app.ts');
+
+    const prCtx: DiffContext = {
+      ...BASE_CTX,
+      source: 'pr',
+      prNumber: 42,
+      filePath: 'src/app.ts',
+    };
+    expect(() => rerender(<CenterDiffOverlay diff={prCtx} />)).not.toThrow();
+    // The PR breadcrumb renders — the overlay swapped bodies cleanly.
+    expect(await screen.findByText('PR #42')).toBeTruthy();
+  });
+
   it('does NOT auto-close when an unrelated store value changes', async () => {
     render(<CenterDiffOverlay diff={BASE_CTX} />);
     await screen.findByText('src/app.ts');

@@ -194,13 +194,20 @@ const formToWireBaseRef = (form: BaseRefForm): 'origin/main' | 'HEAD' =>
   form === 'head' ? 'HEAD' : 'origin/main';
 
 export function WorktreeManagerTab() {
-  const { activeMeshId, activePath } = useProbeContext();
+  // This is a MESH-scoped tab: the health snapshot and the Restore/Free
+  // recovery actions walk the mesh *root*, not a focused node's worktree.
+  // Use `activeMeshPath` (the mesh row's own path) — `activePath` resolves
+  // to the focused node's worktree subdir when a node is active, which would
+  // key the health file-watch subscription off the wrong directory and
+  // diverge from the sidebar `!` badge (which uses the mesh root). See the
+  // `useProbeContext` contract and `MeshPropertiesTab` (issue #809).
+  const { activeMeshId, activeMeshPath } = useProbeContext();
 
   // The health hook subscribes to the shared cache (used by the sidebar's
   // `!` badge too) and refetches on GIT_CHANGED / focus. The prune info is
   // local to this tab — only it cares about the full list, so it doesn't
   // share a cache.
-  const { health, refresh: refreshHealth } = useMeshHealth(activeMeshId, activePath);
+  const { health, refresh: refreshHealth } = useMeshHealth(activeMeshId, activeMeshPath);
 
   const [repos, setRepos] = useState<GitRepoPruneInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -366,7 +373,7 @@ export function WorktreeManagerTab() {
 
   // Configuration card load (issue #451). Mirrors the dep discipline
   // from `MeshPropertiesTab.tsx:143-167`: the dep set is intentionally
-  // `[activeMeshId, activePath]` only — adding the form state (e.g.
+  // `[activeMeshId, activeMeshPath]` only — adding the form state (e.g.
   // `useWorktree`) would re-fire on every save and clobber the user's
   // in-flight edits to `baseRef` / `worktreeMode` with the just-saved
   // values. On a load failure we keep the stale form state rather
@@ -390,7 +397,7 @@ export function WorktreeManagerTab() {
           // MeshPropertiesTab's load-failure behaviour.
         });
     },
-    [activeMeshId, activePath],
+    [activeMeshId, activeMeshPath],
   );
 
   // Configuration card save handlers. Each: (1) update form state
@@ -590,7 +597,7 @@ export function WorktreeManagerTab() {
   // The probe shell's "No project selected" empty state already covers
   // the no-mesh case, so this is belt-and-braces in case the tab is ever
   // mounted standalone.
-  if (activeMeshId === null || !activePath) return null;
+  if (activeMeshId === null || !activeMeshPath) return null;
 
   return (
     <div className="p-4 space-y-4">

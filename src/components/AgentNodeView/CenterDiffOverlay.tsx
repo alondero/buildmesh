@@ -25,6 +25,17 @@
  * commands the existing review surface uses; `source: 'pr'` (issue #421)
  * routes to `PrDiffView`, which talks to GitHub's `/pulls/{n}/files` and
  * doesn't need a local checkout of the PR's head branch.
+ *
+ * Rules-of-Hooks discipline (issue #803): the two source bodies call a
+ * *different number* of hooks (the head/base body owns the local-git fetch
+ * state; the PR body delegates that to `PrDiffView`). The Probe stays
+ * interactive, so `diff.source` can flip base→pr on the *same* mounted
+ * overlay (open a base diff, then click a PR in the Probe). To keep the hook
+ * order stable, this component is a thin dispatcher that always calls the
+ * same three store hooks, then renders a *different child component* per
+ * source — each child owns its own hooks unconditionally, and a source flip
+ * swaps the component type (a clean remount) instead of changing the hook
+ * count of one fiber.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -62,57 +73,74 @@ export function CenterDiffOverlay({ diff }: CenterDiffOverlayProps) {
   const meshName = useMeshStore((s) => s.meshesById.get(diff.meshId)?.name ?? null);
   const parentLabel = node?.name ?? meshName ?? 'Workspace';
 
-  // PR diffs (`source: 'pr'`) don't use the local-git fetch path at all —
-  // PrDiffView handles its own state. Bail out of the head/base branch and
-  // delegate, so the existing fetch effect doesn't run with no work to do.
-  // The shell is the same; only the breadcrumb + mode label + body differ.
+  // These three hooks run every render, in the same order, regardless of
+  // source. The per-source bodies (which call a differing number of hooks)
+  // live in their own components below — see the Rules-of-Hooks note above.
   if (diff.source === 'pr') {
-    const prLabel = diff.prNumber !== undefined ? `PR #${diff.prNumber}` : 'PR';
-    return (
-      <DiffOverlayShell
-        diff={diff}
-        onClose={closeDiff}
-        modeLabel={{
-          text: diff.filePath === '' ? 'PR list' : 'PR file',
-          title:
-            diff.filePath === ''
-              ? 'Files changed in this pull request'
-              : 'Diff for one file in this pull request',
-        }}
-        breadcrumb={
-          <>
-            {diff.filePath !== '' && (
-              <>
-                <span
-                  className="font-mono text-xs text-text-primary truncate"
-                  title={diff.filePath}
-                >
-                  {diff.filePath}
-                </span>
-                <span className="text-text-muted text-xs shrink-0">in</span>
-              </>
-            )}
-            <span
-              className="text-accent-cyan text-xs font-mono font-medium shrink-0"
-              title={prLabel}
-            >
-              {prLabel}
-            </span>
-            <span className="text-text-muted text-xs shrink-0">in</span>
-            <span
-              className="text-text-secondary text-xs font-medium truncate"
-              title={parentLabel}
-            >
-              {parentLabel}
-            </span>
-          </>
-        }
-      >
-        <PrDiffView diff={diff} />
-      </DiffOverlayShell>
-    );
+    return <CenterPrDiff diff={diff} closeDiff={closeDiff} parentLabel={parentLabel} />;
   }
+  return <CenterHeadBaseDiff diff={diff} closeDiff={closeDiff} parentLabel={parentLabel} />;
+}
 
+interface DiffBranchProps {
+  diff: DiffContext;
+  closeDiff: () => void;
+  parentLabel: string;
+}
+
+// PR diffs (`source: 'pr'`) don't use the local-git fetch path at all —
+// PrDiffView handles its own state. The shell is the same; only the
+// breadcrumb + mode label + body differ.
+function CenterPrDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
+  const prLabel = diff.prNumber !== undefined ? `PR #${diff.prNumber}` : 'PR';
+  return (
+    <DiffOverlayShell
+      diff={diff}
+      onClose={closeDiff}
+      modeLabel={{
+        text: diff.filePath === '' ? 'PR list' : 'PR file',
+        title:
+          diff.filePath === ''
+            ? 'Files changed in this pull request'
+            : 'Diff for one file in this pull request',
+      }}
+      breadcrumb={
+        <>
+          {diff.filePath !== '' && (
+            <>
+              <span
+                className="font-mono text-xs text-text-primary truncate"
+                title={diff.filePath}
+              >
+                {diff.filePath}
+              </span>
+              <span className="text-text-muted text-xs shrink-0">in</span>
+            </>
+          )}
+          <span
+            className="text-accent-cyan text-xs font-mono font-medium shrink-0"
+            title={prLabel}
+          >
+            {prLabel}
+          </span>
+          <span className="text-text-muted text-xs shrink-0">in</span>
+          <span
+            className="text-text-secondary text-xs font-medium truncate"
+            title={parentLabel}
+          >
+            {parentLabel}
+          </span>
+        </>
+      }
+    >
+      <PrDiffView diff={diff} />
+    </DiffOverlayShell>
+  );
+}
+
+// Head/base diffs fetch from the local git commands the existing review
+// surface uses, and live-refresh while the agent keeps editing.
+function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
   const [files, setFiles] = useState<FileDiff[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 

@@ -268,13 +268,13 @@ describe('Modal dirty-check (issue #730)', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('after the banner is open, another Escape falls through to onClose (banner is the safeguard, not a lock)', () => {
-    // The issue specifies Escape as the close trigger with the confirm as
-    // safeguard. Once the banner is already up, the next Escape is the user
-    // confirming they want to abandon — so it closes. (A second confirm step
-    // would be annoying and contradicts how every OS dialog handles Escape.)
+  it('after the banner is open, a second Escape dismisses the banner and does NOT discard (issue #808)', () => {
+    // A "discard unsaved changes?" prompt must map Escape to the SAFE option
+    // (Keep editing), matching how OS dialogs treat Escape on a confirmation.
+    // Reflexively pressing Escape to dismiss the prompt must never destroy the
+    // user's work — only the explicit Discard button closes.
     const onClose = vi.fn();
-    const { getByTestId } = render(
+    const { getByTestId, queryByTestId } = render(
       <Modal onClose={onClose} dirty ariaLabel="t">
         <p>body</p>
       </Modal>,
@@ -282,7 +282,38 @@ describe('Modal dirty-check (issue #730)', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     getByTestId('modal-discard-banner');
     expect(onClose).not.toHaveBeenCalled();
+    // Second Escape — banner gone, modal still open.
     fireEvent.keyDown(window, { key: 'Escape' });
+    expect(queryByTestId('modal-discard-banner')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('after the banner is open, a backdrop click dismisses the banner and does NOT discard (issue #808)', () => {
+    const onClose = vi.fn();
+    const { container, getByTestId, queryByTestId } = render(
+      <Modal onClose={onClose} dirty ariaLabel="t">
+        <p>body</p>
+      </Modal>,
+    );
+    const dimmer = (container.firstElementChild as HTMLElement).firstElementChild as HTMLElement;
+    fireEvent.click(dimmer);
+    getByTestId('modal-discard-banner');
+    expect(onClose).not.toHaveBeenCalled();
+    // Second backdrop click — banner gone, modal still open.
+    fireEvent.click(dimmer);
+    expect(queryByTestId('modal-discard-banner')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('the explicit Discard button is the only path that closes a dirty modal', () => {
+    const onClose = vi.fn();
+    const { getByTestId } = render(
+      <Modal onClose={onClose} dirty ariaLabel="t">
+        <p>body</p>
+      </Modal>,
+    );
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(getByTestId('modal-discard-confirm'));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 

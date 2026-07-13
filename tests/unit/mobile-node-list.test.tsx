@@ -94,10 +94,14 @@ describe("NodeList", () => {
 
     // Archived node never renders.
     expect(screen.queryByTestId("node-2")).toBeNull();
-    // Awaiting-input node appears twice: pinned + in its mesh section.
+    // Awaiting-input node is pinned in the attention section with a readable
+    // status label.
     const attention = screen.getByTestId("attention-section");
     expect(attention.textContent).toContain("node-3");
     expect(attention.textContent).toContain("needs input");
+    // …and it appears EXACTLY ONCE overall — it must NOT also be rendered
+    // under its mesh bucket (regression for the duplicate-row bug, #807).
+    expect(screen.getAllByTestId("node-3")).toHaveLength(1);
     // Running node renders normally.
     expect(screen.getByTestId("node-1")).toBeTruthy();
   });

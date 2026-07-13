@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import * as api from '../../lib/tauri';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import type { NetworkStatus } from '../../types/generated/NetworkStatus';
@@ -195,14 +196,16 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   };
 
   const handleInstall = () => {
-    // Open the install URL in the desktop's browser. The PRIMARY phone path
-    // is the install-QR above (scan with phone camera); this fallback is
-    // for the desktop user who wants to install on the host itself (e.g.
-    // fresh build, cert rotated, LAN exposure toggle flipped). Same URL
-    // works for both — the QR scanner is just a more convenient delivery
-    // mechanism for the phone.
+    // Open the install URL in the desktop's default browser. The PRIMARY
+    // phone path is the install-QR above (scan with phone camera); this
+    // fallback is for the desktop user who wants to install on the host
+    // itself (e.g. fresh build, cert rotated, LAN exposure toggle flipped).
+    // Must go through `openUrl()` — a raw `window.location.href` navigates
+    // the Tauri WebView itself, replacing the whole app with the cert-
+    // download/TLS page and no way back (issue #810; the knowledge-primer
+    // external-link anti-pattern).
     if (!installUrl) return;
-    window.location.href = installUrl;
+    openUrl(installUrl).catch(console.error);
   };
 
   return (

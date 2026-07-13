@@ -60,6 +60,7 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     mesh: MESH,
     isSelected: false,
     isDropdownOpen: false,
+    isSpawning: false,
     providerList: PROVIDERS,
     onSelectMesh: vi.fn(),
     onNewNode: vi.fn(),

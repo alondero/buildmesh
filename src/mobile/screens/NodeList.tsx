@@ -123,17 +123,22 @@ export default function NodeList({
   // Archived nodes are history, not actionable work — hide them on mobile.
   const visibleNodes = (nodes ?? []).filter((n) => n.status !== "archived");
 
-  const nodesByMesh = new Map<number, AgentNode[]>();
-  for (const node of visibleNodes) {
-    if (!nodesByMesh.has(node.mesh_id)) nodesByMesh.set(node.mesh_id, []);
-    nodesByMesh.get(node.mesh_id)!.push(node);
-  }
-
   // Mobile-only QoL: pin awaiting-input nodes at the top so attention
   // is one tap away no matter how many meshes you have configured.
   const attentionNodes = visibleNodes
     .filter((n) => n.status === "awaiting_input")
     .sort((a, b) => a.id - b.id);
+
+  // Bucket the remaining nodes by mesh. Attention nodes are EXCLUDED here
+  // because they're already rendered in the "Needs attention" section above;
+  // including them too would render each awaiting-input node twice (once
+  // pinned, once under its mesh).
+  const nodesByMesh = new Map<number, AgentNode[]>();
+  for (const node of visibleNodes) {
+    if (node.status === "awaiting_input") continue;
+    if (!nodesByMesh.has(node.mesh_id)) nodesByMesh.set(node.mesh_id, []);
+    nodesByMesh.get(node.mesh_id)!.push(node);
+  }
 
   return (
     <div className="screen">
