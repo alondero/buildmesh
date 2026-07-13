@@ -16,6 +16,14 @@ vi.mock('qrcode', () => ({
   default: { toDataURL: (...args: unknown[]) => toDataURL(...args) },
 }));
 
+// The install fallback link opens the URL in the host's default browser via
+// `openUrl()` (issue #810) — NOT `window.location.href`, which would navigate
+// the Tauri WebView itself. Capture the argument to assert the route.
+const openUrl = vi.fn().mockResolvedValue(undefined);
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: (...args: unknown[]) => openUrl(...args),
+}));
+
 function status(overrides: Partial<NetworkStatus>): NetworkStatus {
   return {
     lan_exposure_enabled: true,
@@ -23,57 +31,6 @@ function status(overrides: Partial<NetworkStatus>): NetworkStatus {
     tls_active: true,
     exposed_interfaces: [],
     ...overrides,
-  };
-}
-
-/// Stub jsdom's read-only `window.location` so the modal's
-/// `window.location.href = installUrl` writes can be captured. Returns a
-/// `navigated` getter + a `restore()` to put the original Location back.
-///
-/// jsdom installs `location` as a *prototype accessor* on `window`, not a
-/// data property — `Object.getOwnPropertyDescriptor(window, 'location')`
-/// returns `{get, set, …}` from the prototype. A naive `Object.defineProperty`
-/// with `value:` would replace it with a data descriptor, silently breaking
-/// any later test that introspects the shape. The original descriptor is
-/// captured (not just the value) so `restore()` reinstalls it exactly as
-/// jsdom had it — the data-property leak that the early version of this
-/// helper caused (visible in `git log tests/unit/remote-access-modal.test.tsx`).
-function stubWindowLocation(): { navigated: () => string | null; restore: () => void } {
-  let captured: string | null = null;
-  const originalDescriptor = Object.getOwnPropertyDescriptor(window, 'location');
-  const originalLocation = window.location;
-  Object.defineProperty(window, 'location', {
-    configurable: true,
-    get() {
-      return {
-        ...originalLocation,
-        set href(url: string) {
-          captured = url;
-        },
-        get href() {
-          return captured ?? '';
-        },
-      };
-    },
-    set(value: Location) {
-      // jsdom's own setter (rarely hit in tests) — keep the override
-      // symmetric so a future test that reassigns `window.location` doesn't
-      // observe an asymmetry between the get-stub and the set-stub.
-      Object.defineProperty(window, 'location', { configurable: true, value });
-    },
-  });
-  return {
-    navigated: () => captured,
-    restore: () => {
-      if (originalDescriptor) {
-        Object.defineProperty(window, 'location', originalDescriptor);
-      } else {
-        Object.defineProperty(window, 'location', {
-          configurable: true,
-          value: originalLocation,
-        });
-      }
-    },
   };
 }
 
@@ -171,6 +128,7 @@ describe('RemoteAccessModal', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     toDataURL.mockClear();
+    openUrl.mockClear();
   });
 
   function mockBackend(
@@ -502,28 +460,25 @@ describe('RemoteAccessModal', () => {
     expect(screen.getByTestId('remote-access-tab-connect')).toBeTruthy();
   });
 
-  it('navigates the desktop to the install URL when the fallback link is clicked', async () => {
+  it('opens the install URL in the host browser via openUrl when the fallback link is clicked', async () => {
     // The Install cert QR is the primary phone path. The desktop
     // fallback link (below the tabbed QR) opens the same URL in the
     // host browser for users who want to install on the desktop itself
-    // (fresh build, cert rotated, etc.). The URL MUST match the
-    // realized bind — a `tauri://` or loopback URL would error with
-    // ERR_INVALID_URL on a real install attempt.
+    // (fresh build, cert rotated, etc.). It MUST go through `openUrl()` —
+    // a raw `window.location.href` would navigate the Tauri WebView itself,
+    // replacing the whole app with the cert page and no way back (issue
+    // #810). The URL MUST match the realized bind — a `tauri://` or loopback
+    // URL would error with ERR_INVALID_URL on a real install attempt.
     const user = userEvent.setup();
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
     );
-    const { navigated, restore } = stubWindowLocation();
-    try {
-      render(<RemoteAccessModal onClose={() => {}} />);
+    render(<RemoteAccessModal onClose={() => {}} />);
 
-      await user.click(await screen.findByTestId('remote-access-install-link'));
+    await user.click(await screen.findByTestId('remote-access-install-link'));
 
-      await waitFor(() =>
-        expect(navigated()).toBe('https://192.168.1.10:1992/install-cert.der'),
-      );
-    } finally {
-      restore();
-    }
+    await waitFor(() =>
+      expect(openUrl).toHaveBeenCalledWith('https://192.168.1.10:1992/install-cert.der'),
+    );
   });
 });
