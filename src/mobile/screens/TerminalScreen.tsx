@@ -193,9 +193,21 @@ export default function TerminalScreen({
 
     connect();
 
+    // Mobile backgrounding is the normal case: the OS suspends timers and
+    // drops the WebSocket, so a socket can silently exhaust its retries while
+    // the tab is hidden. Resume the moment the document is foregrounded or the
+    // network returns, instead of stranding the user on a manual Retry tap.
+    const onForeground = () => {
+      if (document.visibilityState === "visible") resumeConnection();
+    };
+    document.addEventListener("visibilitychange", onForeground);
+    window.addEventListener("online", resumeConnection);
+
     return () => {
       closedByUserRef.current = true;
       window.removeEventListener("resize", onWindowResize);
+      document.removeEventListener("visibilitychange", onForeground);
+      window.removeEventListener("online", resumeConnection);
       resizeObserver?.disconnect();
       detachTouchPan?.();
       detachScroll?.();
@@ -315,6 +327,21 @@ export default function TerminalScreen({
     reconnectAttemptRef.current = 0;
     setReconnectIn(null);
     connect();
+  }
+
+  // Foreground/online resume: leave a healthy or in-flight socket alone (this
+  // fires on every tab switch), but a dead or exhausted one gets its backoff
+  // reset and reconnects immediately — same effect as tapping Retry.
+  function resumeConnection() {
+    if (closedByUserRef.current) return;
+    const ws = wsRef.current;
+    if (
+      ws &&
+      (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    retryNow();
   }
 
   return (
