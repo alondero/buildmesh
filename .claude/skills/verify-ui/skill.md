@@ -9,7 +9,10 @@ description: Autonomously verify a visible UI change in the real running app and
 
 The change affects something **visible in the UI** (desktop app or mobile SPA) and you want to (a) prove the feature works by driving the real app, and (b) capture before/after screenshots to embed in the PR. Complements `/verify` (build/lint/test/log-scan): run `/verify` first for the green bar, then this for the visual evidence.
 
-**Windows only.** The harness attaches Playwright to the real WebView2 window over the Chrome DevTools Protocol (CDP). macOS/Linux WebViews don't support CDP attach — on those hosts, skip screenshots and say so in the PR.
+**Two paths, pick by host:**
+
+- **Windows (full fidelity, default).** The harness attaches Playwright to the real WebView2 window over the Chrome DevTools Protocol (CDP): real Tauri IPC, real Rust backend, real pixels. Use this whenever you're on Windows — it's the only path that proves the *backend* behaves.
+- **Headless / non-Windows (`--mock`, visual smoke).** macOS/Linux WebViews have no CDP attach, and a headless host (Claude Code on the web, CI) has no WebView2 or backend at all — so the previous "skip screenshots and say so" gap. Instead, render the **real frontend** in the pre-installed headless Chromium against a plain Vite dev server, with a **fake Tauri IPC** injected before boot (`scripts/ui-mock/tauri-mock.mjs`). This proves the UI renders + reacts to fixture data and captures before/after PNGs; it does **not** exercise the Rust backend. Say "visual smoke (mock IPC), not backend-verified" in the PR. See *Headless mock mode* below.
 
 ## How it works (one paragraph)
 
@@ -94,6 +97,24 @@ Screenshots live in the repo so GitHub can render them (repo is public):
 
 `Stop-Process -Name buildmesh-dev -Force` when done (or leave it up if the user may want to poke at it).
 
+## Headless mock mode (`--mock`) — non-Windows / web / CI
+
+No WebView2, no CDP, no Rust backend needed. Renders the real desktop frontend in the pre-installed headless Chromium against a plain Vite dev server, with a fake Tauri IPC installed before the app boots. This is the path a Claude-Code-on-the-web (headless Linux) session takes when it can't drive the real window.
+
+```bash
+npm install                 # if node_modules is missing (fresh web clone)
+# One shot — self-hosts the dev server, screenshots, tears it down:
+node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/<slug>-after.png --mock --serve \
+  --steps steps.mjs --selector "<css>"
+```
+
+- **Before/after** works the same as the CDP path (§1): shoot the merge-base tree first, then your branch. No second Tauri build — just `git switch` and re-run, since the dev server rebuilds from the working tree via Vite HMR (restart it, or use `--serve` which spawns a fresh one).
+- **Fixtures.** `scripts/ui-mock/tauri-mock.mjs` seeds two meshes + agent nodes so the shell renders populated; unknown IPC commands resolve `null` (the screen renders empty, not a crash) and log `[tauri-mock] unmocked invoke: <cmd>` so you know what to add. Override with `--fixtures <file.mjs|json>` (merged over the defaults).
+- **Steps** get `{ page, mock }` instead of `{ page, invoke }` — there's no HTTP bridge. Use `mock.on('cmd', value)` to set an IPC response and `mock.emit('event', payload)` to push a backend event to the app's listeners. Drive everything else through `page` (real Playwright clicks/asserts). A throwing steps module fails the run.
+- **Look at the PNG yourself** (Read it) before attaching, same as always. Then say in the PR: *visual smoke via mock IPC — renders + reacts to fixtures, backend not exercised.*
+- **Limits.** Anything that needs real backend output — terminal PTY content, a real git diff, live provider usage — will be blank/empty here. For those, the Windows CDP path is the only real verification; note the gap rather than claiming coverage.
+- **Browser resolution.** On a host whose pre-installed Chromium doesn't match the build Playwright pins, the script falls back to `$PLAYWRIGHT_BROWSERS_PATH/chromium` (or `--chromium <path>` / `$BUILDMESH_CHROMIUM`). On a normal dev box the bundled browser is used with no flags.
+
 ## Mobile SPA changes (`src/mobile/`)
 
 The mobile UI is served over plain HTTP on loopback — no CDP needed:
@@ -107,7 +128,7 @@ node scripts/ui-shot.mjs --out docs/pr-screenshots/<branch>/mobile-after.png --u
 
 ## Hard rules & pitfalls
 
-- **NEVER** stop the `buildmesh` process or use ports 1991/1992/1420 — that's the stable hub **you may be running inside**. This skill only ever touches `buildmesh-dev` (2991/2992, CDP 9223).
+- **NEVER** stop the `buildmesh` process or use ports 1991/1992/1420 — that's the stable hub **you may be running inside**. The CDP path only ever touches `buildmesh-dev` (2991/2992, CDP 9223). (Exception: `--mock` mode runs a throwaway Vite dev server on 1420 — safe on a headless web/CI host where no hub exists, but don't use `--mock` on a Windows box that's running the hub; use the CDP path there instead.)
 - **Do not** reach for `npm run test:e2e` to "verify UI" — Playwright's webServer boots `tauri dev` on the hub's ports (1991/1992) and needs the hub paused. That suite is for humans/CI, not autonomous verification.
 - CDP attach fails → the app wasn't launched with `-CdpPort` (plain `/use` launches without it) or the window was closed. Re-run step 2.
 - Don't minimize the dev window while shooting — Chromium throttles hidden renderers.
