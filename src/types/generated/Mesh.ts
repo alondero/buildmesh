@@ -48,4 +48,13 @@ sandbox: boolean,
  * `meshes.pre_spawn_pool_size INTEGER NOT NULL DEFAULT 1`
  * (schema v22, default flipped in v24).
  */
-pre_spawn_pool_size: number, };
+pre_spawn_pool_size: number, 
+/**
+ * User-chosen accent colour for the mesh, as a `#rrggbb` hex string.
+ * Picked in the "New mesh" modal on creation and recolourable by
+ * clicking the mesh's colour swatch in the sidebar. `None` means the
+ * user never chose one, so the frontend falls back to the deterministic
+ * palette keyed on the mesh id (`src/lib/meshColors.ts`). Persisted as
+ * `meshes.color TEXT` (schema v25); empty/absent reads back as `None`.
+ */
+color: string | null, };

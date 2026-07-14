@@ -29,6 +29,7 @@ import type { MeshRow } from '../types/generated/MeshRow';
 import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { NetworkStatus } from '../types/generated/NetworkStatus';
+import type { PickedFolder } from '../types/generated/PickedFolder';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
@@ -129,8 +130,16 @@ export const updateAgentNodePositions = (updates: [number, number][]) =>
 export const addMesh = () =>
   _invoke<Mesh>('add_mesh');
 
-export const createMesh = (name: string, path: string) =>
-  _invoke<Mesh>('create_mesh', { name, path });
+/** Open the native folder picker; returns the chosen folder or null (cancel). */
+export const pickMeshFolder = () =>
+  _invoke<PickedFolder | null>('pick_mesh_folder');
+
+export const createMesh = (name: string, path: string, color?: string | null) =>
+  _invoke<Mesh>('create_mesh', { name, path, color: color ?? null });
+
+/** Set (or clear, with null) a mesh's accent colour hex. */
+export const updateMeshColor = (meshId: number, color: string | null) =>
+  _invoke('update_mesh_color', { meshId, color });
 
 export const createTestMesh = (name: string) =>
   _invoke<Mesh>('create_test_mesh', { name });

@@ -98,7 +98,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 24;
+const SCHEMA_VERSION: i32 = 25;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -253,6 +253,9 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
 ensure_mesh_sandbox(&conn)?;
+    // v25 — per-mesh accent colour (user-picked hex). Nullable: pre-v25 rows
+    // read back as `None` and fall back to the deterministic palette.
+    ensure_mesh_color(&conn)?;
     // v22 — Per-mesh pre-spawn pool target (issue #611). The column
     // doesn't exist on pre-v22 DBs; the safety net backfills it on every
     // init. Since v24 the column default (and the one-time backfill below)
@@ -629,6 +632,18 @@ pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
 pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "meshes", "sandbox", "INTEGER NOT NULL DEFAULT 0")? {
         tracing::warn!("ensure_mesh_sandbox: added missing sandbox column");
+    }
+    Ok(())
+}
+
+/// Safety net (v25): ensure the `color` column exists on `meshes`.
+/// Holds the user-picked accent colour as a `#rrggbb` hex string. Nullable —
+/// pre-v25 rows and meshes whose owner never picked a colour read back as
+/// `None`, and the frontend falls back to the deterministic id-keyed palette.
+/// No backfill: the fallback IS the historical behaviour.
+pub(crate) fn ensure_mesh_color(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "meshes", "color", "TEXT")? {
+        tracing::warn!("ensure_mesh_color: added missing color column");
     }
     Ok(())
 }
@@ -1800,7 +1815,7 @@ const MESH_COLUMNS: &str =
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
      COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
      scratchpad, COALESCE(sandbox, 0), \
-     COALESCE(pre_spawn_pool_size, 0)";
+     COALESCE(pre_spawn_pool_size, 0), COALESCE(color, '')";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -1825,6 +1840,7 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         scratchpad: row.get(14)?,
         sandbox: row.get::<_, i32>(15)? != 0,
         pre_spawn_pool_size: row.get::<_, i32>(16)?,
+        color: parse_str(row.get::<_, String>(17)?),
     })
 }
 
@@ -1990,6 +2006,19 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
 pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
     let db = get().lock().unwrap();
     get_mesh_by_id_inner(&db, id)
+}
+
+/// Set (or clear) a mesh's accent colour. `Some(hex)` stores the `#rrggbb`
+/// string; `None` clears it back to the deterministic-palette fallback.
+/// Returns the number of rows updated so callers can surface a "mesh not
+/// found" error rather than a silent no-op (matches the zero-rows contract
+/// used by `set_mesh_sandbox` / `update_mesh_pool_size`).
+pub fn set_mesh_color(id: i64, color: Option<&str>) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET color = ?1 WHERE id = ?2",
+        params![color, id],
+    )
 }
 
 pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {

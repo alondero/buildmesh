@@ -1,14 +1,58 @@
 //! Mesh management commands
 
 use crate::db;
-use crate::models::Mesh;
+use crate::models::{Mesh, PickedFolder};
 use crate::services;
 use tauri::command;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::agent::spawn::inject_attention_hook;
 
-/// Add a mesh by opening a folder picker dialog
+/// Derive a display name (last path segment) from a picked folder, handling
+/// both the native `Path` case and the URL fallback the dialog can return.
+fn folder_display_name(folder_path: &tauri_plugin_dialog::FilePath, path: &str) -> String {
+    if let tauri_plugin_dialog::FilePath::Path(p) = folder_path {
+        std::path::Path::new(p)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                let path_str = p.to_string_lossy();
+                let sep = if path_str.contains('\\') { '\\' } else { '/' };
+                #[allow(clippy::manual_pattern_char_comparison)]
+                path_str
+                    .rsplit(|c| c == sep)
+                    .next()
+                    .unwrap_or(&p.to_string_lossy())
+                    .to_string()
+            })
+    } else {
+        // Url case — rsplit on '/' to get last path segment
+        services::mesh::name_from_path(path)
+    }
+}
+
+/// Open the native folder picker and return the chosen path + derived name,
+/// WITHOUT creating a mesh. The "New mesh" modal (location + colour) calls
+/// this so it can show the selection and let the user pick a colour before
+/// committing via `create_mesh`. Returns `None` when the user cancels.
+#[command]
+pub async fn pick_mesh_folder(app: tauri::AppHandle) -> Result<Option<PickedFolder>, String> {
+    tracing::debug!("pick_mesh_folder called");
+    let folder_path = app.dialog().file().blocking_pick_folder();
+    tracing::debug!("folder picker returned: {:?}", folder_path);
+    let Some(folder_path) = folder_path else {
+        return Ok(None);
+    };
+    let path = folder_path.to_string();
+    let name = folder_display_name(&folder_path, &path);
+    tracing::debug!("picked folder: {} ({})", path, name);
+    Ok(Some(PickedFolder { path, name }))
+}
+
+/// Add a mesh by opening a folder picker dialog. Retained for callers that
+/// want the one-shot "pick + create" behaviour; the desktop "New mesh" flow
+/// now splits this into `pick_mesh_folder` + `create_mesh` so a colour can be
+/// chosen in between.
 #[command]
 pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
     tracing::debug!("add_mesh called");
@@ -20,25 +64,7 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
 
     let path = folder_path.to_string();
     tracing::debug!("selected path: {}", path);
-    let name = if let tauri_plugin_dialog::FilePath::Path(p) = folder_path {
-        std::path::Path::new(&p)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                let path_str = p.to_string_lossy();
-                let sep = if path_str.contains('\\') { '\\' } else { '/' };
-                #[allow(clippy::manual_pattern_char_comparison)]
-                let result = path_str
-                    .rsplit(|c| c == sep)
-                    .next()
-                    .unwrap_or(&p.to_string_lossy())
-                    .to_string();
-                result
-            })
-    } else {
-        // Url case — rsplit on '/' to get last path segment
-        services::mesh::name_from_path(&path)
-    };
+    let name = folder_display_name(&folder_path, &path);
     tracing::debug!("mesh name: {}", name);
 
     let mesh = db::create_mesh(&name, &path).map_err(|e| {
@@ -49,12 +75,35 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
     Ok(mesh)
 }
 
-/// Create a new mesh
+/// Create a new mesh, optionally with a user-picked accent `color` (a
+/// `#rrggbb` hex string). `None` leaves the colour unset so the frontend
+/// falls back to the deterministic palette.
 #[command]
-pub async fn create_mesh(name: String, path: String) -> Result<Mesh, String> {
+pub async fn create_mesh(
+    name: String,
+    path: String,
+    color: Option<String>,
+) -> Result<Mesh, String> {
     let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
+    if let Some(color) = color.as_deref().filter(|c| !c.is_empty()) {
+        db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;
+    }
     inject_attention_hook(std::path::Path::new(&path));
-    Ok(mesh)
+    // Re-read so the returned mesh carries the colour we just wrote.
+    db::get_mesh_by_id(mesh.id).map_err(|e| e.to_string())
+}
+
+/// Set (or clear) a mesh's accent colour — used by the sidebar swatch's
+/// "recolour" flow. Passing `None`/empty clears it back to the palette
+/// fallback. Errors if the mesh no longer exists (zero rows updated).
+#[command]
+pub async fn update_mesh_color(mesh_id: i64, color: Option<String>) -> Result<(), String> {
+    let normalized = color.as_deref().filter(|c| !c.is_empty());
+    let rows = db::set_mesh_color(mesh_id, normalized).map_err(|e| e.to_string())?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
 }
 
 /// Create a mesh for testing without dialog (uses temp directory)

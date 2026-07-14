@@ -12,6 +12,7 @@ import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
+import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
 import type { SpawnOption } from '../../lib/groups';
 
 /// Build the tooltip text for the sidebar drift `!` badge. Lists the
@@ -113,7 +114,8 @@ export function MeshItem({
   } = useSortable({ id: mesh.id });
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const meshColor = getMeshColor(mesh.id);
+  const [recolorOpen, setRecolorOpen] = useState(false);
+  const meshColor = getMeshColor(mesh.id, mesh.color);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -294,7 +296,11 @@ export function MeshItem({
         // focusable so the per-mesh menu can return focus to its trigger
         // on Escape, without putting the row in the natural Tab order.
         tabIndex={-1}
-        className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${meshColor.border} ${
+        // The left accent shows the mesh colour. Rendered via inline style
+        // (not a Tailwind class) so a user-picked custom hex works, not just
+        // the eight palette entries.
+        style={{ borderLeftColor: meshColor.hex }}
+        className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${
           isSelected ? 'bg-bg-card' : 'hover:bg-bg-card/50'
         }`}
         onClick={() => onSelectMesh(mesh.id)}
@@ -312,6 +318,17 @@ export function MeshItem({
           >
             ⋮⋮
           </span>
+          {/* Colour swatch — clicking it opens the colour picker (issue:
+              mesh colour picker). stopPropagation so it doesn't also
+              select/deselect the mesh row. */}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setRecolorOpen(true); }}
+            title="Change mesh colour"
+            aria-label="Change mesh colour"
+            className="h-3 w-3 shrink-0 rounded-full border border-black/20 hover:scale-125 transition-transform"
+            style={{ backgroundColor: meshColor.hex }}
+          />
           <span
             id={`mesh-item-name-${mesh.id}`}
             className="font-sans font-semibold text-sm text-text-primary truncate flex-1"
@@ -390,6 +407,15 @@ export function MeshItem({
           onDelete={(e) => onDeleteNode(e, node.id)}
         />
       ))}
+
+      {recolorOpen && (
+        <MeshRecolorModal
+          meshId={mesh.id}
+          meshName={mesh.name}
+          currentColor={meshColor.hex}
+          onClose={() => setRecolorOpen(false)}
+        />
+      )}
 
       {/* Context menu — periphery actions */}
       {contextMenu && (

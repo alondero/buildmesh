@@ -382,7 +382,9 @@ pub fn run() {
             commands::agent_node::regenerate_agent_node,
             // Mesh (renamed from `*_project` to `*_mesh`).
             commands::mesh::add_mesh,
+            commands::mesh::pick_mesh_folder,
             commands::mesh::create_mesh,
+            commands::mesh::update_mesh_color,
             commands::mesh::create_test_mesh,
             commands::mesh::list_meshes,
             commands::mesh::delete_mesh,
