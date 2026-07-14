@@ -135,6 +135,63 @@ describe('useMeshStore', () => {
     });
   });
 
+  describe('createMesh', () => {
+    it('passes name/path/color to create_mesh and appends the returned mesh', async () => {
+      const created = {
+        id: 7, name: 'newmesh', path: '/new', layout: 'grid', position: 0,
+        created_at: '', color: '#38bdf8',
+      };
+      mockInvoke.mockResolvedValueOnce(created);
+
+      const result = await useMeshStore.getState().createMesh('newmesh', '/new', '#38bdf8');
+
+      expect(mockInvoke).toHaveBeenCalledWith('create_mesh', {
+        name: 'newmesh', path: '/new', color: '#38bdf8',
+      });
+      expect(result).toEqual(created);
+      const state = useMeshStore.getState();
+      expect(state.meshes).toHaveLength(1);
+      expect(state.meshesById.get(7)?.color).toBe('#38bdf8');
+    });
+
+    it('sends null color when none is provided', async () => {
+      mockInvoke.mockResolvedValueOnce({ id: 8, name: 'm', path: '/m', layout: 'grid', position: 0, created_at: '' });
+      await useMeshStore.getState().createMesh('m', '/m');
+      expect(mockInvoke).toHaveBeenCalledWith('create_mesh', { name: 'm', path: '/m', color: null });
+    });
+
+    it('returns null and sets error on failure', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('boom'));
+      const result = await useMeshStore.getState().createMesh('m', '/m', '#fff');
+      expect(result).toBeNull();
+      expect(useMeshStore.getState().error).toContain('boom');
+    });
+  });
+
+  describe('updateMeshColor', () => {
+    it('optimistically updates the color in meshes and meshesById', async () => {
+      const meshes = [
+        { id: 1, name: 'a', path: '/a', layout: 'grid' as const, position: 0, created_at: '' },
+      ];
+      useMeshStore.setState({ meshes, meshesById: new Map(meshes.map(p => [p.id, p])) });
+      mockInvoke.mockResolvedValueOnce(undefined);
+
+      await useMeshStore.getState().updateMeshColor(1, '#a78bfa');
+
+      expect(mockInvoke).toHaveBeenCalledWith('update_mesh_color', { meshId: 1, color: '#a78bfa' });
+      const state = useMeshStore.getState();
+      expect(state.meshes[0].color).toBe('#a78bfa');
+      expect(state.meshesById.get(1)?.color).toBe('#a78bfa');
+    });
+
+    it('ignores update for unknown mesh id', async () => {
+      useMeshStore.setState({ meshes: [], meshesById: new Map() });
+      mockInvoke.mockResolvedValueOnce(undefined);
+      await useMeshStore.getState().updateMeshColor(999, '#000');
+      expect(useMeshStore.getState().meshes).toEqual([]);
+    });
+  });
+
   describe('updateMeshLayout', () => {
     it('updates layout optimistically in meshes and meshesById', async () => {
       const meshes = [

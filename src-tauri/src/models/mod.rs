@@ -260,6 +260,26 @@ pub struct Mesh {
     /// (schema v22, default flipped in v24).
     #[ts(as = "i32")]
     pub pre_spawn_pool_size: i32,
+    /// User-chosen accent colour for the mesh, as a `#rrggbb` hex string.
+    /// Picked in the "New mesh" modal on creation and recolourable by
+    /// clicking the mesh's colour swatch in the sidebar. `None` means the
+    /// user never chose one, so the frontend falls back to the deterministic
+    /// palette keyed on the mesh id (`src/lib/meshColors.ts`). Persisted as
+    /// `meshes.color TEXT` (schema v25); empty/absent reads back as `None`.
+    pub color: Option<String>,
+}
+
+/// The folder chosen in the "New mesh" modal's location picker. Returned by
+/// the `pick_mesh_folder` command so the frontend can show the selected
+/// path (and derived name) before committing the create — the native folder
+/// dialog is a backend-only capability, so this splits "pick a folder" from
+/// "create the mesh" (which used to be fused in `add_mesh`). `None` from the
+/// command means the user cancelled the dialog.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PickedFolder.ts")]
+pub struct PickedFolder {
+    pub path: String,
+    pub name: String,
 }
 
 /// A paired mobile/admin client identified by a persistent per-device token

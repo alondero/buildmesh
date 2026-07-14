@@ -82,7 +82,7 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   // the same value to keep the highlight and the body in sync.
   const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === node.id);
   const meshesById = useMeshStore(state => state.meshesById);
-  const meshColor = getMeshColor(node.mesh_id);
+  const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);
 
   // Issue #736 — measure the rendered header width and bucket it into a tier
   // that decides which chips render and whether the close/max buttons live
