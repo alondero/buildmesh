@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ui-shot.mjs — drive the Buildmesh UI and save a screenshot. Two modes:
+ * ui-shot.mjs — drive the Buildmesh UI and save a screenshot. Three modes:
  *
  * 1. Desktop (default): attach to the RUNNING buildmesh-dev window over the
  *    Chrome DevTools Protocol (CDP). The dev-profile app must have been
@@ -16,18 +16,34 @@
  *    HTTP server, e.g. --url "http://127.0.0.1:2992/v2?token=<token>"
  *    (get the token via the invoke bridge: get_root_token).
  *
+ * 3. Mock (--mock): launch the pre-installed headless Chromium against a
+ *    plain Vite dev server (default http://localhost:1420) with a fake
+ *    Tauri IPC bridge injected before boot (scripts/ui-mock/tauri-mock.mjs).
+ *    No Windows, no CDP, no Rust backend — the real frontend renders with
+ *    FIXTURE data. This is the path for a headless/non-Windows host (Claude
+ *    Code on the web, CI) where modes 1–2 can't run. It proves the UI
+ *    renders + reacts, NOT that the backend behaves — treat it as a visual
+ *    smoke check, and say so in the PR. Start `npm run dev` yourself, or pass
+ *    `--serve` to have this script start (and stop) it for you.
+ *
  * Usage:
  *   node scripts/ui-shot.mjs --out shots/after.png
  *   node scripts/ui-shot.mjs --out shots/after.png --steps my-steps.mjs
  *   node scripts/ui-shot.mjs --out shots/after.png --selector "[data-session-item]"
  *   node scripts/ui-shot.mjs --out shots/mobile.png --url "http://127.0.0.1:2992/v2?token=..." --viewport 390x844
+ *   node scripts/ui-shot.mjs --out shots/after.png --mock --serve            # headless, self-hosted dev server
+ *   node scripts/ui-shot.mjs --out shots/after.png --mock --fixtures fx.mjs  # against an already-running dev server
  *
  * Options:
  *   --out <file.png>     required; parent dirs are created
  *   --cdp <port>         CDP port (default 9223, matches run-dev.ps1 -CdpPort)
  *   --url <url>          mobile-SPA mode: launch headless Chromium at this URL
- *   --viewport <WxH>     viewport size, --url mode only (default 390x844)
- *   --steps <file.mjs>   module whose default export is `async ({ page, invoke }) => {}`
+ *   --viewport <WxH>     viewport size (--url/--mock modes; default 390x844 / 1440x900)
+ *   --mock               mock mode: headless Chromium + fake Tauri IPC (see above)
+ *   --mock-url <url>     dev-server URL for --mock (default http://localhost:1420)
+ *   --fixtures <file>    --mock only: .mjs/.json overriding the default IPC fixtures
+ *   --serve              --mock only: start `npm run dev` and wait for it (auto-stops)
+ *   --steps <file.mjs>   module whose default export is `async ({ page, invoke, mock }) => {}`
  *                        run before the screenshot (click, fill, wait, assert…)
  *   --selector <css>     screenshot only this element (default: full window/page)
  *   --invoke-port <n>    HTTP test-bridge port for the `invoke` helper
@@ -36,25 +52,63 @@
  * The `invoke` helper POSTs to the backend's HTTP test bridge, e.g.
  *   await invoke('create_test_mesh', { name: 'Shot fixture' })
  * Only commands routed in src-tauri/src/commands/test.rs are available there;
- * everything else should be driven through the UI via `page`.
+ * everything else should be driven through the UI via `page`. In --mock mode
+ * there is no bridge — steps get a `mock` helper instead:
+ *   await mock.on('list_meshes', [...]);      // override an IPC response
+ *   await mock.emit('node-status-changed', { nodeId: 1 });  // push a backend event
  *
  * Exit codes: 0 = screenshot written; 1 = any failure (message on stderr).
  * A throwing steps module fails the run — use that for functional assertions.
  */
 import { chromium } from 'playwright';
-import { mkdirSync } from 'fs';
-import { dirname, resolve } from 'path';
+import { mkdirSync, existsSync } from 'fs';
+import { dirname, resolve, join } from 'path';
 import { pathToFileURL } from 'url';
+import { spawn } from 'child_process';
+import { buildInitScript, loadFixtures } from './ui-mock/tauri-mock.mjs';
+
+/**
+ * Launch Chromium, tolerating a host whose pre-installed browser doesn't
+ * match the build Playwright pins (headless CI / Claude Code on the web,
+ * where `PLAYWRIGHT_BROWSERS_PATH` points at a system Chromium). On a normal
+ * dev box the bundled browser is found and this is a plain launch.
+ *
+ * Resolution order for the executable:
+ *   1. --chromium <path> / BUILDMESH_CHROMIUM env (explicit override)
+ *   2. plain launch (bundled browser — the Windows/dev path)
+ *   3. $PLAYWRIGHT_BROWSERS_PATH/chromium (the symlink the web env provides)
+ */
+async function launchChromium(opts = {}) {
+  const override = arg('chromium', process.env.BUILDMESH_CHROMIUM);
+  if (override) return chromium.launch({ ...opts, executablePath: override });
+  try {
+    return await chromium.launch(opts);
+  } catch (e) {
+    const base = process.env.PLAYWRIGHT_BROWSERS_PATH;
+    const candidate = base && join(base, 'chromium');
+    if (candidate && existsSync(candidate)) {
+      return chromium.launch({ ...opts, executablePath: candidate });
+    }
+    throw e;
+  }
+}
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);
   return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
+function flag(name) {
+  return process.argv.includes(`--${name}`);
+}
 
 const out = arg('out');
 const cdpPort = Number(arg('cdp', '9223'));
 const url = arg('url');
-const viewport = arg('viewport', '390x844');
+const mock = flag('mock');
+const mockUrl = arg('mock-url', 'http://localhost:1420');
+const fixturesFile = arg('fixtures');
+const serve = flag('serve');
+const viewport = arg('viewport', mock ? '1440x900' : '390x844');
 const stepsFile = arg('steps');
 const selector = arg('selector');
 const invokePort = Number(arg('invoke-port', '2991'));
@@ -62,6 +116,35 @@ const invokePort = Number(arg('invoke-port', '2991'));
 if (!out) {
   console.error('Missing --out <file.png>');
   process.exit(1);
+}
+
+/**
+ * --mock --serve: start `npm run dev` and resolve once it answers on
+ * `mockUrl`. Returns the child process (so we can kill it) or null when the
+ * dev server is already up (we reuse it and leave it running).
+ */
+async function startDevServer() {
+  const alreadyUp = await fetch(mockUrl).then((r) => r.ok).catch(() => false);
+  if (alreadyUp) {
+    console.log(`Reusing dev server already listening at ${mockUrl}`);
+    return null;
+  }
+  console.log('Starting `npm run dev` …');
+  const child = spawn('npm', ['run', 'dev'], {
+    cwd: resolve(dirname(new URL(import.meta.url).pathname), '..'),
+    stdio: 'ignore',
+    detached: false,
+  });
+  const start = Date.now();
+  while (Date.now() - start < 60000) {
+    if (await fetch(mockUrl).then((r) => r.ok).catch(() => false)) {
+      console.log(`Dev server ready at ${mockUrl}`);
+      return child;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  child.kill();
+  throw new Error(`Dev server did not come up at ${mockUrl} within 60s`);
 }
 
 async function invoke(cmd, args = {}) {
@@ -77,9 +160,43 @@ async function invoke(cmd, args = {}) {
 }
 
 async function getPage() {
+  if (mock) {
+    const [w, h] = viewport.split('x').map(Number);
+    const devServer = serve ? await startDevServer() : null;
+    const browser = await launchChromium();
+    try {
+      const page = await browser.newPage({ viewport: { width: w || 1440, height: h || 900 } });
+      // Install the fake Tauri IPC before ANY app module runs.
+      await page.addInitScript(buildInitScript(await loadFixtures(fixturesFile)));
+      // Surface app-side crashes (a React error, an unhandled rejection) on
+      // stderr so a mock render that "renders blank" is diagnosable.
+      page.on('pageerror', (e) => console.error('[page error]', e.message));
+      // NOT networkidle: index.html preconnects to Google Fonts, which never
+      // settles on an offline/proxied host. Wait for the DOM, then for the app
+      // to actually mount something under #root.
+      await page.goto(mockUrl, { waitUntil: 'domcontentloaded' }).catch((e) => {
+        throw new Error(
+          `Could not load ${mockUrl}. Start the dev server (\`npm run dev\`), ` +
+          `or pass --serve to have this script start it.\n${e.message}`
+        );
+      });
+      await page.waitForFunction(() => {
+        const r = document.getElementById('root');
+        return r && r.childElementCount > 0;
+      }, { timeout: 15000 }).catch(() => {
+        console.error('[tauri-mock] #root never populated — the app may have crashed; screenshotting anyway.');
+      });
+      return { browser, page, devServer };
+    } catch (e) {
+      // Don't leak the browser or a dev server we spawned if setup failed.
+      await browser.close().catch(() => {});
+      if (devServer) devServer.kill();
+      throw e;
+    }
+  }
   if (url) {
     const [w, h] = viewport.split('x').map(Number);
-    const browser = await chromium.launch();
+    const browser = await launchChromium();
     const page = await browser.newPage({ viewport: { width: w || 390, height: h || 844 } });
     await page.goto(url, { waitUntil: 'networkidle' });
     return { browser, page };
@@ -102,12 +219,18 @@ async function getPage() {
   return { browser, page };
 }
 
-const { browser, page } = await getPage();
+const { browser, page, devServer } = await getPage();
+// In --mock mode steps drive fixtures/events through the page instead of the
+// HTTP bridge (which has no backend here).
+const mockHelper = {
+  on: (cmd, value) => page.evaluate(([c, v]) => window.__BUILDMESH_MOCK__.on(c, v), [cmd, value]),
+  emit: (event, payload) => page.evaluate(([e, p]) => window.__BUILDMESH_MOCK__.emit(e, p), [event, payload]),
+};
 try {
   if (stepsFile) {
     const mod = await import(pathToFileURL(resolve(stepsFile)).href);
     if (typeof mod.default !== 'function') throw new Error(`${stepsFile} must default-export an async function`);
-    await mod.default({ page, invoke });
+    await mod.default({ page, invoke, mock: mockHelper });
   }
 
   mkdirSync(dirname(resolve(out)), { recursive: true });
@@ -121,6 +244,8 @@ try {
   console.log(`Saved ${out} (page: ${page.url()})`);
 } finally {
   // In CDP mode this detaches from the app without closing it;
-  // in --url mode it closes the headless browser.
+  // in --url/--mock mode it closes the headless browser.
   await browser.close();
+  // Only stop a dev server WE started (--serve); a reused one is left up.
+  if (devServer) devServer.kill();
 }
