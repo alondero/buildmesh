@@ -4,6 +4,17 @@ import userEvent from '@testing-library/user-event';
 import { ProviderDropdown } from '../../src/components/Sidebar/ProviderDropdown';
 import { colorClassForProvider, type SpawnOption } from '../../src/lib/groups';
 
+// `SafeLink` (rendered by the issue #822 empty state) routes its click
+// through `openUrl` — Tauri 2 drops `target="_blank"` without the
+// webview-window capability. Stub it so the empty-state link is inert
+// under jsdom.
+const { openUrlMock } = vi.hoisted(() => ({
+  openUrlMock: vi.fn<[], Promise<void>>().mockResolvedValue(undefined),
+}));
+vi.mock('@tauri-apps/plugin-opener', () => ({
+  openUrl: openUrlMock,
+}));
+
 // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape. Test
 // fixtures here stand in for the backend's grouped, harness-ordered list;
 // a fixture row that's the only one in its bucket is a native harness
@@ -71,6 +82,43 @@ describe('ProviderDropdown', () => {
   it('renders nothing actionable when the provider list is empty', () => {
     render(<ProviderDropdown meshId={1} providers={[]} onSelect={() => {}} />);
     expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  describe('first-run empty state (issue #822)', () => {
+    // A fresh machine with no agent CLI detected and no keyed provider gets
+    // a Terminal-only menu. The empty-state panel explains what to install;
+    // Terminal stays clickable below it.
+    const TERMINAL_ONLY: SpawnOption[] = [
+      { id: 'terminal', label: 'Terminal', color: 'bg-gray-500', icon: 'T', harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal' },
+    ];
+
+    it('shows the "No agent CLIs found" panel when only Terminal is offered', () => {
+      render(<ProviderDropdown meshId={1} providers={TERMINAL_ONLY} onSelect={() => {}} />);
+      expect(screen.getByTestId('spawn-menu-empty-state')).toBeTruthy();
+      expect(screen.getByText('No agent CLIs found')).toBeTruthy();
+      // Terminal is still spawnable below the hint.
+      expect(screen.getByRole('button', { name: /Terminal/ })).toBeTruthy();
+    });
+
+    it('links to the README prerequisites via openUrl (Tauri 2 routing)', async () => {
+      render(<ProviderDropdown meshId={1} providers={TERMINAL_ONLY} onSelect={() => {}} />);
+      await userEvent.click(screen.getByRole('link', { name: /View setup instructions/ }));
+      expect(openUrlMock).toHaveBeenCalledWith('https://github.com/alondero/buildmesh#prerequisites');
+    });
+
+    it('hides the panel once a real agent harness is present', () => {
+      render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
+      expect(screen.queryByTestId('spawn-menu-empty-state')).toBeNull();
+    });
+
+    it('hides the panel when a keyed Proxied provider is present even without a native harness', () => {
+      const proxiedOnly: SpawnOption[] = [
+        { id: 'claude:minimax', label: 'MiniMax', color: 'bg-indigo-500', icon: 'M', harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
+        { id: 'terminal', label: 'Terminal', color: 'bg-gray-500', icon: 'T', harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal' },
+      ];
+      render(<ProviderDropdown meshId={1} providers={proxiedOnly} onSelect={() => {}} />);
+      expect(screen.queryByTestId('spawn-menu-empty-state')).toBeNull();
+    });
   });
 
   it('renders a harness-grouped menu (issue #575) with no "Legacy" header', () => {

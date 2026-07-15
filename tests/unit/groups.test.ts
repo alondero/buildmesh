@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 import {
   groupByHarness,
+  hasSpawnableAgent,
   mapBackendProviders,
   colorClassForProvider,
   type SpawnOption,
@@ -98,6 +99,39 @@ describe('groupByHarness', () => {
     expect(groupByHarness(providers).map(([k, v]) => [k, v.map((p) => p.id)])).toEqual([
       ['claude', ['claude', 'claude:mm']],
     ]);
+  });
+});
+
+describe('hasSpawnableAgent', () => {
+  it('is false when the menu is empty (no meshes-style edge case)', () => {
+    expect(hasSpawnableAgent([])).toBe(false);
+  });
+
+  it('is false when only the Terminal harness is present (fresh machine, issue #822)', () => {
+    // No agent CLI detected and no keyed provider → backend emits only the
+    // code-defined Terminal harness. This is the onboarding empty state.
+    expect(hasSpawnableAgent([row('terminal', 'terminal', false)])).toBe(false);
+  });
+
+  it('is true when a native agent harness is present', () => {
+    expect(
+      hasSpawnableAgent([
+        row('claude', 'claude', false),
+        row('terminal', 'terminal', false),
+      ]),
+    ).toBe(true);
+  });
+
+  it('is true when a keyed Proxied provider is the only non-terminal option', () => {
+    // A keyed account surfaces a Proxied row under a non-terminal harness id
+    // even when the Claude binary is absent — so "provider keyed" counts as
+    // spawnable and suppresses the empty state.
+    expect(
+      hasSpawnableAgent([
+        row('claude:minimax', 'claude', true),
+        row('terminal', 'terminal', false),
+      ]),
+    ).toBe(true);
   });
 });
 
