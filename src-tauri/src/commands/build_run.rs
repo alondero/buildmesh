@@ -128,11 +128,8 @@ static BUILD_RUN_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<BuildRunRegistry>>> =
 ///
 /// Shell choice per platform (terminal mode):
 /// - Wsl → `wsl.exe` (default user's login shell, cwd is the WSL path)
-/// - macOS → `sh`
+/// - macOS / native Linux → `sh` (any non-Windows host: no WSL, no PowerShell)
 /// - Windows → `powershell.exe` (per user preference; ANSI renders in PTY)
-/// - Linux → `sh` (matches the build/run macOS branch; both are
-///   `cfg!(target_os = "macos") == false` in practice on Windows builds,
-///   but the value is correct on macOS/Linux dev builds too)
 fn build_shell_command(
     mode: BuildRunMode,
     command: &str,
@@ -141,7 +138,8 @@ fn build_shell_command(
     if mode == BuildRunMode::Terminal {
         if env_type == crate::models::EnvType::Wsl {
             CommandBuilder::new("wsl.exe")
-        } else if cfg!(target_os = "macos") {
+        } else if !cfg!(target_os = "windows") {
+            // macOS and native Linux: POSIX `sh` (no WSL, no PowerShell).
             CommandBuilder::new("sh")
         } else {
             CommandBuilder::new("powershell.exe")
@@ -151,7 +149,8 @@ fn build_shell_command(
         c.arg("-e");
         c.arg(command);
         c
-    } else if cfg!(target_os = "macos") {
+    } else if !cfg!(target_os = "windows") {
+        // macOS and native Linux: POSIX `sh -c <command>`.
         let mut c = CommandBuilder::new("sh");
         c.arg("-c");
         c.arg(command);

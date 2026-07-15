@@ -232,7 +232,12 @@ pub fn git_path() -> PathBuf {
 
 /// Determine the environment for a given session path
 pub fn env_for_path(path: &Path) -> Environment {
-    if cfg!(target_os = "macos") {
+    // WSL only exists on a Windows host. On macOS and native Linux every path is
+    // host-native, so a `/home/...` or `/mnt/...` path must NOT be classified as
+    // WSL — doing so on Linux would route spawns through `wsl.exe` and rewrite
+    // paths to bogus `\\wsl$\...` UNC form. (`Environment::Windows` is the
+    // "native host, no translation" variant here, despite the name.)
+    if !cfg!(target_os = "windows") {
         return Environment::Windows;
     }
 
@@ -252,6 +257,15 @@ pub fn env_for_path(path: &Path) -> Environment {
 /// Convert a path from session internal form to host-readable form
 /// (e.g., /home/user -> \\wsl$\Ubuntu\home\user, /mnt/c/Users -> C:\Users, /c/Users -> C:\Users)
 pub fn to_host_path(path: &str) -> String {
+    // Only a Windows host has a WSL filesystem to translate into (`\\wsl$\...`
+    // UNC paths, drive letters). On macOS and native Linux the path is already
+    // host-native, so return it unchanged — otherwise a normal Linux
+    // `/home/...` path would be rewritten to a `\\wsl$\...` UNC path that no
+    // git2/file op on that host can open.
+    if !cfg!(target_os = "windows") {
+        return path.to_string();
+    }
+
     if path.starts_with('/') {
         if path.starts_with("/mnt/") {
             // /mnt/c/Users -> C:\Users
@@ -328,9 +342,11 @@ pub fn resolve_agent_path(base_path: &str, worktree_name: Option<&str>) -> Resol
     let env_internal = env_for_path(&path_buf);
     let env_type = EnvType::from(env_internal);
 
-    // On macOS, paths are always native — no WSL conversion needed.
-    // On Windows, convert based on detected environment.
-    let (host_path, spawn_path) = if cfg!(target_os = "macos") {
+    // On macOS and native Linux, paths are always host-native — no WSL
+    // conversion needed. Only a Windows host translates based on the detected
+    // environment (WSL agents need `\\wsl$\...` host paths + `/mnt/...` spawn
+    // paths).
+    let (host_path, spawn_path) = if !cfg!(target_os = "windows") {
         (raw_path.clone(), raw_path.clone())
     } else {
         let host = to_host_path(&raw_path);
@@ -446,14 +462,27 @@ pub fn active_node_branches(nodes: &[AgentNode]) -> Vec<String> {
 /// Get the .claude directory for session storage in the correct environment
 pub fn claude_dir() -> PathBuf {
     match current_env() {
-        Environment::Wsl => PathBuf::from("/mnt/c/Users/alond/.claude"),
+        Environment::Wsl => {
+            // Buildmesh running inside a Unix/WSL userland: the agent CLI writes
+            // its config to `$HOME/.claude`, the standard Claude Code location.
+            // Resolve it dynamically instead of hardcoding a specific user.
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".claude")
+            } else {
+                PathBuf::from("/root/.claude")
+            }
+        }
         Environment::Windows => {
             if let Ok(home) = env::var("USERPROFILE") {
                 PathBuf::from(home).join(".claude")
             } else if let Ok(home) = env::var("HOME") {
                 PathBuf::from(home).join(".claude")
             } else {
-                PathBuf::from("C:/Users/alond/.claude")
+                // USERPROFILE and HOME both unset — effectively impossible on a
+                // real Windows session. Derive from the account name rather than
+                // a hardcoded user.
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}\\.claude"))
             }
         }
     }

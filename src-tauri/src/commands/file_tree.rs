@@ -211,17 +211,39 @@ mod tests {
         assert_eq!(result, "C:\\Users\\test\\file.txt");
     }
 
+    // WSL translation only happens on a Windows host (that's the only host with
+    // a WSL filesystem). These two assert the Windows-side conversion, so they
+    // are gated to Windows — on macOS/Linux `to_host_path` is an identity
+    // pass-through (see `test_to_host_path_is_identity_off_windows`).
+    #[cfg(target_os = "windows")]
     #[test]
     fn test_to_host_path_converts_linux_path() {
         let result = to_host_path("/home/user/file.txt".to_string());
-        assert!(result.contains("\\wsl$"), "Should convert to UNC path");
+        assert!(result.contains("\\wsl$"), "Should convert to UNC path"); // allow-wsl-path
         assert!(result.contains("\\home\\user\\file.txt"), "Should use backslashes");
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn test_to_host_path_converts_mnt_path() {
         let result = to_host_path("/mnt/c/Users/test/file.txt".to_string());
         assert_eq!(result, "C:\\Users\\test\\file.txt");
+    }
+
+    /// On macOS / native Linux there is no WSL to translate into, so a POSIX
+    /// path must be returned unchanged rather than rewritten to a WSL UNC path
+    /// (readiness fix — otherwise git/diff/file-tree break on Linux).
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_to_host_path_is_identity_off_windows() {
+        assert_eq!(
+            to_host_path("/home/user/file.txt".to_string()),
+            "/home/user/file.txt"
+        );
+        assert_eq!(
+            to_host_path("/mnt/c/Users/test/file.txt".to_string()),
+            "/mnt/c/Users/test/file.txt"
+        );
     }
 
     #[test]
