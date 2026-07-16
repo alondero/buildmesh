@@ -396,6 +396,7 @@ pub fn run() {
             // App preferences (buildmesh-wide)
             commands::preferences::get_app_preferences,
             commands::preferences::set_app_default_provider,
+            commands::preferences::set_app_naming_provider,
             commands::preferences::set_harness_order,
             commands::preferences::get_provider_accounts,
             commands::preferences::upsert_provider_account,

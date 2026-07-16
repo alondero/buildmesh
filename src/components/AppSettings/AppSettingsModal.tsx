@@ -390,6 +390,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [revokingId, setRevokingId] = useState<number | null>(null);
   const [lanEnabled, setLanEnabled] = useState(false);
   const [lanBusy, setLanBusy] = useState(false);
+  // Issue #824: the user-configured rename backend. `null` means
+  // auto-naming is OFF (the post-v2 default). Distinct from `selected`
+  // above (default provider for spawn), since rename runs frequently on
+  // trivial content and shouldn't inherit the node's model.
+  const [namingProvider, setNamingProvider] = useState<string | null>(null);
+  const [namingSaving, setNamingSaving] = useState(false);
+  // `loaded` flag carries over from the existing hydration logic below;
+  // mirrored here so the rename picker only enables after the
+  // preferences load resolves.
   // Realized exposure (issue #586). Mirrors `lanEnabled` (DB intent) until a
   // mismatch is detected — `lanEnabled=true` with no interfaces means the
   // toggle is on but the server is still loopback-only (TLS init failure, no
@@ -436,6 +445,10 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     providersRef.current = providers;
   }, [providers]);
   const selectedRef = useRef<string>(NO_OVERRIDE);
+  // Mirror of `namingProvider` for the same closure-rollback reason as
+  // `selectedRef` (issue #581): a rapid second change rolls back to
+  // the value as of its own selection, not to a stale render snapshot.
+  const namingRef = useRef<string | null>(null);
   useEffect(() => {
     selectedRef.current = selected;
   }, [selected]);
@@ -476,6 +489,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         loadPairingData(providerList);
         const stored = prefs.default_provider;
         setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
+        // Issue #824: the rename-backend picker reads from the same
+        // `AppPreferences` snapshot. `null` here is intentional — that's
+        // the default (auto-naming off until the user opts in). Empty
+        // strings are normalised to `null` so the UI treats a frontend
+        // "" clear the same as the explicit None the backend accepts.
+        const storedNaming = prefs.naming_provider;
+        setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
         setDevices(deviceList);
@@ -620,6 +640,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setError(String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Issue #824: persist the rename backend. Distinct from `handleSave`
+  // above — auto-naming runs frequently on trivial content, so it lives
+  // on its own picker with its own optimistic-rollback ref. Empty
+  // string is normalised to `null` so the picker value reads as
+  // "auto-naming off" rather than as some bizarre empty id.
+  const handleSaveNaming = async (newValue: string | null) => {
+    const previous = namingRef.current;
+    const next = newValue && newValue.length > 0 ? newValue : null;
+    namingRef.current = next;
+    setNamingProvider(next);
+    setNamingSaving(true);
+    setError(null);
+    try {
+      await api.setAppNamingProvider(next);
+    } catch (e) {
+      namingRef.current = previous;
+      setNamingProvider(previous);
+      setError(String(e));
+    } finally {
+      setNamingSaving(false);
     }
   };
 
@@ -822,6 +865,51 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               <option key={p.id} value={p.id}>{p.label}</option>
             ))}
           </select>
+        </div>
+
+        {/* Issue #824: Auto-naming. Distinct from default-provider above.
+            Auto-naming runs frequently on trivial content, so the user
+            explicitly opts in via this picker. The helper pins a cheap
+            haiku tier when "anthropic" is picked so the user's main
+            subscription default is never silently inherited. Empty /
+            "Disabled" leaves nodes with their random adj-adj-noun
+            slugs. */}
+        <div className="mt-8 pt-5 border-t border-border-subtle space-y-4">
+          <label className="block text-lg font-medium text-text-secondary">
+            Auto-naming
+          </label>
+          <p className="text-base text-text-muted">
+            When a node finishes a turn, Buildmesh can ask a small LLM to summarise
+            the work into a slug (e.g. <code>fix-auth-flow</code>) instead of the
+            default <code>bold-keen-brook</code>. Auto-naming runs frequently on
+            trivial content — pick a cheap backend so an Opus-class node doesn't
+            burn tokens on every rename.
+          </p>
+          <select
+            value={namingProvider ?? ''}
+            disabled={!loaded || namingSaving}
+            onChange={e => handleSaveNaming(e.target.value || null)}
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          >
+            <option value="">Disabled (auto-naming off)</option>
+            {providers
+              .filter((p) => p.id !== 'terminal')
+              .map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+          </select>
+          {namingProvider === 'anthropic' && (
+            <p className="text-sm text-text-muted">
+              Built-in Anthropic is pinned to a haiku tier so the rename doesn't
+              inherit your main subscription default.
+            </p>
+          )}
+          {namingProvider === null && (
+            <p className="text-sm text-text-muted">
+              Auto-naming is off. New nodes keep random adjective-adjective-noun
+              slugs. You can always rename manually from the sidebar.
+            </p>
+          )}
         </div>
 
         {error && (

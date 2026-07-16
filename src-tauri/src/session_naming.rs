@@ -751,18 +751,30 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
 }
 
 fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle) {
+    // User-config gate (issue #824 v2): auto-naming is opt-in via
+    // Settings → Auto-naming. `None` (the default for users who never
+    // visited that page) skips the rename entirely — the node keeps its
+    // random `adjective-adjective-noun` slug. Distinct from the
+    // previously-shipped `node.provider` lookup, which would route through
+    // whatever model the spawned node is on (could be Opus with xhigh
+    // effort). The point of this gate is to *opt in*, never to inherit.
+    let Some(user_naming_provider) = crate::preferences::naming_provider() else {
+        return;
+    };
+
     let Some(trigger) = should_trigger_rename(repo, node_id) else {
         return;
     };
-    let RenameTrigger { buffer, provider } = trigger;
+    let RenameTrigger { buffer, provider: _ } = trigger;
 
     tracing::info!("session_naming: triggering rename for node {} ({} chars)", node_id, buffer.len());
 
     // Resolve the LLM-call env once at trigger time so a node's configured
     // backend (or the built-in Anthropic default) is honoured by
-    // `summarize_and_rename_with`. The provider comes from the same row
-    // `should_trigger_rename` already read — no second DB hit per turn.
-    let backend_env = naming_backend_env(&provider);
+    // `summarize_and_rename_with`. The provider comes from
+    // `AppPreferences.naming_provider` — NOT `node.provider`. The
+    // default is "disabled"; the user explicitly opts in.
+    let backend_env = naming_backend_env(&user_naming_provider);
 
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -935,59 +947,63 @@ fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 // Internal: LLM-based summarization
 // ---------------------------------------------------------------------------
 
-/// Pure routing decision. Each input is fed in via a closure so tests can
-/// stub the disk-reading helpers (`preferences::resolve_provider_env`,
-/// `provider_conf::minimax_backend_env`) without touching real preferences
-/// or the user's `~/.claude/providers.conf`. Production callers pass the
-/// real helpers via [`naming_backend_env`].
-pub(crate) fn naming_backend_env_with<
-    F1: FnOnce() -> Vec<(String, String)>,
-    F2: FnOnce() -> Vec<(String, String)>,
-    F3: FnOnce() -> bool,
->(
-    resolve_provider_env: F1,
-    legacy_minimax_has_token: F3,
-    legacy_minimax: F2,
-) -> Vec<(String, String)> {
-    let resolved = resolve_provider_env();
-    if !resolved.is_empty() {
-        return resolved;
+/// Pure routing decision. The single input is fed in via a closure so
+/// tests can stub the disk-reading helper
+/// (`preferences::resolve_provider_env`) without touching real
+/// preferences. Production callers pass the real helper via
+/// [`naming_backend_env`].
+///
+/// Routing (issue #824 v2 — after the user-review pivot to a dedicated
+/// Settings config):
+/// 1. **User-configured `naming_provider`** (a spawn-option id from
+///    [`crate::preferences::naming_provider`]). Honours whatever the user
+///    picked — a Provider Account, a built-in like `"anthropic"`, etc.
+///    This is the *only* layer the user can opt into; the node's own
+///    provider is intentionally **not** consulted (auto-rename runs
+///    frequently on trivial content, see the `#824` review follow-up).
+/// 2. **Empty / unset** — caller should not invoke `summarize_and_rename_with`
+///    at all (auto-naming is off). Returning an empty Vec here is a safety
+///    net for the "user set a value that didn't resolve to an env" path;
+///    the higher-level `on_turn_with` short-circuits on `Option::None`
+///    before the helper is consulted.
+///
+/// Legacy `~/.claude/providers.conf` MiniMax is no longer the implicit
+/// fallback. A user who wants cheap MiniMax renames now picks
+/// `"minimax"` (or the configured `claude:minimax` account id) in
+/// Settings → Auto-naming explicitly, mirroring the same opt-in shape as
+/// every other rename backend. The historic `minimax_backend_env()` is
+/// kept for any future regression check or one-shot tooling, but is no
+/// longer called from the rename path.
+pub(crate) fn naming_backend_env_with<F>(provider: &str, resolve_provider_env: F) -> Vec<(String, String)>
+where
+    F: FnOnce(&str) -> Vec<(String, String)>,
+{
+    if provider.is_empty() {
+        return Vec::new();
     }
-    // Gated on a separate "key present?" probe so a no-key user does NOT
-    // pay the cost of reading `~/.claude/providers.conf` and triggering
-    // `minimax_backend_env`'s `tracing::error!` ("no MINIMAX_API_KEY ...
-    // claude --print will fail to authenticate") on every node turn. That
-    // log was the original #824 noise signal; the gate keeps it dormant
-    // when the user has nothing configured. (#824 follow-up: review
-    // surfaced the unconditional call as a std/standards-axis hard
-    // violation, see commit log.)
-    if legacy_minimax_has_token() {
-        return legacy_minimax();
+    if provider == "anthropic" {
+        // Built-in Anthropic with a pinned haiku tier. The exact model name
+        // is whichever Anthropic ships Claude Code with by default — we
+        // deliberately don't pin a date-suffixed model name here (those
+        // burn out and need updating alongside Anthropic's release cycle;
+        // Claude Code's own haiku resolver picks the current default).
+        return vec![(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            "claude-3-5-haiku-latest".to_string(),
+        )];
     }
-    Vec::new()
+    resolve_provider_env(provider)
 }
 
-/// Production wrapper: resolve the naming-side-channel env for a node given
-/// its `provider` (spawn-option id from `AgentNode.provider`).
-///
-/// Routing order (issue #824):
-/// 1. The node's own provider env (a configured `ProviderAccount` for the
-///    node's `spawn_option_id`). Honours whatever the user set up for that
-///    specific node — MiniMax, Kimi, OpenRouter, custom endpoints, anything.
-/// 2. Legacy `~/.claude/providers.conf` `MINIMAX_API_KEY` — preserved for
-///    users who depended on the side-channel before the Provider-Accounts
-///    migration (#538) and haven't moved to a buildmesh account. Fires only
-///    when the key is actually present (a base-URL-only fixture injects
-///    nothing — the bug class #824 closes).
-/// 3. Built-in Anthropic subscription — empty Vec. The caller clears
-///    inherited `CLAUDE_BACKEND_ENV_VARS` so `claude --print` runs against
-///    the user's normal auth (OAuth/`~/.claude/.credentials.json`).
+/// Production wrapper: resolve the naming-side-channel env for the user's
+/// configured `naming_provider` (spawn-option id from
+/// `AppPreferences.naming_provider`). See [`naming_backend_env_with`] for
+/// the routing contract; this is the thin caller-friendly version that
+/// resolves via [`crate::preferences::resolve_provider_env`].
 pub(crate) fn naming_backend_env(provider: &str) -> Vec<(String, String)> {
-    naming_backend_env_with(
-        || crate::preferences::resolve_provider_env(provider),
-        || crate::agent::provider::provider_conf::minimax_api_key_present(),
-        || crate::agent::provider::provider_conf::minimax_backend_env(),
-    )
+    naming_backend_env_with(provider, |p| {
+        crate::preferences::resolve_provider_env(p)
+    })
 }
 
 async fn summarize_and_rename_with(
@@ -2201,140 +2217,107 @@ mod tests {
         );
     }
 
-    // --- gh824: session auto-naming must not hardwire to MiniMax ---
+    // --- gh824: session auto-naming must respect the user-configured provider ---
 
-    /// Empty inputs (no provider account, no legacy token, key absent) →
-    /// empty env. The caller clears inherited `CLAUDE_BACKEND_ENV_VARS`
-    /// and `claude --print` runs against the user's built-in Anthropic
-    /// subscription. This is the #824 fix: previously the code
-    /// unconditionally injected `minimax_backend_env()`, so any user
-    /// without a MiniMax key got silent auth failures instead of a
-    /// working rename against their own plan.
+    /// Unset `naming_provider` → empty Vec → caller skips rename entirely
+    /// (auto-naming is off). This is the post-v2 default: the user
+    /// must opt in via Settings → Auto-naming.
     #[test]
-    fn naming_backend_env_with_empty_inputs_returns_empty() {
+    fn naming_backend_env_with_unset_provider_returns_empty() {
+        let probed = std::sync::atomic::AtomicUsize::new(0);
+        let probed_ref = &probed;
         let env = naming_backend_env_with(
-            || Vec::new(),
-            || false, // key absent → don't probe the legacy env
-            || Vec::new(),
-        );
-        assert!(env.is_empty(), "expected empty env, got: {:?}", env);
-    }
-
-    /// Legacy fallback is gated on a separate "key present?" probe — the
-    /// legacy env is *not* built (and `minimax_backend_env`'s
-    /// `tracing::error!` is not fired) when no key is configured. Without
-    /// this gate the per-turn log spam the #824 bug class was about
-    /// would persist even after the routing fix.
-    #[test]
-    fn naming_backend_env_with_legacy_ungated_when_key_absent() {
-        // The legacy closure would build a fully-formed env if called. We
-        // use a non-empty legacy payload deliberately so a regression that
-        // calls the closure unconditionally would surface with an
-        // `assert_eq!` on env, not a hidden log.
-        let probed_legacy_calls = std::sync::atomic::AtomicUsize::new(0);
-        let probed_legacy_calls_inner = &probed_legacy_calls;
-        let env = naming_backend_env_with(
-            || Vec::new(),         // no node-provider env
-            || false,              // no key present
-            || {
-                probed_legacy_calls_inner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                vec![(
-                    "ANTHROPIC_AUTH_TOKEN".to_string(),
-                    "sk-should-not-fire".to_string(),
-                )]
+            "",
+            |_p| {
+                probed_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
             },
         );
-        assert!(
-            env.is_empty(),
-            "key-absent fallback should not pull legacy env; got: {:?}",
-            env
-        );
+        assert!(env.is_empty(), "unset provider must not invoke the resolve closure");
         assert_eq!(
-            probed_legacy_calls.load(std::sync::atomic::Ordering::SeqCst),
+            probed.load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "key-absent fallback must not invoke the legacy env closure"
+            "unset provider must NOT call resolve_provider_env (avoid disk reads)"
         );
     }
 
-    /// Legacy fallback fires when the key-present probe returns true.
-    /// This is the backwards-compat path for users who set a
-    /// `MINIMAX_API_KEY` in `~/.claude/providers.conf` and never migrated
-    /// to a Provider Account.
+    /// Built-in Anthropic subscription → pinned haiku tier. The point of
+    /// this branch is to ensure `claude --print` does NOT silently pick
+    /// up the user's main subscription default (issue #824 review:
+    /// routing through whatever model the node is on would burn
+    /// Opus-tier tokens on a trivial summarisation).
     #[test]
-    fn naming_backend_env_with_legacy_fires_when_key_present() {
-        let legacy = vec![
-            (
-                "ANTHROPIC_AUTH_TOKEN".to_string(),
-                "sk-legacy".to_string(),
-            ),
-            (
-                "ANTHROPIC_BASE_URL".to_string(),
-                "https://api.minimax.io/anthropic".to_string(),
-            ),
-        ];
-        let resolved: Vec<(String, String)> = Vec::new();
+    fn naming_backend_env_with_anthropic_pins_haiku() {
+        let probed = std::sync::atomic::AtomicUsize::new(0);
+        let probed_ref = &probed;
         let env = naming_backend_env_with(
-            || resolved,
-            || true, // key present
-            || legacy.clone(),
+            "anthropic",
+            |_p| {
+                probed_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
+            },
         );
-        assert_eq!(env, legacy);
+        assert_eq!(probed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        assert!(
+            map.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            "built-in Anthropic must pin haiku; got: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !map.is_empty(),
+            "anthropic branch must return SOMETHING (the haiku pin)"
+        );
     }
 
-    /// When the node's own provider resolves to a non-empty env (a
-    /// configured account), that env wins — legacy is ignored. Covers
-    /// configured MiniMax / Kimi / OpenRouter / custom endpoints, all of
-    /// which should override the legacy `providers.conf` MiniMax path.
+    /// Configured provider-account pick → forwards through resolve_provider_env.
+    /// Whatever the user set up in Settings → Auto-naming is what runs.
     #[test]
-    fn naming_backend_env_with_resolved_wins_over_legacy() {
-        let resolved = vec![(
+    fn naming_backend_env_with_configured_account_forwards_resolve() {
+        let configured = vec![(
             "ANTHROPIC_BASE_URL".to_string(),
             "https://configured.example/anthropic".to_string(),
         )];
-        let legacy = vec![(
-            "ANTHROPIC_AUTH_TOKEN".to_string(),
-            "sk-legacy".to_string(),
-        )];
+        let probed = std::sync::atomic::AtomicUsize::new(0);
+        let probed_ref = &probed;
         let env = naming_backend_env_with(
-            || resolved.clone(),
-            || true, // key present, but irrelevant
-            || legacy.clone(),
+            "claude:minimax",
+            |p| {
+                probed_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(p, "claude:minimax", "provider must be passed through to resolve");
+                configured.clone()
+            },
         );
-        assert_eq!(env, resolved, "configured account env must win over legacy");
+        assert_eq!(
+            probed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "configured-provider path must call resolve_provider_env exactly once"
+        );
+        assert_eq!(env, configured, "configured provider env must propagate through");
     }
 
-    /// Static guard: `summarize_and_rename_with` must not call
-    /// `minimax_backend_env()` directly. The previous hardcoded call was the
-    /// #824 bug class — every auto-rename routed through MiniMax regardless
-    /// of the node's own provider, and silently broke for any user without a
-    /// MiniMax key. The fix routes through `naming_backend_env_with` so the
-    /// node's configured provider wins.
-    ///
-    /// Trimming the search to the function body keeps the assertion scoped:
-    /// `minimax_backend_env()` is still the legacy-fallback helper itself
-    /// (kept for users who don't migrate to a Provider Account), it just
-    /// must not be the source of truth for the LLM call site anymore.
+    /// Static guard (issue #824 v2): the rename call site must read
+    /// `preferences::naming_provider()` (user-configured) and NOT the
+    /// node's own `provider`. The post-review pivot — a node provider
+    /// can be an expensive tier like Opus with xhigh effort, and
+    /// auto-rename runs frequently on trivial content, so the rename
+    /// backend is decoupled from the node's model and lives in Settings.
+    /// Brace-counts `on_turn_with`'s body so a regression that routes
+    /// through `node.provider` surfaces immediately.
     #[test]
-    fn summarize_and_rename_with_does_not_hardcode_minimax_backend_env() {
+    fn rename_call_site_uses_user_naming_provider_not_node_provider() {
         let source = include_str!("session_naming.rs");
 
-        // Pull out the body of `async fn summarize_and_rename_with(..)` by
-        // brace-counting from its opening `{` so the substring check stays
-        // local to the function. `str::find` for "\n}\n" / "\npub " / "\nasync "
-        // / "\nfn " doesn't survive nested blocks (any `{` inside a match arm
-        // or nested closure looks like the closer), so count braces directly.
-        let sig = "async fn summarize_and_rename_with";
+        // Pull out the body of `fn on_turn_with(..)` by brace-counting so
+        // nested closures don't false-match the closer.
+        let sig = "fn on_turn_with(";
         let sig_idx = source
             .find(sig)
-            .expect("summarize_and_rename_with must exist");
-        let after_sig = &source[sig_idx..];
-        let open_rel = after_sig
+            .expect("on_turn_with must exist");
+        let open_rel = source[sig_idx..]
             .find('{')
-            .expect("summarize_and_rename_with body must open with `{`");
-        let body_start = sig_idx + open_rel + 1; // right after the `{`
-
-        // Walk forward, counting braces; string/char literals aren't an issue
-        // here because the body contains no string containing an unmatched `{`.
+            .expect("on_turn_with body must open with `{`");
+        let body_start = sig_idx + open_rel + 1;
         let bytes = source.as_bytes();
         let mut depth: usize = 1;
         let mut i = body_start;
@@ -2346,16 +2329,13 @@ mod tests {
             }
             i += 1;
         }
-        assert_eq!(depth, 0, "summarize_and_rename_with body must close");
-        let body_end = i - 1; // index of the closing `}`
+        assert_eq!(depth, 0, "on_turn_with body must close");
+        let body_end = i - 1;
         let body = &source[body_start..body_end];
 
-        // Strip line comments so a doc comment that mentions
-        // `minimax_backend_env()` in prose (referencing the old broken
-        // behaviour, see the comment block immediately above) doesn't
-        // false-positive the check. Block comments / strings containing
-        // literal text aren't an issue here because the function body
-        // doesn't have any that resemble a function call.
+        // Strip line comments — the body documents the rejected v1
+        // design ("NOT node.provider", etc.) and we don't want that prose
+        // to false-positive.
         let code_only: String = body
             .lines()
             .map(|line| {
@@ -2365,59 +2345,25 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // The user-configured provider is the SOLE source of the rename
+        // backend. Reading node.provider here would burn whatever
+        // expensive tier the spawned node is on — the v1 regression
+        // that triggered the v2 design pivot.
         assert!(
-            !code_only.contains("minimax_backend_env("),
-            "summarize_and_rename_with must not call minimax_backend_env() \
-             directly (issue #824). Route env through naming_backend_env / \
-             naming_backend_env_with so the node's own provider wins."
-        );
-
-        // The resolved env reaches `summarize_and_rename_with` as a
-        // `backend_env: Vec<(String, String)>` parameter (set in
-        // `on_turn_with` via `naming_backend_env(&node.provider)`), then
-        // forwards each pair onto the spawned `claude --print` command.
-        // Both halves must be present: dropping the parameter pushes the
-        // resolution back into the function body, where it belongs to the
-        // call site — not here. Dropping the `cmd.env(k, v)` loop regresses
-        // #824, since the spawn would run against an empty env even when
-        // the user has a configured account.
-        let sig_idx = source.find("async fn summarize_and_rename_with")
-            .expect("summarize_and_rename_with must exist");
-        // The signature may wrap across multiple lines (parameter list can
-        // run over 80 chars), so find the closing `)` paired with the open
-        // `(` immediately after `summarize_and_rename_with`. That gives the
-        // complete signature regardless of wrapping.
-        let after_name = &source[sig_idx..];
-        let open_rel = after_name
-            .find('(')
-            .expect("function signature must have an opening `(`");
-        let mut depth: usize = 1;
-        let mut close_rel = open_rel + 1;
-        for (i, c) in after_name[close_rel..].char_indices() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close_rel += i;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(depth, 0, "function signature `(` must close");
-        let sig = &source[sig_idx..sig_idx + close_rel + 1];
-        assert!(
-            sig.contains("backend_env"),
-            "summarize_and_rename_with must take the resolved env as a \
-             `backend_env` parameter (issue #824). Without it, the call \
-             site can't route through the node's provider account."
+            code_only.contains("preferences::naming_provider()"),
+            "on_turn_with must call preferences::naming_provider() (issue \
+             #824 v2). Reading node.provider here would burn the node's \
+             own model — auto-rename is opt-in via Settings, decoupled \
+             from the node."
         );
         assert!(
-            code_only.contains("backend_env") && code_only.contains("cmd.env("),
-            "summarize_and_rename_with must forward `backend_env` onto the \
-             spawned command via cmd.env() (issue #824)."
+            !code_only.contains("trigger.provider"),
+            "on_turn_with must NOT use the node's provider for routing \
+             (issue #824 v2). Rename-backend lives in Settings → Auto-naming."
+        );
+        assert!(
+            code_only.contains("naming_backend_env(&user_naming_provider)"),
+            "rename env must come from naming_backend_env(&user_naming_provider)"
         );
     }
 }
