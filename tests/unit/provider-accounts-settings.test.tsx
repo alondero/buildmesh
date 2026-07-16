@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import type { ProviderAccount } from '../../src/lib/tauri';
 
-const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, haiku: null };
+const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
 
 function builtinAccounts(): ProviderAccount[] {
   return [

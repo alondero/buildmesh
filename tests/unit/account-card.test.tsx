@@ -36,7 +36,7 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
     claude_compatible: !SELF_AUTH_IDS.includes(id),
     api_key: null,
     base_url: null,
-    model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, haiku: null },
+    model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
     models: [],
     ...over,
   };
@@ -93,9 +93,25 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       />,
     );
     await user.click(screen.getByRole('button', { name: /edit credentials/i }));
-    for (const label of [/opus model/i, /sonnet model/i, /haiku model/i, /small \/ fast model/i, /default model/i]) {
+    for (const label of [/fable model/i, /opus model/i, /sonnet model/i, /haiku model/i, /small \/ fast model/i, /default model/i]) {
       expect(screen.getByLabelText(label)).toBeTruthy();
     }
+  });
+
+  it('passes an edited Fable tier through onSave (ANTHROPIC_DEFAULT_FABLE_MODEL)', async () => {
+    const onSave = vi.fn().mockResolvedValue(true);
+    const user = userEvent.setup();
+    render(
+      <AccountCard
+        account={account({ id: 'kimi', name: 'Kimi', billing_mode: 'pay_as_you_go' })}
+        onSave={onSave}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+    await user.type(screen.getByLabelText(/fable model/i), 'kimi-k3');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(onSave.mock.calls[0][0].model_tiers.fable).toBe('kimi-k3');
   });
 
   it('passes edited model tiers through onSave (#567)', async () => {

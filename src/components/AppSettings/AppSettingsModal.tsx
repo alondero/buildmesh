@@ -24,10 +24,11 @@ const NO_OVERRIDE = '__no_override__';
 // `preferences::default_provider_accounts`.
 const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax', 'kimi', 'openrouter'];
 
-// The five Claude model aliases a Claude-compatible provider can pin (issue #567).
+// The Claude model aliases a Claude-compatible provider can pin (issue #567).
 // `key` is the ProviderAccount.model_tiers field; `label` is the UI caption.
 const MODEL_TIER_FIELDS: { key: keyof ProviderAccount['model_tiers']; label: string }[] = [
   { key: 'default', label: 'Default model' },
+  { key: 'fable', label: 'Fable' },
   { key: 'opus', label: 'Opus' },
   { key: 'sonnet', label: 'Sonnet' },
   { key: 'haiku', label: 'Haiku' },
@@ -743,7 +744,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       billing_mode: 'pay_as_you_go',
       api_key: apiKey.trim() || null,
       base_url: baseUrl.trim() || null,
-      model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, haiku: null },
+      model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
       models: [],
     });
     // Keep the form open (with the user's entries) if the backend rejected it.

@@ -24,7 +24,7 @@ import { UsageTab } from '../../src/components/Probe/UsageTab';
 import { PROVIDER_LIST_CHANGED_EVENT } from '../../src/hooks/useProviderListInvalidation';
 import type { ProviderMeters, ProviderAccount } from '../../src/lib/tauri';
 
-const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, haiku: null };
+const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
 
 function builtinAccounts(): ProviderAccount[] {
   return [

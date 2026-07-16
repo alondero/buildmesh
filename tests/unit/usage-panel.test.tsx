@@ -46,7 +46,7 @@ function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
     claude_compatible: !SELF_AUTH_IDS.includes(id),
     api_key: null,
     base_url: null,
-    model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, haiku: null },
+    model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
     models: [],
     ...over,
   };
