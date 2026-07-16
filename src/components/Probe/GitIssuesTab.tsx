@@ -72,6 +72,12 @@ import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 import { SafeLink } from '../shared/SafeLink';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  RefreshControl,
+} from '../shared/Spinner';
 
 /**
  * Build the human-readable tooltip text for the blocked-by flag.
@@ -110,7 +116,17 @@ export function GitIssuesTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawning, setSpawning] = useState<number | null>(null);
-  // Only one dropdown open at a time, keyed by issue number — mirrors the
+  // Bump to force the load effect to re-run on a manual Refresh click
+  // (issue #813 — Git Issues/PRs/Archive previously had no manual
+  // refresh button). Mirrors the pattern `GitPullRequestsTab` already
+  // uses for refetching after a successful merge: bumping the key
+  // aborts the previous effect (useAsyncEffect's signal) and re-fires
+  // the IPC, so a stale in-flight load can't clobber the refreshed
+  // result.
+  // Bump to refetch on manual Refresh (issue #813 — `useAsyncEffect`
+  // aborts the previous effect's signal on dep change, so an
+  // in-flight first-load can't clobber the refreshed result).
+  const [reloadKey, setReloadKey] = useState(0);  // Only one dropdown open at a time, keyed by issue number — mirrors the
   // SessionBrowserModal pattern so the click-outside handling stays simple.
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   // The provider list is fetched once at mount and reused for the lifetime
@@ -175,7 +191,7 @@ export function GitIssuesTab() {
     setLoading(true);
     setError(null);
     load();
-  }, [activeMeshId]);
+  }, [activeMeshId, reloadKey]);
 
   // Fetch the provider list once at mount. Platform filtering (e.g.
   // macOS-only Anthropic) is enforced server-side via
@@ -263,14 +279,15 @@ export function GitIssuesTab() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Per-tab header row — mirrors the PRs tab's header so the dock
-          visually agrees across the two GitHub tabs. The shared
-          <ProbePanel> header above the body shows the mesh name, so we
-          don't repeat it here; this row is just the "View on GitHub"
-          list-link affordance. `SafeLink` falls back to a non-link
-          <span> when the URL is empty (non-GitHub mesh), so the layout
-          stays stable whether or not the URL has resolved. */}
-      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-end gap-2">
+      {/* Header row mirrors the PRs tab. `SafeLink` falls back to an
+          inert <span> when the URL is empty (non-GitHub mesh), so
+          the layout stays stable whether or not the URL has resolved. */}
+      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-between gap-2">
+        <RefreshControl
+          onRefresh={() => setReloadKey((k) => k + 1)}
+          isRefreshing={loading && issues.length > 0}
+          ariaLabel="Refresh issues"
+        />
         <SafeLink
           url={issuesListUrl}
           ariaLabel="Open this repo's issues list on GitHub"
@@ -281,30 +298,14 @@ export function GitIssuesTab() {
         </SafeLink>
       </div>
       <div className="flex-1 overflow-y-auto p-2">
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-8 gap-3">
-            <div className="animate-spin w-5 h-5 border border-accent-cyan border-t-transparent rounded-full" />
-            <span className="text-xs text-text-muted">Loading issues...</span>
-          </div>
+        {loading && issues.length === 0 ? (
+          // First-load only: refreshes keep the prior list rendered
+          // so the user's reading position doesn't reset (mirrors PRs).
+          <LoadingState label="Loading issues..." />
         ) : error ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-status-error mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="15" y1="9" x2="9" y2="15"/>
-              <line x1="9" y1="9" x2="15" y2="15"/>
-            </svg>
-            <span className="text-xs text-status-error">Failed to load issues</span>
-            <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
-          </div>
+          <ErrorState title="Failed to load issues" detail={error} />
         ) : issues.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-text-muted mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="8" x2="12" y2="12"/>
-              <line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-            <span className="text-xs text-text-muted">No open issues</span>
-          </div>
+          <EmptyState label="No open issues" />
         ) : (
           <div className="space-y-1">
             {issues.map(issue => {

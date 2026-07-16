@@ -75,6 +75,12 @@ import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 import { SafeLink } from '../shared/SafeLink';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  RefreshControl,
+} from '../shared/Spinner';
 
 type StateFilter = 'open' | 'closed';
 
@@ -238,8 +244,10 @@ export function GitPullRequestsTab() {
   // is aborted by useAsyncEffect's cleanup, so any in-flight getRepoPulls
   // drops its setState instead of clobbering the new run's result. Used
   // by `handleMerge` to refetch after a successful squash-merge (issue #349).
+  // Bump to refetch on manual Refresh or after merge (issue #349
+  // refetch; #813 surfaced Refresh to the user). `useAsyncEffect`
+  // aborts the previous effect's signal on dep change.
   const [reloadKey, setReloadKey] = useState(0);
-
   // "View on GitHub" header button — resolves the active mesh's
   // `origin` to a `https://github.com/{owner}/{repo}/pulls` URL.
   // Mirror of GitIssuesTab's hook call; both tabs share the same
@@ -566,65 +574,56 @@ export function GitPullRequestsTab() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-end gap-2">
-        {/* "View on GitHub" — opens the repo's PR list. Prepended to
-            the left of the Open/Closed toggle so the two controls read
-            as a unit on the right edge of the row. `SafeLink` falls
-            back to an inert <span> when the URL is empty (non-GitHub
-            mesh), so the layout stays stable across meshes. */}
-        <SafeLink
-          url={pullsListUrl}
-          ariaLabel="Open this repo's pull requests list on GitHub"
-          title="Open this repo's pull requests list on GitHub"
-          className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
-        >
-          View on GitHub ↗
-        </SafeLink>
-        {/* Open / Closed segmented toggle */}
-        <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
-          {(['open', 'closed'] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setStateFilter(s)}
-              aria-pressed={stateFilter === s}
-              className={`px-2 py-0.5 text-2xs font-medium capitalize transition-colors ${
-                stateFilter === s
-                  ? 'bg-accent-cyan/20 text-accent-cyan'
-                  : 'text-text-muted hover:text-text-secondary hover:bg-bg-card'
-              }`}
-            >
-              {s}
-            </button>
-          ))}
+      {/* Header row mirrors GitIssuesTab. Manual Refresh on the left,
+          "View on GitHub" link + Open/Closed toggle on the right. */}
+      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-between gap-2">
+        <RefreshControl
+          onRefresh={() => setReloadKey((k) => k + 1)}
+          isRefreshing={loading && prs.length > 0}
+          ariaLabel="Refresh pull requests"
+        />
+        <div className="flex items-center gap-2">
+          {/* "View on GitHub" — opens the repo's PR list. `SafeLink`
+              falls back to an inert <span> when the URL is empty
+              (non-GitHub mesh), so the layout stays stable across
+              meshes. */}
+          <SafeLink
+            url={pullsListUrl}
+            ariaLabel="Open this repo's pull requests list on GitHub"
+            title="Open this repo's pull requests list on GitHub"
+            className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+          >
+            View on GitHub ↗
+          </SafeLink>
+          {/* Open / Closed segmented toggle */}
+          <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
+            {(['open', 'closed'] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStateFilter(s)}
+                aria-pressed={stateFilter === s}
+                className={`px-2 py-0.5 text-2xs font-medium capitalize transition-colors ${
+                  stateFilter === s
+                    ? 'bg-accent-cyan/20 text-accent-cyan'
+                    : 'text-text-muted hover:text-text-secondary hover:bg-bg-card'
+                }`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2">
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-8 gap-3">
-            <div className="animate-spin w-5 h-5 border border-accent-cyan border-t-transparent rounded-full" />
-            <span className="text-xs text-text-muted">Loading pull requests...</span>
-          </div>
+        {loading && prs.length === 0 ? (
+          // First-load only: refreshes keep the prior list rendered.
+          <LoadingState label="Loading pull requests..." />
         ) : error ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-status-error mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="15" y1="9" x2="9" y2="15"/>
-              <line x1="9" y1="9" x2="15" y2="15"/>
-            </svg>
-            <span className="text-xs text-status-error">Failed to load pull requests</span>
-            <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
-          </div>
+          <ErrorState title="Failed to load pull requests" detail={error} />
         ) : prs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-text-muted mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="8" x2="12" y2="12"/>
-              <line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-            <span className="text-xs text-text-muted">No {stateFilter} pull requests</span>
-          </div>
+          <EmptyState label={`No ${stateFilter} pull requests`} />
         ) : (
           <div className="space-y-1">
             {prs.map((pr) => {

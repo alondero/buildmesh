@@ -33,6 +33,7 @@ import { useProviderListInvalidation } from '../../hooks/useProviderListInvalida
 import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
+import { SaveIndicator } from '../shared/SaveIndicator';
 import { groupByHarness } from '../../lib/groups';
 import {
   checkGhAuth,
@@ -400,7 +401,10 @@ sandbox: config.sandbox,
           "Save failed: <message>" when the IPC rejects. The banner
           sits above the form so a failed write is visible without
           scrolling; empty / idle state is suppressed so the UI stays
-          quiet when nothing is happening. */}
+          quiet when nothing is happening. Lifted to a shared primitive
+          (issue #813) so `ScratchpadTab` adopts the same vocabulary
+          without re-implementing both the state machine and the
+          visual. */}
       <SaveIndicator
         status={saveStatus.status}
         error={saveStatus.error}
@@ -686,66 +690,6 @@ function Field({ label, htmlFor, hint, children }: FieldProps) {
         {hint && <span className="text-text-muted/60"> ({hint})</span>}
       </label>
       {children}
-    </div>
-  );
-}
-
-interface SaveIndicatorProps {
-  status: 'idle' | 'saving' | 'saved' | 'error';
-  error: string | null;
-  onDismiss: () => void;
-}
-
-/**
- * Issue #729 — visible feedback for the auto-save handlers below.
- * Renders a one-line, status-coloured bar at the top of the tab:
- *
- *   idle     → nothing (suppressed to keep the form uncluttered)
- *   saving   → "Saving…" in muted text
- *   saved    → "Saved" in success-coloured text (auto-clears inside the hook)
- *   error    → "Save failed: <message>" in error-coloured text, with a
- *              dismiss button. The hook's `error` carries the rejection's
- *              `.message` (stringified for non-Error shapes).
- *
- * Single fixed-height slot keeps the form below from jumping when
- * status flips between `error` and `idle`. The dismiss button is
- * only present on `error` (the other states auto-clear via the
- * hook's `savedClearMs` or simply transition to `idle`).
- */
-function SaveIndicator({ status, error, onDismiss }: SaveIndicatorProps) {
-  // Always render the slot so the form below doesn't reflow on each
-  // transition. `min-h-7` matches the height of a one-line tall pill
-  // (28px) so the Saved/Saving rows don't visibly jump into the slot.
-  // The idle branch is empty — the min-h itself holds the vertical
-  // space without an invisible char needing a screen-reader skip.
-  return (
-    <div
-      role="status"
-      aria-live="polite"
-      data-testid="mesh-save-indicator"
-      className="min-h-7 flex items-center justify-between text-xs rounded-md px-2 py-1"
-    >
-      {status === 'saving' && (
-        <span className="text-text-muted">Saving…</span>
-      )}
-      {status === 'saved' && (
-        <span className="text-status-success">Saved</span>
-      )}
-      {status === 'error' && (
-        <>
-          <span className="text-status-error break-words flex-1">
-            Save failed{error ? `: ${error}` : ''}
-          </span>
-          <button
-            type="button"
-            onClick={onDismiss}
-            aria-label="Dismiss save error"
-            className="ml-2 text-status-error/70 hover:text-status-error text-[11px]"
-          >
-            ✕
-          </button>
-        </>
-      )}
     </div>
   );
 }

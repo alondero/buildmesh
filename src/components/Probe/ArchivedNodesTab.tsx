@@ -58,7 +58,13 @@ import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
-import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
+import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  RefreshControl,
+} from '../shared/Spinner';
 import { mapBackendProviders } from '../../lib/groups';
 
 function timeAgo(isoString: string): string {
@@ -115,7 +121,14 @@ export function ArchivedNodesTab() {
   const [resuming, setResuming] = useState<string | null>(null);
   const [openDropdown, setOpenDropdown] = useState<string | null>(null);
   const [providerList, setProviderList] = useState<ResumableProvider[]>([]);
-
+  // Bump to force the load effect to re-run on a manual Refresh click
+  // (issue #813 — Archive previously had no manual-refresh affordance).
+  // The mirror of the existing GitIssuesTab / GitPullRequestsTab
+  // `reloadKey` pattern — bumping aborts the previous effect's signal
+  // (useAsyncEffect) and refetches.
+  // Bump to refetch on manual Refresh (issue #813 added the Refresh
+  // affordance to this tab).
+  const [reloadKey, setReloadKey] = useState(0);
   // Fetch providers once at mount. Platform filtering is enforced
   // server-side; the `resumable` flag comes straight from the backend
   // (`ProviderInfo.resumable`, derived from
@@ -172,7 +185,7 @@ export function ArchivedNodesTab() {
     setLoading(true);
     setError(null);
     load();
-  }, [activeMeshId, activeMeshPath]);
+  }, [activeMeshId, activeMeshPath, reloadKey]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -242,46 +255,35 @@ export function ArchivedNodesTab() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Search */}
-      <div className="px-3 py-2 border-b border-border-subtle">
+      {/* Search + manual Refresh share one row so the prior
+          "search full-width / refresh elsewhere" jump on tab
+          switch doesn't reappear. */}
+      <div className="px-3 py-2 border-b border-border-subtle flex items-center gap-2">
         <input
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Filter by message, branch, or worktree…"
-          className="w-full bg-bg-card border border-border-default rounded-md px-3 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan"
+          className="flex-1 min-w-0 bg-bg-card border border-border-default rounded-md px-3 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan"
           autoFocus
+        />
+        <RefreshControl
+          onRefresh={() => setReloadKey((k) => k + 1)}
+          isRefreshing={loading && sessions.length > 0}
+          ariaLabel="Refresh archived sessions"
         />
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-2">
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-8 gap-3">
-            <div className="animate-spin w-5 h-5 border border-accent-cyan border-t-transparent rounded-full" />
-            <span className="text-xs text-text-muted">Scanning sessions…</span>
-          </div>
+        {loading && sessions.length === 0 ? (
+          <LoadingState label="Scanning sessions…" />
         ) : error ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-status-error mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="15" y1="9" x2="9" y2="15"/>
-              <line x1="9" y1="9" x2="15" y2="15"/>
-            </svg>
-            <span className="text-xs text-status-error">Failed to discover sessions</span>
-            <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
-          </div>
+          <ErrorState title="Failed to discover sessions" detail={error} />
         ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-text-muted mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="8" x2="12" y2="12"/>
-              <line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-            <span className="text-xs text-text-muted">
-              {sessions.length === 0 ? 'No previous sessions found' : 'No matches'}
-            </span>
-          </div>
+          <EmptyState
+            label={sessions.length === 0 ? 'No previous sessions found' : 'No matches'}
+          />
         ) : (
           <div className="space-y-1">
             {filtered.map(session => (
@@ -304,45 +306,39 @@ export function ArchivedNodesTab() {
                   </div>
                 </div>
 
-                {/* Split resume button */}
-                <div className="relative flex shrink-0" onMouseDown={e => e.stopPropagation()}>
-                  <button
-                    type="button"
-                    onClick={() => handleDefaultResume(session)}
+                {/* Split Resume Menu cluster — ADR-0016 §2 / issue #813.
+                    Primary label "Resume" + session-id key land the
+                    archived-resume flow on the same `<SpawnButtonCluster>`
+                    as Issues/PRs/Sidebar. `getDefaultProvider` is
+                    undefined when `activeMeshId === null` so the cluster
+                    skips its tooltip fetch (the click path still works
+                    via `handleDefaultResume`'s own null guard). */}
+                <div
+                  className="shrink-0"
+                  onMouseDown={e => e.stopPropagation()}
+                >
+                  <SpawnButtonCluster
+                    providers={resumableProviders}
+                    meshId={session.session_id}
+                    isOpen={openDropdown === session.session_id}
+                    primaryLabel="Resume"
+                    busyLabel="Resuming…"
+                    primaryAriaLabel="Resume session"
+                    onToggleDropdown={() =>
+                      setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)
+                    }
+                    onSpawnDefault={() => handleDefaultResume(session)}
+                    onSelectProvider={(providerId) => handleResume(session, providerId)}
                     disabled={resuming !== null}
-                    className="px-2.5 py-1 text-xs font-medium rounded-l-md bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {resuming === session.session_id ? 'Resuming…' : 'Resume'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)}
-                    disabled={resuming !== null}
-                    title="Choose provider"
-                    aria-label="Choose provider to resume with"
-                    aria-haspopup="menu"
-                    aria-expanded={openDropdown === session.session_id}
-                    className="px-1.5 py-1 text-xs font-medium rounded-r-md border-l border-accent-cyan/20 bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    ▾
-                  </button>
-                  {openDropdown === session.session_id && (
-                    <div
-                      data-dropdown-for={session.session_id}
-                      className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-h-[320px] overflow-y-auto animate-scale-in origin-top-right"
-                    >
-                      {/* Issue #814 — `onClose` must be wired so the
-                          `GroupedProviderMenu`'s Escape handler can close
-                          the picker. Without it Escape was a no-op
-                          (review finding from the spec axis). The parent
-                          owns the open/close state via `setOpenDropdown`. */}
-                      <GroupedProviderMenu
-                        providers={resumableProviders}
-                        onSelect={(providerId) => handleResume(session, providerId)}
-                        onClose={() => setOpenDropdown(null)}
-                      />
-                    </div>
-                  )}
+                    isSpawning={resuming === session.session_id}
+                    // The store's `getDefaultProvider` requires a
+                    // non-null mesh id; the cluster calls this from
+                    // hover/focus to populate its tooltip. Drop the
+                    // tooltip affordance when the probe hasn't focused
+                    // a mesh yet (the Resume buttons stay clickable —
+                    // `handleDefaultResume` has its own null guard).
+                    getDefaultProvider={activeMeshId !== null ? () => getDefaultProvider(activeMeshId) : undefined}
+                  />
                 </div>
               </div>
             ))}

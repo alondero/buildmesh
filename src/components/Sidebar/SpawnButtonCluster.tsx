@@ -23,9 +23,31 @@ interface SpawnButtonClusterProps {
   providers: SpawnOption[];
   /** Stable key for this cluster — passed through to `ProviderDropdown`'s
    *  `data-dropdown-for` attribute so click-outside handlers can scope to
-   *  a single cluster when many rows share the same page. For meshes this
-   *  is `mesh.id`; for probe rows it is the issue/PR number. */
-  meshId: number;
+   *  a single cluster when many rows share the same page. For meshes /
+   *  issues / PRs this is `number`; for archived-session resumption
+   *  (issue #813) the natural key is the string `session_id`. The value
+   *  is string-coerced when assigned to the DOM attribute, so either
+   *  shape works at runtime. */
+  meshId: number | string;
+  /** Visible label on the primary (+ default) action button. Defaults
+   *  to "+" — the canonical spawn idiom across the sidebar / issues /
+   *  PRs probe rows. Override for surfaces where the spawn is a
+   *  non-spawn action: the Archive Resume flow (issue #813) uses
+   *  "Resume" because the action imports + adopts an existing CLI
+   *  session rather than spawning fresh. Width-wise the cluster is
+   *  designed around a single character so a label like "Resume"
+   *  still fits inside the 360px dock without breaking the
+   *  row-resize-with-the-other-columns behaviour. */
+  primaryLabel?: string;
+  /** Visible label shown while `isSpawning` is true. Defaults to
+   *  "Spawning..."; Resume uses "Resuming..." instead so the dock
+   *  reads consistently with the action it actually performs. */
+  busyLabel?: string;
+  /** Accessible label on the primary action. Defaults to the cluster
+   *  tooltip ("Add agent node (<default>)"); the Archive flow
+   *  overrides with "Resume session" so AT users get a specific
+   *  affordance instead of "add agent node". */
+  primaryAriaLabel?: string;
   /** Whether this cluster's dropdown is currently open. */
   isOpen: boolean;
   /** Toggle the dropdown open/closed. */
@@ -59,6 +81,9 @@ export function SpawnButtonCluster({
   providers,
   meshId,
   isOpen,
+  primaryLabel = '+',
+  busyLabel = 'Spawning...',
+  primaryAriaLabel,
   onToggleDropdown,
   onSpawnDefault,
   onSelectProvider,
@@ -82,11 +107,16 @@ export function SpawnButtonCluster({
     }
   };
 
+  // Tooltip + accessible label on the primary action. Defaults to the
+  // canonical "+ spawn" wording; surfaces that aren't a spawn (Archive
+  // Resume) override via `primaryAriaLabel` so the hover hint and
+  // aria-label describe what the click actually does.
   const defaultProviderLabel =
     providers.find(p => p.id === defaultProviderId)?.label ?? defaultProviderId;
-  const addNodeTitle = defaultProviderLabel
-    ? `Add agent node (${defaultProviderLabel})`
-    : 'Add agent node';
+  const baseLabel = primaryAriaLabel ?? 'Add agent node';
+  const primaryTitle = defaultProviderLabel
+    ? `${baseLabel} (${defaultProviderLabel})`
+    : baseLabel;
 
   const isDisabled = disabled || isSpawning;
 
@@ -134,10 +164,11 @@ export function SpawnButtonCluster({
           onMouseEnter={refreshDefaultProvider}
           onFocus={refreshDefaultProvider}
           disabled={isDisabled}
+          aria-label={primaryAriaLabel ?? undefined}
           className="flex items-center px-1.5 h-5 text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          title={isSpawning ? 'Spawning...' : addNodeTitle}
+          title={isSpawning ? busyLabel : primaryTitle}
         >
-          {isSpawning ? 'Spawning...' : '+'}
+          {isSpawning ? busyLabel : primaryLabel}
         </button>
         <span className="w-px h-3 bg-accent-cyan/30" />
         <button
@@ -150,10 +181,15 @@ export function SpawnButtonCluster({
           // (the menu's stable id), the open state via `aria-expanded`,
           // and the popup type via `aria-haspopup="menu"`. Screen readers
           // announce "Choose provider, menu button, collapsed/expanded".
+          // Issue #813 — Resume surfaces describe the picker as "Choose
+          // provider to resume with" so AT users get the action context
+          // instead of a generic "Choose provider".
           aria-haspopup="menu"
           aria-expanded={isOpen}
           aria-controls={isOpen ? menuId : undefined}
-          aria-label="Choose provider"
+          aria-label={primaryAriaLabel
+            ? `Choose provider to ${primaryAriaLabel.toLowerCase()} with`
+            : 'Choose provider'}
           className={`flex items-center px-1 h-5 text-xs hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
           title="Choose provider"
         >
