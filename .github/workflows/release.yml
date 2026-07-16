@@ -1,0 +1,91 @@
+name: Release
+
+# Tag-triggered release ONLY — never on push/PR (a full signed bundle per commit
+# gets expensive fast). Bump the version in tauri.conf.json / Cargo.toml /
+# package.json, then push a matching `vX.Y.Z` tag to cut a release. See
+# docs/development/releasing.md. Issue #826.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    # Windows-only for now — the app is Windows/WSL-centric and this keeps
+    # releases cheap. macOS/Linux release builds are tracked separately.
+    runs-on: windows-latest
+    permissions:
+      # tauri-action needs write access to create the GitHub Release + upload
+      # the installer, signature, and latest.json feed.
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          cache: true
+
+      - name: Cache Cargo target
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target
+          key: ${{ runner.os }}-target-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Guard against a `vX.Y.Z` tag pushed without the matching version bump
+      # in all three manifests. tauri-action tags the release from
+      # `github.ref_name` but uses the manifests' `version` for
+      # `latest.json`; a mismatch publishes a release whose installer says
+      # one thing and whose feed offers another, so installed clients
+      # silently fail to see the update. Issue #826.
+      - name: Verify tag matches manifest versions
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"   # strip leading "v"
+          TOML_V=$(grep -E '^version' src-tauri/Cargo.toml | head -1 | sed -E 's/version *= *"([^"]+)".*/\1/')
+          JSON_V=$(node -e "console.log(require('./src-tauri/tauri.conf.json').version)")
+          PKG_V=$(node -e "console.log(require('./package.json').version)")
+          echo "tag=v$TAG  cargo=$TOML_V  tauri=$JSON_V  package=$PKG_V"
+          if [ "$TAG" != "$TOML_V" ] || [ "$TAG" != "$JSON_V" ] || [ "$TAG" != "$PKG_V" ]; then
+            echo "::error::Tag v$TAG does not match the version in src-tauri/Cargo.toml ($TOML_V), src-tauri/tauri.conf.json ($JSON_V), or package.json ($PKG_V). Bump all three before pushing a release tag."
+            exit 1
+          fi
+
+      - name: Build + publish signed release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (minisign) — see docs/development/releasing.md for
+          # one-time secret setup. These are the app's OWN update-integrity
+          # keys, NOT OS code-signing certs (SmartScreen/Gatekeeper still warn).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Buildmesh ${{ github.ref_name }}"
+          releaseBody: "See the assets below to download and install this version. Existing installs will be offered this update automatically."
+          releaseDraft: true
+          prerelease: false
+          # Flip createUpdaterArtifacts on for the release build only — the base
+          # tauri.conf.json keeps it off so the per-push build.yml stays green
+          # without needing the signing secret.
+          args: --config src-tauri/tauri.release.conf.json
+          # Generate + upload latest.json (the updater feed the app polls) and
+          # the per-artifact .sig signatures. Both default true; pinned for clarity.
+          uploadUpdaterJson: true

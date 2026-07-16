@@ -23,6 +23,7 @@ where
 }
 
 pub mod agent;
+pub mod app;
 pub mod clipboard;
 #[cfg(test)]
 pub mod agent_tests;

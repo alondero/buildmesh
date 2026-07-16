@@ -7,6 +7,7 @@ import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
+import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
@@ -446,6 +447,7 @@ function App() {
 
       <WorktreeCloseDialog />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
+      <UpdatePrompt />
 
       {/* Toast notifications. Each toast carries role="status" (implicit
           aria-live=polite) so screen readers announce it on arrival without

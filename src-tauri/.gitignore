@@ -12,3 +12,8 @@
 # the TS_RS_EXPORT_DIR env var isn't picked up. Keep only the
 # canonical copy under version control.
 /bindings
+
+# Updater signing keys must NEVER be committed — the private key lives
+# only in the maintainer's ~/.tauri/ and in the TAURI_SIGNING_PRIVATE_KEY
+# GitHub Actions secret. This is a defensive net (issue #826).
+*.key

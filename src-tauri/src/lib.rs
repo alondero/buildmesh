@@ -132,6 +132,12 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // In-app auto-update (issue #826). `updater` checks the GitHub Releases
+        // feed configured in tauri.conf.json and verifies each package against
+        // the committed minisign pubkey; `process` provides the `relaunch()`
+        // the frontend calls after `downloadAndInstall()`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Initialize database
             let app_dir = app.path().app_data_dir().unwrap();
@@ -516,6 +522,13 @@ pub fn run() {
             // General GitHub auth (issue #433 — moved out of `commands::pr`:
             // no PR call sites, used by git/mobile/UI auth checks).
             commands::github::check_gh_auth,
+            // App-level metadata (issue #826). The frontend uses
+            // `get_app_identifier` to guard the in-app updater: the dev
+            // profile (`com.alond.buildmesh.dev`) must not poll the stable
+            // release feed, since `tauri:build:dev` is also a production Vite
+            // build and a simple `import.meta.env.PROD` check can't tell
+            // them apart.
+            commands::app::get_app_identifier,
             // AI context portability
             commands::ai_context::detect_ai_context,
             commands::ai_context::create_ai_context_portability_pr,
