@@ -6,6 +6,7 @@ import { BuildRunDropdown } from '../BuildRun/BuildRunDropdown';
 import { useGitSummary } from '../../hooks/useGitSummary';
 import { useOpenPr } from '../../hooks/useOpenPr';
 import { useResizeWidth } from '../../hooks/useResizeWidth';
+import { useClickOutside } from '../../hooks/useClickOutside';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
@@ -377,18 +378,19 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
     setOpen((o) => !o);
   };
 
+  // Issue #814 — converged on the shared `useClickOutside` hook
+  // (#492) for the outside-mousedown close path. The hook scopes by
+  // `[data-dropdown-for="<menuId>"]` and `menuId` is per-instance
+  // (one kebab per agent node), so two open kebabs on different
+  // nodes don't interfere. Place `data-dropdown-for={menuId}` on the
+  // menu root so the selector matches.
+  useClickOutside<string>(open ? menuId : null, () => setOpen(false));
+
   // Outside click + Escape close. Same `document`-vs-`window` jsdom
   // caveat as `MeshItem` (issue #735): tests dispatch on `document`,
   // not `window`, because in jsdom the two are independent targets.
   useEffect(() => {
     if (!open) return;
-    const onDocClick = (e: MouseEvent) => {
-      const menu = menuRef.current;
-      const trigger = triggerRef.current;
-      if (menu && !menu.contains(e.target as Node) && trigger && !trigger.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    };
     const focusSibling = (currentIdx: number, dir: 1 | -1) => {
       const next = (currentIdx + dir + itemCount) % itemCount;
       menuItemRefs.current[next]?.focus();
@@ -422,10 +424,8 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
         return;
       }
     };
-    document.addEventListener('mousedown', onDocClick);
     document.addEventListener('keydown', onKeyDown);
     return () => {
-      document.removeEventListener('mousedown', onDocClick);
       document.removeEventListener('keydown', onKeyDown);
     };
   }, [open]);
@@ -489,6 +489,10 @@ function KebabActions({ isMaximized, toggleShortcutHint, onToggleMaximized, onCl
         <div
           ref={menuRef}
           id={menuId}
+          // Issue #814 — scoped attribute for `useClickOutside`. The
+          // menu's per-instance `menuId` ensures sibling kebabs (one per
+          // agent node in the grid) don't share the selector.
+          data-dropdown-for={menuId}
           role="menu"
           aria-label="Agent node actions"
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-right z-[100] py-1"

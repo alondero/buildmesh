@@ -8,6 +8,7 @@ import { resolveZoomKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { useClickOutside } from '../../hooks/useClickOutside';
 
 export { type TerminalInstance } from './TerminalRegistry';
 export const terminalManager = new TerminalRegistry();
@@ -125,19 +126,19 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
     setContextMenu(null);
   };
 
-  // Dismiss context menu
+  // Dismiss context menu — issue #814 converged on the shared
+  // `useClickOutside` hook (#492) for the outside-mousedown path.
+  // `nodeId` scopes the selector (`[data-dropdown-for="<nodeId>"]`)
+  // so two terminals with open context menus wouldn't interfere. The
+  // Escape handler is separate — `useClickOutside` doesn't cover keys.
+  useClickOutside<number>(contextMenu ? nodeId : null, () => setContextMenu(null));
   useEffect(() => {
     if (!contextMenu) return;
-    const handleClick = () => setContextMenu(null);
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setContextMenu(null);
     };
-    document.addEventListener('mousedown', handleClick);
     document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('mousedown', handleClick);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
+    return () => document.removeEventListener('keydown', handleKeyDown);
   }, [contextMenu]);
 
   // Focus search input when opened
@@ -448,6 +449,7 @@ export function AgentTerminal({ nodeId }: { nodeId: number }) {
 
       {contextMenu && (
         <div
+          data-dropdown-for={nodeId}
           className="fixed bg-bg-card border border-border-default rounded-md shadow-md z-[100] py-1 min-w-[160px] animate-scale-in origin-top-left"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}

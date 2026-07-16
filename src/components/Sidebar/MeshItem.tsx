@@ -10,6 +10,7 @@ import type { MeshHealth } from '../../lib/tauri';
 import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
+import { useClickOutside } from '../../hooks/useClickOutside';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
 import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
@@ -183,7 +184,10 @@ export function MeshItem({
 
   useEffect(() => {
     if (!contextMenu) return;
-    const handleClick = () => closeContextMenu();
+    // Issue #814 — the outside-mousedown close path now goes through
+    // the shared `useClickOutside` hook (#492) below; the keydown
+    // listener here only handles the WAI-ARIA keyboard contract
+    // (Escape / Arrow / Home / End / Tab).
     const handleKeyDown = (e: KeyboardEvent) => {
       // WAI-ARIA menu contract: keystrokes only apply while focus is
       // inside the menu. The document-level listener would otherwise
@@ -242,13 +246,16 @@ export function MeshItem({
         return;
       }
     };
-    document.addEventListener('mousedown', handleClick);
     document.addEventListener('keydown', handleKeyDown);
     return () => {
-      document.removeEventListener('mousedown', handleClick);
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [contextMenu]);
+
+  // Issue #814 — outside-mousedown close goes through the shared
+  // `useClickOutside` hook. `mesh.id` scopes the selector so two
+  // sidebar meshes with open context menus don't interfere.
+  useClickOutside<number>(contextMenu ? mesh.id : null, () => closeContextMenu());
 
   // Issue #735 — viewport clamping. Runs after the menu mounts so we can
   // read its rendered size; pushes the position back into state if it
@@ -421,6 +428,12 @@ export function MeshItem({
       {contextMenu && (
         <div
           ref={menuRef}
+          // Issue #814 — scoped attribute for `useClickOutside`. `mesh.id`
+          // ensures sibling meshes' menus don't satisfy this menu's
+          // "inside" check (the previous hand-rolled ref.contains shape
+          // was scoped per-instance via the same `mesh.id`-keyed
+          // selector inside the closure).
+          data-dropdown-for={mesh.id}
           // Issue #735 — WAI-ARIA `menu` role; `aria-labelledby` points at
           // the mesh-name span added above so screen readers can announce
           // the menu's accessible name. Viewport clamping happens in the

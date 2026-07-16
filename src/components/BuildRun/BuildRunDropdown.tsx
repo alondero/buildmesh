@@ -155,7 +155,16 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
   const menuId = useId();
 
   return (
-    <div className="relative">
+    // Issue #814 — `data-dropdown-for={node.id}` lives on the OUTER
+    // wrapper (not the menu popup). The `useClickOutside` hook's
+    // selector is `[data-dropdown-for="<open>"]`, so any element
+    // inside this wrapper (the trigger button, the menu items) is
+    // considered "inside" and the hook won't fire on those clicks.
+    // Placing the attribute on the popup alone would misclassify a
+    // click on the trigger as "outside" — the document mousedown
+    // would close the menu, then the trigger's onClick would toggle
+    // it back open in the same tick (a flicker + state race).
+    <div className="relative" data-dropdown-for={isOpen ? node.id : undefined}>
       <button
         ref={triggerRef}
         type="button"
@@ -191,14 +200,13 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
         // the menu doesn't overflow the bottom edge of the window when
         // the trigger sits low on the page.
         //
-        // `data-dropdown-for={node.id}` is the scoped attribute the
-        // `useClickOutside` hook reads; `node.id` (not a boolean) keeps
-        // sibling BuildRunDropdowns (one per agent node in the grid) from
-        // treating each other's bodies as "inside" and never closing.
+        // `data-dropdown-for` lives on the OUTER wrapper (not here) so
+        // the `useClickOutside` hook scopes the entire trigger+menu
+        // surface — a click on the trigger doesn't fire close. See the
+        // wrapper comment above.
         <div
           ref={menuRef}
           id={menuId}
-          data-dropdown-for={node.id}
           role="menu"
           aria-label="Build, run, or open a terminal"
           className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded-md shadow-md z-50 animate-scale-in origin-top-right"
