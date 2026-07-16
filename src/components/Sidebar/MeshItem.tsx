@@ -4,6 +4,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
+import { useUIStore } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
 import type { MeshHealth } from '../../lib/tauri';
@@ -410,6 +411,16 @@ export function MeshItem({
           onSelect={() => {
             setActiveNode(node.id);
             selectMesh(node.mesh_id);
+            // Retarget the solo view if one is open. The `null` check
+            // preserves "click-while-nothing-maximised leaves maximise
+            // null"; the store's idempotency guard handles self-clicks.
+            // Deferred: Ctrl+Arrow from maximised still exits in
+            // App.tsx:251-256 — revisit keyboard parity as a follow-up
+            // so mouse and keyboard agree.
+            const currentMaximized = useUIStore.getState().maximizedNodeId;
+            if (currentMaximized !== null) {
+              useUIStore.getState().setMaximizedNode(node.id);
+            }
           }}
           onDelete={(e) => onDeleteNode(e, node.id)}
         />

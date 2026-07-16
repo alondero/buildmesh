@@ -48,6 +48,45 @@ describe('useUIStore', () => {
       useUIStore.getState().clearMaximizedNode();
       expect(useUIStore.getState().maximizedNodeId).toBe(null);
     });
+
+    // Issue: sidebar click while a node is maximised should retarget the
+    // solo view, not exit it. The existing `toggleMaximizedNode` would
+    // exit on a self-click and is unsuitable for that wiring — we need a
+    // plain setter with idempotency semantics that mirror `setDragTargetNodeId`
+    // (line 132-136). The tests below pin that contract.
+    describe('setMaximizedNode', () => {
+      it('sets the value when currently null', () => {
+        useUIStore.setState({ maximizedNodeId: null });
+        useUIStore.getState().setMaximizedNode(7);
+        expect(useUIStore.getState().maximizedNodeId).toBe(7);
+      });
+
+      it('switches the solo target to a different id', () => {
+        useUIStore.setState({ maximizedNodeId: 7 });
+        useUIStore.getState().setMaximizedNode(9);
+        expect(useUIStore.getState().maximizedNodeId).toBe(9);
+      });
+
+      it('is idempotent on the same id — no spurious subscriber notification', () => {
+        // The idempotency guard mirrors `setDragTargetNodeId` and prevents
+        // a self-click on the already-maximised node from re-firing the
+        // auto-clear effect downstream.
+        useUIStore.setState({ maximizedNodeId: 7 });
+        let notifyCount = 0;
+        const unsub = useUIStore.subscribe(() => { notifyCount += 1; });
+        useUIStore.getState().setMaximizedNode(7);
+        useUIStore.getState().setMaximizedNode(7);
+        unsub();
+        expect(notifyCount).toBe(0);
+        expect(useUIStore.getState().maximizedNodeId).toBe(7);
+      });
+
+      it('clears maximise when called with null', () => {
+        useUIStore.setState({ maximizedNodeId: 7 });
+        useUIStore.getState().setMaximizedNode(null);
+        expect(useUIStore.getState().maximizedNodeId).toBe(null);
+      });
+    });
   });
 
   describe('Probe Panel (issue #373)', () => {
