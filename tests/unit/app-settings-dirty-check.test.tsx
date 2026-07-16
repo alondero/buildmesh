@@ -15,7 +15,7 @@ import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 
-const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, haiku: null };
+const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
 
 function anthropicAccount() {
   return {

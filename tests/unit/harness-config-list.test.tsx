@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { HarnessConfigList } from '../../src/components/AppSettings/HarnessConfigList';
 import type { ProviderAccount, ProviderPairing } from '../../src/lib/tauri';
 
-const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, haiku: null };
+const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
 
 function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
   return {

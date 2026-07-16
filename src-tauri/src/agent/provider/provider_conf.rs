@@ -80,6 +80,7 @@ pub fn minimax_backend_env() -> Vec<(String, String)> {
         ("ANTHROPIC_SMALL_FAST_MODEL".to_string(), tiers.small_fast.clone().unwrap()),
         ("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), tiers.sonnet.clone().unwrap()),
         ("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), tiers.opus.clone().unwrap()),
+        ("ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(), tiers.fable.clone().unwrap()),
         ("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), tiers.haiku.clone().unwrap()),
     ];
     // Prefer the legacy `~/.claude/providers.conf` key (Adam's existing setup),
@@ -159,6 +160,7 @@ MOONSHOT_API_KEY=sk-moonshot-456
         assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), tiers.small_fast);
         assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), tiers.sonnet);
         assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), tiers.opus);
+        assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), tiers.fable);
         assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), tiers.haiku);
     }
 }
