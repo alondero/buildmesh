@@ -1,50 +1,31 @@
 /**
  * ScratchpadTab — the Probe Panel's 📝 Scratch Pad tab.
  *
- * A mesh-scoped, plain-text free-form note field. The user types whatever
- * they want; saves are debounced (~500ms) in the background; a small
- * "Saving… / Saved / Save failed" indicator in the corner reports the
- * last write's outcome. Empty string is a normal "no notes yet" state
- * (not an error), and a clear-notes write is `setMeshScratchpad(_, "")`.
+ * A mesh-scoped, plain-text free-form note field. Saves are debounced
+ * (~500ms) so the IPC chatter stays bounded while the user is
+ * mid-thought (one save per pause, not per keystroke). The flush on
+ * mesh-switch / unmount guarantees that switching meshes within the
+ * debounce window doesn't silently lose the outgoing keystrokes —
+ * without it, the last 500ms of typing on the outgoing mesh would be
+ * dropped on a switch (the effect ref captures the pending text and
+ * the mesh id, so the flush writes to the correct row even after the
+ * active mesh has already changed).
  *
- * Why debounced auto-save (vs explicit Save button)
- * -----------------------------------------------
- * The scratch pad is a "type whatever you want" surface — losing what
- * the user just typed because they hit `Tab` or `Esc` instead of
- * clicking Save would betray that contract. Auto-save removes the
- * obligation to remember; the 500ms debounce keeps the IPC chatter
- * bounded while the user is mid-thought (one save per pause, not per
- * keystroke).
- *
- * Mesh-switch safety
- * ------------------
- * If the user starts typing in mesh A and switches to mesh B before
- * the 500ms debounce fires, the outgoing save must NOT be lost. The
- * effect tracks the most recent pending text in a ref, and the cleanup
- * path (mesh-change re-run, unmount) flushes it synchronously before
- * the load for the new mesh lands. The ref's `meshId` is also
- * captured, so the flush writes to the correct row even if the active
- * mesh has already changed.
- *
- * Save-indicator state machine
- * ----------------------------
- *   idle     — no edits in this session (initial mount, after mesh
- *              switch, or right after a successful load)
- *   saving   — debounce timer armed or save in flight
- *   saved    — last write succeeded; sticks around until the next edit
- *              so the user has positive confirmation
- *   error    — last write failed; surfaces in the corner with a
- *              console.error for the dev / buildmesh.log audit trail
+ * Save status converged onto the same `useSaveStatus` hook +
+ * `<SaveIndicator>` primitive as `MeshPropertiesTab` (issue #813).
+ * The "Load failed" pill at the corner is a separate channel —
+ * persists until the next read resolves, vs the save status which
+ * auto-clears on success.
  */
 
 import { useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
+import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { getMeshScratchpad, setMeshScratchpad } from '../../lib/tauri';
+import { SaveIndicator } from '../shared/SaveIndicator';
 
 const DEBOUNCE_MS = 500;
-
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 /** Shape of a pending (debounced) write. Held in a ref so the load
  *  effect and the timer can read the latest text without going through
@@ -63,8 +44,14 @@ export function ScratchpadTab() {
   // *typed*; pending writes don't mutate the DB until the debounce
   // fires (or the effect cleans up).
   const [text, setText] = useState('');
-  const [status, setStatus] = useState<SaveStatus>('idle');
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Save-state machine (issue #813, formerly inlined). The hook's
+  // auto-clearing `saved` window (1500ms by default) and the
+  // persists-until-next-start `error` semantics match the inlined
+  // version's behaviour; the only behavioural delta is that the hook
+  // uses an effect to cancel the auto-clear timer on unmount, so a
+  // late `setStatus` cannot land on a torn-down tree.
+  const saveStatus = useSaveStatus();
 
   // `dirtyRef` holds the most recent pending write so the cleanup
   // path (mesh change, unmount) can flush it. Read by the timer
@@ -89,7 +76,7 @@ export function ScratchpadTab() {
     if (!pending) return;
     dirtyRef.current = null;
     setMeshScratchpad(pending.meshId, pending.text).catch((err) => {
-      // The "real" error path also reports via setStatus, but only if
+      // The "real" error path also reports via saveStatus, but only if
       // the save resolves after the user has switched meshes. This
       // catch covers the inverse: the save fails *during* the flush,
       // and the only place left to surface it is the console + log.
@@ -109,12 +96,16 @@ export function ScratchpadTab() {
       flushPending();
       if (activeMeshId === null) {
         setText('');
-        setStatus('idle');
+        saveStatus.reset();
         setLoadError(null);
         return;
       }
       setText('');
-      setStatus('idle');
+      // Reset the save-status on mesh-switch so a stale "Save failed"
+      // from the outgoing mesh doesn't bleed onto the incoming mesh's
+      // corner. Same defensive pattern as `MeshPropertiesTab.tsx`'s
+      // `saveStatus.reset()` effect.
+      saveStatus.reset();
       setLoadError(null);
       getMeshScratchpad(activeMeshId)
         .then((content) => {
@@ -139,7 +130,11 @@ export function ScratchpadTab() {
     // Record the latest pending write. The timer reads this ref so
     // multiple keystrokes within 500ms collapse to a single IPC.
     dirtyRef.current = { meshId: activeMeshId, text: next };
-    setStatus('saving');
+    // Hook transitions `saving → saved/error` on the matching
+    // resolution. `start()` clears any prior `error` and cancels the
+    // pending `saved → idle` timer so a fast second save doesn't get
+    // hidden by the prior save's "Saved" hint.
+    saveStatus.start();
 
     if (debounceRef.current !== null) {
       clearTimeout(debounceRef.current);
@@ -156,13 +151,13 @@ export function ScratchpadTab() {
           // them — skip it so the new mesh's UI isn't clobbered by
           // a status from the previous one.
           if (pending.meshId === activeMeshId) {
-            setStatus('saved');
+            saveStatus.success();
           }
         })
         .catch((err) => {
           if (pending.meshId === activeMeshId) {
             console.error('Failed to save scratch pad:', err);
-            setStatus('error');
+            saveStatus.fail(err);
           } else {
             console.error('Scratch pad save failed after mesh switch:', err);
           }
@@ -172,17 +167,23 @@ export function ScratchpadTab() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-end px-3 py-1 text-xs text-text-muted h-6 shrink-0">
+      {/* Issue #813 — load-error pill (left) lives inline because
+          its persistence differs from the auto-clearing save status
+          (right). They render in separate channels for the same
+          reason the success + error channels in WorktreeManager
+          are kept split (issue #657). */}
+      <div className="flex items-center justify-between gap-2 px-3 py-1 text-xs text-text-muted h-7 shrink-0">
         {loadError !== null && (
           <span className="text-status-error" title={loadError}>
             Load failed
           </span>
         )}
-        {loadError === null && status === 'saving' && <span>Saving…</span>}
-        {loadError === null && status === 'saved' && <span>Saved</span>}
-        {loadError === null && status === 'error' && (
-          <span className="text-status-error">Save failed</span>
-        )}
+        <SaveIndicator
+          status={saveStatus.status}
+          error={saveStatus.error}
+          onDismiss={saveStatus.reset}
+          testId="scratchpad-save-indicator"
+        />
       </div>
       <textarea
         className="flex-1 resize-none p-3 bg-bg-surface text-text-primary text-sm font-mono leading-relaxed focus:outline-none placeholder:text-text-muted/60"

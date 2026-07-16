@@ -24,6 +24,29 @@
  * Read-only by design (issue #601): the tab has no Edit-credentials /
  * enable-toggle / Remove affordance. Those live on the Settings-side
  * AccountCard, where the user goes to actually change something.
+ *
+ * Issue #813 — error colour + empty-state convergence
+ * ---------------------------------------------------
+ * The pre-#813 tab had three off-spec treatments:
+ *   1. The IPC-error banner used `status-warning` (yellow) instead of
+ *      the project's standard `status-error` (red). Every other
+ *      "fetch failed" indicator in the probe tabs renders in red, so
+ *      the yellow here read as "soft warning" rather than "fetch failed"
+ *      — flipped to `status-error` so the iconography matches the
+ *      Git Issues / PRs / Archive tab treatment.
+ *   2. The first-load placeholders used `LoadingState` from day one
+ *      (already converged); this commit routes the Refresh button
+ *      through the shared `<RefreshControl>` primitive so the spinner
+ *      colour, placement, and `aria-busy` semantics match Usage →
+ *      Issues / PRs / Archive.
+ *   3. The "no meters" case used to render *two* empty messages:
+ *      a "No meters to display" header counter AND a longer
+ *      onboarding hint in the body. Issue #813 called out the
+ *      redundancy; the header counter is now suppressed when
+ *      `rows.length === 0`, leaving the body's onboarding copy as
+ *      the single voice. The body copy is wrapped in `<EmptyState>`
+ *      so its i-icon pairs with `LoadingState` and `ErrorState`
+ *      exactly like the Git Issues/PRs/Archive tabs.
  */
 
 import { useState, useCallback } from 'react';
@@ -32,12 +55,24 @@ import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { UsagePanel } from '../AppSettings/UsageRender';
-import { LoadingState } from '../shared/Spinner';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  RefreshControl,
+} from '../shared/Spinner';
 
 export function UsageTab() {
   const [meters, setMeters] = useState<ProviderMeters[] | null>(null);
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Flips true once the first load attempt has resolved (success or
+  // failure). Distinguishes "first fetch is still in flight" from
+  // "first fetch rejected" — the prior `meters === null` early-return
+  // hid a first-load rejection behind `<LoadingState>` indefinitely,
+  // leaving the user staring at a spinner even though `loadMeters`
+  // had already populated `error`. Issue #813 review caught this.
+  const [attempted, setAttempted] = useState(false);
   // Reset in `finally` so a rejected fetch can't leave the button stuck
   // disabled. The flag is set synchronously before the await so React
   // renders the busy state before the IPC roundtrip.
@@ -53,11 +88,10 @@ export function UsageTab() {
       setAccounts(accountRows);
       setError(null);
     } catch (e) {
-      // Non-fatal: the tab keeps the previous rows so a transient IPC
-      // failure doesn't blank the glance surface. The error surfaces
-      // as a small banner above the rows.
       console.error('Failed to load usage:', e);
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAttempted(true);
     }
   }, []);
 
@@ -76,11 +110,12 @@ export function UsageTab() {
   // constant lives in `useProviderListInvalidation.ts` (Rust+TS drift guard).
   useProviderListInvalidation(() => { void loadMeters(false); });
 
-  // Loading state: the tab has not yet received its first response.
-  // Render a neutral placeholder rather than an empty list, so a
-  // returning user doesn't read "0 meters" as "no providers
-  // configured".
-  if (meters === null) {
+  // First-load placeholder. Only renders before the very first IPC
+  // settles — after that, the body renders either the error banner or
+  // the loaded rows, even on a refresh (the in-flight Refresh paints
+  // its busy state on the rows container rather than blanking the
+  // surface — mirrors GitIssuesTab / GitPullRequestsTab).
+  if (!attempted) {
     return (
       <div className="flex items-center justify-center h-full p-6">
         <LoadingState label="Loading usage…" />
@@ -93,23 +128,22 @@ export function UsageTab() {
   // silently dropped (issue #601: a bare meter without a name is
   // meaningless on a glance surface).
   const rows = meters
-    .map(meter => ({ meter, account: accounts.find(a => a.id === meter.provider) }))
-    .filter((row): row is { meter: ProviderMeters; account: ProviderAccount } => row.account != null);
+    ? meters
+        .map(meter => ({ meter, account: accounts.find(a => a.id === meter.provider) }))
+        .filter((row): row is { meter: ProviderMeters; account: ProviderAccount } => row.account != null)
+    : [];
 
-  // CLAUDE.md "user.click swallows async onClick rejections": `loadMeters` is
-  // async and rejects on backend failure. Wrap the Refresh click in a
-  // try/catch so any uncaught throw (e.g. a future refactor that escapes the
-  // internal try/catch) lands in the error banner instead of becoming an
-  // unhandled rejection that fails the test suite. `finally` resets
-  // `isRefreshing` so a rejected fetch can't leave the button stuck
-  // disabled (the safety-net catch on its own would silently swallow).
+  // CLAUDE.md "user.click swallows async onClick rejections": `loadMeters`
+  // rejects on backend failure; safety-net catch lands any escaped
+  // throw into the error banner instead of an unhandled rejection.
+  // `finally` resets `isRefreshing` so a rejected refresh can't leave
+  // the button stuck disabled.
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
       await loadMeters(true);
     } catch {
-      // loadMeters already updates the error banner; this catch is just
-      // a safety net for anything that escapes its internal try/catch.
+      /* loadMeters already updates the error banner */
     } finally {
       setIsRefreshing(false);
     }
@@ -117,37 +151,23 @@ export function UsageTab() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Refresh + summary header. Stays light — the tab is a glance
-          surface, not a config one. The Refresh button forces a
-          refetch bypassing the backend's 5-min cache. */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-border-subtle">
-        <span className="text-xs text-text-muted">
-          {rows.length === 0
-            ? 'No meters to display'
-            : `${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
-        </span>
-        <button
-          type="button"
-          onClick={handleRefresh}
-          disabled={isRefreshing}
-          aria-busy={isRefreshing}
-          aria-label="Refresh usage"
-          className="text-xs text-accent-cyan hover:text-accent-cyan/80 disabled:cursor-not-allowed disabled:hover:text-accent-cyan inline-flex items-center gap-1.5"
-        >
-          {isRefreshing && (
-            <span
-              className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent"
-              aria-hidden="true"
-            />
-          )}
-          Refresh
-        </button>
+        {rows.length > 0 && (
+          <span className="text-xs text-text-muted">
+            {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
+          </span>
+        )}
+        <RefreshControl
+          onRefresh={handleRefresh}
+          isRefreshing={isRefreshing}
+          ariaLabel="Refresh usage"
+        />
       </div>
 
       {error && (
         <div
           role="alert"
-          className="mx-3 mt-2 px-3 py-2 bg-bg-card border border-status-warning/40 rounded-md text-xs text-status-warning"
+          className="mx-3 mt-2 px-3 py-2 bg-bg-card border border-status-error/40 rounded-md text-xs text-status-error"
         >
           {error}
         </div>
@@ -158,12 +178,13 @@ export function UsageTab() {
         aria-busy={isRefreshing}
         className={`flex-1 overflow-y-auto p-3 space-y-3 transition-opacity ${isRefreshing ? 'opacity-60' : ''}`}
       >
-        {rows.length === 0 ? (
-          <div className="text-center py-8 text-text-muted text-xs">
-            No usage meters available. Add credentials for a provider in
-            Settings (API key for MiniMax/Kimi/OpenRouter, or log in to
-            Claude/Codex/Antigravity's CLI) to see its quota or balance here.
-          </div>
+        {rows.length === 0 && !error ? (
+          <EmptyState
+            label="No usage meters available."
+            hint="Add credentials for a provider in Settings (API key for MiniMax/Kimi/OpenRouter, or log in to Claude/Codex/Antigravity's CLI) to see its quota or balance here."
+          />
+        ) : error ? (
+          <ErrorState title="Failed to load usage" detail={error} />
         ) : (
           rows.map(({ meter, account }) => (
             <UsagePanel key={meter.provider} account={account} meter={meter} />

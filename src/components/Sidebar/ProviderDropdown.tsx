@@ -13,7 +13,13 @@ import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
 const PREREQUISITES_URL = 'https://github.com/alondero/buildmesh#prerequisites';
 
 interface ProviderDropdownProps {
-  meshId: number;
+  /** Stable key for this cluster — passed through to `data-dropdown-for`
+   *  so the shared `useClickOutside` hook can scope to a single cluster
+   *  when many rows share the same page. The value is used as a DOM
+   *  attribute only (string-coerced), so any unique row id is fine —
+   *   numeric for meshes / issues / PRs (whose natural key is `number`),
+   *   string for archived-session resumption whose key is `session_id`. */
+  meshId: number | string;
   providers: SpawnOption[];
   onSelect: (providerId: string, altKey: boolean) => void;
   /**
