@@ -48,6 +48,29 @@ pub fn parse_providers_conf(contents: &str) -> HashMap<String, String> {
     map
 }
 
+/// Whether a MiniMax API key is configured, either via the legacy
+/// `~/.claude/providers.conf` file or the Provider-Accounts UI. Used by
+/// [`crate::session_naming`] to gate the legacy-MiniMax fallback without
+/// firing the `tracing::error!` that [`minimax_backend_env`] logs when
+/// the key is missing. Side-effect-free (no log, no panic), so it's safe
+/// to call on every node turn as a precondition check.
+///
+/// Order matches [`minimax_backend_env`]: legacy conf first, then the
+/// #537 Accounts-UI key. Both fallbacks must agree for the legacy path to
+/// count as "configured" — a user who has a conf-file URL but no key still
+/// won't have a usable auth flow.
+pub fn minimax_api_key_present() -> bool {
+    let conf = read_providers_conf();
+    if conf
+        .get("MINIMAX_API_KEY")
+        .filter(|v| !v.is_empty())
+        .is_some()
+    {
+        return true;
+    }
+    crate::preferences::minimax_api_key_resolved().is_some()
+}
+
 /// Build the MiniMax backend `ANTHROPIC_*` env from `~/.claude/providers.conf` —
 /// the variables the absorbed `cwrap --minimax` arm exported.
 ///

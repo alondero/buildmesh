@@ -658,18 +658,32 @@ pub fn on_output(node_id: i64, data: &str) {
     }
 }
 
-/// Testable core: checks whether rename should trigger, returns the buffer if so.
+/// Testable core: checks whether rename should trigger, returns the buffer
+/// if so.
 ///
 /// Side effect: on the very first call for a default-named node, this opens the
 /// node's gate (`buffering_ready`) so subsequent PTY output begins accumulating.
 /// On that first call the buffer is by definition empty, so this returns None
 /// and the actual rename fires on a later turn against clean post-startup content.
+///
+/// Returns a [`RenameTrigger`] (not just the buffer) so the caller can
+/// resolve the naming-side-channel env from the node's own `provider` field
+/// without re-querying the DB. Sharing the read keeps the per-turn cost to
+/// one `get_agent_node_by_id` call (issue #824 review: previously the call
+/// happened twice per turn — once in `should_trigger_rename` for the
+/// default-name check, once in `on_turn_with` for the provider — see commit
+/// log for the review write-up).
 fn should_trigger_rename(
     repo: &dyn SessionNamingRepository,
     node_id: i64,
-) -> Option<String> {
-    if let Ok(node) = repo.get_agent_node_by_id(node_id) {
-        if !is_default_name(&node.name) {
+) -> Option<RenameTrigger> {
+    // Single DB read, hoisted above both the default-name check and the
+    // provider passback. An Err here is non-fatal (default-name bypass
+    // falls through; provider default to "" so `naming_backend_env` falls
+    // back to the legacy-MiniMax probe).
+    let node = repo.get_agent_node_by_id(node_id).ok();
+    if let Some(ref n) = node {
+        if !is_default_name(&n.name) {
             // Node has a real name already; tear down everything so its PTY
             // output stops being buffered for no reason.
             clear_node_state(node_id);
@@ -715,7 +729,20 @@ fn should_trigger_rename(
     }
     st.renaming = true;
 
-    Some(st.buffer.clone())
+    Some(RenameTrigger {
+        buffer: st.buffer.clone(),
+        provider: node.map(|n| n.provider).unwrap_or_default(),
+    })
+}
+
+/// Bundle returned by [`should_trigger_rename`] when a rename fires:
+/// the harvested PTY buffer plus the node's `provider` (spawn-option id
+/// used by [`naming_backend_env`] to resolve the LLM-call env). Keeping
+/// these together in one struct avoids the double-read issue called out
+/// in the #824 code review.
+struct RenameTrigger {
+    buffer: String,
+    provider: String,
 }
 
 /// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
@@ -724,22 +751,18 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
 }
 
 fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle) {
-    let Some(buffer) = should_trigger_rename(repo, node_id) else {
+    let Some(trigger) = should_trigger_rename(repo, node_id) else {
         return;
     };
+    let RenameTrigger { buffer, provider } = trigger;
 
     tracing::info!("session_naming: triggering rename for node {} ({} chars)", node_id, buffer.len());
 
     // Resolve the LLM-call env once at trigger time so a node's configured
     // backend (or the built-in Anthropic default) is honoured by
-    // `summarize_and_rename_with`. Reading the provider here — instead of
-    // inside the async task — keeps the disk-touching helpers off the
-    // node-turn callback path, and lets us hand an owned `Vec` to the task
-    // (the repo's lifetime is the synchronous portion of this fn).
-    let backend_env = match repo.get_agent_node_by_id(node_id) {
-        Ok(node) => naming_backend_env(&node.provider),
-        Err(_) => naming_backend_env(""),
-    };
+    // `summarize_and_rename_with`. The provider comes from the same row
+    // `should_trigger_rename` already read — no second DB hit per turn.
+    let backend_env = naming_backend_env(&provider);
 
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -912,7 +935,40 @@ fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 // Internal: LLM-based summarization
 // ---------------------------------------------------------------------------
 
-/// Resolve the env to inject on the `claude --print` spawn used for auto-naming.
+/// Pure routing decision. Each input is fed in via a closure so tests can
+/// stub the disk-reading helpers (`preferences::resolve_provider_env`,
+/// `provider_conf::minimax_backend_env`) without touching real preferences
+/// or the user's `~/.claude/providers.conf`. Production callers pass the
+/// real helpers via [`naming_backend_env`].
+pub(crate) fn naming_backend_env_with<
+    F1: FnOnce() -> Vec<(String, String)>,
+    F2: FnOnce() -> Vec<(String, String)>,
+    F3: FnOnce() -> bool,
+>(
+    resolve_provider_env: F1,
+    legacy_minimax_has_token: F3,
+    legacy_minimax: F2,
+) -> Vec<(String, String)> {
+    let resolved = resolve_provider_env();
+    if !resolved.is_empty() {
+        return resolved;
+    }
+    // Gated on a separate "key present?" probe so a no-key user does NOT
+    // pay the cost of reading `~/.claude/providers.conf` and triggering
+    // `minimax_backend_env`'s `tracing::error!` ("no MINIMAX_API_KEY ...
+    // claude --print will fail to authenticate") on every node turn. That
+    // log was the original #824 noise signal; the gate keeps it dormant
+    // when the user has nothing configured. (#824 follow-up: review
+    // surfaced the unconditional call as a std/standards-axis hard
+    // violation, see commit log.)
+    if legacy_minimax_has_token() {
+        return legacy_minimax();
+    }
+    Vec::new()
+}
+
+/// Production wrapper: resolve the naming-side-channel env for a node given
+/// its `provider` (spawn-option id from `AgentNode.provider`).
 ///
 /// Routing order (issue #824):
 /// 1. The node's own provider env (a configured `ProviderAccount` for the
@@ -921,53 +977,15 @@ fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 /// 2. Legacy `~/.claude/providers.conf` `MINIMAX_API_KEY` — preserved for
 ///    users who depended on the side-channel before the Provider-Accounts
 ///    migration (#538) and haven't moved to a buildmesh account. Fires only
-///    when the legacy payload actually carries an `ANTHROPIC_AUTH_TOKEN`;
-///    a base-URL-only fixture injects nothing (a tokenless base URL would
-///    make `claude --print` fail silently — the bug class #824 closes).
+///    when the key is actually present (a base-URL-only fixture injects
+///    nothing — the bug class #824 closes).
 /// 3. Built-in Anthropic subscription — empty Vec. The caller clears
 ///    inherited `CLAUDE_BACKEND_ENV_VARS` so `claude --print` runs against
-///    the user's normal auth (OAuth/`~/.claude/.credentials.json`), which
-///    is what most non-key-having users want.
-///
-/// Inputs are closures so tests can stub the disk-reading helpers
-/// (`preferences::resolve_provider_env`, `provider_conf::minimax_backend_env`)
-/// without touching real preferences or the user's `~/.claude/providers.conf`.
-///
-/// Returns `None` only when the helper itself fails to resolve — a missing
-/// or unreadable preference file is currently surfaced as "empty resolved
-/// env" (which is benign, since both branches treat empty as "use built-in
-/// Anthropic"). Returning `Vec` keeps the caller simple: it always
-/// unconditionally clears inherited `CLAUDE_BACKEND_ENV_VARS` and pushes
-/// each pair onto the spawned command.
-pub(crate) fn naming_backend_env_with<
-    F1: FnOnce() -> Vec<(String, String)>,
-    F2: FnOnce() -> Vec<(String, String)>,
->(
-    resolve_provider_env: F1,
-    legacy_minimax: F2,
-) -> Vec<(String, String)> {
-    let resolved = resolve_provider_env();
-    if !resolved.is_empty() {
-        return resolved;
-    }
-    let legacy = legacy_minimax();
-    if legacy.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN") {
-        legacy
-    } else {
-        Vec::new()
-    }
-}
-
-/// Production wrapper: resolve the naming-side-channel env for a node given
-/// its `provider` (spawn-option id from `AgentNode.provider`). Mirrors the
-/// spawn-time `preferences::resolve_provider_env(spawn_option_id)` call so a
-/// node picks up the same backend the user configured for spawning — except
-/// it then falls back to legacy `providers.conf` MiniMax if no account is
-/// configured, instead of always routing through MiniMax unconditionally
-/// (the #824 silent-failure mode).
+///    the user's normal auth (OAuth/`~/.claude/.credentials.json`).
 pub(crate) fn naming_backend_env(provider: &str) -> Vec<(String, String)> {
     naming_backend_env_with(
         || crate::preferences::resolve_provider_env(provider),
+        || crate::agent::provider::provider_conf::minimax_api_key_present(),
         || crate::agent::provider::provider_conf::minimax_backend_env(),
     )
 }
@@ -1815,6 +1833,11 @@ mod tests {
 
     struct MockRepo {
         node_name: String,
+        /// The node's `provider` (spawn-option id). Defaults to "" so tests
+        /// that only care about `node_name` keep working; pass-through
+        /// `with_provider` for tests that exercise the `RenameTrigger`
+        /// passback added by #824.
+        provider: String,
         should_fail: bool,
         updates: std::sync::Mutex<Vec<(i64, String)>>,
     }
@@ -1823,6 +1846,16 @@ mod tests {
         fn with_name(name: &str) -> Self {
             Self {
                 node_name: name.to_string(),
+                provider: String::new(),
+                should_fail: false,
+                updates: std::sync::Mutex::new(vec![]),
+            }
+        }
+
+        fn with_provider(name: &str, provider: &str) -> Self {
+            Self {
+                node_name: name.to_string(),
+                provider: provider.to_string(),
                 should_fail: false,
                 updates: std::sync::Mutex::new(vec![]),
             }
@@ -1834,11 +1867,12 @@ mod tests {
             if self.should_fail {
                 return Err("mock db error".into());
             }
-            // `should_trigger_rename` only reads `node.name`; the rest
-            // spreads through `..Default::default()` (issue #457).
+            // The renaming-path code only reads `node.name` and `node.provider`
+            // (issue #824 routing); the rest spreads through `..Default::default()`.
             Ok(AgentNode {
                 id,
                 name: self.node_name.clone(),
+                provider: self.provider.clone(),
                 ..Default::default()
             })
         }
@@ -1893,7 +1927,8 @@ mod tests {
         // Second call sees the buffer and returns it for renaming
         let second = should_trigger_rename(&repo, node_id);
         assert!(second.is_some(), "second call should trigger rename");
-        assert_eq!(second.unwrap().len(), 2000);
+        assert_eq!(second.as_ref().unwrap().buffer.len(), 2000);
+        assert_eq!(second.as_ref().unwrap().provider, "");
 
         clear_renaming_in_progress(node_id);
         cleanup(node_id);
@@ -1943,6 +1978,33 @@ mod tests {
         cleanup(node_id);
     }
 
+    /// Issue #824 follow-up (code review): the rename-trigger return value
+    /// must carry the node's `provider` field alongside the buffer so the
+    /// caller can resolve the LLM-call env without re-querying the DB.
+    /// Pins the single-read invariant in the test layer too.
+    #[test]
+    fn should_trigger_rename_passes_provider_through_on_second_call() {
+        let node_id = 70007;
+        cleanup(node_id);
+
+        let repo = MockRepo::with_provider("bold-keen-brook", "claude:minimax");
+        // First call opens the gate; no RenameTrigger yet.
+        assert!(should_trigger_rename(&repo, node_id).is_none());
+        on_output(node_id, &"x".repeat(2000));
+
+        // Second call should hand back BOTH buffer and provider.
+        let trigger = should_trigger_rename(&repo, node_id)
+            .expect("second call should trigger rename");
+        assert_eq!(trigger.buffer.len(), 2000);
+        assert_eq!(
+            trigger.provider, "claude:minimax",
+            "provider from the same row should travel with the buffer"
+        );
+
+        clear_renaming_in_progress(node_id);
+        cleanup(node_id);
+    }
+
     #[test]
     fn end_to_end_bypass_permissions_chrome_excluded_from_rename_buffer() {
         // Regression for the bypass-permissions slug bug.
@@ -1981,26 +2043,27 @@ mod tests {
         // Step 4: second turn — buffer is harvested
         let harvested = should_trigger_rename(&repo, node_id)
             .expect("rename should trigger on second turn with real content");
+        let harvested_buf = &harvested.buffer;
 
         assert!(
-            !harvested.contains("Bypass Permissions"),
+            !harvested_buf.contains("Bypass Permissions"),
             "chrome leaked into rename buffer:\n{}",
-            harvested
+            harvested_buf
         );
         assert!(
-            !harvested.contains("Plugins loaded"),
+            !harvested_buf.contains("Plugins loaded"),
             "plugin listing leaked into rename buffer:\n{}",
-            harvested
+            harvested_buf
         );
         assert!(
-            !harvested.contains("hookify"),
+            !harvested_buf.contains("hookify"),
             "skill name leaked from startup chrome:\n{}",
-            harvested
+            harvested_buf
         );
         assert!(
-            harvested.contains("authentication module"),
+            harvested_buf.contains("authentication module"),
             "real user content missing from rename buffer:\n{}",
-            harvested
+            harvested_buf
         );
 
         clear_renaming_in_progress(node_id);
@@ -2071,6 +2134,7 @@ mod tests {
         // the LLM slug still gets a chance to commit.
         let repo = MockRepo {
             node_name: String::new(),
+            provider: String::new(),
             should_fail: true,
             updates: std::sync::Mutex::new(vec![]),
         };
@@ -2139,47 +2203,65 @@ mod tests {
 
     // --- gh824: session auto-naming must not hardwire to MiniMax ---
 
-    /// Empty inputs (no provider account, no legacy token) → empty env. The
-    /// caller clears inherited `CLAUDE_BACKEND_ENV_VARS` and `claude --print`
-    /// runs against the user's built-in Anthropic subscription. This is the
-    /// #824 fix: previously the code unconditionally injected
-    /// `minimax_backend_env()`, so any user without a MiniMax key got silent
-    /// auth failures instead of a working rename against their own plan.
+    /// Empty inputs (no provider account, no legacy token, key absent) →
+    /// empty env. The caller clears inherited `CLAUDE_BACKEND_ENV_VARS`
+    /// and `claude --print` runs against the user's built-in Anthropic
+    /// subscription. This is the #824 fix: previously the code
+    /// unconditionally injected `minimax_backend_env()`, so any user
+    /// without a MiniMax key got silent auth failures instead of a
+    /// working rename against their own plan.
     #[test]
     fn naming_backend_env_with_empty_inputs_returns_empty() {
         let env = naming_backend_env_with(
             || Vec::new(),
+            || false, // key absent → don't probe the legacy env
             || Vec::new(),
         );
         assert!(env.is_empty(), "expected empty env, got: {:?}", env);
     }
 
-    /// Legacy fallback only fires when an actual `ANTHROPIC_AUTH_TOKEN` is
-    /// present. A legacy `providers.conf` with only `MINIMAX_BASE_URL` set is
-    /// not enough — there'd be no auth, so injecting the URL would still
-    /// crash `claude --print`. In that case we fall through to the empty
-    /// (built-in Anthropic) path.
+    /// Legacy fallback is gated on a separate "key present?" probe — the
+    /// legacy env is *not* built (and `minimax_backend_env`'s
+    /// `tracing::error!` is not fired) when no key is configured. Without
+    /// this gate the per-turn log spam the #824 bug class was about
+    /// would persist even after the routing fix.
     #[test]
-    fn naming_backend_env_with_legacy_without_token_returns_empty() {
+    fn naming_backend_env_with_legacy_ungated_when_key_absent() {
+        // The legacy closure would build a fully-formed env if called. We
+        // use a non-empty legacy payload deliberately so a regression that
+        // calls the closure unconditionally would surface with an
+        // `assert_eq!` on env, not a hidden log.
+        let probed_legacy_calls = std::sync::atomic::AtomicUsize::new(0);
+        let probed_legacy_calls_inner = &probed_legacy_calls;
         let env = naming_backend_env_with(
-            || Vec::new(),
-            || vec![(
-                "ANTHROPIC_BASE_URL".to_string(),
-                "https://api.minimax.io/anthropic".to_string(),
-            )],
+            || Vec::new(),         // no node-provider env
+            || false,              // no key present
+            || {
+                probed_legacy_calls_inner.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                vec![(
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    "sk-should-not-fire".to_string(),
+                )]
+            },
         );
         assert!(
             env.is_empty(),
-            "legacy env without token must be ignored; got: {:?}",
+            "key-absent fallback should not pull legacy env; got: {:?}",
             env
+        );
+        assert_eq!(
+            probed_legacy_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "key-absent fallback must not invoke the legacy env closure"
         );
     }
 
-    /// Legacy fallback fires when `providers.conf` actually carries a token
-    /// — preserved for users who depended on the legacy side-channel and
-    /// haven't migrated to a Provider Account.
+    /// Legacy fallback fires when the key-present probe returns true.
+    /// This is the backwards-compat path for users who set a
+    /// `MINIMAX_API_KEY` in `~/.claude/providers.conf` and never migrated
+    /// to a Provider Account.
     #[test]
-    fn naming_backend_env_with_legacy_with_token_returns_legacy() {
+    fn naming_backend_env_with_legacy_fires_when_key_present() {
         let legacy = vec![
             (
                 "ANTHROPIC_AUTH_TOKEN".to_string(),
@@ -2191,14 +2273,18 @@ mod tests {
             ),
         ];
         let resolved: Vec<(String, String)> = Vec::new();
-        let env = naming_backend_env_with(|| resolved, || legacy.clone());
+        let env = naming_backend_env_with(
+            || resolved,
+            || true, // key present
+            || legacy.clone(),
+        );
         assert_eq!(env, legacy);
     }
 
-    /// When the node's own provider resolved to a non-empty env (a configured
-    /// account), that env wins — legacy is ignored. Covers configured
-    /// MiniMax / Kimi / OpenRouter / custom endpoints, all of which should
-    /// override the legacy `providers.conf` MiniMax path.
+    /// When the node's own provider resolves to a non-empty env (a
+    /// configured account), that env wins — legacy is ignored. Covers
+    /// configured MiniMax / Kimi / OpenRouter / custom endpoints, all of
+    /// which should override the legacy `providers.conf` MiniMax path.
     #[test]
     fn naming_backend_env_with_resolved_wins_over_legacy() {
         let resolved = vec![(
@@ -2209,7 +2295,11 @@ mod tests {
             "ANTHROPIC_AUTH_TOKEN".to_string(),
             "sk-legacy".to_string(),
         )];
-        let env = naming_backend_env_with(|| resolved.clone(), || legacy.clone());
+        let env = naming_backend_env_with(
+            || resolved.clone(),
+            || true, // key present, but irrelevant
+            || legacy.clone(),
+        );
         assert_eq!(env, resolved, "configured account env must win over legacy");
     }
 
