@@ -894,6 +894,13 @@ export const getCertChainStatus = () =>
 export const getRootCertDer = () =>
   _invoke<string>('get_root_cert_der');
 
+/** App-level metadata (issue #826). The updater guard in `lib/updater.ts`
+ *  uses this to reject the dev profile (`*.dev` bundle id) from polling
+ *  the stable release feed — `tauri:build:dev` is a production-mode Vite
+ *  build, so an `import.meta.env.PROD` check alone can't tell them apart. */
+export const getAppIdentifier = () =>
+  _invoke<string>('get_app_identifier');
+
 /** Test-only: clear the module-level provider caches between cases. Exported
  *  with a leading-underscore name so accidental production use is loud. */
 export function __resetProviderCachesForTests(): void {
