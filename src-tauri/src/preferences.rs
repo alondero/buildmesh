@@ -833,14 +833,16 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
 /// - [`first_class_surfaces`] for `"minimax"` — the Anthropic surface tier
 /// - [`crate::agent::provider::provider_conf::minimax_backend_env`] — the
 ///   session-naming side-channel
+///
+/// Also the Anthropic surface tier map for MiniMax (Anthropic-surface pairings
+/// now live-derive from the account on every resolution; the account is
+/// authoritative).
 pub(crate) fn minimax_default_tiers() -> ModelTiers {
     ModelTiers {
         default: Some("MiniMax-M3[1m]".to_string()),
         small_fast: Some("MiniMax-M2.7".to_string()),
         sonnet: Some("MiniMax-M3[1m]".to_string()),
         opus: Some("MiniMax-M3[1m]".to_string()),
-        // Fable defaults to the opus pick — the provider's top-tier model is
-        // the closest substitute for the Claude 5 Fable alias.
         fable: Some("MiniMax-M3[1m]".to_string()),
         haiku: Some("MiniMax-M2.7".to_string()),
     }
@@ -857,8 +859,6 @@ pub(crate) fn kimi_default_tiers() -> ModelTiers {
         small_fast: Some("kimi-k2.5".to_string()),
         sonnet: Some("kimi-k2.5".to_string()),
         opus: Some("kimi-k2.6".to_string()),
-        // Fable defaults to the opus pick — the provider's top-tier model is
-        // the closest substitute for the Claude 5 Fable alias.
         fable: Some("kimi-k2.6".to_string()),
         haiku: Some("kimi-k2.5".to_string()),
     }
@@ -1038,16 +1038,36 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
     }
 }
 
+/// The **Anthropic-surface** model-tier map for an account — the precedence
+/// every Anthropic-side consumer (derived pairing, spawn preflight, the
+/// pairing menu renderer) shares. Account tiers (the Providers-page edits)
+/// win when set; the first-class published Anthropic endpoint fills only a
+/// fully-cleared account. A custom Generic provider has no published endpoint,
+/// so its account fields are the only source — the pre-pairings behaviour,
+/// unchanged.
+///
+/// Extracted from `default_anthropic_pairing` so the precedence lives in one
+/// place; the comment naming the smell (`Tier source mirrors`) is the one
+/// truth.
+fn anthropic_tiers_for(account: &ProviderAccount) -> ModelTiers {
+    let own = effective_tiers(account);
+    if !own.is_empty() {
+        return own;
+    }
+    first_class_surfaces(&account.id)
+        .into_iter()
+        .find(|e| e.surface == ApiSurface::Anthropic)
+        .map(|e| e.model_tiers)
+        .unwrap_or_default()
+}
+
 /// The **Anthropic-surface** pairing derived for a keyed account under a
 /// Claude-backed harness (issue #576). Derived *live* on every resolution —
 /// never persisted — so Providers-page edits reach the next spawn.
 ///
-/// Precedence: the account's own `base_url`/tiers (what the Providers page
-/// edits) win when set; the first-class published Anthropic endpoint fills
-/// anything the account leaves empty (so a user-cleared built-in MiniMax/Kimi
-/// still gets working defaults). A custom Generic provider has no published
-/// endpoint, so its account fields are the only source — the pre-pairings
-/// behaviour, unchanged.
+/// Precedence: the account's own `base_url` wins when set; the first-class
+/// published Anthropic endpoint fills anything the account leaves empty.
+/// Tier source: [`anthropic_tiers_for`].
 fn default_anthropic_pairing(account: &ProviderAccount, claude_harness_id: &str) -> ProviderPairing {
     let published = first_class_surfaces(&account.id)
         .into_iter()
@@ -1057,18 +1077,12 @@ fn default_anthropic_pairing(account: &ProviderAccount, claude_harness_id: &str)
         .clone()
         .filter(|s| !s.is_empty())
         .or_else(|| published.as_ref().map(|e| e.base_url.clone()));
-    let own_tiers = effective_tiers(account);
-    let model_tiers = if !own_tiers.is_empty() {
-        own_tiers
-    } else {
-        published.map(|e| e.model_tiers).unwrap_or_default()
-    };
     ProviderPairing {
         harness_id: claude_harness_id.to_string(),
         provider_id: account.id.clone(),
         surface: ApiSurface::Anthropic,
         base_url,
-        model_tiers,
+        model_tiers: anthropic_tiers_for(account),
     }
 }
 
@@ -1090,11 +1104,9 @@ fn resolve_pairing(
     let surface = stored_pairing
         .map(|p| p.surface)
         .or_else(|| surface_of(harness_id))?;
-    // Anthropic-surface config is never user-authored on the pairing (the UI
-    // only attaches/detaches), so a stored pairing is just an attach-time
-    // snapshot — always re-derive from the account so Providers-page edits
-    // (model tiers, base URL) reach the next spawn instead of being shadowed
-    // by frozen defaults.
+    // Anthropic-surface pairings are attach-time snapshots — the UI never
+    // edits their payload, only attaches/detaches — so always re-derive from
+    // the account (see `default_anthropic_pairing`).
     if surface == ApiSurface::Anthropic && account.claude_compatible {
         return Some(default_anthropic_pairing(account, harness_id));
     }
@@ -1149,9 +1161,9 @@ pub(crate) fn effective_pairings(
         if !proxiable_ids.contains(p.provider_id.as_str()) {
             continue;
         }
-        // An Anthropic-surface pairing's payload is an attach-time snapshot;
-        // render the live account-derived config instead so the page matches
-        // what `resolve_pairing` injects at spawn.
+        // Anthropic-surface pairings are attach-time snapshots — render the
+        // live account-derived config so the page matches what the spawn path
+        // injects (see `default_anthropic_pairing`).
         let resolved = if p.surface == ApiSurface::Anthropic {
             accounts
                 .iter()
@@ -1256,12 +1268,11 @@ pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), Strin
 /// disk-reading wrapper so the rule is testable without touching the global
 /// preferences cache.
 ///
-/// Tier source mirrors [`default_anthropic_pairing`]: the account's own tiers
-/// (the Providers-page edits) win when set; a first-class surface's published
-/// tiers fill in only for a fully-cleared account (so a user-cleared MiniMax
-/// with empty `model_tiers` doesn't false-positive — the env builder emits
-/// `ANTHROPIC_MODEL` from `minimax_default_tiers()`). OpenRouter + Generic
-/// have no published surface, so their account tiers are the only source.
+/// Preflight gate for a custom Claude-compatible endpoint — refuses to spawn
+/// when no primary model is pinned (OpenRouter-style 400 trap). Tier source:
+/// [`anthropic_tiers_for`] — same precedence as `default_anthropic_pairing`,
+/// so a user-cleared MiniMax with empty `model_tiers` doesn't false-positive
+/// (the env builder still emits `ANTHROPIC_MODEL` from the published surface).
 fn preflight_account_env(account: Option<&ProviderAccount>) -> Result<(), String> {
     let Some(account) = account else {
         return Ok(());
@@ -1273,16 +1284,7 @@ fn preflight_account_env(account: Option<&ProviderAccount>) -> Result<(), String
     if !base_url_is_set {
         return Ok(());
     }
-    let own_tiers = effective_tiers(account);
-    let tiers = if !own_tiers.is_empty() {
-        own_tiers
-    } else {
-        first_class_surfaces(&account.id)
-            .into_iter()
-            .find(|e| e.surface == ApiSurface::Anthropic)
-            .map(|e| e.model_tiers)
-            .unwrap_or_default()
-    };
+    let tiers = anthropic_tiers_for(account);
     if tiers.default.is_none() {
         return Err(format!(
             "Custom Claude-compatible endpoint '{}' requires the 'Default model' tier to be set. Open the Providers page and configure it (e.g. 'anthropic/claude-3-5-sonnet-latest' for Claude via OpenRouter).",
@@ -2361,6 +2363,7 @@ mod tests {
         assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("MiniMax-M2.7"));
         assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("MiniMax-M3[1m]"));
         assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("MiniMax-M3[1m]"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("MiniMax-M3[1m]"));
         assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("MiniMax-M2.7"));
         assert_eq!(get("API_TIMEOUT_MS"), Some("3000000"));
     }
@@ -2375,6 +2378,7 @@ mod tests {
         assert_eq!(get("ANTHROPIC_MODEL"), Some("kimi-k2.6"));
         assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("kimi-k2.5"));
         assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("kimi-k2.6"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("kimi-k2.6"));
         assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("kimi-k2.5"));
         assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("kimi-k2.5"));
     }
@@ -2591,6 +2595,38 @@ mod tests {
     #[test]
     fn preflight_account_env_passes_for_no_account() {
         assert!(preflight_account_env(None).is_ok());
+    }
+
+    /// The extracted Anthropic-tier-source helper is the single source for the
+    /// derived-pairing + spawn-preflight precedence. Account tiers win; the
+    /// first-class published Anthropic endpoint fills a fully-cleared account;
+    /// a Generic provider's account tiers are the only source.
+    #[test]
+    fn anthropic_tiers_for_precedence_is_account_then_published() {
+        // Account set → account wins (Providers-page edit reaches the next spawn).
+        let edited = ProviderAccount {
+            model_tiers: ModelTiers {
+                default: Some("edited".into()),
+                ..ModelTiers::default()
+            },
+            ..custom_account("deepseek")
+        };
+        assert_eq!(anthropic_tiers_for(&edited).default.as_deref(), Some("edited"));
+
+        // First-class account fully cleared by the user → published surface
+        // fills defaults so ANTHROPIC_MODEL still emits (preflight gate relies
+        // on this — see `preflight_account_env_passes_for_cleared_first_class_account`).
+        let mut cleared = default_provider_accounts().into_iter().find(|a| a.id == "minimax").unwrap();
+        cleared.model_tiers = ModelTiers::default();
+        assert_eq!(anthropic_tiers_for(&cleared).default.as_deref(), Some("MiniMax-M3[1m]"));
+
+        // Generic account cleared → empty (the pre-pairings behaviour).
+        let generic_cleared = ProviderAccount {
+            model_tiers: ModelTiers::default(),
+            models: Vec::new(),
+            ..custom_account("deepseek")
+        };
+        assert!(anthropic_tiers_for(&generic_cleared).is_empty());
     }
 
     /// First-class surfaces (minimax/kimi) supply their OWN populated
