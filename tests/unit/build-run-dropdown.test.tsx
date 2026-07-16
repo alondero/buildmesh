@@ -332,15 +332,22 @@ describe('BuildRunDropdown', () => {
     // and must scope correctly per node id (multiple dropdowns can be
     // mounted simultaneously, one per agent node in the grid).
 
-    it('scopes the menu container with data-dropdown-for=<node.id>', () => {
+    it('scopes the dropdown with data-dropdown-for=<node.id> on the outer wrapper', () => {
       // The hook's selector is built from `String(open)`, so a
       // mismatch (e.g. a boolean coercion) would silently break the
-      // scoping across sibling dropdowns. Pin the attribute value.
+      // scoping across sibling dropdowns. Pin the attribute value
+      // AND the placement: the attribute lives on the OUTER wrapper
+      // (not the menu popup) so a click on the trigger is "inside"
+      // and doesn't race with the toggle.
       const onBuildRun = vi.fn();
       render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
       openMenu();
+      const wrapper = document.querySelector('[data-dropdown-for]') as HTMLElement;
+      expect(wrapper).toBeTruthy();
+      expect(wrapper.getAttribute('data-dropdown-for')).toBe(String(NODE.id));
+      // The menu itself does NOT carry the attribute (only the wrapper).
       const menu = document.querySelector('[role="menu"]') as HTMLElement;
-      expect(menu.getAttribute('data-dropdown-for')).toBe(String(NODE.id));
+      expect(menu.hasAttribute('data-dropdown-for')).toBe(false);
     });
 
     it('closes the menu on mousedown outside the scoped element', () => {

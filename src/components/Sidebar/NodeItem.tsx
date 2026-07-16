@@ -8,6 +8,7 @@ import type { SpawnOption } from '../../lib/groups';
 import { groupByHarness } from '../../lib/groups';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
+import { useClickOutside } from '../../hooks/useClickOutside';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
@@ -135,25 +136,16 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     });
   };
 
+  // Issue #814 — outside-mousedown close goes through the shared
+  // `useClickOutside` hook (#492). Both the parent menu AND the
+  // submenu carry `data-dropdown-for={node.id}` (see below), so a
+  // click inside either subtree satisfies the hook's
+  // `[data-dropdown-for="<id>"]` selector — closing on a sub-internal
+  // click is now handled by attribute scoping instead of two ref walks.
+  useClickOutside<number>(contextMenu ? node.id : null, () => closeContextMenu());
+
   useEffect(() => {
     if (!contextMenu) return;
-    const handleClick = (e: MouseEvent) => {
-      // `stopPropagation` on the menu's React onMouseDown handler
-      // doesn't help here — the native event still bubbles to the
-      // `document` listener we're attached to. Instead, ignore the
-      // event if it originated inside the parent menu OR the
-      // submenu (issue #774). Both have their own click handlers
-      // that should run unimpeded; closing on a sub-internal click
-      // would make the submenu un-openable via real mouse clicks.
-      const target = e.target;
-      const menu = menuRef.current;
-      const submenu = submenuRef.current;
-      if (target instanceof Node) {
-        if (menu && menu.contains(target)) return;
-        if (submenu && submenu.contains(target)) return;
-      }
-      closeContextMenu();
-    };
     const handleKeyDown = (e: KeyboardEvent) => {
       // WAI-ARIA menu contract: keystrokes only apply while focus is
       // inside the menu. The document-level listener would otherwise
@@ -255,10 +247,8 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
         return;
       }
     };
-    document.addEventListener('mousedown', handleClick);
     document.addEventListener('keydown', handleKeyDown);
     return () => {
-      document.removeEventListener('mousedown', handleClick);
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [contextMenu]);
@@ -380,6 +370,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
       {contextMenu && (
         <div
           ref={menuRef}
+          // Issue #814 — scoped attribute for `useClickOutside`. The
+          // submenu carries the same value (below), so a click inside
+          // either subtree matches `[data-dropdown-for="<id>"]` and the
+          // hook treats both as "inside".
+          data-dropdown-for={node.id}
           role="menu"
           aria-labelledby={`node-item-name-${node.id}`}
           className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
@@ -484,6 +479,11 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                 role="menu"
                 aria-label="Pick target provider"
                 data-testid="regenerate-submenu"
+                // Issue #814 — same scoped attribute as the parent menu
+                // so `useClickOutside` treats clicks inside the
+                // submenu as "inside" (closing on a sub-internal click
+                // would make the picker un-clickable).
+                data-dropdown-for={node.id}
                 className="absolute left-full top-0 -ml-1 min-w-[200px] bg-bg-overlay border border-border-default rounded-md shadow-md py-1 z-[101]"
                 // `onMouseDown stopPropagation` mirrors the parent
                 // menu — without it, a click inside the submenu

@@ -331,9 +331,15 @@ export function ArchivedNodesTab() {
                       data-dropdown-for={session.session_id}
                       className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-h-[320px] overflow-y-auto animate-scale-in origin-top-right"
                     >
+                      {/* Issue #814 — `onClose` must be wired so the
+                          `GroupedProviderMenu`'s Escape handler can close
+                          the picker. Without it Escape was a no-op
+                          (review finding from the spec axis). The parent
+                          owns the open/close state via `setOpenDropdown`. */}
                       <GroupedProviderMenu
                         providers={resumableProviders}
                         onSelect={(providerId) => handleResume(session, providerId)}
+                        onClose={() => setOpenDropdown(null)}
                       />
                     </div>
                   )}
