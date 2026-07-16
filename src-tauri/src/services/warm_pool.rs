@@ -2012,7 +2012,7 @@ mod tests {
         let path = tmp.path().to_str().unwrap().to_string();
 
         let run = |args: &[&str]| {
-            let status = std::process::Command::new("git")
+            let status = std::process::Command::new("git") // allow-inline-process-spawn: test helper
                 .args(args)
                 .current_dir(&path)
                 .status()
@@ -2092,7 +2092,7 @@ mod tests {
     }
 
     fn read_head_sha(worktree_path: &str) -> String {
-        let output = std::process::Command::new("git")
+        let output = std::process::Command::new("git") // allow-inline-process-spawn: test helper
             .args(["-C", worktree_path, "rev-parse", "HEAD"])
             .output()
             .expect("git rev-parse");
