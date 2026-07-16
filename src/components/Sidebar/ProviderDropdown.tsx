@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
@@ -15,9 +16,27 @@ interface ProviderDropdownProps {
   meshId: number;
   providers: SpawnOption[];
   onSelect: (providerId: string, altKey: boolean) => void;
+  /**
+   * Issue #814 — Escape closes the dropdown. The parent (e.g. the
+   * sidebar's `SpawnButtonCluster`) owns the `isOpen` state, so it must
+   * provide a callback to flip that back to false. We can't repurpose
+   * `onSelect` because Escape isn't a row pick — it's a dismiss.
+   * `GroupedProviderMenu`'s keyboard handler also calls this on Escape,
+   * so the two paths share the same close action.
+   */
+  onClose?: () => void;
+  /**
+   * Issue #814 — stable id used by the parent's trigger button's
+   * `aria-controls`. The id is mirrored onto the menu's outer div so the
+   * disclosure link is bidirectional (trigger → menu and menu → trigger).
+   * Optional so callers that don't use the trigger-button pattern (e.g.
+   * `ArchivedNodesTab`'s direct `<GroupedProviderMenu>` render) can omit
+   * it without supplying a value.
+   */
+  menuId?: string;
 }
 
-export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdownProps) {
+export function ProviderDropdown({ meshId, providers, onSelect, onClose, menuId }: ProviderDropdownProps) {
   // Issue #575 / ADR-0016 — render the harness-grouped, always-expanded
   // Spawn Menu. The single backend-derived list (issue #538 retired the
   // legacy enum-backed rows) is now grouped by `group_key` (== `harness_id`):
@@ -33,9 +52,61 @@ export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdo
   // explaining the fix. Terminal stays clickable below — it's still a valid,
   // if limited, spawn — so this augments rather than replaces the menu.
   const noAgent = !hasSpawnableAgent(providers);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Issue #814 — viewport clamping. The menu sits `absolute right-0 top-full
+  // mt-1` so it can overflow the bottom edge of the sidebar when the trigger
+  // lives near the bottom of a long mesh list. `useLayoutEffect` (not
+  // `useEffect`) reads the rendered height BEFORE the browser paints, so
+  // the user never sees the overflow position. If the menu's bottom edge
+  // would push past the viewport, we shift the menu up via a CSS
+  // `translateY` — keeping the existing `top-full mt-1` anchor intact so
+  // the close animation doesn't have to re-layout a repositioned popover.
+  //
+  // `transform: translateY(-shift)` is applied as an inline style; the
+  // cleanup resets it so a remount starts from the unclamped position
+  // (the parent's `animate-scale-in` runs every open, so a stale transform
+  // would clip the opening frame).
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    if (!menu) return;
+    const rect = menu.getBoundingClientRect();
+    const vh = window.innerHeight;
+    const MARGIN = 4;
+    const overflow = rect.bottom - (vh - MARGIN);
+    if (overflow <= 0) return;
+    // Bound the shift by the space ABOVE the menu's current top so the
+    // shifted-up top doesn't land at a negative y. The `maxShift` is
+    // `rect.top - MARGIN` (not `rect.top - rect.height - MARGIN` — that
+    // would double-subtract the menu's own height and produce too small
+    // a cap, leaving the menu still overflowing).
+    const maxShift = Math.max(0, rect.top - MARGIN);
+    const shift = Math.min(overflow, maxShift);
+    if (shift <= 0) return;
+    menu.style.transform = `translateY(-${shift}px)`;
+    return () => {
+      menu.style.transform = '';
+    };
+  }, [providers]);
   return (
     <div
+      ref={menuRef}
+      id={menuId}
       data-dropdown-for={meshId}
+      // Issue #814 — `role="menu"` is declared on `GroupedProviderMenu`'s
+      // own root (the inner element that holds the menuitems). Nesting
+      // `role="menu"` inside another `role="menu"` is invalid ARIA (a
+      // menu cannot contain a menu as a direct child — AT will announce
+      // the empty-state panel + the menu as two separate menus). The
+      // outer shell stays role-less so the inner `GroupedProviderMenu`
+      // owns the single menu role regardless of whether it's wrapped by
+      // this shell (`Sidebar`/`Issues`/`PRs`/`Archive`) or rendered
+      // directly (`ArchivedNodesTab`'s standalone use).
+      // `aria-label` stays on this shell so the empty-state panel (when
+      // visible) is announced as a child of the surrounding menu
+      // surface, with the inner `GroupedProviderMenu` adding its own
+      // label for the menu itself.
+      aria-label="Select a provider"
       className="absolute right-0 top-full mt-1 z-50 bg-bg-overlay border border-border-default rounded-md shadow-md min-w-[200px] max-h-[400px] overflow-y-auto animate-scale-in origin-top-right"
     >
       {noAgent && (
@@ -61,7 +132,10 @@ export function ProviderDropdown({ meshId, providers, onSelect }: ProviderDropdo
           </SafeLink>
         </div>
       )}
-      <GroupedProviderMenu providers={providers} onSelect={onSelect} />
+      {/* Issue #814 — forward `onClose` to `GroupedProviderMenu` so its
+          keyboard handler (Escape → close) calls the same callback the
+          parent's `useClickOutside` and outside-mousedown paths call. */}
+      <GroupedProviderMenu providers={providers} onSelect={onSelect} onClose={onClose} />
     </div>
   );
 }

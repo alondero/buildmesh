@@ -11,7 +11,7 @@
  * space shrinks ~34 px and the menu items keep their original labels.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { render, fireEvent, screen } from '@testing-library/react';
+import { render, fireEvent, screen, act } from '@testing-library/react';
 import { type AgentNode } from '../../src/stores/agentNodeStore';
 import { BuildRunDropdown } from '../../src/components/BuildRun/BuildRunDropdown';
 
@@ -122,5 +122,267 @@ describe('BuildRunDropdown', () => {
     openMenu();
     fireEvent.click(screen.getByText('Run'));
     expect(onBuildRun).toHaveBeenLastCalledWith(NODE.id, 'run');
+  });
+
+  describe('WAI-ARIA menu semantics (issue #814)', () => {
+    it('declares role="menu" on the menu container with an accessible label', () => {
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const menu = screen.getByRole('menu', { name: /Build, run/ });
+      expect(menu).toBeTruthy();
+    });
+
+    it('marks every action as a menuitem (Build, Run, Terminal)', () => {
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      expect(screen.getAllByRole('menuitem')).toHaveLength(3);
+      expect(screen.getByRole('menuitem', { name: 'Build' })).toBeTruthy();
+      expect(screen.getByRole('menuitem', { name: 'Run' })).toBeTruthy();
+      expect(screen.getByRole('menuitem', { name: 'Terminal' })).toBeTruthy();
+    });
+
+    it('puts only the first item in the natural tab order on open (roving tabindex)', () => {
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const items = screen.getAllByRole('menuitem');
+      expect(items[0].getAttribute('tabindex')).toBe('0');
+      expect(items[1].getAttribute('tabindex')).toBe('-1');
+      expect(items[2].getAttribute('tabindex')).toBe('-1');
+    });
+  });
+
+  describe('keyboard navigation (issue #814)', () => {
+    it('ArrowDown cycles focus between Build → Run → Terminal → Build', () => {
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const items = screen.getAllByRole('menuitem');
+      // Item 0 (Build) is auto-focused on open.
+      expect(document.activeElement).toBe(items[0]);
+      // Advance.
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+      expect(document.activeElement).toBe(items[1]);
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+      expect(document.activeElement).toBe(items[2]);
+      // Wrap around to first.
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+      expect(document.activeElement).toBe(items[0]);
+    });
+
+    it('ArrowUp cycles with wrap-around (Build → Terminal → Run → Build)', () => {
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const items = screen.getAllByRole('menuitem');
+      // Up from first wraps to last.
+      fireEvent.keyDown(items[0], { key: 'ArrowUp' });
+      expect(document.activeElement).toBe(items[2]);
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+      expect(document.activeElement).toBe(items[1]);
+      fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+      expect(document.activeElement).toBe(items[0]);
+    });
+
+    it('Home jumps to the first item, End jumps to the last', () => {
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const items = screen.getAllByRole('menuitem');
+      items[1].focus();
+      fireEvent.keyDown(document.activeElement!, { key: 'End' });
+      expect(document.activeElement).toBe(items[2]);
+      fireEvent.keyDown(document.activeElement!, { key: 'Home' });
+      expect(document.activeElement).toBe(items[0]);
+    });
+  });
+
+  describe('Escape closes the menu and returns focus to the trigger (issue #814)', () => {
+    it('Escape closes the menu and returns focus to the trigger button', () => {
+      // The WAI-ARIA contract: closing a menu via Escape MUST return
+      // focus to the element that opened it (the trigger). Without
+      // this, keyboard users land "nowhere" — a screen-reader trap.
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      const trigger = screen.getByLabelText('Open build menu');
+      // `fireEvent.click` (not `trigger.click()`) — React's synthetic
+      // event system is wired through Testing Library's dispatcher, so
+      // the native HTMLElement.click() in jsdom doesn't reach React's
+      // onClick handler reliably.
+      fireEvent.click(trigger);
+      // Sanity: menuitems are in the DOM (the strongest signal that
+      // the menu opened — `getByRole('menu')` would clash with the
+      // trigger's `aria-haspopup="menu"` which some accessibility
+      // libraries also resolve to role="menu").
+      const items = screen.getAllByRole('menuitem');
+      expect(items).toHaveLength(3);
+      expect(document.activeElement).toBe(items[0]);
+      // Press Escape — menu closes, focus returns to trigger.
+      fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+      expect(screen.queryAllByRole('menuitem')).toHaveLength(0);
+      // requestAnimationFrame is used to wait for the unmount before
+      // focusing the trigger — flush microtasks + rAF so the assertion
+      // sees the post-rAF state.
+      return new Promise<void>((resolve) =>
+        requestAnimationFrame(() => {
+          expect(document.activeElement).toBe(trigger);
+          resolve();
+        }),
+      );
+    });
+
+    it('Escape does nothing when the menu is closed', () => {
+      // The keydown listener is gated on `isOpen`. Pressing Escape
+      // while the menu is closed must not throw or interfere.
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      expect(() => fireEvent.keyDown(document, { key: 'Escape' })).not.toThrow();
+    });
+  });
+
+  describe('viewport clamping (issue #814)', () => {
+    let rectSpy: ReturnType<typeof vi.spyOn> | undefined;
+
+    afterEach(() => {
+      rectSpy?.mockRestore();
+      rectSpy = undefined;
+    });
+
+    it('applies a negative translateY when the menu would overflow the bottom of the viewport', () => {
+      // Stub `HTMLElement.prototype.getBoundingClientRect` so the
+      // layout effect sees an overflow rect on its initial mount.
+      // (A per-element spy would be on a detached node because the
+      // menu unmounts when isOpen flips false — the prototype mock
+      // covers the freshly mounted element on the next open.)
+      //
+      // The mock positions the menu near the bottom of the viewport
+      // (top=600) with a height that extends past the bottom (700 +
+      // 200 = 900 > 768). `rect.top=600` gives the cap `maxShift =
+      // rect.top - MARGIN = 596`, plenty of room to shift up by the
+      // full overflow (900 - 764 = 136). A `top=0` mock would
+      // cap the shift at 0 and the test would falsely see no
+      // transform applied.
+      rectSpy = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockReturnValue({
+          top: 600,
+          bottom: 900,
+          left: 0,
+          right: 200,
+          width: 200,
+          height: 300,
+          x: 0,
+          y: 600,
+          toJSON: () => ({}),
+        } as DOMRect);
+
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const menu = document.querySelector('[role="menu"]') as HTMLElement;
+      expect(menu.style.transform).toMatch(/translateY\(-/);
+    });
+
+    it('does not apply translateY when the menu fits in the viewport', () => {
+      // Mock returns a rect that fits comfortably inside the viewport.
+      rectSpy = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockReturnValue({
+          top: 100,
+          bottom: 250,
+          left: 0,
+          right: 200,
+          width: 200,
+          height: 150,
+          x: 0,
+          y: 100,
+          toJSON: () => ({}),
+        } as DOMRect);
+
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const menu = document.querySelector('[role="menu"]') as HTMLElement;
+      // No overflow → no transform applied.
+      expect(menu.style.transform).toBe('');
+    });
+  });
+
+  describe('Tab closes the menu (WAI-ARIA non-modal popover, issue #814)', () => {
+    it('Tab leaves the menu and closes it (no focus trap)', () => {
+      // A `role="menu"` is a non-modal popover — Tab moves focus to the
+      // next tabbable element on the page and the menu closes. (A
+      // modal menu would trap focus; the WAI-ARIA `menu` role is
+      // explicitly the non-modal variant.)
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      expect(screen.getByRole('menu')).toBeTruthy();
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Tab' });
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+  });
+
+  describe('close-on-outside-click via the shared useClickOutside hook (issue #814)', () => {
+    // Pre-#814 the dropdown hand-rolled a `ref.contains` mousedown
+    // listener; the consolidation in #492's hook form is the canonical
+    // primitive. The hook's selector is `[data-dropdown-for="<id>"]`
+    // and must scope correctly per node id (multiple dropdowns can be
+    // mounted simultaneously, one per agent node in the grid).
+
+    it('scopes the menu container with data-dropdown-for=<node.id>', () => {
+      // The hook's selector is built from `String(open)`, so a
+      // mismatch (e.g. a boolean coercion) would silently break the
+      // scoping across sibling dropdowns. Pin the attribute value.
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const menu = document.querySelector('[role="menu"]') as HTMLElement;
+      expect(menu.getAttribute('data-dropdown-for')).toBe(String(NODE.id));
+    });
+
+    it('closes the menu on mousedown outside the scoped element', () => {
+      const onBuildRun = vi.fn();
+      render(
+        <div>
+          <button data-testid="outside">outside</button>
+          <BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />
+        </div>,
+      );
+      openMenu();
+      expect(screen.queryByRole('menu')).toBeTruthy();
+      fireEvent.mouseDown(screen.getByTestId('outside'));
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('does NOT close the menu on mousedown inside the scoped element', () => {
+      const onBuildRun = vi.fn();
+      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
+      openMenu();
+      const buildItem = screen.getByRole('menuitem', { name: 'Build' });
+      // mousedown on the menuitem must not flip isOpen — the click
+      // handler below is the only path that closes the menu after a
+      // pick. (Without this, a real user would have their Build action
+      // cancelled because the menu closed mid-mousedown.)
+      fireEvent.mouseDown(buildItem);
+      expect(screen.queryByRole('menu')).toBeTruthy();
+    });
+
+    it('does not attach a mousedown listener while the menu is closed', () => {
+      // Outside mousedown before the menu ever opened must be a no-op
+      // (the hook only attaches while `open !== null`).
+      const onBuildRun = vi.fn();
+      render(
+        <div>
+          <button data-testid="outside">outside</button>
+          <BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />
+        </div>,
+      );
+      // Menu is closed → listener is detached → outside click is a no-op.
+      fireEvent.mouseDown(screen.getByTestId('outside'));
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
   });
 });

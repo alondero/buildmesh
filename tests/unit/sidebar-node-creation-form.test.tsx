@@ -90,14 +90,14 @@ describe('NodeCreationForm', () => {
     // Issue #575 — the harness header carries a "harness" badge, so
     // the accessible name is "<label> harness" rather than just the
     // label. Regex matchers keep the test robust to that suffix.
-    expect(screen.getByRole('button', { name: /Anthropic/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Agy/ })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: /Anthropic/ })).toBeTruthy();
+    expect(screen.getByRole('menuitem', { name: /Agy/ })).toBeTruthy();
   });
 
   it('selects a specific provider from the open dropdown, deferring use_worktree to the mesh default', async () => {
     const { onSelectProvider } = setup({ isDropdownOpen: true });
 
-    await userEvent.click(screen.getByRole('button', { name: /Agy/ }));
+    await userEvent.click(screen.getByRole('menuitem', { name: /Agy/ }));
 
     expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', undefined);
   });
@@ -105,7 +105,7 @@ describe('NodeCreationForm', () => {
   it('selects a specific provider in the mesh root from the open dropdown when alt-clicked', async () => {
     const { onSelectProvider } = setup({ isDropdownOpen: true });
 
-    fireEvent.click(screen.getByRole('button', { name: /Agy/ }), { altKey: true });
+    fireEvent.click(screen.getByRole('menuitem', { name: /Agy/ }), { altKey: true });
 
     expect(onSelectProvider).toHaveBeenCalledWith(MESH, 'agy', false);
   });
