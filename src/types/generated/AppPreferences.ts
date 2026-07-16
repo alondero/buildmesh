@@ -56,4 +56,19 @@ harness_order: Array<string>,
  * Codex). An additive field — an older `preferences.json` without it loads
  * with an empty list.
  */
-provider_pairings: Array<ProviderPairing>, };
+provider_pairings: Array<ProviderPairing>, 
+/**
+ * The backend that summaries PTY output into a slug (issue #824).
+ * Distinct from the node's own provider — auto-rename runs frequently
+ * and often sits well below the model's intelligence threshold, so the
+ * user opts in via Settings rather than inheriting whatever expensive
+ * tier the spawned node is on. `None` (the default) means auto-naming
+ * is disabled — nodes keep their `adjective-adjective-noun` random
+ * slugs until the user explicitly configures this. `Some(spawn_id)`
+ * forwards through [`crate::preferences::resolve_provider_env`] so
+ * whatever provider the user picks resolves through the same
+ * configured-account pipeline that node spawns use. Built-in
+ * Anthropic is special-cased in `session_naming` to pin a cheap
+ * haiku tier instead of the user's main subscription default.
+ */
+naming_provider: string | null, };

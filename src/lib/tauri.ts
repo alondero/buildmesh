@@ -709,6 +709,16 @@ export const getAppPreferences = () =>
 export const setAppDefaultProvider = (provider: string | null) =>
   _invoke('set_app_default_provider', { provider });
 
+/** Issue #824: pick the backend that summarises PTY output into a slug.
+ *  Pass `null` (or empty) to **disable** auto-naming — nodes keep their
+ *  random `adjective-adjective-noun` slugs until the user picks a value
+ *  in Settings → Auto-naming. Distinct from `default_provider`: a
+ *  rename runs frequently on trivial content, so the user opts in
+ *  explicitly rather than inheriting whatever expensive tier the
+ *  spawned node happens to be on. */
+export const setAppNamingProvider = (provider: string | null) =>
+  _invoke('set_app_naming_provider', { provider });
+
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });
 

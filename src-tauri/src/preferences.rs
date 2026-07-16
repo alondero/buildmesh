@@ -286,6 +286,20 @@ pub struct AppPreferences {
     /// with an empty list.
     #[serde(default)]
     pub provider_pairings: Vec<ProviderPairing>,
+    /// The backend that summaries PTY output into a slug (issue #824).
+    /// Distinct from the node's own provider — auto-rename runs frequently
+    /// and often sits well below the model's intelligence threshold, so the
+    /// user opts in via Settings rather than inheriting whatever expensive
+    /// tier the spawned node is on. `None` (the default) means auto-naming
+    /// is disabled — nodes keep their `adjective-adjective-noun` random
+    /// slugs until the user explicitly configures this. `Some(spawn_id)`
+    /// forwards through [`crate::preferences::resolve_provider_env`] so
+    /// whatever provider the user picks resolves through the same
+    /// configured-account pipeline that node spawns use. Built-in
+    /// Anthropic is special-cased in `session_naming` to pin a cheap
+    /// haiku tier instead of the user's main subscription default.
+    #[serde(default)]
+    pub naming_provider: Option<String>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -363,6 +377,39 @@ pub fn default_provider() -> Option<String> {
         Ok(prefs) => prefs.default_provider.filter(|s| !s.is_empty()),
         Err(e) => {
             tracing::warn!("preferences::default_provider load failed, falling back: {}", e);
+            None
+        }
+    }
+}
+
+/// The user-configured backend the session-naming helper uses to summarise
+/// PTY output into a slug (issue #824). `None` means "auto-naming is off" —
+/// the session_naming module short-circuits and nodes retain their random
+/// `adjective-adjective-noun` slug. An empty string is normalised to `None`
+/// here so a save with `""` from the frontend acts the same as a clear.
+///
+/// Distinct from `default_provider`: the naming helper runs frequently on
+/// content that is well below the front-line model's intelligence
+/// threshold, so the user explicitly opts in via Settings rather than
+/// inheriting whatever provider a spawned node happens to be on (which can
+/// be an expensive tier like Opus with xhigh effort).
+///
+/// The naming helper treats this as a *spawn-option id* (e.g. `"minimax"`,
+/// `"claude:minimax"`, `"claude:openrouter"`) and resolves it through
+/// [`crate::preferences::resolve_provider_env`] the same way node spawns
+/// do — so a user who already configured a Provider Account can reuse it
+/// here for free. Built-in Anthropic (`"anthropic"`) is special-cased
+/// inside `session_naming` to pin a cheap haiku tier; the historical
+/// `minimax_backend_env()` side-channel is no longer the implicit
+/// default.
+pub fn naming_provider() -> Option<String> {
+    match load() {
+        Ok(prefs) => prefs.naming_provider.filter(|s| !s.is_empty()),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::naming_provider load failed, falling back: {}",
+                e
+            );
             None
         }
     }

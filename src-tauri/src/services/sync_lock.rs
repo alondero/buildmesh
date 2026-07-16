@@ -258,52 +258,69 @@ mod tests {
         );
     }
 
-    /// Different keys do NOT serialize: two threads with two distinct
-    /// keys sleep 100ms each, and the wallclock must be ≪ 2*100ms (i.e.
-    /// the inner locks were never contended). This guards against an
-    /// accidental global-mutex regression — the same-key test above
-    /// already proves serialization *works*; this one proves it doesn't
-    /// *over*-serialize.
+    /// Different keys do NOT serialize: two threads with two distinct keys
+    /// sleep 100ms each, and the maximum simultaneous-thread count inside
+    /// the critical section must reach 2 at some point during the run.
+    /// If the per-key lock were secretly global, only one thread could
+    /// ever be inside at once, and the peak would stay at 1.
     ///
-    /// The bound is intentionally generous (1.9x the parallel-expected
-    /// elapsed vs. 2x the serialized-expected elapsed) because Windows
-    /// can co-schedule 2 threads on the same core under contention,
-    /// costing up to one full `SLEEP_MS` of scheduler latency on a busy
-    /// CI box. Tight bounds here flake on slow machines without adding
-    /// real coverage — the same-key test is the precise correctness
-    /// check; this one is a smoke test against "did I accidentally
-    /// replace the per-Mesh map with a single global".
+    /// This replaces the prior wallclock-bound assertion (`elapsed <
+    /// 1.9 * SLEEP_MS`), which flaked on Windows whenever a busy CI box
+    /// co-scheduled both threads on the same core. The handshake is the
+    /// same pattern `same_key_serializes_concurrent_callers` already uses
+    /// (issue #652 / commit 771bc79), so the test is now deterministic —
+    /// no timing assumptions — while still catching the regression it's
+    /// targeted at: a per-Mesh map accidentally replaced by a single
+    /// global mutex. The wide 100ms sleep on each thread gives the OS
+    /// scheduler plenty of room to actually overlap them — the assertion
+    /// checks the overlap was *possible*, not how fast it happened.
     #[test]
     fn different_keys_run_in_parallel() {
         const SLEEP_MS: u64 = 100;
 
-        let start = Instant::now();
-        let h1 = thread::spawn(|| {
-            with_mesh_sync_lock("mesh://alpha", || {
-                thread::sleep(Duration::from_millis(SLEEP_MS));
-            });
-        });
-        let h2 = thread::spawn(|| {
-            with_mesh_sync_lock("mesh://beta", || {
-                thread::sleep(Duration::from_millis(SLEEP_MS));
-            });
-        });
-        h1.join().unwrap();
-        h2.join().unwrap();
-        let elapsed = start.elapsed();
+        // Threads INSIDE the critical section + the peak count seen
+        // across the whole run. `fetch_add` returns the *previous* value,
+        // so `prev + 1` is the count after the increment; `fetch_max`
+        // records the peak.
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
 
-        // Serialized bound (worst case): 2 * SLEEP_MS = 200ms.
-        // Parallel ceiling: 1.9x the parallel-expected elapsed of
-        // SLEEP_MS = 190ms — leaves 10ms of headroom over a fully-
-        // serialized run, generous enough for Windows scheduler
-        // co-scheduling on a busy CI box.
-        let parallel_ceiling = Duration::from_millis((SLEEP_MS as f64 * 1.9) as u64);
-        assert!(
-            elapsed < parallel_ceiling,
-            "elapsed ({:?}) reached the serialized bound (~{:?}); \
-             different keys unexpectedly serialized",
-            elapsed,
-            2 * SLEEP_MS,
+        let i1 = Arc::clone(&in_flight);
+        let p1 = Arc::clone(&peak);
+        let h1 = thread::spawn(move || {
+            with_mesh_sync_lock("mesh://alpha", move || {
+                let new = i1.fetch_add(1, Ordering::SeqCst) + 1;
+                p1.fetch_max(new, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(SLEEP_MS));
+                i1.fetch_sub(1, Ordering::SeqCst);
+            });
+        });
+        let i2 = Arc::clone(&in_flight);
+        let p2 = Arc::clone(&peak);
+        let h2 = thread::spawn(move || {
+            with_mesh_sync_lock("mesh://beta", move || {
+                let new = i2.fetch_add(1, Ordering::SeqCst) + 1;
+                p2.fetch_max(new, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(SLEEP_MS));
+                i2.fetch_sub(1, Ordering::SeqCst);
+            });
+        });
+        h1.join().expect("alpha thread panicked");
+        h2.join().expect("beta thread panicked");
+
+        // Sanity: counter must be back to 0 after both threads exit.
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+
+        // The peak inside the critical section must reach 2, i.e. at some
+        // moment both threads were inside their (different) per-key locks
+        // simultaneously. A global-lock regression would keep the peak at 1.
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert_eq!(
+            observed_peak, 2,
+            "peak simultaneous per-key lock holders was {} (expected 2); \
+             the per-Mesh lock was unexpectedly serialized \
+             (issue #652 / different-keys regression)",
+            observed_peak,
         );
     }
 

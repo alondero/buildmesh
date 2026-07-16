@@ -658,18 +658,32 @@ pub fn on_output(node_id: i64, data: &str) {
     }
 }
 
-/// Testable core: checks whether rename should trigger, returns the buffer if so.
+/// Testable core: checks whether rename should trigger, returns the buffer
+/// if so.
 ///
 /// Side effect: on the very first call for a default-named node, this opens the
 /// node's gate (`buffering_ready`) so subsequent PTY output begins accumulating.
 /// On that first call the buffer is by definition empty, so this returns None
 /// and the actual rename fires on a later turn against clean post-startup content.
+///
+/// Returns a [`RenameTrigger`] (not just the buffer) so the caller can
+/// resolve the naming-side-channel env from the node's own `provider` field
+/// without re-querying the DB. Sharing the read keeps the per-turn cost to
+/// one `get_agent_node_by_id` call (issue #824 review: previously the call
+/// happened twice per turn — once in `should_trigger_rename` for the
+/// default-name check, once in `on_turn_with` for the provider — see commit
+/// log for the review write-up).
 fn should_trigger_rename(
     repo: &dyn SessionNamingRepository,
     node_id: i64,
-) -> Option<String> {
-    if let Ok(node) = repo.get_agent_node_by_id(node_id) {
-        if !is_default_name(&node.name) {
+) -> Option<RenameTrigger> {
+    // Single DB read, hoisted above both the default-name check and the
+    // provider passback. An Err here is non-fatal (default-name bypass
+    // falls through; provider default to "" so `naming_backend_env` falls
+    // back to the legacy-MiniMax probe).
+    let node = repo.get_agent_node_by_id(node_id).ok();
+    if let Some(ref n) = node {
+        if !is_default_name(&n.name) {
             // Node has a real name already; tear down everything so its PTY
             // output stops being buffered for no reason.
             clear_node_state(node_id);
@@ -715,7 +729,20 @@ fn should_trigger_rename(
     }
     st.renaming = true;
 
-    Some(st.buffer.clone())
+    Some(RenameTrigger {
+        buffer: st.buffer.clone(),
+        provider: node.map(|n| n.provider).unwrap_or_default(),
+    })
+}
+
+/// Bundle returned by [`should_trigger_rename`] when a rename fires:
+/// the harvested PTY buffer plus the node's `provider` (spawn-option id
+/// used by [`naming_backend_env`] to resolve the LLM-call env). Keeping
+/// these together in one struct avoids the double-read issue called out
+/// in the #824 code review.
+struct RenameTrigger {
+    buffer: String,
+    provider: String,
 }
 
 /// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
@@ -724,15 +751,34 @@ pub fn on_turn(node_id: i64, app: AppHandle) {
 }
 
 fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle) {
-    let Some(buffer) = should_trigger_rename(repo, node_id) else {
+    // User-config gate (issue #824 v2): auto-naming is opt-in via
+    // Settings → Auto-naming. `None` (the default for users who never
+    // visited that page) skips the rename entirely — the node keeps its
+    // random `adjective-adjective-noun` slug. Distinct from the
+    // previously-shipped `node.provider` lookup, which would route through
+    // whatever model the spawned node is on (could be Opus with xhigh
+    // effort). The point of this gate is to *opt in*, never to inherit.
+    let Some(user_naming_provider) = crate::preferences::naming_provider() else {
         return;
     };
 
+    let Some(trigger) = should_trigger_rename(repo, node_id) else {
+        return;
+    };
+    let RenameTrigger { buffer, provider: _ } = trigger;
+
     tracing::info!("session_naming: triggering rename for node {} ({} chars)", node_id, buffer.len());
+
+    // Resolve the LLM-call env once at trigger time so a node's configured
+    // backend (or the built-in Anthropic default) is honoured by
+    // `summarize_and_rename_with`. The provider comes from
+    // `AppPreferences.naming_provider` — NOT `node.provider`. The
+    // default is "disabled"; the user explicitly opts in.
+    let backend_env = naming_backend_env(&user_naming_provider);
 
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
-        match summarize_and_rename_with(node_id, &buffer).await {
+        match summarize_and_rename_with(node_id, &buffer, backend_env).await {
             Ok(slug) => {
                 // User-rename race guard: the LLM call above can take 5-30s.
                 // During that window the user may have invoked `rename_session`
@@ -773,6 +819,17 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
                     tracing::warn!(
                         "Node {} giving up on rename after {} attempts (last error: {})",
                         node_id, attempt, e
+                    );
+                    // Issue #824: surface the terminal rename failure to the
+                    // frontend so the user sees a toast / Settings hint
+                    // instead of a silent log. The frontend can map the
+                    // event to its existing toast primitive.
+                    let _ = app_for_task.emit(
+                        "naming-backend-failed",
+                        serde_json::json!({
+                            "node_id": node_id,
+                            "reason": e,
+                        }),
                     );
                 } else {
                     tracing::warn!(
@@ -890,9 +947,69 @@ fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 // Internal: LLM-based summarization
 // ---------------------------------------------------------------------------
 
+/// Pure routing decision. The single input is fed in via a closure so
+/// tests can stub the disk-reading helper
+/// (`preferences::resolve_provider_env`) without touching real
+/// preferences. Production callers pass the real helper via
+/// [`naming_backend_env`].
+///
+/// Routing (issue #824 v2 — after the user-review pivot to a dedicated
+/// Settings config):
+/// 1. **User-configured `naming_provider`** (a spawn-option id from
+///    [`crate::preferences::naming_provider`]). Honours whatever the user
+///    picked — a Provider Account, a built-in like `"anthropic"`, etc.
+///    This is the *only* layer the user can opt into; the node's own
+///    provider is intentionally **not** consulted (auto-rename runs
+///    frequently on trivial content, see the `#824` review follow-up).
+/// 2. **Empty / unset** — caller should not invoke `summarize_and_rename_with`
+///    at all (auto-naming is off). Returning an empty Vec here is a safety
+///    net for the "user set a value that didn't resolve to an env" path;
+///    the higher-level `on_turn_with` short-circuits on `Option::None`
+///    before the helper is consulted.
+///
+/// Legacy `~/.claude/providers.conf` MiniMax is no longer the implicit
+/// fallback. A user who wants cheap MiniMax renames now picks
+/// `"minimax"` (or the configured `claude:minimax` account id) in
+/// Settings → Auto-naming explicitly, mirroring the same opt-in shape as
+/// every other rename backend. The historic `minimax_backend_env()` is
+/// kept for any future regression check or one-shot tooling, but is no
+/// longer called from the rename path.
+pub(crate) fn naming_backend_env_with<F>(provider: &str, resolve_provider_env: F) -> Vec<(String, String)>
+where
+    F: FnOnce(&str) -> Vec<(String, String)>,
+{
+    if provider.is_empty() {
+        return Vec::new();
+    }
+    if provider == "anthropic" {
+        // Built-in Anthropic with a pinned haiku tier. The exact model name
+        // is whichever Anthropic ships Claude Code with by default — we
+        // deliberately don't pin a date-suffixed model name here (those
+        // burn out and need updating alongside Anthropic's release cycle;
+        // Claude Code's own haiku resolver picks the current default).
+        return vec![(
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
+            "claude-3-5-haiku-latest".to_string(),
+        )];
+    }
+    resolve_provider_env(provider)
+}
+
+/// Production wrapper: resolve the naming-side-channel env for the user's
+/// configured `naming_provider` (spawn-option id from
+/// `AppPreferences.naming_provider`). See [`naming_backend_env_with`] for
+/// the routing contract; this is the thin caller-friendly version that
+/// resolves via [`crate::preferences::resolve_provider_env`].
+pub(crate) fn naming_backend_env(provider: &str) -> Vec<(String, String)> {
+    naming_backend_env_with(provider, |p| {
+        crate::preferences::resolve_provider_env(p)
+    })
+}
+
 async fn summarize_and_rename_with(
     node_id: i64,
     buffer: &str,
+    backend_env: Vec<(String, String)>,
 ) -> Result<String, String> {
     let ansi_stripped = ANSI_ESCAPE.replace_all(buffer, "").to_string();
     let clean_buffer = strip_claude_code_banner(&ansi_stripped);
@@ -925,19 +1042,18 @@ async fn summarize_and_rename_with(
     cmd.args(["--print"]);
 
     // Clear any inherited claude backend env (cwrap `unset` parity) so a value
-    // exported in buildmesh's own environment can't override the MiniMax routing
-    // below, then inject the MiniMax backend env (ANTHROPIC_BASE_URL, API token,
-    // model routing) so `claude` talks to the MiniMax endpoint instead of the
-    // built-in Anthropic subscription. Replaces the env `cwrap --minimax` would
-    // have sourced from `~/.claude/providers.conf` — same source of truth,
-    // rebuilt in-process by `provider_conf::minimax_backend_env`. (This naming
-    // helper always uses the cheap MiniMax model regardless of the node's own
-    // provider, so it keeps its own hardcoded routing even though node spawns
-    // now resolve backend env per-profile from the configured provider account.)
+    // exported in buildmesh's own environment can't override the resolved
+    // backend below — then inject the env chosen by `naming_backend_env`
+    // (per-node provider account, legacy `MINIMAX_API_KEY`, or built-in
+    // Anthropic subscription when `backend_env` is empty). `naming_backend_env`
+    // replaces the unconditional `minimax_backend_env()` injection that
+    // #824 documented: previously this site routed every node through MiniMax
+    // regardless of the node's own provider, and silently failed for any
+    // user without a `MINIMAX_API_KEY`.
     for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
         cmd.env_remove(k);
     }
-    for (k, v) in crate::agent::provider::provider_conf::minimax_backend_env() {
+    for (k, v) in &backend_env {
         cmd.env(k, v);
     }
 
@@ -1733,6 +1849,11 @@ mod tests {
 
     struct MockRepo {
         node_name: String,
+        /// The node's `provider` (spawn-option id). Defaults to "" so tests
+        /// that only care about `node_name` keep working; pass-through
+        /// `with_provider` for tests that exercise the `RenameTrigger`
+        /// passback added by #824.
+        provider: String,
         should_fail: bool,
         updates: std::sync::Mutex<Vec<(i64, String)>>,
     }
@@ -1741,6 +1862,16 @@ mod tests {
         fn with_name(name: &str) -> Self {
             Self {
                 node_name: name.to_string(),
+                provider: String::new(),
+                should_fail: false,
+                updates: std::sync::Mutex::new(vec![]),
+            }
+        }
+
+        fn with_provider(name: &str, provider: &str) -> Self {
+            Self {
+                node_name: name.to_string(),
+                provider: provider.to_string(),
                 should_fail: false,
                 updates: std::sync::Mutex::new(vec![]),
             }
@@ -1752,11 +1883,12 @@ mod tests {
             if self.should_fail {
                 return Err("mock db error".into());
             }
-            // `should_trigger_rename` only reads `node.name`; the rest
-            // spreads through `..Default::default()` (issue #457).
+            // The renaming-path code only reads `node.name` and `node.provider`
+            // (issue #824 routing); the rest spreads through `..Default::default()`.
             Ok(AgentNode {
                 id,
                 name: self.node_name.clone(),
+                provider: self.provider.clone(),
                 ..Default::default()
             })
         }
@@ -1811,7 +1943,8 @@ mod tests {
         // Second call sees the buffer and returns it for renaming
         let second = should_trigger_rename(&repo, node_id);
         assert!(second.is_some(), "second call should trigger rename");
-        assert_eq!(second.unwrap().len(), 2000);
+        assert_eq!(second.as_ref().unwrap().buffer.len(), 2000);
+        assert_eq!(second.as_ref().unwrap().provider, "");
 
         clear_renaming_in_progress(node_id);
         cleanup(node_id);
@@ -1861,6 +1994,33 @@ mod tests {
         cleanup(node_id);
     }
 
+    /// Issue #824 follow-up (code review): the rename-trigger return value
+    /// must carry the node's `provider` field alongside the buffer so the
+    /// caller can resolve the LLM-call env without re-querying the DB.
+    /// Pins the single-read invariant in the test layer too.
+    #[test]
+    fn should_trigger_rename_passes_provider_through_on_second_call() {
+        let node_id = 70007;
+        cleanup(node_id);
+
+        let repo = MockRepo::with_provider("bold-keen-brook", "claude:minimax");
+        // First call opens the gate; no RenameTrigger yet.
+        assert!(should_trigger_rename(&repo, node_id).is_none());
+        on_output(node_id, &"x".repeat(2000));
+
+        // Second call should hand back BOTH buffer and provider.
+        let trigger = should_trigger_rename(&repo, node_id)
+            .expect("second call should trigger rename");
+        assert_eq!(trigger.buffer.len(), 2000);
+        assert_eq!(
+            trigger.provider, "claude:minimax",
+            "provider from the same row should travel with the buffer"
+        );
+
+        clear_renaming_in_progress(node_id);
+        cleanup(node_id);
+    }
+
     #[test]
     fn end_to_end_bypass_permissions_chrome_excluded_from_rename_buffer() {
         // Regression for the bypass-permissions slug bug.
@@ -1899,26 +2059,27 @@ mod tests {
         // Step 4: second turn — buffer is harvested
         let harvested = should_trigger_rename(&repo, node_id)
             .expect("rename should trigger on second turn with real content");
+        let harvested_buf = &harvested.buffer;
 
         assert!(
-            !harvested.contains("Bypass Permissions"),
+            !harvested_buf.contains("Bypass Permissions"),
             "chrome leaked into rename buffer:\n{}",
-            harvested
+            harvested_buf
         );
         assert!(
-            !harvested.contains("Plugins loaded"),
+            !harvested_buf.contains("Plugins loaded"),
             "plugin listing leaked into rename buffer:\n{}",
-            harvested
+            harvested_buf
         );
         assert!(
-            !harvested.contains("hookify"),
+            !harvested_buf.contains("hookify"),
             "skill name leaked from startup chrome:\n{}",
-            harvested
+            harvested_buf
         );
         assert!(
-            harvested.contains("authentication module"),
+            harvested_buf.contains("authentication module"),
             "real user content missing from rename buffer:\n{}",
-            harvested
+            harvested_buf
         );
 
         clear_renaming_in_progress(node_id);
@@ -1989,6 +2150,7 @@ mod tests {
         // the LLM slug still gets a chance to commit.
         let repo = MockRepo {
             node_name: String::new(),
+            provider: String::new(),
             should_fail: true,
             updates: std::sync::Mutex::new(vec![]),
         };
@@ -2052,6 +2214,156 @@ mod tests {
             "summarize_and_rename_with must call .kill_on_drop(true) on its \
              tokio::process::Command (issue #688). Without it, cancellation, \
              timeout, or app-shutdown leaves the claude child orphaned."
+        );
+    }
+
+    // --- gh824: session auto-naming must respect the user-configured provider ---
+
+    /// Unset `naming_provider` → empty Vec → caller skips rename entirely
+    /// (auto-naming is off). This is the post-v2 default: the user
+    /// must opt in via Settings → Auto-naming.
+    #[test]
+    fn naming_backend_env_with_unset_provider_returns_empty() {
+        let probed = std::sync::atomic::AtomicUsize::new(0);
+        let probed_ref = &probed;
+        let env = naming_backend_env_with(
+            "",
+            |_p| {
+                probed_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
+            },
+        );
+        assert!(env.is_empty(), "unset provider must not invoke the resolve closure");
+        assert_eq!(
+            probed.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "unset provider must NOT call resolve_provider_env (avoid disk reads)"
+        );
+    }
+
+    /// Built-in Anthropic subscription → pinned haiku tier. The point of
+    /// this branch is to ensure `claude --print` does NOT silently pick
+    /// up the user's main subscription default (issue #824 review:
+    /// routing through whatever model the node is on would burn
+    /// Opus-tier tokens on a trivial summarisation).
+    #[test]
+    fn naming_backend_env_with_anthropic_pins_haiku() {
+        let probed = std::sync::atomic::AtomicUsize::new(0);
+        let probed_ref = &probed;
+        let env = naming_backend_env_with(
+            "anthropic",
+            |_p| {
+                probed_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Vec::new()
+            },
+        );
+        assert_eq!(probed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        assert!(
+            map.contains_key("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            "built-in Anthropic must pin haiku; got: {:?}",
+            map.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !map.is_empty(),
+            "anthropic branch must return SOMETHING (the haiku pin)"
+        );
+    }
+
+    /// Configured provider-account pick → forwards through resolve_provider_env.
+    /// Whatever the user set up in Settings → Auto-naming is what runs.
+    #[test]
+    fn naming_backend_env_with_configured_account_forwards_resolve() {
+        let configured = vec![(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://configured.example/anthropic".to_string(),
+        )];
+        let probed = std::sync::atomic::AtomicUsize::new(0);
+        let probed_ref = &probed;
+        let env = naming_backend_env_with(
+            "claude:minimax",
+            |p| {
+                probed_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(p, "claude:minimax", "provider must be passed through to resolve");
+                configured.clone()
+            },
+        );
+        assert_eq!(
+            probed.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "configured-provider path must call resolve_provider_env exactly once"
+        );
+        assert_eq!(env, configured, "configured provider env must propagate through");
+    }
+
+    /// Static guard (issue #824 v2): the rename call site must read
+    /// `preferences::naming_provider()` (user-configured) and NOT the
+    /// node's own `provider`. The post-review pivot — a node provider
+    /// can be an expensive tier like Opus with xhigh effort, and
+    /// auto-rename runs frequently on trivial content, so the rename
+    /// backend is decoupled from the node's model and lives in Settings.
+    /// Brace-counts `on_turn_with`'s body so a regression that routes
+    /// through `node.provider` surfaces immediately.
+    #[test]
+    fn rename_call_site_uses_user_naming_provider_not_node_provider() {
+        let source = include_str!("session_naming.rs");
+
+        // Pull out the body of `fn on_turn_with(..)` by brace-counting so
+        // nested closures don't false-match the closer.
+        let sig = "fn on_turn_with(";
+        let sig_idx = source
+            .find(sig)
+            .expect("on_turn_with must exist");
+        let open_rel = source[sig_idx..]
+            .find('{')
+            .expect("on_turn_with body must open with `{`");
+        let body_start = sig_idx + open_rel + 1;
+        let bytes = source.as_bytes();
+        let mut depth: usize = 1;
+        let mut i = body_start;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        assert_eq!(depth, 0, "on_turn_with body must close");
+        let body_end = i - 1;
+        let body = &source[body_start..body_end];
+
+        // Strip line comments — the body documents the rejected v1
+        // design ("NOT node.provider", etc.) and we don't want that prose
+        // to false-positive.
+        let code_only: String = body
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") { "" } else { line }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The user-configured provider is the SOLE source of the rename
+        // backend. Reading node.provider here would burn whatever
+        // expensive tier the spawned node is on — the v1 regression
+        // that triggered the v2 design pivot.
+        assert!(
+            code_only.contains("preferences::naming_provider()"),
+            "on_turn_with must call preferences::naming_provider() (issue \
+             #824 v2). Reading node.provider here would burn the node's \
+             own model — auto-rename is opt-in via Settings, decoupled \
+             from the node."
+        );
+        assert!(
+            !code_only.contains("trigger.provider"),
+            "on_turn_with must NOT use the node's provider for routing \
+             (issue #824 v2). Rename-backend lives in Settings → Auto-naming."
+        );
+        assert!(
+            code_only.contains("naming_backend_env(&user_naming_provider)"),
+            "rename env must come from naming_backend_env(&user_naming_provider)"
         );
     }
 }

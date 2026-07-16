@@ -22,6 +22,19 @@ pub async fn set_app_default_provider(provider: Option<String>) -> Result<(), St
     preferences::save(prefs)
 }
 
+/// Set the backend that summaries node PTY output into a slug (issue #824).
+/// Distinct from [`set_app_default_provider`]: auto-naming runs on every
+/// rename trigger (often), at low content complexity, so it shouldn't
+/// inherit an expensive tier the spawned node happens to be on. `None` (or
+/// an empty string) **disables auto-naming entirely** — nodes keep their
+/// random `adjective-adjective-noun` slugs until the user picks a value.
+#[command]
+pub async fn set_app_naming_provider(provider: Option<String>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.naming_provider = provider.filter(|s| !s.is_empty());
+    preferences::save(prefs)
+}
+
 /// Persist the user's spawn-menu harness order (issue #573). `order` is the list
 /// of harness-row ids in the desired top-to-bottom order; `Terminal` is filtered
 /// out backend-side (it's always forced last). Emits `provider-list-changed` so
