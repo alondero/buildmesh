@@ -2,11 +2,19 @@
  * NodeList: archived nodes are hidden, awaiting-input nodes are pinned in
  * the attention section with a readable status label, and an auth failure
  * (revoked token) routes to onAuthFailed instead of the offline overlay.
+ * Issue #815 — the spawn picker consumes the live `listProviders()` rows
+ * (First-class / Proxied providers, harness ordering) rather than a
+ * hardcoded fallback, so newly-configured harnesses reach mobile.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import NodeList from "../../src/mobile/screens/NodeList";
-import type { AgentNode, Mesh, NodeStatus } from "../../src/mobile/api";
+import type {
+  AgentNode,
+  Mesh,
+  NodeStatus,
+  Provider,
+} from "../../src/mobile/api";
 
 class FakeWebSocket {
   onopen: (() => void) | null = null;
@@ -40,15 +48,19 @@ function makeNode(id: number, status: NodeStatus): AgentNode {
   };
 }
 
-function mockApi(nodes: AgentNode[], opts?: { status?: number }) {
+function mockApi(
+  nodes: AgentNode[],
+  opts?: { status?: number; providers?: Provider[] },
+) {
   const status = opts?.status ?? 200;
+  const providers = opts?.providers;
   const fn = vi.fn().mockImplementation(async (url: string) => {
     const ok = status >= 200 && status < 300;
-    const body = url.includes("/api/meshes")
-      ? [mesh]
-      : url.includes("/api/nodes")
-        ? nodes
-        : []; // providers
+    let body: unknown;
+    if (url.includes("/api/meshes")) body = [mesh];
+    else if (url.includes("/api/nodes")) body = nodes;
+    else if (url.includes("/api/providers")) body = providers ?? [];
+    else body = [];
     return {
       ok,
       status,
@@ -81,7 +93,7 @@ describe("NodeList", () => {
     render(
       <NodeList
         onOpenNode={noop}
-        onOpenSessions={noop}
+        onOpenAgentNodes={noop}
         onOpenIssues={noop}
         onOffline={noop}
         onAuthFailed={noop}
@@ -108,6 +120,75 @@ describe("NodeList", () => {
     expect(screen.getByTestId("node-1")).toBeTruthy();
   });
 
+  it("NodeRow shows the friendly provider label and shared status hex (issue #815)", async () => {
+    // The live list maps `"claude"` → `"Claude Code"`, distinct from the
+    // raw provider id a node carries. Issue #815's "row subtitle should
+    // show the label, not the id" only holds if this lookup wins — and
+    // the status bar (3px right rail) must read STATUS_CONFIG.hex
+    // (e.g. `#f59e0b` for `awaiting_input`, `#00d4ff` for `running`),
+    // not the legacy hardcoded hex from the deleted `STATUS_META`.
+    // (The node's `provider` field is overridden to `"claude"` so the
+    // lookup hits the live row; otherwise the `?? node.provider` fallback
+    // branch fires and the test would be passing for the wrong reason.)
+    mockApi(
+      [
+        { ...makeNode(1, "running"), provider: "claude" },
+        { ...makeNode(3, "awaiting_input"), provider: "claude" },
+      ],
+      {
+        providers: [
+          {
+            id: "claude",
+            label: "Claude Code",
+            color: "#1d7cfc",
+            icon: "A",
+            resumable: true,
+            harness_id: "claude",
+            provider_id: null,
+            is_proxied: false,
+            group_key: "claude",
+          },
+        ],
+      },
+    );
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+    });
+
+    // Wait for the live provider fetch to land — without it, the row
+    // falls back to the raw provider id (per the `?? node.provider`
+    // branch in NodeRow).
+    await waitFor(() => {
+      expect(screen.getByTestId("node-3").textContent).toContain(
+        "Claude Code",
+      );
+    });
+
+    // Both rows use the friendly label from the live list, not the raw
+    // provider id (`"claude"` is the id; the label is `"Claude Code"`).
+    const row1 = screen.getByTestId("node-1");
+    const row3 = screen.getByTestId("node-3");
+    for (const row of [row1, row3]) {
+      expect(row.textContent).toContain("Claude Code");
+    }
+    // The status bar is the 3px-wide rail at the right edge of the row —
+    // its inline `background` style must come from STATUS_CONFIG (jsdom
+    // normalizes hex → rgb(), so compare via `hexToRgbString`).
+    expect(railHex(row1)).toBe(hexToRgbString("#00d4ff")); // running
+    expect(railHex(row3)).toBe(hexToRgbString("#f59e0b")); // awaiting_input
+  });
+
   it("routes a 401 to onAuthFailed, not the offline overlay", async () => {
     mockApi([], { status: 401 });
     const onOffline = vi.fn();
@@ -116,7 +197,7 @@ describe("NodeList", () => {
     render(
       <NodeList
         onOpenNode={noop}
-        onOpenSessions={noop}
+        onOpenAgentNodes={noop}
         onOpenIssues={noop}
         onOffline={onOffline}
         onAuthFailed={onAuthFailed}
@@ -137,7 +218,7 @@ describe("NodeList", () => {
     render(
       <NodeList
         onOpenNode={noop}
-        onOpenSessions={noop}
+        onOpenAgentNodes={noop}
         onOpenIssues={noop}
         onOffline={onOffline}
         onAuthFailed={onAuthFailed}
@@ -149,4 +230,95 @@ describe("NodeList", () => {
     });
     expect(onAuthFailed).not.toHaveBeenCalled();
   });
+
+  it("renders the live backend-derived providers in the spawn picker (issue #815)", async () => {
+    // The live list deliberately OMITS two FALLBACK_PROVIDERS rows
+    // (`agy`, `opencode`) and INCLUDES a Proxied account row that the
+    // fallback never has (`claude:minimax-prod`). If the picker rendered
+    // FALLBACK_PROVIDERS we'd see `agy`/`opencode` rows and no
+    // `claude:minimax-prod` row — both of which this assertion catches.
+    // (`claude` itself appears in both lists; it's kept so the test still
+    // exercises the harness-header native row.)
+    mockApi([], {
+      providers: [
+        {
+          id: "claude",
+          label: "Claude Code",
+          color: "#1d7cfc",
+          icon: "A",
+          resumable: true,
+          harness_id: "claude",
+          provider_id: null,
+          is_proxied: false,
+          group_key: "claude",
+        },
+        {
+          id: "claude:minimax-prod",
+          label: "MiniMax Pro Account",
+          color: "#6366f1",
+          icon: "M",
+          resumable: false,
+          harness_id: "claude",
+          provider_id: "minimax-prod",
+          is_proxied: true,
+          group_key: "claude",
+        },
+      ],
+    });
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("node-list")).toBeTruthy();
+    });
+
+    // Open the spawn picker. The listProviders() fetch is async, so wait
+    // for the picker to render — it'll be the live list once the fetch
+    // resolves.
+    fireEvent.click(screen.getByTestId("new-node-1"));
+    await waitFor(() => {
+      expect(screen.getByTestId("provider-picker")).toBeTruthy();
+    });
+
+    // The Proxied row's live label is what the user sees — not the
+    // raw id, not "Antigravity CLI" / "OpenCode" from FALLBACK_PROVIDERS.
+    const proxiedRow = await screen.findByTestId("provider-claude:minimax-prod");
+    expect(proxiedRow.textContent).toContain("MiniMax Pro Account");
+
+    // The harness header row is also rendered from the live list.
+    expect(screen.getByTestId("provider-claude")).toBeTruthy();
+
+    // Harness grouping (issue #575): native + Proxied share a bucket.
+    expect(screen.getByTestId("spawn-group-claude")).toBeTruthy();
+  });
 });
+
+// The 3px status rail is the last direct child of a NodeRow button
+// (NodeList.tsx:484-492) — avatar, inner text block, rail. Pull the
+// inline `background` style off it so a regression that re-hardcodes
+// STATUS_META's colours fails the assertion.
+function railHex(row: HTMLElement): string {
+  const rail = row.lastElementChild as HTMLElement | null;
+  if (!rail) throw new Error("NodeRow has no rail element");
+  return rail.style.background;
+}
+
+function hexToRgbString(hex: string): string {
+  // Accept both 6-digit and 3-digit shorthand (e.g. "#1d7cfc" / "#555").
+  const m =
+    /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex) ??
+    /^#([0-9a-f])([0-9a-f])([0-9a-f])$/i.exec(hex);
+  if (!m) throw new Error(`bad hex: ${hex}`);
+  const [r, g, b] = [m[1], m[2], m[3]].map((s) =>
+    s.length === 1 ? s + s : s,
+  );
+  return `rgb(${parseInt(r, 16)}, ${parseInt(g, 16)}, ${parseInt(b, 16)})`;
+}
