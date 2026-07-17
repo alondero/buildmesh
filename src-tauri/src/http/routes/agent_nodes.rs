@@ -12,7 +12,6 @@
 //! the dispatcher (src/http/mod.rs) for one release as a deprecation shim
 //! with a `Deprecation: true` response header.
 
-use tokio::io::AsyncReadExt;
 use crate::http::MaybeTls;
 
 use crate::db;
@@ -63,15 +62,11 @@ pub async fn import_and_resume(
     mesh_id: i64,
     content_length: usize,
 ) {
-    if content_length > 64 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
+    let Some(body_bytes) =
+        request::read_body_or_send_error(lines, content_length, 64 * 1024).await
+    else {
         return;
-    }
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
+    };
 
     let req: ImportAndResumeRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,

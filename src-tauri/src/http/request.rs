@@ -1,10 +1,96 @@
 //! HTTP request parsing helpers: tokens, headers, and response writers.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
-use tokio::io::{AsyncWriteExt, BufStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
 
 use crate::http::MaybeTls;
+
+/// Wall-clock budget for reading a request body once the head is in. Bounds the
+/// same slowloris class that `http::mod::REQUEST_HEAD_TIMEOUT` bounds for the
+/// head: a client that advertises `Content-Length: 262144` and dribbles bytes
+/// once a second would otherwise pin a tokio worker for the entire upload
+/// window. 60 s is long enough for a legitimate 256 KB upload over a constrained
+/// link (≈ 4 KB/s sustained) and short enough that a stalled connection drops
+/// inside a single connection-handling task's lifetime.
+pub const BODY_READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Outcome of a bounded body read.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReadBodyError {
+    /// `Content-Length` exceeded the route's per-call cap. The connection is
+    /// left in a usable state — caller writes `413` and returns.
+    TooLarge,
+    /// EOF or a read error before `content_length` bytes arrived. Caller writes
+    /// `400`.
+    ReadFailed,
+    /// The read did not finish within [`BODY_READ_TIMEOUT`]. Caller writes
+    /// `408` and the connection is dropped (the body may be partially read).
+    TimedOut,
+}
+
+/// Read a request body of exactly `content_length` bytes under a wall-clock
+/// deadline ([`BODY_READ_TIMEOUT`]), refusing anything larger than `max_bytes`.
+///
+/// The cap and the timeout are independent guards: the cap bounds *how much*
+/// the client can force the server to buffer, the timeout bounds *how long* a
+/// stalled client can pin the connection. Without the timeout a slowloris that
+/// sends `Content-Length: 262144` and dribbles 1 byte/sec would pin a worker
+/// for the full upload window — the same DoS class `handle_connection`'s head
+/// read closes for the request line + headers. Both halves live behind this
+/// helper so every body-reading route carries the same guard.
+pub async fn read_body_with_cap(
+    lines: &mut BufStream<MaybeTls>,
+    content_length: usize,
+    max_bytes: usize,
+) -> Result<Vec<u8>, ReadBodyError> {
+    if content_length > max_bytes {
+        return Err(ReadBodyError::TooLarge);
+    }
+    let mut buf = vec![0u8; content_length];
+    let read = async {
+        if content_length > 0 {
+            lines
+                .read_exact(&mut buf)
+                .await
+                .map_err(|_| ReadBodyError::ReadFailed)?;
+        }
+        Ok::<_, ReadBodyError>(buf)
+    };
+    match tokio::time::timeout(BODY_READ_TIMEOUT, read).await {
+        Ok(result) => result,
+        Err(_) => Err(ReadBodyError::TimedOut),
+    }
+}
+
+/// Convenience wrapper for the common dispatch shape: read a body, mapping
+/// each failure to the status line the route would have written by hand
+/// (`413` / `400` / `408`). Returns `None` on any failure so the caller can
+/// `return` immediately without writing its own status. The empty-body case
+/// (`Content-Length: 0`) returns `Some(vec![])` — same shape every existing
+/// route already produces.
+pub async fn read_body_or_send_error(
+    lines: &mut BufStream<MaybeTls>,
+    content_length: usize,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    match read_body_with_cap(lines, content_length, max_bytes).await {
+        Ok(buf) => Some(buf),
+        Err(ReadBodyError::TooLarge) => {
+            send_json_error(lines, "413 Content Too Large", "Body too large").await;
+            None
+        }
+        Err(ReadBodyError::ReadFailed) => {
+            let _ = write_status_only(lines, "400 Bad Request").await;
+            None
+        }
+        Err(ReadBodyError::TimedOut) => {
+            let _ = write_status_only(lines, "408 Request Timeout").await;
+            None
+        }
+    }
+}
 
 /// Write `bytes` to the connection **and flush them to the wire**.
 ///
@@ -272,5 +358,152 @@ mod tests {
         assert_eq!(extract_header_value(headers, "sec-websocket-key"), Some("abc123"));
         assert_eq!(extract_header_value(headers, "Host"), Some("localhost"));
         assert_eq!(extract_header_value(headers, "Missing"), None);
+    }
+
+    // --- read_body_with_cap / read_body_or_send_error ------------------------
+    //
+    // These pin the two paths a test can reliably exercise: TooLarge
+    // (advertised content_length > max_bytes) and ReadFailed (premature EOF
+    // before content_length bytes arrive). The happy-path read and the
+    // empty-body case round it out. The TimedOut path needs a stalled socket
+    // and a 60 s+ test wall-clock; the `BODY_READ_TIMEOUT` constant itself is
+    // the single audit surface for that branch.
+
+    #[tokio::test]
+    async fn read_body_with_cap_rejects_oversize_with_too_large() {
+        // 11-byte body with a 10-byte cap is the smallest failing case. The
+        // server side only needs to accept — the cap check fires before any
+        // read, so the server doesn't have to send anything; we drop it once
+        // accepted and let the helper return TooLarge.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Accept the connection and drop both halves — the client never
+            // tries to read, so this closes the socket.
+            let _ = listener.accept().await;
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut lines = BufStream::new(MaybeTls::Plain(stream));
+        let result = read_body_with_cap(&mut lines, 11, 10).await;
+        assert_eq!(result, Err(ReadBodyError::TooLarge));
+    }
+
+    #[tokio::test]
+    async fn read_body_with_cap_returns_read_failed_on_early_eof() {
+        // Server sends 5 bytes then drops the connection — read_exact waits for
+        // 10 and gets EOF instead, which the helper maps to ReadFailed.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            let mut s = stream;
+            s.write_all(b"hello").await.unwrap();
+            s.shutdown().await.unwrap();
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut lines = BufStream::new(MaybeTls::Plain(stream));
+        let result = read_body_with_cap(&mut lines, 10, 1024).await;
+        assert_eq!(result, Err(ReadBodyError::ReadFailed));
+    }
+
+    #[tokio::test]
+    async fn read_body_with_cap_reads_exact_bytes_on_happy_path() {
+        // Server sends exactly content_length bytes; helper returns them.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            let mut s = stream;
+            s.write_all(b"abc123").await.unwrap();
+            s.shutdown().await.unwrap();
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut lines = BufStream::new(MaybeTls::Plain(stream));
+        let buf = read_body_with_cap(&mut lines, 6, 1024).await.unwrap();
+        assert_eq!(buf, b"abc123");
+    }
+
+    #[tokio::test]
+    async fn read_body_with_cap_handles_zero_length_body() {
+        // Content-Length: 0 — the read fast-paths to an empty Vec without
+        // touching the wire. Tests the `if content_length > 0` branch.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // Drop the listener without accepting — proves we never read.
+            drop(listener);
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut lines = BufStream::new(MaybeTls::Plain(stream));
+        let buf = read_body_with_cap(&mut lines, 0, 1024).await.unwrap();
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_body_or_send_error_writes_413_on_too_large() {
+        // The wrapper must translate TooLarge into a 413 with a JSON body so
+        // the SPA can surface it; the call site then returns None.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 256];
+            use tokio::io::AsyncReadExt;
+            let mut s = stream;
+            // Read the full response the server writes back.
+            let _ = s.read(&mut buf).await;
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut lines = BufStream::new(MaybeTls::Plain(stream));
+        let result = read_body_or_send_error(&mut lines, 1024, 100).await;
+        assert_eq!(result, None, "wrapper must return None on TooLarge");
+        drop(lines);
+
+        let response = server.await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "wrapper must write a 413; got: {response:?}"
+        );
+        assert!(
+            response.contains("Body too large"),
+            "413 body must explain the cap; got: {response:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_body_or_send_error_writes_400_on_read_failed() {
+        // Server sends fewer bytes than advertised → ReadFailed → 400.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut s = stream;
+            s.write_all(b"hi").await.unwrap();
+            s.shutdown().await.unwrap();
+            let mut buf = vec![0u8; 256];
+            let _ = s.read(&mut buf).await;
+            String::from_utf8_lossy(&buf).into_owned()
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut lines = BufStream::new(MaybeTls::Plain(stream));
+        let result = read_body_or_send_error(&mut lines, 10, 1024).await;
+        assert_eq!(result, None);
+        drop(lines);
+
+        let response = server.await.unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 400"),
+            "wrapper must write a 400 on ReadFailed; got: {response:?}"
+        );
     }
 }
