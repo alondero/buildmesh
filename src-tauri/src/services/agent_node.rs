@@ -292,6 +292,12 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     };
 
     crate::session_naming::cleanup(session_id);
+    // Drop autopilot state too. The ledger delete must be explicit: the
+    // table's ON DELETE CASCADE never fires because the connection doesn't
+    // enable SQLite's `foreign_keys` pragma. Removing the row also frees
+    // the issue for a poller retry if it is still open + labelled.
+    crate::autopilot::evaluator::unregister(session_id);
+    db::delete_autopilot_run(session_id)?;
 
     let removal = removal_path.as_deref().map(|p| (p, node.name.as_str()));
     db::delete_agent_node_enqueueing_removal(session_id, removal)?;

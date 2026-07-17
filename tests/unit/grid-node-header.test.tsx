@@ -48,12 +48,17 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 // missing / not a directory) are exercised in src-tauri's own tests;
 // here we just assert wiring: the click resolves the path through
 // `getNodeGitPath` and hands it to the IPC layer.
-const { openInFileManagerMock } = vi.hoisted(() => ({
+const { openInFileManagerMock, triggerFinishMock } = vi.hoisted(() => ({
   openInFileManagerMock: vi.fn().mockResolvedValue(undefined),
+  triggerFinishMock: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../src/lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/lib/tauri')>();
-  return { ...actual, openInFileManager: openInFileManagerMock };
+  return {
+    ...actual,
+    openInFileManager: openInFileManagerMock,
+    triggerFinish: triggerFinishMock,
+  };
 });
 
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
@@ -587,6 +592,41 @@ describe('GridNodeHeader reveal-in-explorer action', () => {
     expect(errSpy).toHaveBeenCalledWith(
       'Failed to open folder in file manager:',
       expect.stringContaining('Path does not exist'),
+    );
+    errSpy.mockRestore();
+  });
+});
+
+// Manual `/finish` trigger (issue #484, PRD #480 story 15). Behavioural
+// assertion (the invoke effect, not `={noop}` wiring — the JSX
+// silent-extra-prop lesson): clicking the button hands the node id to the
+// `trigger_finish` IPC wrapper.
+describe('GridNodeHeader Finish trigger (#484)', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+    triggerFinishMock.mockClear();
+    triggerFinishMock.mockResolvedValue(undefined);
+  });
+
+  it('clicking Finish invokes trigger_finish with the node id', async () => {
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    fireEvent.click(getByLabelText('Finish agent node'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(triggerFinishMock).toHaveBeenCalledWith(NODE.id);
+  });
+
+  it('swallows a backend rejection (dead node) with console.error', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    triggerFinishMock.mockRejectedValueOnce('Node has no live agent process to finish');
+    const { getByLabelText } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    fireEvent.click(getByLabelText('Finish agent node'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(errSpy).toHaveBeenCalledWith(
+      'Failed to trigger finish:',
+      expect.stringContaining('no live agent process'),
     );
     errSpy.mockRestore();
   });

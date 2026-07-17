@@ -214,6 +214,33 @@ export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
 export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
   _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
 
+/** Manually trigger the Autopilot wrap-up (`/finish`) sequence on a live
+ *  node (issue #484, PRD #480 story 15). Enrolls the node in the wrap-up
+ *  state machine so the self-correction loop and PR verification apply. */
+export const triggerFinish = (nodeId: number) =>
+  _invoke<void>('trigger_finish', { nodeId });
+
+/** Persist a mesh's Autopilot Policy in one write (issue #481, PRD #480).
+ *  Dedicated typed command like `updateMeshSandbox` — the backend
+ *  range-checks the concurrency limit (1..=8) and collapses blank
+ *  label/provider/action strings to NULL (poller defaults apply). */
+export const updateMeshAutopilot = (
+  meshId: number,
+  enabled: boolean,
+  triggerLabel: string | null,
+  concurrencyLimit: number,
+  provider: string | null,
+  actionOnSuccess: string | null
+) =>
+  _invoke<void>('update_mesh_autopilot', {
+    meshId,
+    enabled,
+    triggerLabel,
+    concurrencyLimit,
+    provider,
+    actionOnSuccess,
+  });
+
 /** Per-mesh target for the pre-spawn Worktree Pool
  *  (`services::warm_pool`, issue #611). `0` disables the pool for the
  *  mesh; `1..=5` is the target the worker fills to. Dedicated command

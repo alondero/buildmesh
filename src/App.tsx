@@ -405,6 +405,52 @@ function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
+  // Autopilot lifecycle notifications (PRD #480 story 14). Same toast stack
+  // as Sync/Worktree; the `Autopilot` label groups all three outcomes. The
+  // node list refetch keeps status badges (Completed / Error) in step with
+  // the backend's direct DB writes, which emit no dedicated status event.
+  useEffect(() => {
+    const unlistenBlocked = listen<{ node_id: number; issue: number }>(
+      'autopilot-blocked',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `Agent on node ${event.payload.node_id} needs your input (issue #${event.payload.issue}).`,
+          'warning',
+        );
+      },
+    );
+    const unlistenPr = listen<{ node_id: number; issue: number; pr_url: string | null }>(
+      'autopilot-pr-created',
+      (event) => {
+        addToast(
+          'Autopilot',
+          event.payload.pr_url
+            ? `Wrap-up complete — PR opened: ${event.payload.pr_url}`
+            : `Wrap-up complete for node ${event.payload.node_id}.`,
+          'warning',
+        );
+        void useAgentNodeStore.getState().fetchAgentNodes();
+      },
+    );
+    const unlistenFailed = listen<{ node_id: number; issue: number; reasons: string[] }>(
+      'autopilot-finish-failed',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `Node ${event.payload.node_id} failed its wrap-up after 3 attempts: ${event.payload.reasons.join('; ')}`,
+          'error',
+        );
+        void useAgentNodeStore.getState().fetchAgentNodes();
+      },
+    );
+    return () => {
+      unlistenBlocked.then((fn) => fn());
+      unlistenPr.then((fn) => fn());
+      unlistenFailed.then((fn) => fn());
+    };
+  }, []);
+
   // Auto-dismiss toasts after TOAST_TTL_MS. A 1s tick is coarse
   // enough that it won't fight React's render cycle, fine enough
   // that the user sees the toast disappear in real time.

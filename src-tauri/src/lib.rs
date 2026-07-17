@@ -330,6 +330,13 @@ pub fn run() {
             // can emit `pool-count-changed` from its inner drain/fill calls.
             services::pool_worker::start_background_worker(app.handle().clone());
 
+            // Autopilot polling daemon (issue #482, PRD #480). Walks every
+            // autopilot-enabled mesh on a 2-minute cadence and auto-spawns
+            // branched-worktree Agent Nodes for newly-labelled GitHub
+            // issues, capacity-gated per mesh. No-op while no mesh has
+            // Autopilot enabled.
+            services::autopilot::start_autopilot_worker(app.handle().clone());
+
             // Always-on resource diagnostics (issue: background-refresh grind).
             // A low-frequency sampler writes process vitals (memory, handles,
             // threads, live child processes) + per-subsystem counters to a
@@ -447,6 +454,7 @@ pub fn run() {
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,
             commands::agent::start_node_background,
+            commands::agent::trigger_finish,
             // Build/Run
             commands::build_run::build_run,
             commands::build_run::get_mesh_row,
@@ -461,6 +469,7 @@ pub fn run() {
             commands::mesh_properties::remove_worktree_base_ref,
             commands::mesh_properties::update_mesh_use_worktree,
             commands::mesh_properties::update_mesh_sandbox,
+            commands::mesh_properties::update_mesh_autopilot,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)

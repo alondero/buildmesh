@@ -57,4 +57,35 @@ pre_spawn_pool_size: number,
  * palette keyed on the mesh id (`src/lib/meshColors.ts`). Persisted as
  * `meshes.color TEXT` (schema v25); empty/absent reads back as `None`.
  */
-color: string | null, };
+color: string | null, 
+/**
+ * Autopilot Mode master switch (issue #481, PRD #480). When `true` the
+ * background poller (`services::autopilot`) watches this mesh's GitHub
+ * repo for issues tagged [`Mesh::autopilot_trigger_label`] and spawns
+ * branched-worktree Agent Nodes for them automatically. Persisted as
+ * `meshes.autopilot_enabled INTEGER NOT NULL DEFAULT 0` (schema v26).
+ */
+autopilot_enabled: boolean, 
+/**
+ * GitHub issue label that marks an issue as an Autopilot task. `None`
+ * falls back to [`DEFAULT_AUTOPILOT_TRIGGER_LABEL`] at poll time.
+ */
+autopilot_trigger_label: string | null, 
+/**
+ * Maximum number of concurrently *active* auto-spawned nodes for this
+ * mesh. The poller only ingests new issues while the active count is
+ * below this limit (PRD #480 story 5/6). Clamped to `1..=8` at the IPC
+ * boundary; stored as `INTEGER NOT NULL DEFAULT 2`.
+ */
+autopilot_concurrency_limit: number, 
+/**
+ * Spawn Option id auto-spawned nodes use. `None` falls through the
+ * normal default-provider chain (mesh default → app default → claude).
+ */
+autopilot_provider: string | null, 
+/**
+ * What Autopilot asks the agent to do once the wrap-up verification
+ * passes: `"draft_pr"` (default) opens a draft PR, `"pr"` opens a
+ * ready-for-review PR, `"none"` stops after push.
+ */
+autopilot_action_on_success: string | null, };

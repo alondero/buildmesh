@@ -729,6 +729,63 @@ impl GitHubClient {
         Ok(result.items)
     }
 
+    /// List open issues (excluding pull requests) carrying `label`. The
+    /// Autopilot poller's ingest query (issue #482): because it always asks
+    /// GitHub for the *current* open+labelled set, issues closed or untagged
+    /// while the app was offline simply never appear — state reconciliation
+    /// falls out of the query shape rather than needing a diff pass.
+    ///
+    /// The label is quoted in the search qualifier (labels may contain
+    /// spaces) and percent-encoded for the URL; embedded `"` are stripped
+    /// (GitHub label names can't contain them, and passing one through
+    /// would break the qualifier quoting).
+    pub fn list_open_issues_with_label(
+        &self,
+        owner: &str,
+        repo: &str,
+        label: &str,
+    ) -> Result<Vec<Issue>, GitHubError> {
+        let clean_label = label.replace('"', "");
+        let query = format!(
+            "repo:{}/{} is:issue state:open label:\"{}\"",
+            owner, repo, clean_label
+        );
+        let encoded: String = query
+            .chars()
+            .map(|c| match c {
+                ' ' => "+".to_string(),
+                '"' => "%22".to_string(),
+                '#' => "%23".to_string(),
+                '&' => "%26".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+        let url = format!(
+            "https://api.github.com/search/issues?q={}&per_page=100",
+            encoded
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        #[derive(Deserialize)]
+        struct SearchResult {
+            items: Vec<Issue>,
+        }
+
+        let result: SearchResult = resp.json()?;
+        Ok(result.items)
+    }
+
     /// Create a pull request. Returns the PR URL.
     pub fn create_pull_request(
         &self,

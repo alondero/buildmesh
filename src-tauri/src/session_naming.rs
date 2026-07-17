@@ -486,7 +486,10 @@ const MAX_RENAME_ATTEMPTS: u8 = 3;
 static SLUG_REGEX: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-z][a-z0-9-]{2,50}$").unwrap());
 
-static ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> =
+// `pub(crate)` so Autopilot's state evaluator (`autopilot::evaluator`,
+// issue #483) shares the exact same terminal-cleaning rule instead of
+// growing a second, subtly-different ANSI regex.
+pub(crate) static ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> =
     once_cell::sync::Lazy::new(|| {
         regex::Regex::new(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b[()][A-B012]").unwrap()
     });
