@@ -32,16 +32,17 @@ Run in order; on any failure, enter hill-climb (see below). All steps must pass 
 2. `cargo build --manifest-path src-tauri/Cargo.toml` — Rust compile.
 3. `npm run test:unit` — Vitest unit suite (118+ tests, mocked Tauri).
 
-### `standard` (~2–3 min) — default
+### `standard` (~3–4 min) — default
 
 1–3 above, plus:
 
 4. `cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings` — Rust lint with warnings-as-errors.
-5. `npm run test:integration` — Vitest integration suite (uses mocked `invoke()`; **does not** require a running Tauri instance, so safe in this tier).
+5. `scripts\check.ps1 rust` — Rust unit tests via the `check.ps1` wrapper (bakes in the worktree workarounds: builds `dist/mobile/`, clears `BUILDMESH_PREFILL`, pins Git-for-Windows first in PATH). Gates regressions like the BOM test `encode_for_powershell_produces_no_bom_utf16le` in `src-tauri/src/agent/spawn_environment.rs`. Fail-fast on non-zero exit.
+6. `npm run test:integration` — Vitest integration suite (uses mocked `invoke()`; **does not** require a running Tauri instance, so safe in this tier).
 
 ### `full` (~5–8 min)
 
-1–5 above, plus:
+1–6 above, plus:
 
 6. `npm run tauri:build:dev` — produces the **dev profile** bundle at `src-tauri\target\release-dev\release\buildmesh-dev.exe` (identity `com.alond.buildmesh.dev`, ports 2991/2992). The dev build sets `CARGO_TARGET_DIR=src-tauri\target\release-dev` (via `scripts\run-dev.ps1` on Windows / `scripts\run-dev.sh` elsewhere) so it lands in a separate target dir from the stable hub and never file-locks the hub's `buildmesh.exe`. Cargo nests the profile subdir, hence the `release-dev\release\` two-level path.
 7. Launch the app via `scripts\run-dev.ps1`. The script kills any existing `buildmesh-dev` process (**never** the stable hub), verifies the binary, records the pre-launch log line count, starts the binary, and confirms startup.
@@ -161,7 +162,7 @@ When you finish (pass or fail, including iteration-cap stop), produce a structur
 /verify <tier> → <PASS | FAIL @ step N>
 
 Quick:    ✓ build  ✓ cargo  ✓ unit
-Standard: ✓ clippy ✓ integration
+Standard: ✓ clippy ✓ cargo test ✓ integration
 Full:     ✓ tauri build  ✓ launch  ✗ log scan
           └─ "ERROR rusqlite: UNIQUE constraint failed" at line 1247
 
