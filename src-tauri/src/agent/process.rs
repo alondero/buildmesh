@@ -18,6 +18,22 @@ pub struct AgentProcess {
     /// (drop the `MasterPty`). See issue #300.
     pub master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
     pub reader_alive: Arc<AtomicBool>,
+    /// Set by `kill_session` BEFORE it closes the PTY, so the reader
+    /// thread's post-exit epilogue can tell a deliberate teardown (node
+    /// close, stale-process kill at spawn step 2, app shutdown) apart
+    /// from the child dying on its own. On a deliberate kill the reader
+    /// must not write any node status — the kill initiator owns the next
+    /// status. Without this, a process killed within `EARLY_EXIT_WINDOW`
+    /// of its creation was misread as a failed `--resume`: the reader
+    /// wrote `Error` + emitted `resume-failed`, and that stale `Error`
+    /// blocked the replacing spawn's Spawning→Running promotion — the
+    /// node showed "failed" while the new agent booted fine.
+    ///
+    /// `Arc` because the reader thread holds its own clone: `kill_session`
+    /// removes the registry entry after a bounded 2s join, and a reader
+    /// that outlives the join timeout could no longer reach the flag
+    /// through the registry.
+    pub deliberate_kill: Arc<AtomicBool>,
     /// Mesh this agent belongs to. Stored at registration time so the
     /// PTY read/write hot paths (`write_bytes`, the `pump_pty_output`
     /// closure in `agent::spawn::start_reader`) can record per-mesh
@@ -194,6 +210,13 @@ impl AgentProcessRegistry {
     ///    `kill_session` to hang the UI thread.
     pub fn kill_session(&self, session_id: i64) {
         if let Some(agent) = self.inner.get(&session_id) {
+            // 0. Flag the teardown as deliberate BEFORE closing anything,
+            //    so the reader thread — EOFed by the master drop below —
+            //    is guaranteed to observe the flag when its epilogue runs.
+            //    See the `deliberate_kill` field doc for why the reader
+            //    must not apply the early-exit Error heuristic here.
+            agent.deliberate_kill.store(true, Ordering::SeqCst);
+
             // 1. Drop the master. `Option::take` removes the `Box<dyn MasterPty>`
             //    from the mutex; the binding falls out of scope and drops
             //    it, closing the pseudoconsole. We don't hold the mutex
@@ -514,6 +537,63 @@ mod tests {
 
         assert!(record_first_input_if_first(&flag, spawn_start, 42));
         assert!(flag.load(Ordering::SeqCst));
+    }
+
+    /// A `kill_session` teardown must be observable as deliberate by the
+    /// reader thread (via the shared `deliberate_kill` flag) — this is
+    /// what stops the reader's 3s early-exit heuristic from misreading a
+    /// stale-process kill (spawn step 2), node close, or app shutdown as
+    /// a failed `--resume` and stamping the node `Error` ("failed to
+    /// start") while a replacing spawn is booting fine.
+    #[test]
+    fn kill_session_sets_deliberate_kill_flag() {
+        let recipe = SpawnRecipe {
+            binary: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" },
+            base_args: if cfg!(windows) {
+                vec!["/c".into(), "exit".into(), "0".into()]
+            } else {
+                vec!["-c".into(), "exit 0".into()]
+            },
+            windows_shell: WindowsShell::Direct,
+        };
+        let cwd = std::env::current_dir().unwrap();
+        let cmd = spawn_environment::wrap(
+            recipe,
+            EnvType::Windows,
+            &cwd.to_string_lossy(),
+            -915_4002,
+            false,
+        );
+
+        let pair = open_pty_pair(24, 80).expect("open pty pair");
+        let child = spawn_child(&pair, cmd).expect("spawn child");
+        let writer = pair.master.take_writer().expect("take writer");
+
+        let deliberate_kill = Arc::new(AtomicBool::new(false));
+        let registry = AgentProcessRegistry::new();
+        registry.insert(
+            -915_4002,
+            AgentProcess {
+                child: Arc::new(Mutex::new(child)),
+                writer: Arc::new(Mutex::new(writer)),
+                master: Arc::new(Mutex::new(Some(pair.master))),
+                reader_alive: Arc::new(AtomicBool::new(true)),
+                deliberate_kill: deliberate_kill.clone(),
+                job: None,
+                reader_handle: Mutex::new(None),
+                spawn_start: std::time::Instant::now(),
+                first_user_input_logged: AtomicBool::new(false),
+                mesh_id: 0,
+            },
+        );
+
+        registry.kill_session(-915_4002);
+
+        assert!(
+            deliberate_kill.load(Ordering::SeqCst),
+            "kill_session must set deliberate_kill before closing the PTY, \
+             so the reader epilogue skips the early-exit Error heuristic"
+        );
     }
 
     /// Regression guard for issue #287: when the agent CLI exits
