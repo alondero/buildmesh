@@ -65,12 +65,12 @@ export const AUTOPILOT_PILL_STYLES: Record<AutopilotRunState, { label: string; c
     title: 'Autopilot: wrap-up in progress (verify, commit, push, PR)',
   },
   completed: {
-    label: 'autopilot ✓',
+    label: 'autopilot · complete',
     className: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
-    title: 'Autopilot: wrap-up verified — waiting for the PR to merge',
+    title: 'Autopilot: wrap-up verified, hands off — the PR is ready for review; the node closes when it merges',
   },
   merged: {
-    label: 'autopilot ✓',
+    label: 'autopilot · merged',
     className: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
     title: 'Autopilot: PR merged',
   },

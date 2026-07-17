@@ -201,6 +201,76 @@ mod tests {
         std::fs::remove_file(&temp_path).ok();
     }
 
+    /// Poller re-drive work list (node 2328, 2026-07-17): a `finishing` run
+    /// becomes a candidate only once its ledger row has been quiet for the
+    /// stale window; fresh activity and state advances take it back off.
+    #[test]
+    fn test_stalled_finishing_runs_listing() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path =
+            std::env::temp_dir().join(format!("buildmesh_autopilot_stalled_{}.db", test_id));
+        crate::db::init(&temp_path).unwrap();
+
+        let path = format!("/tmp/autopilot-stalled-{}", test_id);
+        let mesh = crate::db::create_mesh("Stalled Mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "gh42-node",
+            &mesh.path,
+            "origin/main",
+            crate::models::EnvType::Windows,
+            "anthropic",
+            None,
+            Some(42),
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+
+        use crate::db::AutopilotRunState as S;
+        crate::db::create_autopilot_run(node.id, mesh.id, 42).unwrap();
+        crate::db::set_autopilot_run_state(node.id, S::Finishing, Some(2)).unwrap();
+
+        // The state write just bumped updated_at → not stalled yet.
+        assert!(
+            !crate::db::list_stalled_finishing_autopilot_runs(5)
+                .unwrap()
+                .contains(&node.id),
+            "a run with fresh pipeline activity must not be re-driven"
+        );
+
+        // Backdate the row as if no pipeline activity happened for 10 minutes.
+        {
+            let db = crate::db::get().lock().unwrap();
+            db.execute(
+                "UPDATE autopilot_runs SET updated_at = datetime('now', '-10 minutes') \
+                 WHERE node_id = ?1",
+                rusqlite::params![node.id],
+            )
+            .unwrap();
+        }
+        assert!(
+            crate::db::list_stalled_finishing_autopilot_runs(5)
+                .unwrap()
+                .contains(&node.id),
+            "a quiet finishing run must surface as a re-drive candidate"
+        );
+
+        // Any state advance takes it off the work list.
+        crate::db::set_autopilot_run_state(node.id, S::Completed, None).unwrap();
+        assert!(!crate::db::list_stalled_finishing_autopilot_runs(5)
+            .unwrap()
+            .contains(&node.id));
+
+        std::fs::remove_file(&temp_path).ok();
+    }
+
     /// Merged-PR auto-close plumbing: the recorded wrap-up PR makes a
     /// completed run sweepable, the pill listing reports every live run,
     /// and archiving the node removes it from both.

@@ -325,8 +325,58 @@ pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Sanitize the .git file in a worktree to ensure it uses the correct path format
-/// for the target environment (Windows vs WSL).
+/// Convert a worktree link-file path to the target environment's format
+/// (Windows drive path vs WSL `/mnt/...`). Shared by both halves of
+/// [`sanitize_git_worktree`] so the gitlink and the back-pointer can't drift
+/// onto different conversion rules.
+fn convert_link_path_for_env(path: &str, env_type: EnvType) -> String {
+    match env_type {
+        EnvType::Wsl => {
+            // Ensure it's a WSL-friendly path
+            if path.contains(':') || path.starts_with("\\\\") {
+                // Convert Windows path to WSL (/mnt/c/...)
+                let path_str = path.replace('\\', "/");
+                if let Some(pos) = path_str.find(':') {
+                    let drive = path_str[..pos].to_lowercase();
+                    format!("/mnt/{}{}", drive, &path_str[pos + 1..])
+                } else {
+                    path_str
+                }
+            } else if path.len() >= 2
+                && path.starts_with('/')
+                && path.as_bytes()[1].is_ascii_alphabetic()
+                && (path.len() == 2 || path.as_bytes()[2] == b'/')
+            {
+                // Git-Bash drive style `/f/...` (what an MSYS git writes —
+                // the 2026-07-17 corruption): WSL wants it as `/mnt/f/...`.
+                // Real WSL paths (`/mnt/...`, `/home/...`) have a multi-char
+                // first segment, so they never match this arm.
+                let drive = path.as_bytes()[1].to_ascii_lowercase() as char;
+                format!("/mnt/{}{}", drive, &path[2..])
+            } else {
+                path.to_string()
+            }
+        }
+        EnvType::Windows => {
+            // Target is Windows. to_host_path handles /mnt/, /home/, and /c/ styles.
+            to_host_path(path)
+        }
+    }
+}
+
+/// Sanitize a worktree's git link files to the correct path format for the
+/// target environment (Windows vs WSL). Repairs BOTH sides of the link:
+///
+/// - the worktree's `.git` gitlink (`gitdir: <admin dir>`), and
+/// - the repo-side back-pointer (`<admin dir>/gitdir` → `<worktree>/.git`).
+///
+/// The back-pointer matters because libgit2 resolves it when opening a
+/// worktree: an MSYS-flavoured git writes Git-Bash-style `/f/...` paths that
+/// the Git CLI tolerates but `git2::Repository::open` reports as NotFound.
+/// In the 2026-07-17 gh252 incident that mismatch made the autopilot wrap-up
+/// verifier see a healthy, already-PR'd worktree as unopenable; fixing only
+/// the gitlink (this function's pre-incident behaviour) left libgit2 locked
+/// out through the admin side.
 pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Result<(), String> {
     let git_file_path = std::path::Path::new(worktree_host_path).join(".git");
 
@@ -346,34 +396,32 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
         return Err("invalid .git file: empty gitdir path".to_string());
     }
 
-    // Convert the path to the target environment's format
-    let new_path = match env_type {
-        EnvType::Wsl => {
-            // Ensure it's a WSL-friendly path
-            if git_dir_path.contains(':') || git_dir_path.starts_with("\\\\") {
-                // Convert Windows path to WSL (/mnt/c/...)
-                let path_str = git_dir_path.replace('\\', "/");
-                if let Some(pos) = path_str.find(':') {
-                    let drive = path_str[..pos].to_lowercase();
-                    format!("/mnt/{}{}", drive, &path_str[pos + 1..])
-                } else {
-                    path_str
-                }
-            } else {
-                git_dir_path.to_string()
-            }
-        }
-        EnvType::Windows => {
-            // Target is Windows. to_host_path handles /mnt/, /home/, and /c/ styles.
-            to_host_path(git_dir_path)
-        }
-    };
+    let new_path = convert_link_path_for_env(git_dir_path, env_type);
 
     if new_path != git_dir_path {
         tracing::info!("Sanitizing .git file: {} -> {}", git_dir_path, new_path);
         // Ensure we use Unix line endings for the .git file as Git expects
         std::fs::write(&git_file_path, format!("gitdir: {}\n", new_path))
             .map_err(|e| format!("Failed to write sanitized .git file: {}", e))?;
+    }
+
+    // Repo-side back-pointer. The admin dir itself is a host filesystem
+    // access, so resolve it host-side regardless of the target env format.
+    let backpointer_path = std::path::Path::new(&to_host_path(&new_path)).join("gitdir");
+    if backpointer_path.is_file() {
+        let existing = std::fs::read_to_string(&backpointer_path)
+            .map_err(|e| format!("Failed to read worktree gitdir back-pointer: {}", e))?;
+        let existing = existing.trim();
+        let converted = convert_link_path_for_env(existing, env_type);
+        if converted != existing {
+            tracing::info!(
+                "Sanitizing worktree gitdir back-pointer: {} -> {}",
+                existing,
+                converted
+            );
+            std::fs::write(&backpointer_path, format!("{}\n", converted))
+                .map_err(|e| format!("Failed to write sanitized gitdir back-pointer: {}", e))?;
+        }
     }
 
     Ok(())
@@ -859,6 +907,111 @@ mod tests {
             !dst.join("warm-amber-fox").exists(),
             "the source must not have been nested inside the occupied target"
         );
+    }
+
+    // ── sanitize (unix-style link corruption, 2026-07-17 gh252 incident) ─────
+
+    /// Turn `F:\a\b` into the Git-Bash-style `/f/a/b` an MSYS-flavoured git
+    /// writes into worktree link files.
+    #[cfg(windows)]
+    fn to_msys_style(p: &Path) -> String {
+        let s = p.to_str().unwrap().replace('\\', "/");
+        let drive = s.chars().next().unwrap().to_ascii_lowercase();
+        format!("/{}{}", drive, &s[2..])
+    }
+
+    /// A worktree whose link files carry Git-Bash-style `/f/...` paths opens
+    /// fine under the Git CLI but is NotFound to libgit2 — which made the
+    /// autopilot wrap-up verifier report a healthy, PR'd worktree as broken.
+    /// `sanitize_git_worktree` must repair BOTH sides of the link (the
+    /// worktree's `.git` gitlink AND the repo-side `gitdir` back-pointer) so
+    /// libgit2 can open it again.
+    #[cfg(windows)]
+    #[test]
+    fn sanitize_repairs_unix_style_links_on_both_sides_for_libgit2() {
+        let td = TestDir::new("sanitize_unix_links");
+        let parent = td.path();
+        init_repo_with_commit(parent, &[("README.md", "# p\n")]);
+        let wt = make_branched_worktree(parent, "wt-unix");
+        let admin_dir = parent.join(".git").join("worktrees").join("wt-unix");
+
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", to_msys_style(&admin_dir)),
+        )
+        .unwrap();
+        fs::write(
+            admin_dir.join("gitdir"),
+            format!("{}/.git\n", to_msys_style(&wt)),
+        )
+        .unwrap();
+        assert!(
+            git2::Repository::open(&wt).is_err(),
+            "precondition (the bug): unix-style link files must break libgit2 open"
+        );
+
+        sanitize_git_worktree(wt.to_str().unwrap(), EnvType::Windows)
+            .expect("sanitize must succeed");
+
+        git2::Repository::open(&wt)
+            .expect("libgit2 must open the worktree after sanitize");
+        let backpointer = fs::read_to_string(admin_dir.join("gitdir")).unwrap();
+        assert!(
+            !backpointer.trim_start().starts_with('/'),
+            "repo-side gitdir back-pointer must be host-format, got: {}",
+            backpointer
+        );
+    }
+
+    /// Pure conversion table for both env targets — in particular the
+    /// Git-Bash `/f/...` drive style (what an MSYS git writes into link
+    /// files, the 2026-07-17 corruption) must repair under BOTH targets,
+    /// and already-correct paths must pass through unchanged.
+    #[test]
+    fn convert_link_path_covers_git_bash_drive_style_for_both_envs() {
+        // → WSL
+        assert_eq!(
+            convert_link_path_for_env("/f/src/repo/.git/worktrees/wt", EnvType::Wsl),
+            "/mnt/f/src/repo/.git/worktrees/wt"
+        );
+        assert_eq!(
+            convert_link_path_for_env("F:\\src\\repo", EnvType::Wsl),
+            "/mnt/f/src/repo"
+        );
+        // Real WSL paths must NOT be re-mangled by the drive-style arm.
+        assert_eq!(convert_link_path_for_env("/mnt/f/src", EnvType::Wsl), "/mnt/f/src");
+        assert_eq!(convert_link_path_for_env("/home/u/repo", EnvType::Wsl), "/home/u/repo");
+        // → Windows (host conversion is a Windows-host behaviour)
+        #[cfg(windows)]
+        assert_eq!(
+            convert_link_path_for_env("/f/src/repo", EnvType::Windows),
+            "F:\\src\\repo"
+        );
+    }
+
+    /// The common case — healthy Windows-format link files — must pass through
+    /// sanitize byte-identical (no churn on every spawn).
+    #[cfg(windows)]
+    #[test]
+    fn sanitize_leaves_healthy_link_files_untouched() {
+        let td = TestDir::new("sanitize_noop");
+        let parent = td.path();
+        init_repo_with_commit(parent, &[("README.md", "# p\n")]);
+        let wt = make_branched_worktree(parent, "wt-ok");
+        let admin_gitdir = parent
+            .join(".git")
+            .join("worktrees")
+            .join("wt-ok")
+            .join("gitdir");
+        let gitlink_before = fs::read_to_string(wt.join(".git")).unwrap();
+        let backpointer_before = fs::read_to_string(&admin_gitdir).unwrap();
+
+        sanitize_git_worktree(wt.to_str().unwrap(), EnvType::Windows)
+            .expect("sanitize must succeed");
+
+        assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), gitlink_before);
+        assert_eq!(fs::read_to_string(&admin_gitdir).unwrap(), backpointer_before);
+        git2::Repository::open(&wt).expect("worktree must still open");
     }
 
     #[test]

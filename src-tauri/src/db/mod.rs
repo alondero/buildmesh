@@ -2297,6 +2297,28 @@ pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
     )
 }
 
+/// Node ids of `finishing` runs (all meshes) whose ledger row hasn't
+/// advanced for at least `stale_minutes` — the poller re-drive's candidates.
+/// The wrap-up pipeline is otherwise purely turn-driven, so a run whose
+/// final Node Turn was lost (dropped by the in-flight guard, or a missed
+/// attention callback) would stall in `finishing` forever, occupying a
+/// concurrency slot (node 2328, 2026-07-17). Deliberately NOT scoped to
+/// autopilot-enabled meshes: disabling a mesh's autopilot must not strand
+/// its already-running wrap-ups. `updated_at` is bumped on every
+/// state/attempt write, so "stale" means "no pipeline activity", not
+/// "agent quiet".
+pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Vec<i64>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT r.node_id FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE r.state = 'finishing' AND a.status != 'archived' \
+         AND r.updated_at <= datetime('now', '-' || ?1 || ' minutes')",
+    )?;
+    let rows = stmt.query_map(params![stale_minutes], |row| row.get(0))?;
+    rows.collect()
+}
+
 /// Node ids of every run still in the pipeline, across all meshes. Startup
 /// hydration for the evaluator's piloted-node registry — a restart must not
 /// silently drop live autopilot nodes out of the wrap-up loop.

@@ -636,6 +636,10 @@ describe('GridNodeHeader autopilot pill', () => {
     useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'completed' } });
     const { getByTestId, rerender } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
     expect(getByTestId('autopilot-pill').className).toContain('text-accent-green');
+    // The label must say it, not just tint it: a bare checkmark reads as
+    // decoration, and "autopilot done, hands off, awaiting your PR review"
+    // is the state the user acts on.
+    expect(getByTestId('autopilot-pill').textContent).toContain('complete');
 
     useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'failed' } });
     rerender(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
