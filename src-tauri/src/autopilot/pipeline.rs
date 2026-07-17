@@ -662,6 +662,47 @@ mod tests {
         }
     }
 
+    /// The impure half of the repo-error contract: an unopenable worktree
+    /// must actually populate `repo_error` (and name the inspected path) —
+    /// without this, a regression in `observe_wrapup_state`'s Err arm would
+    /// pass every pure `decide_finishing` test above.
+    #[test]
+    fn observe_wrapup_state_populates_repo_error_for_an_unopenable_worktree() {
+        let node = crate::models::AgentNode {
+            id: 1,
+            mesh_id: 1,
+            name: "gh1-missing".to_string(),
+            path: std::env::temp_dir()
+                .join("bm-observe-missing-mesh")
+                .to_string_lossy()
+                .to_string(),
+            branch: "main".to_string(),
+            env: crate::models::EnvType::default(),
+            provider: "anthropic".to_string(),
+            status: SessionStatus::Running,
+            cli_session_id: None,
+            worktree_name: Some("gh1-missing".to_string()),
+            use_worktree: true,
+            source_issue: Some(1),
+            source_pr: None,
+            head_repo_owner: None,
+            head_repo_clone_url: None,
+            source_pr_pinned_sha: None,
+            position: 0,
+            created_at: chrono::Utc::now(),
+        };
+        // The worktree path doesn't exist, so the repo open must fail and the
+        // pushed=false short-circuit keeps GitHub out of the picture.
+        let state = observe_wrapup_state(&node, true);
+        let err = state.repo_error.expect("unopenable worktree must set repo_error");
+        assert!(
+            err.contains("gh1-missing"),
+            "reason must name the inspected path, got: {}",
+            err
+        );
+        assert!(err.contains("could not open"));
+    }
+
     /// The honest repo-error reason still respects the attempts cap.
     #[test]
     fn unopenable_repo_at_the_cap_fails_with_the_honest_reason() {

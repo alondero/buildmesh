@@ -2539,10 +2539,8 @@ mod tests {
             "the failure must name the existing branch refusal, got: {}",
             err
         );
-        // The refusal is pre-move (2026-07-17 gh252 incident): the pool entry
-        // must be exactly where it was, and the target never materialised —
-        // a post-move refusal left a half-adopted worktree for the failure
-        // cleanup to delete, stranding a stale admin entry.
+        // Fail-fast contract: refusal is pre-move — see the guard in
+        // `adopt_warm_worktree_by_move`.
         assert!(pool.exists(), "pool entry must be untouched after a refused adoption");
         assert!(!target.exists(), "target must not be materialised by a refused adoption");
     }

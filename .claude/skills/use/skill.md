@@ -43,6 +43,47 @@ Dev profile (what `/use` launches):
 
 The stable hub logs to `com.alond.buildmesh` (no `.dev`) — a different directory.
 
+## Live diagnostic probes (issue #160)
+
+When the log monitor shows a clean launch but the user reports "spawn succeeded but the terminal is blank" — or any "app looks fine, nothing is happening" symptom — `buildmesh.log` only tells you **spawn worked**. The authoritative probe is the **terminal-output WebSocket**, which replays the snapshot + streams live PTY bytes:
+
+```
+ws://localhost:1992/ws/terminal/{node_id}?ticket=<ticket>     # stable hub
+ws://localhost:2992/ws/terminal/{node_id}?ticket=<ticket>     # dev profile (buildmesh-dev)
+```
+
+The HTTP server's actually-bound port (`current_http_port()`) may be `+1/+2` higher when the preferred slot is held — check `buildmesh.log` for `bound http on :1992` / `:2992`.
+
+**Auth is a single-use ticket**, not a raw `?token=` — the upgrade rejects raw tokens with 401 (issue #500 AC4, regression test at `http/mod.rs:2427`). Mint one:
+
+```powershell
+# Root token sources (pick one):
+#   1. Open the desktop Remote Access modal (it calls invoke('get_root_token')).
+#   2. sqlite3 "$env:APPDATA\com.alond.buildmesh.dev\buildmesh.db" \
+#        "SELECT value FROM app_settings WHERE key='remote_access_token';"
+#   3. Read the log line "Generated remote access root token" on first launch.
+$root   = '<root token>'
+$body   = @{ surface='terminal'; node_id=<node_id> } | ConvertTo-Json -Compress
+$ticket = (Invoke-RestMethod -Method Post -Uri 'http://localhost:2992/api/ws-ticket' `
+           -Headers @{ Authorization = "Bearer $root" } `
+           -ContentType 'application/json' -Body $body).ticket
+
+# Connect and read 5s of frames; assert >= 1 byte received on a running node.
+$ws = [System.Net.WebSockets.ClientWebSocket]::new()
+$ws.ConnectAsync([Uri]"ws://localhost:2992/ws/terminal/<node_id>?ticket=$ticket",
+                 [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+# ... read frames; 0 bytes after 5s ⇒ PTY not producing.
+```
+
+For "Rust thinks the agent is alive?", use the headless IPC commands registered in `lib.rs` (callable from devtools console or a Playwright/CDP harness — the legacy `GET /api/debug/state?token=` HTTP wrapper from PR #163 was retired by the route-table refactor; see *Diagnostic probes* in `/verify`):
+
+```js
+await window.__TAURI_INTERNALS__.invoke('debug_list_agents');     // [] ⇒ PROCESS_REGISTRY empty
+await window.__TAURI_INTERNALS__.invoke('debug_crash_snapshot');   // recent panics + counters
+```
+
+These four signals (log + WebSocket + the two IPC probes) are the primary authoritative probes for "is the agent actually working?"; tailing `buildmesh.log` alone covers a narrow slice.
+
 ## Important
 
 - Monitor keeps running until TaskStop or session end — do NOT stop proactively

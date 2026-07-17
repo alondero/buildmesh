@@ -489,18 +489,21 @@ fn head_has_unpushed_or_unmerged_commits(
     if !is_detached {
         if let Some(refname) = current_refname {
             if let Ok(upstream_buf) = repo.branch_upstream_name(refname) {
-                let Some(upstream_refname) = upstream_buf.as_str() else {
-                    return true;
-                };
-                let Ok(upstream_ref) = repo.find_reference(upstream_refname) else {
-                    return true;
-                };
-                let Some(upstream_oid) = upstream_ref.target() else {
-                    return true;
-                };
-                return primitives::ahead_behind(repo, head_oid, upstream_oid)
-                    .map(|(ahead, _)| ahead > 0)
-                    .unwrap_or(true);
+                // Each step short-circuits on success only. A missing or
+                // unreadable tracking ref is the everyday post-merge state
+                // (`git status` shows `[gone]` after a squash-merge + remote
+                // auto-delete); the reachability walk below is the better
+                // safety net there, so we fall through instead of warning
+                // unconditionally (#252).
+                if let Some(upstream_refname) = upstream_buf.as_str() {
+                    if let Ok(upstream_ref) = repo.find_reference(upstream_refname) {
+                        if let Some(upstream_oid) = upstream_ref.target() {
+                            return primitives::ahead_behind(repo, head_oid, upstream_oid)
+                                .map(|(ahead, _)| ahead > 0)
+                                .unwrap_or(true);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1253,6 +1256,101 @@ mod tests {
 
         assert_eq!(safety.worktree_path, None);
         assert!(!safety.has_uncommitted);
+    }
+
+    // ── close-safety: [gone] upstream (#252) ─────────────────────────────────
+    //
+    // After a squash-merge + auto-delete, git config still points the local
+    // branch at `refs/remotes/origin/<branch>`, but the tracking ref has been
+    // pruned. `find_reference` then fails and the old code wrongly fell into
+    // `return true`. The fix falls through to the reachability check so the
+    // common "work is on main, branch is just dead weight" case closes cleanly.
+
+    /// Configure `branch.<name>.remote`/`.merge` to point at `origin/<name>`
+    /// without ever creating the `refs/remotes/origin/<name>` tracking ref —
+    /// the post-prune `[gone]` state from issue #252. Mirrors `git remote add`
+    /// closely enough for git2 to resolve the upstream: `remote.origin.url`,
+    /// the standard fetch refspec, and the per-branch remote/merge pointers.
+    fn configure_upstream_without_tracking_ref(repo: &git2::Repository, branch: &str) {
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("remote.origin.url", "https://example.invalid/repo.git")
+            .unwrap();
+        cfg.set_str(
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        )
+        .unwrap();
+        cfg.set_str(&format!("branch.{}.remote", branch), "origin")
+            .unwrap();
+        cfg.set_str(
+            &format!("branch.{}.merge", branch),
+            &format!("refs/heads/{}", branch),
+        )
+        .unwrap();
+        // Sanity: the tracking ref really is absent (the bug only triggers here).
+        assert!(
+            repo.find_reference(&format!("refs/remotes/origin/{}", branch))
+                .is_err(),
+            "test precondition: tracking ref must be pruned"
+        );
+    }
+
+    #[test]
+    fn close_safety_reports_gone_upstream_with_merged_work_as_safe() {
+        // Squash-merge + auto-delete: HEAD on the feature branch points at the
+        // same commit as main (the work is safely on main), upstream config
+        // exists, but the tracking ref has been pruned. Must NOT warn — closing
+        // should be allowed. The current bug returns true from the
+        // `find_reference` Err path and never consults reachability.
+        let td = TestDir::new("safe_gone_upstream_merged");
+        init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        let wt = make_branched_worktree(td.path(), "wt-merged");
+        let wt_repo = git2::Repository::open(&wt).unwrap();
+
+        // Sanity: HEAD on wt-merged is at the same commit as the parent's
+        // default branch — that's the reachable-from-another-ref precondition
+        // the fix relies on.
+        let wt_head_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
+        let parent_repo = git2::Repository::open(td.path()).unwrap();
+        let parent_head_oid = parent_repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(
+            wt_head_oid, parent_head_oid,
+            "test precondition: wt-merged HEAD must equal main HEAD (FF-merged)"
+        );
+
+        configure_upstream_without_tracking_ref(&wt_repo, "wt-merged");
+
+        let safety = close_safety(&wt.to_string_lossy());
+
+        assert!(!safety.is_detached);
+        assert!(!safety.has_uncommitted);
+        assert!(
+            !safety.has_unpushed,
+            "configured-but-gone upstream with work reachable from another ref must not warn \
+             (issue #252: false-positive 'unpushed' on squash-merged branches)"
+        );
+    }
+
+    #[test]
+    fn close_safety_reports_gone_upstream_with_unmerged_work_as_unpushed() {
+        // Safety net: when the upstream tracking ref is gone AND HEAD is not
+        // reachable from any other branch, we must still warn — closing would
+        // otherwise lose the only copy of the work.
+        let td = TestDir::new("safe_gone_upstream_orphan");
+        init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        let wt = make_branched_worktree(td.path(), "wt-orphan");
+        let wt_repo = git2::Repository::open(&wt).unwrap();
+        commit_file(&wt_repo, &wt, "exclusive.txt", "only on wt-orphan");
+
+        configure_upstream_without_tracking_ref(&wt_repo, "wt-orphan");
+
+        let safety = close_safety(&wt.to_string_lossy());
+
+        assert!(!safety.is_detached);
+        assert!(
+            safety.has_unpushed,
+            "orphan branch with [gone] upstream must still warn — closing would lose work"
+        );
     }
 
     // ── remove ───────────────────────────────────────────────────────────────

@@ -463,14 +463,25 @@ pub(crate) fn adopt_warm_worktree_by_move(
     // pool entry exactly where it was.
     if mode == "branched" {
         let host_root = crate::env::to_host_path(project_root);
-        let branch_taken = git2::Repository::open(&host_root)
-            .ok()
-            .is_some_and(|repo| repo.find_branch(branch_name, git2::BranchType::Local).is_ok());
-        if branch_taken {
-            return Err(format!(
-                "a branch named '{}' already exists — refusing to adopt the warm worktree over it",
-                branch_name
-            ));
+        match git2::Repository::open(&host_root) {
+            Ok(repo) => {
+                if repo.find_branch(branch_name, git2::BranchType::Local).is_ok() {
+                    return Err(format!(
+                        "a branch named '{}' already exists — refusing to adopt the warm worktree over it",
+                        branch_name
+                    ));
+                }
+            }
+            // Fail open: the post-move `git checkout -b` still refuses an
+            // existing branch, so an unopenable root degrades to the old
+            // (later) refusal rather than blocking every adoption.
+            Err(e) => tracing::warn!(
+                "adopt_warm_worktree_by_move: could not open {} to pre-check branch '{}' ({}); \
+                 relying on the post-move checkout refusal",
+                host_root,
+                branch_name,
+                e
+            ),
         }
     }
     super::move_git_worktree(project_root, old_host_path, new_host_path)?;
@@ -1057,11 +1068,8 @@ mod tests {
             result.unwrap_err().contains("already exists"),
             "error must name the clobber refusal"
         );
-        // Fail-fast contract (2026-07-17 gh252 incident): the refusal must
-        // happen BEFORE the pool directory is disturbed. The old order moved
-        // the worktree first and only then hit the `git checkout -b` refusal,
-        // leaving a half-adopted worktree for the failure cleanup to delete —
-        // which stranded a stale admin entry (a phantom worktree).
+        // Fail-fast contract: the refusal happens BEFORE the pool directory
+        // is disturbed — see the pre-move guard in `adopt_warm_worktree_by_move`.
         assert!(
             pool_path.exists(),
             "pool entry must be untouched after a refused adoption"
