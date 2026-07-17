@@ -47,6 +47,18 @@ pub(crate) fn app_handle() -> Option<&'static tauri::AppHandle> {
 const HTTP_PORT_START: u16 = 1992;
 const HTTP_PORT_END: u16 = 1994;
 
+/// How long the server will wait for a client to finish sending its request line
+/// and headers before dropping the connection. Bounds slowloris-style holds: a
+/// LAN peer (exposure on) that opens a socket and then dribbles or stalls can't
+/// pin a connection open indefinitely. Each connection reads exactly one request
+/// (no keep-alive loop here), so a single deadline covers the whole request head.
+const REQUEST_HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Upper bound on the combined size of a request's header block. A well-formed
+/// mobile/coordinator request is a few KB; anything past this is malformed or
+/// hostile, so we reject with `431` rather than let `headers` grow unbounded.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+
 /// Default/expected port for the attention webhook hook.
 /// The actual server may bind 1993 or 1994 if 1992 is taken; the hook will
 /// silently no-op on the wrong port since `|| true` is appended.
@@ -1142,8 +1154,47 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // to gate the `Secure` session cookie below (issue #553).
     let secure = stream.is_tls();
     let mut lines = tokio::io::BufStream::new(stream);
-    let mut request_line = String::new();
-    if lines.read_line(&mut request_line).await.is_err() {
+
+    // Read the request head under one deadline. The EOF short-circuit is the
+    // load-bearing detail: `read_line` returns `Ok(0)` on EOF, which is not an
+    // error — without the explicit break the loop spun at 100% CPU on any
+    // half-closed / slowloris peer, pinning a worker and a connection.
+    let head = match tokio::time::timeout(REQUEST_HEAD_TIMEOUT, async {
+        let mut request_line = String::new();
+        match lines.read_line(&mut request_line).await {
+            Ok(0) | Err(_) => return None, // EOF or read error before any request
+            Ok(_) => {}
+        }
+
+        let mut headers = String::new();
+        while !headers.ends_with("\r\n\r\n") {
+            match lines.read_line(&mut headers).await {
+                // EOF mid-headers: the client closed without terminating the
+                // block. Stop instead of re-reading Ok(0) forever.
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            if headers.len() > MAX_HEADER_BYTES {
+                return Some((request_line, headers, true));
+            }
+            // A blank line (just the CRLF) terminates a header-less request.
+            if headers.trim().is_empty() {
+                break;
+            }
+        }
+        Some((request_line, headers, false))
+    })
+    .await
+    {
+        Ok(Some(head)) => head,
+        // Timed out, or EOF/error before a usable request line — drop the socket.
+        Ok(None) | Err(_) => return,
+    };
+    let (request_line, headers, header_overflow) = head;
+
+    if header_overflow {
+        let _ = request::write_status_only(&mut lines, "431 Request Header Fields Too Large").await;
         return;
     }
 
@@ -1157,16 +1208,6 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     }
     let method = parts[0].as_str();
     let path_with_query = parts[1].clone();
-
-    let mut headers = String::new();
-    while headers.lines().count() == 0 || !headers.ends_with("\r\n\r\n") {
-        if lines.read_line(&mut headers).await.is_err() {
-            break;
-        }
-        if headers.trim().is_empty() {
-            break;
-        }
-    }
 
     // DNS-rebinding guard (issue #496 / ADR-0012): every request — including the
     // WebSocket upgrades below — must carry a `Host` that targets this machine.
@@ -1499,16 +1540,11 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         // its `{ surface, node_id }` arrives in the request body. A missing or
         // malformed target is a 400 — we never mint a ticket that could never
         // match an upgrade.
-        let content_length = content_length(&headers);
-        if content_length > 8 * 1024 {
-            let _ = request::write_status_only(&mut lines, "413 Content Too Large").await;
+        let Some(body_bytes) =
+            request::read_body_or_send_error(&mut lines, content_length(&headers), 8 * 1024).await
+        else {
             return;
-        }
-        let mut body_bytes = vec![0u8; content_length];
-        if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
-            return;
-        }
+        };
         let target = match ws_ticket::parse_mint_target(&body_bytes) {
             Ok(t) => t,
             Err(()) => {
@@ -1733,6 +1769,74 @@ mod tests {
             .and_then(|l| l.split_whitespace().nth(1))
             .and_then(|s| s.parse().ok())
             .unwrap_or(0)
+    }
+
+    /// Regression pin for the header-read CPU spin: a client that sends a partial
+    /// header line and then half-closes WITHOUT the terminating blank line used to
+    /// make `read_line` return `Ok(0)` (EOF) forever, and neither loop `break`
+    /// fired — a spun CPU core and a pinned connection (a trivial LAN DoS when
+    /// exposure is on). The handler must instead stop on EOF and drop the socket.
+    /// The test's own timeout is the assertion: pre-fix it never returns.
+    #[tokio::test]
+    async fn partial_headers_then_eof_does_not_hang() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        // Request line + one header, but NO terminating CRLFCRLF, then close the
+        // write half so the server sees EOF mid-headers.
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+
+        // The server must finish (respond or drop) — a read that reaches EOF or a
+        // response both mean the loop terminated. Pre-fix this read never returns.
+        let mut buf = [0u8; 512];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut buf))
+            .await
+            .expect("server spun on partial headers instead of stopping at EOF");
+        // Either EOF (0) or a written status line is acceptable — both prove the
+        // header loop exited rather than spinning.
+        let _ = n.expect("read failed");
+    }
+
+    /// The other half of the head-read fix: oversize headers must trip the
+    /// `MAX_HEADER_BYTES` cap and produce a `431`, not unbounded `String`
+    /// growth that a slow-loris could blow past `usize::MAX`.
+    #[tokio::test]
+    async fn oversize_headers_return_431() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        // Header value alone exceeds the cap; line + name is well over 64 KB.
+        // No terminating CRLFCRLF so the cap is the only thing that triggers.
+        let huge = "x".repeat(70 * 1024);
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: {huge}\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 512];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut buf))
+            .await
+            .expect("server hung on oversize headers instead of rejecting them")
+            .expect("read failed");
+        let response = String::from_utf8_lossy(&buf[..n]).into_owned();
+        assert!(
+            response.starts_with("HTTP/1.1 431"),
+            "oversize headers must produce 431; got: {response:?}"
+        );
     }
 
     #[tokio::test]
