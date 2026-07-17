@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { act } from '@testing-library/react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
@@ -261,5 +262,180 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
       );
       expect(nonForceCalls.length).toBeGreaterThanOrEqual(2);
     });
+  });
+
+  // ---------------------------------------------------------------------
+  // "Refreshed X ago" indicator
+  // ---------------------------------------------------------------------
+  // The fake-timer setup scopes `toFake` to just `setInterval` /
+  // `clearInterval` / `Date` so RTL's `findByText` polling (real
+  // `setTimeout`) still resolves. `advanceTo(t)` offsets by -1s so
+  // the post-tick clock equals `t` exactly — `advanceTimersByTime`
+  // itself advances the clock.
+
+  async function advanceTo(t: Date) {
+    vi.setSystemTime(new Date(t.getTime() - 1000));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+  }
+
+  it('shows "Refreshed just now" after the initial load resolves', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      const t0 = new Date('2026-07-17T14:23:00Z');
+      vi.setSystemTime(t0);
+      mockBackend();
+      render(<UsageTab />);
+
+      // Indicator absent during the in-flight initial mount.
+      expect(screen.queryByTestId('usage-last-refreshed')).toBeNull();
+
+      await screen.findByText(/Refreshed just now/);
+      const timeEl = screen.getByTestId('usage-last-refreshed').querySelector('time') as HTMLElement;
+      expect(timeEl.getAttribute('datetime')).toBe('2026-07-17T14:23:00.000Z');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('exposes the absolute timestamp via aria-label and title for AT / hover inspection', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-07-17T14:23:00Z'));
+      mockBackend();
+      render(<UsageTab />);
+      await screen.findByText(/Refreshed just now/);
+      const timeEl = screen.getByTestId('usage-last-refreshed').querySelector('time') as HTMLElement;
+      // `title`'s exact format is locale-dependent; assert non-empty.
+      expect(timeEl.getAttribute('aria-label')).toMatch(/Last refreshed at /);
+      expect(timeEl.getAttribute('title')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('advances the label as the wall clock ticks ("Xs ago" → "Xm ago")', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      const t0 = new Date('2026-07-17T14:23:00Z');
+      vi.setSystemTime(t0);
+      mockBackend();
+      render(<UsageTab />);
+      await screen.findByText(/Refreshed just now/);
+
+      await advanceTo(new Date(t0.getTime() + 29 * 1000));
+      expect(screen.getByText(/Refreshed just now/)).toBeTruthy();
+
+      await advanceTo(new Date(t0.getTime() + 35 * 1000));
+      expect(screen.getByText(/Refreshed 35s ago/)).toBeTruthy();
+
+      await advanceTo(new Date(t0.getTime() + 65 * 1000));
+      expect(screen.getByText(/Refreshed 1m ago/)).toBeTruthy();
+
+      // Minute-floor: 5m30s reads as "5m ago".
+      await advanceTo(new Date(t0.getTime() + (5 * 60 + 30) * 1000));
+      expect(screen.getByText(/Refreshed 5m ago/)).toBeTruthy();
+
+      await advanceTo(new Date(t0.getTime() + 3 * 60 * 60 * 1000));
+      expect(screen.getByText(/Refreshed 3h ago/)).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resets to "just now" when the user clicks Refresh after time has passed', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      const t0 = new Date('2026-07-17T14:23:00Z');
+      vi.setSystemTime(t0);
+      mockBackend();
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      render(<UsageTab />);
+      await screen.findByText(/Refreshed just now/);
+
+      await advanceTo(new Date(t0.getTime() + 5 * 60 * 1000));
+      expect(screen.getByText(/Refreshed 5m ago/)).toBeTruthy();
+
+      await user.click(screen.getByRole('button', { name: /refresh usage/i }));
+      await screen.findByText(/Refreshed just now/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT advance the timestamp when a forced refresh rejects (last known-good moment sticks)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      const t0 = new Date('2026-07-17T14:23:00Z');
+      vi.setSystemTime(t0);
+
+      mockBackend();
+      render(<UsageTab />);
+      await screen.findByText(/Refreshed just now/);
+
+      await advanceTo(new Date(t0.getTime() + 5 * 60 * 1000));
+      expect(screen.getByText(/Refreshed 5m ago/)).toBeTruthy();
+
+      // Flip the backend so the NEXT (forced) refresh rejects;
+      // the timestamp must NOT advance when the failure settles.
+      let rejectRefresh!: (err: Error) => void;
+      const refreshPending = new Promise<ProviderMeters[]>((_res, rej) => { rejectRefresh = rej; });
+      vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+        const a = args as { forceRefresh?: boolean } | undefined;
+        if (cmd === 'get_provider_meters') {
+          if (a?.forceRefresh === true) return refreshPending;
+          return Promise.resolve([]);
+        }
+        if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
+        return Promise.resolve({});
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(screen.getByRole('button', { name: /refresh usage/i }));
+      // The IPC rejection drives `setError(...)` — we have to
+      // resolve the pending promise BEFORE the indicator assertions
+      // can settle, otherwise the assertions race against the still-
+      // pending IPC. Note the existing UI surfaces the error in TWO
+      // places (the inline banner at the top of the tab body AND the
+      // body's `<ErrorState>`), so we use `findAllByText` and assert
+      // presence-not-uniqueness. Adding a follow-up to consolidate
+      // those would be out of scope for the indicator work.
+      rejectRefresh(new Error('backend gone'));
+      await screen.findAllByText(/backend gone/i);
+
+      // Indicator stays at "5m ago" — lastRefreshedAt was not advanced.
+      expect(screen.queryByText(/Refreshed 5m ago/)).toBeTruthy();
+      expect(screen.queryByText(/Refreshed just now/)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('updates the timestamp when the provider-list-changed event drives a successful re-fetch', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      const t0 = new Date('2026-07-17T14:23:00Z');
+      vi.setSystemTime(t0);
+      mockBackend();
+      let captured: ((e: { payload: unknown }) => void) | null = null;
+      vi.mocked(listen).mockImplementation((event, handler) => {
+        if (event === PROVIDER_LIST_CHANGED_EVENT) {
+          captured = handler as (e: { payload: unknown }) => void;
+        }
+        return Promise.resolve(() => {});
+      });
+      render(<UsageTab />);
+      await screen.findByText(/Refreshed just now/);
+
+      await advanceTo(new Date(t0.getTime() + 2 * 60 * 1000));
+      expect(screen.getByText(/Refreshed 2m ago/)).toBeTruthy();
+
+      captured?.({ payload: undefined });
+
+      await screen.findByText(/Refreshed just now/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
