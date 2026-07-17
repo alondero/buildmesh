@@ -35,11 +35,11 @@ pub fn open_from_host_path(path: &str) -> Result<Repository, git2::Error> {
 /// - [`is_dirty`] is the *strict* gate: any non-ignored change is dirty. Use
 ///   it for data-safety decisions (worktree close, base restore) where
 ///   hiding any real work risks silent data loss.
-/// - [`is_dirty_mirrors_git_status`] is the *fetch gate*: it additionally
+/// - [`is_dirty_mirrors_git_status`] is the *pull gate*: it additionally
 ///   honours `submodule.<path>.ignore = {dirty,all,untracked}` from
 ///   `.git/config`, mirroring what `git status` reports. Use it only when the
 ///   user's contract is "the repo looks dirty iff `git status` says so" —
-///   which is exactly the sync-time auto-fetch (sync.rs:318), where a
+///   which is exactly the sync-time ff-pull gate (`do_sync` Step 5), where a
 ///   submodule's WT edits being hidden matches the user's mental model.
 ///   Note: `commands/prune.rs` reads this kind of dirty signal too, but as a
 ///   UI badge (with `.unwrap_or(false)`), not a gate; that call site is fine
@@ -58,26 +58,28 @@ pub fn is_dirty(repo: &Repository) -> Result<bool, git2::Error> {
 /// libgit2's `repo.statuses()` does not honour this config and always
 /// reports the gitlink's WT state as `WT_MODIFIED` when the submodule's WT
 /// differs from its HEAD. Without filtering, a mesh whose submodules have
-/// uncommitted internal edits gets its fetch falsely blocked with
-/// "Skipped: working tree has uncommitted changes" (the user-visible message
-/// is in `commands/git.rs:415`; the gate that produces the variant is
-/// `sync.rs:318`).
+/// uncommitted internal edits gets its fast-forward pull falsely skipped
+/// with "fast-forward skipped: working tree has uncommitted changes" (the
+/// user-visible message is in `commands/git.rs`'s
+/// `sync_outcome_to_git_sync_result`; the gate that produces the variant is
+/// `do_sync` Step 5).
 ///
 /// **Scope of parity.** This helper matches `git status --ignore-submodules=
 /// dirty` *for submodule working-tree changes*. It does NOT distinguish
 /// staged gitlink advances (`+`-prefix lines in `git status`, surfacing as
 /// `INDEX_MODIFIED` on the parent's gitlink) from WT-dirt: the parent's view
 /// via `repo.statuses()` reports both as `WT_MODIFIED` on the gitlink path.
-/// That divergence is benign for the fetch gate (a `git fetch` is safe with
-/// staged changes) but the parity claim should NOT be relied on by any
+/// That divergence is benign for the pull gate (a `git pull --ff-only` on a
+/// tree whose only dirt is staged changes either applies cleanly or aborts
+/// without data loss) but the parity claim should NOT be relied on by any
 /// future destructive-operation caller.
 ///
 /// **Do not use this for data-safety decisions** (worktree close, base
 /// restore, prune-badging): hiding submodule dirt in those callers risks
-/// silently dropping user work. Keep the use site narrow — only the spawn
-/// auto-sync and the manual `git_sync` Tauri command route through this
-/// helper, because the user's contract there is "should the fetch happen?",
-/// not "is anything dirty?".
+/// silently dropping user work. Keep the use site narrow — only `do_sync`'s
+/// pre-pull gate (shared by the spawn auto-sync and the manual `git_sync`
+/// Tauri command) routes through this helper, because the user's contract
+/// there is "should the fast-forward pull happen?", not "is anything dirty?".
 ///
 /// **`ignore = all`:** hides everything for the submodule, including HEAD
 /// advance. **`ignore = untracked`:** only hides untracked files inside the
@@ -185,11 +187,37 @@ pub fn head_branch_name(repo: &Repository) -> Option<String> {
 /// one and it resolves. `None` covers "no upstream configured" and "upstream
 /// ref missing/unreadable" alike — callers that must distinguish those treat
 /// `None` as "nothing to compare against".
+///
+/// Resolution is two-tier. `branch_upstream_name` maps `refs/heads/<b>`
+/// through the remote's configured fetch refspec — but a remote wired
+/// URL-only (a hand-written `remote.<r>.url` with no `remote.<r>.fetch`
+/// line; seen in the wild 2026-07-17 on pixelcache) has no refspec to map
+/// through, so git2 errors even though `branch.<b>.remote`/`.merge` are set
+/// and `git pull` resolves the upstream fine. The fallback mirrors git's own
+/// config lookup directly: `refs/remotes/<branch.<b>.remote>/<branch.<b>.merge
+/// minus refs/heads/>`. Without it, every behind-count in the app reads 0 for
+/// such a repo — the sidebar ↓N badge never shows and the sync machinery
+/// reports "Already up to date" against a frozen ref.
 pub fn upstream_oid_for_branch(repo: &Repository, branch: &str) -> Option<Oid> {
     let refname = format!("refs/heads/{}", branch);
-    let upstream_buf = repo.branch_upstream_name(&refname).ok()?;
-    let upstream_ref = upstream_buf.as_str()?;
-    repo.find_reference(upstream_ref).ok()?.target()
+    if let Ok(buf) = repo.branch_upstream_name(&refname) {
+        if let Some(name) = buf.as_str() {
+            if let Some(oid) = repo.find_reference(name).ok().and_then(|r| r.target()) {
+                return Some(oid);
+            }
+        }
+    }
+    // `branch_upstream_name` maps through the remote's configured fetch
+    // refspec, so a URL-only remote (no `remote.<r>.fetch` — 2026-07-17
+    // pixelcache incident) makes it error even though `branch.<b>.remote` is
+    // set. Mirror `git pull`'s lookup from the branch config directly.
+    let cfg = repo.config().ok()?;
+    let remote = cfg.get_string(&format!("branch.{}.remote", branch)).ok()?;
+    let merge = cfg.get_string(&format!("branch.{}.merge", branch)).ok()?;
+    let merge_branch = merge.strip_prefix("refs/heads/")?;
+    repo.find_reference(&format!("refs/remotes/{}/{}", remote, merge_branch))
+        .ok()?
+        .target()
 }
 
 /// `(ahead, behind)` of `local` relative to `upstream`, saturating to `u32`.
@@ -328,10 +356,11 @@ mod tests {
         //   - submodule HEAD matches the parent's recorded gitlink SHA
         //   - parent's .git/config sets `submodule.sub.ignore = dirty`
         // `git status` honours the ignore rule and reports clean.
-        // `is_dirty_mirrors_git_status` must do the same or the spawn-time
-        // auto-sync falsely bails with "Skipped: working tree has uncommitted
-        // changes" (the user-visible message lives in commands/git.rs:415;
-        // the gate that emits SyncOutcome::SkippedDirty is sync.rs:318).
+        // `is_dirty_mirrors_git_status` must do the same or the sync's
+        // ff-pull is falsely skipped with "fast-forward skipped: working
+        // tree has uncommitted changes" (the user-visible message lives in
+        // commands/git.rs's sync_outcome_to_git_sync_result; the gate that
+        // emits SyncOutcome::FetchedButDirty is do_sync Step 5).
         // Note: `is_dirty` (strict) would still report this as dirty — that's
         // the correct behaviour for data-safety gates, just not for the fetch.
         let td = TestDir::new("prim_submod_ignore_dirty");
@@ -451,6 +480,49 @@ mod tests {
         let upstream = upstream_oid_for_branch(&repo, &branch).expect("upstream resolves");
         assert_eq!(upstream, base);
         assert_eq!(ahead_behind(&repo, local, upstream).unwrap(), (1, 0));
+    }
+
+    #[test]
+    fn upstream_oid_for_branch_falls_back_to_branch_config_when_refspec_missing() {
+        // 2026-07-17 pixelcache incident: `.git/config` has
+        // `remote.origin.url` + `branch.<b>.remote`/`.merge`, but NO
+        // `remote.origin.fetch` refspec (remote wired by hand, not via
+        // `git remote add`). git2's `branch_upstream_name` maps the branch
+        // through the fetch refspec, so it errors — yet git itself (and
+        // `git pull`) resolves the upstream fine from the branch config.
+        // The fallback must do the same, or every behind-count in the app
+        // silently reads 0 against a frozen tracking ref.
+        let td = TestDir::new("prim_upstream_no_refspec");
+        let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
+        let branch = head_branch_name(&repo).unwrap();
+        let base = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+        // URL-only remote: write the config key directly — `repo.remote()`
+        // would also write the fetch refspec, defeating the test.
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("remote.origin.url", td.path().to_str().unwrap())
+            .unwrap();
+        cfg.set_str(&format!("branch.{}.remote", branch), "origin")
+            .unwrap();
+        cfg.set_str(
+            &format!("branch.{}.merge", branch),
+            &format!("refs/heads/{}", branch),
+        )
+        .unwrap();
+        repo.reference(
+            &format!("refs/remotes/origin/{}", branch),
+            base,
+            false,
+            "test",
+        )
+        .unwrap();
+
+        assert_eq!(
+            upstream_oid_for_branch(&repo, &branch),
+            Some(base),
+            "upstream must resolve via branch.<b>.remote/.merge when the \
+             remote has no fetch refspec"
+        );
     }
 
     #[test]

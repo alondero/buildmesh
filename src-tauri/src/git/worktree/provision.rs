@@ -83,12 +83,13 @@
 /// [`crate::git::sync::do_fetch_only`] — the fetch-only half of `do_sync`
 /// (the shared fetch+ff-pull algorithm used by `fetch_origin` and the manual
 /// `git_sync` command). Consolidating onto the shared algorithm means:
-///   - The PR-spawn path inherits `do_fetch_only`'s dirty-check (skips with
-///     `SkippedDirty` on a dirty parent) — the old shell-out would have run
-///     anyway, which left the spawn path inconsistent with the base-ref
-///     fetch behaviour.
 ///   - Windows quoting, ref-with-special-chars, and lock-contention fixes
 ///     land in one place for both the auto-sync and the PR-head fetch.
+///   - A dirty parent does NOT block the fetch (2026-07-17): a fetch never
+///     touches the working tree, and the whole point here is materialising
+///     `refs/remotes/origin/<head_ref>` — the old pre-fetch dirty-skip
+///     silently cut the PR worktree from a stale ref (or fell back to
+///     `base_ref`) whenever the mesh root had uncommitted changes.
 ///
 /// **Why fetch-only, not full `do_sync`:** the PR-head fetch is a
 /// single-ref materialisation; the goal is to populate
@@ -99,8 +100,8 @@
 /// `main` advances on every PR spawn) AND wasted work (a few hundred ms
 /// of duplicate fast-forward on top of the `fetch_origin` call a few
 /// lines earlier in `spawn_agent_inner`, under the same per-Mesh
-/// `sync_lock`). `do_fetch_only` runs steps 1-4 (open, dirty-check,
-/// has-remote, `git fetch`) and stops before the `commits_behind` and
+/// `sync_lock`). `do_fetch_only` runs steps 1-3 (open, has-remote,
+/// `git fetch`) and stops before the `commits_behind`, dirty-gate and
 /// `git pull` tail.
 ///
 /// Best-effort by design: the caller falls back to the mesh's `base_ref` on
