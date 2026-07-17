@@ -97,8 +97,11 @@ pub(crate) fn first_text_block(content: Option<&serde_json::Value>) -> String {
 /// Truncate to at most `max` *bytes* (the right unit for bounding payload
 /// size), appending `…` if cut. Respects UTF-8 boundaries so we never split a
 /// multi-byte character "— for non-ASCII text the result is therefore fewer than
-/// `max` characters.
-fn truncate(s: &str, max: usize) -> String {
+/// `max` characters. `pub(crate)` so the sibling Claude-Code JSONL consumers
+/// (`agent_node_discovery`, formerly `session_discovery`) share one truncation
+/// rule "— divergence here is how the two copies of this fn used to drift
+/// silently (issue #340).
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
