@@ -162,12 +162,12 @@ async function assertXtermHasRenderedBytes(page: Page, nodeId: number, timeoutMs
     const rows = xterm.locator('.xterm-rows > div');
     const rowCount = await rows.count();
     lastRowCount = rowCount;
+    let nonEmpty = 0;
     for (let i = 0; i < rowCount; i++) {
       const text = (await rows.nth(i).textContent()) ?? '';
-      if (text.trim().length > 0) {
-        return { rowCount, nonEmpty: 1 };
-      }
+      if (text.trim().length > 0) nonEmpty++;
     }
+    if (nonEmpty > 0) return { rowCount, nonEmpty };
     await page.waitForTimeout(150);
   }
   throw new Error(
@@ -187,10 +187,11 @@ test.describe('verify-smoke (issue #157)', () => {
     // reaches for `window.__TAURI_INTERNALS__` synchronously, so the
     // shim must exist before the navigation commit.
     await page.addInitScript({ content: buildInitScript(SMOKE_FIXTURES) });
-    // Make page errors fail the test — a #149 regression would surface
-    // as an uncaught `Illegal invocation` thrown from the listener
-    // wrapper. With `quiet` set on the mock, mock-level misses don't
-    // spam the log; real exceptions still bubble to Playwright.
+    // Surface uncaught page errors as test failures — a #149 regression
+    // throws "Illegal invocation" synchronously inside Chromium when
+    // the listener wrapper calls writer.append(); without this handler
+    // the throw becomes a generic Playwright pageerror that loses the
+    // stack-trace anchor the summary quotes.
     page.on('pageerror', (err) => {
       throw new Error(`[verify-smoke] page error: ${err.message}`);
     });
@@ -230,7 +231,8 @@ test.describe('verify-smoke (issue #157)', () => {
 
     // The actual assertion (issue spec step 4): xterm mounted AND at
     // least one rendered row has non-empty textContent.
-    const { rowCount } = await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
+    const { rowCount, nonEmpty } = await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
     expect(rowCount, 'xterm should render rows').toBeGreaterThan(0);
+    expect(nonEmpty, 'at least one rendered row should have non-empty textContent').toBeGreaterThan(0);
   });
 });
