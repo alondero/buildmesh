@@ -80,6 +80,12 @@ pub(crate) struct WrapupState {
     pub pr_number: Option<i64>,
     /// Does the mesh's policy require a PR (`action_on_success != "none"`)?
     pub pr_required: bool,
+    /// The node's worktree could not be opened as a git repository — the
+    /// dirty/pushed/PR fields are unknowable, and the correction must say so
+    /// instead of fabricating "uncommitted changes" (2026-07-17 gh252 run:
+    /// a broken worktree produced three invented reasons and sent the agent
+    /// chasing state that was never wrong).
+    pub repo_error: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -93,14 +99,21 @@ pub(crate) enum FinishOutcome {
 
 pub(crate) fn decide_finishing(state: &WrapupState, attempts: i32) -> FinishOutcome {
     let mut reasons = Vec::new();
-    if state.dirty {
-        reasons.push("the worktree still has uncommitted changes".to_string());
-    }
-    if !state.pushed {
-        reasons.push("the branch has not been pushed to origin (or has unpushed commits)".to_string());
-    }
-    if state.pr_required && state.pr_url.is_none() {
-        reasons.push("no open pull request exists for the branch".to_string());
+    if let Some(err) = &state.repo_error {
+        // Unopenable repo: the git-state checks below would all be
+        // fabrications. Report the one true failure so the agent repairs the
+        // worktree the harness is actually looking at.
+        reasons.push(err.clone());
+    } else {
+        if state.dirty {
+            reasons.push("the worktree still has uncommitted changes".to_string());
+        }
+        if !state.pushed {
+            reasons.push("the branch has not been pushed to origin (or has unpushed commits)".to_string());
+        }
+        if state.pr_required && state.pr_url.is_none() {
+            reasons.push("no open pull request exists for the branch".to_string());
+        }
     }
     if reasons.is_empty() {
         FinishOutcome::Complete
@@ -196,7 +209,7 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
         .map(|r| r.host_path)
         .unwrap_or_else(|| node.path.clone());
 
-    let (dirty, branch, pushed) = match git2::Repository::open(&host_path) {
+    let (dirty, branch, pushed, repo_error) = match git2::Repository::open(&host_path) {
         Ok(repo) => {
             let dirty = crate::git::primitives::is_dirty(&repo).unwrap_or(true);
             let branch = crate::git::primitives::head_branch_name(&repo);
@@ -212,7 +225,7 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
                     Some(ahead == 0)
                 })
                 .unwrap_or(false);
-            (dirty, branch, pushed)
+            (dirty, branch, pushed, None)
         }
         Err(e) => {
             tracing::warn!(
@@ -221,7 +234,15 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
                 host_path,
                 e
             );
-            (true, None, false)
+            // Name the exact path the harness inspects — without it the agent
+            // has no way to know where the check is looking and starts
+            // guessing (renaming branches, recreating worktrees elsewhere).
+            let repo_error = format!(
+                "the verification could not open the node's worktree at {} as a git repository ({}) — \
+                 repair or recreate the worktree at that exact path and do your wrap-up (commit, push, PR) from it",
+                host_path, e
+            );
+            (true, None, false, Some(repo_error))
         }
     };
 
@@ -253,7 +274,7 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
         None => (None, None),
     };
 
-    WrapupState { dirty, pushed, pr_url, pr_number, pr_required }
+    WrapupState { dirty, pushed, pr_url, pr_number, pr_required, repo_error }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +470,7 @@ mod tests {
             pr_url: pr.map(str::to_string),
             pr_number: pr.map(|_| 1),
             pr_required,
+            repo_error: None,
         }
     }
 
@@ -513,6 +535,40 @@ mod tests {
                 assert!(reasons.iter().any(|r| r.contains("pull request")));
             }
             other => panic!("expected Retry, got {:?}", other),
+        }
+    }
+
+    /// 2026-07-17 gh252/gh340 regression: when the node's worktree can't be
+    /// opened, the old code degraded to `(dirty=true, pushed=false)` and the
+    /// correction claimed "uncommitted changes / not pushed / no PR" — all
+    /// fabricated. The agent was sent to fix state that was never wrong. An
+    /// unopenable repo must surface as exactly one honest reason.
+    #[test]
+    fn unopenable_repo_reports_the_real_error_not_fabricated_reasons() {
+        let mut s = wrapup(true, false, None, true);
+        s.repo_error = Some(
+            "the verification could not open the node's worktree at X ( ... )".to_string(),
+        );
+        match decide_finishing(&s, 1) {
+            FinishOutcome::Retry(reasons) => {
+                assert_eq!(reasons.len(), 1, "one honest reason, no fabrications");
+                assert!(reasons[0].contains("could not open"));
+                assert!(!reasons[0].contains("uncommitted"));
+            }
+            other => panic!("expected Retry, got {:?}", other),
+        }
+    }
+
+    /// The honest repo-error reason still respects the attempts cap.
+    #[test]
+    fn unopenable_repo_at_the_cap_fails_with_the_honest_reason() {
+        let mut s = wrapup(true, false, None, true);
+        s.repo_error = Some("could not open worktree".to_string());
+        match decide_finishing(&s, MAX_FINISH_ATTEMPTS) {
+            FinishOutcome::Fail(reasons) => {
+                assert_eq!(reasons, vec!["could not open worktree".to_string()]);
+            }
+            other => panic!("expected Fail, got {:?}", other),
         }
     }
 

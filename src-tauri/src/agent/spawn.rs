@@ -2535,10 +2535,16 @@ mod tests {
         )
         .expect_err("adoption must refuse to overwrite an existing branch");
         assert!(
-            err.contains("git checkout"),
-            "the failure must come from the refusing `-b` checkout, got: {}",
+            err.contains("already exists"),
+            "the failure must name the existing branch refusal, got: {}",
             err
         );
+        // The refusal is pre-move (2026-07-17 gh252 incident): the pool entry
+        // must be exactly where it was, and the target never materialised —
+        // a post-move refusal left a half-adopted worktree for the failure
+        // cleanup to delete, stranding a stale admin entry.
+        assert!(pool.exists(), "pool entry must be untouched after a refused adoption");
+        assert!(!target.exists(), "target must not be materialised by a refused adoption");
     }
 
     // -----------------------------------------------------------------------
