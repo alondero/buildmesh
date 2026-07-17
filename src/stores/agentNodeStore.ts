@@ -239,7 +239,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // the header tracks the run without waiting for the next full
         // refetch (App.tsx separately refetches on the completion/failure
         // events to pick up the node's own status change).
-        const patchAutopilotState = (nodeId: number, state: string) =>
+        const patchAutopilotState = (nodeId: number, state: AutopilotRunState) =>
           set((s) => ({ autopilotStates: { ...s.autopilotStates, [nodeId]: state } }));
         await listen<{ node_id: number }>('autopilot-finishing', (event) => {
           patchAutopilotState(event.payload.node_id, 'finishing');
