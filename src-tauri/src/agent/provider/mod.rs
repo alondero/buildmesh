@@ -343,9 +343,13 @@ pub trait AgentProvider: Send + Sync {
     /// When `true`, `start_reader` skips the LLM-specific EOF tail:
     /// PTY exit becomes `SessionStatus::Idle` (never `Error`), and the
     /// 3-second "resume-failed" early-exit warning and event are
-    /// suppressed. Other LLM-specific skips in `spawn_agent_inner` are
-    /// already gated by the existing capability flags this adapter also
-    /// returns `false` for.
+    /// suppressed. `start_reader` also never buffers the node's PTY
+    /// output for session auto-naming (`session_naming::on_output`,
+    /// issue #296): a terminal's rename buffer would never be consumed —
+    /// the rename LLM only fires from `on_turn`, which only the Claude
+    /// stop hook calls. Other LLM-specific skips in `spawn_agent_inner`
+    /// are already gated by the existing capability flags this adapter
+    /// also returns `false` for.
     fn is_plain_terminal(&self) -> bool {
         false
     }

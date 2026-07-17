@@ -565,6 +565,22 @@ pub fn pump_pty_output(
     }
 }
 
+/// Buffer a PTY chunk for session auto-naming — every chunk for LLM
+/// providers, never for a plain terminal. A terminal's rename buffer is
+/// never consumed: the rename LLM only fires from `on_turn`, which only
+/// the Claude stop hook calls. Ungated, each Terminal node would retain
+/// up to `MAX_BUFFER_CHARS` and contend the global NAMING mutex on every
+/// chunk for the node's whole lifetime (issue #296).
+///
+/// Extracted from `start_reader`'s pump callback so the gate is
+/// unit-testable without standing up an AppHandle / PTY (same seam
+/// pattern as `resolve_base_ref_for_spawn`).
+pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, text: &str) {
+    if !is_plain_terminal {
+        crate::session_naming::on_output(session_id, text);
+    }
+}
+
 /// Start the PTY reader thread. Returns the `JoinHandle` so the caller
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
@@ -628,7 +644,7 @@ fn start_reader(
             crate::services::pool_worker::note_activity_for_mesh(mesh_id);
 
             let text = String::from_utf8_lossy(data);
-            crate::session_naming::on_output(session_id, &text);
+            maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
             // Autopilot state evaluator tail (issue #483) — one in-memory
             // set lookup for non-piloted nodes.
             crate::autopilot::evaluator::on_output(session_id, &text);
