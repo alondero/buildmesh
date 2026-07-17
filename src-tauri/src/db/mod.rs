@@ -2297,29 +2297,25 @@ pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
     )
 }
 
-/// `finishing` runs on this mesh whose ledger row hasn't advanced for at
-/// least `stale_minutes`: `(node_id, issue_number, attempts)`. These are the
-/// poller re-drive's candidates — the wrap-up pipeline is otherwise purely
-/// turn-driven, so a run whose final Node Turn was lost (dropped by the
-/// in-flight guard, or a missed attention callback) would stall in
-/// `finishing` forever, occupying a concurrency slot (node 2328,
-/// 2026-07-17). `updated_at` is bumped on every state/attempt write, so
-/// "stale" means "no pipeline activity", not "agent quiet".
-pub fn list_stalled_finishing_autopilot_runs(
-    mesh_id: i64,
-    stale_minutes: i64,
-) -> SqlResult<Vec<(i64, i64, i32)>> {
+/// Node ids of `finishing` runs (all meshes) whose ledger row hasn't
+/// advanced for at least `stale_minutes` — the poller re-drive's candidates.
+/// The wrap-up pipeline is otherwise purely turn-driven, so a run whose
+/// final Node Turn was lost (dropped by the in-flight guard, or a missed
+/// attention callback) would stall in `finishing` forever, occupying a
+/// concurrency slot (node 2328, 2026-07-17). Deliberately NOT scoped to
+/// autopilot-enabled meshes: disabling a mesh's autopilot must not strand
+/// its already-running wrap-ups. `updated_at` is bumped on every
+/// state/attempt write, so "stale" means "no pipeline activity", not
+/// "agent quiet".
+pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Vec<i64>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
-        "SELECT r.node_id, r.issue_number, r.attempts FROM autopilot_runs r \
+        "SELECT r.node_id FROM autopilot_runs r \
          JOIN agent_nodes a ON a.id = r.node_id \
-         WHERE r.mesh_id = ?1 AND r.state = 'finishing' AND a.status != 'archived' \
-         AND r.updated_at <= datetime('now', '-' || ?2 || ' minutes')",
+         WHERE r.state = 'finishing' AND a.status != 'archived' \
+         AND r.updated_at <= datetime('now', '-' || ?1 || ' minutes')",
     )?;
-    let rows =
-        stmt.query_map(params![mesh_id, stale_minutes], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+    let rows = stmt.query_map(params![stale_minutes], |row| row.get(0))?;
     rows.collect()
 }
 

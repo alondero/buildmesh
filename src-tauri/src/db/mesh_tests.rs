@@ -239,9 +239,9 @@ mod tests {
 
         // The state write just bumped updated_at → not stalled yet.
         assert!(
-            crate::db::list_stalled_finishing_autopilot_runs(mesh.id, 5)
+            !crate::db::list_stalled_finishing_autopilot_runs(5)
                 .unwrap()
-                .is_empty(),
+                .contains(&node.id),
             "a run with fresh pipeline activity must not be re-driven"
         );
 
@@ -255,17 +255,18 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(
-            crate::db::list_stalled_finishing_autopilot_runs(mesh.id, 5).unwrap(),
-            vec![(node.id, 42, 2)],
-            "a quiet finishing run must surface with its issue and attempts"
+        assert!(
+            crate::db::list_stalled_finishing_autopilot_runs(5)
+                .unwrap()
+                .contains(&node.id),
+            "a quiet finishing run must surface as a re-drive candidate"
         );
 
         // Any state advance takes it off the work list.
         crate::db::set_autopilot_run_state(node.id, S::Completed, None).unwrap();
-        assert!(crate::db::list_stalled_finishing_autopilot_runs(mesh.id, 5)
+        assert!(!crate::db::list_stalled_finishing_autopilot_runs(5)
             .unwrap()
-            .is_empty());
+            .contains(&node.id));
 
         std::fs::remove_file(&temp_path).ok();
     }

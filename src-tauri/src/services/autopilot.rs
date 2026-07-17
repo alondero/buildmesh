@@ -93,6 +93,21 @@ pub fn start_autopilot_worker(app: AppHandle) {
 /// One full pass over every autopilot-enabled mesh. Per-mesh failures are
 /// logged and isolated — one mesh's bad remote must not starve the others.
 fn run_poll_pass(app: &AppHandle) {
+    // Re-drive stalled wrap-ups BEFORE the per-mesh loop: the pipeline is
+    // turn-driven and a lost final turn strands a green, already-PR'd run in
+    // `finishing` forever (node 2328, 2026-07-17). Completing it here frees
+    // its concurrency slot for the capacity counts just below, in this same
+    // pass. Runs across ALL meshes — not just autopilot-enabled ones — so
+    // toggling a mesh's autopilot off can't strand its in-flight wrap-ups.
+    // Conservative: the re-drive only completes observably-green runs.
+    match db::list_stalled_finishing_autopilot_runs(FINISHING_REDRIVE_STALE_MINUTES) {
+        Ok(stalled) if !stalled.is_empty() => {
+            crate::autopilot::pipeline::redrive_stalled_finishing(app, &stalled)
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("autopilot: stalled-run listing failed: {}", e),
+    }
+
     let meshes = match db::list_autopilot_enabled_meshes() {
         Ok(m) => m,
         Err(e) => {
@@ -108,19 +123,6 @@ fn run_poll_pass(app: &AppHandle) {
 }
 
 fn poll_mesh(app: &AppHandle, mesh: &Mesh) -> Result<(), String> {
-    // Re-drive stalled wrap-ups BEFORE anything else: the pipeline is
-    // turn-driven and a lost final turn strands a green, already-PR'd run in
-    // `finishing` forever (node 2328, 2026-07-17). Completing it here frees
-    // its concurrency slot for the capacity count just below, in this same
-    // pass. Conservative: the re-drive only completes observably-green runs.
-    match db::list_stalled_finishing_autopilot_runs(mesh.id, FINISHING_REDRIVE_STALE_MINUTES) {
-        Ok(stalled) if !stalled.is_empty() => {
-            crate::autopilot::pipeline::redrive_stalled_finishing(app, &stalled)
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!("autopilot: stalled-run listing for mesh {} failed: {}", mesh.id, e),
-    }
-
     // The merged-PR sweep runs BEFORE the capacity gate: a mesh at capacity
     // must still get its finished nodes archived (that's what clears grid
     // space), and the sweep costs no network when there's nothing to sweep.

@@ -342,6 +342,17 @@ fn convert_link_path_for_env(path: &str, env_type: EnvType) -> String {
                 } else {
                     path_str
                 }
+            } else if path.len() >= 2
+                && path.starts_with('/')
+                && path.as_bytes()[1].is_ascii_alphabetic()
+                && (path.len() == 2 || path.as_bytes()[2] == b'/')
+            {
+                // Git-Bash drive style `/f/...` (what an MSYS git writes —
+                // the 2026-07-17 corruption): WSL wants it as `/mnt/f/...`.
+                // Real WSL paths (`/mnt/...`, `/home/...`) have a multi-char
+                // first segment, so they never match this arm.
+                let drive = path.as_bytes()[1].to_ascii_lowercase() as char;
+                format!("/mnt/{}{}", drive, &path[2..])
             } else {
                 path.to_string()
             }
@@ -946,6 +957,32 @@ mod tests {
             !backpointer.trim_start().starts_with('/'),
             "repo-side gitdir back-pointer must be host-format, got: {}",
             backpointer
+        );
+    }
+
+    /// Pure conversion table for both env targets — in particular the
+    /// Git-Bash `/f/...` drive style (what an MSYS git writes into link
+    /// files, the 2026-07-17 corruption) must repair under BOTH targets,
+    /// and already-correct paths must pass through unchanged.
+    #[test]
+    fn convert_link_path_covers_git_bash_drive_style_for_both_envs() {
+        // → WSL
+        assert_eq!(
+            convert_link_path_for_env("/f/src/repo/.git/worktrees/wt", EnvType::Wsl),
+            "/mnt/f/src/repo/.git/worktrees/wt"
+        );
+        assert_eq!(
+            convert_link_path_for_env("F:\\src\\repo", EnvType::Wsl),
+            "/mnt/f/src/repo"
+        );
+        // Real WSL paths must NOT be re-mangled by the drive-style arm.
+        assert_eq!(convert_link_path_for_env("/mnt/f/src", EnvType::Wsl), "/mnt/f/src");
+        assert_eq!(convert_link_path_for_env("/home/u/repo", EnvType::Wsl), "/home/u/repo");
+        // → Windows (host conversion is a Windows-host behaviour)
+        #[cfg(windows)]
+        assert_eq!(
+            convert_link_path_for_env("/f/src/repo", EnvType::Windows),
+            "F:\\src\\repo"
         );
     }
 

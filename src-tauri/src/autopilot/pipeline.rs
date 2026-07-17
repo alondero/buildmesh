@@ -205,11 +205,11 @@ pub(crate) fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
 /// Inspect the node's worktree + GitHub for the observable wrap-up state.
 /// Blocking (libgit2 walk + one GitHub round-trip) — worker thread only.
 fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> WrapupState {
-    let resolved = crate::env::node_worktree_path(node);
-    let host_path = resolved
-        .as_ref()
-        .map(|r| r.host_path.clone())
-        .unwrap_or_else(|| node.path.clone());
+    // `node_working_path` resolves Worktree and Root Nodes alike (host path +
+    // env), so the self-heal below covers both; on a Root Node the sanitize
+    // is a no-op (`.git` is a directory, not a gitlink).
+    let resolved = crate::env::node_working_path(node);
+    let host_path = resolved.host_path.clone();
 
     // Self-heal before giving up: an MSYS-flavoured git leaves Git-Bash-style
     // `/f/...` paths in the worktree link files that the agent's CLI reads
@@ -218,17 +218,14 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
     // sides and retry once, so a format-only mismatch never reaches the
     // repo_error path and never costs a correction attempt.
     let opened = git2::Repository::open(&host_path).or_else(|first_err| {
-        if let Some(resolved) = &resolved {
-            tracing::info!(
-                "autopilot pipeline({}): open failed ({}); sanitizing worktree links and retrying",
-                node.id,
-                first_err
-            );
-            if let Err(e) =
-                crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type)
-            {
-                tracing::warn!("autopilot pipeline({}): sanitize failed: {}", node.id, e);
-            }
+        tracing::info!(
+            "autopilot pipeline({}): open failed ({}); sanitizing worktree links and retrying",
+            node.id,
+            first_err
+        );
+        if let Err(e) = crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type)
+        {
+            tracing::warn!("autopilot pipeline({}): sanitize failed: {}", node.id, e);
         }
         git2::Repository::open(&host_path)
     });
@@ -508,29 +505,32 @@ fn complete_finishing_run(
 /// Deliberately conservative: a green observation completes the run — the
 /// work is observably done, no agent interaction needed. A red observation is
 /// left for the turn-driven correction path, because injecting a correction
-/// prompt outside a turn could interrupt an agent that is still typing.
+/// prompt outside a turn could interrupt an agent that is still typing. (A
+/// real turn arriving *while* a re-drive holds the guard is dropped, same as
+/// any turn during an evaluation — worst case it costs one extra stale
+/// window, never a wrong action.)
 /// Runs on the poller's worker thread (blocking git + GitHub round-trips are
 /// fine there).
-pub fn redrive_stalled_finishing(app: &AppHandle, candidates: &[(i64, i64, i32)]) {
-    for &(node_id, issue_number, attempts) in candidates {
+pub fn redrive_stalled_finishing(app: &AppHandle, candidates: &[i64]) {
+    for &node_id in candidates {
         {
             let mut evaluating = EVALUATING.lock().unwrap();
             if !evaluating.insert(node_id) {
                 continue; // a live turn evaluation owns this node right now
             }
         }
-        redrive_one(node_id, issue_number, attempts, app);
+        redrive_one(node_id, app);
         EVALUATING.lock().unwrap().remove(&node_id);
     }
 }
 
-fn redrive_one(node_id: i64, issue_number: i64, attempts: i32, app: &AppHandle) {
-    // Re-read the ledger under the guard: the stalled listing was taken
-    // before the guard, and a turn may have advanced the run since.
-    match db::get_autopilot_run(node_id) {
-        Ok(Some((_, S::Finishing, _))) => {}
+fn redrive_one(node_id: i64, app: &AppHandle) {
+    // Read the ledger under the guard, not from the stalled listing: a turn
+    // may have advanced the state (or the attempts count) in between.
+    let (issue_number, attempts) = match db::get_autopilot_run(node_id) {
+        Ok(Some((issue, S::Finishing, attempts))) => (issue, attempts),
         _ => return,
-    }
+    };
     let node = match db::get_agent_node_by_id(node_id) {
         Ok(n) => n,
         Err(e) => {
