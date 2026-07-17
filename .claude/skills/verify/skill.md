@@ -122,9 +122,17 @@ Originally exposed over HTTP as `GET /api/debug/state?token=...` (PR #163); the 
 
 ## Strict log scan (full tier, step 8)
 
-Log path: `$env:APPDATA\com.alond.buildmesh.dev\logs\buildmesh.log` (the dev profile launched in step 7).
+Three log files come out of `scripts\run-dev.ps1` step 7, all under `$env:APPDATA\com.alond.buildmesh.dev\logs\`:
 
-Compute new lines only (lines added since pre-launch count from `run.ps1`). Scan those new lines:
+- `buildmesh.log` — `tracing-appender` output (every `info!`/`warn!`/`error!` and HTTP request line)
+- `panic.log` — main panic hook (`src-tauri/src/lib.rs:348-382`): timestamp + thread name + thread id + backtrace
+- `panic_early.log` — pre-setup panic hook (`src-tauri/src/lib.rs:41-128`): captures panics during Tauri-init that the main hook can't, because the main hook isn't installed until `setup()` runs
+
+`run-dev.ps1` emits `Buildmesh Dev pre-launch line count (<file>): N` lines on stdout before launching. Capture those three numbers; the delta is the slice to scan.
+
+### `buildmesh.log` slice
+
+Scan new lines for the patterns below.
 
 | Pattern in new lines | Action |
 |---|---|
@@ -137,6 +145,41 @@ Compute new lines only (lines added since pre-launch count from `run.ps1`). Scan
 
 Benign WARN list (seed; extend as you confirm a WARN is non-actionable):
 - Tauri startup `IPC scope not set` boilerplate
+
+### `panic.log` + `panic_early.log` slices (issue #158)
+
+A clean panic-only crash writes to one of the panic-hook files but does NOT necessarily produce an `ERROR` line in `buildmesh.log` (the main hook writes to `panic.log` and `eprintln!`s; it never pushes to the tracing pipeline). So a Rust panic at startup currently passes the `buildmesh.log` scan above.
+
+**Rule:** any new line in `panic.log` or `panic_early.log` is an **unconditional FAIL** of the log-scan step.
+
+**Failure summary must include** (so the user can read the panic in the PR):
+
+- The panic entry's first line (timestamp + message + thread name + location for `panic.log`; timestamp + msg + loc for `panic_early.log`).
+- The full `Backtrace:` block for `panic.log` entries (everything from `Backtrace:` to the next blank line or EOF — that's the actually-useful part of the dump).
+- The originating file (so the user can tell which hook fired).
+
+**Where to read on Windows + PowerShell:**
+
+```powershell
+$prePanic = <captured from run-dev.ps1 stdout, e.g. 0>
+$preEarly = <captured from run-dev.ps1 stdout>
+$panic = "$env:APPDATA\com.alond.buildmesh.dev\logs\panic.log"
+$early = "$env:APPDATA\com.alond.buildmesh.dev\logs\panic_early.log"
+foreach ($f in @($panic, $early)) {
+  if (Test-Path $f) {
+    $all = Get-Content $f
+    $pre = if ($f -eq $panic) { $prePanic } else { $preEarly }
+    if ($all.Count -gt $pre) {
+      $newLines = $all[$pre..($all.Count - 1)]
+      # Surface the panic entry verbatim
+      $newLines | ForEach-Object { Write-Output $_ }
+      # then mark this step FAILED
+    }
+  }
+}
+```
+
+On macOS/Linux the same delta is `tail -n +$((pre + 1)) "$f"` against the equivalent `XDG_DATA_HOME`/`$HOME/Library/Application Support` path — `scripts\run-dev.sh` prints the same `pre-launch line count` lines.
 
 ## Known failure modes
 
@@ -153,6 +196,7 @@ Seed entries — pattern-match the failure against these first before diagnosing
 - **Playwright e2e times out waiting for `http://localhost:1420`** → a stale `tauri dev` process from a previous run is bound but unhealthy. Fix: `Stop-Process -Name node -Force` (kills Vite) and `Stop-Process -Name buildmesh -Force` (kills the dev exe), then re-run.
 - **`vitest run tests/integration` fails with "ECONNREFUSED 127.0.0.1:1991"** → an integration test is hitting the HTTP test bridge instead of the mocked `invoke()`. Likely a test using `invokeViaHttp` from `tests/e2e/utils/tauri-http.ts`. Fix: that test belongs in `tests/e2e/`, not `tests/integration/`; move it or run it inside Playwright.
 - **Symptom: user reports "terminal blank after spawn" but `buildmesh.log` shows `Process spawned` / no `Failed to spawn`** → log says spawn worked; only the terminal-output WebSocket can prove the PTY actually piped bytes. Fix: connect to `ws://localhost:{1992|2992}/ws/terminal/{node_id}?ticket=<single-use ticket>` (mint ticket via `POST /api/ws-ticket` with bearer root token + body `{"surface":"terminal","node_id":<id>}`) and assert ≥1 byte received within 5 s — see *Diagnostic probes* below. 0 bytes ⇒ PTY dead; cross-check `await window.__TAURI_INTERNALS__.invoke('debug_list_agents')` to confirm `PROCESS_REGISTRY` still holds the node. Memory: `buildmesh-terminal-blank-probe`.
+- **`/verify full` log-scan fails on `panic.log` but `buildmesh.log` looks clean** → the main panic hook (`src-tauri/src/lib.rs:348-382`) writes only to `panic.log` + stderr; it never logs to the tracing pipeline. So a Rust panic during normal operation is invisible to the `buildmesh.log` pattern scan. Fix: surface the full panic entry (timestamp + thread + message + location + `Backtrace:` block) from `panic.log` in the failure summary, then read the stack frames to find the offending Rust file:line — the backtrace points at the *first* frame inside Buildmesh code, not the panic message origin (which is often inside `tracing`/`tauri`/etc.). If the entry is in `panic_early.log` instead, the panic fired BEFORE `setup()` installed the main hook — suspect Tauri config, app-data-dir resolution, or `db::init` failure. Memory: `buildmesh-panic-log-scan`.
 
 ## Reporting
 
@@ -173,8 +217,24 @@ WARN (informational):
 - <each warn line, or "none">
 ```
 
+If the log-scan step failed because of a panic-file entry, append the panic entry under the failure line:
+
+```
+Full:     ✓ tauri build  ✓ launch  ✗ log scan (panic.log)
+          └─ "[2026-07-17T12:34:56Z] PANIC in thread 'main' (ThreadId(2)):
+              called `Result::unwrap()` on an `Err` value at
+              src-tauri/src/services/foo.rs:123:45
+              Backtrace:
+                0: rust_panic
+                1: services::foo::bar
+                ..."
+```
+
+The user reads this to triage without opening `%APPDATA%\com.alond.buildmesh.dev\logs\panic.log` themselves.
+
 ## Notes
 
 - Always use `npm run tauri build` for the full bundle — never `cargo build --release` directly. The Tauri CLI handles frontend → backend wiring; bypassing it produces an exe with stale frontend assets. Memory: `feedback_frontend-bundling`.
 - This skill takes precedence over the global `/verify` skill because it lives in `.claude/skills/`. The global skill's generic "figure out how to run the app" is replaced here by the Buildmesh-specific pipeline.
 - The skill file is meant to grow. When you append a new Known failure mode, keep entries one-line and pattern-first so future pattern-matching stays cheap.
+- A panic-only crash is invisible to the `buildmesh.log` pattern scan (issue #158). The log-scan step also tails `panic.log` + `panic_early.log` and treats any new line as a fail. Memory: `buildmesh-panic-log-scan`.
