@@ -53,6 +53,13 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(120);
 /// pool reconcile) finishes before we compete for the DB mutex and network.
 const STARTUP_DELAY: Duration = Duration::from_secs(20);
 
+/// How long a `finishing` ledger row must sit untouched before the poller
+/// re-verifies it (see `pipeline::redrive_stalled_finishing`). Short is safe:
+/// the re-drive only *completes* observably-green runs, and a green
+/// observation means the wrap-up work exists regardless of what the agent is
+/// doing right now.
+const FINISHING_REDRIVE_STALE_MINUTES: i64 = 5;
+
 /// `(mesh_id, issue_number)` pairs whose author failed the collaborator gate.
 /// Remembered for the app's lifetime so each gated trigger costs exactly one
 /// permission fetch + one log line, not one per pass. Cleared on restart —
@@ -101,6 +108,19 @@ fn run_poll_pass(app: &AppHandle) {
 }
 
 fn poll_mesh(app: &AppHandle, mesh: &Mesh) -> Result<(), String> {
+    // Re-drive stalled wrap-ups BEFORE anything else: the pipeline is
+    // turn-driven and a lost final turn strands a green, already-PR'd run in
+    // `finishing` forever (node 2328, 2026-07-17). Completing it here frees
+    // its concurrency slot for the capacity count just below, in this same
+    // pass. Conservative: the re-drive only completes observably-green runs.
+    match db::list_stalled_finishing_autopilot_runs(mesh.id, FINISHING_REDRIVE_STALE_MINUTES) {
+        Ok(stalled) if !stalled.is_empty() => {
+            crate::autopilot::pipeline::redrive_stalled_finishing(app, &stalled)
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("autopilot: stalled-run listing for mesh {} failed: {}", mesh.id, e),
+    }
+
     // The merged-PR sweep runs BEFORE the capacity gate: a mesh at capacity
     // must still get its finished nodes archived (that's what clears grid
     // space), and the sweep costs no network when there's nothing to sweep.

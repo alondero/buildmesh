@@ -205,11 +205,35 @@ pub(crate) fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
 /// Inspect the node's worktree + GitHub for the observable wrap-up state.
 /// Blocking (libgit2 walk + one GitHub round-trip) — worker thread only.
 fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> WrapupState {
-    let host_path = crate::env::node_worktree_path(node)
-        .map(|r| r.host_path)
+    let resolved = crate::env::node_worktree_path(node);
+    let host_path = resolved
+        .as_ref()
+        .map(|r| r.host_path.clone())
         .unwrap_or_else(|| node.path.clone());
 
-    let (dirty, branch, pushed, repo_error) = match git2::Repository::open(&host_path) {
+    // Self-heal before giving up: an MSYS-flavoured git leaves Git-Bash-style
+    // `/f/...` paths in the worktree link files that the agent's CLI reads
+    // fine but libgit2 reports as NotFound (the 2026-07-17 gh252 incident —
+    // the agent had to run `git worktree repair` itself). Sanitize both link
+    // sides and retry once, so a format-only mismatch never reaches the
+    // repo_error path and never costs a correction attempt.
+    let opened = git2::Repository::open(&host_path).or_else(|first_err| {
+        if let Some(resolved) = &resolved {
+            tracing::info!(
+                "autopilot pipeline({}): open failed ({}); sanitizing worktree links and retrying",
+                node.id,
+                first_err
+            );
+            if let Err(e) =
+                crate::git::worktree::sanitize_git_worktree(&host_path, resolved.env_type)
+            {
+                tracing::warn!("autopilot pipeline({}): sanitize failed: {}", node.id, e);
+            }
+        }
+        git2::Repository::open(&host_path)
+    });
+
+    let (dirty, branch, pushed, repo_error) = match opened {
         Ok(repo) => {
             let dirty = crate::git::primitives::is_dirty(&repo).unwrap_or(true);
             let branch = crate::git::primitives::head_branch_name(&repo);
@@ -384,30 +408,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
         S::Finishing => {
             let observed = observe_wrapup_state(&node, action_on_success != "none");
             match decide_finishing(&observed, attempts) {
-                FinishOutcome::Complete => {
-                    // PR identity first, state second: the merged-PR sweep
-                    // keys off `state = completed AND pr_number IS NOT NULL`,
-                    // so this order can't yield a sweepable row without a PR.
-                    if let (Some(n), Some(url)) = (observed.pr_number, observed.pr_url.as_deref()) {
-                        let _ = db::set_autopilot_run_pr(node_id, n, url);
-                    }
-                    let _ = db::set_autopilot_run_state(node_id, Completed, None);
-                    let _ = db::update_agent_node_status(node_id, SessionStatus::Completed);
-                    let _ = app.emit(
-                        "autopilot-pr-created",
-                        serde_json::json!({
-                            "node_id": node_id,
-                            "issue": issue_number,
-                            "pr_url": observed.pr_url,
-                        }),
-                    );
-                    evaluator::unregister(node_id);
-                    tracing::info!(
-                        "autopilot pipeline({}): wrap-up verified (pr: {:?}) — node Completed",
-                        node_id,
-                        observed.pr_url
-                    );
-                }
+                FinishOutcome::Complete => complete_finishing_run(node_id, issue_number, &observed, app),
                 FinishOutcome::Retry(reasons) => {
                     let prompt = correction_prompt(&reasons, &evaluator::cleaned_tail(node_id));
                     match write_prompt_to_pty(node_id, &prompt) {
@@ -455,7 +456,109 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
             }
         }
         // terminal — stale registration cleanup
-        S::Completed | S::Failed | S::Merged | S::Implementing => evaluator::unregister(node_id),
+        S::Completed | S::Failed | S::Merged => evaluator::unregister(node_id),
+    }
+}
+
+/// Mark a verified-green `finishing` run Completed. Shared by the turn path
+/// and the poller re-drive so the two exits can't drift.
+fn complete_finishing_run(
+    node_id: i64,
+    issue_number: i64,
+    observed: &WrapupState,
+    app: &AppHandle,
+) {
+    // PR identity first, state second: the merged-PR sweep
+    // keys off `state = completed AND pr_number IS NOT NULL`,
+    // so this order can't yield a sweepable row without a PR.
+    if let (Some(n), Some(url)) = (observed.pr_number, observed.pr_url.as_deref()) {
+        let _ = db::set_autopilot_run_pr(node_id, n, url);
+    }
+    let _ = db::set_autopilot_run_state(node_id, Completed, None);
+    let _ = db::update_agent_node_status(node_id, SessionStatus::Completed);
+    let _ = app.emit(
+        "autopilot-pr-created",
+        serde_json::json!({
+            "node_id": node_id,
+            "issue": issue_number,
+            "pr_url": observed.pr_url,
+        }),
+    );
+    evaluator::unregister(node_id);
+    tracing::info!(
+        "autopilot pipeline({}): wrap-up verified (pr: {:?}) — node Completed",
+        node_id,
+        observed.pr_url
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Poller re-drive (stalled `finishing` runs)
+// ---------------------------------------------------------------------------
+
+/// Re-verify stalled `finishing` runs without waiting for a Node Turn.
+///
+/// The wrap-up pipeline is otherwise purely turn-driven, and a turn is not a
+/// guaranteed delivery: the in-flight guard drops turns that arrive during an
+/// evaluation, and an attention callback can simply never fire. When the
+/// *final* turn is the lost one, the run stalls in `finishing` forever with
+/// its concurrency slot held (node 2328, 2026-07-17: agent had pushed and
+/// PR'd, verification never re-ran).
+///
+/// Deliberately conservative: a green observation completes the run — the
+/// work is observably done, no agent interaction needed. A red observation is
+/// left for the turn-driven correction path, because injecting a correction
+/// prompt outside a turn could interrupt an agent that is still typing.
+/// Runs on the poller's worker thread (blocking git + GitHub round-trips are
+/// fine there).
+pub fn redrive_stalled_finishing(app: &AppHandle, candidates: &[(i64, i64, i32)]) {
+    for &(node_id, issue_number, attempts) in candidates {
+        {
+            let mut evaluating = EVALUATING.lock().unwrap();
+            if !evaluating.insert(node_id) {
+                continue; // a live turn evaluation owns this node right now
+            }
+        }
+        redrive_one(node_id, issue_number, attempts, app);
+        EVALUATING.lock().unwrap().remove(&node_id);
+    }
+}
+
+fn redrive_one(node_id: i64, issue_number: i64, attempts: i32, app: &AppHandle) {
+    // Re-read the ledger under the guard: the stalled listing was taken
+    // before the guard, and a turn may have advanced the run since.
+    match db::get_autopilot_run(node_id) {
+        Ok(Some((_, S::Finishing, _))) => {}
+        _ => return,
+    }
+    let node = match db::get_agent_node_by_id(node_id) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("autopilot redrive({}): node read failed: {}", node_id, e);
+            return;
+        }
+    };
+    let action_on_success = db::get_mesh_by_id(node.mesh_id)
+        .ok()
+        .and_then(|m| m.autopilot_action_on_success)
+        .unwrap_or_else(|| "draft_pr".to_string());
+
+    let observed = observe_wrapup_state(&node, action_on_success != "none");
+    match decide_finishing(&observed, attempts) {
+        FinishOutcome::Complete => {
+            tracing::info!(
+                "autopilot redrive({}): stalled wrap-up is observably green — completing",
+                node_id
+            );
+            complete_finishing_run(node_id, issue_number, &observed, app);
+        }
+        FinishOutcome::Retry(reasons) | FinishOutcome::Fail(reasons) => {
+            tracing::info!(
+                "autopilot redrive({}): still red ({}) — leaving for the turn-driven path",
+                node_id,
+                reasons.join("; ")
+            );
+        }
     }
 }
 
