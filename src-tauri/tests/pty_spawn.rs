@@ -91,6 +91,7 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
             job: None,
             // The natural-exit helper drains via the master drop in
             // `PROCESS_REGISTRY.remove` and joins the local `reader_handle`
@@ -320,6 +321,7 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
             job: None,
             reader_handle: Mutex::new(Some(reader_handle)),
             // Spawn-timing instrumentation (#spawn-latency investigation):
@@ -413,6 +415,7 @@ fn windows_kill_session_closes_master() {
             writer: Arc::new(Mutex::new(writer)),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
             job: None,
             reader_handle: Mutex::new(Some(reader_handle)),
             // Spawn-timing instrumentation (#spawn-latency investigation):

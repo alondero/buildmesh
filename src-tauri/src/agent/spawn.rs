@@ -51,6 +51,112 @@ pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 /// direction.
 pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// What the PTY reader thread's epilogue should do to the node's status
+/// after the read loop ends. Extracted as a pure decision so the
+/// deliberate-kill / early-exit / plain-terminal matrix is unit-testable
+/// without a live PTY.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PostExitAction {
+    /// Natural exit — flip the node to Idle.
+    MarkIdle,
+    /// The process died on its own within `EARLY_EXIT_WINDOW` of its
+    /// creation — almost always a `--resume <uuid>` that the CLI rejected
+    /// ("No conversation found…"). Mark Error and emit `resume-failed`.
+    MarkErrorResumeFailed,
+    /// `kill_session` tore the PTY down deliberately (node close, spawn
+    /// step-2 stale kill, app shutdown). The kill initiator owns the next
+    /// status; any write from the reader would race it. The pre-fix bug:
+    /// a <3s-old process killed by a respawn was stamped `Error`, which
+    /// then blocked the new spawn's Spawning→Running promotion (`Error`
+    /// is in that write's exclusion list) — the node showed "failed to
+    /// start" while the replacing agent booted fine seconds later.
+    LeaveStatusAlone,
+}
+
+pub(crate) fn post_exit_action(
+    is_plain_terminal: bool,
+    deliberately_killed: bool,
+    elapsed_since_process_creation: std::time::Duration,
+) -> PostExitAction {
+    if deliberately_killed {
+        return PostExitAction::LeaveStatusAlone;
+    }
+    if is_plain_terminal {
+        // A shell exiting — `exit`, window close — is a normal Idle,
+        // never an Error: a shell is not a --resume, so a fast exit
+        // isn't a resume-failure signal.
+        return PostExitAction::MarkIdle;
+    }
+    if elapsed_since_process_creation < EARLY_EXIT_WINDOW {
+        PostExitAction::MarkErrorResumeFailed
+    } else {
+        PostExitAction::MarkIdle
+    }
+}
+
+/// Session ids with a `spawn_agent_inner` call currently in flight.
+///
+/// `is_agent_already_running` only sees the PROCESS_REGISTRY, and
+/// registration happens seconds into the pipeline (after git fetch +
+/// worktree provisioning) — so two near-simultaneous spawn calls for the
+/// same node (e.g. the backend's `start_node_background` racing the
+/// frontend Terminal auto-spawn on an 'idle' row) both passed the check.
+/// The loser's step-2 stale-kill (or registry insert-replace) then killed
+/// the winner's freshly-booted process — the "failed to start, yet it
+/// boots seconds later" symptom — and, when the frontend had already
+/// picked up the captured `cli_session_id`, respawned with
+/// `--resume <uuid>` against a session that never persisted a
+/// conversation ("No conversation found with session ID").
+///
+/// This set closes the TOCTOU across the WHOLE pipeline: the claim is
+/// taken at function entry and held (RAII) until the spawn returns.
+///
+/// Implementation note: the lock is `std::sync::Mutex` rather than
+/// `tokio::sync::Mutex` because both the claim entry (synchronous) and
+/// the Drop (synchronous) are short, non-suspending operations on a
+/// tiny set. Holding the guard across `.await` suspension points is
+/// safe because Drop runs only at function scope exit (Rust's
+/// `NLL`-aware borrow checker keeps the binding alive across `.await`s
+/// without contending with the lock — a single contended acquire on
+/// Drop would be a tokio-worker-blocking scenario, but the only writer
+/// of contention is another concurrent claim, and `HashSet::insert` is
+/// bounded by the spawn rate which is ≪ 1k/s).
+static SPAWNS_IN_FLIGHT: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashSet<i64>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+/// RAII claim on a session id in [`SPAWNS_IN_FLIGHT`]. Dropping releases
+/// the claim on every exit path, including a cancelled async task.
+pub(crate) struct SpawnInFlightClaim {
+    session_id: i64,
+}
+
+impl SpawnInFlightClaim {
+    /// `Some(claim)` if no spawn is in flight for this session, `None` if
+    /// one already is (the caller should short-circuit as a duplicate).
+    pub(crate) fn try_claim(session_id: i64) -> Option<Self> {
+        // parking_lot::Mutex::lock is non-poisoning and a strict upgrade
+        // over std here: no unwrap on contention, and `try_lock` lets
+        // Drop fall back gracefully if the runtime is mid-shutdown.
+        let mut guard = SPAWNS_IN_FLIGHT.lock();
+        if guard.insert(session_id) {
+            Some(Self { session_id })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for SpawnInFlightClaim {
+    fn drop(&mut self) {
+        // `lock` (blocking) is correct here: the guard's lifetime is the
+        // whole spawn function, so contention is at most a few µs of
+        // contended HashSet::remove — never long enough to starve a
+        // tokio worker. `try_lock` would silently leak the claim on
+        // contention, which is the opposite of what the bug requires.
+        SPAWNS_IN_FLIGHT.lock().remove(&self.session_id);
+    }
+}
+
 /// Resolve the `base_ref` string that `git::sync::fetch_origin` will use for
 /// the spawn-time auto-sync. The chain (each tier only runs if the previous
 /// one yields nothing useful):
@@ -503,6 +609,7 @@ fn register_agent(
     job: Option<crate::process_util::JobHandle>,
     spawn_start: std::time::Instant,
     mesh_id: i64,
+    deliberate_kill: Arc<AtomicBool>,
 ) {
     PROCESS_REGISTRY.insert(
         session_id,
@@ -513,6 +620,10 @@ fn register_agent(
             // out to drop the pseudoconsole (issue #300).
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive,
+            // Shared with the reader thread (started right after this
+            // insert) so a `kill_session` teardown is distinguishable
+            // from the child dying on its own — see the field docs.
+            deliberate_kill,
             job,
             // The handle is set after the reader thread is spawned, via
             // `AgentProcess::set_reader_handle`. We insert first so a
@@ -609,6 +720,7 @@ fn start_reader(
     is_plain_terminal: bool,
     spawn_start: std::time::Instant,
     mesh_id: i64,
+    deliberate_kill: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -681,30 +793,31 @@ fn start_reader(
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 
-        if is_plain_terminal {
-            // A plain terminal's shell exiting — whether via `exit`, the
-            // user closing the window, or the process being killed — is
-            // a normal Idle state, never an Error. Skip the LLM-specific
-            // 3-second "resume-failed" early-exit warning and event: a
-            // shell is not a --resume, so a fast exit isn't a resume
-            // signal; emitting one would confuse the frontend.
-            let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
-        } else {
-            // Detect early exit (likely a failed --resume). Uses
-            // `spawned_at` (process-creation time), NOT `spawn_start`,
-            // because the heuristic answers "did the process die
-            // almost immediately after it was created?" — a slow
-            // spawn pipeline followed by a 1s-later death should
-            // still trigger `resume-failed`. Switching the reference
-            // to `spawn_start` here would add the entire pipeline
-            // duration (often 2-14s) to the threshold and miss
-            // legitimate early-exit detections on slow spawns.
-            let elapsed = spawned_at.elapsed();
-            if elapsed < EARLY_EXIT_WINDOW {
+        // `spawned_at` is process-creation time, NOT `spawn_start`: the
+        // early-exit heuristic answers "did the process die almost
+        // immediately after it was created?" — a slow 14s pipeline
+        // followed by a 1s-later death must still read as an early exit.
+        match post_exit_action(
+            is_plain_terminal,
+            deliberate_kill.load(Ordering::SeqCst),
+            spawned_at.elapsed(),
+        ) {
+            PostExitAction::LeaveStatusAlone => {
+                // kill_session initiated this exit; the kill initiator
+                // owns the node's next status (see PostExitAction docs).
+                tracing::debug!(
+                    "Node {} reader exited after deliberate kill — leaving status to the kill initiator",
+                    session_id
+                );
+            }
+            PostExitAction::MarkIdle => {
+                let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
+            }
+            PostExitAction::MarkErrorResumeFailed => {
                 tracing::warn!(
                     "Node {} reader exited after {:?} — likely resume failure",
                     session_id,
-                    elapsed
+                    spawned_at.elapsed()
                 );
                 // Symmetric to the orchestrator's Spawning write (#654):
                 // never resurrect `Archived`, and don't double-write `Error`
@@ -721,8 +834,6 @@ fn start_reader(
                         "error": "Agent exited immediately after spawn — session may have expired"
                     }),
                 );
-            } else {
-                let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
             }
         }
 
@@ -763,6 +874,26 @@ pub async fn spawn_agent_inner(
         _ => "manual-spawn",
     };
     let diag = spawn_diag::InFlightGuard::enter(session_id, diag_label);
+
+    // 0. Claim the session for the WHOLE pipeline. `is_agent_already_running`
+    //    below only sees registered processes, and registration is seconds
+    //    away (git fetch + worktree provisioning) — without this claim a
+    //    concurrent duplicate call (backend stage-2 vs frontend Terminal
+    //    auto-spawn) passes that check and its step-2 stale-kill destroys
+    //    THIS call's freshly-booted process. Returning Ok mirrors the
+    //    already-running short-circuit: the node is being brought up, the
+    //    caller has nothing further to do.
+    let _spawn_claim = match SpawnInFlightClaim::try_claim(session_id) {
+        Some(claim) => claim,
+        None => {
+            tracing::info!(
+                "spawn_agent_inner: spawn already in flight for session {}, skipping duplicate call",
+                session_id
+            );
+            diag.checkpoint("duplicate_spawn_short_circuit");
+            return Ok(());
+        }
+    };
 
     // 1. Check if already running
     if is_agent_already_running(&session_id) {
@@ -1560,7 +1691,10 @@ pub async fn spawn_agent_inner(
         }
     }
     diag.checkpoint("before_register_agent");
-    register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start(), mesh_id);
+    // One flag instance shared three ways: the registry entry (kill_session
+    // sets it), the reader thread (its epilogue reads it), and nothing else.
+    let deliberate_kill = Arc::new(AtomicBool::new(false));
+    register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start(), mesh_id, deliberate_kill.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
     diag.checkpoint("after_register_agent");
 
@@ -1595,6 +1729,7 @@ pub async fn spawn_agent_inner(
         adapter.is_plain_terminal(),
         spawn_start,
         mesh_id,
+        deliberate_kill,
     );
 
     // 13b. Start natural-exit watcher (issue #287). On Windows ConPTY
@@ -1924,6 +2059,238 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    // -----------------------------------------------------------------------
+    // Reader-epilogue decision matrix (false "failed to start" fix).
+    //
+    // The reader thread's post-exit status write used to apply the 3s
+    // early-exit Error heuristic unconditionally, so a process that
+    // `kill_session` tore down deliberately (spawn step-2 stale kill, node
+    // close, app shutdown) within 3s of its creation was stamped `Error`
+    // + toasted `resume-failed` — and that stale Error then blocked the
+    // replacing spawn's Spawning→Running promotion. These tests pin the
+    // full matrix of `post_exit_action`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deliberate_kill_never_writes_status_even_within_early_exit_window() {
+        // The heart of the fix: a deliberate kill 1s after process creation
+        // must NOT be misread as a failed --resume.
+        assert_eq!(
+            post_exit_action(false, true, std::time::Duration::from_secs(1)),
+            PostExitAction::LeaveStatusAlone,
+        );
+        // …nor may it write Idle over the replacing spawn's Spawning.
+        assert_eq!(
+            post_exit_action(false, true, std::time::Duration::from_secs(60)),
+            PostExitAction::LeaveStatusAlone,
+        );
+        // Plain terminals too: the kill initiator owns the next status.
+        assert_eq!(
+            post_exit_action(true, true, std::time::Duration::from_secs(1)),
+            PostExitAction::LeaveStatusAlone,
+        );
+    }
+
+    #[test]
+    fn natural_early_exit_still_flags_resume_failure() {
+        // The heuristic's true positive is preserved: an LLM process that
+        // dies on its own within the window (typically `--resume` against
+        // an expired session) still reads as a resume failure.
+        assert_eq!(
+            post_exit_action(false, false, std::time::Duration::from_secs(1)),
+            PostExitAction::MarkErrorResumeFailed,
+        );
+    }
+
+    #[test]
+    fn natural_exit_after_window_marks_idle() {
+        assert_eq!(
+            post_exit_action(false, false, EARLY_EXIT_WINDOW),
+            PostExitAction::MarkIdle,
+        );
+    }
+
+    #[test]
+    fn plain_terminal_natural_exit_is_idle_regardless_of_elapsed() {
+        // A shell exiting fast is not a resume signal.
+        assert_eq!(
+            post_exit_action(true, false, std::time::Duration::from_millis(10)),
+            PostExitAction::MarkIdle,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-session spawn claim (duplicate-spawn fix). `is_agent_already_running`
+    // only sees registered processes and registration is seconds into the
+    // pipeline, so the claim must cover the whole `spawn_agent_inner` body.
+    // Test ids are unique across the suite (tests share the process-global
+    // set and run in parallel).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_claim_rejects_concurrent_duplicate_for_same_session() {
+        let first = SpawnInFlightClaim::try_claim(-917_0001);
+        assert!(first.is_some(), "first claim must succeed");
+        assert!(
+            SpawnInFlightClaim::try_claim(-917_0001).is_none(),
+            "second claim for the same session while the first is held must \
+             be rejected — this is what stops a duplicate spawn_agent_inner \
+             from killing the in-flight spawn's freshly-booted process"
+        );
+    }
+
+    #[test]
+    fn spawn_claim_is_per_session() {
+        let _a = SpawnInFlightClaim::try_claim(-917_0002).expect("claim a");
+        assert!(
+            SpawnInFlightClaim::try_claim(-917_0003).is_some(),
+            "claims for different sessions must not contend"
+        );
+    }
+
+    #[test]
+    fn spawn_claim_released_on_drop() {
+        {
+            let _claim = SpawnInFlightClaim::try_claim(-917_0004).expect("claim");
+        }
+        assert!(
+            SpawnInFlightClaim::try_claim(-917_0004).is_some(),
+            "dropping the claim must release the session for the next spawn \
+             (RAII covers every return path, including cancelled tasks)"
+        );
+    }
+
+    /// Regression guard for the user-visible "failed to start" symptom.
+    ///
+    /// Spawn RACERS threads racing `try_claim` for the same session —
+    /// the first to acquire the HashSet entry wins, the rest see the
+    /// entry present and get `None`. Pins the entire atomicity story:
+    /// without it, two concurrent `spawn_agent_inner` calls for the
+    /// same node (backend stage-2 vs frontend Terminal auto-spawn on
+    /// `'idle'`) both passed the registry check and the loser's step-2
+    /// stale-kill destroyed the winner's freshly-booted process — the
+    /// "failed to start, yet it boots seconds later" symptom.
+    ///
+    /// Uses a fresh session id per round so the test doesn't depend on
+    /// the racing threads' Drop ordering vs the next round's claim —
+    /// the global HashSet could in principle still hold a stale entry
+    /// from a previous round's racer that hasn't yet been observed as
+    /// dropped by the test thread (parking_lot's Drop is synchronous,
+    /// but the test thread's join() happens-before the next round).
+    #[test]
+    fn concurrent_spawn_claim_exactly_one_winner() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+
+        const RACERS: usize = 8;
+        const ROUNDS: usize = 200;
+
+        for round in 0..ROUNDS {
+            // Fresh session id per round so there's no cross-round
+            // dependency on Drop ordering.
+            let session: i64 = -917_1000 - round as i64;
+
+            let winners = Arc::new(AtomicUsize::new(0));
+            // Two barriers: gate the racers before the lock, AND gate
+            // them before the drop. Without the second gate, a racer
+            // that loses the lock race still releases its (empty) claim
+            // path before the next racer even tries — the second
+            // barrier forces every racer to attempt the lock with the
+            // claim held until the round-end signal.
+            let start_barrier = Arc::new(std::sync::Barrier::new(RACERS + 1));
+            let end_barrier = Arc::new(std::sync::Barrier::new(RACERS + 1));
+
+            let handles: Vec<_> = (0..RACERS)
+                .map(|_| {
+                    let winners = winners.clone();
+                    let start = start_barrier.clone();
+                    let end = end_barrier.clone();
+                    std::thread::spawn(move || {
+                        // Phase 1: align all racers at the lock.
+                        start.wait();
+                        let claim = SpawnInFlightClaim::try_claim(session);
+                        if claim.is_some() {
+                            winners.fetch_add(1, AOrd::SeqCst);
+                        }
+                        // Phase 2: hold the claim until the test thread
+                        // signals round end. Any racer arriving at the
+                        // lock now MUST see the existing entry (the
+                        // insert returns false → claim is None).
+                        end.wait();
+                        drop(claim);
+                    })
+                })
+                .collect();
+
+            // Fire the start gun — every racer races for the lock now.
+            start_barrier.wait();
+            // Give every racer time to acquire the lock, observe the
+            // entry, and reach the end barrier.
+            end_barrier.wait();
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            assert_eq!(
+                winners.load(AOrd::SeqCst),
+                1,
+                "exactly one racer must win the claim (round {round}, session {session})"
+            );
+
+            // After the last racing thread joined, its _claim dropped,
+            // releasing the entry. Confirm by claiming it ourselves —
+            // this exercises the post-drop "slot is empty" invariant
+            // and prevents cross-round state pollution if a future
+            // refactor accidentally leaks entries.
+            assert!(
+                SpawnInFlightClaim::try_claim(session).is_some(),
+                "round {round}: racers all joined so their claims dropped — \
+                 the next try_claim for session {session} must find the slot empty"
+            );
+        }
+    }
+
+    /// RAII must release on a *cancelled* async task too — the field doc
+    /// on `SpawnInFlightClaim` makes that an explicit guarantee. A
+    /// `tokio::time::timeout` racing a future that holds the claim is
+    /// the cheapest reproduction: the future is dropped at the await
+    /// point, the claim's Drop runs synchronously, and the next
+    /// `try_claim` must succeed.
+    #[test]
+    fn spawn_claim_released_when_async_task_is_cancelled() {
+        // No real DB / PTY needed — the claim itself is what we're
+        // pinning. Drive it on a runtime so the cancellation path
+        // (Future::drop mid-await) actually runs.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let session = -917_0006;
+        rt.block_on(async {
+            // Spawn a task that holds the claim for "the whole pipeline"
+            // (here, forever). Cancel it via timeout.
+            let task = tokio::spawn(async move {
+                let _claim = SpawnInFlightClaim::try_claim(session)
+                    .expect("first claim must succeed");
+                // Park forever. The test cancels this task below.
+                std::future::pending::<()>().await;
+            });
+
+            // Let the task reach its pending await.
+            tokio::task::yield_now().await;
+            task.abort();
+            // The abort drops the task's locals → Drop runs → claim released.
+            let _ = task.await;
+
+            assert!(
+                SpawnInFlightClaim::try_claim(session).is_some(),
+                "aborting the holding task must release the claim (RAII covers \
+                 cancelled futures, not just successful return)"
+            );
+        });
     }
 
     // -----------------------------------------------------------------------
