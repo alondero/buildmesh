@@ -154,11 +154,10 @@ describe('Settings — optimistic rollback ref pattern (issue #581)', () => {
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
 
-    // The modal has exactly one `<select>` — the default-provider dropdown.
-    // (No `aria-label` on it, so we reach in via the role.) The label
-    // "Default provider" sits as a sibling `<label>` text, but the select
-    // isn't associated with it, so a name-filtered query wouldn't match.
-    const dropdown = (await screen.findByRole('combobox')) as HTMLSelectElement;
+    // The default-provider `<select>` is now aria-labelled so this query is
+    // unambiguous (the Auto-naming picker is also a combobox). Reaching in via
+    // the role without a name would match either.
+    const dropdown = (await screen.findByRole('combobox', { name: 'Default provider' })) as HTMLSelectElement;
     expect(dropdown.value).toBe('__no_override__');
 
     // Fire the change. We don't assert the transient optimistic state

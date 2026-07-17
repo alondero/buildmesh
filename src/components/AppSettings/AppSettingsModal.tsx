@@ -856,6 +856,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             Used when a mesh has no `default_provider` of its own.
           </p>
           <select
+            aria-label="Default provider"
             value={selected}
             disabled={!loaded || saving}
             onChange={e => handleSave(e.target.value)}
