@@ -522,7 +522,12 @@ pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
     // sentinel the prompt renderer filters out.
     db::create_autopilot_run(node_id, node.mesh_id, node.source_issue.unwrap_or(0))
         .map_err(|e| e.to_string())?;
-    db::set_autopilot_run_state(node_id, "finishing", Some(1)).map_err(|e| e.to_string())?;
+    db::set_autopilot_run_state(
+        node_id,
+        crate::db::AutopilotRunState::Finishing,
+        Some(1),
+    )
+    .map_err(|e| e.to_string())?;
     crate::autopilot::evaluator::register(node_id);
 
     let prompt = crate::autopilot::finish::finish_prompt(node.source_issue, Some(&action));
@@ -534,6 +539,31 @@ pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
     );
     tracing::info!("trigger_finish: injected wrap-up prompt into node {}", node_id);
     Ok(())
+}
+
+/// One Autopilot-managed node's pipeline position, for the header pill.
+/// `state` is the typed `autopilot_runs.state` union
+/// (`implementing`/`finishing`/`completed`/`failed`/`merged`).
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "AutopilotRunState.ts")]
+pub struct AutopilotRunStateRow {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub state: crate::db::AutopilotRunState,
+}
+
+/// Every live (non-archived) Autopilot run, so the frontend can badge
+/// piloted nodes. Fetched alongside the node list; kept fresh by the
+/// `autopilot-*` lifecycle events triggering a refetch.
+#[command]
+pub fn list_autopilot_runs() -> Result<Vec<AutopilotRunStateRow>, String> {
+    db::list_autopilot_run_states()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(node_id, state)| AutopilotRunStateRow { node_id, state })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

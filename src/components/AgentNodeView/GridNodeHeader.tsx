@@ -10,6 +10,7 @@ import { useClickOutside } from '../../hooks/useClickOutside';
 import { getNodeGitPath } from '../../lib/paths';
 import { getStatusConfig } from '../../lib/status';
 import { getMeshColor } from '../../lib/meshColors';
+import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
 import { FolderOpenIcon } from '../shared/FolderOpenIcon';
@@ -46,6 +47,39 @@ export const HEADER_TIER_BREAKPOINTS: Record<Exclude<HeaderTier, 'compact'>, num
   slim: 280,  // mesh label joins the row; kebab stays
 };
 // `compact` is the implicit floor (`< HEADER_TIER_BREAKPOINTS.slim`).
+
+// Autopilot pill styling per pipeline state (the typed
+// `AutopilotRunState` union — wires in via ts-rs from the Rust enum).
+// Violet is the "automation owns this node" accent; the wrap-up / terminal
+// states reuse the amber / green / red semantics the rest of the header
+// already speaks.
+export const AUTOPILOT_PILL_STYLES: Record<AutopilotRunState, { label: string; className: string; title: string }> = {
+  implementing: {
+    label: 'autopilot',
+    className: 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40',
+    title: 'Autopilot: agent is implementing the task',
+  },
+  finishing: {
+    label: 'autopilot · wrap-up',
+    className: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
+    title: 'Autopilot: wrap-up in progress (verify, commit, push, PR)',
+  },
+  completed: {
+    label: 'autopilot ✓',
+    className: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
+    title: 'Autopilot: wrap-up verified — waiting for the PR to merge',
+  },
+  merged: {
+    label: 'autopilot ✓',
+    className: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
+    title: 'Autopilot: PR merged',
+  },
+  failed: {
+    label: 'autopilot ✗',
+    className: 'bg-status-error-bg text-status-error ring-status-error/40',
+    title: 'Autopilot: wrap-up failed after 3 attempts — needs a human',
+  },
+};
 
 export function getHeaderTier(width: number): HeaderTier {
   if (width >= HEADER_TIER_BREAKPOINTS.xl) return 'xl';
@@ -84,6 +118,9 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
   const isReviewingThisNode = useAgentNodeStore((s) => s.activeNodeId === node.id);
   const meshesById = useMeshStore(state => state.meshesById);
   const meshColor = getMeshColor(node.mesh_id, meshesById.get(node.mesh_id)?.color);
+  // Autopilot pipeline state for this node (undefined = not piloted). String
+  // selector so only headers whose own state changes re-render.
+  const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
 
   // Issue #736 — measure the rendered header width and bucket it into a tier
   // that decides which chips render and whether the close/max buttons live
@@ -203,6 +240,21 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             <span className="text-xs text-text-secondary font-normal"> {meshLabel}</span>
           )}
         </span>
+        {/* Autopilot pill — which nodes automation owns, and where each is
+            in the pipeline. Gated one tier looser than the worktree pill
+            (visible down to `slim`): "is this node on autopilot?" outranks
+            "worktree vs root" when horizontal space runs out. */}
+        {showMeshLabel && autopilotState && (
+          <span
+            data-testid="autopilot-pill"
+            title={AUTOPILOT_PILL_STYLES[autopilotState].title}
+            className={`text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-semibold select-none whitespace-nowrap drop-shadow-sm flex-shrink-0 ring-1 ring-inset ${
+              AUTOPILOT_PILL_STYLES[autopilotState].className
+            }`}
+          >
+            {AUTOPILOT_PILL_STYLES[autopilotState].label}
+          </span>
+        )}
         {showWorktree && (
           <span
             title={node.use_worktree

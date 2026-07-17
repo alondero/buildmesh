@@ -26,6 +26,7 @@
 
 pub mod evaluator;
 pub mod finish;
+pub mod launch;
 pub mod pipeline;
 
 use crate::models::SessionStatus;

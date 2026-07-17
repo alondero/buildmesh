@@ -62,6 +62,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
 });
 
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
+import { AUTOPILOT_PILL_STYLES } from '../../src/components/AgentNodeView/GridNodeHeader';
 
 const NODE: AgentNode = {
   id: 1,
@@ -594,6 +595,68 @@ describe('GridNodeHeader reveal-in-explorer action', () => {
       expect.stringContaining('Path does not exist'),
     );
     errSpy.mockRestore();
+  });
+});
+
+/**
+ * Autopilot pill — surfaces which nodes automation owns and where each is
+ * in the pipeline, driven by `autopilotStates` in the agent-node store
+ * (hydrated from `list_autopilot_runs` + patched by `autopilot-*` events).
+ */
+describe('GridNodeHeader autopilot pill', () => {
+  beforeEach(() => {
+    useAgentNodeStore.setState({ agentNodes: [NODE], activeNodeId: NODE.id, autopilotStates: {} });
+    useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
+    summaryMock.mockReturnValue(null);
+    prMock.mockReturnValue(null);
+  });
+
+  it('is absent for a hand-spawned node (no autopilot run)', () => {
+    const { queryByTestId } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(queryByTestId('autopilot-pill')).toBeNull();
+  });
+
+  it('shows a violet "autopilot" pill while the agent is implementing', () => {
+    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'implementing' } });
+    const { getByTestId } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const pill = getByTestId('autopilot-pill');
+    expect(pill.textContent).toBe('autopilot');
+    expect(pill.className).toContain('text-accent-violet');
+  });
+
+  it('flips to the amber wrap-up treatment while finishing', () => {
+    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'finishing' } });
+    const { getByTestId } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    const pill = getByTestId('autopilot-pill');
+    expect(pill.textContent).toContain('wrap-up');
+    expect(pill.className).toContain('text-accent-amber');
+  });
+
+  it('shows green when completed and red when failed', () => {
+    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'completed' } });
+    const { getByTestId, rerender } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(getByTestId('autopilot-pill').className).toContain('text-accent-green');
+
+    useAgentNodeStore.setState({ autopilotStates: { [NODE.id]: 'failed' } });
+    rerender(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(getByTestId('autopilot-pill').className).toContain('text-status-error');
+  });
+
+  it('the typed union means a backend adding a new state would surface here as a TS error', () => {
+    // Regression guard: the pill style map is `Record<AutopilotRunState, …>`
+    // (the typed union generated from the Rust enum via ts-rs), so a
+    // future backend state that isn't in the map would fail to compile
+    // rather than silently degrading to a default. The pin: the map and
+    // the union live in lockstep on both sides of the wire.
+    expect(Object.keys(AUTOPILOT_PILL_STYLES).sort()).toEqual(
+      ['completed', 'failed', 'finishing', 'implementing', 'merged'],
+    );
+  });
+
+  it('only badges the node the run belongs to', () => {
+    useAgentNodeStore.setState({ autopilotStates: { 999: 'implementing' } });
+    const { queryByTestId } = render(<GridNodeHeader node={NODE} onBuildRun={() => {}} />);
+    expect(queryByTestId('autopilot-pill')).toBeNull();
   });
 });
 

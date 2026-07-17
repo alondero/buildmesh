@@ -33,6 +33,7 @@ use tauri::{AppHandle, Emitter};
 use super::evaluator::{self, Classification};
 use super::finish;
 use crate::db;
+use crate::db::AutopilotRunState::{self as S, *};
 use crate::models::SessionStatus;
 
 /// Self-correction cap (PRD #480 story 13): total wrap-up prompt injections
@@ -74,6 +75,9 @@ pub(crate) struct WrapupState {
     pub pushed: bool,
     /// Open PR URL for the branch, if any.
     pub pr_url: Option<String>,
+    /// The same PR's number — persisted to the ledger on completion so the
+    /// merged-PR auto-close sweep can check it without re-deriving the branch.
+    pub pr_number: Option<i64>,
     /// Does the mesh's policy require a PR (`action_on_success != "none"`)?
     pub pr_required: bool,
 }
@@ -222,14 +226,14 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
     };
 
     // PR lookup only makes sense once the branch exists remotely.
-    let pr_url = if pushed {
+    let pr = if pushed {
         branch.as_deref().and_then(|b| {
             let mesh = db::get_mesh_by_id(node.mesh_id).ok()?;
             let (owner, repo_name) =
                 crate::commands::pr::resolve_github_owner_repo(&mesh).ok()?;
             let client = crate::services::github::GitHubClient::new().ok()?;
             match client.find_open_pr_for_branch(&owner, &repo_name, b) {
-                Ok(pr) => pr.map(|p| p.html_url),
+                Ok(pr) => pr.map(|p| (p.number, p.html_url)),
                 Err(e) => {
                     tracing::warn!(
                         "autopilot pipeline({}): PR lookup for {} failed: {}",
@@ -244,8 +248,12 @@ fn observe_wrapup_state(node: &crate::models::AgentNode, pr_required: bool) -> W
     } else {
         None
     };
+    let (pr_number, pr_url) = match pr {
+        Some((n, url)) => (Some(n), Some(url)),
+        None => (None, None),
+    };
 
-    WrapupState { dirty, pushed, pr_url, pr_required }
+    WrapupState { dirty, pushed, pr_url, pr_number, pr_required }
 }
 
 // ---------------------------------------------------------------------------
@@ -300,8 +308,8 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
         .and_then(|m| m.autopilot_action_on_success.clone())
         .unwrap_or_else(|| "draft_pr".to_string());
 
-    match state.as_str() {
-        "implementing" => {
+    match state {
+        S::Implementing => {
             // Evaluator backend env: the mesh's Autopilot provider
             // side-channel (falls back to the built-in Anthropic haiku pin
             // when unset) — never the node's own possibly-expensive model
@@ -318,7 +326,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                         finish::finish_prompt(Some(issue_number).filter(|n| *n > 0), Some(&action_on_success));
                     match write_prompt_to_pty(node_id, &prompt) {
                         Ok(()) => {
-                            let _ = db::set_autopilot_run_state(node_id, "finishing", Some(1));
+                            let _ = db::set_autopilot_run_state(node_id, Finishing, Some(1));
                             clear_attention_after_injection(node_id, app);
                             let _ = app.emit(
                                 "autopilot-finishing",
@@ -352,11 +360,17 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                 TurnAction::Nothing => {}
             }
         }
-        "finishing" => {
+        S::Finishing => {
             let observed = observe_wrapup_state(&node, action_on_success != "none");
             match decide_finishing(&observed, attempts) {
                 FinishOutcome::Complete => {
-                    let _ = db::set_autopilot_run_state(node_id, "completed", None);
+                    // PR identity first, state second: the merged-PR sweep
+                    // keys off `state = completed AND pr_number IS NOT NULL`,
+                    // so this order can't yield a sweepable row without a PR.
+                    if let (Some(n), Some(url)) = (observed.pr_number, observed.pr_url.as_deref()) {
+                        let _ = db::set_autopilot_run_pr(node_id, n, url);
+                    }
+                    let _ = db::set_autopilot_run_state(node_id, Completed, None);
                     let _ = db::update_agent_node_status(node_id, SessionStatus::Completed);
                     let _ = app.emit(
                         "autopilot-pr-created",
@@ -379,7 +393,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                         Ok(()) => {
                             let _ = db::set_autopilot_run_state(
                                 node_id,
-                                "finishing",
+                                Finishing,
                                 Some(attempts + 1),
                             );
                             clear_attention_after_injection(node_id, app);
@@ -399,7 +413,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                     }
                 }
                 FinishOutcome::Fail(reasons) => {
-                    let _ = db::set_autopilot_run_state(node_id, "failed", None);
+                    let _ = db::set_autopilot_run_state(node_id, Failed, None);
                     let _ = db::update_agent_node_status(node_id, SessionStatus::Error);
                     let _ = app.emit(
                         "autopilot-finish-failed",
@@ -419,8 +433,8 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                 }
             }
         }
-        // completed / failed — terminal; stale registration cleanup.
-        _ => evaluator::unregister(node_id),
+        // terminal — stale registration cleanup
+        S::Completed | S::Failed | S::Merged | S::Implementing => evaluator::unregister(node_id),
     }
 }
 
@@ -433,6 +447,7 @@ mod tests {
             dirty,
             pushed,
             pr_url: pr.map(str::to_string),
+            pr_number: pr.map(|_| 1),
             pr_required,
         }
     }

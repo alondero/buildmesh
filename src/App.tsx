@@ -444,10 +444,38 @@ function App() {
         void useAgentNodeStore.getState().fetchAgentNodes();
       },
     );
+    // Launch watcher pressed Enter — the agent has actually started the
+    // task (the prefill alone only stages it). No refetch needed: nothing
+    // about the node row changed.
+    const unlistenSubmitted = listen<{ node_id: number; issue: number }>(
+      'autopilot-submitted',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `Started work on issue #${event.payload.issue} (node ${event.payload.node_id}).`,
+          'warning',
+        );
+      },
+    );
+    // Merged-PR sweep archived a finished node (the store refetches the
+    // node list on this same event; here we just tell the user why a card
+    // vanished from the grid).
+    const unlistenClosed = listen<{ node_id: number; pr_number: number }>(
+      'autopilot-node-closed',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `PR #${event.payload.pr_number} merged — node ${event.payload.node_id} closed.`,
+          'warning',
+        );
+      },
+    );
     return () => {
       unlistenBlocked.then((fn) => fn());
       unlistenPr.then((fn) => fn());
       unlistenFailed.then((fn) => fn());
+      unlistenSubmitted.then((fn) => fn());
+      unlistenClosed.then((fn) => fn());
     };
   }, []);
 

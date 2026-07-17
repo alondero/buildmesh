@@ -101,15 +101,26 @@ fn run_poll_pass(app: &AppHandle) {
 }
 
 fn poll_mesh(app: &AppHandle, mesh: &Mesh) -> Result<(), String> {
+    // The merged-PR sweep runs BEFORE the capacity gate: a mesh at capacity
+    // must still get its finished nodes archived (that's what clears grid
+    // space), and the sweep costs no network when there's nothing to sweep.
+    let sweep_candidates =
+        db::list_completed_autopilot_runs_with_pr(mesh.id).unwrap_or_default();
+
     let active = db::count_active_autopilot_nodes(mesh.id).map_err(|e| e.to_string())?;
     let capacity = i64::from(mesh.autopilot_concurrency_limit) - active;
-    // PRD story 6: no spare capacity → no GitHub round-trip at all.
-    if capacity <= 0 {
+    // PRD story 6: no spare capacity AND nothing to sweep → no GitHub
+    // round-trip at all.
+    if capacity <= 0 && sweep_candidates.is_empty() {
         return Ok(());
     }
 
     let (owner, repo) = crate::commands::pr::resolve_github_owner_repo(mesh)?;
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
+    close_merged_nodes(app, &client, &owner, &repo, &sweep_candidates);
+    if capacity <= 0 {
+        return Ok(());
+    }
     let label = mesh
         .autopilot_trigger_label
         .as_deref()
@@ -175,6 +186,55 @@ fn poll_mesh(app: &AppHandle, mesh: &Mesh) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Merged-PR auto-close sweep: for each completed run whose wrap-up PR is
+/// now merged on GitHub, kill the (idle) agent process and archive the node.
+/// Archiving — not deleting — keeps the ledger row, so the issue stays
+/// deduped even if it somehow re-appears labelled; the worktree and branch
+/// stay on disk and surface in the Archive tab like any closed node.
+/// Per-candidate failures are logged and skipped: the next pass retries.
+fn close_merged_nodes(
+    app: &AppHandle,
+    client: &GitHubClient,
+    owner: &str,
+    repo: &str,
+    candidates: &[(i64, i64)],
+) {
+    for &(node_id, pr_number) in candidates {
+        match client.pull_request_merged(owner, repo, pr_number) {
+            Ok(true) => {
+                crate::agent::process::PROCESS_REGISTRY.kill_session(node_id);
+                if let Err(e) = db::archive_agent_node(node_id) {
+                    tracing::warn!("autopilot: archive of node {} failed: {}", node_id, e);
+                    continue;
+                }
+                // Terminal ledger state so the sweep never re-checks this PR.
+                let _ = db::set_autopilot_run_state(
+                    node_id,
+                    db::AutopilotRunState::Merged,
+                    None,
+                );
+                crate::autopilot::evaluator::unregister(node_id);
+                let _ = app.emit(
+                    "autopilot-node-closed",
+                    serde_json::json!({ "node_id": node_id, "pr_number": pr_number }),
+                );
+                tracing::info!(
+                    "autopilot: PR #{} merged — node {} archived (slot freed)",
+                    pr_number,
+                    node_id
+                );
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                "autopilot: merged check for PR #{} (node {}) failed: {}",
+                pr_number,
+                node_id,
+                e
+            ),
+        }
+    }
 }
 
 /// Pure scheduler core: which of the currently-labelled `issues` to spawn,
@@ -256,7 +316,13 @@ fn spawn_autopilot_node(
         provider
     );
 
-    crate::commands::agent::start_node_background(app.clone(), node.id, Some(prefill))
+    crate::commands::agent::start_node_background(app.clone(), node.id, Some(prefill))?;
+
+    // The prefill only *stages* the prompt in the harness's input box —
+    // nothing submits it. Watch the PTY until the harness is observably
+    // ready (prefill echoed + output quiet), then press Enter for it.
+    crate::autopilot::launch::watch_and_submit(app.clone(), node.id, issue.number);
+    Ok(())
 }
 
 #[cfg(test)]

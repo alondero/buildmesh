@@ -455,6 +455,7 @@ pub fn run() {
             commands::agent::create_issue_node,
             commands::agent::start_node_background,
             commands::agent::trigger_finish,
+            commands::agent::list_autopilot_runs,
             // Build/Run
             commands::build_run::build_run,
             commands::build_run::get_mesh_row,

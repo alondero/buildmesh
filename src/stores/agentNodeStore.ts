@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { disposeTerminal } from '../components/Terminal/Terminal';
+import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
 import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
 import { useMeshStore } from './meshStore';
@@ -15,6 +15,7 @@ import { useMeshStore } from './meshStore';
 // it adds `env`, `source_issue`, and the `archived` status the hand-written
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
+import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
 export type { AgentNode };
 
 /// Apply a mesh's re-positioned nodes optimistically and persist them. The
@@ -69,6 +70,11 @@ export interface ScheduledTask {
 
 interface AgentNodeState {
   agentNodes: AgentNode[];
+  // Autopilot pipeline state per piloted node id ('implementing' /
+  // 'finishing' / 'completed' / 'failed' / 'merged'). Absent key = not an
+  // autopilot node. Drives the header's Autopilot pill; refreshed with the
+  // node list and nudged by the `autopilot-*` lifecycle events.
+  autopilotStates: Record<number, AutopilotRunState>;
   activeNodeId: number | null;
   loading: boolean;
   error: string | null;
@@ -121,6 +127,7 @@ interface AgentNodeState {
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   agentNodes: [],
+  autopilotStates: {},
   activeNodeId: null,
   loading: false,
   error: null,
@@ -141,8 +148,16 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   fetchAgentNodes: async () => {
     set({ loading: true, error: null });
     try {
-      const agentNodes = await api.listAgentNodes();
-      set({ agentNodes, loading: false });
+      // Autopilot states ride along with every node refresh, but their
+      // failure must never blank the node list — degrade to "no pills".
+      const [agentNodes, autopilotRuns] = await Promise.all([
+        api.listAgentNodes(),
+        api.listAutopilotRuns().catch(() => []),
+      ]);
+      const autopilotStates = Object.fromEntries(
+        (Array.isArray(autopilotRuns) ? autopilotRuns : []).map((r) => [r.node_id, r.state]),
+      );
+      set({ agentNodes, autopilotStates, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -218,6 +233,31 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
               s.id === nodeId ? { ...s, status: 'running' as const } : s
             ),
           }));
+        });
+
+        // Autopilot pipeline transitions: patch the pill state in place so
+        // the header tracks the run without waiting for the next full
+        // refetch (App.tsx separately refetches on the completion/failure
+        // events to pick up the node's own status change).
+        const patchAutopilotState = (nodeId: number, state: string) =>
+          set((s) => ({ autopilotStates: { ...s.autopilotStates, [nodeId]: state } }));
+        await listen<{ node_id: number }>('autopilot-finishing', (event) => {
+          patchAutopilotState(event.payload.node_id, 'finishing');
+        });
+        await listen<{ node_id: number }>('autopilot-pr-created', (event) => {
+          patchAutopilotState(event.payload.node_id, 'completed');
+        });
+        await listen<{ node_id: number }>('autopilot-finish-failed', (event) => {
+          patchAutopilotState(event.payload.node_id, 'failed');
+        });
+        // Merged-PR auto-close: the backend archived the node (NOT deleted);
+        // refetch so the card leaves the grid. We deliberately do NOT dispose
+        // the terminal — archive keeps the row, branch, and scrollback alive
+        // for the Archive tab, and the terminal-persistence rule says only a
+        // node-delete may dispose. `TerminalManager` is a singleton; the
+        // instance survives the refetch.
+        await listen<{ node_id: number }>('autopilot-node-closed', async () => {
+          await get().fetchAgentNodes();
         });
 
         // Two-stage spawn failure: backend already updated the node's DB

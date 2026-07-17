@@ -158,20 +158,21 @@ mod tests {
         )
         .unwrap();
 
+        use crate::db::AutopilotRunState as S;
         crate::db::create_autopilot_run(node.id, mesh.id, 42).unwrap();
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 1);
         let (issue, state, attempts) =
             crate::db::get_autopilot_run(node.id).unwrap().expect("run row exists");
-        assert_eq!((issue, state.as_str(), attempts), (42, "implementing", 0));
+        assert_eq!((issue, state, attempts), (42, S::Implementing, 0));
 
         // The issue number is known → the poller must not respawn it.
         let known = crate::db::list_known_autopilot_issue_numbers(mesh.id).unwrap();
         assert!(known.contains(&42));
 
         // finishing still occupies the slot; completed frees it.
-        crate::db::set_autopilot_run_state(node.id, "finishing", Some(1)).unwrap();
+        crate::db::set_autopilot_run_state(node.id, S::Finishing, Some(1)).unwrap();
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 1);
-        crate::db::set_autopilot_run_state(node.id, "completed", None).unwrap();
+        crate::db::set_autopilot_run_state(node.id, S::Completed, None).unwrap();
         assert_eq!(crate::db::count_active_autopilot_nodes(mesh.id).unwrap(), 0);
         // ...but the issue stays deduped even after completion.
         let known = crate::db::list_known_autopilot_issue_numbers(mesh.id).unwrap();
@@ -196,6 +197,74 @@ mod tests {
         .unwrap();
         let known = crate::db::list_known_autopilot_issue_numbers(mesh.id).unwrap();
         assert!(known.contains(&43));
+
+        std::fs::remove_file(&temp_path).ok();
+    }
+
+    /// Merged-PR auto-close plumbing: the recorded wrap-up PR makes a
+    /// completed run sweepable, the pill listing reports every live run,
+    /// and archiving the node removes it from both.
+    #[test]
+    fn test_autopilot_run_pr_recording_and_sweep_listing() {
+        let test_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_path =
+            std::env::temp_dir().join(format!("buildmesh_autopilot_pr_{}.db", test_id));
+        crate::db::init(&temp_path).unwrap();
+
+        let path = format!("/tmp/autopilot-pr-{}", test_id);
+        let mesh = crate::db::create_mesh("PR Mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "gh99-node",
+            &mesh.path,
+            "origin/main",
+            crate::models::EnvType::Windows,
+            "anthropic",
+            None,
+            Some(99),
+            None,
+            None,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::db::create_autopilot_run(node.id, mesh.id, 99).unwrap();
+
+        // Pill listing sees the run while the node is live.
+        let states = crate::db::list_autopilot_run_states().unwrap();
+        assert!(states.contains(&(node.id, crate::db::AutopilotRunState::Implementing)));
+
+        // Not sweepable yet: completed but no PR recorded.
+        crate::db::set_autopilot_run_state(node.id, crate::db::AutopilotRunState::Completed, None)
+            .unwrap();
+        assert!(crate::db::list_completed_autopilot_runs_with_pr(mesh.id)
+            .unwrap()
+            .is_empty());
+
+        // Recording the wrap-up PR makes it sweepable.
+        crate::db::set_autopilot_run_pr(node.id, 512, "https://github.com/x/y/pull/512")
+            .unwrap();
+        assert_eq!(
+            crate::db::list_completed_autopilot_runs_with_pr(mesh.id).unwrap(),
+            vec![(node.id, 512)]
+        );
+
+        // The sweep archives the node + moves the run to `merged`: it must
+        // drop out of the sweep list AND the pill listing, but stay deduped.
+        crate::db::archive_agent_node(node.id).unwrap();
+        crate::db::set_autopilot_run_state(node.id, crate::db::AutopilotRunState::Merged, None)
+            .unwrap();
+        assert!(crate::db::list_completed_autopilot_runs_with_pr(mesh.id)
+            .unwrap()
+            .is_empty());
+        let states = crate::db::list_autopilot_run_states().unwrap();
+        assert!(states.iter().all(|(id, _)| *id != node.id));
+        let known = crate::db::list_known_autopilot_issue_numbers(mesh.id).unwrap();
+        assert!(known.contains(&99), "archived run still dedupes its issue");
 
         std::fs::remove_file(&temp_path).ok();
     }
