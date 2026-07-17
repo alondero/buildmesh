@@ -2535,10 +2535,14 @@ mod tests {
         )
         .expect_err("adoption must refuse to overwrite an existing branch");
         assert!(
-            err.contains("git checkout"),
-            "the failure must come from the refusing `-b` checkout, got: {}",
+            err.contains("already exists"),
+            "the failure must name the existing branch refusal, got: {}",
             err
         );
+        // Fail-fast contract: refusal is pre-move — see the guard in
+        // `adopt_warm_worktree_by_move`.
+        assert!(pool.exists(), "pool entry must be untouched after a refused adoption");
+        assert!(!target.exists(), "target must not be materialised by a refused adoption");
     }
 
     // -----------------------------------------------------------------------

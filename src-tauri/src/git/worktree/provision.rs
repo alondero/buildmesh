@@ -454,6 +454,36 @@ pub(crate) fn adopt_warm_worktree_by_move(
     // BEFORE the move means a bad ref fails fast, before we disturb the pool
     // directory.
     let base_sha = super::resolve_base_ref_sha(project_root, base_ref)?;
+    // Same fail-fast principle for the branch: `checkout_worktree_to_base`'s
+    // `git checkout -b` refuses an existing branch, but by then the pool
+    // directory has already been moved — the spawn failure cleanup then
+    // deletes a half-adopted worktree, which can strand a stale admin entry
+    // (the phantom worktree from the 2026-07-17 gh252 duplicate-spawn
+    // incident). Refuse BEFORE the move so a refused adoption leaves the
+    // pool entry exactly where it was.
+    if mode == "branched" {
+        let host_root = crate::env::to_host_path(project_root);
+        match git2::Repository::open(&host_root) {
+            Ok(repo) => {
+                if repo.find_branch(branch_name, git2::BranchType::Local).is_ok() {
+                    return Err(format!(
+                        "a branch named '{}' already exists — refusing to adopt the warm worktree over it",
+                        branch_name
+                    ));
+                }
+            }
+            // Fail open: the post-move `git checkout -b` still refuses an
+            // existing branch, so an unopenable root degrades to the old
+            // (later) refusal rather than blocking every adoption.
+            Err(e) => tracing::warn!(
+                "adopt_warm_worktree_by_move: could not open {} to pre-check branch '{}' ({}); \
+                 relying on the post-move checkout refusal",
+                host_root,
+                branch_name,
+                e
+            ),
+        }
+    }
     super::move_git_worktree(project_root, old_host_path, new_host_path)?;
     checkout_worktree_to_base(new_host_path, branch_name, mode, &base_sha)?;
     super::apply_worktree_include(
@@ -1037,6 +1067,16 @@ mod tests {
         assert!(
             result.unwrap_err().contains("already exists"),
             "error must name the clobber refusal"
+        );
+        // Fail-fast contract: the refusal happens BEFORE the pool directory
+        // is disturbed — see the pre-move guard in `adopt_warm_worktree_by_move`.
+        assert!(
+            pool_path.exists(),
+            "pool entry must be untouched after a refused adoption"
+        );
+        assert!(
+            !host_path.exists(),
+            "the target path must not have been materialised by a refused adoption"
         );
     }
 
