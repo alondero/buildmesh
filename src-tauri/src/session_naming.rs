@@ -1844,6 +1844,53 @@ mod tests {
         );
     }
 
+    // --- Plain-terminal naming gate (issue #296) ---
+
+    /// A plain Terminal node's PTY chunks must never reach the rename
+    /// buffer: the buffer is consumed only by the rename LLM, which fires
+    /// from `on_turn` — and only the Claude stop hook calls that. Ungated,
+    /// every Terminal chunk would take the global NAMING mutex and retain
+    /// up to MAX_BUFFER_CHARS for the node's whole lifetime.
+    ///
+    /// The provider gate lives in the spawn reader callback
+    /// (`agent::spawn::maybe_buffer_for_naming`); drive it with the node's
+    /// buffering gate open — the state where `on_output` WOULD write — so
+    /// this pin fails if the provider gate is ever bypassed.
+    #[test]
+    fn plain_terminal_output_never_reaches_rename_buffer() {
+        let node_id = 70296;
+        cleanup(node_id);
+        open_gate(node_id);
+
+        crate::agent::spawn::maybe_buffer_for_naming(true, node_id, "user typed: ls -la\n");
+
+        assert!(
+            buffer_of(node_id).as_deref().unwrap_or("").is_empty(),
+            "terminal node output must not reach the rename buffer, got: {:?}",
+            buffer_of(node_id)
+        );
+        cleanup(node_id);
+    }
+
+    /// Counterpart pin: the #296 gate must not swallow LLM providers'
+    /// chunks — `on_output` still fires on every chunk once the node's
+    /// buffering gate is open.
+    #[test]
+    fn llm_provider_output_still_reaches_rename_buffer() {
+        let node_id = 71296;
+        cleanup(node_id);
+        open_gate(node_id);
+
+        crate::agent::spawn::maybe_buffer_for_naming(false, node_id, "assistant reply chunk");
+
+        assert_eq!(
+            buffer_of(node_id).as_deref(),
+            Some("assistant reply chunk"),
+            "LLM provider output must keep accumulating after the #296 gate"
+        );
+        cleanup(node_id);
+    }
+
     #[test]
     fn reset_buffers_removes_only_target() {
         open_gate(5);
