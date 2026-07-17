@@ -111,6 +111,14 @@ pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
 /// override exported in the shell that launched the app) can't leak into the
 /// agent — reproducing the clean slate cwrap gave each session. Mirrors the
 /// `unset ...` block in `~/.local/bin/cwrap`. See [`AgentProvider::resets_backend_env`].
+///
+/// `MINIMAX_API_KEY` is included even though Claude Code itself does not read
+/// it: a value exported in the user's shell still propagates to the spawn
+/// child via OS env passing, and any third-party wrapper (or future claude
+/// release that consults it) would silently route the rename / spawn through
+/// the MiniMax endpoint — bypassing the user's configured `naming_provider`.
+/// Keeping it cleared is the same defence #824 installed for the hardcoded
+/// `provider_conf::minimax_backend_env` path. See issue #846.
 pub const CLAUDE_BACKEND_ENV_VARS: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_AUTH_TOKEN",
@@ -123,6 +131,7 @@ pub const CLAUDE_BACKEND_ENV_VARS: &[&str] = &[
     "API_TIMEOUT_MS",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "MINIMAX_API_KEY",
 ];
 
 /// UI metadata declared by an adapter. The `id` is supplied separately via
@@ -354,5 +363,34 @@ pub trait AgentProvider: Send + Sync {
     /// vars.
     fn resets_backend_env(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #846 — "cover shell-injected `MINIMAX_API_KEY`".
+    ///
+    /// The rename path (`session_naming::summarize_and_rename_with`) iterates
+    /// over `CLAUDE_BACKEND_ENV_VARS` and `env_remove`s each from the spawned
+    /// `claude --print` child. Without `MINIMAX_API_KEY` in the list, a value
+    /// exported in the user's shell (e.g. `export MINIMAX_API_KEY=sk-...` in
+    /// `~/.bashrc`) is inherited by the child via OS env passing — silently
+    /// routing the rename through the MiniMax backend regardless of the user's
+    /// configured `naming_provider`. Pinning it here means any future refactor
+    /// that shrinks the list trips this test, surfacing the regression instead
+    /// of leaking a "why is my Anthropic-rename going to MiniMax?" surprise
+    /// (the exact class of bug issue #824 closed for the hardcoded
+    /// `provider_conf::minimax_backend_env` path).
+    #[test]
+    fn claude_backend_env_vars_clears_shell_injected_minimax_api_key() {
+        assert!(
+            CLAUDE_BACKEND_ENV_VARS.contains(&"MINIMAX_API_KEY"),
+            "CLAUDE_BACKEND_ENV_VARS must clear MINIMAX_API_KEY before the \
+             rename child spawns, otherwise a shell-exported key silently \
+             routes the rename through MiniMax (issue #846). Current list: {:?}",
+            CLAUDE_BACKEND_ENV_VARS
+        );
     }
 }

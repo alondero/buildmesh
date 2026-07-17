@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -19,6 +19,7 @@ import { toggleGridMaximize } from './lib/gridShortcuts';
 import { isMac } from './lib/platform';
 import { getGridRows } from './hooks/useGridLayout';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
+import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
 import * as api from './lib/tauri';
 import {
   applyToastCap,
@@ -463,11 +464,32 @@ function App() {
     return () => clearInterval(interval);
   }, [toasts.length]);
 
-  const addToast = (provider: string, message: string, severity: ToastSeverity = 'error') => {
-    const now = Date.now();
-    const incoming: ErrorToast = { id: now, provider, message, createdAt: now, severity };
-    setToasts((prev) => applyToastCap(dedupToasts(prev, incoming, now, TOAST_DEDUP_TTL_MS), TOAST_MAX));
-  };
+  const addToast = useCallback(
+    (provider: string, message: string, severity: ToastSeverity = 'error') => {
+      const now = Date.now();
+      const incoming: ErrorToast = { id: now, provider, message, createdAt: now, severity };
+      setToasts((prev) => applyToastCap(dedupToasts(prev, incoming, now, TOAST_DEDUP_TTL_MS), TOAST_MAX));
+    },
+    [],
+  );
+
+  // Issue #846: surface the sticky-lockout `naming-backend-failed` event as a
+  // toast. The backend has already burned MAX_RENAME_ATTEMPTS=3 retries on
+  // the LLM call before emitting (see `session_naming::on_turn_with`), so the
+  // severity is `error`, not `warning` — this is a real failure, not a hiccup.
+  // The toast points the user at Settings → Auto-naming (issue #824) so they
+  // can pick a working backend instead of giving up silently.
+  const handleNamingBackendFailure = useCallback(
+    ({ node_id, reason }: { node_id: number; reason: string }) => {
+      addToast(
+        'Auto-naming',
+        `Couldn't auto-name node ${node_id} after several retries (${reason}). Pick a name manually, or check Settings → Auto-naming.`,
+        'error',
+      );
+    },
+    [addToast],
+  );
+  useNamingBackendFailureToast(handleNamingBackendFailure);
 
   const dismissToast = (id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
