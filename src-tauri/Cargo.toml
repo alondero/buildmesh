@@ -1,6 +1,6 @@
 [package]
 name = "buildmesh"
-version = "0.1.0"
+version = "1.0.0"
 description = "AI Agent Orchestration Hub for Windows + WSL"
 authors = ["alond"]
 edition = "2021"
