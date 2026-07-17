@@ -7,7 +7,8 @@ export type SessionStatus =
   | 'idle'
   | 'awaiting_input'
   | 'error'
-  | 'suspended';
+  | 'suspended'
+  | 'completed';
 
 // `hex` mirrors the resolved value of each entry's Tailwind `color` token
 // (see the `--color-*` custom properties in `src/App.css`) as a literal
@@ -72,6 +73,16 @@ export const STATUS_CONFIG = {
     dot: '⏸',
     label: 'Suspended',
     hex: '#8b5cf6',
+  },
+  // Issue #485 — an Autopilot node whose wrap-up finished (clean worktree,
+  // branch pushed, PR opened). Terminal state; green mirrors the diff
+  // "added" accent used elsewhere for success.
+  completed: {
+    color: 'text-accent-green',
+    bgColor: 'bg-accent-green',
+    dot: '✓',
+    label: 'PR opened',
+    hex: '#22c55e',
   },
 } as const;
 

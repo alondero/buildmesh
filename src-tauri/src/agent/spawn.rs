@@ -629,6 +629,9 @@ fn start_reader(
 
             let text = String::from_utf8_lossy(data);
             crate::session_naming::on_output(session_id, &text);
+            // Autopilot state evaluator tail (issue #483) — one in-memory
+            // set lookup for non-piloted nodes.
+            crate::autopilot::evaluator::on_output(session_id, &text);
 
             if !session_captured.load(Ordering::Relaxed) {
                 if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
@@ -805,6 +808,18 @@ pub async fn spawn_agent_inner(
         .as_ref()
         .and_then(|r| r.worktree_mode.as_deref())
         .unwrap_or(DEFAULT_WORKTREE_MODE);
+    // Autopilot enforcement (issue #482, PRD #480): auto-spawned nodes must
+    // always work on a real branch (and in a worktree) — the wrap-up sequence
+    // pushes a branch and opens a PR, which a detached-HEAD worktree or a
+    // shared mesh root cannot do. The ledger row is written before stage-2
+    // starts, so this read is ordered correctly. The node row itself already
+    // carries `use_worktree = true` (spawn override in `services::autopilot`).
+    let is_autopilot = db::get_autopilot_run(session_id)
+        .ok()
+        .flatten()
+        .is_some();
+    let use_worktree = use_worktree || is_autopilot;
+    let worktree_mode = if is_autopilot { "branched" } else { worktree_mode };
     let base_ref = resolve_base_ref_for_spawn(
         &node.path,
         row.as_ref().and_then(|r| r.base_ref.as_deref()),

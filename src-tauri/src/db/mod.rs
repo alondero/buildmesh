@@ -98,7 +98,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 25;
+const SCHEMA_VERSION: i32 = 26;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -237,6 +237,25 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
 
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
+
+        -- Autopilot runs (issue #482, PRD #480). One row per auto-spawned
+        -- Agent Node, keyed by the node so close/delete cascades. Kept as a
+        -- satellite table (not an agent_nodes column) so the positional
+        -- AGENT_NODE_COLUMNS projection and its consumers stay untouched.
+        -- `state` is the wrap-up pipeline machine: implementing (agent working
+        -- on the issue) -> finishing (wrap-up prompt injected, attempt N) ->
+        -- completed | failed. `attempts` counts wrap-up/self-correction
+        -- injections (capped by autopilot::MAX_FINISH_ATTEMPTS).
+        CREATE TABLE IF NOT EXISTS autopilot_runs (
+            node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            mesh_id INTEGER NOT NULL,
+            issue_number INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'implementing',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
         "
     )?;
 
@@ -256,6 +275,8 @@ ensure_mesh_sandbox(&conn)?;
     // v25 — per-mesh accent colour (user-picked hex). Nullable: pre-v25 rows
     // read back as `None` and fall back to the deterministic palette.
     ensure_mesh_color(&conn)?;
+    // v26 — Autopilot Policy columns (issue #481, PRD #480).
+    ensure_mesh_autopilot_columns(&conn)?;
     // v22 — Per-mesh pre-spawn pool target (issue #611). The column
     // doesn't exist on pre-v22 DBs; the safety net backfills it on every
     // init. Since v24 the column default (and the one-time backfill below)
@@ -632,6 +653,24 @@ pub(crate) fn ensure_mesh_scratchpad(conn: &Connection) -> SqlResult<()> {
 pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
     if ensure_column(conn, "meshes", "sandbox", "INTEGER NOT NULL DEFAULT 0")? {
         tracing::warn!("ensure_mesh_sandbox: added missing sandbox column");
+    }
+    Ok(())
+}
+
+/// Safety net (v26): ensure the Autopilot Policy columns exist on `meshes`
+/// (issue #481). Same one-line-per-column shape as `migrate_mesh_columns`.
+pub(crate) fn ensure_mesh_autopilot_columns(conn: &Connection) -> SqlResult<()> {
+    let columns = [
+        ("autopilot_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("autopilot_trigger_label", "TEXT"),
+        ("autopilot_concurrency_limit", "INTEGER NOT NULL DEFAULT 2"),
+        ("autopilot_provider", "TEXT"),
+        ("autopilot_action_on_success", "TEXT"),
+    ];
+    for (name, ty) in columns {
+        if ensure_column(conn, "meshes", name, ty)? {
+            tracing::warn!("ensure_mesh_autopilot_columns: added missing {} column", name);
+        }
     }
     Ok(())
 }
@@ -1815,7 +1854,10 @@ const MESH_COLUMNS: &str =
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
      COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
      scratchpad, COALESCE(sandbox, 0), \
-     COALESCE(pre_spawn_pool_size, 0), COALESCE(color, '')";
+     COALESCE(pre_spawn_pool_size, 0), COALESCE(color, ''), \
+     COALESCE(autopilot_enabled, 0), COALESCE(autopilot_trigger_label, ''), \
+     COALESCE(autopilot_concurrency_limit, 2), COALESCE(autopilot_provider, ''), \
+     COALESCE(autopilot_action_on_success, '')";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -1841,6 +1883,11 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         sandbox: row.get::<_, i32>(15)? != 0,
         pre_spawn_pool_size: row.get::<_, i32>(16)?,
         color: parse_str(row.get::<_, String>(17)?),
+        autopilot_enabled: row.get::<_, i32>(18)? != 0,
+        autopilot_trigger_label: parse_str(row.get::<_, String>(19)?),
+        autopilot_concurrency_limit: row.get::<_, i32>(20)?,
+        autopilot_provider: parse_str(row.get::<_, String>(21)?),
+        autopilot_action_on_success: parse_str(row.get::<_, String>(22)?),
     })
 }
 
@@ -2019,6 +2066,152 @@ pub fn set_mesh_color(id: i64, color: Option<&str>) -> SqlResult<usize> {
         "UPDATE meshes SET color = ?1 WHERE id = ?2",
         params![color, id],
     )
+}
+
+// --- Autopilot (issues #481/#482/#485, PRD #480) ---
+
+/// Persist the full Autopilot Policy for a mesh in one write. Empty strings
+/// for the optional TEXT columns store NULL so they read back as `None`
+/// (matching `parse_str`). Returns the number of rows updated so the caller
+/// can surface "mesh not found" (same zero-rows contract as
+/// `update_mesh_pool_size`).
+pub fn set_mesh_autopilot(
+    id: i64,
+    enabled: bool,
+    trigger_label: Option<&str>,
+    concurrency_limit: i32,
+    provider: Option<&str>,
+    action_on_success: Option<&str>,
+) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET autopilot_enabled = ?1, autopilot_trigger_label = ?2, \
+         autopilot_concurrency_limit = ?3, autopilot_provider = ?4, \
+         autopilot_action_on_success = ?5 WHERE id = ?6",
+        params![
+            if enabled { 1 } else { 0 },
+            trigger_label,
+            concurrency_limit,
+            provider,
+            action_on_success,
+            id
+        ],
+    )
+}
+
+/// Every mesh with Autopilot enabled — the poller's work list.
+pub fn list_autopilot_enabled_meshes() -> SqlResult<Vec<Mesh>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM meshes WHERE COALESCE(autopilot_enabled, 0) = 1 ORDER BY id",
+        MESH_COLUMNS
+    ))?;
+    let rows = stmt.query_map([], map_mesh_row)?;
+    rows.collect()
+}
+
+/// Record an auto-spawned node in the `autopilot_runs` ledger (state
+/// `implementing`). Idempotent per node (PRIMARY KEY node_id).
+pub fn create_autopilot_run(node_id: i64, mesh_id: i64, issue_number: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO autopilot_runs (node_id, mesh_id, issue_number) \
+         VALUES (?1, ?2, ?3)",
+        params![node_id, mesh_id, issue_number],
+    )?;
+    Ok(())
+}
+
+/// The pipeline row for a node, if it is Autopilot-managed:
+/// `(issue_number, state, attempts)`. `Ok(None)` for hand-spawned nodes.
+pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<(i64, String, i32)>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT issue_number, state, attempts FROM autopilot_runs WHERE node_id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![node_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    rows.next().transpose()
+}
+
+/// Advance a node's Autopilot pipeline state, optionally bumping the
+/// wrap-up attempt counter.
+pub fn set_autopilot_run_state(node_id: i64, state: &str, attempts: Option<i32>) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    match attempts {
+        Some(n) => db.execute(
+            "UPDATE autopilot_runs SET state = ?1, attempts = ?2, \
+             updated_at = datetime('now') WHERE node_id = ?3",
+            params![state, n, node_id],
+        )?,
+        None => db.execute(
+            "UPDATE autopilot_runs SET state = ?1, updated_at = datetime('now') \
+             WHERE node_id = ?2",
+            params![state, node_id],
+        )?,
+    };
+    Ok(())
+}
+
+/// Remove a node's Autopilot ledger row. Called from the node-delete path
+/// (`services::agent_node::delete`) — the table declares `ON DELETE
+/// CASCADE`, but this codebase never turns on SQLite's `foreign_keys`
+/// pragma (see `apply_connection_pragmas`), so the cascade is decorative
+/// and the delete must be explicit. Deleting the row also un-dedupes the
+/// issue (`list_known_autopilot_issue_numbers`), which is the intended
+/// behaviour: closing a bad autopilot node while the issue stays labelled
+/// lets the poller retry it.
+pub fn delete_autopilot_run(node_id: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "DELETE FROM autopilot_runs WHERE node_id = ?1",
+        params![node_id],
+    )?;
+    Ok(())
+}
+
+/// Number of *active* Autopilot nodes for a mesh — rows still in the
+/// pipeline (`implementing`/`finishing`) whose node hasn't been archived.
+/// This is the count the poller compares against
+/// `autopilot_concurrency_limit`; completed/failed runs free their slot.
+pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
+    let db = get().lock().unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE r.mesh_id = ?1 AND r.state IN ('implementing', 'finishing') \
+         AND a.status != 'archived'",
+        params![mesh_id],
+        |row| row.get(0),
+    )
+}
+
+/// Node ids of every run still in the pipeline, across all meshes. Startup
+/// hydration for the evaluator's piloted-node registry — a restart must not
+/// silently drop live autopilot nodes out of the wrap-up loop.
+pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT node_id FROM autopilot_runs WHERE state IN ('implementing', 'finishing')",
+    )?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// Every GitHub issue number this mesh already has a node for — union of the
+/// Autopilot ledger and manually issue-spawned nodes — so the poller never
+/// double-spawns an issue (including issues whose node completed or errored).
+pub fn list_known_autopilot_issue_numbers(mesh_id: i64) -> SqlResult<Vec<i64>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT issue_number FROM autopilot_runs WHERE mesh_id = ?1 \
+         UNION \
+         SELECT source_issue FROM agent_nodes \
+         WHERE mesh_id = ?1 AND source_issue IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![mesh_id], |row| row.get(0))?;
+    rows.collect()
 }
 
 pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {

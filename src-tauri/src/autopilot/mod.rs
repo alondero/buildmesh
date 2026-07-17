@@ -24,6 +24,10 @@
 //! gate they will consume — it deliberately stops at "decide + map to a node
 //! status" and does not spawn nodes or touch the UI.
 
+pub mod evaluator;
+pub mod finish;
+pub mod pipeline;
+
 use crate::models::SessionStatus;
 use crate::services::github::{GitHubClient, GitHubError, Issue, PullRequest};
 
@@ -54,12 +58,6 @@ pub struct AutopilotTrigger {
     pub kind: TriggerKind,
 }
 
-// Seam: these constructors and `gate_trigger` below are consumed by the
-// not-yet-built Autopilot trigger pipeline (the user-chosen scope for issue #499
-// is "gate helpers + seam", leaving the pipeline and approval UI to later
-// slices). `allow(dead_code)` until that wiring lands — the decision logic is
-// exhaustively covered by this module's tests and the integration test.
-#[allow(dead_code)]
 impl AutopilotTrigger {
     /// Build a trigger from a fetched [`Issue`]. `owner`/`repo` are the mesh's
     /// repo coordinates (the issue body doesn't carry them); `author` and
@@ -77,6 +75,10 @@ impl AutopilotTrigger {
     /// Build a trigger from a fetched [`PullRequest`]. The gate checks *who
     /// opened the PR* (`pr.author`), not the fork owner — the two usually match
     /// but the author is the trust-relevant identity.
+    // Seam: the poller (#482) ingests issues only today; PR triggers are a
+    // later Autopilot slice. Covered by this module's tests + the
+    // autopilot_security integration test.
+    #[allow(dead_code)]
     pub(crate) fn from_pull_request(owner: &str, repo: &str, pr: &PullRequest) -> Self {
         Self {
             owner: owner.to_string(),
@@ -141,9 +143,8 @@ pub fn evaluate(trigger: &AutopilotTrigger, author_permission: CollaboratorPermi
 /// permission, then [`evaluate`]. Network- and error-prone, so it is not unit
 /// tested here (mirroring the other live `GitHubClient` calls) — the decision
 /// logic it delegates to *is* exhaustively covered. `pub(crate)` because the
-/// only caller is the in-crate Autopilot pipeline, and it names the
-/// crate-private `GitHubClient`.
-#[allow(dead_code)] // seam — see the `impl AutopilotTrigger` note above.
+/// only caller is the in-crate Autopilot poller (`services::autopilot`), and it
+/// names the crate-private `GitHubClient`.
 pub(crate) fn gate_trigger(
     client: &GitHubClient,
     trigger: &AutopilotTrigger,

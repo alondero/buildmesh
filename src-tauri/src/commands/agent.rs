@@ -497,6 +497,45 @@ pub fn create_issue_node(
     Ok(IssueNodeDraft { node, prefill })
 }
 
+/// Manually trigger the Autopilot wrap-up sequence on a live node (issue
+/// #484 / PRD #480 story 15). Injects the same `/finish` prompt the
+/// automated pipeline uses AND enrolls the node in the wrap-up state
+/// machine, so the self-correction loop + PR verification (#485) apply to
+/// hand-started tasks exactly as to auto-spawned ones.
+///
+/// Idempotent-ish: re-triggering resets the node to `finishing` attempt 1
+/// (a deliberate "run the wrap-up again now" affordance).
+#[command]
+pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
+        return Err("Node has no live agent process to finish".to_string());
+    }
+    let mesh = db::get_mesh_by_id(node.mesh_id).map_err(|e| e.to_string())?;
+    let action = mesh
+        .autopilot_action_on_success
+        .clone()
+        .unwrap_or_else(|| "draft_pr".to_string());
+
+    // Enroll (or re-arm) the node in the pipeline. `source_issue` may be
+    // absent for hand-spawned nodes — 0 is the "no originating issue"
+    // sentinel the prompt renderer filters out.
+    db::create_autopilot_run(node_id, node.mesh_id, node.source_issue.unwrap_or(0))
+        .map_err(|e| e.to_string())?;
+    db::set_autopilot_run_state(node_id, "finishing", Some(1)).map_err(|e| e.to_string())?;
+    crate::autopilot::evaluator::register(node_id);
+
+    let prompt = crate::autopilot::finish::finish_prompt(node.source_issue, Some(&action));
+    crate::autopilot::pipeline::write_prompt_to_pty(node_id, &prompt)?;
+    crate::autopilot::pipeline::clear_attention_after_injection(node_id, &app);
+    let _ = app.emit(
+        "autopilot-finishing",
+        serde_json::json!({ "node_id": node_id, "issue": node.source_issue }),
+    );
+    tracing::info!("trigger_finish: injected wrap-up prompt into node {}", node_id);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Two-stage PR spawn (fast stage-1 + background stage-2) — issue #420
 //

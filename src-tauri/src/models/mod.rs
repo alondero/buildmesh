@@ -168,6 +168,11 @@ pub enum SessionStatus {
     /// reader thread already wrote `error`. Closes the race where each
     /// writer could clobber the other, leaving a ghost-Running node.
     Spawning,
+    /// Issue #485 — an Autopilot node whose wrap-up sequence finished:
+    /// worktree clean, branch pushed, PR opened. Terminal for the pipeline
+    /// (the node stays viewable but Autopilot no longer counts it against
+    /// the mesh's concurrency limit).
+    Completed,
 }
 
 /// Parse a session status from a DB string column
@@ -181,6 +186,7 @@ impl SessionStatus {
             "suspended" => SessionStatus::Suspended,
             "pending" => SessionStatus::Pending,
             "spawning" => SessionStatus::Spawning,
+            "completed" => SessionStatus::Completed,
             _ => SessionStatus::Idle,
         }
     }
@@ -195,6 +201,7 @@ impl SessionStatus {
             SessionStatus::Suspended => "suspended",
             SessionStatus::Pending => "pending",
             SessionStatus::Spawning => "spawning",
+            SessionStatus::Completed => "completed",
         }
     }
 }
@@ -267,7 +274,33 @@ pub struct Mesh {
     /// palette keyed on the mesh id (`src/lib/meshColors.ts`). Persisted as
     /// `meshes.color TEXT` (schema v25); empty/absent reads back as `None`.
     pub color: Option<String>,
+    /// Autopilot Mode master switch (issue #481, PRD #480). When `true` the
+    /// background poller (`services::autopilot`) watches this mesh's GitHub
+    /// repo for issues tagged [`Mesh::autopilot_trigger_label`] and spawns
+    /// branched-worktree Agent Nodes for them automatically. Persisted as
+    /// `meshes.autopilot_enabled INTEGER NOT NULL DEFAULT 0` (schema v26).
+    pub autopilot_enabled: bool,
+    /// GitHub issue label that marks an issue as an Autopilot task. `None`
+    /// falls back to [`DEFAULT_AUTOPILOT_TRIGGER_LABEL`] at poll time.
+    pub autopilot_trigger_label: Option<String>,
+    /// Maximum number of concurrently *active* auto-spawned nodes for this
+    /// mesh. The poller only ingests new issues while the active count is
+    /// below this limit (PRD #480 story 5/6). Clamped to `1..=8` at the IPC
+    /// boundary; stored as `INTEGER NOT NULL DEFAULT 2`.
+    #[ts(as = "i32")]
+    pub autopilot_concurrency_limit: i32,
+    /// Spawn Option id auto-spawned nodes use. `None` falls through the
+    /// normal default-provider chain (mesh default → app default → claude).
+    pub autopilot_provider: Option<String>,
+    /// What Autopilot asks the agent to do once the wrap-up verification
+    /// passes: `"draft_pr"` (default) opens a draft PR, `"pr"` opens a
+    /// ready-for-review PR, `"none"` stops after push.
+    pub autopilot_action_on_success: Option<String>,
 }
+
+/// Fallback for [`Mesh::autopilot_trigger_label`] when the user enables
+/// Autopilot without customizing the label (PRD #480 uses this literal).
+pub const DEFAULT_AUTOPILOT_TRIGGER_LABEL: &str = "buildmesh:run";
 
 /// The folder chosen in the "New mesh" modal's location picker. Returned by
 /// the `pick_mesh_folder` command so the frontend can show the selected
@@ -642,6 +675,13 @@ pub struct MeshRow {
     /// the Worktrees Probe's ConfigurationCard (issue #611).
     #[ts(as = "i32")]
     pub pre_spawn_pool_size: i32,
+    /// Autopilot Policy (issue #481) — see the matching [`Mesh`] fields.
+    pub autopilot_enabled: bool,
+    pub autopilot_trigger_label: Option<String>,
+    #[ts(as = "i32")]
+    pub autopilot_concurrency_limit: i32,
+    pub autopilot_provider: Option<String>,
+    pub autopilot_action_on_success: Option<String>,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -658,6 +698,11 @@ impl From<&Mesh> for MeshRow {
             default_provider: mesh.default_provider.clone(),
             sandbox: mesh.sandbox,
             pre_spawn_pool_size: mesh.pre_spawn_pool_size,
+            autopilot_enabled: mesh.autopilot_enabled,
+            autopilot_trigger_label: mesh.autopilot_trigger_label.clone(),
+            autopilot_concurrency_limit: mesh.autopilot_concurrency_limit,
+            autopilot_provider: mesh.autopilot_provider.clone(),
+            autopilot_action_on_success: mesh.autopilot_action_on_success.clone(),
         }
     }
 }

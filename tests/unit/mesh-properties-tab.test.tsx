@@ -52,6 +52,13 @@ const MESH_CONFIG = {
   worktree_mode: 'branched',
   default_provider: 'anthropic',
   sandbox: true,
+  // Autopilot Policy (issue #481) — disabled by default in the fixture;
+  // the dedicated tests below flip it on via a per-test override.
+  autopilot_enabled: false,
+  autopilot_trigger_label: null,
+  autopilot_concurrency_limit: 2,
+  autopilot_provider: null,
+  autopilot_action_on_success: null,
 };
 
 /**
@@ -422,6 +429,98 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // "Sandbox agent processes (macOS only)" accessible names.
     const sandboxes = await screen.findAllByLabelText(/Sandbox agent processes/);
     expect(sandboxes).toHaveLength(1);
+  });
+
+  // ── Autopilot Policy (issue #481, PRD #480) ─────────────────────────────
+
+  it('renders the Autopilot toggle collapsed (policy fields hidden while disabled)', async () => {
+    await openPropertiesTab();
+    const toggle = (await screen.findByLabelText('Autopilot Mode')) as HTMLInputElement;
+    expect(toggle.type).toBe('checkbox');
+    expect(toggle.checked).toBe(false);
+    // Policy fields must not render while disabled.
+    expect(screen.queryByLabelText('Trigger label')).toBeNull();
+    expect(screen.queryByLabelText('Max concurrent autopilot nodes')).toBeNull();
+  });
+
+  it('enabling Autopilot saves the full policy and reveals the policy fields', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const toggle = (await screen.findByLabelText('Autopilot Mode')) as HTMLInputElement;
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: true,
+        triggerLabel: null,
+        concurrencyLimit: 2,
+        provider: null,
+        actionOnSuccess: null,
+      });
+    });
+    // Policy fields appear once enabled.
+    expect(await screen.findByLabelText('Trigger label')).toBeTruthy();
+    expect(screen.getByLabelText('Max concurrent autopilot nodes')).toBeTruthy();
+    expect(screen.getByLabelText('Autopilot provider')).toBeTruthy();
+    expect(screen.getByLabelText('On success')).toBeTruthy();
+  });
+
+  it('preloads a saved Autopilot policy and saves edits to the policy fields', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_properties') {
+        return Promise.resolve({
+          ...MESH_CONFIG,
+          autopilot_enabled: true,
+          autopilot_trigger_label: 'buildmesh:run',
+          autopilot_concurrency_limit: 3,
+          autopilot_provider: 'codex',
+          autopilot_action_on_success: 'draft_pr',
+        });
+      }
+      if (cmd === 'list_providers')
+        return Promise.resolve([
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+          { id: 'codex', label: 'Codex', color: '#000', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
+        ]);
+      if (cmd === 'detect_mesh_project')
+        return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context')
+        return Promise.resolve({
+          claude_md_exists: false,
+          agents_md_exists: false,
+          skills_dir_exists: false,
+          skill_count: 0,
+          agents_skills_exists: false,
+        });
+      return Promise.resolve({});
+    });
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const label = (await screen.findByLabelText('Trigger label')) as HTMLInputElement;
+    expect(label.value).toBe('buildmesh:run');
+    const concurrency = screen.getByLabelText(
+      'Max concurrent autopilot nodes'
+    ) as HTMLSelectElement;
+    expect(concurrency.value).toBe('3');
+    const provider = screen.getByLabelText('Autopilot provider') as HTMLSelectElement;
+    expect(provider.value).toBe('codex');
+
+    // Editing the concurrency limit persists the whole policy in one write,
+    // carrying the untouched fields along (atomic-policy contract).
+    await user.selectOptions(concurrency, '5');
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: true,
+        triggerLabel: 'buildmesh:run',
+        concurrencyLimit: 5,
+        provider: 'codex',
+        actionOnSuccess: 'draft_pr',
+      });
+    });
   });
 
   it('renders nothing when no mesh is selected (the probe shell handles the empty state)', () => {

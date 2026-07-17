@@ -36,4 +36,8 @@ sandbox: boolean,
  * `0` = pool off, `1..=5` = target the worker fills to. Surfaced in
  * the Worktrees Probe's ConfigurationCard (issue #611).
  */
-pre_spawn_pool_size: number, };
+pre_spawn_pool_size: number, 
+/**
+ * Autopilot Policy (issue #481) — see the matching [`Mesh`] fields.
+ */
+autopilot_enabled: boolean, autopilot_trigger_label: string | null, autopilot_concurrency_limit: number, autopilot_provider: string | null, autopilot_action_on_success: string | null, };

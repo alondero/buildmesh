@@ -19,8 +19,11 @@
 use tauri::AppHandle;
 
 /// Publish a Node Turn for `node_id`: its agent has yielded control back to the
-/// user. Fans out to the two independent consumers.
+/// user. Fans out to the three independent consumers (attention marking, AI
+/// rename, and — for Autopilot-managed nodes only — the wrap-up pipeline's
+/// state evaluation, issues #483-#485).
 pub fn publish(node_id: i64, app: &AppHandle) {
     crate::commands::attention::mark_attention(node_id, app);
     crate::session_naming::on_turn(node_id, app.clone());
+    crate::autopilot::pipeline::on_turn(node_id, app);
 }

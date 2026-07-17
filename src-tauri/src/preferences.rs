@@ -321,6 +321,13 @@ pub fn init(app_data_dir: PathBuf) {
     let _ = APP_DATA_DIR.set(app_data_dir);
 }
 
+/// The app-data directory `init` was wired to, for sibling config files
+/// that live next to `preferences.json` (e.g. Autopilot's `finish.md`,
+/// issue #484). `None` before `init` runs (tests without a Tauri setup).
+pub(crate) fn app_data_dir() -> Option<PathBuf> {
+    APP_DATA_DIR.get().cloned()
+}
+
 fn preferences_path() -> Result<PathBuf, String> {
     APP_DATA_DIR
         .get()
