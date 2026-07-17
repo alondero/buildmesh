@@ -54,7 +54,11 @@ Write-Output "Buildmesh pre-launch line count (buildmesh.log): $BeforeLines"
 Write-Output "Buildmesh pre-launch line count (panic.log): $BeforePanicLines"
 Write-Output "Buildmesh pre-launch line count (panic_early.log): $BeforePanicEarlyLines"
 
-# 5. Launch raw binary
+# 5. Launch raw binary.
+# RUST_BACKTRACE=1 enables `std::backtrace::Backtrace::capture()` in the panic
+# hook (lib.rs setup()) so %APPDATA%\com.alond.buildmesh\logs\panic.log gets
+# real frames instead of the "disabled backtrace" placeholder. Issue #152.
+$env:RUST_BACKTRACE = '1'
 $proc = Start-Process $Binary -PassThru
 Write-Output "Launched PID: $($proc.Id)"
 

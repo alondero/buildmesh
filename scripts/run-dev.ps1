@@ -82,16 +82,23 @@ Write-Output "Buildmesh Dev pre-launch line count (panic_early.log): $BeforePani
 # 5. Launch raw binary. The WebView2 loader reads the env var at app start;
 #    it must be set only for the launch (not the build) and cleared after so
 #    it never leaks into unrelated WebView2 processes started from this shell.
+#    RUST_BACKTRACE=1 has the same scope concern (issue #152): enables
+#    std::backtrace::Backtrace::capture() in the panic hook so the dev
+#    profile's panic.log gets real frames, not the "disabled backtrace"
+#    placeholder. Always on — even when CDP is off, since dev is where you
+#    most often see a panic while iterating.
 if ($CdpPort -gt 0) {
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$CdpPort"
     Write-Output "CDP enabled on 127.0.0.1:$CdpPort"
 }
+$env:RUST_BACKTRACE = '1'
 try {
     $proc = Start-Process $Binary -PassThru
 } finally {
     if ($CdpPort -gt 0) {
         Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
     }
+    Remove-Item Env:RUST_BACKTRACE -ErrorAction SilentlyContinue
 }
 Write-Output "Launched PID: $($proc.Id)"
 

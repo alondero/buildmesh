@@ -63,7 +63,11 @@ echo "Buildmesh pre-launch line count (buildmesh.log): $BEFORE_LINES"
 echo "Buildmesh pre-launch line count (panic.log): $BEFORE_PANIC_LINES"
 echo "Buildmesh pre-launch line count (panic_early.log): $BEFORE_PANIC_EARLY_LINES"
 
-# 5. Launch raw binary (never the .app bundle — it can be stale)
+# 5. Launch raw binary (never the .app bundle — it can be stale).
+# RUST_BACKTRACE=1 enables std::backtrace::Backtrace::capture() in the panic
+# hook (lib.rs setup()) so the app data dir's panic.log gets real frames
+# instead of the "disabled backtrace" placeholder. Issue #152.
+export RUST_BACKTRACE=1
 "$BINARY" &
 PID=$!
 echo "Launched PID: $PID"
