@@ -5,6 +5,7 @@ import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
 import type { AppPreferences } from '../types/generated/AppPreferences';
+import type { AutopilotRunStateRow } from '../types/generated/AutopilotRunState';
 import type { BillingBalance } from '../types/generated/BillingBalance';
 import type { BillingMode } from '../types/generated/BillingMode';
 import type { BranchInfo } from '../types/generated/BranchInfo';
@@ -219,6 +220,11 @@ export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
  *  state machine so the self-correction loop and PR verification apply. */
 export const triggerFinish = (nodeId: number) =>
   _invoke<void>('trigger_finish', { nodeId });
+
+/** Every live Autopilot run's `(node_id, state)` — the header pill's data.
+ *  Fetched alongside the node list in `fetchAgentNodes`. */
+export const listAutopilotRuns = () =>
+  _invoke<AutopilotRunStateRow[]>('list_autopilot_runs');
 
 /** Persist a mesh's Autopilot Policy in one write (issue #481, PRD #480).
  *  Dedicated typed command like `updateMeshSandbox` — the backend

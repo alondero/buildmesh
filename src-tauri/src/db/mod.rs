@@ -252,6 +252,8 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             issue_number INTEGER NOT NULL,
             state TEXT NOT NULL DEFAULT 'implementing',
             attempts INTEGER NOT NULL DEFAULT 0,
+            pr_number INTEGER,
+            pr_url TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -262,6 +264,7 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     // Safety nets: add any columns that may be missing on old or migrated DBs.
     // These are no-ops on fresh DBs (tables just created above have the base schema).
     ensure_mesh_columns(&conn)?;
+    ensure_autopilot_run_pr_columns(&conn)?;
     ensure_agent_node_source_issue(&conn)?;
     ensure_agent_node_use_worktree(&conn)?;
     ensure_agent_node_position(&conn)?;
@@ -611,6 +614,20 @@ pub(crate) fn ensure_checkpoints_dropped(conn: &Connection) -> SqlResult<()> {
 /// Called after migrate_if_needed to fix DBs that skipped migration due to
 /// the projects-table guard (existing DBs that already had schema_version=8
 /// but whose meshes table lacked those columns).
+/// Safety net: ensure the `pr_number`/`pr_url` columns exist on
+/// `autopilot_runs`. Added for the merged-PR auto-close sweep — a completed
+/// run records the wrap-up PR so the poller can later check GitHub for its
+/// merge and archive the node. Nullable; pre-existing rows stay `NULL` and
+/// are simply never swept.
+pub(crate) fn ensure_autopilot_run_pr_columns(conn: &Connection) -> SqlResult<()> {
+    for (name, ty) in [("pr_number", "INTEGER"), ("pr_url", "TEXT")] {
+        if ensure_column(conn, "autopilot_runs", name, ty)? {
+            tracing::warn!("ensure_autopilot_run_pr_columns: added missing {} column", name);
+        }
+    }
+    Ok(())
+}
+
 fn ensure_mesh_columns(conn: &Connection) -> SqlResult<()> {
     let columns = [
         ("build_command", "TEXT"),
@@ -2122,36 +2139,129 @@ pub fn create_autopilot_run(node_id: i64, mesh_id: i64, issue_number: i64) -> Sq
     Ok(())
 }
 
+/// Typed view of the `autopilot_runs.state` column (migrates the stringly-
+/// typed surface that issue #855 tracked). The DB column stays TEXT for
+/// backward-compat; `to_db_str` matches the column constraint and every
+/// existing row's stored value. Wire shape is the same snake-case union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[ts(rename_all = "snake_case", export_to = "AutopilotRunStateKind.ts")]
+pub enum AutopilotRunState {
+    Implementing,
+    Finishing,
+    Completed,
+    Failed,
+    /// Terminal state set by the merged-PR auto-close sweep. The node row
+    /// has also been `archived` by then — `Merged` is purely a pipeline
+    /// marker so the sweep can fast-skip without re-fetching the GitHub
+    /// merge endpoint. Distinct from `Completed` (the agent PR'd the work)
+    /// and from `Failed`.
+    Merged,
+}
+
+impl AutopilotRunState {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Implementing => "implementing",
+            Self::Finishing => "finishing",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Merged => "merged",
+        }
+    }
+
+    /// Parse back from the DB column. Unknown strings degrade to
+    /// `Implementing` (the safest default; the sweep never re-fetches, so
+    /// an unknown row simply costs one extra GitHub round-trip the next
+    /// pass) rather than `None` — every call site wants a value.
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "implementing" => Self::Implementing,
+            "finishing" => Self::Finishing,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "merged" => Self::Merged,
+            _ => Self::Implementing,
+        }
+    }
+
+    /// The active states that occupy a mesh's concurrency slot.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Implementing | Self::Finishing)
+    }
+}
+
+impl serde::Serialize for AutopilotRunState {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(self.as_db_str())
+    }
+}
+
 /// The pipeline row for a node, if it is Autopilot-managed:
 /// `(issue_number, state, attempts)`. `Ok(None)` for hand-spawned nodes.
-pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<(i64, String, i32)>> {
+pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<(i64, AutopilotRunState, i32)>> {
     let db = get().lock().unwrap();
     let mut stmt = db.prepare(
         "SELECT issue_number, state, attempts FROM autopilot_runs WHERE node_id = ?1",
     )?;
     let mut rows = stmt.query_map(params![node_id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        let s: String = row.get(1)?;
+        Ok((
+            row.get(0)?,
+            AutopilotRunState::from_db_str(&s),
+            row.get(2)?,
+        ))
     })?;
     rows.next().transpose()
 }
 
 /// Advance a node's Autopilot pipeline state, optionally bumping the
 /// wrap-up attempt counter.
-pub fn set_autopilot_run_state(node_id: i64, state: &str, attempts: Option<i32>) -> SqlResult<()> {
+pub fn set_autopilot_run_state(
+    node_id: i64,
+    state: AutopilotRunState,
+    attempts: Option<i32>,
+) -> SqlResult<()> {
     let db = get().lock().unwrap();
+    let state_str = state.as_db_str();
     match attempts {
         Some(n) => db.execute(
             "UPDATE autopilot_runs SET state = ?1, attempts = ?2, \
              updated_at = datetime('now') WHERE node_id = ?3",
-            params![state, n, node_id],
+            params![state_str, n, node_id],
         )?,
         None => db.execute(
             "UPDATE autopilot_runs SET state = ?1, updated_at = datetime('now') \
              WHERE node_id = ?2",
-            params![state, node_id],
+            params![state_str, node_id],
         )?,
     };
     Ok(())
+}
+/// Record the wrap-up PR a completed run produced, so the merged-PR sweep
+/// can later find and close the node without re-deriving the branch.
+pub fn set_autopilot_run_pr(node_id: i64, pr_number: i64, pr_url: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE autopilot_runs SET pr_number = ?1, pr_url = ?2, \
+         updated_at = datetime('now') WHERE node_id = ?3",
+        params![pr_number, pr_url, node_id],
+    )?;
+    Ok(())
+}
+
+/// Completed runs on this mesh whose wrap-up PR is known and whose node is
+/// still on the grid — the merged-PR auto-close sweep's work list:
+/// `(node_id, pr_number)`.
+pub fn list_completed_autopilot_runs_with_pr(mesh_id: i64) -> SqlResult<Vec<(i64, i64)>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT r.node_id, r.pr_number FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE r.mesh_id = ?1 AND r.state = 'completed' \
+         AND r.pr_number IS NOT NULL AND a.status != 'archived'",
+    )?;
+    let rows = stmt.query_map(params![mesh_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
 }
 
 /// Remove a node's Autopilot ledger row. Called from the node-delete path
@@ -2196,6 +2306,23 @@ pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
         "SELECT node_id FROM autopilot_runs WHERE state IN ('implementing', 'finishing')",
     )?;
     let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// Every active run's `(node_id, state)` across all meshes — the frontend's
+/// autopilot-pill data (which nodes are piloted, and where in the pipeline
+/// each one is). Excludes archived nodes: their cards aren't on the grid.
+pub fn list_autopilot_run_states() -> SqlResult<Vec<(i64, AutopilotRunState)>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT r.node_id, r.state FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE a.status != 'archived'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let s: String = row.get(1)?;
+        Ok((row.get(0)?, AutopilotRunState::from_db_str(&s)))
+    })?;
     rows.collect()
 }
 

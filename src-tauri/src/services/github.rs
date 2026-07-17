@@ -893,6 +893,38 @@ impl GitHubClient {
         Ok(prs)
     }
 
+    /// Has this pull request been merged? Uses `GET /pulls/{n}/merge`, which
+    /// answers with a bare status: `204` = merged, `404` = not merged (or
+    /// closed without merging). Cheaper and less ambiguous than fetching the
+    /// full PR detail and combining `state` + `merged_at`.
+    pub fn pull_request_merged(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> Result<bool, GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}/merge",
+            owner, repo, pr_number
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let body = resp.text().unwrap_or_default();
+        Err(GitHubError::Api(status.as_u16(), body))
+    }
+
     /// Fetch a single PR's mergeability via the detail endpoint. The list
     /// endpoint omits `mergeable`/`mergeable_state`; only `GET /pulls/{n}`
     /// carries them. `mergeable` is `null` while GitHub is still computing

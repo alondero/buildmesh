@@ -52,6 +52,12 @@ static PILOTED: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new
 /// Per-node PTY tail. Entries exist only for piloted nodes.
 static TAILS: Lazy<Mutex<HashMap<i64, String>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// When each piloted node last produced PTY output. The launch watcher
+/// (`autopilot::launch`) reads this to detect output quiescence — "the CLI
+/// has finished drawing and is sitting idle at its input box".
+static LAST_OUTPUT: Lazy<Mutex<HashMap<i64, std::time::Instant>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// Start buffering PTY output for a node. Idempotent.
 pub fn register(node_id: i64) {
     PILOTED.lock().unwrap().insert(node_id);
@@ -67,6 +73,17 @@ pub fn is_piloted(node_id: i64) -> bool {
 pub fn unregister(node_id: i64) {
     PILOTED.lock().unwrap().remove(&node_id);
     TAILS.lock().unwrap().remove(&node_id);
+    LAST_OUTPUT.lock().unwrap().remove(&node_id);
+}
+
+/// Milliseconds since the node last produced PTY output, or `None` if it has
+/// produced none since registration (or isn't piloted).
+pub fn millis_since_last_output(node_id: i64) -> Option<u128> {
+    LAST_OUTPUT
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .map(|t| t.elapsed().as_millis())
 }
 
 /// PTY reader hook — called for every output chunk (see `agent::spawn`'s
@@ -76,6 +93,10 @@ pub fn on_output(node_id: i64, data: &str) {
     if !is_piloted(node_id) {
         return;
     }
+    LAST_OUTPUT
+        .lock()
+        .unwrap()
+        .insert(node_id, std::time::Instant::now());
     let mut tails = TAILS.lock().unwrap();
     let tail = tails.entry(node_id).or_default();
     tail.push_str(data);
