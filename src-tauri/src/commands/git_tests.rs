@@ -338,6 +338,73 @@ mod tests {
         assert!(local.path().join("remote-change.txt").exists());
     }
 
+    /// 2026-07-17 incident (pixelcache): a mesh whose `origin` was wired
+    /// URL-only — `remote.origin.url` present, `remote.origin.fetch`
+    /// refspec MISSING — reported "Already up to date" from the sidebar
+    /// Sync button while a terminal `git pull` in the same directory
+    /// pulled a five-days' backlog. Two compounding failures:
+    /// `git fetch origin` updated only FETCH_HEAD (no refspec → no
+    /// tracking-ref update), and git2's refspec-based upstream mapping
+    /// failed so the behind-count error was swallowed into `UpToDate`.
+    /// The command must instead fetch (explicit refspec), count via the
+    /// branch-config fallback, and fast-forward.
+    #[tokio::test]
+    async fn git_sync_pulls_when_remote_has_no_fetch_refspec() {
+        let remote = TempGitRepo::new();
+        fs::create_dir_all(remote.path()).unwrap();
+        git2::Repository::init_bare(remote.path()).unwrap();
+
+        let seed = TempGitRepo::new();
+        let seed_repo = init_git_repo(seed.path());
+        run_git(seed.path(), &["branch", "-M", "main"]);
+        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let local = TempGitRepo::new();
+        run_git_without_dir(&[
+            "clone",
+            "-b",
+            "main",
+            remote.path().to_str().unwrap(),
+            local.path().to_str().unwrap(),
+        ]);
+        // Recreate the incident config: URL-only remote. The clone wrote
+        // the standard refspec; drop it, and drop the now-unmappable
+        // tracking ref state back to the clone-time SHA (it's already
+        // there — the remote hasn't moved yet).
+        run_git(local.path(), &["config", "--unset-all", "remote.origin.fetch"]);
+
+        // Remote gains a commit AFTER the clone.
+        stage_file(&seed_repo, seed.path(), "remote-change.txt", "remote change");
+        commit_staged(&seed_repo, "add remote change");
+        run_git(seed.path(), &["push", "origin", "main"]);
+
+        let result = crate::commands::git::git_sync(local.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+
+        assert!(result.fetched, "expected fetch to succeed: {}", result.message);
+        assert!(
+            result.pulled,
+            "expected fast-forward pull despite the missing fetch refspec \
+             (got: {})",
+            result.message
+        );
+        assert_eq!(result.new_commits, 1, "message: {}", result.message);
+        assert!(local.path().join("remote-change.txt").exists());
+        // Confidence contract (ADR 0022): a successful manual Sync must
+        // stamp the freshness registry so a subsequent spawn within the
+        // TTL skips its own fetch. The spawn path's `spawn_can_skip_fetch`
+        // gate reads `time_since_success`, so that's the call we check.
+        assert!(
+            crate::services::fetch_freshness::time_since_success(local.path().to_str().unwrap())
+                < std::time::Duration::from_secs(60),
+            "manual Sync that pulled new commits must stamp the freshness \
+             registry — without it the user's confidence contract fails on \
+             the very next spawn"
+        );
+    }
+
     /// Regression test for issue #680 — the manual `git_sync` Tauri
     /// command must run inside `services::sync_lock::with_mesh_sync_lock`
     /// so a manual Sync click on a Mesh can't race against concurrent

@@ -45,27 +45,81 @@ fn set_local_origin(host_path: &Path, origin_path: &Path) {
 
 // ── Issue #213 acceptance criteria ─────────────────────────────────────────
 
-/// Acceptance criterion: "Pulling is skipped if the parent directory
-/// has uncommitted changes." A repo with a dirty working tree must
-/// report `SkippedDirty` and must NOT shell out to git at all.
+/// Acceptance criterion (issue #213, retargeted 2026-07-17): "Pulling is
+/// skipped if the parent directory has uncommitted changes" — the PULL,
+/// not the fetch. A dirty working tree must still fetch (a fetch never
+/// touches the working tree, and the remote-tracking ref it updates is
+/// what worktree nodes are cut from), then skip the fast-forward and
+/// report `FetchedButDirty`. Pre-2026-07-17 the dirty gate sat before
+/// the fetch, so a mesh whose root checkout stayed dirty never freshened
+/// `refs/remotes/*` on ANY path and new nodes went stale without bound.
 #[test]
-fn fetch_origin_skips_dirty_parent() {
+fn fetch_origin_fetches_but_skips_pull_when_parent_dirty() {
     let td = TestDir::new("autosync_dirty");
     let parent = td.path();
-    let _repo = init_repo_with_commit(parent, &[("README.md", "clean\n")]);
-    // Modify the tracked file WITHOUT committing — that's what
-    // makes the working tree dirty. (A `commit_file` would ADVANCE
-    // HEAD and leave the tree clean, which would defeat the test.)
+    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
+    std::fs::create_dir_all(&origin_dir).unwrap();
+
+    // Local "remote" one commit ahead — same fixture shape as
+    // `fetch_origin_fetches_and_fast_forwards_clean_local_remote`.
+    let status = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(&origin_dir)
+        .status()
+        .expect("git init --bare failed");
+    assert!(status.success());
+    let repo = init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+    set_local_origin(parent, &origin_dir);
+    let status = Command::new("git")
+        .args(["push", "-u", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push failed");
+    assert!(status.success());
+    commit_file(&repo, parent, "README.md", "v2\n");
+    let status = Command::new("git")
+        .args(["push", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push (v2) failed");
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(parent)
+        .status()
+        .expect("git reset failed");
+    assert!(status.success());
+    // Rewind the remote-tracking ref too, so the test can observe the
+    // fetch advancing it (push already moved it to v2 locally).
+    let v1 = repo.head().unwrap().peel_to_commit().unwrap().id();
+    repo.reference("refs/remotes/origin/main", v1, true, "test rewind")
+        .unwrap();
+
+    // Dirty the tree: modify the tracked file WITHOUT committing.
     std::fs::write(parent.join("README.md"), "edited-not-committed\n").unwrap();
-    let repo = git2::Repository::open(parent).unwrap();
-    let status = repo.statuses(None).unwrap();
-    assert!(
-        status.iter().any(|e| !e.status().is_ignored()),
-        "precondition: parent must be dirty"
-    );
 
     let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
-    assert_eq!(outcome, Ok(FetchOutcome::SkippedDirty));
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::FetchedButDirty { new_commits: 1 }),
+        "a dirty parent must still fetch, then skip only the ff-pull"
+    );
+
+    // The fetch must have advanced the remote-tracking ref (this is what
+    // a new worktree node is cut from)...
+    let tracking = repo
+        .find_reference("refs/remotes/origin/main")
+        .unwrap()
+        .target()
+        .unwrap();
+    assert_ne!(tracking, v1, "fetch must advance refs/remotes/origin/main");
+    // ...while the dirty working tree stays untouched.
+    let content = std::fs::read_to_string(parent.join("README.md")).unwrap();
+    assert_eq!(
+        content, "edited-not-committed\n",
+        "the skipped pull must not touch the dirty working tree"
+    );
 }
 
 /// A repo with no `origin` remote must skip silently — not error. A
@@ -602,8 +656,12 @@ fn fetch_outcome_advanced_ref_table() {
         reason: "x".into()
     }
     .advanced_ref());
+    // FetchedButDirty is only constructed when the count-behind found new
+    // commits, and the fetch that preceded it moved the remote-tracking
+    // refs — the warm pool must refresh onto the new SHA just as it does
+    // for the diverged case.
+    assert!(FetchedButDirty { new_commits: 1 }.advanced_ref());
     assert!(!UpToDate.advanced_ref());
-    assert!(!SkippedDirty.advanced_ref());
     assert!(!SkippedNoRemote.advanced_ref());
 }
 
@@ -621,8 +679,8 @@ fn sync_outcome_advanced_ref_table() {
         reason: "x".into()
     }
     .advanced_ref());
+    assert!(FetchedButDirty { new_commits: 1 }.advanced_ref());
     assert!(!UpToDate.advanced_ref());
-    assert!(!SkippedDirty.advanced_ref());
     assert!(!SkippedNoRemote.advanced_ref());
     assert!(!FetchFailed {
         reason: "x".into()
@@ -632,4 +690,95 @@ fn sync_outcome_advanced_ref_table() {
         reason: "x".into()
     }
     .advanced_ref());
+}
+
+// ── 2026-07-17 incident — URL-only remote (no fetch refspec) ────────────────
+//
+// A repo whose `.git/config` carries `remote.origin.url` but NO
+// `remote.origin.fetch` line (written by hand or by tooling that skipped
+// `git remote add`). Two independent failures compounded:
+//   1. `git fetch origin` stored the result only in FETCH_HEAD — the
+//      remote-tracking refs (what worktree nodes are cut from) never moved.
+//   2. git2's `branch_upstream_name` needs the refspec to map the branch to
+//      its tracking ref, so `commits_behind_upstream` errored and `do_sync`
+//      swallowed that into `UpToDate` — the manual Sync button reported
+//      "Already up to date" while `git pull` in a terminal pulled a
+//      five-days' backlog.
+
+/// The full incident reproduction: URL-only remote, branch tracking config
+/// present, remote one commit ahead, remote-tracking ref stale. The sync
+/// must fetch (advancing the tracking ref via the explicit refspec),
+/// count the commits behind (via the branch-config fallback in
+/// `upstream_oid_for_branch`), and fast-forward — reporting `Synced`,
+/// never "Already up to date".
+#[test]
+fn fetch_origin_syncs_when_remote_has_no_fetch_refspec() {
+    let td = TestDir::new("autosync_no_refspec");
+    let parent = td.path();
+    let name = td.path().file_name().unwrap().to_string_lossy().into_owned();
+    let origin_dir = td.path().parent().unwrap().join(format!("{}_origin", name));
+    std::fs::create_dir_all(&origin_dir).unwrap();
+
+    let status = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(&origin_dir)
+        .status()
+        .expect("git init --bare failed");
+    assert!(status.success());
+    let repo = init_repo_with_commit(parent, &[("README.md", "v1\n")]);
+    set_local_origin(parent, &origin_dir);
+    let status = Command::new("git")
+        .args(["push", "-u", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push failed");
+    assert!(status.success());
+    commit_file(&repo, parent, "README.md", "v2\n");
+    let status = Command::new("git")
+        .args(["push", "origin", "HEAD:main"])
+        .current_dir(parent)
+        .status()
+        .expect("git push (v2) failed");
+    assert!(status.success());
+    let status = Command::new("git")
+        .args(["reset", "--hard", "HEAD~1"])
+        .current_dir(parent)
+        .status()
+        .expect("git reset failed");
+    assert!(status.success());
+    let v1 = repo.head().unwrap().peel_to_commit().unwrap().id();
+
+    // Recreate the incident config: drop the fetch refspec entirely and
+    // rewind the tracking ref to the stale commit (the push above had
+    // advanced it as a side effect).
+    let status = Command::new("git")
+        .args(["config", "--unset-all", "remote.origin.fetch"])
+        .current_dir(parent)
+        .status()
+        .expect("git config --unset-all failed");
+    assert!(status.success());
+    repo.reference("refs/remotes/origin/main", v1, true, "test rewind")
+        .unwrap();
+
+    let outcome = fetch_origin(parent.to_str().unwrap(), "origin/main");
+    assert_eq!(
+        outcome,
+        Ok(FetchOutcome::Synced { new_commits: 1 }),
+        "a URL-only remote (no fetch refspec) must still sync — \
+         'Already up to date' here was the 2026-07-17 incident"
+    );
+
+    // Both the checkout and the remote-tracking ref must be at v2.
+    let content = std::fs::read_to_string(parent.join("README.md")).unwrap();
+    assert_eq!(content, "v2\n", "ff-pull must move the local branch forward");
+    let tracking = repo
+        .find_reference("refs/remotes/origin/main")
+        .unwrap()
+        .target()
+        .unwrap();
+    assert_ne!(
+        tracking, v1,
+        "the explicit refspec must advance refs/remotes/origin/main \
+         even with no remote.origin.fetch config"
+    );
 }

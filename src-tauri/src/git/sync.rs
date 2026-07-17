@@ -26,11 +26,16 @@ use std::time::Duration;
 /// is something the user might want to know about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchOutcome {
-    /// Parent repo has uncommitted changes; the pull is skipped per
-    /// issue #213's "skip if dirty" criterion. This is silent from the
-    /// user's perspective — the user clearly knows the working tree is
-    /// dirty, and we don't want to nag them on every spawn.
-    SkippedDirty,
+    /// Fetched `new_commits` commits but the fast-forward pull was
+    /// skipped because the parent repo has uncommitted changes
+    /// (issue #213's "skip if dirty" criterion, which applies to the
+    /// *pull* only — the fetch is always safe and MUST run so the
+    /// remote-tracking refs worktree nodes are cut from stay fresh;
+    /// gating the fetch on dirt starved them without bound, 2026-07-17
+    /// incident). Silent from the spawn's perspective: the new node is
+    /// cut from the just-fetched ref, and the user already knows their
+    /// own checkout is dirty.
+    FetchedButDirty { new_commits: u32 },
     /// No `origin` remote is configured. A purely local Mesh is a
     /// valid setup; we don't surface a toast for that.
     SkippedNoRemote,
@@ -73,7 +78,10 @@ impl FetchOutcome {
     pub(crate) fn fetched_ok(&self) -> bool {
         matches!(
             self,
-            Self::UpToDate | Self::Synced { .. } | Self::FetchedButDiverged { .. }
+            Self::UpToDate
+                | Self::Synced { .. }
+                | Self::FetchedButDiverged { .. }
+                | Self::FetchedButDirty { .. }
         )
     }
 
@@ -85,7 +93,10 @@ impl FetchOutcome {
     /// decision. Single-sourced here so the two sites stay in lockstep
     /// (issue #634).
     pub fn advanced_ref(&self) -> bool {
-        matches!(self, Self::Synced { .. } | Self::FetchedButDiverged { .. })
+        matches!(
+            self,
+            Self::Synced { .. } | Self::FetchedButDiverged { .. } | Self::FetchedButDirty { .. }
+        )
     }
 }
 
@@ -101,11 +112,15 @@ impl FetchOutcome {
 /// callers decide what to do with each variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SyncOutcome {
-    /// Repo has uncommitted changes; the pull is skipped per
-    /// issue #213's "skip if dirty" policy. Silent from the user's
-    /// perspective (the user knows the working tree is dirty; we
-    /// don't want to nag on every spawn or every Sync click).
-    SkippedDirty,
+    /// Fetched `new_commits` commits but the fast-forward pull was
+    /// skipped because the repo has uncommitted changes (issue #213's
+    /// "skip if dirty" policy — applied to the *pull* only). The fetch
+    /// half always runs: it never touches the working tree, and the
+    /// remote-tracking refs it updates are what worktree nodes are cut
+    /// from. Pre-2026-07-17 the dirty gate sat before the fetch, so a
+    /// mesh whose root checkout stayed dirty never freshened its refs
+    /// on ANY path (background worker, spawn, manual Sync click).
+    FetchedButDirty { new_commits: u32 },
     /// The named remote is not configured on the repo. A purely local
     /// Mesh is a valid state; we don't surface a warning for that.
     SkippedNoRemote,
@@ -158,6 +173,7 @@ impl SyncOutcome {
             Self::UpToDate
                 | Self::Synced { .. }
                 | Self::FetchedButDiverged { .. }
+                | Self::FetchedButDirty { .. }
                 | Self::PullTimedOut { .. }
         )
     }
@@ -170,7 +186,10 @@ impl SyncOutcome {
     /// variants (`FetchFailed`, `RepoUnusable`) — neither advanced the ref,
     /// and the caller can't usefully schedule a refresh pass on a failure.
     pub(crate) fn advanced_ref(&self) -> bool {
-        matches!(self, Self::Synced { .. } | Self::FetchedButDiverged { .. })
+        matches!(
+            self,
+            Self::Synced { .. } | Self::FetchedButDiverged { .. } | Self::FetchedButDirty { .. }
+        )
     }
 }
 
@@ -179,33 +198,44 @@ impl SyncOutcome {
 /// command (issue #274). Steps:
 ///
 /// 1. **Open the repo** at `host_path`. On failure → `RepoUnusable`.
-/// 2. **Dirty-check** (`unwrap_or(true)` = fail closed: an unreadable
-///    status call is treated as dirty, not as a green light to pull
-///    into a state we couldn't read). On dirty → `SkippedDirty`.
-/// 3. **Has-remote check.** If `find_remote(remote)` fails → `SkippedNoRemote`.
-/// 4. **`git fetch <remote> [<branch>]`.** On spawn failure or
-///    non-zero exit → `FetchFailed` with stderr. The `branch` arg
-///    narrows the fetch to a single refspec; pass `None` to fetch all
-///    remote refs. Narrowing is the spawn-time latency fix from
-///    `parse_branch_for_base_ref`; the manual `git_sync` passes `None`.
-/// 5. **Count-behind** via [`commits_behind_upstream`]. Treats "no
+/// 2. **Has-remote check.** If `find_remote(remote)` fails → `SkippedNoRemote`.
+/// 3. **`git fetch <remote> <refspec>`.** On spawn failure or
+///    non-zero exit → `FetchFailed` with stderr. The refspec is built
+///    explicitly (`+refs/heads/<branch>:refs/remotes/<remote>/<branch>`,
+///    or the `*` glob form when `branch` is `None`) so the remote-
+///    tracking refs are GUARANTEED to advance — a repo whose remote was
+///    wired URL-only (no `remote.<r>.fetch` config line) otherwise
+///    fetches into `FETCH_HEAD` only, leaving `refs/remotes/*` frozen
+///    (the 2026-07-17 pixelcache incident: manual Sync reported
+///    "Already up to date" while worktree nodes were cut from a
+///    five-day-old SHA). Narrowing to one branch is the spawn-time
+///    latency fix from `parse_branch_for_base_ref`; the manual
+///    `git_sync` passes `None`.
+/// 4. **Count-behind** via [`commits_behind_upstream`]. Treats "no
 ///    upstream" as `UpToDate` (most common cause: a fresh local-only
 ///    branch that just gained a remote via `git remote add` but
 ///    hasn't been pushed).
+/// 5. **Dirty-check** (`unwrap_or(true)` = fail closed: an unreadable
+///    status call is treated as dirty, not as a green light to pull
+///    into a state we couldn't read). On dirty → `FetchedButDirty`.
+///    The gate sits HERE — after the fetch, before the pull — because
+///    only the pull mutates the working tree. Gating the fetch on dirt
+///    (the pre-2026-07-17 shape) starved the remote-tracking refs on
+///    any mesh whose root checkout stayed dirty.
 /// 6. **`git pull --ff-only --no-rebase`.** The explicit `--no-rebase`
 ///    defeats a user's global `pull.rebase=true`, which would
 ///    otherwise turn this into a rebase and write conflict markers
 ///    on a diverged history (issue #213). The pull is the *only*
 ///    point in the algorithm that mutates the local branch, so the
-///    `SkippedDirty` skip above exists to make sure this pull is
+///    `FetchedButDirty` skip above exists to make sure this pull is
 ///    never asked to merge into a dirty tree.
 ///
-/// **Steps 1-4 are factored into [`do_fetch_only`]** (issue #446) so
-/// the PR-spawn fetch helper can reuse the open-repo + dirty-check +
-/// has-remote + `git fetch` chain WITHOUT the `commits_behind` /
-/// `git pull` tail — the PR-head fetch is a single-ref materialisation
-/// and must not mutate the mesh's currently-checked-out branch as a
-/// side effect of spawning a PR agent.
+/// **Steps 1-3 are factored into [`do_fetch_only`]** (issue #446) so
+/// the PR-spawn fetch helper can reuse the open-repo + has-remote +
+/// `git fetch` chain WITHOUT the `commits_behind` / `git pull` tail —
+/// the PR-head fetch is a single-ref materialisation and must not
+/// mutate the mesh's currently-checked-out branch as a side effect of
+/// spawning a PR agent.
 ///
 /// Caller responsibilities:
 /// - Open the repo / resolve the remote / decide whether to narrow
@@ -222,15 +252,14 @@ pub(crate) fn do_sync(
     branch: Option<&str>,
     timeout: Duration,
 ) -> SyncOutcome {
-    // Steps 1-4: open + dirty-check + has-remote + `git fetch`. The
-    // helper returns the same `SyncOutcome` variants we would have
-    // returned inline, so the early return is a literal rename of the
-    // old Step 1-4 ladder.
+    // Steps 1-3: open + has-remote + `git fetch`. The helper returns
+    // the same `SyncOutcome` variants we would have returned inline,
+    // so the early return is a literal rename of the old step ladder.
     if let Err(outcome) = do_fetch_only(host_path, remote, branch, timeout) {
         return outcome;
     }
 
-    // Re-open the repo for steps 5-6. The cost is a stat walk — we
+    // Re-open the repo for steps 4-6. The cost is a stat walk — we
     // paid it once in `do_fetch_only` and would pay it again here, but
     // threading the open repo through the `Err` channel would couple
     // the helper to its two consumers' needs.
@@ -243,7 +272,7 @@ pub(crate) fn do_sync(
         }
     };
 
-    // Step 5: count how many commits the local branch is behind. No
+    // Step 4: count how many commits the local branch is behind. No
     // upstream → treat as "nothing to pull" rather than an error.
     // Other `commits_behind_upstream` errors (perm denied on .git/HEAD,
     // corrupt object db, refdb lock contention) are real git2 errors
@@ -270,6 +299,29 @@ pub(crate) fn do_sync(
     };
     if new_commits == 0 {
         return SyncOutcome::UpToDate;
+    }
+
+    // Step 5: skip the PULL (not the fetch — that already ran) if the
+    // working tree is dirty. Fail-closed: a corrupt index or perm
+    // denied on .git is treated as dirty rather than as a green light
+    // to fast-forward into a state we couldn't read.
+    //
+    // We use `is_dirty_mirrors_git_status` here (not the strict `is_dirty`)
+    // because the user's contract at this gate is "is my tree dirty iff
+    // `git status` says so". `git status` honours `submodule.<path>.ignore`
+    // from `.git/config`, so a mesh with dirty submodules whose user has set
+    // `submodule.X.ignore = dirty` (very common in N64-recomp-style projects
+    // with build artifacts inside submodules) would otherwise be falsely
+    // blocked here. The strict helper is correct for the data-safety gates
+    // (close_safety, restore_to_base, prune badging) — see the helper's
+    // docstring for the use-site split.
+    if crate::git::primitives::is_dirty_mirrors_git_status(&repo).unwrap_or(true) {
+        tracing::info!(
+            "do_sync: {} is {} behind but has uncommitted changes; fetched, skipping pull",
+            host_path,
+            new_commits
+        );
+        return SyncOutcome::FetchedButDirty { new_commits };
     }
 
     // Step 6: `git pull --ff-only --no-rebase`. The `--no-rebase` is
@@ -320,10 +372,19 @@ pub(crate) fn do_sync(
 }
 
 /// The fetch-only half of [`do_sync`] (issue #446): open the repo,
-/// dirty-check, has-remote, `git fetch`. Returns the same
-/// [`SyncOutcome`] non-success variants [`do_sync`] would have
-/// returned at the same step, so [`do_sync`] can early-return without
-/// re-implementing the mapping. Returns `Ok(())` on a clean fetch.
+/// has-remote, `git fetch`. Returns the same [`SyncOutcome`]
+/// non-success variants [`do_sync`] would have returned at the same
+/// step, so [`do_sync`] can early-return without re-implementing the
+/// mapping. Returns `Ok(())` on a clean fetch.
+///
+/// **No dirty-check.** A fetch only writes `.git/FETCH_HEAD` and
+/// `refs/remotes/*` — it never touches the working tree, so it is
+/// always safe on a dirty checkout. The dirty gate lives in
+/// [`do_sync`] Step 5, guarding only the `git pull` that follows.
+/// (Pre-2026-07-17 the gate sat here, which meant a mesh whose root
+/// checkout stayed dirty never updated its remote-tracking refs on
+/// any path — and worktree nodes, which are cut from those refs, went
+/// stale without bound.)
 ///
 /// **Why this exists:** [`do_sync`]’s Step 6 (`git pull --ff-only
 /// --no-rebase`) mutates the mesh's currently-checked-out branch. For
@@ -338,10 +399,11 @@ pub(crate) fn do_sync(
 /// the fetch-only chain lets the PR-spawn path use the shared
 /// algorithm without inheriting the pull tail.
 ///
-/// **Note:** this helper intentionally does NOT pass a `--` separator
-/// to `git fetch`. The fetch-only caller ([`fetch_single_ref`])
-/// rejects `-`-prefixed refs up front for the same security reason
-/// the old shell-out had `cmd.arg("--")` — see that fn's doc.
+/// **Note:** this helper does NOT pass a `--` separator to
+/// `git fetch`. The branch is embedded into an explicit refspec whose
+/// first character is `+`, so a `-`-prefixed value can never reach
+/// git's option parser; the fetch-only caller ([`fetch_single_ref`])
+/// additionally rejects `-`-prefixed refs up front — see that fn's doc.
 pub(crate) fn do_fetch_only(
     host_path: &str,
     remote: &str,
@@ -365,43 +427,49 @@ pub(crate) fn do_fetch_only(
         }
     };
 
-    // Step 2: skip if dirty. Fail-closed: a corrupt index or perm
-    // denied on .git is treated as dirty rather than as a clean
-    // green light to fetch into a state we couldn't read.
-    //
-    // We use `is_dirty_mirrors_git_status` here (not the strict `is_dirty`)
-    // because the user's contract at the fetch gate is "is my tree dirty iff
-    // `git status` says so". `git status` honours `submodule.<path>.ignore`
-    // from `.git/config`, so a mesh with dirty submodules whose user has set
-    // `submodule.X.ignore = dirty` (very common in N64-recomp-style projects
-    // with build artifacts inside submodules) would otherwise be falsely
-    // blocked here. The strict helper is correct for the data-safety gates
-    // (close_safety, restore_to_base, prune badging) — see the helper's
-    // docstring for the use-site split.
-    if crate::git::primitives::is_dirty_mirrors_git_status(&repo).unwrap_or(true) {
-        tracing::info!(
-            "do_fetch_only: {} has uncommitted changes; skipping",
-            host_path
-        );
-        return Err(SyncOutcome::SkippedDirty);
-    }
+    // Step 2: skip if the remote is missing. A Mesh may be a purely
+    // local repo (not yet pushed) and that's a valid state. Keep the
+    // remote handle — we inspect its configured fetch refspecs below.
+    let remote_handle = match repo.find_remote(remote) {
+        Ok(r) => r,
+        Err(_) => {
+            tracing::info!(
+                "do_fetch_only: {} has no '{}' remote; skipping",
+                host_path,
+                remote
+            );
+            return Err(SyncOutcome::SkippedNoRemote);
+        }
+    };
 
-    // Step 3: skip if the remote is missing. A Mesh may be a purely
-    // local repo (not yet pushed) and that's a valid state.
-    if repo.find_remote(remote).is_err() {
-        tracing::info!(
-            "do_fetch_only: {} has no '{}' remote; skipping",
-            host_path,
-            remote
-        );
-        return Err(SyncOutcome::SkippedNoRemote);
-    }
-
-    // Step 4: `git fetch <remote> [<branch>]`. Narrowing to a single
+    // Step 3: `git fetch <remote> <refspec>`. Narrowing to a single
     // branch keeps cold-spawn latency down on repos with hundreds of
     // refs (the spawn-time call site always passes a branch; the
     // manual `git_sync` passes `None` for the all-refs default).
     //
+    // The refspec is always explicit so the remote-tracking refs are
+    // guaranteed to advance. A bare `git fetch <remote> <branch>` only
+    // updates `refs/remotes/<remote>/<branch>` *opportunistically* —
+    // when the remote's configured `remote.<r>.fetch` refspec covers
+    // it. A remote wired URL-only (config written by hand or by
+    // tooling, no fetch line at all — the 2026-07-17 pixelcache
+    // incident) fetches into FETCH_HEAD and updates NOTHING: the sync
+    // then reports "Already up to date" forever while worktree nodes
+    // are cut from a frozen ref. The `+` prefix mirrors the default
+    // refspec's force marker so a rewritten remote branch still
+    // updates, and also guarantees a `-`-prefixed branch value can't
+    // reach git's option parser.
+    let refspec = match branch {
+        Some(b) => format!("+refs/heads/{}:refs/remotes/{}/{}", b, remote, b),
+        // All-refs fetch: honour the remote's own refspec config when it
+        // has one (it may deliberately narrow or remap); supply the
+        // standard glob only when the config is missing entirely.
+        None if remote_handle.fetch_refspecs().map(|r| r.is_empty()).unwrap_or(true) => {
+            format!("+refs/heads/*:refs/remotes/{}/*", remote)
+        }
+        None => String::new(),
+    };
+    drop(remote_handle);
     // **Timeout (issue #762):** `git fetch` can wedge indefinitely on a
     // half-open connection. `run_command_with_timeout` kills the child
     // and returns `Err` if it overruns `FETCH_TIMEOUT`. The wrapped
@@ -411,13 +479,13 @@ pub(crate) fn do_fetch_only(
     tracing::info!(
         "do_fetch_only: running git fetch {} {} in {}",
         remote,
-        branch.unwrap_or("(all refs)"),
+        if refspec.is_empty() { "(configured refspecs)" } else { &refspec },
         host_path
     );
     let mut fetch_builder = git_command();
     fetch_builder.arg("fetch").arg(remote);
-    if let Some(b) = branch {
-        fetch_builder.arg(b);
+    if !refspec.is_empty() {
+        fetch_builder.arg(&refspec);
     }
     fetch_builder.current_dir(host_path);
     let fetch_output = match run_command_with_timeout(
@@ -437,7 +505,7 @@ pub(crate) fn do_fetch_only(
         tracing::warn!(
             "do_fetch_only: git fetch {} {} failed: {}",
             remote,
-            branch.unwrap_or(""),
+            if refspec.is_empty() { "(configured refspecs)" } else { &refspec },
             trimmed
         );
         return Err(SyncOutcome::FetchFailed {
@@ -629,12 +697,25 @@ pub(crate) fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<
     }
     let branch_name = head.shorthand()?;
     let local_refname = format!("refs/heads/{}", branch_name);
-    let upstream_refname = repo.branch_upstream_name(&local_refname).ok()?;
-    let upstream_str = upstream_refname.as_str()?;
-    // Format: refs/remotes/<remote>/<branch...>
-    upstream_str
-        .strip_prefix("refs/remotes/")
-        .and_then(|s| s.split_once('/').map(|(r, _)| r.to_string()))
+    if let Ok(buf) = repo.branch_upstream_name(&local_refname) {
+        // Format: refs/remotes/<remote>/<branch...>
+        if let Some(remote) = buf
+            .as_str()
+            .and_then(|s| s.strip_prefix("refs/remotes/"))
+            .and_then(|s| s.split_once('/'))
+            .map(|(r, _)| r.to_string())
+        {
+            return Some(remote);
+        }
+    }
+    // `branch_upstream_name` maps through the remote's fetch refspec, so a
+    // URL-only remote (no `remote.<r>.fetch` config — 2026-07-17 pixelcache
+    // incident) makes it error even though `branch.<b>.remote` is set. Read
+    // the config key directly, exactly as `git pull` does.
+    repo.config()
+        .ok()?
+        .get_string(&format!("branch.{}.remote", branch_name))
+        .ok()
 }
 
 /// Fetch from the configured upstream and fast-forward the parent
@@ -668,8 +749,12 @@ pub(crate) fn current_branch_upstream_remote(repo: &git2::Repository) -> Option<
 ///
 /// **This function never blocks the spawn.** The caller (`spawn.rs`)
 /// is expected to call it as a best-effort step and continue with
-/// local-HEAD fallback on any non-`Ok(Synced|_UpToDate|_Skipped*)`
-/// outcome.
+/// local-HEAD fallback on any outcome where the fetch itself failed
+/// (the two `Err` variants) or where new commits couldn't be applied
+/// to the working tree (`FetchedButDiverged`). The four "success" and
+/// skip variants (`Synced`, `UpToDate`, `FetchedButDirty`,
+/// `SkippedNoRemote`) all leave the spawn from at least as fresh a
+/// ref as the fetch — the worktree node is current either way.
 pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, FetchError> {
     let host_root = to_host_path(project_root);
 
@@ -715,7 +800,9 @@ pub fn fetch_origin(project_root: &str, base_ref: &str) -> Result<FetchOutcome, 
         SPAWN_FETCH_TIMEOUT,
     );
     Ok(match outcome {
-        SyncOutcome::SkippedDirty => FetchOutcome::SkippedDirty,
+        SyncOutcome::FetchedButDirty { new_commits } => {
+            FetchOutcome::FetchedButDirty { new_commits }
+        }
         SyncOutcome::SkippedNoRemote => FetchOutcome::SkippedNoRemote,
         SyncOutcome::UpToDate => FetchOutcome::UpToDate,
         SyncOutcome::Synced { new_commits } => FetchOutcome::Synced { new_commits },

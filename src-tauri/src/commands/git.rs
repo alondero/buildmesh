@@ -363,13 +363,12 @@ pub struct GitSyncResult {
 /// translate the shared `SyncOutcome` back to the `GitSyncResult`
 /// shape the frontend expects (the wire type is unchanged).
 ///
-/// Note: the shared helper performs a dirty-check and skips silently
-/// (returning `SkippedDirty` → "Skipped: working tree has
-/// uncommitted changes" in the result). This is new behaviour for
-/// `git_sync`; the pre-#274 inline code would have gone ahead and
-/// tried the fetch + ff-pull anyway, then reported a ff-pull
-/// failure. The new message is more informative and avoids the
-/// unnecessary network round-trip on a dirty click.
+/// Note: the shared helper always runs the fetch (a fetch never
+/// touches the working tree) and only skips the fast-forward pull
+/// when the tree is dirty (returning `FetchedButDirty` → "Fetched N
+/// new commits — fast-forward skipped: working tree has uncommitted
+/// changes"). A manual Sync click on a dirty mesh therefore still
+/// freshens the remote-tracking refs that worktree nodes are cut from.
 ///
 /// **Fetch scope trade-off:** the pre-#274 inline code did
 /// `git fetch` with NO arguments, which git resolves to "fetch the
@@ -442,7 +441,11 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
     // matches the spawn-time `FetchOutcome::advanced_ref()` — both kept in
     // lockstep on `git::sync::SyncOutcome` / `git::sync::FetchOutcome`
     // (issue #634).
-    if outcome.advanced_ref() {
+    // The `is_initialized` guard keeps this hermetic under `cargo test`:
+    // `db::get()` panics on an uninitialized global DB, and a filtered test
+    // run may execute `git_sync` before any DB-initializing test has run.
+    // In production the DB is always initialized at startup.
+    if outcome.advanced_ref() && crate::db::is_initialized() {
         if let Ok(mesh) = crate::db::get_mesh_by_path(&path) {
             let mesh_id = mesh.id;
             std::thread::spawn(move || {
@@ -457,19 +460,22 @@ fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
 /// Map a [`crate::git::sync::SyncOutcome`] to the [`GitSyncResult`]
 /// shape the frontend expects from the `git_sync` Tauri command. The
 /// four wire fields are unchanged; the messages match the prior
-/// `format!` strings where the variant maps cleanly, and introduce a
-/// clear message for the two skip variants (`SkippedDirty`,
-/// `SkippedNoRemote`) that the pre-#274 inline code never produced.
+/// `format!` strings where the variant maps cleanly.
 fn sync_outcome_to_git_sync_result(
     outcome: crate::git::sync::SyncOutcome,
 ) -> GitSyncResult {
     use crate::git::sync::SyncOutcome;
     match outcome {
-        SyncOutcome::SkippedDirty => GitSyncResult {
-            fetched: false,
+        SyncOutcome::FetchedButDirty { new_commits } => GitSyncResult {
+            fetched: true,
             pulled: false,
-            new_commits: 0,
-            message: "Skipped: working tree has uncommitted changes".to_string(),
+            new_commits,
+            message: format!(
+                "Fetched {} new commit{}; fast-forward skipped: working tree has \
+                 uncommitted changes",
+                new_commits,
+                plural_s(new_commits)
+            ),
         },
         SyncOutcome::SkippedNoRemote => GitSyncResult {
             fetched: false,
@@ -490,7 +496,7 @@ fn sync_outcome_to_git_sync_result(
             message: format!(
                 "Pulled {} new commit{}",
                 new_commits,
-                if new_commits == 1 { "" } else { "s" }
+                plural_s(new_commits)
             ),
         },
         SyncOutcome::FetchedButDiverged { new_commits, reason } => GitSyncResult {
@@ -500,7 +506,7 @@ fn sync_outcome_to_git_sync_result(
             message: format!(
                 "Fetched {} new commit{} but fast-forward failed: {}",
                 new_commits,
-                if new_commits == 1 { "" } else { "s" },
+                plural_s(new_commits),
                 reason
             ),
         },
@@ -516,7 +522,7 @@ fn sync_outcome_to_git_sync_result(
             message: format!(
                 "Fetched {} new commit{} but pull timed out: {}",
                 new_commits,
-                if new_commits == 1 { "" } else { "s" },
+                plural_s(new_commits),
                 reason
             ),
         },
@@ -533,6 +539,12 @@ fn sync_outcome_to_git_sync_result(
             message: format!("Repository unusable: {}", reason),
         },
     }
+}
+
+/// `""` for `n == 1`, `"s"` otherwise. Used four times in
+/// `sync_outcome_to_git_sync_result` for the "N new commit[s]" wording.
+fn plural_s(n: u32) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 // ── Mesh health detection (issue #231) ──────────────────────────────────────

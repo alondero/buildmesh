@@ -1044,7 +1044,9 @@ pub async fn spawn_agent_inner(
                 let fetch_outcome: &'static str = match &sync_result {
                     Ok(crate::git::sync::FetchOutcome::Synced { .. }) => "ok:synced",
                     Ok(crate::git::sync::FetchOutcome::UpToDate) => "ok:up_to_date",
-                    Ok(crate::git::sync::FetchOutcome::SkippedDirty) => "skip:dirty",
+                    Ok(crate::git::sync::FetchOutcome::FetchedButDirty { .. }) => {
+                        "ok:fetched_dirty"
+                    }
                     Ok(crate::git::sync::FetchOutcome::SkippedNoRemote) => "skip:no_remote",
                     Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. }) => "ok:diverged",
                     Err(_) => "err",
@@ -1766,7 +1768,7 @@ pub async fn spawn_agent_inner(
 /// listens for the event and shows a non-fatal warning toast.
 ///
 /// Per issue #213:
-/// - `SkippedDirty`, `SkippedNoRemote`, `UpToDate`, `Synced` are silent.
+/// - `FetchedButDirty`, `SkippedNoRemote`, `UpToDate`, `Synced` are silent.
 /// - `FetchedButDiverged`, `FetchFailed`, `RepoUnusable` emit a
 ///   warning so the user knows the spawn fell back to local HEAD.
 ///
@@ -1778,9 +1780,15 @@ fn emit_sync_outcome_event(
     outcome: Result<crate::git::sync::FetchOutcome, crate::git::sync::FetchError>,
 ) {
     let (event_name, payload) = match outcome {
-        Ok(crate::git::sync::FetchOutcome::SkippedDirty) => {
+        Ok(crate::git::sync::FetchOutcome::FetchedButDirty { new_commits }) => {
+            // Silent, like Synced/UpToDate: the fetch reached the remote and
+            // advanced the tracking refs the worktree is cut from — the new
+            // node IS fresh. Only the parent checkout's fast-forward was
+            // skipped, and the user already knows their own tree is dirty.
             tracing::info!(
-                "spawn_agent_inner: auto-sync skipped (parent dirty) for session {}",
+                "spawn_agent_inner: auto-sync fetched {} commit(s) but skipped the pull \
+                 (parent dirty) for session {}",
+                new_commits,
                 session_id
             );
             return;
@@ -2954,22 +2962,19 @@ mod tests {
         );
     }
 
-    /// Dirty-skip pin (issue #446 acceptance #2): a parent repo with
-    /// uncommitted changes must skip the fetch entirely rather than let
-    /// `git fetch` run into a dirty tree. Before the refactor, the
-    /// shell-out path skipped no checks and would have raced on
-    /// `.git/FETCH_HEAD` against a half-written working tree; after the
-    /// consolidation onto `do_fetch_only`, the PR-spawn fetch inherits the
-    /// same dirty-handling the base-ref fetch
-    /// (`fetch_origin_skips_dirty_parent`) already enforces. Pin the
-    /// contract so a future refactor that re-introduces the shell-out path
-    /// fails this test.
+    /// Dirty-parent pin (issue #446 acceptance #2, inverted 2026-07-17): a
+    /// parent repo with uncommitted changes must STILL fetch the PR head.
+    /// A `git fetch` never touches the working tree — the pre-2026-07-17
+    /// dirty-skip meant a mesh whose root checkout stayed dirty silently
+    /// fell back to `base_ref` on every PR spawn, cutting the worktree
+    /// from the wrong commits. Pin the new contract so a future refactor
+    /// that re-introduces a pre-fetch dirty gate fails this test.
     ///
     /// `is_dirty` includes untracked files, so writing one to the freshly-
     /// init'd local repo is enough to dirty it — no need to seed a tracked
     /// file first.
     #[test]
-    fn fetch_single_ref_skips_dirty_parent() {
+    fn fetch_single_ref_fetches_despite_dirty_parent() {
         let (local, _bare) = init_same_repo_fixture();
         // Precondition: the fixture's local repo must start clean, then we
         // make it dirty with an untracked file.
@@ -2983,16 +2988,25 @@ mod tests {
             "precondition: writing an untracked file must dirty the repo"
         );
 
-        // Without the dirty-skip, this would have shelled out to
-        // `git fetch origin -- feat/420-pr-spawn` and returned true —
-        // racing the dirty working tree against the fetch lock. With the
-        // refactor, `do_fetch_only` returns `SkippedDirty` and the wrapper
-        // maps it to `false`.
         let ok = fetch_single_ref(local.path().to_str().unwrap(), "feat/420-pr-spawn");
         assert!(
-            !ok,
-            "fetch_single_ref must return false on a dirty parent (do_fetch_only's \
-             SkippedDirty → false mapping; the spawn falls back to base_ref)"
+            ok,
+            "fetch_single_ref must fetch on a dirty parent — a fetch never \
+             touches the working tree, and skipping cut PR worktrees from \
+             stale refs"
+        );
+        // The head ref must be materialised so the worktree can be cut
+        // from it — the whole point of the fetch.
+        let repo = git2::Repository::open(local.path()).unwrap();
+        assert!(
+            repo.find_reference("refs/remotes/origin/feat/420-pr-spawn")
+                .is_ok(),
+            "the fetch must materialise refs/remotes/origin/<head_ref>"
+        );
+        // And the dirty marker must be untouched.
+        assert_eq!(
+            std::fs::read_to_string(local.path().join("dirty-marker.txt")).unwrap(),
+            "uncommitted\n"
         );
     }
 
