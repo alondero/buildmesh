@@ -21,6 +21,16 @@
  *     emits `provider-list-changed` on upsert/remove so a toggled or
  *     removed provider's meter updates without a manual Refresh click.
  *
+ * Cache staleness indicator (issue follow-up):
+ *   The header also renders a "Refreshed X ago" label next to the
+ *   count + Refresh button. The backend's `get_provider_meters` has a
+ *   5-minute TTL (#574) so a fresh read may be served from cache
+ *   without re-hitting each provider — the indicator tells the user
+ *   how stale their view could possibly be. It's set only on a
+ *   SUCCESSFUL load (initial mount, cross-surface invalidation, manual
+ *   Refresh); a failed refresh leaves the previous timestamp in place
+ *   so the label continues to refer to the last known-good moment.
+ *
  * Read-only by design (issue #601): the tab has no Edit-credentials /
  * enable-toggle / Remove affordance. Those live on the Settings-side
  * AccountCard, where the user goes to actually change something.
@@ -49,7 +59,7 @@
  *      exactly like the Git Issues/PRs/Archive tabs.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import * as api from '../../lib/tauri';
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
@@ -61,6 +71,7 @@ import {
   LoadingState,
   RefreshControl,
 } from '../shared/Spinner';
+import { formatRelativeAge } from '../../lib/time';
 
 export function UsageTab() {
   const [meters, setMeters] = useState<ProviderMeters[] | null>(null);
@@ -77,6 +88,13 @@ export function UsageTab() {
   // disabled. The flag is set synchronously before the await so React
   // renders the busy state before the IPC roundtrip.
   const [isRefreshing, setIsRefreshing] = useState(false);
+  // Wall-clock timestamp of the last successful load. Updated only when
+  // `loadMeters` resolves without throwing — a failed refresh leaves the
+  // previous timestamp in place so the staleness indicator continues
+  // to point at the last known-good moment. `null` until the very
+  // first successful load completes (the header hides the indicator
+  // during the initial loading state and after a first-load rejection).
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
   const loadMeters = useCallback(async (force: boolean) => {
     try {
@@ -84,6 +102,13 @@ export function UsageTab() {
         api.getProviderMeters(force),
         api.getProviderAccounts(),
       ]);
+      // Stamp the indicator FIRST so the timestamp describes the data
+      // we're about to set. JS is single-threaded through the await
+      // resolve + these setStates, so there is no race — either all
+      // three setStates commit (and the indicator correctly reflects
+      // them) or the `Promise.all` rejects and none of them do (and
+      // the previous timestamp stays in place).
+      setLastRefreshedAt(new Date());
       setMeters(meterRows);
       setAccounts(accountRows);
       setError(null);
@@ -109,6 +134,21 @@ export function UsageTab() {
   // mounted. Same hook every other Probe tab uses — module-scope event-name
   // constant lives in `useProviderListInvalidation.ts` (Rust+TS drift guard).
   useProviderListInvalidation(() => { void loadMeters(false); });
+
+  // Tick once a second so the "Refreshed X ago" label updates without
+  // a re-fetch. Cheap (one no-op render), and only mounted while the
+  // tab is alive — the cleanup drops the interval when the tab
+  // unmounts. `now` is the only piece of state this drives; `formatRelativeAge`
+  // is pure, so we don't need to track `lastRefreshedAt` in a ref. The
+  // 1s cadence is the smallest grain we display ("Ns ago"); the
+  // higher-grain labels ("Xm ago") tick on minute boundaries for free
+  // because the render recomputes from the fresh `Date.now()`.
+  const [, setTicker] = useState(0);
+  useEffect(() => {
+    if (lastRefreshedAt === null) return;
+    const id = window.setInterval(() => setTicker((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [lastRefreshedAt]);
 
   // First-load placeholder. Only renders before the very first IPC
   // settles — after that, the body renders either the error banner or
@@ -149,14 +189,44 @@ export function UsageTab() {
     }
   };
 
+  // Staleness indicator values. Computed every render so the 1s tick
+  // effect can drive a re-render with a fresh `now`. Both are `null`
+  // until the first successful load completes — the header hides the
+  // indicator entirely in that window (the LoadingState placeholder
+  // is showing anyway, and a first-load rejection has no trustworthy
+  // timestamp to point at).
+  const refreshedRelative = lastRefreshedAt
+    ? formatRelativeAge(lastRefreshedAt, new Date(), { granularity: 'second' })
+    : null;
+  const refreshedAbsolute = lastRefreshedAt
+    ? lastRefreshedAt.toLocaleTimeString()
+    : null;
+
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border-subtle">
-        {rows.length > 0 && (
-          <span className="text-xs text-text-muted">
-            {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
-          </span>
-        )}
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border-subtle">
+        <div className="flex items-center gap-2 min-w-0">
+          {rows.length > 0 && (
+            <span className="text-xs text-text-muted shrink-0">
+              {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
+            </span>
+          )}
+          {refreshedRelative !== null && (
+            <span
+              className="text-2xs text-text-muted/80 shrink-0"
+              data-testid="usage-last-refreshed"
+            >
+              <time
+                dateTime={lastRefreshedAt!.toISOString()}
+                aria-label={`Last refreshed at ${refreshedAbsolute}`}
+                title={refreshedAbsolute!}
+                className="cursor-default"
+              >
+                {`Refreshed ${refreshedRelative}`}
+              </time>
+            </span>
+          )}
+        </div>
         <RefreshControl
           onRefresh={handleRefresh}
           isRefreshing={isRefreshing}

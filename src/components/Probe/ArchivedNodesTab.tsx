@@ -66,19 +66,17 @@ import {
   RefreshControl,
 } from '../shared/Spinner';
 import { mapBackendProviders } from '../../lib/groups';
+import { formatRelativeAge } from '../../lib/time';
 
+// The Archive tab renders a `date` fallback for items older than 30
+// days (the historical "days never reset" convention). The shared
+// helper floors at 24h + `days` indefinitely, so we only delegate
+// the first four tiers and handle `days >= 30` locally.
 function timeAgo(isoString: string): string {
-  const now = Date.now();
-  const then = new Date(isoString).getTime();
-  const diffMs = now - then;
-  const minutes = Math.floor(diffMs / 60000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(isoString).toLocaleDateString();
+  const then = new Date(isoString);
+  const days = Math.floor((Date.now() - then.getTime()) / (24 * 60 * 60 * 1000));
+  if (days >= 30) return then.toLocaleDateString();
+  return formatRelativeAge(then, new Date());
 }
 
 // Mirror the ProviderInfo wire shape with only the columns the picker

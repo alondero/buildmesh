@@ -8,6 +8,7 @@ import {
 } from "../api";
 import { AppBar, CenterNote, PulseDots } from "../ui";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
+import { formatRelativeAge } from "../../lib/time";
 
 type Props = {
   mesh: Mesh;
@@ -169,13 +170,5 @@ export default function ArchivedNodesScreen({ mesh, onBack, onResumed }: Props) 
 }
 
 function timeAgo(iso: string): string {
-  const date = new Date(iso);
-  const diffMs = Date.now() - date.getTime();
-  const min = Math.floor(diffMs / 60000);
-  if (min < 1) return "just now";
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const d = Math.floor(hr / 24);
-  return `${d}d ago`;
+  return formatRelativeAge(new Date(iso), new Date());
 }
