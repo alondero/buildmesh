@@ -7,7 +7,7 @@
 
 use crate::db;
 use crate::env;
-use crate::services::transcript_reader::{encode_path, first_text_block, is_synthetic_message};
+use crate::services::transcript_reader::{encode_path, first_text_block, is_synthetic_message, truncate};
 use serde::Serialize;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -50,19 +50,6 @@ fn strip_tags(input: &str) -> String {
         }
     }
     result.trim().to_string()
-}
-
-/// Truncate a string to at most `max` characters, appending "…" if truncated.
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &s[..end])
-    }
 }
 
 /// Parse a JSONL session file to extract the first real user message and metadata.
@@ -281,6 +268,21 @@ mod tests {
     fn truncate_respects_boundary() {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world this is long", 11), "hello world…");
+    }
+
+    #[test]
+    fn truncate_respects_utf8_char_boundary() {
+        // "héllo" — the é is a 2-byte UTF-8 char, so "h" sits at byte 0, "é"
+        // starts at byte 1 (and ends at byte 3), "l" at byte 3, and the final
+        // bytes total 6. Asking for max=2 would land inside the é and is the
+        // classic naive `&s[..max]` panic case. `truncate` must step back to
+        // the next char boundary (byte 1) and append the ellipsis.
+        assert_eq!(truncate("héllo", 2), "h…");
+        // Asking for max=4 lands mid-é too (bytes 0..4 cross both halves),
+        // so the safe end is byte 3 and the result is "hél" + ellipsis.
+        assert_eq!(truncate("héllo", 4), "hél…");
+        // String already short enough for max → passes through untouched.
+        assert_eq!(truncate("héllo", 10), "héllo");
     }
 
     #[test]
