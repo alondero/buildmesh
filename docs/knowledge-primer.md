@@ -183,6 +183,8 @@ Event-driven agent provisioning: a mesh with `autopilot_enabled` is polled every
 
 - Logs written to `buildmesh.log` via `tracing-appender` (not console)
 - Panic hook writes to `logs/panic.log` with thread name, thread ID, and full backtrace
+- **`panic.log` vs `panic_early.log`** — two hooks, two files (`lib.rs:41-128` + `lib.rs:348-382`). The early hook is installed in `run()` BEFORE Tauri setup so it catches panics during Tauri-init that the main hook (installed later in `setup()`) can't. Bundle-id is derived from the binary name (`buildmesh-dev.exe` → `com.alond.buildmesh.dev`), so dev-profile crashes don't pollute the stable hub's logs. Both hooks `flush()` + `sync_all()` because `panic = "abort"` kills the process via `__fastfail` before the OS file buffer flushes.
+- **`panic.log` is invisible to `buildmesh.log` pattern scanning.** The main panic hook writes to the file + `eprintln!`s but never pushes to the tracing pipeline. `/verify`'s full-tier log-scan (issue #158) tails `panic.log` and `panic_early.log` separately and treats any new line as an unconditional fail; the `scripts/run-dev.ps1` and `scripts/run-dev.sh` launchers also fast-fail on the same condition so a panic-only crash can't masquerade as a successful launch.
 - `_guard` from `tracing_appender::non_blocking` is leaked with `Box::leak` to live for app lifetime — dropping it would stop logging
 
 ## Environment Detection
