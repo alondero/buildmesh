@@ -8,6 +8,7 @@ import {
   createNode,
   eventsWsUrl,
   isAuthError,
+  isRateLimited,
   listMeshes,
   listNodes,
   listProviders,
@@ -624,6 +625,14 @@ function useWsEvents(onEvent: () => void, onAuthError: () => void) {
           onAuthErrorRef.current();
           return;
         }
+        // Issue #552: a 429 from the mint is a server pacing signal, NOT a
+        // connectivity failure. We deliberately do NOT fall through to the
+        // 1/2/4/8s reconnect ladder here — the helper's own bounded wait
+        // already gave the rate-limit window its best shot at draining, so
+        // a second 429 is genuine oversaturation. The 5s poll that backs
+        // this screen still surfaces new state, so a brief stall is
+        // invisible to the user; stop reconnecting silently.
+        if (isRateLimited(e)) return;
         scheduleReconnect();
         return;
       }

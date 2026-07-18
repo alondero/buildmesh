@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { AgentNode, isAuthError, terminalWsUrl } from "../api";
+import { AgentNode, isAuthError, isRateLimited, terminalWsUrl } from "../api";
 import { attachTouchPan } from "./attachTouchPan";
 import { QUICK_KEYS } from "./quickKeys";
 import { AppBar } from "../ui";
@@ -36,6 +36,11 @@ export default function TerminalScreen({
   const closedByUserRef = useRef(false);
 
   const [reconnectIn, setReconnectIn] = useState<number | null>(null);
+  // Issue #552: a 429 from the mint (server rate-cap; see api.ts) is shown
+  // as a "server is busy" banner with a Retry button — distinct from the
+  // "Connection lost — reconnecting in N s…" copy so the user knows it's
+  // a pacing delay, not an outage. Cleared on the next successful mint.
+  const [rateLimited, setRateLimited] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const [copyMode, setCopyMode] = useState(false);
   const [bufferText, setBufferText] = useState("");
@@ -237,6 +242,18 @@ export default function TerminalScreen({
         onAuthFailed?.();
         return;
       }
+      // Issue #552: a 429 that survives the helper's one-shot back-off
+      // means the server is genuinely oversaturated. DON'T count this
+      // against the reconnect ladder (it's a server-pacing signal, not a
+      // connectivity failure); surface a brief, non-alarming toast instead
+      // and try once more on the manual "Now" tap.
+      if (isRateLimited(e)) {
+        // Issue #552: 429 → "Server is busy" toast + manual Retry. No
+        // scheduleReconnect(), so this never enters the 1/2/4/8/16s ladder
+        // and the user is not woken by a fake "Connection lost" banner.
+        setRateLimited(true);
+        return;
+      }
       scheduleReconnect();
       return;
     }
@@ -255,6 +272,7 @@ export default function TerminalScreen({
     ws.onopen = () => {
       reconnectAttemptRef.current = 0;
       setReconnectIn(null);
+      setRateLimited(false);
       const term = termRef.current;
       if (term) {
         ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
@@ -374,7 +392,19 @@ export default function TerminalScreen({
         )}
       </AppBar>
 
-      {reconnectIn !== null && (
+      {rateLimited && (
+        <div data-testid="rate-limited-toast" className="banner warn">
+          <span style={{ flex: 1 }}>Server is busy — please try again.</span>
+          <button
+            className="chip-btn"
+            onClick={retryNow}
+            data-testid="rate-limited-retry"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {reconnectIn !== null && !rateLimited && (
         <div
           data-testid="reconnect-overlay"
           className={`banner ${reconnectIn < 0 ? "error" : "warn"}`}

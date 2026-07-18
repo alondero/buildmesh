@@ -354,21 +354,146 @@ export async function mintWsTicket(target: WsTarget): Promise<string> {
   return j.ticket;
 }
 
+// --- 429 back-off for ticket mint (issue #552) ---------------------------
+//
+// The HTTP layer caps `/api/ws-ticket` mints at 30/token/minute so a
+// sustained flood on a valid token cannot churn the in-memory ticket map.
+// A legitimate phone — say, one that reconnects in a tight loop because
+// of a VPN flap — can still hit that cap. A 429 from the mint is not the
+// same as a connectivity failure: it carries a server-suggested
+// `Retry-After` (seconds). We honour that hint with a single brief retry
+// (issue #552 AC: "brief back-off and surfaces a non-alarming toast; does
+// not loop"), then surface a regular `ApiError(429)` so the caller can
+// fall back to its usual reconnect/error path.
+
+/// Cap how long we'll wait before retrying — a `Retry-After` of 60s would
+/// freeze the UI. Two seconds is the smallest interval the server could
+/// realistically ask for (cap-exhaustion usually reports ~55s, but a
+/// fresh window opening up will frequently report a sub-second hint)
+/// while still feeling responsive. The intent is "take the hint, but
+/// don't ever make the user wait through the full window".
+const MAX_RETRY_AFTER_MS = 2000;
+
+/// True iff `e` is an `ApiError` carrying the 429 status. Mirrors
+/// `isAuthError` so callers can branch.
+export function isRateLimited(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 429;
+}
+
+/// Parse a `Retry-After` header value per RFC 7231 §7.1.3: an integer
+/// (delta-seconds) is the only shape the server emits. Anything else
+/// (HTTP-date, malformed) returns `null` and the caller falls back to a
+/// small default.
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null;
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
+/// Tiny sleep helper. Kept local so the test can stub the global
+/// `setTimeout` (or skip it via `vi.useFakeTimers`) and the back-off is
+/// fully deterministic.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/// Mint a WS ticket, retrying exactly once on 429 with a brief back-off
+/// capped at [`MAX_RETRY_AFTER_MS`]. The retry never loops — if the
+/// second attempt is also 429, throws `ApiError(429)` whose message is the
+/// toast text the SPA surfaces.
+///
+/// On a 429, waits the server's `Retry-After` hint (bounded) before
+/// retrying — gives the rate-limit window the best chance to drain. If
+/// the hint is absent or unparseable, falls back to a small default
+/// (`FALLBACK_RETRY_MS`).
+///
+/// Accepts an `options.sleep` override so unit tests can plug in a
+/// promise that resolves immediately without touching the global
+/// setTimeout clock — the same effect as `vi.useFakeTimers().advanceTimersByTime(...)`,
+/// but with zero risk of another test bleeding fake-timer state.
+interface MintOptions {
+  sleep?: (ms: number) => Promise<void>;
+}
+const FALLBACK_RETRY_MS = 800;
+
+/// One fetch + one classifier — the cheap half. Body parse on 200 happens
+/// here too so the public surface can `await` it without further branching.
+async function fetchMintTicket(target: WsTarget): Promise<Response | string> {
+  const resp = await fetch("/api/ws-ticket", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(target),
+  });
+  if (resp.status === 429) return resp; // carry the 429 (with headers) to the orchestrator
+  if (!resp.ok) {
+    const detail = await safeJsonError(resp);
+    throw new ApiError(resp.status, detail || fallbackMessage(resp.status));
+  }
+  const j = (await resp.json()) as WsTicket;
+  return j.ticket;
+}
+
+export async function mintWsTicketWithBackoff(
+  target: WsTarget,
+  options: MintOptions = {},
+): Promise<string> {
+  const snooze = options.sleep ?? sleep;
+  const first = await fetchMintTicket(target);
+  if (typeof first === "string") return first;
+  // first is the 429 Response — honour its `Retry-After`, wait, retry
+  // exactly once. NOT a loop.
+  const hint = parseRetryAfter(first.headers.get("Retry-After"));
+  const waitMs =
+    hint === null ? FALLBACK_RETRY_MS : Math.min(hint * 1000, MAX_RETRY_AFTER_MS);
+  await snooze(waitMs);
+  const second = await fetchMintTicket(target);
+  if (typeof second === "string") return second;
+  // second 429 still — surface the canonical toast text so the SPA renders
+  // it uniformly across terminal & events surfaces.
+  throw new ApiError(429, "Server is busy — reconnecting.");
+}
+
+/// Best-effort JSON `{"error":"..."}` extraction that mirrors `apiFetch`'s
+/// pattern. Shared with `fetchMintTicket` and `apiFetch` to keep the
+/// failure-shape consistent.
+async function safeJsonError(resp: Response): Promise<string> {
+  try {
+    const j = (await resp.json()) as { error?: unknown };
+    if (typeof j?.error === "string") return j.error;
+  } catch {
+    /* non-JSON body */
+  }
+  return "";
+}
+
 /// Build the WS URL for a given node id. Mints a fresh ticket per connection
 /// (single-use), bound to this node's terminal surface (issue #551), and prefers
 /// the page's own host:port so the SPA works regardless of which fallback port
 /// (1992/1993/1994) the server bound to.
+///
+/// The mint goes through [`mintWsTicketWithBackoff`] so a 429 from a brief
+/// reconnect storm (issue #552) is handled with one bounded wait inside this
+/// helper — callers don't see the transient 429 and don't have to plumb
+/// retry logic into the screen's reconnect machinery.
 export async function terminalWsUrl(nodeId: number): Promise<string> {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host; // includes :port
-  const ticket = await mintWsTicket({ surface: "terminal", node_id: nodeId });
+  const ticket = await mintWsTicketWithBackoff({
+    surface: "terminal",
+    node_id: nodeId,
+  });
   return `${proto}//${host}/ws/terminal/${nodeId}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 export async function eventsWsUrl(): Promise<string> {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  const ticket = await mintWsTicket({ surface: "events", node_id: null });
+  const ticket = await mintWsTicketWithBackoff({
+    surface: "events",
+    node_id: null,
+  });
   return `${proto}//${host}/ws/events?ticket=${encodeURIComponent(ticket)}`;
 }
 

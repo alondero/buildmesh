@@ -8,6 +8,7 @@ pub mod auth;
 pub mod events;
 pub mod interface_rank;
 pub mod interface_watcher;
+pub mod rate_limit;
 pub mod request;
 pub mod revocation;
 pub mod routes;
@@ -1529,7 +1530,43 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // POST /api/ws-ticket — mint a single-use WebSocket handshake ticket (issue
     // #500 AC4). Authenticated as an Admin request (cookie or bearer root
     // token); the returned ticket is then passed as `?ticket=` on the WS upgrade.
+    //
+    // The rate cap (issue #552) runs BEFORE the auth guard so a stolen-token
+    // flooder cannot distinguish "rate limited" from "bad token" by reading
+    // the response. The 429 body is intentionally empty — same wire shape
+    // as the 401/403 the auth path would write — with only the status line
+    // and the `Retry-After` header distinguishing them. A flooder with a
+    // bogus token still gets 429 (bounded DB churn from `resolve_role`'s
+    // SHA-256 lookup); a flooder with a good token gets 429 without minting
+    // — no in-memory churn either (the `mint()` path never runs).
     if method == "POST" && path_without_query == "/api/ws-ticket" {
+        // Fingerprint the *presented* credential so the counter is per-token
+        // (the issue's required granularity). Hashing via `db::hash_token` keeps
+        // raw tokens out of this module's map — same privacy posture as the
+        // `device_sessions.token_hash` column. The cookie is the Admin/root
+        // path; the bearer is the same root token presented differently. Either
+        // way, the SHA-256 fingerprint is identical — the two presentations of
+        // the *same* credential legitimately share one bucket.
+        let credential_for_rate_limit = request::bearer_token(&headers)
+            .or_else(|| request::extract_token_from_cookies(&headers));
+        if let Some(presented) = credential_for_rate_limit {
+            let fingerprint = crate::db::hash_token(&presented);
+            match rate_limit::check_and_record(
+                &fingerprint,
+                std::time::Instant::now(),
+                rate_limit::DEFAULT_MAX_PER_WINDOW,
+            ) {
+                rate_limit::Outcome::Allow => {}
+                rate_limit::Outcome::Deny { retry_after } => {
+                    let _ = request::write_rate_limited(&mut lines, retry_after).await;
+                    return;
+                }
+            }
+        }
+        // No credential → no rate-limit key. We let `auth::guard` produce the
+        // 401 from the same uniform-body shape — a no-credential probe is the
+        // cheapest possible request (DB-free fast path in `resolve_role`), so
+        // it doesn't need its own throttle.
         if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
             .await
             .is_none()
@@ -2830,6 +2867,184 @@ ANY / -> Public (SPA shell)";
         // Minting a WS ticket requires an authenticated Admin request; with no
         // credentials the guard returns 401 before any ticket is minted.
         assert_eq!(post_status("/api/ws-ticket").await, 401);
+    }
+
+    // --- /api/ws-ticket rate cap (issue #552) -----------------------------
+    //
+    // The unit tests in `rate_limit::tests` pin the in-memory counter's
+    // contract (per-token isolation, window reset, 1-second Retry-After floor).
+    // These dispatcher-level tests pin the WIRING: that the `/api/ws-ticket`
+    // branch actually emits the 429 with a `Retry-After` header when the
+    // cap is hit, that the 429 body is uniform with the 401 body (no
+    // token-validity leak), and that the rate-limit state survives across
+    // requests in-process. The token we present is some opaque arbitrary
+    // value — no DB lookup is required because the rate-limit check runs
+    // BEFORE `auth::guard`, and the 429 path returns before the auth
+    // module is touched.
+
+    /// Lock serializing rate-limit dispatcher tests. Same concern as the
+    /// `rate_limit::tests::TEST_LOCK` (the global counter is process-wide).
+    static RATE_LIMIT_DISPATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Send a raw HTTP/1.1 POST to `path` and parse the FIRST response line,
+    /// returning the status code AND the full set of response headers (so the
+    /// rate-limit tests can assert `Retry-After` is present). Bodyless on
+    /// purpose — every rate-limit test calls this 30+ times and an empty body
+    /// keeps the loop free of a per-call allocation.
+    async fn post_status_and_headers(
+        method: &str,
+        path: &str,
+        headers: &str,
+    ) -> (u16, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n{}\r\n",
+            method, path, headers
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 2048];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("request hung")
+            .expect("read failed");
+        buf.truncate(n);
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status = raw
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (status, raw)
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_endpoint_rate_limits_a_repeated_bearer_after_the_cap() {
+        // AC: "Exceeding the cap returns 429 Too Many Requests with a Retry-After
+        // header; … mint attempts rejected by the cap do not allocate or evict
+        // a ticket slot". The default cap is 30/minute/token — drive 31 raw
+        // POSTs with the same bearer and assert the 31st is 429. We don't try
+        // to assert the FIRST 30 are 200 because every one of those goes
+        // through `auth::guard` which needs a DB we don't have here — what
+        // matters is that the cap is observed from the dispatcher side.
+        let _g = RATE_LIMIT_DISPATCH_LOCK.lock().unwrap();
+        rate_limit::reset_for_test();
+
+        // 31 hits with the same bearer. The rate-limit check runs BEFORE the
+        // auth guard, so every one of them sees the 429 once the cap is hit.
+        let bearer = "Bearer rate-limit-test-aaa";
+        let headers = format!("Authorization: {}\r\n", bearer);
+        let mut last_status = 0;
+        let mut saw_429 = false;
+        let mut last_response = String::new();
+        for _ in 0..31 {
+            let (status, raw) =
+                post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
+            last_status = status;
+            last_response = raw;
+            if status == 429 {
+                saw_429 = true;
+                break;
+            }
+        }
+        assert!(
+            saw_429,
+            "expected a 429 within 31 attempts; last status was {last_status}"
+        );
+        assert!(
+            last_response.contains("Retry-After:"),
+            "429 response must include a Retry-After header; got: {last_response:?}"
+        );
+        // The 1-second Retry-After floor: it must parse to a positive integer.
+        let retry_after = last_response
+            .lines()
+            .find_map(|l| {
+                let mut parts = l.splitn(2, ':');
+                let n = parts.next()?;
+                if n.eq_ignore_ascii_case("Retry-After") {
+                    parts.next()?.trim().parse::<u32>().ok()
+                } else {
+                    None
+                }
+            })
+            .expect("Retry-After must parse as u32");
+        assert!(
+            retry_after >= 1,
+            "Retry-After must be >= 1 second; got {retry_after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_endpoint_429_body_is_uniform_with_401_shape() {
+        // AC: "the response body is uniform with the other auth-failure shapes
+        // so a caller cannot distinguish 'rate-limited' from 'bad token'". Both
+        // 429 and 401 must be `Content-Length: 0` with no body — the only
+        // signal a caller can use is the status line + the `Retry-After`
+        // header (which is fine, it's a standard pacing hint, not an
+        // authentication signal).
+        let _g = RATE_LIMIT_DISPATCH_LOCK.lock().unwrap();
+        rate_limit::reset_for_test();
+
+        // Burn the cap with one bearer so the 31st is 429.
+        let bearer = "Bearer uniform-test-bbb";
+        let headers = format!("Authorization: {}\r\n", bearer);
+        for _ in 0..31 {
+            let _ = post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
+        }
+        let (status, raw) =
+            post_status_and_headers("POST", "/api/ws-ticket", &headers).await;
+        assert_eq!(status, 429, "must be over the cap by now");
+        // The body must be empty: Content-Length: 0 means no body bytes.
+        assert!(
+            raw.contains("Content-Length: 0"),
+            "429 body must be empty (uniform with 401); got: {raw:?}"
+        );
+        // Sanity: no JSON error payload leaks via the body.
+        let after_headers = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert_eq!(
+            after_headers.trim(),
+            "",
+            "429 body must be empty (no JSON error); got: {after_headers:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_endpoint_per_token_isolation_at_the_dispatcher() {
+        // AC: "per-token isolation (one token's flood does not affect another)".
+        // Two different bearer tokens must rate-limit independently — token
+        // A burning its cap must not put token B over B's cap.
+        let _g = RATE_LIMIT_DISPATCH_LOCK.lock().unwrap();
+        rate_limit::reset_for_test();
+
+        let token_a = "Bearer iso-token-aaa";
+        let token_b = "Bearer iso-token-ccc";
+        let headers_a = format!("Authorization: {}\r\n", token_a);
+        let headers_b = format!("Authorization: {}\r\n", token_b);
+
+        // Burn A's cap; A's counter is at the default cap, B's is at 0.
+        for _ in 0..rate_limit::DEFAULT_MAX_PER_WINDOW {
+            let _ = post_status_and_headers("POST", "/api/ws-ticket", &headers_a).await;
+        }
+        // One more A → must be 429 (cap reached).
+        let (a_status, _) =
+            post_status_and_headers("POST", "/api/ws-ticket", &headers_a).await;
+        assert_eq!(a_status, 429, "token A must hit 429 after the cap");
+        // B's first request must NOT be 429 — it has its own counter.
+        let (b_status, _) =
+            post_status_and_headers("POST", "/api/ws-ticket", &headers_b).await;
+        assert_ne!(
+            b_status, 429,
+            "token B must not be rate-limited by token A's flood"
+        );
     }
 
     // --- #585: interface snapshot must refresh on rebind ---

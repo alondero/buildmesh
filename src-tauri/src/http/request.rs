@@ -215,6 +215,30 @@ pub async fn write_status_only(
     write_full(lines, response.as_bytes()).await
 }
 
+/// Write a `429 Too Many Requests` whose **body** is uniform with the
+/// auth-failure shapes (empty) and whose **`Retry-After` header** carries
+/// the pacing hint. The body uniformity is the load-bearing security
+/// property: a caller presenting a stolen token MUST NOT be able to
+/// distinguish "rate-limited" from "bad token" by reading the response —
+/// the only signal they get is the status line + header. `retry_after_secs`
+/// is taken straight from the rate-limit [`crate::http::rate_limit::Outcome`]
+/// computation (always `>= 1`) so we never emit `Retry-After: 0`,
+/// which would invite an instant retry loop.
+pub async fn write_rate_limited(
+    lines: &mut tokio::io::BufStream<MaybeTls>,
+    retry_after_secs: u32,
+) -> std::io::Result<()> {
+    // Header-only line, no body — same wire shape as every other
+    // 4xx/5xx the auth paths emit (issue #552 AC: "uniform with the other
+    // auth-failure shapes").
+    let response = format!(
+        "HTTP/1.1 429 Too Many Requests\r\n\
+         Retry-After: {retry_after_secs}\r\n\
+         Content-Length: 0\r\n\r\n"
+    );
+    write_full(lines, response.as_bytes()).await
+}
+
 pub async fn write_json(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     status: &str,
