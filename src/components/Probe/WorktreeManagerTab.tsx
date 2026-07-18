@@ -869,6 +869,94 @@ function HealthBlock({ health, inFlight, onRestore, onFree, message }: HealthBlo
   );
 }
 
+// ── Selectable row (issue #661) ────────────────────────────────────────────
+
+interface SelectableRowProps {
+  /** Unique key for selection lookup; used as the React `key` at the call
+   *  site (the component takes no `key` prop — that's an anti-pattern). */
+  rowKey: string;
+  /** Hover tooltip on the row (e.g. "Active — cannot delete"). */
+  title?: string;
+  /** Whether the checkbox is disabled AND the row is dimmed. The two
+   *  always co-vary — a disabled checkbox is useless if the row still
+   *  looks interactive, and an undeletable-but-bright row confuses the
+   *  user about what's lockable. Branch rows: disabled when active or
+   *  checked out as a worktree head; worktree rows: disabled when
+   *  active or pool-managed. */
+  disabled: boolean;
+  /** Whether the row is currently checked in the parent's selection set. */
+  selected: boolean;
+  /** Toggle callback fired with `rowKey` so the parent can mutate its Set. */
+  onToggle: (key: string) => void;
+  /** Primary text (left of badges). Plain string for a single name;
+   *  JSX for branch-name + secondary branch-tag (worktree rows). */
+  children: React.ReactNode;
+  /** Right-aligned status badges. Omit when the row has no badges. */
+  badges?: React.ReactNode;
+  /** Optional trailing action button (the worktree row's open-in-explorer).
+   *  Rendered OUTSIDE the inner `<label>` so clicking it does NOT toggle
+   *  the checkbox (matches the regression-tested label-vs-button split).
+   *  Presence also flips the row's container to `group` so a
+   *  `group-hover` style on the action button can fade it in. */
+  action?: React.ReactNode;
+}
+
+/**
+ * One row in the prune list — a checkbox + primary text + status badges,
+ * with optional trailing action. Shared between the branch and worktree
+ * lists of `<RepoBlock>` so the hover, dim, accessibility-name, and
+ * trailing-action contract stays consistent across both surfaces
+ * (issue #661 — both rows used to duplicate ~80 lines of identical
+ * markup; the duplicated parts were the structural pieces, not the
+ * specific badges, so the component takes a `children` + `badges` pair
+ * rather than a wider interface of per-context booleans).
+ *
+ * Accessibility: the checkbox is nested inside a `<label>`, so its
+ * accessible name is the concatenation of the `children` text and any
+ * badge texts inside the row. The Worktree Manager tests rely on this
+ * for `getByRole('checkbox', { name: /feature\/live/i })` — the regex
+ * matches the branch name once (it appears verbatim inside the label),
+ * not once per badge.
+ */
+function SelectableRow({
+  rowKey,
+  title,
+  disabled,
+  selected,
+  onToggle,
+  children,
+  badges,
+  action,
+}: SelectableRowProps) {
+  return (
+    <div
+      title={title}
+      className={`${action ? 'group ' : ''}flex items-center gap-2 text-xs rounded-md px-1 py-0.5 ${
+        disabled
+          ? 'opacity-60'
+          : 'cursor-pointer hover:bg-bg-overlay/40'
+      }`}
+    >
+      <label
+        className={`flex items-center gap-2 flex-1 min-w-0 ${
+          disabled ? 'cursor-not-allowed' : 'cursor-pointer'
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={selected}
+          disabled={disabled}
+          onChange={() => onToggle(rowKey)}
+          className="accent-accent-cyan disabled:cursor-not-allowed flex-shrink-0"
+        />
+        <span className="text-text-primary truncate flex-1 min-w-0">{children}</span>
+        <span className="flex items-center gap-1 flex-shrink-0">{badges}</span>
+      </label>
+      {action}
+    </div>
+  );
+}
+
 // ── Repo block (branches / worktrees / remote-tracking) ─────────────────────
 
 interface RepoBlockProps {
@@ -941,8 +1029,12 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                 ? pathDirname(b.checked_out_in_worktree)
                 : null;
               return (
-                <div
+                <SelectableRow
                   key={key}
+                  rowKey={key}
+                  disabled={undeletable}
+                  selected={selected.has(key)}
+                  onToggle={onToggle}
                   title={
                     b.is_active
                       ? 'Active — cannot delete'
@@ -950,26 +1042,8 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                       ? `Checked out in worktree "${inWorktreeName}" — remove the worktree above to delete this branch`
                       : undefined
                   }
-                  className={`flex items-center gap-2 text-xs rounded-md px-1 py-0.5 ${
-                    undeletable
-                      ? 'opacity-60'
-                      : 'cursor-pointer hover:bg-bg-overlay/40'
-                  }`}
-                >
-                  <label
-                    className={`flex items-center gap-2 flex-1 min-w-0 ${
-                      undeletable ? 'cursor-not-allowed' : 'cursor-pointer'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selected.has(key)}
-                      disabled={undeletable}
-                      onChange={() => onToggle(key)}
-                      className="accent-accent-cyan disabled:cursor-not-allowed flex-shrink-0"
-                    />
-                    <span className="text-text-primary truncate flex-1">{b.name}</span>
-                    <span className="flex items-center gap-1 flex-shrink-0">
+                  badges={
+                    <>
                       {b.is_head && (
                         <Badge color="bg-accent-cyan/15 text-accent-cyan" text="HEAD" />
                       )}
@@ -1006,9 +1080,11 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                           {formatDate(b.last_commit_date)}
                         </span>
                       )}
-                    </span>
-                  </label>
-                </div>
+                    </>
+                  }
+                >
+                  {b.name}
+                </SelectableRow>
               );
             })}
           </div>
@@ -1034,8 +1110,12 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
               // defence-in-depth.
               const undeletable = w.is_active || w.is_pool;
               return (
-                <div
+                <SelectableRow
                   key={key}
+                  rowKey={key}
+                  disabled={undeletable}
+                  selected={selected.has(key)}
+                  onToggle={onToggle}
                   title={
                     w.is_active
                       ? 'Active — cannot delete'
@@ -1043,31 +1123,8 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                       ? 'Pre-spawn Pool — managed automatically'
                       : w.path
                   }
-                  className={`group flex items-center gap-2 text-xs rounded-md px-1 py-0.5 ${
-                    undeletable
-                      ? 'opacity-60'
-                      : 'cursor-pointer hover:bg-bg-overlay/40'
-                  }`}
-                >
-                  <label
-                    className={`flex items-center gap-2 flex-1 min-w-0 ${
-                      undeletable ? 'cursor-not-allowed' : 'cursor-pointer'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selected.has(key)}
-                      disabled={undeletable}
-                      onChange={() => onToggle(key)}
-                      className="accent-accent-cyan disabled:cursor-not-allowed flex-shrink-0"
-                    />
-                    <span className="text-text-primary truncate flex-1 min-w-0">
-                      {name}
-                      {w.branch && (
-                        <span className="text-text-secondary"> · {w.branch}</span>
-                      )}
-                    </span>
-                    <span className="flex items-center gap-1 flex-shrink-0">
+                  badges={
+                    <>
                       {w.is_active && (
                         <Badge
                           color="bg-accent-cyan/15 text-accent-cyan"
@@ -1085,26 +1142,35 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                           title="Pre-spawn Pool — managed automatically"
                         />
                       )}
-                    </span>
-                  </label>
-                  {/* Per-row open-in-explorer. Outside the inner `<label>`
-                      so clicking it doesn't toggle the row's checkbox —
-                      the label-vs-button DOM split isolates the click
-                      target (regression-tested). */}
-                  <button
-                    type="button"
-                    onClick={() => openInExplorer(w.path)}
-                    // Full path, not `name` — two worktrees in different
-                    // repos with the same directory name would sound
-                    // identical to a screen-reader user otherwise.
-                    aria-label={`Open ${w.path} in file explorer`}
-                    title="Open in file explorer"
-                    data-testid={`worktree-open-${key}`}
-                    className="p-1 rounded-md text-text-muted opacity-0 group-hover:opacity-100 hover:!opacity-100 hover:text-accent-cyan hover:bg-bg-card transition-opacity flex-shrink-0"
-                  >
-                    <FolderOpenIcon className="w-3.5 h-3.5" />
-                  </button>
-                </div>
+                    </>
+                  }
+                  action={
+                    // Per-row open-in-explorer. Renders OUTSIDE the
+                    // `<label>` (the component splits the row into a
+                    // label-wrapped checkbox + a sibling action so
+                    // clicking the icon does NOT toggle the checkbox —
+                    // the label-vs-button DOM isolation is
+                    // regression-tested).
+                    <button
+                      type="button"
+                      onClick={() => openInExplorer(w.path)}
+                      // Full path, not `name` — two worktrees in different
+                      // repos with the same directory name would sound
+                      // identical to a screen-reader user otherwise.
+                      aria-label={`Open ${w.path} in file explorer`}
+                      title="Open in file explorer"
+                      data-testid={`worktree-open-${key}`}
+                      className="p-1 rounded-md text-text-muted opacity-0 group-hover:opacity-100 hover:!opacity-100 hover:text-accent-cyan hover:bg-bg-card transition-opacity flex-shrink-0"
+                    >
+                      <FolderOpenIcon className="w-3.5 h-3.5" />
+                    </button>
+                  }
+                >
+                  {name}
+                  {w.branch && (
+                    <span className="text-text-secondary"> · {w.branch}</span>
+                  )}
+                </SelectableRow>
               );
             })}
           </div>

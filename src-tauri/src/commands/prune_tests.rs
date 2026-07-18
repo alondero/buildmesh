@@ -1162,6 +1162,43 @@ fn delete_worktrees_does_not_reject_non_pool_path() {
     }
 }
 
+// ── reject_blocked helper (issue #661) ─────────────────────────────────────
+
+/// Contract for the shared rejection helper. Three cases:
+///   1. empty → silent `Ok(())` (the call site proceeds to its deletes);
+///   2. single blocked item → `Err` names just that one item, prefix
+///      matched against the caller's header so the partition layers
+///      above can build their own per-context message ("cannot delete
+///      branches held by an active agent node", "cannot delete pre-spawn
+///      pool entries (managed automatically)", …);
+///   3. multiple blocked items → `Err` lists every blocked name
+///      comma-separated, so bulk selections surface the full blocked set
+///      in one toast instead of multiple per-item errors interleaved
+///      with successful deletes (review contract — see the original
+///      `delete_branches_in_repo` / `remove_worktrees` comments for the
+///      full rationale).
+#[test]
+fn reject_blocked_combines_blocked_items_into_one_message() {
+    // No blocks → Ok(()). The check is silent; the helper's only
+    // side-effect is on the non-empty case.
+    let empty: Vec<&String> = vec![];
+    reject_blocked(&empty, "cannot delete X")
+        .expect("empty blocked list → Ok(())");
+
+    // Single block → Err names just that one item.
+    let s1 = "feature-a".to_string();
+    let one_blocked: Vec<&String> = vec![&s1];
+    let err1 = reject_blocked(&one_blocked, "cannot delete X")
+        .expect_err("non-empty blocked list → Err");
+    assert_eq!(err1, "cannot delete X: feature-a");
+
+    // Multiple blocks → Err lists every blocked name, comma-separated.
+    let s2 = "feature-b".to_string();
+    let both: Vec<&String> = vec![&s1, &s2];
+    let err2 = reject_blocked(&both, "cannot delete X").unwrap_err();
+    assert_eq!(err2, "cannot delete X: feature-a, feature-b");
+}
+
 // ── prune_remote_tracking (issue #657) ──────────────────────────────────
 //
 // `prune_remote_tracking` now returns `Result<String, String>` so the
@@ -1221,8 +1258,9 @@ async fn prune_remote_tracking_returns_string_on_success() {
     let result = prune_remote_tracking(local.path_str()).await;
     // Type-anchor: the success variant MUST be a String. If the signature
     // regresses to `Result<(), String>` the `: String` annotation fails
-    // to compile, which is the desired RED state. Underscore prefix
-    // keeps the type anchor without an unused-binding warning.
+    // to compile, which is the desired RED state. The leading underscore
+    // keeps the type anchor without an unused-binding warning — the
+    // binding exists only to pin the type; the value is unused.
     let _message: String = result.expect("prune should succeed against a clean clone");
 }
 
