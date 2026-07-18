@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -169,7 +170,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // a copy-link fallback, so the user has a working remediation
         // path even when the QR fails to render.
       } catch (e) {
-        setError(String(e));
+        setError(formatError(e));
       }
     };
     init();

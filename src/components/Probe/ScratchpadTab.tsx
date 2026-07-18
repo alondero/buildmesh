@@ -18,6 +18,7 @@
  * auto-clears on success.
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
@@ -115,7 +116,7 @@ export function ScratchpadTab() {
         .catch((err) => {
           if (signal.aborted) return;
           console.error('Failed to load scratch pad:', err);
-          setLoadError(err instanceof Error ? err.message : String(err));
+          setLoadError(formatError(err));
         });
       return flushPending;
     },

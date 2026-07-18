@@ -18,6 +18,8 @@
  * MUST live inside the handler — callers wire this helper straight into the
  * toggle's onClick and the swallowed rejection is handled here.
  */
+import { formatError } from './errorUtils';
+
 export async function optimisticToggle<T>(args: {
   current: T;
   next: T;
@@ -41,7 +43,7 @@ export async function optimisticToggle<T>(args: {
     }
   } catch (e) {
     args.setValue(previous);
-    args.setError(String(e));
+    args.setError(formatError(e));
   } finally {
     args.setBusy(false);
   }

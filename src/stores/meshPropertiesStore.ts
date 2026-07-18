@@ -1,3 +1,4 @@
+import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import type { DetectedProject, ProjectPreset } from '../lib/projectPresets';
@@ -135,7 +136,7 @@ export const useMeshPropertiesStore = create<MeshPropertiesState>((set, get) => 
           break;
       }
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -151,7 +152,7 @@ export const useMeshPropertiesStore = create<MeshPropertiesState>((set, get) => 
         api.updateMeshColumn(meshId, 'run_command', preset.run),
       ]);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },

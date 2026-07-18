@@ -45,6 +45,7 @@
  *     only handles the former.
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useState, useMemo, useCallback } from 'react';
 // `openUrl` is intentionally imported here even though the title + ↗
 // links now route through `<SafeLink>`. The blocked-by button (further
@@ -184,7 +185,7 @@ export function GitIssuesTab() {
       } catch (e) {
         if (signal.aborted) return;
         console.error('Failed to load issues:', e);
-        setError(e instanceof Error ? e.message : String(e));
+        setError(formatError(e));
       } finally {
         if (!signal.aborted) setLoading(false);
       }

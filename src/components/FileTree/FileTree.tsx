@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import { useState, useCallback } from 'react';
 import {
   listDirectory,
@@ -103,7 +104,7 @@ export function FileTree({
       })
       .catch((e) => {
         if (signal.aborted) return;
-        setErrorState(String(e));
+        setErrorState(formatError(e));
         setLoadingState(false);
       });
   }, [rootPath]);
