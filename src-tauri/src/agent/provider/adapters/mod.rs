@@ -15,12 +15,14 @@
 pub mod agy;
 pub mod anthropic;
 pub mod codex;
+pub mod grok;
 pub mod opencode;
 pub mod terminal;
 
 pub use agy::AGY;
 pub use anthropic::ANTHROPIC;
 pub use codex::CODEX;
+pub use grok::GROK;
 pub use opencode::OPENCODE;
 pub use terminal::TERMINAL;
 
