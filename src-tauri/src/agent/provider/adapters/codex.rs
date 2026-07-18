@@ -47,6 +47,183 @@ fn hook_command(platform: Platform) -> String {
     }
 }
 
+/// Translate `backend_env` `OPENAI_BASE_URL` / `OPENAI_MODEL` into the
+/// codex profile name a **Proxied Provider** spawn should load (issue #599).
+///
+/// Live probing of `codex-cli 0.144.0` established the canonical contract:
+/// - `OPENAI_API_KEY` is honoured as an env var (regression-pinned via
+///   `auth.credentials` reporting it under `auth env vars present`).
+/// - `OPENAI_BASE_URL` / `OPENAI_MODEL` are **silently ignored** as env vars
+///   even when exported — `codex doctor --json` reports
+///   `endpoint: wss://api.openai.com/v1/<redacted>` regardless of what was
+///   in `OPENAI_BASE_URL`.
+/// - Custom (non-`openai`) `model_providers.<name>` entries **must** live in
+///   `~/.codex/config.toml` — `-c key=value` overrides only validate against
+///   known providers; `-p <name>` (profile layering) is the supported way
+///   to inject a custom provider at runtime, reading
+///   `$CODEX_HOME/<name>.config.toml` on top of the user's main config.
+///
+/// The fix therefore:
+/// 1. Returns `Some(profile_name, base_url, model)` from this helper when
+///    `backend_env` carries a non-empty `OPENAI_BASE_URL` (the marker for a
+///    Codex Proxied Provider pairing).
+/// 2. Spawn path writes the matching `<profile_name>.config.toml`
+///    idempotently via [`ensure_proxy_profile`] (idempotent: the hash names
+///    only one file per `(base_url, model)` pair; a pair change gets a new
+///    name, so we never overwrite unrelated pairing configs).
+/// 3. Spawn path adds `-p <profile_name>` to the codex CLI args.
+///
+/// Returns `None` for **native Codex** (`backend_env` carries no
+/// `OPENAI_BASE_URL`, which is the marker that the spawn is *not* a Proxied
+/// Provider pairing) — a bare `codex` harness spawn emits no extra flag,
+/// byte-identical to the pre-#599 path. A partially-filled pairing (no
+/// `base_url`) is also `None`, matching `openai_surface_env`'s half-fill
+/// behaviour: emitting `-p` with an empty `model_providers.<...>.base_url=""
+/// would route the spawn at an empty endpoint, which is exactly the
+/// silent-leak bug this helper exists to close.
+///
+/// The return struct carries `base_url` + `model` alongside the profile name
+/// so the spawn path doesn't have to re-scan `backend_env` — that re-scan
+/// was previously a duplication risk: a different scan could in principle
+/// find an empty or absent value and write `base_url = ""` to the profile
+/// config, exactly the silent-leak class this helper exists to close.
+pub(crate) fn proxy_pair(backend_env: &[(String, String)]) -> Option<ProxyPair<'_>> {
+    let find = |key: &str| -> Option<&str> {
+        backend_env
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let base_url = find("OPENAI_BASE_URL")?;
+    let model = find("OPENAI_MODEL");
+
+    // Stable, build-local profile name. `DefaultHasher` (SipHasher13) is
+    // deterministic within a binary — the profile name is only used to
+    // namespace TOML keys within a single codex invocation, so cross-build
+    // stability is unnecessary. 16 hex chars (~64 bits) makes collisions
+    // vanishingly unlikely across the user's likely pairing set. The
+    // base_url is the primary input; we hash the model too (when set) so a
+    // future Kimi/MiniMax model-flag story (two pairings to the same
+    // endpoint with different `OPENAI_MODEL` values) gets isolated profiles.
+    let profile_name = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        base_url.hash(&mut hasher);
+        if let Some(m) = model {
+            '\0'.hash(&mut hasher);
+            m.hash(&mut hasher);
+        }
+        format!("bm{:x}", hasher.finish())
+    };
+    Some(ProxyPair {
+        profile_name,
+        base_url,
+        model,
+    })
+}
+
+/// The resolved per-pairing data a Codex Proxied Provider spawn needs.
+/// `model` is `None` when the pairing didn't pin a model — the
+/// `[model_providers.<name>]` block writes without a `model = "…"` line so
+/// the user's own `~/.codex/config.toml` model default stays in force.
+pub(crate) struct ProxyPair<'a> {
+    pub profile_name: String,
+    pub base_url: &'a str,
+    pub model: Option<&'a str>,
+}
+
+/// `-p <profile_name>` flag pair, ready to `.extend(recipe.base_args)` from
+/// the spawn path. Pure: profile-name validity is [`proxy_profile_name`]'s
+/// job; this helper is a one-line adapter that ensures the flag pair is
+/// emitted in the documented order (`-p` first, then the name).
+pub(crate) fn proxy_p_flag(profile_name: &str) -> Vec<String> {
+    vec!["-p".into(), profile_name.into()]
+}
+
+/// Resolve the directory Codex reads profiles from (`-p <name>` looks up
+/// `<coxehome>/<name>.config.toml`). Order matches Codex's own lookup:
+///   1. `$CODEX_HOME` (explicit override)
+///   2. `%USERPROFILE%\.codex` on Windows, `$HOME/.codex` elsewhere
+///
+/// Exposed as a separate helper so tests can drive `ensure_proxy_profile`
+/// against a temp dir without touching the real env (cross-platform
+/// `std::env::set_var`/`remove_var` is partially supported and racy on
+/// Windows, so a parameterised helper is the deterministic unit-test seam).
+fn resolve_coxehome() -> Option<std::path::PathBuf> {
+    std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            let env_var = if cfg!(target_os = "windows") {
+                "USERPROFILE"
+            } else {
+                "HOME"
+            };
+            std::env::var_os(env_var).map(|p| std::path::PathBuf::from(p).join(".codex"))
+        })
+}
+
+/// Idempotently write `<coxehome>/<profile_name>.config.toml` carrying the
+/// `[model_providers.<profile_name>]` entry that routes codex to the proxied
+/// endpoint. CodeX's `-p <name>` flag layers the file on top of the user's
+/// `~/.codex/config.toml` at startup, so we never have to round-trip the
+/// user's existing config — the profile is purely additive.
+///
+/// `coxehome_for_test` lets tests point at a tmp dir (production callers pass
+/// `None`, so the function uses the env-derived directory via
+/// [`resolve_coxehome`]).
+///
+/// Returns `Ok(())` early when the file already exists: a re-spawn with the
+/// same `(base_url, model)` pair hashes to the same name, and the file's
+/// content only depends on those inputs (no timestamps, no random data).
+/// The user can also hand-edit the file between spawns; we don't fight that.
+///
+/// Returns `Err` when `$CODEX_HOME`/`~/.codex` can't be located — the spawn
+/// then proceeds without `-p` (logged), which restores the pre-#599 fall-back
+/// of "codex ignores our OPENAI_BASE_URL and targets OpenAI's real endpoint".
+/// Better than a hard spawn failure: at least the user's spawn runs, with a
+/// warning that the pairing isn't routed correctly.
+pub(crate) fn ensure_proxy_profile(
+    profile_name: &str,
+    base_url: &str,
+    model: Option<&str>,
+    coxehome_for_test: Option<&std::path::Path>,
+) -> Result<(), String> {
+    let coxehome = match coxehome_for_test {
+        Some(p) => p.to_path_buf(),
+        None => resolve_coxehome().ok_or_else(|| {
+            "could not locate CODEX_HOME or user home for proxy profile write".to_string()
+        })?,
+    };
+    std::fs::create_dir_all(&coxehome)
+        .map_err(|e| format!("failed to create codex home dir: {e}"))?;
+    let path = coxehome.join(format!("{profile_name}.config.toml"));
+    if path.exists() {
+        // Idempotent re-spawn: pairing signature unchanged → identical hash →
+        // identical filename → skip the write. A user who edited the file by
+        // hand has signalled intent; respect it.
+        return Ok(());
+    }
+    let model_line = model
+        .map(|m| format!("model = \"{m}\"\n"))
+        .unwrap_or_default();
+    let content = format!(
+        r#"{model_line}model_provider = "{profile_name}"
+
+[model_providers.{profile_name}]
+name = "Buildmesh proxy {profile_name}"
+base_url = "{base_url}"
+env_key = "OPENAI_API_KEY"
+requires_openai_auth = true
+"#
+    );
+    std::fs::write(&path, content)
+        .map_err(|e| format!("failed to write proxy profile {}: {e}", path.display()))?;
+    tracing::info!("spawn_agent: wrote codex proxy profile {:?}", path);
+    Ok(())
+}
+
 /// Ensure `<project>/.codex/config.toml` enables the hooks feature
 /// (`[features] hooks = true` — `codex_hooks` is the legacy alias, issue
 /// #884). Text-level merge (no toml dep): a file that already enables the
@@ -361,5 +538,208 @@ mod tests {
             assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
         }
+    }
+
+    // ─── Issue #599: Codex proxy profile plumbing ────────────────────────────
+
+    /// Native Codex has no `OPENAI_BASE_URL` in its `backend_env` — the
+    /// translator must return `None`, byte-identical to the pre-#599 path
+    /// (regression-pinned).
+    #[test]
+    fn proxy_pair_none_for_native_codex() {
+        let env: Vec<(String, String)> = vec![];
+        assert!(
+            proxy_pair(&env).is_none(),
+            "empty env → None (native Codex)"
+        );
+
+        // Even if other OPENAI_* leak into the env (e.g. an unrelated process
+        // export), the marker key is `OPENAI_BASE_URL` — without it the
+        // translator must not emit any flag.
+        let env = vec![("OPENAI_API_KEY".into(), "sk-foo".into())];
+        assert!(
+            proxy_pair(&env).is_none(),
+            "OPENAI_API_KEY alone is not a proxy marker"
+        );
+    }
+
+    /// A partially-filled pairing (no `OPENAI_BASE_URL`) must NOT emit a
+    /// profile name — codex would interpret the empty `base_url` as a real
+    /// (broken) endpoint, exactly the silent-leak bug this helper exists to
+    /// close. Matches `openai_surface_env`'s half-fill behaviour.
+    #[test]
+    fn proxy_pair_none_for_blank_base_url() {
+        let env = vec![("OPENAI_BASE_URL".into(), String::new())];
+        assert!(
+            proxy_pair(&env).is_none(),
+            "blank OPENAI_BASE_URL must not produce a profile name (would route to an empty endpoint)"
+        );
+
+        // `OPENAI_MODEL` alone (no `OPENAI_BASE_URL`) is also None — model
+        // without an endpoint is meaningless for codex.
+        let env = vec![("OPENAI_MODEL".into(), "some-model".into())];
+        assert!(
+            proxy_pair(&env).is_none(),
+            "OPENAI_MODEL without OPENAI_BASE_URL must not produce a profile name"
+        );
+    }
+
+    /// Full pairing → a stable `ProxyPair` with the resolved `base_url` and
+    /// `model` carried through (so the spawn path doesn't re-scan
+    /// `backend_env` and risk inconsistency). The `profile_name` is
+    /// `bm` + 16 hex chars; two calls with the same inputs must yield the
+    /// same name (idempotent — a re-spawn reuses the existing on-disk
+    /// profile, no churn).
+    #[test]
+    fn proxy_pair_stable_for_full_pairing() {
+        let env = vec![
+            ("OPENAI_BASE_URL".into(), "https://api.minimax.io/v1".into()),
+            ("OPENAI_API_KEY".into(), "sk-mm".into()),
+            ("OPENAI_MODEL".into(), "MiniMax-M3[1m]".into()),
+        ];
+        let pair = proxy_pair(&env).expect("full pairing → Some");
+        let name = &pair.profile_name;
+        assert!(
+            name.starts_with("bm") && name.len() == 18 && name[2..].chars().all(|c| c.is_ascii_hexdigit()),
+            "profile_name must be `bm` + 16 hex chars (got {name:?})"
+        );
+        assert_eq!(pair.base_url, "https://api.minimax.io/v1");
+        assert_eq!(pair.model, Some("MiniMax-M3[1m]"));
+        let again = proxy_pair(&env).expect("full pairing is deterministic");
+        assert_eq!(
+            name, &again.profile_name,
+            "proxy_pair must be deterministic for identical inputs"
+        );
+    }
+
+    /// Different `base_url` or `model` must yield different profile names —
+    /// codex namespaces the `[model_providers.<name>]` table by name, so a
+    /// collision would let a Kimi spawn inherit a MiniMax URL (or vice-versa).
+    /// 16 hex chars (≈ 64 bits of entropy) makes natural collisions
+    /// vanishingly unlikely; this test pins that *intentional* inputs (same
+    /// model, different endpoint) produce *distinct* profile names.
+    #[test]
+    fn proxy_pair_distinct_per_endpoint() {
+        let env_a = vec![(
+            "OPENAI_BASE_URL".into(),
+            "https://api.minimax.io/v1".into(),
+        )];
+        let env_b = vec![(
+            "OPENAI_BASE_URL".into(),
+            "https://api.moonshot.ai/v1".into(),
+        )];
+        let name_a = proxy_pair(&env_a).unwrap().profile_name;
+        let name_b = proxy_pair(&env_b).unwrap().profile_name;
+        assert_ne!(
+            name_a, name_b,
+            "different base_urls must hash to different profile names (got {name_a:?} == {name_b:?})"
+        );
+    }
+
+    /// The model variant of the same base_url must also yield a distinct
+    /// profile — two pairings sharing an endpoint but different models
+    /// (e.g. a future Kimi model-flag story) get isolated TOML tables.
+    #[test]
+    fn proxy_pair_distinct_per_model() {
+        let env_a = vec![
+            ("OPENAI_BASE_URL".into(), "https://api.minimax.io/v1".into()),
+            ("OPENAI_MODEL".into(), "MiniMax-M3[1m]".into()),
+        ];
+        let env_b = vec![
+            ("OPENAI_BASE_URL".into(), "https://api.minimax.io/v1".into()),
+            ("OPENAI_MODEL".into(), "MiniMax-M2.7".into()),
+        ];
+        let name_a = proxy_pair(&env_a).unwrap().profile_name;
+        let name_b = proxy_pair(&env_b).unwrap().profile_name;
+        assert_ne!(
+            name_a, name_b,
+            "different models at the same endpoint must get isolated profile names"
+        );
+    }
+
+    /// `-p <name>` flag pair — the spawn-time addition the codex runtime
+    /// expects (regression-pinned so a future refactor doesn't drop the `-p`
+    /// and silently re-introduce the silent-OpenAI-routing bug).
+    #[test]
+    fn proxy_p_flag_is_dash_p_name() {
+        assert_eq!(proxy_p_flag("bm1234567890abcdef"), ["-p", "bm1234567890abcdef"]);
+    }
+
+    /// `ensure_proxy_profile` is the I/O side of the translation: idempotent
+    /// on identical inputs (file already there → no re-write), and writes
+    /// the canonical `[model_providers.<name>]` TOML block codex consumes.
+    /// Pointed at a temp dir via the `coxehome_for_test` parameter so the
+    /// host's `~/.codex/` stays clean — mutating `CODEX_HOME` / `HOME` via
+    /// `std::env::set_var` is partially supported and racy on Windows.
+    #[test]
+    fn ensure_proxy_profile_is_idempotent_and_writes_canonical_toml() {
+        let temp = TempDir::new().unwrap();
+        ensure_proxy_profile(
+            "bme2btest_minimax",
+            "https://api.minimax.io/v1",
+            Some("MiniMax-M3[1m]"),
+            Some(temp.path()),
+        )
+        .expect("first call writes the file");
+
+        let path = temp.path().join("bme2btest_minimax.config.toml");
+        let content = std::fs::read_to_string(&path).expect("file written");
+        assert!(content.contains(r#"model_provider = "bme2btest_minimax""#), "{content}");
+        assert!(
+            content.contains(r#"[model_providers.bme2btest_minimax]"#),
+            "{content}"
+        );
+        assert!(
+            content.contains(r#"base_url = "https://api.minimax.io/v1""#),
+            "{content}"
+        );
+        assert!(content.contains(r#"env_key = "OPENAI_API_KEY""#), "{content}");
+        assert!(content.contains("requires_openai_auth = true"), "{content}");
+        assert!(content.contains(r#"name = "Buildmesh proxy bme2btest_minimax""#), "{content}");
+        assert!(content.contains(r#"model = "MiniMax-M3[1m]""#), "{content}");
+
+        // Idempotency: a second call must NOT rewrite (preserves any
+        // hand-edits the user made between spawns).
+        let first_content = content.clone();
+        ensure_proxy_profile(
+            "bme2btest_minimax",
+            "https://api.minimax.io/v1",
+            Some("MiniMax-M3[1m]"),
+            Some(temp.path()),
+        )
+        .expect("second call is a no-op");
+        let second_content = std::fs::read_to_string(&path).expect("file unchanged");
+        assert_eq!(
+            first_content, second_content,
+            "ensure_proxy_profile must be idempotent (file content unchanged on re-call)"
+        );
+    }
+
+    /// Missing model → no `model = "..."` line is written (so the user's
+    /// own `~/.codex/config.toml` model default wins). The
+    /// `[model_providers.<name>]` block still writes, since the base_url +
+    /// env_key are the only required fields for routing.
+    #[test]
+    fn ensure_proxy_profile_omits_model_line_when_model_absent() {
+        let temp = TempDir::new().unwrap();
+        ensure_proxy_profile(
+            "bme2btest_no_model",
+            "https://example.com/v1",
+            None,
+            Some(temp.path()),
+        )
+        .expect("no-model call still writes");
+        let content = std::fs::read_to_string(
+            temp.path().join("bme2btest_no_model.config.toml"),
+        )
+        .expect("file written");
+        assert!(
+            !content.contains("model = "),
+            "absent model must not write a model= line; got: {content}"
+        );
+        assert!(
+            content.contains(r#"base_url = "https://example.com/v1""#),
+            "{content}"
+        );
     }
 }
