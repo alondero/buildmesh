@@ -6,6 +6,10 @@ import { createTerminalOptions } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { TerminalWriter } from './TerminalWriter';
 import { decodeBase64Bytes } from '../../lib/base64';
+import type { BuildRunOutputPayload } from '../../types/generated/BuildRunOutputPayload';
+import type { BuildRunExitedPayload } from '../../types/generated/BuildRunExitedPayload';
+
+export type { BuildRunOutputPayload };
 import { ThemeManager } from './ThemeManager';
 import { setTheme, type ThemeName } from '../../lib/theme';
 
@@ -48,10 +52,6 @@ import { setTheme, type ThemeName } from '../../lib/theme';
  * for this fix.
  */
 export type BuildRunMode = 'build' | 'run' | 'terminal';
-
-interface BuildRunOutputPayload {
-  data?: string;
-}
 
 export interface BuildRunInstance {
   sessionId: number;
@@ -96,7 +96,10 @@ function modeBanner(mode: BuildRunMode, useWorktree: boolean): string {
 
 function payloadToBytes(payload: string | BuildRunOutputPayload): string | Uint8Array {
   if (typeof payload === 'string') return payload;
-  if (payload.data !== undefined) return decodeBase64Bytes(payload.data);
+  // `!= null` catches both Rust's `None` (serialised as `null`) AND a
+  // test-constructed literal that omits the field entirely (TypeScript
+  // widens the missing key to `undefined` at runtime).
+  if (payload.data != null) return decodeBase64Bytes(payload.data);
   return '';
 }
 
@@ -438,7 +441,7 @@ export class BuildRunTerminalRegistry {
       // the listen-resolution window would otherwise mis-fire the previous
       // reader thread's exit event onto the new instance.
       const exitEventName = `build-run-exited-${sessionId}`;
-      const exitUnlisten = await listen<unknown>(exitEventName, () => {
+      const exitUnlisten = await listen<BuildRunExitedPayload>(exitEventName, () => {
         if ((this.sessionGenerations.get(sessionId) ?? -1) !== generation) return;
         inst.ptyAlive = false;
         if (inst.attachedContainer) {

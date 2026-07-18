@@ -16,6 +16,20 @@ use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::sync::atomic::{AtomicBool, Ordering};
+use ts_rs::TS;
+
+/// Payload of the `node-activated` Tauri event. Emitted only by the
+/// HTTP-based E2E test server (`handle_set_active_node`) — production never
+/// broadcasts it; the active-node state is read via the IPC refetch.
+///
+/// Generated to `src/types/generated/NodeActivatedPayload.ts`; the TS half
+/// is imported by `src/stores/agentNodeStore.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeActivatedPayload.ts")]
+pub struct NodeActivatedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+}
 
 const TEST_SERVER_PORT: u16 = 1991;
 
@@ -238,7 +252,10 @@ fn handle_create_agent_node(args: &serde_json::Value, app: AppHandle) -> String 
     ) {
         Ok(node) => {
             // Emit event so frontend agent-node store can refetch via invoke()
-            let _ = app.emit("node-created", serde_json::json!({ "id": node.id }));
+            let _ = app.emit(
+                "node-created",
+                crate::commands::agent::NodeCreatedPayload { id: node.id },
+            );
             JsonRpcResponse::success(&node)
         }
         Err(e) => JsonRpcResponse::error(&e.to_string()),
@@ -327,7 +344,10 @@ fn handle_spawn_handover_agent(args: &serde_json::Value, app: AppHandle) -> Stri
 
     match result {
         Ok(Ok(node)) => {
-            let _ = app.emit("node-created", serde_json::json!({ "id": node.id }));
+            let _ = app.emit(
+                "node-created",
+                crate::commands::agent::NodeCreatedPayload { id: node.id },
+            );
             JsonRpcResponse::success(&node)
         }
         Ok(Err(e)) => {
@@ -363,10 +383,19 @@ fn handle_inject_test_output(args: &serde_json::Value, app: AppHandle) -> String
     tracing::info!("[test_server] inject_test_output: node_id={} lines={}", node_id, lines.len());
 
     for line in &lines {
-        let _ = app.emit("agent-output", serde_json::json!({
-            "node_id": node_id,
-            "line": line
-        }));
+        // Use the same wire key as the production `agent-output` emit
+        // (`session_id`, NOT `node_id` — see `crate::agent::spawn` and
+        // `src/components/Terminal/TerminalRegistry.ts`'s `AgentOutputPayload`).
+        // Pre-#161 this used `node_id` and the TS listener silently dropped the
+        // payload — the test injection was broken in production.
+        let _ = app.emit(
+            "agent-output",
+            crate::agent::spawn::AgentOutputPayload {
+                session_id: node_id,
+                line: Some(line.clone()),
+                data: None,
+            },
+        );
     }
 
     JsonRpcResponse::success(&serde_json::json!({
@@ -424,7 +453,10 @@ fn handle_set_active_node(args: &serde_json::Value, app: AppHandle) -> String {
     tracing::info!("[test_server] set_active_node: node_id={}", node_id);
 
     // Emit a frontend event that the agent-node store listens to
-    let _ = app.emit("node-activated", serde_json::json!({ "node_id": node_id }));
+    let _ = app.emit(
+        "node-activated",
+        NodeActivatedPayload { node_id },
+    );
 
     JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id }))
 }

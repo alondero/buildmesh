@@ -9,7 +9,46 @@
 
 use crate::db;
 use crate::models::{AgentNode, SessionStatus};
+use serde::Serialize;
 use tauri::{command, AppHandle, Emitter};
+use ts_rs::TS;
+
+// ---------------------------------------------------------------------------
+// Wire types — Tauri event payloads (issue #161)
+// ---------------------------------------------------------------------------
+
+/// Payload of the `attention-needed` Tauri event. Emitted by the attention
+/// router ([`mark_attention`], the coordinator route, the autopilot pipeline)
+/// when a Node Turn lands; the frontend flips the node status to
+/// `awaiting_input`. The `session_id` key is the wire contract with
+/// already-deployed agent hooks (CONTEXT.md ambiguity #1 says this stays as
+/// "session" intentionally — `node_id` is the internal alias).
+///
+/// Generated to `src/types/generated/AttentionNeededPayload.ts`; the TS half
+/// is imported by `src/stores/agentNodeStore.ts`. Mirrors
+/// [`AttentionClearedPayload`] in shape (a single id-keyed object).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AttentionNeededPayload.ts")]
+pub struct AttentionNeededPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+}
+
+/// Payload of the `attention-cleared` Tauri event. Emitted by
+/// [`clear_attention_node`], [`crate::attention_autoclear::clear_now`], the
+/// coordinator drive path, and the autopilot pipeline when a Node Turn
+/// resolves (the user typed, the agent resumed output, etc).
+///
+/// Generated to `src/types/generated/AttentionClearedPayload.ts`; the TS half
+/// is imported by `src/stores/agentNodeStore.ts`. Same `session_id` key as
+/// [`AttentionNeededPayload`] — keeping them symmetric keeps the store's two
+/// listeners trivially parallel.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AttentionClearedPayload.ts")]
+pub struct AttentionClearedPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+}
 
 /// The side effects of marking a node for attention, behind a seam so the logic
 /// is testable without a real [`AppHandle`] or the process-global DB. Mirrors
@@ -30,7 +69,7 @@ impl AttentionSink for AppAttentionSink<'_> {
     fn emit_attention_needed(&self, node_id: i64) {
         let _ = self
             .app
-            .emit("attention-needed", serde_json::json!({ "session_id": node_id }));
+            .emit("attention-needed", AttentionNeededPayload { session_id: node_id });
     }
 }
 
@@ -66,7 +105,7 @@ pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), St
     db::update_agent_node_status(node_id, SessionStatus::Running).map_err(|e| e.to_string())?;
     app.emit(
         "attention-cleared",
-        serde_json::json!({ "node_id": node_id }),
+        AttentionClearedPayload { session_id: node_id },
     )
     .map_err(|e| e.to_string())?;
     tracing::info!("Node {} attention cleared", node_id);

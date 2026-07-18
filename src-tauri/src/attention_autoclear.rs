@@ -110,7 +110,7 @@ fn clear_now(node_id: i64) {
     if let Some(app) = crate::http::app_handle() {
         let _ = app.emit(
             "attention-cleared",
-            serde_json::json!({ "session_id": node_id }),
+            crate::commands::attention::AttentionClearedPayload { session_id: node_id },
         );
     }
     crate::http::events::emit(crate::http::events::EventMsg::AttentionCleared {

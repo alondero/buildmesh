@@ -21,9 +21,120 @@ use crate::git::worktree::provision::{
 use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
+use ts_rs::TS;
+
+// ---------------------------------------------------------------------------
+// Wire types — Tauri event payloads (issue #161)
+// ---------------------------------------------------------------------------
+
+/// Payload of the `agent-output` Tauri event. Streamed from the PTY reader
+/// thread for every node. Exactly one of `data` (base64-encoded bytes) or
+/// `line` (raw UTF-8 string) is populated — the listener branches on which
+/// is `Some`. The empty-both case is meaningless and ignored.
+///
+/// Generated to `src/types/generated/AgentOutputPayload.ts`; the TS half is
+/// imported by `src/components/Terminal/TerminalRegistry.ts`. The wire key is
+/// `session_id` (NOT `node_id`) — historically this mismatched the test
+/// server's emit (which used `node_id`) and silently dropped test
+/// injections; issue #161 realigns both sides on `session_id`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AgentOutputPayload.ts")]
+pub struct AgentOutputPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+    pub data: Option<String>,
+    pub line: Option<String>,
+}
+
+/// Payload of the `agent-spawned` Tauri event. Emitted once stage-2 of the
+/// two-stage spawn (the slow path that registers the process in
+/// `PROCESS_REGISTRY`) completes. The frontend listener re-pushes the
+/// terminal's fitted dimensions via `resize_agent`, closing the auto-spawn
+/// attach-fit race (issue #332).
+///
+/// Generated to `src/types/generated/AgentSpawnedPayload.ts`; the TS half is
+/// imported by `src/components/Terminal/TerminalRegistry.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AgentSpawnedPayload.ts")]
+pub struct AgentSpawnedPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+    #[ts(as = "i32")]
+    pub rows: i32,
+    #[ts(as = "i32")]
+    pub cols: i32,
+}
+
+/// Payload of the `provider-error` Tauri event. Emitted by the sandbox-spawn
+/// and direct-pty branches when the agent CLI could not be launched
+/// (network denied, AppContainer mis-config, cwrap spawn failed, etc). The
+/// frontend surfaces it as an error toast; the `provider` field drives the
+/// toast label so the user knows which harness choked.
+///
+/// Generated to `src/types/generated/ProviderErrorPayload.ts`; the TS half is
+/// imported by `src/App.tsx`. `session_id` is included for completeness
+/// (lets future listners jump to the failing node) — pre-#161 the inline TS
+/// type only declared `provider` + `message` and silently dropped it.
+/// `provider` is the typed [`Provider`] enum (not a plain string) so the
+/// serde-derived lowercase wire value (`"anthropic"`, `"codex"`, …) is
+/// preserved across the typed rewrite.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "ProviderErrorPayload.ts")]
+pub struct ProviderErrorPayload {
+    #[ts(as = "i32")]
+    pub session_id: i64,
+    pub provider: crate::models::Provider,
+    pub message: String,
+}
+
+/// Payload of the `mesh-sync-warning` Tauri event. Emitted for any non-fatal
+/// auto-sync failure (network down, diverged history, repo unusable, PR-head
+/// unfetchable, PR SHA drift). The `outcome` discriminator drives the toast
+/// label / extra actions in the frontend; per-variant fields populate
+/// context for that copy.
+///
+/// Generated to `src/types/generated/MeshSyncWarningPayload.ts`; the TS half
+/// is imported by `src/App.tsx`. Kept as a flat struct with `Option<...>`
+/// fields rather than a tagged-enum so a single TS type covers all six
+/// outcomes — the frontend only reads `message` regardless.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "MeshSyncWarningPayload.ts")]
+pub struct MeshSyncWarningPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub mesh_path: String,
+    pub outcome: MeshSyncOutcome,
+    #[ts(as = "Option<i32>")]
+    pub new_commits: Option<u32>,
+    #[ts(as = "Option<i32>")]
+    pub pr_number: Option<i64>,
+    pub head_ref: Option<String>,
+    pub expected_sha: Option<String>,
+    pub actual_sha: Option<String>,
+    pub fallback_base_ref: Option<String>,
+    pub head_repo_owner: Option<String>,
+    pub head_repo_clone_url: Option<String>,
+    pub message: String,
+}
+
+/// `outcome` discriminant for [`MeshSyncWarningPayload`]. The Rust enum's
+/// `#[serde(rename_all = "snake_case")]` keeps the wire variants in the
+/// shape the pre-#161 inline TS union expected.
+#[derive(Debug, Clone, Copy, Serialize, TS)]
+#[ts(export, export_to = "MeshSyncOutcome.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum MeshSyncOutcome {
+    Diverged,
+    FetchFailed,
+    RepoUnusable,
+    PrHeadUnfetchable,
+    PrForkUnfetchable,
+    PrShaDrift,
+}
 
 /// Default `worktree_mode` when the mesh config leaves it unset. Pinned by
 /// the unit test in this module (`default_worktree_mode_is_branched`).
@@ -815,10 +926,11 @@ fn start_reader(
 
             let _ = app_clone.emit(
                 "agent-output",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "data": encode_pty_chunk(data)
-                }),
+                AgentOutputPayload {
+                    session_id,
+                    data: Some(encode_pty_chunk(data)),
+                    line: None,
+                },
             );
 
             // Forward to any connected mobile WebSocket clients
@@ -863,10 +975,11 @@ fn start_reader(
                 );
                 let _ = app_clone.emit(
                     "resume-failed",
-                    serde_json::json!({
-                        "node_id": session_id,
-                        "error": "Agent exited immediately after spawn — session may have expired"
-                    }),
+                    crate::commands::agent::ResumeFailedPayload {
+                        node_id: session_id,
+                        error: "Agent exited immediately after spawn — session may have expired"
+                            .to_string(),
+                    },
                 );
             }
         }
@@ -1338,16 +1451,20 @@ pub async fn spawn_agent_inner(
                             );
                             let _ = app.emit(
                                 "mesh-sync-warning",
-                                serde_json::json!({
-                                    "node_id": session_id,
-                                    "mesh_path": node.path,
-                                    "outcome": "pr_sha_drift",
-                                    "pr_number": pr_number,
-                                    "head_ref": head_ref,
-                                    "expected_sha": expected,
-                                    "actual_sha": actual,
-                                    "message": message,
-                                }),
+                                MeshSyncWarningPayload {
+                                    node_id: session_id,
+                                    mesh_path: node.path.clone(),
+                                    outcome: MeshSyncOutcome::PrShaDrift,
+                                    new_commits: None,
+                                    pr_number: Some(pr_number),
+                                    head_ref: Some(head_ref.clone()),
+                                    expected_sha: Some(expected.to_string()),
+                                    actual_sha: Some(actual.to_string()),
+                                    fallback_base_ref: None,
+                                    head_repo_owner: None,
+                                    head_repo_clone_url: None,
+                                    message,
+                                },
                             );
                         }
                     }
@@ -1360,11 +1477,6 @@ pub async fn spawn_agent_inner(
                     // (the user renamed or deleted the fork) than a same-
                     // repo failure (usually transient network).
                     let is_fork = node.head_repo_owner.is_some();
-                    let outcome = if is_fork {
-                        "pr_fork_unfetchable"
-                    } else {
-                        "pr_head_unfetchable"
-                    };
                     let source_label = if is_fork {
                         let alias = node
                             .head_repo_owner
@@ -1384,23 +1496,37 @@ pub async fn spawn_agent_inner(
                         message,
                         session_id,
                     );
-                    let mut payload = serde_json::json!({
-                        "node_id": session_id,
-                        "mesh_path": node.path,
-                        "outcome": outcome,
-                        "pr_number": pr_number,
-                        "head_ref": head_ref,
-                        "fallback_base_ref": base_ref,
-                        "message": message,
-                    });
+                    let mut head_repo_owner_str: Option<String> = None;
+                    let mut head_repo_clone_url_str: Option<String> = None;
                     if let (Some(owner), Some(url)) = (
                         node.head_repo_owner.as_deref(),
                         node.head_repo_clone_url.as_deref(),
                     ) {
-                        payload["head_repo_owner"] = serde_json::Value::String(owner.to_string());
-                        payload["head_repo_clone_url"] = serde_json::Value::String(url.to_string());
+                        head_repo_owner_str = Some(owner.to_string());
+                        head_repo_clone_url_str = Some(url.to_string());
                     }
-                    let _ = app.emit("mesh-sync-warning", payload);
+                    let outcome_enum = if is_fork {
+                        MeshSyncOutcome::PrForkUnfetchable
+                    } else {
+                        MeshSyncOutcome::PrHeadUnfetchable
+                    };
+                    let _ = app.emit(
+                        "mesh-sync-warning",
+                        MeshSyncWarningPayload {
+                            node_id: session_id,
+                            mesh_path: node.path.clone(),
+                            outcome: outcome_enum,
+                            new_commits: None,
+                            pr_number: Some(pr_number),
+                            head_ref: Some(head_ref.clone()),
+                            expected_sha: None,
+                            actual_sha: None,
+                            fallback_base_ref: Some(base_ref.to_string()),
+                            head_repo_owner: head_repo_owner_str,
+                            head_repo_clone_url: head_repo_clone_url_str,
+                            message,
+                        },
+                    );
                     base_ref.to_string()
                 }
             } else {
@@ -1589,11 +1715,11 @@ pub async fn spawn_agent_inner(
     let emit_provider_error = |e: &String| {
         let _ = app.emit(
             "provider-error",
-            serde_json::json!({
-                "session_id": session_id,
-                "provider": provider,
-                "message": e
-            }),
+            ProviderErrorPayload {
+                session_id,
+                provider,
+                message: e.clone(),
+            },
         );
     };
 
@@ -1813,10 +1939,10 @@ pub async fn spawn_agent_inner(
                 // manual-rename command uses (agentNodeStore listens for it).
                 let _ = app.emit(
                     "node-renamed",
-                    serde_json::json!({
-                        "node_id": session_id,
-                        "name": entry.preassigned_name,
-                    }),
+                    crate::session_naming::NodeRenamedPayload {
+                        node_id: session_id,
+                        name: entry.preassigned_name,
+                    },
                 );
             }
         }
@@ -1874,11 +2000,11 @@ pub async fn spawn_agent_inner(
     // terminals) and swallows the "Agent not running" rejection.
     let _ = app.emit(
         "agent-spawned",
-        serde_json::json!({
-            "session_id": session_id,
-            "rows": rows,
-            "cols": cols,
-        }),
+        AgentSpawnedPayload {
+            session_id,
+            rows: rows as i32,
+            cols: cols as i32,
+        },
     );
 
     tracing::info!("spawn_agent_inner: complete");
@@ -1902,7 +2028,7 @@ fn emit_sync_outcome_event(
     mesh_path: &str,
     outcome: Result<crate::git::sync::FetchOutcome, crate::git::sync::FetchError>,
 ) {
-    let (event_name, payload) = match outcome {
+    let payload = match outcome {
         Ok(crate::git::sync::FetchOutcome::FetchedButDirty { new_commits }) => {
             // Silent, like Synced/UpToDate: the fetch reached the remote and
             // advanced the tracking refs the worktree is cut from — the new
@@ -1949,16 +2075,20 @@ fn emit_sync_outcome_event(
                 new_commits, reason
             );
             tracing::warn!("spawn_agent_inner: {}", message);
-            (
-                "mesh-sync-warning",
-                serde_json::json!({
-                    "node_id": session_id,
-                    "mesh_path": mesh_path,
-                    "outcome": "diverged",
-                    "new_commits": new_commits,
-                    "message": message,
-                }),
-            )
+            Some(MeshSyncWarningPayload {
+                node_id: session_id,
+                mesh_path: mesh_path.to_string(),
+                outcome: MeshSyncOutcome::Diverged,
+                new_commits: Some(new_commits),
+                pr_number: None,
+                head_ref: None,
+                expected_sha: None,
+                actual_sha: None,
+                fallback_base_ref: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                message,
+            })
         }
         Err(crate::git::sync::FetchError::RepoUnusable(reason)) => {
             let message = format!(
@@ -1966,15 +2096,20 @@ fn emit_sync_outcome_event(
                 reason
             );
             tracing::warn!("spawn_agent_inner: {}", message);
-            (
-                "mesh-sync-warning",
-                serde_json::json!({
-                    "node_id": session_id,
-                    "mesh_path": mesh_path,
-                    "outcome": "repo_unusable",
-                    "message": message,
-                }),
-            )
+            Some(MeshSyncWarningPayload {
+                node_id: session_id,
+                mesh_path: mesh_path.to_string(),
+                outcome: MeshSyncOutcome::RepoUnusable,
+                new_commits: None,
+                pr_number: None,
+                head_ref: None,
+                expected_sha: None,
+                actual_sha: None,
+                fallback_base_ref: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                message,
+            })
         }
         Err(crate::git::sync::FetchError::FetchFailed(reason)) => {
             // The most common case: network down. We don't try to
@@ -1990,18 +2125,25 @@ fn emit_sync_outcome_event(
                 )
             };
             tracing::warn!("spawn_agent_inner: {}", message);
-            (
-                "mesh-sync-warning",
-                serde_json::json!({
-                    "node_id": session_id,
-                    "mesh_path": mesh_path,
-                    "outcome": "fetch_failed",
-                    "message": message,
-                }),
-            )
+            Some(MeshSyncWarningPayload {
+                node_id: session_id,
+                mesh_path: mesh_path.to_string(),
+                outcome: MeshSyncOutcome::FetchFailed,
+                new_commits: None,
+                pr_number: None,
+                head_ref: None,
+                expected_sha: None,
+                actual_sha: None,
+                fallback_base_ref: None,
+                head_repo_owner: None,
+                head_repo_clone_url: None,
+                message,
+            })
         }
     };
-    let _ = app.emit(event_name, payload);
+    if let Some(payload) = payload {
+        let _ = app.emit("mesh-sync-warning", payload);
+    }
 }
 
 // The worktree-provision helpers — `fetch_single_ref`, `locked_fetch_pr_head`,

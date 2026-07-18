@@ -2,6 +2,17 @@ import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import { listen } from '@tauri-apps/api/event';
+import type { AttentionNeededPayload } from '../types/generated/AttentionNeededPayload';
+import type { AttentionClearedPayload } from '../types/generated/AttentionClearedPayload';
+import type { NodeRenamedPayload } from '../types/generated/NodeRenamedPayload';
+import type { NodeCreatedPayload } from '../types/generated/NodeCreatedPayload';
+import type { NodeActivatedPayload } from '../types/generated/NodeActivatedPayload';
+import type { NodeSpawnCompletedPayload } from '../types/generated/NodeSpawnCompletedPayload';
+import type { NodeSpawnFailedPayload } from '../types/generated/NodeSpawnFailedPayload';
+import type { AutopilotFinishingPayload } from '../types/generated/AutopilotFinishingPayload';
+import type { AutopilotPrCreatedPayload } from '../types/generated/AutopilotPrCreatedPayload';
+import type { AutopilotFinishFailedPayload } from '../types/generated/AutopilotFinishFailedPayload';
+import type { AutopilotNodeClosedPayload } from '../types/generated/AutopilotNodeClosedPayload';
 import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
 import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
@@ -176,7 +187,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // already-deployed agent hooks (CONTEXT.md ambiguity #1 says this stays
         // as "session" intentionally). Map to the internal `node_id` alias for
         // vocabulary consistency inside the store.
-        await listen<{ session_id: number }>('attention-needed', (event) => {
+        await listen<AttentionNeededPayload>('attention-needed', (event) => {
           const nodeId = event.payload.session_id;
           set((state) => ({
             agentNodes: state.agentNodes.map((s) =>
@@ -185,7 +196,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
           }));
         });
 
-        await listen<{ session_id: number }>('attention-cleared', (event) => {
+        await listen<AttentionClearedPayload>('attention-cleared', (event) => {
           const nodeId = event.payload.session_id;
           set((state) => ({
             agentNodes: state.agentNodes.map((s) =>
@@ -197,7 +208,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // `node-renamed` is the internal event emitted by `rename_agent_node`
         // (renamed from `session-renamed` in issue #490). The payload key
         // follows: `node_id`, not `session_id`.
-        await listen<{ node_id: number; name: string }>('node-renamed', (event) => {
+        await listen<NodeRenamedPayload>('node-renamed', (event) => {
           const { node_id: nodeId, name } = event.payload;
           set((state) => ({
             agentNodes: state.agentNodes.map((s) =>
@@ -214,12 +225,12 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // In both cases the cleanest recovery is to refetch the full list — the
         // row is already committed by the time the event fires, so we can never
         // lose a node by racing the IPC.
-        await listen<{ id: number }>('node-created', async () => {
+        await listen<NodeCreatedPayload>('node-created', async () => {
           await get().fetchAgentNodes();
         });
 
         // Listen for node-activated events from test server (HTTP-based E2E tests)
-        await listen<{ node_id: number }>('node-activated', (event) => {
+        await listen<NodeActivatedPayload>('node-activated', (event) => {
           const nodeId = event.payload.node_id;
           set({ activeNodeId: nodeId });
         });
@@ -227,7 +238,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // Two-stage spawn completion: the backend emits this when stage-2
         // (`start_node_background`) finishes the slow work and the agent
         // process is up. Flips the node from 'pending' to 'running'.
-        await listen<{ node_id: number }>('node-spawn-completed', (event) => {
+        await listen<NodeSpawnCompletedPayload>('node-spawn-completed', (event) => {
           const nodeId = event.payload.node_id;
           set((state) => ({
             agentNodes: state.agentNodes.map((s) =>
@@ -242,13 +253,13 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // events to pick up the node's own status change).
         const patchAutopilotState = (nodeId: number, state: AutopilotRunState) =>
           set((s) => ({ autopilotStates: { ...s.autopilotStates, [nodeId]: state } }));
-        await listen<{ node_id: number }>('autopilot-finishing', (event) => {
+        await listen<AutopilotFinishingPayload>('autopilot-finishing', (event) => {
           patchAutopilotState(event.payload.node_id, 'finishing');
         });
-        await listen<{ node_id: number }>('autopilot-pr-created', (event) => {
+        await listen<AutopilotPrCreatedPayload>('autopilot-pr-created', (event) => {
           patchAutopilotState(event.payload.node_id, 'completed');
         });
-        await listen<{ node_id: number }>('autopilot-finish-failed', (event) => {
+        await listen<AutopilotFinishFailedPayload>('autopilot-finish-failed', (event) => {
           patchAutopilotState(event.payload.node_id, 'failed');
         });
         // Merged-PR auto-close: the backend archived the node (NOT deleted);
@@ -257,14 +268,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         // for the Archive tab, and the terminal-persistence rule says only a
         // node-delete may dispose. `TerminalManager` is a singleton; the
         // instance survives the refetch.
-        await listen<{ node_id: number }>('autopilot-node-closed', async () => {
+        await listen<AutopilotNodeClosedPayload>('autopilot-node-closed', async () => {
           await get().fetchAgentNodes();
         });
 
         // Two-stage spawn failure: backend already updated the node's DB
         // status to 'error' before emitting — we mirror it in the store so
         // the sidebar/title-bar renders the red badge without a refetch.
-        await listen<{ node_id: number; error: string }>('node-spawn-failed', (event) => {
+        await listen<NodeSpawnFailedPayload>('node-spawn-failed', (event) => {
           const nodeId = event.payload.node_id;
           set((state) => ({
             agentNodes: state.agentNodes.map((s) =>

@@ -199,7 +199,7 @@ impl DriveTarget for RegistryTarget {
             use tauri::Emitter;
             let _ = app.emit(
                 "attention-cleared",
-                serde_json::json!({ "session_id": node_id }),
+                crate::commands::attention::AttentionClearedPayload { session_id: node_id },
             );
         }
         crate::http::events::emit(crate::http::events::EventMsg::AttentionCleared {

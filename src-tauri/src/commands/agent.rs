@@ -15,6 +15,91 @@ use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
 
 // ---------------------------------------------------------------------------
+// Wire types — Tauri event payloads (issue #161)
+// ---------------------------------------------------------------------------
+
+/// Payload of the `resume-failed` Tauri event. Emitted from the
+/// early-exit-detection branch in `crate::agent::spawn` when the PTY reader
+/// thread exits within 3s of spawn — the `--resume` session expired or the
+/// CLI rejected the resumed id. The frontend renders it as a toast.
+///
+/// Generated to `src/types/generated/ResumeFailedPayload.ts`; the TS half is
+/// imported by `src/App.tsx`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "ResumeFailedPayload.ts")]
+pub struct ResumeFailedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub error: String,
+}
+
+/// Payload of the `node-created` Tauri event. Emitted by [`create_issue_node`]
+/// after the `pending` row is committed, by the autopilot spawn path, and by
+/// the HTTP-based E2E test server (`commands::test::handle_inject_test_output`'s
+/// sibling). The frontend `agentNodeStore` refetches the node list on receipt
+/// (issue #490 renamed this from `session-created`).
+///
+/// The wire key is `id` (single-field payload — issue #490 chose brevity over
+/// parallelism with the `node_*` events).
+///
+/// Generated to `src/types/generated/NodeCreatedPayload.ts`; the TS half is
+/// imported by `src/stores/agentNodeStore.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeCreatedPayload.ts")]
+pub struct NodeCreatedPayload {
+    #[ts(as = "i32")]
+    pub id: i64,
+}
+
+/// Payload of the `node-spawn-completed` Tauri event. Emitted by
+/// `start_node_background` when stage-2 (slow work, registers the process
+/// with `PROCESS_REGISTRY`) finishes successfully. The frontend flips the
+/// node from `pending` to `running`.
+///
+/// Generated to `src/types/generated/NodeSpawnCompletedPayload.ts`; the TS
+/// half is imported by `src/stores/agentNodeStore.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeSpawnCompletedPayload.ts")]
+pub struct NodeSpawnCompletedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+}
+
+/// Payload of the `node-spawn-failed` Tauri event. Emitted by
+/// `start_node_background` when stage-2 fails (e.g. the PTY could not be
+/// opened, the agent CLI rejected its argv). The backend has already
+/// updated the DB to `Error` before emitting, so the listener mirrors it.
+///
+/// Generated to `src/types/generated/NodeSpawnFailedPayload.ts`; the TS half
+/// is imported by `src/stores/agentNodeStore.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeSpawnFailedPayload.ts")]
+pub struct NodeSpawnFailedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub error: String,
+}
+
+/// Payload of the `autopilot-finishing` Tauri event. Emitted by
+/// [`trigger_finish`] when the user manually enrolls a node in the wrap-up
+/// state machine (the header ✓ button) — the autopilot pipeline then takes
+/// over with the same evaluation/correction loop automated spawns get.
+///
+/// Generated to `src/types/generated/AutopilotFinishingPayload.ts`; the TS
+/// half is imported by `src/stores/agentNodeStore.ts`. `issue` is `None`
+/// for hand-spawned nodes that have no originating GitHub issue — preserved
+/// as a nullable wire field so the existing JSON shape (`"issue": null`) is
+/// backwards-compatible with already-deployed listeners.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotFinishingPayload.ts")]
+pub struct AutopilotFinishingPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "Option<i32>")]
+    pub issue: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
 // Provider listing
 // ---------------------------------------------------------------------------
 
@@ -536,7 +621,7 @@ pub fn create_issue_node(
     // node's row id.
     let _ = app.emit(
         "node-created",
-        serde_json::json!({ "id": node.id }),
+        NodeCreatedPayload { id: node.id },
     );
 
     tracing::info!(
@@ -587,7 +672,10 @@ pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
     crate::autopilot::pipeline::clear_attention_after_injection(node_id, &app);
     let _ = app.emit(
         "autopilot-finishing",
-        serde_json::json!({ "node_id": node_id, "issue": node.source_issue }),
+        AutopilotFinishingPayload {
+            node_id,
+            issue: node.source_issue,
+        },
     );
     tracing::info!("trigger_finish: injected wrap-up prompt into node {}", node_id);
     Ok(())
@@ -786,7 +874,10 @@ pub fn create_pr_node(
         head_repo_clone_url,
     )?;
     // Mirrors `create_issue_node` — see that block for the rationale.
-    let _ = app.emit("node-created", serde_json::json!({ "id": draft.node.id }));
+    let _ = app.emit(
+        "node-created",
+        NodeCreatedPayload { id: draft.node.id },
+    );
     Ok(draft)
 }
 
@@ -898,7 +989,7 @@ pub fn start_node_background(
             Ok(()) => {
                 let _ = app.emit(
                     "node-spawn-completed",
-                    serde_json::json!({ "node_id": node_id }),
+                    NodeSpawnCompletedPayload { node_id },
                 );
                 tracing::info!("start_node_background: node {} ready", node_id);
             }
@@ -911,7 +1002,10 @@ pub fn start_node_background(
                 let _ = db::update_agent_node_status(node_id, SessionStatus::Error);
                 let _ = app.emit(
                     "node-spawn-failed",
-                    serde_json::json!({ "node_id": node_id, "error": e }),
+                    NodeSpawnFailedPayload {
+                        node_id,
+                        error: e.to_string(),
+                    },
                 );
             }
         }
@@ -1033,10 +1127,13 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
             Err(e) => {
                 tracing::error!("auto_resume_agent_nodes: failed to resume node {}: {}", node.id, e);
                 db::update_agent_node_status(node.id, SessionStatus::Error).ok();
-                let _ = app.emit("resume-failed", serde_json::json!({
-                    "node_id": node.id,
-                    "error": e
-                }));
+                let _ = app.emit(
+                    "resume-failed",
+                    ResumeFailedPayload {
+                        node_id: node.id,
+                        error: e.to_string(),
+                    },
+                );
             }
         }
 
@@ -1078,7 +1175,10 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
         })
         .await?;
     if should_signal {
-        let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
+        let _ = app.emit(
+        "attention-cleared",
+        crate::commands::attention::AttentionClearedPayload { session_id },
+    );
     }
     Ok(())
 }

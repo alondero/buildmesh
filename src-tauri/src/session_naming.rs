@@ -67,6 +67,24 @@ pub struct NamingBackendFailedPayload {
     pub reason: String,
 }
 
+/// Payload of the `node-renamed` Tauri event. Emitted by the LLM rename
+/// pipeline ([`on_turn_with`]) AND by the post-spawn preassigned-name
+/// adoption path in `crate::agent::spawn` (which re-labels the throwaway
+/// slug the row was created under). The frontend listener patches the node
+/// list in place.
+///
+/// Generated to `src/types/generated/NodeRenamedPayload.ts`; the TS half is
+/// imported by `src/stores/agentNodeStore.ts`. Renamed from `session-renamed`
+/// alongside the IPC rename in issue #490 — the wire key is `node_id`, NOT
+/// `session_id`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "NodeRenamedPayload.ts")]
+pub struct NodeRenamedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub name: String,
+}
+
 // ---------------------------------------------------------------------------
 // Repository trait — abstracts DB calls for testability
 // ---------------------------------------------------------------------------
@@ -831,10 +849,10 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
                 clear_node_state(node_id);
                 let _ = app_for_task.emit(
                     "node-renamed",
-                    serde_json::json!({
-                        "node_id": node_id,
-                        "name": slug
-                    }),
+                    NodeRenamedPayload {
+                        node_id,
+                        name: slug.clone(),
+                    },
                 );
                 tracing::info!("Node {} renamed to '{}'", node_id, slug);
             }
