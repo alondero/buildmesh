@@ -59,57 +59,31 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-[alondero@gmail.com](mailto:alondero@gmail.com). All complaints will be reviewed
-and investigated promptly and fairly.
+reported to the community leaders responsible for enforcement through the
+project's [GitHub Security Advisories](../../security/advisories/new)
+channel — reports stay private between the reporter and the maintainer until
+disclosure. All complaints will be reviewed and investigated promptly and
+fairly.
 
 All community leaders are obligated to respect the privacy and security of the
 reporter of any incident.
 
-## Enforcement Guidelines
+Buildmesh is maintained by a single person. There is no moderation team and
+no formal review board; the realistic enforcement toolkit is whatever GitHub
+gives a repository maintainer. Outcomes, in increasing severity, are:
 
-Community leaders will follow these Community Impact Guidelines in determining
-the consequences of any action they deem in violation of this Code of Conduct:
+- a private note,
+- a public note on the offending thread,
+- locking the offending thread or issue,
+- blocking the user from interacting with the repository via Settings →
+  Moderation → "Block user" (with an expiry, or indefinitely), and
+- for behaviour that crosses GitHub's platform Terms of Service (harassment,
+  doxxing, threats), reporting the user to GitHub Support, who can suspend
+  their account across all of github.com.
 
-### 1. Correction
-
-**Community Impact**: Use of inappropriate language or other behavior deemed
-unprofessional or unwelcome in the community.
-
-**Consequence**: A private, written warning from community leaders, providing
-clarity around the nature of the violation and an explanation of why the
-behavior was inappropriate. A public apology may be requested.
-
-### 2. Warning
-
-**Community Impact**: A violation through a single incident or series
-of actions.
-
-**Consequence**: A warning with consequences for continued behavior. No
-interaction with the people involved, including unsolicited interaction with
-those enforcing the Code of Conduct, for a specified period of time. This
-includes avoiding interactions in community spaces as well as external channels
-like social media. Violating these terms may lead to a temporary or
-permanent ban.
-
-### 3. Temporary Ban
-
-**Community Impact**: A serious violation of community standards, including
-sustained inappropriate behavior.
-
-**Consequence**: A temporary ban from any sort of interaction or public
-communication with the community for a specified period of time. No public or
-private interaction with the people involved, including unsolicited interaction
-with those enforcing the Code of Conduct, is allowed during this period.
-Violating these terms may lead to a permanent ban.
-
-### 4. Permanent Ban
-
-**Community Impact**: Demonstrating a pattern of violation of community
-standards, including sustained inappropriate behavior.
-
-**Consequence**: A permanent ban from any sort of public interaction within
-the community.
+There is no published escalation ladder. Outcomes are decided case by case
+by the maintainer, in private, and informed by the project's stated Standards
+above.
 
 ## Attribution
 
@@ -117,15 +91,11 @@ This Code of Conduct is adapted from the [Contributor Covenant][homepage],
 version 2.1, available at
 [https://www.contributor-covenant.org/version/2/1/code_of_conduct.html][v2.1].
 
-Community Impact Guidelines were inspired by
-[Mozilla's code of conduct enforcement ladder][mozilla-coop].
-
 For answers to common questions about this code of conduct, see the FAQ at
 [https://www.contributor-covenant.org/faq][faq]. Translations are available
 at [https://www.contributor-covenant.org/translations][translations].
 
 [homepage]: https://www.contributor-covenant.org
 [v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
-[mozilla-coop]: https://github.com/mozilla/diversity
 [faq]: https://www.contributor-covenant.org/faq
 [translations]: https://www.contributor-covenant.org/translations

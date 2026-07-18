@@ -107,7 +107,9 @@ credential, etc.), **please do not file a public issue**. See
 
 By participating, you agree to the
 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
-Report CoC violations to [alondero@gmail.com](mailto:alondero@gmail.com).
+Report CoC violations through the project's [GitHub Security Advisories](../../security/advisories/new)
+channel (private until disclosure) — the same path used for security
+reports.
 
 ## Filing issues & PRs
 

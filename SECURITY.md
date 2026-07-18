@@ -18,12 +18,8 @@ Use GitHub's private vulnerability-reporting channel — the
 **Security** tab when this file exists — so the report stays between
 you and the maintainer until disclosure. The direct URL is
 <https://github.com/alondero/buildmesh/security/advisories/new>.
-GitHub will email the maintainer; you do not need to know the
+GitHub will notify the maintainer; you do not need to know the
 maintainer's email address to report.
-
-If GitHub's advisory flow is unavailable for any reason, email
-[alondero@gmail.com](mailto:alondero@gmail.com) with the subject prefix
-`[buildmesh security]`.
 
 ### What to include
 
