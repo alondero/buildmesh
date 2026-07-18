@@ -22,12 +22,19 @@
 //!
 //! Threading: `on_turn` is called from the attention webhook path, so all
 //! real work (LLM classify, git inspection, GitHub round-trip) runs on a
-//! dedicated worker thread; a per-node in-flight guard collapses re-entrant
-//! turns while an evaluation is running.
+//! dedicated worker thread; a per-node in-flight guard serialises re-entrant
+//! turns while an evaluation is running (a turn arriving mid-evaluation is
+//! queued, not dropped — a dropped *final* turn stalls the run, #874).
+//!
+//! Turn delivery is not guaranteed (the attention callback is a best-effort
+//! HTTP hook), so the poller adds two fallbacks: the green-only re-drive for
+//! stalled `finishing` rows, and [`watchdog_pass`], which synthesises the
+//! evaluation a lost turn never delivered for any quiet piloted node.
 
 use once_cell::sync::Lazy;
-use std::collections::HashSet;
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 use super::evaluator::{self, Classification};
@@ -40,8 +47,42 @@ use crate::models::SessionStatus;
 /// (the initial `/finish` + corrections) before the node is failed.
 pub const MAX_FINISH_ATTEMPTS: i32 = 3;
 
-/// Nodes with an evaluation currently in flight (in-flight guard).
-static EVALUATING: Lazy<Mutex<HashSet<i64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+/// Nodes with an evaluation currently in flight. The value records whether
+/// another turn arrived *while* that evaluation was running — `true` means
+/// the finishing evaluation must immediately re-run instead of dropping the
+/// arrival (issue #874: a dropped final turn stalls the run forever).
+static EVALUATING: Lazy<Mutex<HashMap<i64, bool>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Claim the per-node evaluation slot. `false` = an evaluation is already in
+/// flight; the arrival has been queued and that evaluation will re-run.
+pub(crate) fn try_begin_evaluation(node_id: i64) -> bool {
+    match EVALUATING.lock().unwrap().entry(node_id) {
+        Entry::Occupied(mut e) => {
+            *e.get_mut() = true;
+            false
+        }
+        Entry::Vacant(v) => {
+            v.insert(false);
+            true
+        }
+    }
+}
+
+/// Release the slot. `true` = a turn arrived mid-evaluation and the caller
+/// must run another evaluation (the slot stays claimed for it).
+pub(crate) fn end_evaluation_and_check_rerun(node_id: i64) -> bool {
+    let mut evaluating = EVALUATING.lock().unwrap();
+    match evaluating.get_mut(&node_id) {
+        Some(pending) if *pending => {
+            *pending = false;
+            true
+        }
+        _ => {
+            evaluating.remove(&node_id);
+            false
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Pure decision cores (unit-tested without IO)
@@ -158,11 +199,59 @@ pub(crate) fn correction_prompt(reasons: &[String], recent_output: &str) -> Stri
 // PTY injection (#484)
 // ---------------------------------------------------------------------------
 
-/// Write a (possibly multi-line) prompt into the node's PTY stdin and submit
-/// it. Multi-line text is wrapped in bracketed-paste markers so the agent
-/// CLI treats it as one pasted block instead of submitting at every
-/// newline; the trailing `\r` is the Enter keystroke (same as the desktop
-/// input path).
+/// Poll cadence for the submit watcher's readiness/acknowledgement checks.
+const SUBMIT_POLL: Duration = Duration::from_millis(250);
+
+/// How long to wait for the pasted prompt to echo back in PTY output before
+/// concluding this provider renders no echo and moving on.
+const PASTE_ECHO_DEADLINE: Duration = Duration::from_secs(3);
+
+/// The TUI redraw after a paste must have been quiet this long before Enter
+/// is sent (mirrors `launch::MIN_QUIET_MS`'s reasoning at a smaller scale —
+/// the box is drawn and the CLI is waiting).
+const PASTE_SETTLE_QUIET_MS: u128 = 1_000;
+
+/// Upper bound on waiting for the post-paste redraw to settle.
+const PASTE_SETTLE_DEADLINE: Duration = Duration::from_secs(15);
+
+/// After an Enter keystroke, PTY output must appear within this window for
+/// the submit to count as acknowledged.
+const ENTER_ACK_WINDOW: Duration = Duration::from_secs(6);
+
+/// Enter keystrokes attempted before the watcher gives up and surfaces the
+/// node for human attention.
+const MAX_ENTER_ATTEMPTS: u32 = 3;
+
+/// The bytes staged into the PTY input box — WITHOUT the Enter keystroke.
+/// Multi-line text is wrapped in bracketed-paste markers so the agent CLI
+/// treats it as one pasted block instead of submitting at every newline.
+///
+/// The Enter is deliberately NOT part of this payload: ink-based TUIs
+/// (Claude Code) batch stdin reads, and a `\r` arriving in the same read
+/// burst as a bracketed paste is treated as part of the paste — the prompt
+/// sits staged in the input box and is never submitted (issue #874, node
+/// 2328: the correction was visibly pasted, the run stalled forever).
+pub(crate) fn injection_payload(text: &str) -> String {
+    if text.contains('\n') {
+        format!("\x1b[200~{}\x1b[201~", text)
+    } else {
+        text.to_string()
+    }
+}
+
+/// Has the node produced PTY output more recently than `ms_since_mark`
+/// milliseconds ago? Pure core of both the paste-echo check and the
+/// Enter-acknowledgement check.
+pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u128) -> bool {
+    matches!(ms_since_output, Some(m) if m < ms_since_mark)
+}
+
+/// Write a (possibly multi-line) prompt into the node's PTY stdin, then
+/// submit it from a background watcher: wait for the paste to echo and the
+/// redraw to settle, send Enter as its own write, and verify output follows
+/// (retrying Enter a bounded number of times). `Ok` means "staged and
+/// submission scheduled" — a submit that never takes marks the node for
+/// human attention instead of stalling silently.
 ///
 /// Deliberately NOT routed through `coordinator::drive::AgentDriver`
 /// (whose "no parallel write path" rule targets *Coordinator/scheduler*
@@ -170,16 +259,90 @@ pub(crate) fn correction_prompt(reasons: &[String], recent_output: &str) -> Stri
 /// template would submit fragments) and its idempotency ledger models
 /// retried remote requests, which an in-process turn reaction doesn't
 /// have. If `AgentDriver` grows multi-line paste support, converge on it.
-pub(crate) fn write_prompt_to_pty(node_id: i64, text: &str) -> Result<(), String> {
+pub(crate) fn write_prompt_to_pty(node_id: i64, text: &str, app: &AppHandle) -> Result<(), String> {
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
         return Err(format!("node {} has no live agent process", node_id));
     }
-    let payload = if text.contains('\n') {
-        format!("\x1b[200~{}\x1b[201~\r", text)
-    } else {
-        format!("{}\r", text)
-    };
-    crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, payload.as_bytes())
+    crate::agent::process::PROCESS_REGISTRY
+        .write_bytes(node_id, injection_payload(text).as_bytes())?;
+    let app = app.clone();
+    std::thread::spawn(move || submit_staged_prompt(node_id, &app));
+    Ok(())
+}
+
+/// The background half of [`write_prompt_to_pty`]: settle, Enter, verify.
+fn submit_staged_prompt(node_id: i64, app: &AppHandle) {
+    // Phase 1: wait for the paste to echo back (the TUI redrawing its input
+    // box with the staged text). Providers that render no echo fall through
+    // at the deadline.
+    let wrote_at = Instant::now();
+    while Instant::now() < wrote_at + PASTE_ECHO_DEADLINE {
+        if output_seen_within(
+            evaluator::millis_since_last_output(node_id),
+            wrote_at.elapsed().as_millis(),
+        ) {
+            break;
+        }
+        std::thread::sleep(SUBMIT_POLL);
+    }
+    // Phase 2: wait for the redraw to go quiet — Enter must land at an idle
+    // input box, not inside the paste-processing burst.
+    let settle_deadline = Instant::now() + PASTE_SETTLE_DEADLINE;
+    while Instant::now() < settle_deadline {
+        match evaluator::millis_since_last_output(node_id) {
+            Some(quiet) if quiet < PASTE_SETTLE_QUIET_MS => std::thread::sleep(SUBMIT_POLL),
+            _ => break, // quiet (or no output tracked at all) — settled
+        }
+    }
+    // Phase 3: submit and verify.
+    match press_enter_until_output(node_id) {
+        Ok(attempt) => tracing::info!(
+            "autopilot inject({}): staged prompt submitted (Enter attempt {})",
+            node_id,
+            attempt
+        ),
+        Err(e) => {
+            // Loud degrade: a staged-but-unsubmitted prompt is exactly the
+            // silent stall of #874 — surface the node instead.
+            tracing::warn!(
+                "autopilot inject({}): staged prompt was never submitted ({}) — \
+                 marking the node for human attention",
+                node_id,
+                e
+            );
+            crate::commands::attention::mark_attention(node_id, app);
+        }
+    }
+}
+
+/// Send Enter and wait for PTY output to acknowledge it, retrying up to
+/// [`MAX_ENTER_ATTEMPTS`] times. Returns the attempt number that took.
+/// Shared with the launch watcher — a swallowed Enter stalls a prefilled
+/// launch the same way it stalls an injection.
+pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
+    for attempt in 1..=MAX_ENTER_ATTEMPTS {
+        crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, b"\r")?;
+        let sent_at = Instant::now();
+        while Instant::now() < sent_at + ENTER_ACK_WINDOW {
+            std::thread::sleep(SUBMIT_POLL);
+            if output_seen_within(
+                evaluator::millis_since_last_output(node_id),
+                sent_at.elapsed().as_millis(),
+            ) {
+                return Ok(attempt);
+            }
+        }
+        tracing::warn!(
+            "autopilot inject({}): Enter attempt {}/{} produced no output",
+            node_id,
+            attempt,
+            MAX_ENTER_ATTEMPTS
+        );
+    }
+    Err(format!(
+        "no PTY output followed any of {} Enter keystrokes",
+        MAX_ENTER_ATTEMPTS
+    ))
 }
 
 /// After a backend-driven injection the agent is busy again — mirror the
@@ -308,21 +471,28 @@ pub fn on_turn(node_id: i64, app: &AppHandle) {
     if !evaluator::is_piloted(node_id) {
         return;
     }
-    {
-        let mut evaluating = EVALUATING.lock().unwrap();
-        if !evaluating.insert(node_id) {
-            tracing::debug!("autopilot pipeline({}): evaluation already in flight", node_id);
-            return;
-        }
+    if !try_begin_evaluation(node_id) {
+        tracing::debug!(
+            "autopilot pipeline({}): evaluation already in flight — turn queued for re-run",
+            node_id
+        );
+        return;
     }
     let app = app.clone();
-    std::thread::spawn(move || {
+    std::thread::spawn(move || loop {
         run_turn_evaluation(node_id, &app);
-        EVALUATING.lock().unwrap().remove(&node_id);
+        if !end_evaluation_and_check_rerun(node_id) {
+            break;
+        }
+        tracing::debug!(
+            "autopilot pipeline({}): re-running evaluation for a turn that arrived mid-flight",
+            node_id
+        );
     });
 }
 
 fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
+    evaluator::note_evaluation(node_id);
     let run = match db::get_autopilot_run(node_id) {
         Ok(Some(run)) => run,
         Ok(None) => {
@@ -366,7 +536,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                 TurnAction::InjectFinish => {
                     let prompt =
                         finish::finish_prompt(Some(issue_number).filter(|n| *n > 0), Some(&action_on_success));
-                    match write_prompt_to_pty(node_id, &prompt) {
+                    match write_prompt_to_pty(node_id, &prompt, app) {
                         Ok(()) => {
                             let _ = db::set_autopilot_run_state(node_id, Finishing, Some(1));
                             clear_attention_after_injection(node_id, app);
@@ -408,7 +578,7 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                 FinishOutcome::Complete => complete_finishing_run(node_id, issue_number, &observed, app),
                 FinishOutcome::Retry(reasons) => {
                     let prompt = correction_prompt(&reasons, &evaluator::cleaned_tail(node_id));
-                    match write_prompt_to_pty(node_id, &prompt) {
+                    match write_prompt_to_pty(node_id, &prompt, app) {
                         Ok(()) => {
                             let _ = db::set_autopilot_run_state(
                                 node_id,
@@ -504,23 +674,87 @@ fn complete_finishing_run(
 ///
 /// Deliberately conservative: a green observation completes the run — the
 /// work is observably done, no agent interaction needed. A red observation is
-/// left for the turn-driven correction path, because injecting a correction
-/// prompt outside a turn could interrupt an agent that is still typing. (A
-/// real turn arriving *while* a re-drive holds the guard is dropped, same as
-/// any turn during an evaluation — worst case it costs one extra stale
-/// window, never a wrong action.)
+/// left for the turn-driven correction path and for [`watchdog_pass`], which
+/// injects corrections only once the node's output has been quiet long
+/// enough that the agent cannot still be typing. (A real turn arriving
+/// *while* a re-drive holds the guard is queued and re-run as a full turn
+/// evaluation, never dropped.)
 /// Runs on the poller's worker thread (blocking git + GitHub round-trips are
 /// fine there).
 pub fn redrive_stalled_finishing(app: &AppHandle, candidates: &[i64]) {
     for &node_id in candidates {
-        {
-            let mut evaluating = EVALUATING.lock().unwrap();
-            if !evaluating.insert(node_id) {
-                continue; // a live turn evaluation owns this node right now
-            }
+        if !try_begin_evaluation(node_id) {
+            continue; // a live turn evaluation owns this node right now
         }
         redrive_one(node_id, app);
-        EVALUATING.lock().unwrap().remove(&node_id);
+        while end_evaluation_and_check_rerun(node_id) {
+            // A real turn arrived while we re-drove — honour it in full.
+            run_turn_evaluation(node_id, app);
+        }
+    }
+}
+
+/// How long a piloted node's PTY output must have been quiet before the
+/// watchdog treats an unevaluated yield as a lost turn and synthesises the
+/// evaluation itself. Long enough that an agent mid-response (thinking,
+/// streaming pauses) is never interrupted; the poller only passes every
+/// 2 minutes anyway.
+pub(crate) const WATCHDOG_QUIET_MS: u128 = 180_000;
+
+/// Should the watchdog synthesise a turn evaluation for this node?
+/// True when the node has produced output no evaluation has reacted to
+/// (output newer than the last evaluation start, or no evaluation ever ran)
+/// AND that output has been quiet at least [`WATCHDOG_QUIET_MS`].
+pub(crate) fn should_watchdog_evaluate(
+    ms_since_output: Option<u128>,
+    ms_since_eval: Option<u128>,
+) -> bool {
+    match ms_since_output {
+        // No output observed since registration — nothing to react to (the
+        // green-only re-drive still covers post-restart hydrated runs).
+        None => false,
+        Some(out) => out >= WATCHDOG_QUIET_MS && ms_since_eval.is_none_or(|ev| out < ev),
+    }
+}
+
+/// Poller fallback for lost turns (issue #874): for every active piloted
+/// node, if a yield went unevaluated (missed attention callback) and the
+/// node has been output-quiet long enough, run the same evaluation a Node
+/// Turn would have driven — classify in `implementing`, verify/correct in
+/// `finishing`. This is what makes a lost turn recoverable in *every*
+/// pipeline state, not just observably-green `finishing`.
+pub fn watchdog_pass(app: &AppHandle, candidates: &[i64]) {
+    for &node_id in candidates {
+        if !evaluator::is_piloted(node_id) {
+            continue;
+        }
+        if !should_watchdog_evaluate(
+            evaluator::millis_since_last_output(node_id),
+            evaluator::millis_since_last_evaluation(node_id),
+        ) {
+            continue;
+        }
+        if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
+            // A dead agent can't receive an injection; the green re-drive
+            // still completes observably-done work, everything else needs a
+            // human (the node already shows as dead in the UI).
+            tracing::debug!(
+                "autopilot watchdog({}): unevaluated yield but no live process — skipping",
+                node_id
+            );
+            continue;
+        }
+        if !try_begin_evaluation(node_id) {
+            continue;
+        }
+        tracing::info!(
+            "autopilot watchdog({}): quiet unevaluated yield — synthesizing the lost turn's evaluation",
+            node_id
+        );
+        run_turn_evaluation(node_id, app);
+        while end_evaluation_and_check_rerun(node_id) {
+            run_turn_evaluation(node_id, app);
+        }
     }
 }
 
@@ -749,6 +983,88 @@ mod tests {
         assert!(p.contains("pull request"));
         // #485 AC — the captured terminal output rides along.
         assert!(p.contains("assertion at foo.rs:42"));
+    }
+
+    // ── prompt injection: paste and Enter are decoupled (#874) ─────────────
+
+    /// The 2026-07-17 node-2328 stall: paste + `\r` in one atomic PTY write
+    /// left the correction staged in the input box, never submitted — the
+    /// TUI batched the Enter into the paste event. The staged payload must
+    /// therefore never carry the Enter keystroke; Enter is a separate,
+    /// settle-gated write.
+    #[test]
+    fn injection_payload_never_carries_the_enter_keystroke() {
+        assert!(!injection_payload("line one\nline two").contains('\r'));
+        assert!(!injection_payload("single line prompt").contains('\r'));
+    }
+
+    #[test]
+    fn multiline_payload_is_bracketed_paste_wrapped() {
+        let p = injection_payload("a\nb");
+        assert!(p.starts_with("\x1b[200~"));
+        assert!(p.ends_with("\x1b[201~"));
+        assert!(p.contains("a\nb"));
+    }
+
+    #[test]
+    fn single_line_payload_is_written_verbatim() {
+        assert_eq!(injection_payload("do the thing"), "do the thing");
+    }
+
+    #[test]
+    fn output_seen_within_only_counts_output_newer_than_the_mark() {
+        // Output 200ms ago, mark set 500ms ago → the output followed the mark.
+        assert!(output_seen_within(Some(200), 500));
+        // Output 800ms ago predates a 500ms-old mark → not an acknowledgement.
+        assert!(!output_seen_within(Some(800), 500));
+        // No output tracked at all → never an acknowledgement.
+        assert!(!output_seen_within(None, 10_000));
+    }
+
+    // ── in-flight guard: queue, don't drop (#874 candidate 3) ──────────────
+
+    #[test]
+    fn a_turn_arriving_mid_evaluation_is_queued_not_dropped() {
+        let id = 920_001;
+        assert!(try_begin_evaluation(id), "first claim wins the slot");
+        assert!(!try_begin_evaluation(id), "second turn can't claim mid-flight");
+        assert!(
+            end_evaluation_and_check_rerun(id),
+            "the queued turn demands a re-run"
+        );
+        assert!(
+            !end_evaluation_and_check_rerun(id),
+            "the re-run consumed the queued turn — slot released"
+        );
+        assert!(try_begin_evaluation(id), "slot is claimable again");
+        assert!(
+            !end_evaluation_and_check_rerun(id),
+            "no queued turn → no re-run"
+        );
+    }
+
+    // ── watchdog decision (#874: lost turns in any state) ──────────────────
+
+    #[test]
+    fn watchdog_evaluates_a_quiet_never_evaluated_node() {
+        assert!(should_watchdog_evaluate(Some(WATCHDOG_QUIET_MS), None));
+    }
+
+    #[test]
+    fn watchdog_evaluates_quiet_output_newer_than_the_last_evaluation() {
+        // Output 4 minutes ago, last evaluation 10 minutes ago → the yield
+        // after that evaluation was never reacted to (the lost turn).
+        assert!(should_watchdog_evaluate(Some(240_000), Some(600_000)));
+    }
+
+    #[test]
+    fn watchdog_skips_evaluated_streaming_and_silent_nodes() {
+        // Last evaluation is newer than the last output → already reacted.
+        assert!(!should_watchdog_evaluate(Some(240_000), Some(10_000)));
+        // Recent output → the agent may still be mid-response; never inject.
+        assert!(!should_watchdog_evaluate(Some(2_000), None));
+        // No output since registration → nothing to react to.
+        assert!(!should_watchdog_evaluate(None, None));
     }
 
     #[test]

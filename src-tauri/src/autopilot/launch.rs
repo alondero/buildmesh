@@ -98,15 +98,17 @@ pub fn watch_and_submit(app: AppHandle, node_id: i64, issue_number: i64) {
             if !ready_to_submit(&tail, &marker, quiet_ms) {
                 continue;
             }
-            // The same Enter byte the pipeline's prompt injector sends
-            // (`pipeline::write_prompt_to_pty`) — the PTY stdin IS the input box.
-            match crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, b"\r") {
-                Ok(()) => {
+            // The pipeline's shared submit helper: Enter as its own write,
+            // acknowledged by PTY output, retried if swallowed — a swallowed
+            // Enter stalls a prefilled launch exactly like an injection (#874).
+            match crate::autopilot::pipeline::press_enter_until_output(node_id) {
+                Ok(attempt) => {
                     tracing::info!(
                         "autopilot launch({}): harness ready — submitted prefilled prompt \
-                         for issue #{}",
+                         for issue #{} (Enter attempt {})",
                         node_id,
-                        issue_number
+                        issue_number,
+                        attempt
                     );
                     let _ = app.emit(
                         "autopilot-submitted",
@@ -114,7 +116,7 @@ pub fn watch_and_submit(app: AppHandle, node_id: i64, issue_number: i64) {
                     );
                 }
                 Err(e) => tracing::warn!(
-                    "autopilot launch({}): Enter keystroke failed: {}",
+                    "autopilot launch({}): prefilled prompt was never submitted: {}",
                     node_id,
                     e
                 ),

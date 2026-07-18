@@ -108,6 +108,18 @@ fn run_poll_pass(app: &AppHandle) {
         Err(e) => tracing::warn!("autopilot: stalled-run listing failed: {}", e),
     }
 
+    // Watchdog: synthesize the evaluation a lost turn never delivered (#874).
+    // Covers what the green-only re-drive can't — a lost turn during
+    // `implementing`, or a red `finishing` stall — gated on the node's PTY
+    // output having been quiet long enough that the agent isn't mid-response.
+    match db::list_active_autopilot_node_ids() {
+        Ok(active) if !active.is_empty() => {
+            crate::autopilot::pipeline::watchdog_pass(app, &active)
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("autopilot: active-run listing failed: {}", e),
+    }
+
     let meshes = match db::list_autopilot_enabled_meshes() {
         Ok(m) => m,
         Err(e) => {
