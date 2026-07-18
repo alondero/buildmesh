@@ -88,4 +88,19 @@ autopilot_provider: string | null,
  * passes: `"draft_pr"` (default) opens a draft PR, `"pr"` opens a
  * ready-for-review PR, `"none"` stops after push.
  */
-autopilot_action_on_success: string | null, };
+autopilot_action_on_success: string | null, 
+/**
+ * Root-context build command (issue #802). When set, a node running at
+ * the mesh root (`env::worktree_segment(node).is_none()`) runs this
+ * instead of [`build_command`](Self::build_command); Worktree Nodes keep
+ * running `build_command`. `None` falls back to `build_command` in both
+ * contexts — the historical PR #801 behaviour. Persisted as
+ * `meshes.root_build_command TEXT` (schema v27).
+ */
+root_build_command: string | null, 
+/**
+ * Root-context run command (issue #802) — the run-mode sibling of
+ * [`root_build_command`](Self::root_build_command). `None` falls back to
+ * `run_command`. Persisted as `meshes.root_run_command TEXT` (schema v27).
+ */
+root_run_command: string | null, };

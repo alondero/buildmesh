@@ -45,6 +45,10 @@ const MESH_CONFIG = {
   name: 'demo',
   build_command: 'npm run build',
   run_command: 'npm run dev',
+  // Per-context commands (issue #802) — unset in the base fixture so the
+  // load path exercises the empty-string fallback; a dedicated test sets them.
+  root_build_command: null,
+  root_run_command: null,
   model: 'opus-4',
   effort: 'high',
   base_ref: 'origin/main',
@@ -257,6 +261,73 @@ describe('MeshPropertiesTab (issue #375)', () => {
         meshId: 42,
         column: 'build_command',
         value: 'cargo build',
+      });
+    });
+  });
+
+  // Per-context build/run commands (issue #802).
+  it('renders the optional Root build/run command fields with a fallback hint', async () => {
+    await openPropertiesTab();
+
+    const rootBuild = (await screen.findByLabelText(/^Root build command/)) as HTMLInputElement;
+    const rootRun = screen.getByLabelText(/^Root run command/) as HTMLInputElement;
+    expect(rootBuild).toBeTruthy();
+    expect(rootRun).toBeTruthy();
+    // The accessible name carries the "(optional — falls back to …)" hint so
+    // the user knows leaving it blank reuses the Build / Run command.
+    expect(rootBuild.labels?.[0].textContent).toMatch(/optional.*falls back/i);
+    expect(rootRun.labels?.[0].textContent).toMatch(/optional.*falls back/i);
+    // Empty in the base fixture (both columns null) — the load path maps
+    // null → ''.
+    expect(rootBuild.value).toBe('');
+    expect(rootRun.value).toBe('');
+  });
+
+  it('preloads configured Root build/run commands', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_properties') {
+        return Promise.resolve({
+          ...MESH_CONFIG,
+          root_build_command: 'cargo build --workspace',
+          root_run_command: 'npm run lint --workspaces',
+        });
+      }
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    await openPropertiesTab();
+
+    const rootBuild = (await screen.findByLabelText(/^Root build command/)) as HTMLInputElement;
+    const rootRun = screen.getByLabelText(/^Root run command/) as HTMLInputElement;
+    expect(rootBuild.value).toBe('cargo build --workspace');
+    expect(rootRun.value).toBe('npm run lint --workspaces');
+  });
+
+  it('saves Root build/run on blur via update_mesh_column', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const rootBuild = (await screen.findByLabelText(/^Root build command/)) as HTMLInputElement;
+    await user.clear(rootBuild);
+    await user.type(rootBuild, 'cargo build --workspace');
+    fireEvent.blur(rootBuild);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 42,
+        column: 'root_build_command',
+        value: 'cargo build --workspace',
+      });
+    });
+
+    const rootRun = screen.getByLabelText(/^Root run command/) as HTMLInputElement;
+    await user.clear(rootRun);
+    await user.type(rootRun, 'cargo run -p app');
+    fireEvent.blur(rootRun);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 42,
+        column: 'root_run_command',
+        value: 'cargo run -p app',
       });
     });
   });

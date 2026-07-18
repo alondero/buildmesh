@@ -93,6 +93,8 @@ export function MeshPropertiesTab() {
     effort: '',
     buildCommand: '',
     runCommand: '',
+    rootBuildCommand: '',
+    rootRunCommand: '',
     defaultProvider: '',
 sandbox: false,
     autopilotEnabled: false,
@@ -227,6 +229,8 @@ sandbox: false,
           effort: config.effort ?? '',
           buildCommand: config.build_command ?? '',
           runCommand: config.run_command ?? '',
+          rootBuildCommand: config.root_build_command ?? '',
+          rootRunCommand: config.root_run_command ?? '',
           defaultProvider: config.default_provider ?? '',
 sandbox: config.sandbox,
           autopilotEnabled: config.autopilot_enabled,
@@ -359,6 +363,18 @@ sandbox: config.sandbox,
   const saveRunCommand = async (value: string) => {
     if (activeMeshId === null) return;
     await wrappedSave(() => updateMeshColumn(activeMeshId, 'run_command', value));
+  };
+
+  // Per-context commands (issue #802). Optional — a blank value clears the
+  // column so the Root Node falls back to build_command / run_command.
+  const saveRootBuildCommand = async (value: string) => {
+    if (activeMeshId === null) return;
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'root_build_command', value));
+  };
+
+  const saveRootRunCommand = async (value: string) => {
+    if (activeMeshId === null) return;
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'root_run_command', value));
   };
 
   const saveDefaultProvider = async (value: string) => {
@@ -803,6 +819,47 @@ sandbox: config.sandbox,
                 await saveRunCommand(e.target.value);
               }}
               placeholder="e.g., npm run dev — type to override, or pick a preset above"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+            />
+          </Field>
+
+          {/* Per-context build/run overrides (issue #802). A Root Node runs
+              these instead of the commands above; leaving them blank falls
+              back to Build / Run command in every context. */}
+          <Field
+            label="Root build command"
+            htmlFor="mesh-prop-root-build"
+            hint="optional — falls back to build command"
+          >
+            <input
+              id="mesh-prop-root-build"
+              type="text"
+              value={form.rootBuildCommand}
+              onChange={(e) => setForm((p) => ({ ...p, rootBuildCommand: e.target.value }))}
+              onBlur={async (e) => {
+                if (!mountedRef.current) return;
+                await saveRootBuildCommand(e.target.value);
+              }}
+              placeholder="e.g., cargo build --workspace — run from the mesh root"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+            />
+          </Field>
+
+          <Field
+            label="Root run command"
+            htmlFor="mesh-prop-root-run"
+            hint="optional — falls back to run command"
+          >
+            <input
+              id="mesh-prop-root-run"
+              type="text"
+              value={form.rootRunCommand}
+              onChange={(e) => setForm((p) => ({ ...p, rootRunCommand: e.target.value }))}
+              onBlur={async (e) => {
+                if (!mountedRef.current) return;
+                await saveRootRunCommand(e.target.value);
+              }}
+              placeholder="e.g., npm run lint --workspaces — run from the mesh root"
               className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>

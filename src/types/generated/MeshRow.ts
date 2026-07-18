@@ -40,4 +40,10 @@ pre_spawn_pool_size: number,
 /**
  * Autopilot Policy (issue #481) — see the matching [`Mesh`] fields.
  */
-autopilot_enabled: boolean, autopilot_trigger_label: string | null, autopilot_concurrency_limit: number, autopilot_provider: string | null, autopilot_action_on_success: string | null, };
+autopilot_enabled: boolean, autopilot_trigger_label: string | null, autopilot_concurrency_limit: number, autopilot_provider: string | null, autopilot_action_on_success: string | null, 
+/**
+ * Per-context build/run commands (issue #802). When set, a Root Node
+ * runs these instead of `build_command` / `run_command`; `None` falls
+ * back to those. See the matching [`Mesh`] fields.
+ */
+root_build_command: string | null, root_run_command: string | null, };
