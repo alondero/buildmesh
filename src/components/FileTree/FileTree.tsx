@@ -1,4 +1,11 @@
-import { useState, useCallback } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import {
   listDirectory,
   type FileNode,
@@ -77,6 +84,12 @@ interface FileTreeProps {
   onFileSelect: (path: string | null) => void;
 }
 
+/** A flat row entry — one per currently-visible node, in DOM/visual order. */
+interface VisibleRow {
+  node: FileNode;
+  depth: number;
+}
+
 export function FileTree({
   rootPath,
   showGitStatus,
@@ -88,6 +101,11 @@ export function FileTree({
   const [treeState, setTreeState] = useState<FileNode | null>(null);
   const [loadingState, setLoadingState] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
+  // Lifted from per-TreeNode state (issue #728) so the keyboard handler
+  // can compute a stable visible-order index space without walking the DOM.
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
+  // Roving tabindex — exactly one row is `tabIndex={0}` at a time.
+  const [activeIndex, setActiveIndex] = useState(0);
 
   useAsyncEffect((signal) => {
     if (!rootPath) return;
@@ -116,6 +134,13 @@ export function FileTree({
     showGitStatus ? rootPath || null : null,
   );
 
+  // list_directory returns absolute node paths; get_git_status returns paths
+  // relative to the repo root. Key the map by the relative path and reconcile
+  // each node by stripping rootPath, so changed files are badged correctly.
+  // Declared before `handleKeyDown` so the keyboard handler's closure can
+  // read it on every render without tripping the TDZ (issue #728).
+  const gitStatusMap = new Map(gitFiles.map((s) => [normalizePath(s.path), s.status]));
+
   const handleFileClick = useCallback(
     async (path: string, relPath: string, isChanged: boolean) => {
       if (isChanged && onChangedFileSelect) {
@@ -135,14 +160,170 @@ export function FileTree({
     [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect]
   );
 
+  // Flatten the tree to the rows the user can see right now. The keyboard
+  // handler reads this list to index ArrowDown/Up/Home/End and to compute
+  // parent/child hops for ArrowLeft/Right — keeping it a memoised array
+  // (not a DOM walk) means nav math is O(visible.length).
+  const visible = useMemo<VisibleRow[]>(() => {
+    if (!treeState) return [];
+    const result: VisibleRow[] = [];
+    const walk = (node: FileNode, depth: number) => {
+      result.push({ node, depth });
+      if (node.is_dir && expandedPaths.has(node.path)) {
+        for (const child of node.children) {
+          walk(child, depth + 1);
+        }
+      }
+    };
+    for (const child of treeState.children) {
+      walk(child, 0);
+    }
+    return result;
+  }, [treeState, expandedPaths]);
+
+  // Clamp the roving tabindex when the visible list shrinks beneath it
+  // (e.g. a parent folder was collapsed, hiding the focused descendant).
+  useEffect(() => {
+    if (visible.length === 0) {
+      if (activeIndex !== 0) setActiveIndex(0);
+      return;
+    }
+    if (activeIndex >= visible.length) {
+      setActiveIndex(visible.length - 1);
+    }
+  }, [visible.length, activeIndex]);
+
+  const toggleExpanded = useCallback((path: string) => {
+    setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
+
+  const treeRef = useRef<HTMLDivElement>(null);
+
+  // Sync the roving tabindex to whichever row currently holds focus.
+  // Without this, focusing a non-active row via mouse click or tab leaves
+  // `activeIndex` pointing at the old row — the next ArrowDown would jump
+  // from the OLD activeIndex, not the row the user is actually on. This
+  // mirrors how `useAriaMenu` keeps its menuitem index in step with focus.
+  const handleFocus = useCallback((e: React.FocusEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.getAttribute('role') !== 'treeitem') return;
+    const root = treeRef.current;
+    if (!root) return;
+    const items = root.querySelectorAll<HTMLElement>('[role="treeitem"]');
+    const idx = Array.from(items).indexOf(target);
+    if (idx >= 0) setActiveIndex(idx);
+  }, []);
+
+  // WAI-ARIA tree keyboard contract (issue #728). Delegated on the tree
+  // container so a single handler covers every row, regardless of how
+  // many rows the flat render emits. Reads the actually-focused row on
+  // entry — NOT `activeIndex` from state — because `setActiveIndex` from
+  // a just-fired focus event hasn't propagated through React's batch
+  // boundary by the time the next synchronous event (e.g. Enter right
+  // after `element.focus()`) arrives.
+  const handleKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (visible.length === 0) return;
+      const root = treeRef.current;
+      if (!root) return;
+
+      const items = root.querySelectorAll<HTMLElement>('[role="treeitem"]');
+      const focused = document.activeElement;
+      let currentIndex = activeIndex;
+      if (focused instanceof HTMLElement) {
+        const idx = Array.from(items).indexOf(focused);
+        if (idx >= 0) currentIndex = idx;
+      }
+      const current = visible[currentIndex];
+      if (!current) return;
+
+      let nextIndex: number | null = null;
+      let action: 'expand' | 'collapse' | 'activate' | null = null;
+
+      switch (e.key) {
+        case 'ArrowDown':
+          nextIndex = Math.min(currentIndex + 1, visible.length - 1);
+          break;
+        case 'ArrowUp':
+          nextIndex = Math.max(currentIndex - 1, 0);
+          break;
+        case 'Home':
+          nextIndex = 0;
+          break;
+        case 'End':
+          nextIndex = visible.length - 1;
+          break;
+        case 'ArrowRight':
+          if (current.node.is_dir) {
+            if (!expandedPaths.has(current.node.path)) {
+              action = 'expand';
+            } else {
+              // Already open — ArrowRight descends to the first child.
+              const childIdx = currentIndex + 1;
+              if (childIdx < visible.length && visible[childIdx].depth === current.depth + 1) {
+                nextIndex = childIdx;
+              }
+            }
+          }
+          break;
+        case 'ArrowLeft':
+          if (current.node.is_dir && expandedPaths.has(current.node.path)) {
+            action = 'collapse';
+          } else {
+            // Leaf or already-collapsed folder — ArrowLeft ascends to the
+            // nearest visible ancestor.
+            const parentDepth = current.depth - 1;
+            for (let i = currentIndex - 1; i >= 0; i--) {
+              if (visible[i].depth === parentDepth) {
+                nextIndex = i;
+                break;
+              }
+            }
+          }
+          break;
+        case 'Enter':
+        case ' ':
+          action = 'activate';
+          break;
+        default:
+          return;
+      }
+
+      e.preventDefault();
+      if (action === 'expand' || action === 'collapse') {
+        toggleExpanded(current.node.path);
+      } else if (action === 'activate') {
+        if (current.node.is_dir) {
+          toggleExpanded(current.node.path);
+        } else {
+          const relPath = relativeToRoot(rootPath, current.node.path);
+          const status = relPath != null ? gitStatusMap.get(relPath) : undefined;
+          const isChanged = status !== undefined;
+          handleFileClick(current.node.path, relPath ?? current.node.path, isChanged);
+        }
+      }
+      if (nextIndex !== null && nextIndex !== currentIndex) {
+        setActiveIndex(nextIndex);
+        items[nextIndex]?.focus();
+      }
+    },
+    [visible, activeIndex, expandedPaths, toggleExpanded, rootPath, gitStatusMap, handleFileClick]
+  );
+
   // Block on the initial file-listing fetch, and on the initial git-status
   // fetch only while the tree hasn't rendered yet (so a file's changed/
   // unchanged state is settled before it's first clickable). Once
   // `treeState` exists, a background GIT_CHANGED refresh must NOT blank
-  // the tree — that unmounts every `TreeNode`, snapping shut whatever
-  // folders the user had expanded (issue #804). `gitFiles` keeps its last
-  // value during the refresh (see `pathInvalidatedCache.ts`), so badges
-  // just update in place once the new status resolves.
+  // the tree — re-mounting the whole list would reset the lifted
+  // `expandedPaths` set and snap shut every folder the user had opened
+  // (issue #804). `gitFiles` keeps its last value during the refresh
+  // (see `pathInvalidatedCache.ts`), so badges just update in place once
+  // the new status resolves.
   if (loadingState || (gitLoading && !treeState)) {
     return (
       <div className="flex items-center justify-center h-20">
@@ -167,25 +348,39 @@ export function FileTree({
     );
   }
 
-  // list_directory returns absolute node paths; get_git_status returns paths
-  // relative to the repo root. Key the map by the relative path and reconcile
-  // each node by stripping rootPath, so changed files are badged correctly.
-  const gitStatusMap = new Map(gitFiles.map((s) => [normalizePath(s.path), s.status]));
-
   return (
-    <div className="text-xs font-mono">
-      {treeState.children.map((child) => (
-        <TreeNode
-          key={child.path}
-          node={child}
-          rootPath={rootPath}
-          gitStatusMap={gitStatusMap}
-          depth={0}
-          showGitStatus={showGitStatus}
-          selectedFile={selectedFile}
-          onFileClick={handleFileClick}
-        />
-      ))}
+    <div
+      ref={treeRef}
+      role="tree"
+      aria-label={rootPath ? `Files in ${rootPath}` : 'Files'}
+      onKeyDown={handleKeyDown}
+      onFocus={handleFocus}
+      className="text-xs font-mono"
+    >
+      {visible.map((row, index) => {
+        const expanded = expandedPaths.has(row.node.path);
+        const relPath = relativeToRoot(rootPath, row.node.path);
+        const status = relPath != null ? gitStatusMap.get(relPath) : undefined;
+        const isChanged = status !== undefined;
+        const isSelected = selectedFile === row.node.path;
+        const isActive = index === activeIndex;
+        return (
+          <TreeRow
+            key={row.node.path}
+            node={row.node}
+            depth={row.depth}
+            expanded={expanded}
+            isActive={isActive}
+            isChanged={isChanged}
+            isSelected={isSelected}
+            showGitStatus={showGitStatus}
+            status={status}
+            onToggleExpanded={toggleExpanded}
+            onFileClick={handleFileClick}
+            relPath={relPath}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -204,101 +399,93 @@ function relativeToRoot(root: string, abs: string): string | null {
   return na.startsWith(prefix) ? na.slice(prefix.length) : null;
 }
 
-interface TreeNodeProps {
+interface TreeRowProps {
   node: FileNode;
-  rootPath: string;
-  gitStatusMap: Map<string, string>;
   depth: number;
+  expanded: boolean;
+  isActive: boolean;
+  isChanged: boolean;
+  isSelected: boolean;
   showGitStatus: boolean;
-  selectedFile: string | null;
+  status: string | undefined;
+  onToggleExpanded: (path: string) => void;
   onFileClick: (path: string, relPath: string, isChanged: boolean) => void;
+  relPath: string | null;
 }
 
-function TreeNode({
+function TreeRow({
   node,
-  rootPath,
-  gitStatusMap,
   depth,
+  expanded,
+  isActive,
+  isChanged,
+  isSelected,
   showGitStatus,
-  selectedFile,
+  status,
+  onToggleExpanded,
   onFileClick,
-}: TreeNodeProps) {
-  const [expanded, setExpanded] = useState(false);
-
-  const relPath = relativeToRoot(rootPath, node.path);
-  const status = relPath != null ? gitStatusMap.get(relPath) : undefined;
-  const isChanged = status !== undefined;
-  const isSelected = selectedFile === node.path;
-
+  relPath,
+}: TreeRowProps) {
   return (
-    <div>
-      <div
-        className={`
-          flex items-center gap-1 px-2 py-0.5 rounded-md cursor-pointer
-          hover:bg-bg-card transition-colors
-          ${isSelected ? 'bg-bg-overlay' : ''}
-        `}
-        style={{ paddingLeft: `${depth * 16 + 8}px` }}
-        onClick={() => {
-          if (node.is_dir) {
-            setExpanded(!expanded);
-          } else {
-            onFileClick(node.path, relPath ?? node.path, isChanged);
-          }
-        }}
-      >
-        {node.is_dir ? (
-          <span
-            className={`w-3 h-3 flex items-center justify-center text-text-muted transition-transform ${
-              expanded ? 'rotate-90' : ''
-            }`}
-            // Decorative — the row itself owns expand on click. The
-            // rotate-on-state is the cheapest way to flip the chevron
-            // direction without swapping the SVG.
-            data-testid={expanded ? 'folder-expanded' : 'folder-collapsed'}
-          >
-            <ChevronRightIcon className="w-3 h-3" />
-          </span>
-        ) : (
-          <span className="w-3 h-3" />
-        )}
-        <span className="w-3 h-3 flex items-center justify-center text-text-muted">
-          {node.is_dir ? (
-            <FolderIcon className="w-3 h-3" />
-          ) : (
-            <FileIcon className="w-3 h-3" />
-          )}
-        </span>
+    <div
+      role="treeitem"
+      aria-level={depth + 1}
+      // Only folder rows carry aria-expanded — it's invalid on leaf treeitems.
+      aria-expanded={node.is_dir ? expanded : undefined}
+      tabIndex={isActive ? 0 : -1}
+      className={`
+        flex items-center gap-1 px-2 py-0.5 rounded-md cursor-pointer
+        hover:bg-bg-card transition-colors outline-none
+        focus-visible:ring-2 focus-visible:ring-accent-blue/60
+        ${isSelected ? 'bg-bg-overlay' : ''}
+      `}
+      style={{ paddingLeft: `${depth * 16 + 8}px` }}
+      onClick={() => {
+        if (node.is_dir) {
+          onToggleExpanded(node.path);
+        } else {
+          onFileClick(node.path, relPath ?? node.path, isChanged);
+        }
+      }}
+    >
+      {node.is_dir ? (
         <span
-          className={`flex-1 truncate ${
-            node.is_dir ? 'text-text-secondary' : 'text-text-muted'
+          className={`w-3 h-3 flex items-center justify-center text-text-muted transition-transform ${
+            expanded ? 'rotate-90' : ''
           }`}
+          // Decorative — the row itself owns expand on click. The
+          // rotate-on-state is the cheapest way to flip the chevron
+          // direction without swapping the SVG.
+          data-testid={expanded ? 'folder-expanded' : 'folder-collapsed'}
         >
-          {node.name}
+          <ChevronRightIcon className="w-3 h-3" />
         </span>
-        {showGitStatus && status && (
-          <span
-            className={`font-bold ${statusMeta(status as Parameters<typeof statusMeta>[0]).color}`}
-            title={statusMeta(status as Parameters<typeof statusMeta>[0]).label}
-          >
-            {statusMeta(status as Parameters<typeof statusMeta>[0]).letter}
-          </span>
+      ) : (
+        <span className="w-3 h-3" />
+      )}
+      <span className="w-3 h-3 flex items-center justify-center text-text-muted">
+        {node.is_dir ? (
+          <FolderIcon className="w-3 h-3" />
+        ) : (
+          <FileIcon className="w-3 h-3" />
         )}
-      </div>
-      {node.is_dir &&
-        expanded &&
-        node.children.map((child) => (
-          <TreeNode
-            key={child.path}
-            node={child}
-            rootPath={rootPath}
-            gitStatusMap={gitStatusMap}
-            depth={depth + 1}
-            showGitStatus={showGitStatus}
-            selectedFile={selectedFile}
-            onFileClick={onFileClick}
-          />
-        ))}
+      </span>
+      <span
+        className={`flex-1 truncate ${
+          node.is_dir ? 'text-text-secondary' : 'text-text-muted'
+        }`}
+      >
+        {node.name}
+      </span>
+      {showGitStatus && status && (
+        <span
+          className={`font-bold ${statusMeta(status as Parameters<typeof statusMeta>[0]).color}`}
+          title={statusMeta(status as Parameters<typeof statusMeta>[0]).label}
+        >
+          {statusMeta(status as Parameters<typeof statusMeta>[0]).letter}
+        </span>
+      )}
     </div>
   );
 }
+
