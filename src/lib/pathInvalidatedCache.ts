@@ -57,17 +57,23 @@
  *
  * `null` vs `undefined` cache reads
  * ---------------------------------
- * The cache uses a `Symbol` sentinel (`HAS_NULL`) to distinguish "no entry"
- * from "entry whose value is `null`". Most callers treat `null` as a real
- * state ("no open PR", "no files changed", etc.), so we can't rely on
- * `Map.get` returning `undefined` to mean "uncached".
+ * Presence and value are tracked in two separate Maps (issue #346): `known`
+ * (`Map<K, true>`) records whether a key has EVER been cached — the boolean
+ * value is irrelevant, only `.has(key)` matters — while `values` (`Map<K,
+ * V>`) holds the actual cached value, and simply has no entry for a key
+ * whose cached value is `null`. `read` checks `known.has(key)` first (an
+ * absent entry there means "uncached", i.e. `undefined`); if present, it
+ * falls back to `values.get(key) ?? null` to normalize the "known but no
+ * value" case to `null`. This avoids a `Symbol`-sentinel dance in one Map:
+ * most callers treat `null` as a real state ("no open PR", "no files
+ * changed", etc.), so we can't rely on `Map.get` returning `undefined` to
+ * mean "uncached".
  */
 
 import { listen } from '@tauri-apps/api/event';
 import { GIT_CHANGED } from './events';
 import { pathMatchesGitEvent } from './paths';
 
-const HAS_NULL = Symbol('pathInvalidatedCache.has-null');
 // Single shared clientId for all "callback-only" subscribers (see
 // `subscribeGitPathInvalidation` below). The handler registered for it is
 // stateless — it just calls `sub.notify()` — so one entry in `busHandlers`
@@ -172,7 +178,7 @@ export interface PathInvalidatedCacheOptions<K, V> {
 interface KeyedPathSubscriber<K> {
   /** Discriminator — `'keyed'` means the subscriber carries a cache key and
    * its `notify` will be routed through the owning client's
-   * `BusHandler` (which evicts `cache[key]` / `pending[key]`). */
+   * `BusHandler` (which evicts `known[key]` / `values[key]` / `pending[key]`). */
   kind: 'keyed';
   clientId: symbol;
   key: K;
@@ -339,7 +345,13 @@ function createInternalClient<K, V>(
   // Per-client state. A `Symbol` clientId is the load-bearing piece that
   // makes the cross-client dispatch scoping work — see module docstring.
   const clientId = Symbol('pathInvalidatedCache');
-  const cache = new Map<K, V | typeof HAS_NULL>();
+  // Presence marker: `known.has(key)` is `true` iff `key` has ever been
+  // cached (via a successful `refresh`); the boolean value itself is
+  // irrelevant. `values` holds the actual cached value and simply has no
+  // entry for a key whose cached value is `null` — see the `null` vs
+  // `undefined` docstring above (issue #346).
+  const known = new Map<K, true>();
+  const values = new Map<K, V>();
   const pending = new Map<K, Promise<V | null>>();
   // Per-key most-recent error, populated by `refresh`'s catch and cleared
   // on the next successful refresh for the same key. Exposed via
@@ -370,7 +382,8 @@ function createInternalClient<K, V>(
     trailingTimers.delete(key);
     const notifies = trailingNotifies.get(key);
     trailingNotifies.delete(key);
-    cache.delete(key);
+    known.delete(key);
+    values.delete(key);
     pending.delete(key);
     // The stamp must go too: the value is no longer authoritative, so the
     // next bus event (or this notify's refetch) must not be re-suppressed
@@ -381,7 +394,8 @@ function createInternalClient<K, V>(
 
   // Let `resetPathInvalidatedCacheForTests` wipe this client's state too.
   clientCacheResets.add(() => {
-    cache.clear();
+    known.clear();
+    values.clear();
     pending.clear();
     errors.clear();
     lastFetchedAt.clear();
@@ -421,16 +435,16 @@ function createInternalClient<K, V>(
       }
     }
     cancelTrailing(sub.key);
-    cache.delete(sub.key);
+    known.delete(sub.key);
+    values.delete(sub.key);
     pending.delete(sub.key);
     sub.notify();
   };
 
   return {
     read(key) {
-      if (!cache.has(key)) return undefined;
-      const entry = cache.get(key);
-      return entry === HAS_NULL ? null : (entry as V);
+      if (!known.has(key)) return undefined;
+      return values.get(key) ?? null;
     },
 
     refresh(key) {
@@ -439,7 +453,16 @@ function createInternalClient<K, V>(
 
       const p = fetcher(key)
         .then((result) => {
-          cache.set(key, result === null ? HAS_NULL : result);
+          known.set(key, true);
+          // `values` only holds non-null results — a `null` result leaves
+          // (or clears) no entry there, so `read`'s `values.get(key) ?? null`
+          // falls through to `null` correctly, including on a refetch that
+          // flips a previously-cached non-null value back to `null`.
+          if (result === null) {
+            values.delete(key);
+          } else {
+            values.set(key, result);
+          }
           pending.delete(key);
           lastFetchedAt.set(key, Date.now());
           // A success erases the previous failure for this key — the hook
@@ -474,7 +497,8 @@ function createInternalClient<K, V>(
     },
 
     invalidate(key) {
-      cache.delete(key);
+      known.delete(key);
+      values.delete(key);
       pending.delete(key);
       // An explicit invalidation says the value is no longer authoritative:
       // drop the freshness stamp so the `minRefetchIntervalMs` window can't
