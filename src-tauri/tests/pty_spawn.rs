@@ -1,4 +1,4 @@
-﻿//! Real-PTY integration test for the agent spawn pipeline (issue #154).
+//! Real-PTY integration test for the agent spawn pipeline (issue #154).
 //!
 //! The unit tests mock `invoke` or re-implement the arg-vector logic locally, so
 //! nothing in CI exercises a real spawn. This test drives the actual production
@@ -562,3 +562,202 @@ fn windows_natural_child_exit_unblocks_reader_via_watcher() {
     drop(writer);
     let _ = reader_handle.join();
 }
+
+/// Test Windows-native interactive TUI compatibility using npm-installed `pi.cmd`.
+/// Spawns `pi` in interactive mode inside ConPTY, reads output, writes to stdin, and verifies response.
+#[cfg(windows)]
+#[test]
+fn windows_pi_interactive_tui() {
+    use std::io::Write;
+
+    let recipe = SpawnRecipe {
+        binary: "pi.cmd",
+        base_args: vec![
+            "--no-extensions".into(),
+            "--no-skills".into(),
+            "--no-themes".into(),
+            "--no-context-files".into(),
+            "--no-session".into(),
+        ],
+        windows_shell: WindowsShell::Cmd,
+    };
+    
+    let session_id = -915_4201;
+    let cwd = std::env::current_dir().unwrap();
+    let cmd = spawn_environment::wrap(recipe, EnvType::Windows, &cwd.to_string_lossy(), session_id, false);
+
+    eprintln!("[pty-test {session_id}] opening pty pair");
+    let pair = open_pty_pair(24, 80).expect("open pty pair");
+    eprintln!("[pty-test {session_id}] spawning child");
+    let child = spawn_child(&pair, cmd).expect("spawn child");
+    eprintln!("[pty-test {session_id}] child spawned, wiring io");
+
+    let reader = pair.master.try_clone_reader().expect("clone reader");
+    let writer = pair.master.take_writer().expect("take writer");
+    let master = pair.master;
+    drop(pair.slave);
+
+    let reader_alive = Arc::new(AtomicBool::new(true));
+    PROCESS_REGISTRY.insert(
+        session_id,
+        AgentProcess {
+            child: Arc::new(Mutex::new(child)),
+            writer: Arc::new(Mutex::new(writer)),
+            master: Arc::new(Mutex::new(Some(master))),
+            reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: Mutex::new(None),
+            spawn_start: std::time::Instant::now(),
+            first_user_input_logged: AtomicBool::new(false),
+            mesh_id: 0,
+        },
+    );
+
+    // Drain output on a background thread
+    let collected = Arc::new(Mutex::new(Vec::new()));
+    let collected_w = collected.clone();
+    let reader_alive_thread = reader_alive.clone();
+    let reader_handle = std::thread::spawn(move || {
+        pump_pty_output(reader, |chunk| {
+            collected_w.lock().unwrap().extend_from_slice(chunk);
+        });
+        reader_alive_thread.store(false, Ordering::SeqCst);
+    });
+
+    // Wait for the TUI to initialize (e.g. print something). Let's wait up to 4s.
+    eprintln!("[pty-test {session_id}] waiting for TUI initialization");
+    let init_deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut initialized = false;
+    while std::time::Instant::now() < init_deadline {
+        let has_output = !collected.lock().unwrap().is_empty();
+        if has_output {
+            initialized = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    
+    let initial_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
+    eprintln!("[pty-test {session_id}] initial output: {:?}", initial_output);
+    assert!(initialized, "pi TUI should produce output within 4 seconds");
+
+    // Write a key to the PTY stdin (like 'a')
+    eprintln!("[pty-test {session_id}] writing input");
+    {
+        let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
+        let mut writer_guard = entry.writer.lock().unwrap();
+        writer_guard.write_all(b"a").expect("write to pty");
+        writer_guard.flush().expect("flush pty");
+    }
+
+    // Wait for the input to be echoed or processed
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let after_input_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
+    eprintln!("[pty-test {session_id}] output after writing 'a': {:?}", after_input_output);
+
+    // Kill the session cleanly
+    PROCESS_REGISTRY.kill_session(session_id);
+    PROCESS_REGISTRY.remove(&session_id);
+    reader_handle.join().expect("reader thread joins");
+}
+
+/// Test WSL interactive TUI compatibility using npm-installed `/mnt/c/Users/alond/AppData/Roaming/npm/pi`.
+/// Spawns `pi` in interactive mode inside a WSL PTY, reads output, writes to stdin, and verifies response.
+#[cfg(windows)]
+#[test]
+fn wsl_pi_interactive_tui() {
+    use std::io::Write;
+
+    let recipe = SpawnRecipe {
+        binary: "/mnt/c/Users/alond/AppData/Roaming/npm/pi",
+        base_args: vec![
+            "--no-extensions".into(),
+            "--no-skills".into(),
+            "--no-themes".into(),
+            "--no-context-files".into(),
+            "--no-session".into(),
+        ],
+        windows_shell: WindowsShell::Direct,
+    };
+    
+    let session_id = -915_4202;
+    let cwd = "/home";
+    let cmd = spawn_environment::wrap(recipe, EnvType::Wsl, cwd, session_id, false);
+
+    eprintln!("[pty-test {session_id}] opening pty pair");
+    let pair = open_pty_pair(24, 80).expect("open pty pair");
+    eprintln!("[pty-test {session_id}] spawning child under WSL");
+    let child = spawn_child(&pair, cmd).expect("spawn child");
+    eprintln!("[pty-test {session_id}] child spawned, wiring io");
+
+    let reader = pair.master.try_clone_reader().expect("clone reader");
+    let writer = pair.master.take_writer().expect("take writer");
+    let master = pair.master;
+    drop(pair.slave);
+
+    let reader_alive = Arc::new(AtomicBool::new(true));
+    PROCESS_REGISTRY.insert(
+        session_id,
+        AgentProcess {
+            child: Arc::new(Mutex::new(child)),
+            writer: Arc::new(Mutex::new(writer)),
+            master: Arc::new(Mutex::new(Some(master))),
+            reader_alive: reader_alive.clone(),
+            deliberate_kill: Arc::new(AtomicBool::new(false)),
+            job: None,
+            reader_handle: Mutex::new(None),
+            spawn_start: std::time::Instant::now(),
+            first_user_input_logged: AtomicBool::new(false),
+            mesh_id: 0,
+        },
+    );
+
+    // Drain output on a background thread
+    let collected = Arc::new(Mutex::new(Vec::new()));
+    let collected_w = collected.clone();
+    let reader_alive_thread = reader_alive.clone();
+    let reader_handle = std::thread::spawn(move || {
+        pump_pty_output(reader, |chunk| {
+            collected_w.lock().unwrap().extend_from_slice(chunk);
+        });
+        reader_alive_thread.store(false, Ordering::SeqCst);
+    });
+
+    // Wait for the TUI to initialize. Let's wait up to 4s.
+    eprintln!("[pty-test {session_id}] waiting for WSL TUI initialization");
+    let init_deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    let mut initialized = false;
+    while std::time::Instant::now() < init_deadline {
+        let has_output = !collected.lock().unwrap().is_empty();
+        if has_output {
+            initialized = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    
+    let initial_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
+    eprintln!("[pty-test {session_id}] WSL initial output: {:?}", initial_output);
+    assert!(initialized, "WSL pi TUI should produce output within 4 seconds");
+
+    // Write a key to the PTY stdin (like 'a')
+    eprintln!("[pty-test {session_id}] writing input to WSL");
+    {
+        let entry = PROCESS_REGISTRY.get(&session_id).expect("entry registered");
+        let mut writer_guard = entry.writer.lock().unwrap();
+        writer_guard.write_all(b"a").expect("write to pty");
+        writer_guard.flush().expect("flush pty");
+    }
+
+    // Wait for the input to be echoed or processed
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let after_input_output = String::from_utf8_lossy(&collected.lock().unwrap()).into_owned();
+    eprintln!("[pty-test {session_id}] WSL output after writing 'a': {:?}", after_input_output);
+
+    // Kill the session cleanly
+    PROCESS_REGISTRY.kill_session(session_id);
+    PROCESS_REGISTRY.remove(&session_id);
+    reader_handle.join().expect("reader thread joins");
+}
+
