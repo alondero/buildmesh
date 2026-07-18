@@ -1,3 +1,4 @@
+import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import type { Mesh } from '../types/generated/Mesh';
@@ -41,7 +42,7 @@ export const useMeshStore = create<MeshState>((set) => ({
       const meshesById = new Map(meshes.map((p) => [p.id, p]));
       set({ meshes, meshesById, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatError(e), loading: false });
     }
   },
 
@@ -53,7 +54,7 @@ export const useMeshStore = create<MeshState>((set) => ({
         meshesById: new Map([...state.meshesById, [mesh.id, mesh]])
       }));
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -66,7 +67,7 @@ export const useMeshStore = create<MeshState>((set) => ({
       }));
       return mesh;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       return null;
     }
   },
@@ -80,7 +81,7 @@ export const useMeshStore = create<MeshState>((set) => ({
       }));
       return mesh;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       return null;
     }
   },
@@ -90,7 +91,7 @@ export const useMeshStore = create<MeshState>((set) => ({
       await api.deleteMesh(id);
       await useMeshStore.getState().fetchMeshes();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -109,7 +110,7 @@ export const useMeshStore = create<MeshState>((set) => ({
         };
       });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -131,7 +132,7 @@ export const useMeshStore = create<MeshState>((set) => ({
       const updates = currentMeshes.map((p) => [p.id, p.position] as [number, number]);
       await api.updateMeshPositions(updates);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       await useMeshStore.getState().fetchMeshes();
     }
   },
@@ -149,7 +150,7 @@ export const useMeshStore = create<MeshState>((set) => ({
         };
       });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -166,7 +167,7 @@ export const useMeshStore = create<MeshState>((set) => ({
         };
       });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -174,7 +175,7 @@ export const useMeshStore = create<MeshState>((set) => ({
     try {
       return await api.getDefaultProvider(meshId);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       // Post-#538 the native Claude harness profile id is `'claude'`
       // (the unified-claude-harness change renamed the bare `'anthropic'`
       // provider id to the new harness-profile form). The backend's

@@ -1,3 +1,4 @@
+import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import { listen } from '@tauri-apps/api/event';
@@ -36,7 +37,7 @@ async function persistPositions(
     const updates = updatedMeshNodes.map(n => [n.id, n.position] as [number, number]);
     await api.updateAgentNodePositions(updates);
   } catch (e) {
-    set({ error: String(e) });
+    set({ error: formatError(e) });
     await get().fetchAgentNodes();
   }
 }
@@ -159,7 +160,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       );
       set({ agentNodes, autopilotStates, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatError(e), loading: false });
     }
   },
 
@@ -281,7 +282,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       set((state) => ({ agentNodes: [...state.agentNodes, node] }));
       return node;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -345,7 +346,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       }
     } catch (e) {
       clearClosing();
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       return;
     }
 
@@ -401,7 +402,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // version, not a stale pre-rename snapshot.
       set((state) => ({
         agentNodes: nodeForRestore ? [...state.agentNodes, nodeForRestore] : state.agentNodes,
-        error: String(e),
+        error: formatError(e),
       }));
       throw e;
     }
@@ -427,7 +428,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         agentNodes: state.agentNodes.map(s =>
           s.id === id ? { ...s, name: prior.name } : s
         ),
-        error: String(e),
+        error: formatError(e),
       }));
       throw e;
     }
@@ -496,7 +497,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // store-side catch keeps doing two things the wrapper does not: it
       // surfaces the error on `state.error` for the UI to render, and it
       // re-throws so the caller's catch can react.
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -520,7 +521,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       }
       return updated;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -532,7 +533,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       await get().fetchAgentNodes();
       return node;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -542,7 +543,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       await api.killAgent(nodeId);
       await get().fetchAgentNodes();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -550,7 +551,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     try {
       await api.sendToAgent(nodeId, input);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -558,7 +559,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     try {
       await api.writeToAgent(nodeId, data);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 

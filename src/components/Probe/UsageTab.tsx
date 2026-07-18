@@ -111,6 +111,7 @@
  * UI semantics — as warranting a separate commit).
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useState, useCallback, useEffect } from 'react';
 import * as api from '../../lib/tauri';
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
@@ -167,7 +168,7 @@ export function UsageTab() {
       setError(null);
     } catch (e) {
       console.error('Failed to load usage:', e);
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatError(e));
     } finally {
       setAttempted(true);
     }

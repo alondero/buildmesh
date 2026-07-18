@@ -38,6 +38,7 @@
  * count of one fiber.
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   diffFileAgainstHead,
@@ -164,7 +165,7 @@ function CenterHeadBaseDiff({ diff, closeDiff, parentLabel }: DiffBranchProps) {
         })
         .catch((e) => {
           if (reqId.current !== myId) return;
-          if (!opts?.background) setError(String(e));
+          if (!opts?.background) setError(formatError(e));
         });
     },
     [diff.source, diff.nodeId, diff.filePath, diff.rootPath],

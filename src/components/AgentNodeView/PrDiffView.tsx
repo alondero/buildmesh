@@ -28,6 +28,7 @@
  * surfaces.
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getPrFiles, type PrFileEntry } from '../../lib/tauri';
 import { useUIStore, type DiffContext } from '../../stores/uiStore';
@@ -77,10 +78,7 @@ export function PrDiffView({ diff }: PrDiffViewProps) {
       })
       .catch((e) => {
         if (reqId.current !== myId) return;
-        // `e.message` is what we want to render — `String(e)` would prepend
-        // "Error: " (because `e` is an Error), which the central IPC
-        // chokepoint (#386) unwraps before rethrowing.
-        setError(e instanceof Error ? e.message : String(e));
+        setError(formatError(e));
       });
   }, [diff.meshId, prNumber]);
 

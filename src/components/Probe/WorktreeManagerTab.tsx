@@ -32,6 +32,7 @@
  * including on GIT_CHANGED events from the file-watcher.
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
@@ -318,7 +319,7 @@ export function WorktreeManagerTab() {
       .then((data) => {
         setRepos(data);
       })
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(formatError(e)))
       .finally(() => setLoading(false));
   }, [activeMeshId]);
 
@@ -351,7 +352,7 @@ export function WorktreeManagerTab() {
         })
         .catch((e) => {
           if (!signal.aborted) {
-            setError(String(e));
+            setError(formatError(e));
             setLoading(false);
           }
         });
@@ -415,7 +416,7 @@ export function WorktreeManagerTab() {
       try {
         await updateMeshUseWorktree(activeMeshId, next);
       } catch (e) {
-        setSaveError(`Failed to update use_worktree: ${String(e)}`);
+        setSaveError(`Failed to update use_worktree: ${formatError(e)}`);
       }
     },
     [activeMeshId],
@@ -429,7 +430,7 @@ export function WorktreeManagerTab() {
       try {
         await updateWorktreeBaseRef(activeMeshId, formToWireBaseRef(next));
       } catch (e) {
-        setSaveError(`Failed to update base_ref: ${String(e)}`);
+        setSaveError(`Failed to update base_ref: ${formatError(e)}`);
       }
     },
     [activeMeshId],
@@ -443,7 +444,7 @@ export function WorktreeManagerTab() {
       try {
         await updateMeshColumn(activeMeshId, 'worktree_mode', next);
       } catch (e) {
-        setSaveError(`Failed to update worktree_mode: ${String(e)}`);
+        setSaveError(`Failed to update worktree_mode: ${formatError(e)}`);
       }
     },
     [activeMeshId],
@@ -465,7 +466,7 @@ export function WorktreeManagerTab() {
       try {
         await updateMeshPoolSize(activeMeshId, clamped);
       } catch (e) {
-        setSaveError(`Failed to update pool size: ${String(e)}`);
+        setSaveError(`Failed to update pool size: ${formatError(e)}`);
       }
     },
     [activeMeshId],
@@ -574,14 +575,14 @@ export function WorktreeManagerTab() {
         try {
           await deleteBranches(activeMeshId, repoPath, names);
         } catch (e) {
-          errors.push(String(e));
+          errors.push(formatError(e));
         }
       }
       if (worktreePaths.length > 0) {
         try {
           await deleteWorktrees(worktreePaths);
         } catch (e) {
-          errors.push(String(e));
+          errors.push(formatError(e));
         }
       }
     } finally {
@@ -726,7 +727,7 @@ export function WorktreeManagerTab() {
                     clearTimeout(successTimerRef.current);
                     successTimerRef.current = null;
                   }
-                  pruneError = `Prune failed: ${String(e)}`;
+                  pruneError = `Prune failed: ${formatError(e)}`;
                 } finally {
                   setPruningPaths((prev) => {
                     const next = new Set(prev);

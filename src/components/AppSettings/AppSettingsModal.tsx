@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
@@ -552,7 +553,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         setExposedInterfaces(network.exposed_interfaces);
         setLoaded(true);
       } catch (e) {
-        setError(String(e));
+        setError(formatError(e));
         setLoaded(true);
       }
     };
@@ -572,7 +573,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       await api.revokeDeviceSession(id);
     } catch (e) {
       setDevices(previous);
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setRevokingId(null);
     }
@@ -628,7 +629,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setAccounts(accountList);
       await loadPairingData(providerList);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
       throw e;
     }
   };
@@ -641,7 +642,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setProviders(providerList);
       await loadPairingData(providerList);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
       throw e;
     }
   };
@@ -666,7 +667,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       await api.setHarnessOrder(order);
     } catch (e) {
       setProviders(previous);
-      setError(String(e));
+      setError(formatError(e));
     }
   };
 
@@ -684,7 +685,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       await api.setAppDefaultProvider(providerArg);
     } catch (e) {
       setSelected(previous);
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setSaving(false);
     }
@@ -707,7 +708,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     } catch (e) {
       namingRef.current = previous;
       setNamingProvider(previous);
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setNamingSaving(false);
     }
@@ -746,7 +747,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     } catch (e) {
       poolSavedRef.current = previous;
       setPoolDraft(previous);
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setPoolSaving(false);
     }
@@ -780,7 +781,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       return true;
     } catch (e) {
       setAccounts(previous);
-      setError(String(e));
+      setError(formatError(e));
       return false;
     }
   };
@@ -802,7 +803,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setAccounts(accountList);
       setProviders(providerList);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     }
   };
 
@@ -893,7 +894,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setCoordToken(token);
       setCoordHasToken(true);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setCoordBusy(false);
     }
@@ -907,7 +908,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // Let the "Copied!" confirmation fade back so a second copy reads clearly.
       setTimeout(() => setCoordCopied(false), 2000);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     }
   };
 
