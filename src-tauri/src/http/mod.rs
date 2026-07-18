@@ -1578,7 +1578,13 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // verifies the peer is loopback (issue #496) and rejects external callers
     // with 403 before publishing the Node Turn.
     if method == "POST" && path_without_query.starts_with("/api/attention/") {
-        routes::attention::handle_post(&mut lines, &path_without_query, addr).await;
+        routes::attention::handle_post(
+            &mut lines,
+            &path_without_query,
+            addr,
+            content_length(&headers),
+        )
+        .await;
         return;
     }
 
@@ -2728,7 +2734,7 @@ ANY / -> Public (SPA shell)";
         tokio::spawn(async move {
             let (stream, _real_peer) = listener.accept().await.unwrap();
             let mut lines = tokio::io::BufStream::new(MaybeTls::Plain(stream));
-            routes::attention::handle_post(&mut lines, &path, peer).await;
+            routes::attention::handle_post(&mut lines, &path, peer, 0).await;
         });
 
         let mut stream = TcpStream::connect(addr).await.unwrap();

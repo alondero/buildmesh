@@ -533,8 +533,12 @@ pub fn inject_attention_hook(project_path: &std::path::Path) {
     // spawn_environment) rather than baking a literal. This keeps the hook
     // correct across the 1992→1994 fallback and routes a dev-profile agent's
     // attention to the dev instance (2992), not the stable hub.
+    // `--data-binary @-` forwards the hook's stdin JSON ({hook_event_name,
+    // transcript_path, …}) as the POST body (issue #878). The backend uses it
+    // to tell "turn ended, user needed" from "turn ended, waiting on
+    // background tasks"; an empty body degrades to always-mark.
     let hook_command =
-        "curl -sf -X POST http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"
+        "curl -sf -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true"
             .to_string();
 
     // We register two hooks so the user is told the *instant* their input is
@@ -759,6 +763,9 @@ fn start_reader(
             // Autopilot state evaluator tail (issue #483) — one in-memory
             // set lookup for non-piloted nodes.
             crate::autopilot::evaluator::on_output(session_id, &text);
+            // Stale-attention safety net (issue #878) — one map lookup for
+            // unarmed nodes.
+            crate::attention_autoclear::on_output(session_id, data.len());
 
             if !session_captured.load(Ordering::Relaxed) {
                 if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
@@ -2832,6 +2839,33 @@ mod tests {
             command.contains("/api/attention/"),
             "Stop hook should POST to the attention endpoint, got: {command}"
         );
+    }
+
+    /// Both hooks must forward the hook's stdin JSON as the POST body (issue
+    /// #878). Claude Code pipes `{hook_event_name, transcript_path, …}` into
+    /// the command; without `--data-binary @-` the backend gets an empty body
+    /// and cannot tell "turn ended, user needed" from "turn ended, waiting on
+    /// background tasks".
+    #[test]
+    fn attention_hook_forwards_stdin_payload() {
+        let temp = TempDir::new().unwrap();
+        inject_attention_hook(temp.path());
+
+        let settings = read_injected_settings(temp.path());
+        for (event, path) in [
+            ("Notification", &settings["hooks"]["Notification"][0]["hooks"][0]),
+            ("Stop", &settings["hooks"]["Stop"][0]["hooks"][0]),
+        ] {
+            let command = path["command"].as_str().unwrap();
+            assert!(
+                command.contains("--data-binary @-"),
+                "{event} hook must forward stdin as the POST body, got: {command}"
+            );
+            assert!(
+                command.contains("Content-Type: application/json"),
+                "{event} hook must declare a JSON body, got: {command}"
+            );
+        }
     }
 
     /// Injection is idempotent: a second call over an already-correct file must

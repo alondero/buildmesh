@@ -39,6 +39,10 @@ impl AttentionSink for AppAttentionSink<'_> {
 /// Idempotent — re-marking an already-awaiting node is a no-op write + re-emit.
 pub fn mark_attention(node_id: i64, app: &AppHandle) {
     mark_attention_with(&AppAttentionSink { app }, node_id);
+    // Arm the resume-detection safety net (issue #878): if the agent starts
+    // producing output again without user input, the mark was stale and gets
+    // auto-cleared.
+    crate::attention_autoclear::on_marked(node_id);
 }
 
 pub(crate) fn mark_attention_with(sink: &dyn AttentionSink, node_id: i64) {
@@ -58,6 +62,7 @@ pub async fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(),
 /// Clear the attention state for a node — called when the user resumes it.
 #[command]
 pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
+    crate::attention_autoclear::disarm(node_id);
     db::update_agent_node_status(node_id, SessionStatus::Running).map_err(|e| e.to_string())?;
     app.emit(
         "attention-cleared",
