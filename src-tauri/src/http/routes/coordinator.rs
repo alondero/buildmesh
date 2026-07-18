@@ -14,7 +14,7 @@
 use crate::coordinator::{drive, enrichment, node_digest};
 use crate::db;
 use crate::http::request;
-use tokio::io::{AsyncReadExt, BufStream};
+use tokio::io::BufStream;
 use crate::http::MaybeTls;
 
 /// `GET /nodes` → JSON array of layered Node Digests across every Mesh. Each

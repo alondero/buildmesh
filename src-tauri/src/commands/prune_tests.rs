@@ -1221,8 +1221,9 @@ async fn prune_remote_tracking_returns_string_on_success() {
     let result = prune_remote_tracking(local.path_str()).await;
     // Type-anchor: the success variant MUST be a String. If the signature
     // regresses to `Result<(), String>` the `: String` annotation fails
-    // to compile, which is the desired RED state.
-    let message: String = result.expect("prune should succeed against a clean clone");
+    // to compile, which is the desired RED state. Underscore prefix
+    // keeps the type anchor without an unused-binding warning.
+    let _message: String = result.expect("prune should succeed against a clean clone");
 }
 
 #[tokio::test]
