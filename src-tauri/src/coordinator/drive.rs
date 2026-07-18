@@ -193,6 +193,7 @@ impl DriveTarget for RegistryTarget {
         // and fan out `attention-cleared` to both the desktop webview and mobile
         // subscribers so neither shows a stale "awaiting" badge for a node the
         // coordinator just drove.
+        crate::attention_autoclear::disarm(node_id);
         let _ = crate::db::update_agent_node_status(node_id, SessionStatus::Running);
         if let Some(app) = crate::http::app_handle() {
             use tauri::Emitter;

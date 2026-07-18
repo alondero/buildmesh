@@ -55,6 +55,18 @@ if ((Test-Path (Join-Path $gitForWindows 'git.exe')) -and ($gitOnPath -notlike "
   $env:PATH = "$gitForWindows;$env:PATH"
 }
 
+# Same trap, different binary: the http::tls cert tests shell out to `openssl`,
+# and devkitPro's MSYS2 copy (seen shadowing it in agent PowerShell sessions,
+# independently of which git.exe resolves) dies with "add_item ... failed"
+# before doing any work — false-failing 4 tests. Git for Windows ships a
+# working openssl in usr\bin; pin it first when openssl resolves elsewhere.
+$gitUsrBin = 'C:\Program Files\Git\usr\bin'
+$openSslOnPath = (Get-Command openssl -ErrorAction SilentlyContinue).Source
+if ((Test-Path (Join-Path $gitUsrBin 'openssl.exe')) -and ($openSslOnPath -notlike 'C:\Program Files\Git\*')) {
+  Write-Host "== PATH openssl is '$openSslOnPath' -> pinning $gitUsrBin first ==" -ForegroundColor Yellow
+  $env:PATH = "$gitUsrBin;$env:PATH"
+}
+
 function Ensure-MobileBuilt {
   # Rebuild when index.html is missing OR empty — an interrupted prior build (Ctrl-C /
   # Defender lock) can leave a zero-byte/truncated index.html that a Test-Path-only gate

@@ -1047,6 +1047,10 @@ pub(crate) fn write_to_agent_blocking(
     data: String,
 ) -> Result<bool, String> {
     PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
+    // Any accepted keystroke means the user is engaged with this node — the
+    // stale-mark hypothesis behind auto-clear (issue #878) no longer holds,
+    // and the keystroke's own echo must not count toward the resume burst.
+    crate::attention_autoclear::disarm(session_id);
     let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
         && !should_skip_attention_signals(session_id);
     if should_signal {
