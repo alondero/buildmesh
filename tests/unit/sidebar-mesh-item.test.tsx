@@ -2,8 +2,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
-import { DndContext } from '@dnd-kit/core';
-import { SortableContext } from '@dnd-kit/sortable';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
 import { MeshItem } from '../../src/components/Sidebar/MeshItem';
 import type { Mesh } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
@@ -641,5 +652,182 @@ describe('MeshItem', () => {
       expect(menu.style.top).toBe(before.top);
       expect(menu.style.left).toBe(before.left);
     });
+  });
+});
+
+// Issue #727 — keyboard a11y for the mesh-reorder drag handle. The
+// dnd-kit `KeyboardSensor` is wired in via `useSensors` in Sidebar.tsx;
+// here we mount a minimal sibling-rows harness so the tests can fire
+// Space/ArrowDown/Escape against a real sortable list (the
+// single-row `<DndContext>` above would otherwise have no `over`
+// target). The harness emits `onDragEnd` like the real Sidebar so the
+// reorder contract stays honest.
+describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
+  afterEach(() => cleanup());
+
+  const MESH_A: Mesh = { ...MESH, id: 1, name: 'mesh-a' };
+  const MESH_B: Mesh = { ...MESH, id: 2, name: 'mesh-b' };
+  const MESH_C: Mesh = { ...MESH, id: 3, name: 'mesh-c' };
+
+  /**
+   * Sidebar-equivalent: a DndContext with KeyboardSensor +
+   * sortableKeyboardCoordinates + an onDragEnd that calls a passed
+   * callback with the new id order. Mirrors Sidebar.tsx's wiring so
+   * the tests prove the production contract, not a one-off fixture.
+   */
+  function SidebarHarness({ onReorder }: { onReorder: (order: number[]) => void }) {
+    const sensors = useSensors(
+      useSensor(PointerSensor),
+      useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    );
+    const handleDragEnd = (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      const items = [MESH_A.id, MESH_B.id, MESH_C.id];
+      const from = items.indexOf(active.id as number);
+      const to = items.indexOf(over.id as number);
+      if (from === -1 || to === -1) return;
+      const next = [...items];
+      next.splice(from, 1);
+      next.splice(to, 0, active.id as number);
+      onReorder(next);
+    };
+    return (
+      <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+        <SortableContext items={[MESH_A.id, MESH_B.id, MESH_C.id]} strategy={verticalListSortingStrategy}>
+          <div data-testid="mesh-list">
+            {[MESH_A, MESH_B, MESH_C].map(mesh => (
+              <MeshItem
+                key={mesh.id}
+                mesh={mesh}
+                isSelected={false}
+                isDropdownOpen={false}
+                isSpawning={false}
+                providerList={PROVIDERS}
+                onSelectMesh={vi.fn()}
+                onNewNode={vi.fn()}
+                onSelectProvider={vi.fn()}
+                onOpenFilesProbe={vi.fn()}
+                onOpenPropertiesProbe={vi.fn()}
+                onOpenWorktreesProbe={vi.fn()}
+                onOpenIssuesProbe={vi.fn()}
+                onOpenSessionHistoryProbe={vi.fn()}
+                meshNodes={[]}
+                activeNodeId={null}
+                setActiveNode={vi.fn()}
+                selectMesh={vi.fn()}
+                onDeleteNode={vi.fn()}
+                getDefaultProvider={vi.fn().mockResolvedValue('anthropic')}
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+    );
+  }
+
+  it('renders the drag handle as a focusable button with aria-roledescription="sortable"', () => {
+    render(<SidebarHarness onReorder={() => {}} />);
+    const handle = screen.getByLabelText('Reorder mesh-a');
+    // tabIndex=0 — required for the KeyboardSensor to find the activator.
+    expect(handle.getAttribute('tabindex')).toBe('0');
+    // role=button is dnd-kit's default; our explicit override is idempotent.
+    expect(handle.getAttribute('role')).toBe('button');
+    // aria-roledescription=sortable is the WAI-ARIA description for
+    // sortable list items (overrides dnd-kit's "draggable" default).
+    expect(handle.getAttribute('aria-roledescription')).toBe('sortable');
+  });
+
+  it('focuses the handle when keyboard tab order lands on it', () => {
+    render(<SidebarHarness onReorder={() => {}} />);
+    const handle = screen.getByLabelText('Reorder mesh-b') as HTMLElement;
+    handle.focus();
+    expect(document.activeElement).toBe(handle);
+  });
+
+  it('Space starts a drag (aria-pressed flips true) and ArrowDown then drop commits the reorder', async () => {
+    // Walk through the full Space → ArrowDown → Space drop sequence.
+    // dnd-kit's KeyboardSensor: Space activates the drag (aria-pressed
+    // flips true), ArrowDown translates the active item to the next
+    // sibling via `sortableKeyboardCoordinates`, and the second Space
+    // finalises the move via `onDragEnd`. The reorder is committed
+    // through the same `onReorder` callback Sidebar wires to
+    // `reorderMeshes` in production.
+    //
+    // Activation fires on the handle's React `onKeyDown` listener.
+    // After activation, dnd-kit attaches the document-level listener
+    // via `setTimeout(...)` to avoid the same keydown both activating
+    // and ending the drag — flush a tick before the ArrowDown/Space.
+    //
+    // `sortableKeyboardCoordinates` walks siblings by comparing rect
+    // tops; jsdom returns zeros, so stub each row's
+    // `getBoundingClientRect` with strictly increasing tops so the
+    // getter finds the next row.
+    const onReorder = vi.fn();
+    const { container } = render(<SidebarHarness onReorder={onReorder} />);
+    const handles = container.querySelectorAll('[aria-roledescription="sortable"]');
+    expect(handles.length).toBe(3);
+    handles.forEach((h, i) => {
+      // Walk up from the handle to the row that owns `setNodeRef` —
+      // MeshItem nests the handle inside `<div className="group/mesh">`
+      // (the dnd-kit droppable target), so `parentElement` isn't
+      // enough — go to the closest ancestor with the `mb-1` class
+      // (the row container, the setNodeRef target).
+      let row: HTMLElement | null = h as HTMLElement;
+      while (row && !row.className.includes('mb-1')) {
+        row = row.parentElement;
+      }
+      expect(row).toBeTruthy();
+      const top = i * 50;
+      row!.getBoundingClientRect = function (this: HTMLElement) {
+        return {
+          width: 200,
+          height: 50,
+          top,
+          left: 0,
+          right: 200,
+          bottom: top + 50,
+          x: 0,
+          y: top,
+          toJSON() { return {}; },
+        } as DOMRect;
+      };
+    });
+
+    const handle = screen.getByLabelText('Reorder mesh-a') as HTMLElement;
+    handle.focus();
+    expect(document.activeElement).toBe(handle);
+
+    fireEvent.keyDown(handle, { key: ' ', code: 'Space' });
+    expect(handle.getAttribute('aria-pressed')).toBe('true');
+
+    await new Promise(r => setTimeout(r, 0));
+
+    fireEvent.keyDown(document, { key: 'ArrowDown', code: 'ArrowDown' });
+    fireEvent.keyDown(document, { key: ' ', code: 'Space' });
+
+    expect(onReorder).toHaveBeenCalledTimes(1);
+    expect(onReorder).toHaveBeenCalledWith([2, 1, 3]);
+  });
+
+  it('Escape cancels the drag and does not commit a reorder', async () => {
+    // Escape drops the active item back to its original slot —
+    // dnd-kit dispatches `onDragCancel`, which (like Sidebar) does
+    // not translate into an `onReorder` call. Cancel is an explicit
+    // "no" from the user, not a commit.
+    const onReorder = vi.fn();
+    render(<SidebarHarness onReorder={onReorder} />);
+    const handle = screen.getByLabelText('Reorder mesh-a') as HTMLElement;
+    handle.focus();
+
+    fireEvent.keyDown(handle, { key: ' ', code: 'Space' });
+    expect(handle.getAttribute('aria-pressed')).toBe('true');
+
+    await new Promise(r => setTimeout(r, 0));
+
+    fireEvent.keyDown(document, { key: 'Escape', code: 'Escape' });
+
+    expect(onReorder).not.toHaveBeenCalled();
+    expect(handle.getAttribute('aria-pressed')).not.toBe('true');
   });
 });
