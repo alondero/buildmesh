@@ -1,4 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import type { ProviderAccount, ProviderPairing, ApiSurface } from '../../lib/tauri';
 
@@ -17,6 +33,22 @@ const SURFACE_LABEL: Record<ApiSurface, string> = {
  *  `(harness_id, provider_id)` identity used for detach. */
 const pairKey = (harnessId: string, providerId: string) => `${harnessId}:${providerId}`;
 
+/** Pure: move `activeId` to where `overId` sits, returning the new id order.
+ *  Exposed so the reorder math can be unit-tested without simulating a drag
+ *  (jsdom can't fire real pointer drags through dnd-kit). Mirrors
+ *  `reorderIds` in `HarnessOrderList.tsx` — the harness-config analogue,
+ *  scoped to one harness's children only. */
+export function reorderProxiedIds(
+  ids: string[],
+  activeId: string,
+  overId: string,
+): string[] {
+  const from = ids.indexOf(activeId);
+  const to = ids.indexOf(overId);
+  if (from === -1 || to === -1 || from === to) return ids;
+  return arrayMove(ids, from, to);
+}
+
 /**
  * The harness-centric **config page** (ADR-0016 §5, issue #576). For each
  * proxy-capable **Agent Harness** it lists the **Proxied Providers** attached to
@@ -29,6 +61,13 @@ const pairKey = (harnessId: string, providerId: string) => `${harnessId}:${provi
  * an inline key field). The default Anthropic pairing for a keyed provider is
  * derived backend-side and shown as managed-on-Providers (not detachable here);
  * extra surfaces/harnesses the user attaches are detachable.
+ *
+ * **Issue #577**: each `HarnessCard` wraps its child list in its own
+ * `<DndContext>` + `<SortableContext>`, so a draggable can only be dropped on
+ * a sibling in the same card — cross-harness drag is structurally
+ * disallowed. Only stored pairings are draggable; derived defaults are
+ * managed on the Providers page and show the "Default · key on Providers"
+ * placeholder without a reorder handle.
  */
 export function HarnessConfigList({
   harnesses,
@@ -38,6 +77,7 @@ export function HarnessConfigList({
   accounts,
   onAttach,
   onDetach,
+  onReorderProxied,
   onDirtyChange,
 }: {
   harnesses: ProxyHarness[];
@@ -48,6 +88,14 @@ export function HarnessConfigList({
   accounts: ProviderAccount[];
   onAttach: (harnessId: string, providerId: string, apiKey: string | null) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  /**
+   * Issue #577 — called with `(harnessId, newProviderIds)` after the user
+   * drops a child row inside a harness card. Only fires for stored pairings
+   * (the rows that are draggable). Cross-harness drag is disallowed at the
+   * UI layer (each card is its own `DndContext`), so `harnessId` here always
+   * matches the card the drag started in.
+   */
+  onReorderProxied?: (harnessId: string, providerIds: string[]) => void;
   /**
    * Forwarded to each card so the parent can aggregate the modal-wide dirty
    * signal (issue #730). Each card's form opens independently; any one
@@ -91,6 +139,7 @@ export function HarnessConfigList({
           isKeyed={isKeyed}
           onAttach={onAttach}
           onDetach={onDetach}
+          onReorderProxied={onReorderProxied}
           onDirtyChange={onDirtyChange ? (d) => onDirtyChange(harness.id, d) : undefined}
         />
       ))}
@@ -107,6 +156,7 @@ function HarnessCard({
   isKeyed,
   onAttach,
   onDetach,
+  onReorderProxied,
   onDirtyChange,
 }: {
   harness: ProxyHarness;
@@ -117,6 +167,8 @@ function HarnessCard({
   isKeyed: (id: string) => boolean;
   onAttach: (harnessId: string, providerId: string, apiKey: string | null) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  /** Issue #577 — reorder handler (only stored pairings call it). */
+  onReorderProxied?: (harnessId: string, providerIds: string[]) => void;
   /** Dirty = the inline "Add proxied provider" form is open AND has a
    *  selection or a half-typed key. See issue #730. */
   onDirtyChange?: (dirty: boolean) => void;
@@ -173,6 +225,31 @@ function HarnessCard({
     }
   };
 
+  // Issue #577 — child reorder handler. Only stored pairings participate
+  // (derived defaults are managed on the Providers page). `reorderProxiedIds`
+  // is a no-op when active == over or either id is missing.
+  const storedPairings = pairings.filter((p) => storedKeys.has(pairKey(p.harness_id, p.provider_id)));
+  const handleDragEnd = (event: DragEndEvent) => {
+    if (!onReorderProxied) return;
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    // Both ids are sortable child keys (`<provider_id>`), so they map to
+    // a stored pairing under THIS harness by construction.
+    const next = reorderProxiedIds(
+      storedPairings.map((p) => p.provider_id),
+      active.id as string,
+      over.id as string,
+    );
+    onReorderProxied(harness.id, next);
+  };
+
+  // Mirror the `HarnessOrderList` keyboard-sensor pattern (issue #727) so
+  // the drag handle is operable from the keyboard.
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
   return (
     <div className="border border-border-subtle rounded-lg p-5" data-testid={`harness-${harness.id}`}>
       <div className="flex items-center gap-3 mb-3">
@@ -183,43 +260,33 @@ function HarnessCard({
       {pairings.length === 0 ? (
         <p className="text-base text-text-muted">No proxied providers attached.</p>
       ) : (
-        <ul className="flex flex-col gap-2">
-          {pairings.map((p) => {
-            const detachable = storedKeys.has(pairKey(p.harness_id, p.provider_id));
-            return (
-              <li
-                key={p.provider_id}
-                className="flex items-center gap-3 border border-border-subtle rounded-md px-3 py-2"
-                data-testid={`pairing-${p.harness_id}-${p.provider_id}`}
-              >
-                <ProviderIcon providerId={p.provider_id} className="h-5 w-5" />
-                <div className="min-w-0 flex-1">
-                  <div className="text-base text-text-primary truncate">
-                    {accountName(p.provider_id)}
-                    <span className="ml-2 text-sm text-accent-cyan">{SURFACE_LABEL[p.surface]}</span>
-                  </div>
-                  {p.base_url && (
-                    <div className="text-sm text-text-secondary truncate font-mono">{p.base_url}</div>
-                  )}
-                </div>
-                {detachable ? (
-                  <button
-                    onClick={() => detach(p.provider_id)}
-                    disabled={busy}
-                    className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
-                    aria-label={`Detach ${accountName(p.provider_id)} from ${harness.label}`}
-                  >
-                    Detach
-                  </button>
-                ) : (
-                  <span className="text-sm text-text-muted whitespace-nowrap" title="The global key is managed on the Providers page">
-                    Default · key on Providers
-                  </span>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+        // Issue #577 — per-harness DndContext so a draggable can only be
+        // dropped on a sibling in the same card (cross-harness drag is
+        // structurally disallowed). The sortable ids are `provider_id`s
+        // (not composite ids) so the reorder math is one-dimensional.
+        <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+          <SortableContext
+            items={storedPairings.map((p) => p.provider_id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <ul className="flex flex-col gap-2">
+              {pairings.map((p) => {
+                const detachable = storedKeys.has(pairKey(p.harness_id, p.provider_id));
+                return (
+                  <ProxiedChildRow
+                    key={p.provider_id}
+                    pairing={p}
+                    harnessLabel={harness.label}
+                    detachable={detachable}
+                    onDetach={detach}
+                    accountName={accountName}
+                    busy={busy}
+                  />
+                );
+              })}
+            </ul>
+          </SortableContext>
+        </DndContext>
       )}
 
       {adding ? (
@@ -288,5 +355,102 @@ function HarnessCard({
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * One **Proxied Provider** child row (issue #577). For **stored** pairings
+ * the row is sortable — dnd-kit's `useSortable` wires the drag handle
+ * activator. For **derived** default pairings (the keyed-account Claude/
+ * Anthropic default managed on the Providers page) the row renders without
+ * a drag handle and shows the "Default · key on Providers" placeholder.
+ *
+ * The Detach button is the user-stored-only control, so it never renders
+ * for derived defaults — the same `detachable` gate determines both.
+ */
+function ProxiedChildRow({
+  pairing,
+  harnessLabel,
+  detachable,
+  onDetach,
+  accountName,
+  busy,
+}: {
+  pairing: ProviderPairing;
+  harnessLabel: string;
+  detachable: boolean;
+  onDetach: (providerId: string) => void;
+  accountName: (id: string) => string;
+  busy: boolean;
+}) {
+  // `useSortable` is unconditional so dnd-kit's hooks order is stable;
+  // when the row isn't detachable the listener/handle aren't wired into
+  // the DOM (see the conditional spread below), so the row is inert.
+  const { setNodeRef, transform, transition, isDragging, attributes, listeners } =
+    useSortable({ id: pairing.provider_id, disabled: !detachable });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  // The drag handle only exists on detachable rows — derived defaults
+  // are managed on the Providers page and aren't orderable.
+  const handleProps = detachable ? { ...attributes, ...listeners } : {};
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      className="flex items-center gap-3 border border-border-subtle rounded-md px-3 py-2"
+      data-testid={`pairing-${pairing.harness_id}-${pairing.provider_id}`}
+      data-spawn-harness={pairing.harness_id}
+      data-spawn-id={`${pairing.harness_id}:${pairing.provider_id}`}
+    >
+      {detachable ? (
+        <span
+          {...handleProps}
+          tabIndex={0}
+          role="button"
+          aria-roledescription="sortable"
+          aria-label={`Reorder ${accountName(pairing.provider_id)} under ${harnessLabel}`}
+          className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm"
+          title="Drag to reorder"
+        >
+          ⋮⋮
+        </span>
+      ) : (
+        <span
+          className="w-3.5 text-transparent select-none"
+          aria-hidden="true"
+        >
+          ⋮⋮
+        </span>
+      )}
+      <ProviderIcon providerId={pairing.provider_id} className="h-5 w-5" />
+      <div className="min-w-0 flex-1">
+        <div className="text-base text-text-primary truncate">
+          {accountName(pairing.provider_id)}
+          <span className="ml-2 text-sm text-accent-cyan">{SURFACE_LABEL[pairing.surface]}</span>
+        </div>
+        {pairing.base_url && (
+          <div className="text-sm text-text-secondary truncate font-mono">{pairing.base_url}</div>
+        )}
+      </div>
+      {detachable ? (
+        <button
+          onClick={() => onDetach(pairing.provider_id)}
+          disabled={busy}
+          className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
+          aria-label={`Detach ${accountName(pairing.provider_id)} from ${harnessLabel}`}
+        >
+          Detach
+        </button>
+      ) : (
+        <span className="text-sm text-text-muted whitespace-nowrap" title="The global key is managed on the Providers page">
+          Default · key on Providers
+        </span>
+      )}
+    </li>
   );
 }

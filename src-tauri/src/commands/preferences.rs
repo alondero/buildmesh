@@ -59,6 +59,31 @@ pub async fn set_harness_order(app: AppHandle, order: Vec<String>) -> Result<(),
     Ok(())
 }
 
+/// Persist the **Proxied Provider** child order under one harness (issue
+/// #577). `provider_ids` is the top-to-bottom list of `provider_id`s as the
+/// user arranged them in the drag list on the harness-config page; only
+/// registered [`crate::preferences::ProviderAccount`] ids are persisted
+/// (unknown ids are silently dropped — the order seam would never render
+/// them anyway, and a stale UI send can't pollute the preferences file).
+/// Cross-harness drag is disallowed at the UI layer (each `HarnessCard`
+/// is its own `DndContext`), so the harness_id + provider_ids pair is the
+/// entire scope the command accepts.
+///
+/// Emits `provider-list-changed` so every spawn surface (sidebar, Probe
+/// tabs, archived-resume, mobile) drops its cached provider list and
+/// re-reads the reordered menu — the same invalidation [`set_harness_order`]
+/// fires for the harness-level reorder.
+#[command]
+pub async fn set_proxied_provider_order(
+    app: AppHandle,
+    harness_id: String,
+    provider_ids: Vec<String>,
+) -> Result<(), String> {
+    preferences::set_proxied_provider_order(harness_id, provider_ids)?;
+    let _ = app.emit("provider-list-changed", ());
+    Ok(())
+}
+
 /// The effective model-provider account list — code-defined built-ins with the
 /// user's stored overrides merged in (issue #537). The settings UI renders this
 /// rather than the raw `provider_accounts` override list so the built-ins are

@@ -136,6 +136,24 @@ pub enum ApiSurface {
     OpenAI,
 }
 
+/// One harness's ordered **Proxied Provider** children (issue #577).
+///
+/// Mirrors the per-harness shape of the Spawn Menu — the wire-side list is
+/// just `provider_id`s in top-to-bottom order, scoped to the named harness.
+/// `Terminal` is excluded (it's a native harness with no proxied children).
+/// A harness without an entry keeps its natural (insertion) order; a
+/// newly-attached provider appends to the end on the next refresh.
+///
+/// Generated to src/types/generated/ProxiedProviderOrder.ts (issue #577).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "ProxiedProviderOrder.ts")]
+pub struct ProxiedProviderOrder {
+    /// Harness profile id this child order applies to (e.g. `"claude"`).
+    pub harness_id: String,
+    /// `provider_id`s in user-chosen top-to-bottom order.
+    pub provider_ids: Vec<String>,
+}
+
 /// A **Proxied Provider** pairing — one harness×provider attachment (ADR-0016
 /// §4, issue #576).
 ///
@@ -293,6 +311,18 @@ pub struct AppPreferences {
     /// with an empty list.
     #[serde(default)]
     pub provider_pairings: Vec<ProviderPairing>,
+    /// User-chosen order of the **Proxied Provider** children under each
+    /// harness (issue #577). One [`ProxiedProviderOrder`] per harness the
+    /// user has reordered; a harness without an entry keeps its natural
+    /// (insertion) order — the per-harness bucket in the Spawn Menu
+    /// preserves the order the backend emits it in. The drag-to-reorder UI
+    /// lives on the harness-config page (Settings → Harnesses); cross-harness
+    /// drag is disallowed (each `HarnessCard` is its own `DndContext`, so a
+    /// draggable can only be dropped on a sibling in the same card). An
+    /// additive field — an older `preferences.json` without it loads with an
+    /// empty list.
+    #[serde(default)]
+    pub proxied_provider_order: Vec<ProxiedProviderOrder>,
     /// The backend that summaries PTY output into a slug (issue #824).
     /// Distinct from the node's own provider — auto-rename runs frequently
     /// and often sits well below the model's intelligence threshold, so the
@@ -1122,6 +1152,97 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
             Vec::new()
         }
     }
+}
+
+/// The full stored per-harness **Proxied Provider** child orders (issue
+/// #577). One [`ProxiedProviderOrder`] per harness the user has reordered;
+/// a harness without an entry keeps its natural order (the backend's
+/// `order_proxied_children` falls through when the per-harness lookup is
+/// `None`). A load failure is logged and treated as "no stored order".
+pub fn proxied_provider_order() -> Vec<ProxiedProviderOrder> {
+    match load() {
+        Ok(prefs) => prefs.proxied_provider_order,
+        Err(e) => {
+            tracing::warn!(
+                "preferences::proxied_provider_order load failed, using none: {}",
+                e
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// The stored per-harness child order, if any (issue #577). `None` means
+/// "no stored preference" — the backend's `order_proxied_children` falls
+/// through to natural insertion order. The pair-id comparator
+/// `(harness_id, provider_id)` is identical to the pairing key the rest of
+/// the codebase uses, so this lookup is a one-liner for the spawn menu and
+/// the harness-config page alike.
+///
+/// `pub` for the single-harness lookup symmetry with the full-list
+/// [`proxied_provider_order`] getter and the [`set_proxied_provider_order`]
+/// setter — the spawn-menu read path uses [`proxied_provider_order`] (a
+/// single `HashMap` lookup) for performance, but a UI surface that wants
+/// "what's the order under harness X?" can reach for this without parsing
+/// the full vector.
+#[allow(dead_code)]
+pub fn proxied_order_for(harness_id: &str) -> Option<Vec<String>> {
+    proxied_provider_order()
+        .into_iter()
+        .find(|o| o.harness_id == harness_id)
+        .map(|o| o.provider_ids)
+}
+
+/// Persist the **Proxied Provider** child order for a single harness (issue
+/// #577). Upserts by `harness_id`: a re-set replaces the prior entry in
+/// place; a new harness appends. An empty `provider_ids` is normalised to
+/// "drop the entry" — the natural order is then re-derived on read, so a
+/// detach-reattach sequence can't be confused by a stale empty slot.
+///
+/// Defensive filters on the incoming list (mirrors `set_harness_order`'s
+/// dedupe/keep-first pattern):
+///   * **Dedup** — first occurrence wins; later duplicates are dropped
+///     (a malformed UI send with `[a, b, a]` doesn't shift every later
+///     provider's index on persist).
+///   * **Drop unknown account ids** — any id that isn't a registered
+///     [`ProviderAccount`] (built-in or custom) is silently dropped. The
+///     ordering seam would never render it, and persisting it would let a
+///     stale UI send pollute the stored preferences. Note we validate
+///     against `provider_accounts()` rather than `provider_pairings()`:
+///     the order is meaningful for any account the user could attach under
+///     this harness, even before the pairing exists (a user can rearrange
+///     after a future attach and the slot is reserved).
+pub fn set_proxied_provider_order(harness_id: String, provider_ids: Vec<String>) -> Result<(), String> {
+    let mut prefs = load()?;
+    let known_ids: std::collections::HashSet<String> = crate::preferences::provider_accounts()
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    let incoming: Vec<String> = dedupe_keeping_first(provider_ids.into_iter())
+        .into_iter()
+        .filter(|id| known_ids.contains(id))
+        .collect();
+    let existing = prefs
+        .proxied_provider_order
+        .iter_mut()
+        .find(|o| o.harness_id == harness_id);
+    match existing {
+        Some(entry) if incoming.is_empty() => {
+            // Empty list = the user cleared their order preference. Drop
+            // the entry entirely so the next read returns `None` and the
+            // backend falls through to natural order — a stored empty
+            // would silently no-op the ordering seam.
+            let _ = entry; // `entry` is borrowed only for the empty-list check
+            prefs.proxied_provider_order.retain(|o| o.harness_id != harness_id);
+        }
+        Some(entry) => entry.provider_ids = incoming,
+        None if !incoming.is_empty() => prefs.proxied_provider_order.push(ProxiedProviderOrder {
+            harness_id,
+            provider_ids: incoming,
+        }),
+        None => { /* nothing to persist */ }
+    }
+    save(prefs)
 }
 
 /// The **Anthropic-surface** model-tier map for an account — the precedence
@@ -2099,6 +2220,127 @@ mod tests {
             set_harness_order(vec!["claude".into(), "terminal".into(), "codex".into()]).unwrap();
             *CACHE.lock().unwrap() = None;
             assert_eq!(harness_order(), vec!["claude".to_string(), "codex".to_string()]);
+        });
+    }
+
+    // ─── Proxied Provider order (issue #577) ────────────────────────────────
+
+    #[test]
+    fn app_preferences_defaults_proxied_provider_order_to_empty_when_key_absent() {
+        // Additive wire: an older preferences.json without the key deserializes
+        // with an empty Vec rather than failing.
+        let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.proxied_provider_order, Vec::<ProxiedProviderOrder>::new());
+    }
+
+    #[test]
+    fn proxied_order_for_returns_none_when_harness_unset() {
+        with_temp_dir(|_| {
+            // No stored order → the per-harness helper returns None so the
+            // backend `order_proxied_children` falls through to natural order.
+            assert_eq!(proxied_order_for("claude"), None);
+        });
+    }
+
+    #[test]
+    fn set_proxied_provider_order_round_trips_through_save_and_read() {
+        with_temp_dir(|_| {
+            set_proxied_provider_order("claude".into(), vec!["kimi".into(), "minimax".into()]).unwrap();
+            *CACHE.lock().unwrap() = None; // force a disk read
+            assert_eq!(
+                proxied_order_for("claude"),
+                Some(vec!["kimi".to_string(), "minimax".to_string()]),
+            );
+            assert_eq!(
+                proxied_provider_order(),
+                vec![ProxiedProviderOrder {
+                    harness_id: "claude".to_string(),
+                    provider_ids: vec!["kimi".to_string(), "minimax".to_string()],
+                }]
+            );
+        });
+    }
+
+    #[test]
+    fn set_proxied_provider_order_upserts_by_harness_id() {
+        with_temp_dir(|_| {
+            // First harness writes its own entry.
+            set_proxied_provider_order("claude".into(), vec!["minimax".into(), "kimi".into()]).unwrap();
+            // Second harness appends, first is untouched.
+            set_proxied_provider_order("codex".into(), vec!["minimax".into()]).unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(
+                proxied_order_for("claude"),
+                Some(vec!["minimax".to_string(), "kimi".to_string()]),
+            );
+            assert_eq!(
+                proxied_order_for("codex"),
+                Some(vec!["minimax".to_string()]),
+            );
+            // Re-setting claude overwrites just that entry.
+            set_proxied_provider_order("claude".into(), vec!["kimi".into(), "minimax".into()]).unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(
+                proxied_order_for("claude"),
+                Some(vec!["kimi".to_string(), "minimax".to_string()]),
+            );
+            assert_eq!(
+                proxied_order_for("codex"),
+                Some(vec!["minimax".to_string()]),
+            );
+            // Two harness entries persist in the underlying vector.
+            assert_eq!(proxied_provider_order().len(), 2);
+        });
+    }
+
+    #[test]
+    fn set_proxied_provider_order_drops_duplicate_ids() {
+        with_temp_dir(|_| {
+            // A malformed UI send with duplicates: first occurrence wins.
+            set_proxied_provider_order(
+                "claude".into(),
+                vec!["minimax".into(), "kimi".into(), "minimax".into()],
+            )
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(
+                proxied_order_for("claude"),
+                Some(vec!["minimax".to_string(), "kimi".to_string()]),
+            );
+        });
+    }
+
+    #[test]
+    fn set_proxied_provider_order_drops_ids_not_currently_paired() {
+        with_temp_dir(|_| {
+            // Drop a stale UI send carrying an id whose pairing has been
+            // detached (or was never attached). Defends the ordering seam
+            // against silently persisting dead entries that would resurrect
+            // on a later re-attach.
+            set_proxied_provider_order(
+                "claude".into(),
+                vec!["minimax".into(), "ghost".into(), "kimi".into()],
+            )
+            .unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(
+                proxied_order_for("claude"),
+                Some(vec!["minimax".to_string(), "kimi".to_string()]),
+            );
+        });
+    }
+
+    #[test]
+    fn set_proxied_provider_order_normalises_empty_to_drop_entry() {
+        with_temp_dir(|_| {
+            // An empty provider list is the user's signal "I have no order
+            // preference" — drop the entry so a later attach re-derives
+            // natural order rather than resurrecting an empty stored slot.
+            set_proxied_provider_order("claude".into(), vec!["minimax".into()]).unwrap();
+            set_proxied_provider_order("claude".into(), vec![]).unwrap();
+            *CACHE.lock().unwrap() = None;
+            assert_eq!(proxied_order_for("claude"), None);
+            assert!(proxied_provider_order().is_empty());
         });
     }
 

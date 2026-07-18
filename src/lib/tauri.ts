@@ -781,6 +781,29 @@ export const setHarnessOrder = async (order: string[]) => {
   }
 };
 
+/** Persist the **Proxied Provider** child order under one harness (issue #577).
+ *  `providerIds` is the top-to-bottom list of `provider_id`s the user arranged
+ *  via the drag list on the harness-config page. Cross-harness drag is
+ *  disallowed at the UI layer (each `HarnessCard` is its own dnd-kit context),
+ *  so the `harnessId` + `providerIds` pair is the entire scope. Backend-side
+ *  unknown-account ids are silently dropped — the order seam would never
+ *  render them anyway. Busts the cached provider list AFTER the write resolves
+ *  so every spawn surface (sidebar, probe tabs, archived-resume, mobile)
+ *  re-reads the reordered menu on the next read. */
+export const setProxiedProviderOrder = async (
+  harnessId: string,
+  providerIds: string[],
+) => {
+  try {
+    return await _invoke('set_proxied_provider_order', {
+      harnessId,
+      providerIds,
+    });
+  } finally {
+    providerListPromise = null;
+  }
+};
+
 // ── Model provider accounts (issue #537) ───────────────────────────────────
 //
 // Generated from `crate::preferences::{ProviderAccount, BillingMode}`. A custom

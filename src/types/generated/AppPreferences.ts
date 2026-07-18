@@ -2,6 +2,7 @@
 import type { HarnessProfile } from "./HarnessProfile";
 import type { ProviderAccount } from "./ProviderAccount";
 import type { ProviderPairing } from "./ProviderPairing";
+import type { ProxiedProviderOrder } from "./ProxiedProviderOrder";
 
 /**
  * User-editable, persisted preferences applied across all meshes.
@@ -57,6 +58,19 @@ harness_order: Array<string>,
  * with an empty list.
  */
 provider_pairings: Array<ProviderPairing>, 
+/**
+ * User-chosen order of the **Proxied Provider** children under each
+ * harness (issue #577). One [`ProxiedProviderOrder`] per harness the
+ * user has reordered; a harness without an entry keeps its natural
+ * (insertion) order — the per-harness bucket in the Spawn Menu
+ * preserves the order the backend emits it in. The drag-to-reorder UI
+ * lives on the harness-config page (Settings → Harnesses); cross-harness
+ * drag is disallowed (each `HarnessCard` is its own `DndContext`, so a
+ * draggable can only be dropped on a sibling in the same card). An
+ * additive field — an older `preferences.json` without it loads with an
+ * empty list.
+ */
+proxied_provider_order: Array<ProxiedProviderOrder>, 
 /**
  * The backend that summaries PTY output into a slug (issue #824).
  * Distinct from the node's own provider — auto-rename runs frequently

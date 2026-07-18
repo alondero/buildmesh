@@ -138,6 +138,7 @@ fn compose_provider_menu(
     pairings: Vec<crate::preferences::ProviderPairing>,
     host: Platform,
     order: &[String],
+    proxied_order: &[crate::preferences::ProxiedProviderOrder],
 ) -> Vec<ProviderInfo> {
     let mut rows: Vec<ProviderInfo> = profiles
         .iter()
@@ -158,7 +159,7 @@ fn compose_provider_menu(
             }
         }
     }
-    order_providers(rows, order)
+    order_proxied_children(order_providers(rows, order), proxied_order)
 }
 
 /// Returns the list of agent providers available on this host platform.
@@ -170,7 +171,58 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         crate::preferences::provider_pairings(),
         Platform::current(),
         &crate::preferences::harness_order(),
+        &crate::preferences::proxied_provider_order(),
     )
+}
+
+/// Within each harness bucket, sort **Proxied Provider** children by the
+/// user's stored per-harness order (issue #577). The harness-level rank is
+/// untouched — this runs after [`order_providers`] and only re-orders the
+/// within-bucket child sequence. A child present in the bucket but not in
+/// the stored list appends at the end in its natural input order (stable
+/// sort). Native harness headers are never reordered — they're not proxied
+/// children; a stored entry that names a native id is silently ignored.
+///
+/// Pure (no disk / globals) so the ordering is the unit-test seam. The
+/// bucketing is by `group_key == harness_id`, the same wire-shape field
+/// the frontend `groupBy` uses (ADR-0016 §6); every Proxied row carries
+/// its harness id via that field.
+fn order_proxied_children(
+    mut rows: Vec<ProviderInfo>,
+    proxied_order: &[crate::preferences::ProxiedProviderOrder],
+) -> Vec<ProviderInfo> {
+    if proxied_order.is_empty() {
+        return rows;
+    }
+    let index_by_harness: std::collections::HashMap<&str, &[String]> = proxied_order
+        .iter()
+        .map(|o| (o.harness_id.as_str(), o.provider_ids.as_slice()))
+        .collect();
+    rows.sort_by(|a, b| {
+        // Only proxied rows within the same harness bucket compete on the
+        // stored order. Native rows and rows in different buckets fall
+        // through to the stable sort, preserving the harness-level rank
+        // established by `order_providers`.
+        if !a.is_proxied || !b.is_proxied || a.harness_id != b.harness_id {
+            return std::cmp::Ordering::Equal;
+        }
+        let Some(provider_ids) = index_by_harness.get(a.harness_id.as_str()) else {
+            return std::cmp::Ordering::Equal;
+        };
+        let rank_a = provider_ids
+            .iter()
+            .position(|id| id == a.provider_id.as_deref().unwrap_or(""));
+        let rank_b = provider_ids
+            .iter()
+            .position(|id| id == b.provider_id.as_deref().unwrap_or(""));
+        match (rank_a, rank_b) {
+            (Some(ra), Some(rb)) => ra.cmp(&rb),
+            (Some(_), None) => std::cmp::Ordering::Less, // listed before unlisted
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal, // both unlisted → stable
+        }
+    });
+    rows
 }
 
 /// Order the Spawn Menu by the user's stored harness order, with the plain
@@ -1165,6 +1217,7 @@ pub async fn debug_crash_snapshot() -> CrashSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preferences::ProxiedProviderOrder;
 
     #[test]
     fn plain_terminal_provider_skips_attention_signals() {
@@ -1537,6 +1590,163 @@ mod tests {
         );
     }
 
+    // ----- order_proxied_children (issue #577) ------------------------
+    //
+    // Within each harness bucket, the user-chosen order of the **Proxied
+    // Provider** children is applied AFTER `order_providers` so the harness-
+    // level rank is untouched. Native harness headers (always the first
+    // row in their bucket) are not orderable — only proxied children.
+    // `order_proxied_children` is the pure seam so the per-harness sort
+    // can be pinned without touching disk / globals.
+
+    /// Empty / unset `proxied_order` is a no-op — natural input order wins.
+    #[test]
+    fn order_proxied_children_keeps_natural_order_when_unset() {
+        let rows = vec![
+            row_native("claude"),
+            row_proxied("claude", "minimax"),
+            row_proxied("claude", "kimi"),
+        ];
+        let ordered = order_proxied_children(rows.clone(), &[]);
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["claude", "claude:minimax", "claude:kimi"],
+            "no stored order → preserve input order"
+        );
+    }
+
+    /// The stored per-harness order is applied to children of that harness.
+    /// Children present in the bucket but absent from the stored order
+    /// append in their natural (input) order at the end (stable sort).
+    #[test]
+    fn order_proxied_children_applies_per_harness_order() {
+        let rows = vec![
+            row_native("claude"),
+            row_proxied("claude", "minimax"),
+            row_proxied("claude", "kimi"),
+            row_proxied("claude", "openrouter"),
+        ];
+        let order = vec![ProxiedProviderOrder {
+            harness_id: "claude".into(),
+            provider_ids: vec!["kimi".into(), "openrouter".into(), "minimax".into()],
+        }];
+        let ordered = order_proxied_children(rows, &order);
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        // Native header first, then children in stored order.
+        assert_eq!(ids, vec!["claude", "claude:kimi", "claude:openrouter", "claude:minimax"]);
+    }
+
+    /// A stored order applies ONLY to the children of the named harness.
+    /// Other harnesses' children keep their natural order — the per-harness
+    /// scoping is the entire point (cross-harness drag is disallowed by
+    /// the UI; the backend enforces the same scope).
+    #[test]
+    fn order_proxied_children_is_scoped_per_harness() {
+        let rows = vec![
+            row_native("claude"),
+            row_proxied("claude", "minimax"),
+            row_proxied("claude", "kimi"),
+            row_native("codex"),
+            row_proxied("codex", "minimax"),
+            row_proxied("codex", "kimi"),
+        ];
+        // Reorder Claude children only; Codex untouched.
+        let order = vec![ProxiedProviderOrder {
+            harness_id: "claude".into(),
+            provider_ids: vec!["kimi".into(), "minimax".into()],
+        }];
+        let ordered = order_proxied_children(rows, &order);
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "claude",
+                "claude:kimi",
+                "claude:minimax",
+                "codex",
+                "codex:minimax",
+                "codex:kimi",
+            ],
+            "Claude children reorder; Codex children keep natural order"
+        );
+    }
+
+    /// Children that aren't in the stored order (newly attached, or stored
+    /// on a different harness) append at the end of their bucket. The
+    /// stable sort keeps their relative natural order intact.
+    #[test]
+    fn order_proxied_children_appends_unknown_ids_in_natural_order() {
+        let rows = vec![
+            row_native("claude"),
+            row_proxied("claude", "minimax"),
+            row_proxied("claude", "kimi"),
+            row_proxied("claude", "deepseek"),
+        ];
+        let order = vec![ProxiedProviderOrder {
+            harness_id: "claude".into(),
+            provider_ids: vec!["kimi".into()],
+        }];
+        let ordered = order_proxied_children(rows, &order);
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        // kimi first (listed), then minimax and deepseek in input order.
+        assert_eq!(ids, vec!["claude", "claude:kimi", "claude:minimax", "claude:deepseek"]);
+    }
+
+    /// Native harness rows are never reordered — they're not proxied
+    /// children. A spurious entry in `proxied_order` that names a native
+    /// id is silently ignored.
+    #[test]
+    fn order_proxied_children_does_not_move_native_harness_header() {
+        // The natural input from `compose_provider_menu`: native first, then
+        // children. A stored order that puts the native header second is
+        // impossible to honor — the native row stays first; the proxied
+        // children sort by the stored order within the bucket.
+        let rows = vec![
+            row_native("claude"),
+            row_proxied("claude", "minimax"),
+            row_proxied("claude", "kimi"),
+        ];
+        let order = vec![ProxiedProviderOrder {
+            harness_id: "claude".into(),
+            provider_ids: vec!["kimi".into(), "minimax".into()],
+        }];
+        let ordered = order_proxied_children(rows, &order);
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        // Native header stays first; children sorted by stored order.
+        assert_eq!(ids, vec!["claude", "claude:kimi", "claude:minimax"]);
+    }
+
+    /// End-to-end: `compose_provider_menu` runs `order_proxied_children`
+    /// after `order_providers`, so the Spawn Menu applies the per-harness
+    /// child order on top of the harness-level order. The native harness
+    /// header is always first inside its bucket (the renderer puts the
+    /// header above its children), and Terminal stays pinned last.
+    #[test]
+    fn compose_provider_menu_propagates_proxied_order() {
+        let menu = compose_provider_menu(
+            vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
+            vec![
+                acct("minimax", true, Some("sk-mm")),
+                acct("kimi", true, Some("sk-moon")),
+            ],
+            vec![],
+            Platform::Windows,
+            &[],
+            // User dragged Kimi above MiniMax under Claude.
+            &[ProxiedProviderOrder {
+                harness_id: "claude".into(),
+                provider_ids: vec!["kimi".into(), "minimax".into()],
+            }],
+        );
+        let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["claude", "claude:kimi", "claude:minimax", "terminal"],
+            "native header first inside bucket; children in stored order; Terminal still pinned last",
+        );
+    }
+
     // ----- parse_spawn_option_id resolver (issue #575) ------------------
     //
     // The composite id format `<harness>` (native) or `<harness>:<provider>`
@@ -1673,6 +1883,8 @@ mod tests {
             vec![],
             Platform::Windows,
             &[],
+            // No stored per-harness child order — natural insertion order applies.
+            &[],
         );
         let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
         // Composite ids — resolver splits on ':' to get (executor, creds).
@@ -1708,6 +1920,7 @@ mod tests {
             vec![],
             Platform::Windows,
             &[],
+            &[],
         );
         let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["terminal"], "none of these should reach the menu");
@@ -1722,6 +1935,7 @@ mod tests {
             vec![acct("claude", true, Some("k"))],
             vec![],
             Platform::Windows,
+            &[],
             &[],
         );
         assert_eq!(menu.iter().filter(|p| p.id == "claude").count(), 1);
