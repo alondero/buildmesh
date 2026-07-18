@@ -7,9 +7,9 @@
 
 use crate::agent::process::PROCESS_REGISTRY;
 use crate::agent::provider::{Platform, ProviderInfo};
+use crate::agent::session_lifecycle::{self, SessionLifecycleSink};
 use crate::agent::spawn::SpawnOptions;
 use crate::db;
-use crate::models::SessionStatus;
 use serde::{Deserialize, Serialize};
 use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
@@ -908,7 +908,11 @@ pub fn start_node_background(
                     node_id,
                     e
                 );
-                let _ = db::update_agent_node_status(node_id, SessionStatus::Error);
+                // Routes through SessionLifecycle (issue #132). The
+                // `unless_in(Error, Archived)` guard is preserved inside
+                // `on_error`.
+                let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+                let _ = session_lifecycle::on_error(&sink, node_id);
                 let _ = app.emit(
                     "node-spawn-failed",
                     serde_json::json!({ "node_id": node_id, "error": e }),
@@ -1003,7 +1007,8 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
             Some(id) if !id.is_empty() => id.clone(),
             _ => {
                 tracing::warn!("auto_resume_agent_nodes: node {} has no cli_session_id, skipping", node.id);
-                db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
+                let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+                session_lifecycle::on_idle(&sink, node.id).ok();
                 continue;
             }
         };
@@ -1013,7 +1018,8 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
         let provider = crate::preferences::resolve_harness_provider(&node.provider);
         if !provider.adapter().auto_resume_on_startup() {
             tracing::info!("auto_resume_agent_nodes: skipping non-resumable node {} ({:?})", node.id, node.provider);
-            db::update_agent_node_status(node.id, SessionStatus::Idle).ok();
+            let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+            session_lifecycle::on_idle(&sink, node.id).ok();
             continue;
         }
 
@@ -1032,11 +1038,12 @@ pub async fn auto_resume_agent_nodes(app: AppHandle) -> Result<Vec<i64>, String>
             }
             Err(e) => {
                 tracing::error!("auto_resume_agent_nodes: failed to resume node {}: {}", node.id, e);
-                db::update_agent_node_status(node.id, SessionStatus::Error).ok();
-                let _ = app.emit("resume-failed", serde_json::json!({
-                    "node_id": node.id,
-                    "error": e
-                }));
+                let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
+                // Routes through SessionLifecycle (issue #132).
+                // `on_resume_failed` is the single entry point for the
+                // Error + resume-failed pair — callers never call
+                // `sink.emit_resume_failed` directly.
+                let _ = session_lifecycle::on_resume_failed(&sink, node.id, &e);
             }
         }
 
@@ -1106,7 +1113,17 @@ pub(crate) fn write_to_agent_blocking(
     let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
         && !should_skip_attention_signals(session_id);
     if should_signal {
-        db::update_agent_node_status(session_id, SessionStatus::Running).ok();
+        // Status write routes through SessionLifecycle (issue #132). The
+        // sink here is `DbOnlySink` because the blocking core has no
+        // `AppHandle`; the corresponding `attention-cleared` emit is the
+        // caller's responsibility (the `should_signal` flag tells the
+        // caller to emit, preserving the original behaviour where the
+        // emit lived in the async wrapper).
+        session_lifecycle::on_attention_cleared(
+            &session_lifecycle::DbOnlySink,
+            session_id,
+        )
+        .ok();
     }
     Ok(should_signal)
 }
@@ -1156,7 +1173,11 @@ pub(crate) fn kill_agent_blocking(session_id: i64) -> Result<(), String> {
     PROCESS_REGISTRY.kill_session(session_id);
     PROCESS_REGISTRY.remove(&session_id);
     crate::http_server::clear_scrollback(session_id);
-    db::update_agent_node_status(session_id, SessionStatus::Idle).map_err(|e| e.to_string())?;
+    // Routes through SessionLifecycle (issue #132). `DbOnlySink` because
+    // the blocking core has no `AppHandle` — kill is silent on the
+    // attention channel anyway (no `attention-cleared` emit here).
+    session_lifecycle::on_idle(&session_lifecycle::DbOnlySink, session_id)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

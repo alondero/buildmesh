@@ -10,14 +10,12 @@ use std::sync::OnceLock;
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
-use tauri::Emitter;
 use tokio::sync::broadcast;
 use tokio_tungstenite::{tungstenite, WebSocketStream};
 
 use crate::http::MaybeTls;
 
 use crate::agent::process::{ProcessRegistryApi, PROCESS_REGISTRY};
-use crate::db;
 
 /// Should this socket close in response to a revocation signal (issue #502)? A
 /// root-token socket (`device_id == None`) owns no device row and is never
@@ -212,11 +210,18 @@ fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, te
     }
     if text.bytes().any(|b| b == b'\n' || b == b'\r') {
         crate::attention_autoclear::disarm(node_id);
-        let _ = db::update_agent_node_status(node_id, crate::models::SessionStatus::Running);
+        // Routes through SessionLifecycle (issue #132) for the DB write +
+        // desktop emit; the mobile broadcast is a separate channel kept
+        // below.
         if let Some(app) = super::app_handle() {
-            let _ = app.emit(
-                "attention-cleared",
-                serde_json::json!({ "session_id": node_id }),
+            let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink {
+                app: &app.clone(),
+            };
+            let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
+        } else {
+            let _ = crate::agent::session_lifecycle::on_attention_cleared(
+                &crate::agent::session_lifecycle::DbOnlySink,
+                node_id,
             );
         }
         // Also fan out to mobile event subscribers — the desktop Tauri

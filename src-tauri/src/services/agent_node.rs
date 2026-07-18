@@ -248,7 +248,14 @@ pub fn create_pending_with_source_pr_fork(
     // trip. Acceptable: this function is on the fast path, and the second
     // write is the whole point — without it the new node would look
     // identical to a freshly-closed, ready-to-resume idle node.
-    db::update_agent_node_status(node.id, SessionStatus::Pending)?;
+    // Routes through SessionLifecycle (issue #132). `DbOnlySink` because
+    // this function has no `AppHandle` and `Pending` doesn't emit any
+    // events anyway.
+    crate::agent::session_lifecycle::on_created(
+        &crate::agent::session_lifecycle::DbOnlySink,
+        node.id,
+    )
+    .map_err(AgentNodeError::Backend)?;
     node.status = SessionStatus::Pending;
     Ok(node)
 }
@@ -534,8 +541,8 @@ pub async fn regenerate(
     //    that short-circuit doesn't fire.
     //
     //    Errors are ignored: `kill_agent` returns Err only from the
-    //    trailing `db::update_agent_node_status(... Idle)` — the
-    //    registry side effects (`kill_session` + `remove`) are
+    //    trailing `SessionLifecycle::on_kill(.., Idle)` (issue #132) —
+    //    the registry side effects (`kill_session` + `remove`) are
     //    already in place. The new spawn sets the status correctly
     //    anyway.
     let _ = crate::commands::agent::kill_agent(node_id).await;

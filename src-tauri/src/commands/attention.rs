@@ -6,49 +6,26 @@
 //! itself is published by `crate::node_turn::publish`, which also drives session
 //! naming independently. Keeping the two reactions separate means attention
 //! marking can be exercised without the LLM rename machinery (see the tests).
+//!
+//! Status writes + Tauri events are delegated to `crate::agent::session_lifecycle`
+//! (issue #132) — this module is now a thin routing layer that builds an
+//! `AppSessionLifecycleSink` and adds the autoclear arm on top.
 
+use crate::agent::session_lifecycle::{AppSessionLifecycleSink, SessionLifecycleSink};
 use crate::db;
 use crate::models::{AgentNode, SessionStatus};
-use tauri::{command, AppHandle, Emitter};
-
-/// The side effects of marking a node for attention, behind a seam so the logic
-/// is testable without a real [`AppHandle`] or the process-global DB. Mirrors
-/// `session_naming::SessionNamingRepository`.
-pub(crate) trait AttentionSink {
-    fn set_awaiting_input(&self, node_id: i64) -> Result<(), String>;
-    fn emit_attention_needed(&self, node_id: i64);
-}
-
-struct AppAttentionSink<'a> {
-    app: &'a AppHandle,
-}
-
-impl AttentionSink for AppAttentionSink<'_> {
-    fn set_awaiting_input(&self, node_id: i64) -> Result<(), String> {
-        db::update_agent_node_status(node_id, SessionStatus::AwaitingInput).map_err(|e| e.to_string())
-    }
-    fn emit_attention_needed(&self, node_id: i64) {
-        let _ = self
-            .app
-            .emit("attention-needed", serde_json::json!({ "session_id": node_id }));
-    }
-}
+use tauri::{command, AppHandle};
 
 /// Mark a node as awaiting user input and notify the frontend. One of the two
 /// independent reactions to a Node Turn; see [`crate::node_turn::publish`].
 /// Idempotent — re-marking an already-awaiting node is a no-op write + re-emit.
 pub fn mark_attention(node_id: i64, app: &AppHandle) {
-    mark_attention_with(&AppAttentionSink { app }, node_id);
+    let sink = AppSessionLifecycleSink { app };
+    let _ = crate::agent::session_lifecycle::on_attention(&sink, node_id);
     // Arm the resume-detection safety net (issue #878): if the agent starts
     // producing output again without user input, the mark was stale and gets
     // auto-cleared.
     crate::attention_autoclear::on_marked(node_id);
-}
-
-pub(crate) fn mark_attention_with(sink: &dyn AttentionSink, node_id: i64) {
-    let _ = sink.set_awaiting_input(node_id);
-    sink.emit_attention_needed(node_id);
-    tracing::info!("Node {} awaiting user input (Node Turn)", node_id);
 }
 
 /// Register that a node is awaiting user input. Publishes a Node Turn so both
@@ -63,14 +40,8 @@ pub async fn register_attention_node(app: AppHandle, node_id: i64) -> Result<(),
 #[command]
 pub async fn clear_attention_node(app: AppHandle, node_id: i64) -> Result<(), String> {
     crate::attention_autoclear::disarm(node_id);
-    db::update_agent_node_status(node_id, SessionStatus::Running).map_err(|e| e.to_string())?;
-    app.emit(
-        "attention-cleared",
-        serde_json::json!({ "node_id": node_id }),
-    )
-    .map_err(|e| e.to_string())?;
-    tracing::info!("Node {} attention cleared", node_id);
-    Ok(())
+    let sink = AppSessionLifecycleSink { app: &app };
+    crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id)
 }
 
 /// Whether a node is currently awaiting user input. Derived from the lifecycle
@@ -92,32 +63,65 @@ fn status_is_awaiting(node: &AgentNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::session_lifecycle::SessionLifecycleSink as _;
     use rusqlite::Connection;
     use std::cell::RefCell;
 
+    /// Records every status write and emit so the transition test
+    /// can assert exactly one DB write + exactly one event emit.
     #[derive(Default)]
-    struct FakeSink {
-        set_awaiting: RefCell<Vec<i64>>,
-        emitted: RefCell<Vec<i64>>,
+    struct FakeLifecycleSink {
+        writes: RefCell<Vec<(i64, SessionStatus)>>,
+        attention_needed: RefCell<Vec<i64>>,
     }
-    impl AttentionSink for FakeSink {
-        fn set_awaiting_input(&self, node_id: i64) -> Result<(), String> {
-            self.set_awaiting.borrow_mut().push(node_id);
+
+    impl SessionLifecycleSink for FakeLifecycleSink {
+        fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
+            self.writes.borrow_mut().push((node_id, new));
             Ok(())
         }
-        fn emit_attention_needed(&self, node_id: i64) {
-            self.emitted.borrow_mut().push(node_id);
+        fn write_status_if(
+            &self,
+            _node_id: i64,
+            _new: SessionStatus,
+            _expected: SessionStatus,
+        ) -> Result<bool, String> {
+            Ok(true)
         }
+        fn write_status_unless_in(
+            &self,
+            _node_id: i64,
+            _new: SessionStatus,
+            _forbidden: &[SessionStatus],
+        ) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn emit_attention_needed(&self, node_id: i64) {
+            self.attention_needed.borrow_mut().push(node_id);
+        }
+        fn emit_attention_cleared(&self, _node_id: i64) {}
+        fn emit_resume_failed(&self, _node_id: i64, _reason: &str) {}
     }
 
     /// The decoupling payoff: attention marking is now exercisable on its own,
     /// with no `AppHandle` and no session-naming/LLM machinery in the way.
+    /// Routes through `session_lifecycle::on_attention` (issue #132) so the
+    /// transition is owned by the lifecycle module and exercised via its
+    /// `SessionLifecycleSink` seam.
     #[test]
     fn mark_attention_sets_status_and_emits() {
-        let sink = FakeSink::default();
-        mark_attention_with(&sink, 42);
-        assert_eq!(*sink.set_awaiting.borrow(), vec![42]);
-        assert_eq!(*sink.emitted.borrow(), vec![42]);
+        let sink = FakeLifecycleSink::default();
+        crate::agent::session_lifecycle::on_attention(&sink, 42).unwrap();
+        assert_eq!(
+            *sink.writes.borrow(),
+            vec![(42, SessionStatus::AwaitingInput)],
+            "on_attention must write AwaitingInput exactly once"
+        );
+        assert_eq!(
+            *sink.attention_needed.borrow(),
+            vec![42],
+            "on_attention must emit attention-needed exactly once"
+        );
     }
 
     /// Minimal current-schema in-memory DB with one node, mirroring the pattern

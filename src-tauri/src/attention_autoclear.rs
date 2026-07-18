@@ -28,7 +28,6 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
-use tauri::Emitter;
 
 /// Ignore PTY output arriving this soon after the mark — it is the tail of the
 /// turn the Stop hook just reported, not new work.
@@ -100,17 +99,24 @@ fn accumulate(bytes_after_grace: &mut usize, elapsed_ms: u128, byte_len: usize) 
 
 /// Flip the node back to `running` and broadcast `attention-cleared` — the
 /// same fan-out every other clear path performs (`http::ws`,
-/// `coordinator::drive`, `autopilot::pipeline`).
+/// `coordinator::drive`, `autopilot::pipeline`). Routes through
+/// `SessionLifecycle` (issue #132) for the DB write + desktop emit; the
+/// mobile broadcast (`http::events`) is a separate channel kept here.
 fn clear_now(node_id: i64) {
     tracing::info!(
         "Node {} attention auto-cleared: agent resumed output without user input (issue #878)",
         node_id
     );
-    let _ = crate::db::update_agent_node_status(node_id, crate::models::SessionStatus::Running);
     if let Some(app) = crate::http::app_handle() {
-        let _ = app.emit(
-            "attention-cleared",
-            serde_json::json!({ "session_id": node_id }),
+        let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+        let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
+    } else {
+        // No app handle — write the status but skip the emit (matches
+        // pre-refactor behaviour where the `if let Some(app)` branch
+        // guarded the emit).
+        let _ = crate::agent::session_lifecycle::on_attention_cleared(
+            &crate::agent::session_lifecycle::DbOnlySink,
+            node_id,
         );
     }
     crate::http::events::emit(crate::http::events::EventMsg::AttentionCleared {

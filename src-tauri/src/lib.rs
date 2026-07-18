@@ -262,7 +262,10 @@ pub fn run() {
 
             // Crash recovery: any sessions still marked 'running' from a previous
             // crash have no live process. Mark them suspended for auto-resume.
-            match db::mark_running_nodes_suspended() {
+            // Lives inside SessionLifecycle (issue #132) — the lifecycle
+            // module is the single owner of every state transition, including
+            // the startup sweep.
+            match crate::agent::session_lifecycle::recover_from_crash() {
                 Ok(count) if count > 0 => {
                     tracing::info!("Crash recovery: marked {} orphaned sessions as suspended", count);
                 }
