@@ -65,6 +65,7 @@ import {
   LoadingState,
   RefreshControl,
 } from '../shared/Spinner';
+import { ProbeTabBody } from './ProbeTabBody';
 import { mapBackendProviders } from '../../lib/groups';
 import { formatRelativeAge } from '../../lib/time';
 
@@ -273,7 +274,7 @@ export function ArchivedNodesTab() {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-2">
+      <ProbeTabBody padding="p-3">
         {loading && sessions.length === 0 ? (
           <LoadingState label="Scanning sessions…" />
         ) : error ? (
@@ -342,7 +343,7 @@ export function ArchivedNodesTab() {
             ))}
           </div>
         )}
-      </div>
+      </ProbeTabBody>
     </div>
   );
 }

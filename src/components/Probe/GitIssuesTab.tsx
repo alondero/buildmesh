@@ -71,6 +71,7 @@ import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
+import { ProbeTabBody } from './ProbeTabBody';
 import { SafeLink } from '../shared/SafeLink';
 import {
   EmptyState,
@@ -297,7 +298,7 @@ export function GitIssuesTab() {
           View on GitHub ↗
         </SafeLink>
       </div>
-      <div className="flex-1 overflow-y-auto p-2">
+      <ProbeTabBody padding="p-3">
         {loading && issues.length === 0 ? (
           // First-load only: refreshes keep the prior list rendered
           // so the user's reading position doesn't reset (mirrors PRs).
@@ -411,7 +412,7 @@ export function GitIssuesTab() {
             })}
           </div>
         )}
-      </div>
+      </ProbeTabBody>
     </div>
   );
 }

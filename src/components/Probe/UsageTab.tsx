@@ -123,6 +123,7 @@ import {
   LoadingState,
   RefreshControl,
 } from '../shared/Spinner';
+import { ProbeTabBody } from './ProbeTabBody';
 import { formatRelativeAge } from '../../lib/time';
 
 export function UsageTab() {
@@ -286,10 +287,10 @@ export function UsageTab() {
         />
       </div>
 
-      <div
+      <ProbeTabBody
         data-testid="usage-rows"
         aria-busy={isRefreshing}
-        className={`flex-1 overflow-y-auto p-3 space-y-3 transition-opacity ${isRefreshing ? 'opacity-60' : ''}`}
+        className={`space-y-3 transition-opacity ${isRefreshing ? 'opacity-60' : ''}`}
       >
         {rows.length === 0 && !error ? (
           <EmptyState
@@ -303,7 +304,7 @@ export function UsageTab() {
             <UsagePanel key={meter.provider} account={account} meter={meter} />
           ))
         )}
-      </div>
+      </ProbeTabBody>
     </div>
   );
 }
