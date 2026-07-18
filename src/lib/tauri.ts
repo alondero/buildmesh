@@ -202,7 +202,15 @@ export const getMeshProperties = (meshId: number) =>
  *  `updateWorktreeBaseRef` below. */
 export const updateMeshColumn = (
   meshId: number,
-  column: 'build_command' | 'run_command' | 'model' | 'effort' | 'worktree_mode' | 'default_provider',
+  column:
+    | 'build_command'
+    | 'run_command'
+    | 'root_build_command'
+    | 'root_run_command'
+    | 'model'
+    | 'effort'
+    | 'worktree_mode'
+    | 'default_provider',
   value: string,
 ) => _invoke<void>('update_mesh_column', { meshId, column, value });
 

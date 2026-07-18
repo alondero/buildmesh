@@ -8,6 +8,7 @@ import type { SpawnOption } from '../../lib/groups';
 import { groupByHarness } from '../../lib/groups';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { InlineEditableText } from '../shared/InlineEditableText';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useClickOutside } from '../../hooks/useClickOutside';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
@@ -125,12 +126,42 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
     requestAnimationFrame(() => trigger?.focus());
   };
 
+  // Issue #778 — in-flight confirmation dialog. Carries both the
+  // chosen provider id (the IPC argument) and its display label (for
+  // the dialog message). `null` means no dialog open; the picker click
+  // sets it, both Confirm and Cancel clear it.
+  const [pendingRegenerate, setPendingRegenerate] = useState<{
+    providerId: string;
+    providerLabel: string;
+  } | null>(null);
+  const cancelRegenerate = () => setPendingRegenerate(null);
+  const confirmRegenerate = () => {
+    if (!pendingRegenerate) return;
+    const { providerId } = pendingRegenerate;
+    setPendingRegenerate(null);
+    regenerateAgentNode(node.id, providerId).catch((err) => {
+      console.error('[NodeItem] Regenerate failed:', err);
+    });
+  };
+
   // Issue #774 — invoke `regenerate_agent_node` with the chosen
   // provider and close the menu. Centralised so the submenu hover/click
   // paths and any future shortcut key wire to the same error-handling.
-  const pickProvider = (providerId: string) => {
+  //
+  // Issue #778 — when the node is `running`, an interrupting regenerate
+  // drops the agent's in-flight PTY output without warning. The picker
+  // row click opens a confirmation dialog instead of firing the IPC
+  // directly; for `idle` / `awaiting_input` / `error` the dialog is
+  // skipped (no live work to lose). `providerLabel` is the human-readable
+  // name interpolated into the dialog message so the user sees exactly
+  // which Model Provider they're switching to.
+  const pickProvider = (providerId: string, providerLabel: string) => {
     if (isRegenerateDisabled || !hasAlternateProviders) return;
     closeContextMenu();
+    if (node.status === 'running') {
+      setPendingRegenerate({ providerId, providerLabel });
+      return;
+    }
     regenerateAgentNode(node.id, providerId).catch((err) => {
       console.error('[NodeItem] Regenerate failed:', err);
     });
@@ -515,7 +546,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                             role="menuitem"
                             data-spawn-id={native.id}
                             data-spawn-harness={native.harness_id}
-                            onClick={() => pickProvider(native.id)}
+                            onClick={() => pickProvider(native.id, native.label)}
                             className="w-full text-left px-3 py-1.5 text-xs text-text-primary font-medium hover:bg-bg-card flex items-center gap-2"
                           >
                             <ProviderIcon providerId={native.id} className="h-3.5 w-3.5 shrink-0" />
@@ -530,7 +561,7 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
                             key={child.id}
                             data-spawn-id={child.id}
                             data-spawn-harness={child.harness_id}
-                            onClick={() => pickProvider(child.id)}
+                            onClick={() => pickProvider(child.id, child.label)}
                             className="w-full text-left pl-7 pr-3 py-1 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
                           >
                             <ProviderIcon providerId={child.id} className="h-3.5 w-3.5 shrink-0" />
@@ -545,6 +576,21 @@ export function NodeItem({ node, meshColor, isActive, providerList, onSelect, on
             )}
           </div>
         </div>
+      )}
+
+      {/* Issue #778 — confirmation dialog for running-node Regenerate.
+          Mounted only while a picker click has set `pendingRegenerate`;
+          both Confirm and Cancel clear the state, so the Modal's
+          window-level Escape listener arms/unarms with the dialog
+          itself (no Escape-stealing risk against agent CLIs). */}
+      {pendingRegenerate && (
+        <ConfirmDialog
+          title="Regenerate this node?"
+          message={`Agent is currently working. Regenerate with ${pendingRegenerate.providerLabel}?`}
+          confirmLabel="Regenerate"
+          onConfirm={confirmRegenerate}
+          onCancel={cancelRegenerate}
+        />
       )}
     </div>
   );

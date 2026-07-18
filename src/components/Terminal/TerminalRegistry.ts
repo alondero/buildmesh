@@ -11,8 +11,10 @@ import { resolveKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
 import { FontSizeManager } from './FontSizeManager';
+import { ThemeManager } from './ThemeManager';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { decodeBase64Bytes } from '../../lib/base64';
+import { setTheme, type ThemeName } from '../../lib/theme';
 
 export interface TerminalInstance {
   term: Terminal;
@@ -51,6 +53,7 @@ export class TerminalRegistry {
   private listeners = new Set<() => void>();
   private writer = new TerminalWriter();
   private fontSizeManager = new FontSizeManager();
+  private themeManager = new ThemeManager();
   // unlisten handles for module-level listeners (e.g. the agent-spawned
   // reconcile), collected so destroy() can release them. The per-instance
   // `instance.unlisten` already covers the agent-output / serialize-request
@@ -218,12 +221,31 @@ export class TerminalRegistry {
         instance.resizeObserver.disconnect();
       }
       instance.unlisten();
-      instance.term.dispose();
+      instance.term.dispose(); // allow-dispose — keyed by deleted-node IPC, the registry's only legit dispose path
       this.instances.delete(nodeId);
       this.writer.unregister(nodeId);
       this.fontSizeManager.unregister(nodeId);
+      this.themeManager.unregister(nodeId);
       this.notify();
     }
+  }
+
+  /**
+   * Push the named theme to every live terminal AND the <html data-theme>
+   * attribute (so the CSS cascade picks up the new token values for the
+   * rest of the app). Idempotent — re-applying the active value re-syncs
+   * the DOM (in case something external mutated it) but only fans out
+   * listeners on a real flip.
+   *
+   * Issue #734: this is the registry's public entry point for code
+   * (mainly tests) that wants to flip the theme without reaching into
+   * theme.ts directly. The settings modal just calls `setTheme(...)` —
+   * both registries' ThemeManager instances subscribe to the module-
+   * level pub/sub at construction, so one `setTheme` call updates both
+   * xterm maps AND the DOM in lockstep.
+   */
+  applyTheme(theme: ThemeName): void {
+    setTheme(theme);
   }
 
   subscribe(cb: () => void): () => void {
@@ -271,6 +293,10 @@ export class TerminalRegistry {
 
       this.writer.register(nodeId, (data) => term.write(data));
       this.fontSizeManager.register(nodeId, term, () => measureAndFit(instance));
+      // Issue #734: register the new term with the ThemeManager so a later
+      // theme flip (handled by ThemeManager's onTerminalThemeChange listener)
+      // pushes the matching xterm.js palette into term.options.theme.
+      this.themeManager.register(nodeId, term);
 
       const unlisten = await listen<AgentOutputPayload>('agent-output', (event) => {
         if (event.payload.session_id === nodeId) {
@@ -361,6 +387,7 @@ export class TerminalRegistry {
       this.dispose(nodeId); // allow-dispose — destroy() only runs at app-exit / test teardown
     }
     this.fontSizeManager.destroy();
+    this.themeManager.destroy();
     for (const unlisten of this.unlistenFns) {
       unlisten();
     }

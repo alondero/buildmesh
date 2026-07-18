@@ -263,7 +263,19 @@ export function MeshItem({
           <span
             {...attributes}
             {...listeners}
-            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none"
+            // Issue #727 — make the grab handle focusable so the
+            // KeyboardSensor can pick it up. dnd-kit's `attributes`
+            // spread already injects `role="button"` + `tabIndex={0}`
+            // + `aria-pressed` (the drag-active toggle); we override
+            // `aria-roledescription` to "sortable" (dnd-kit's default
+            // is "draggable", which doesn't tell assistive tech this
+            // row is a positional list item that can be reordered).
+            // The `aria-label` gives it a screen-reader friendly name.
+            tabIndex={0}
+            role="button"
+            aria-label={`Reorder ${mesh.name}`}
+            aria-roledescription="sortable"
+            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm"
             title="Drag to reorder"
           >
             ⋮⋮

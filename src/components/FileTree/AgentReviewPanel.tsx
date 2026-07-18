@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   diffNodeAgainstBase,
@@ -52,7 +53,7 @@ export function AgentReviewPanel({ nodeId, rootPath, onOpenFile }: AgentReviewPa
           if (reqId.current !== myId) return;
           // Don't blow away a good diff because a background refresh failed;
           // only surface the error when we have nothing else to show.
-          if (!opts?.background) setError(String(e));
+          if (!opts?.background) setError(formatError(e));
           setLoading(false);
         });
     },

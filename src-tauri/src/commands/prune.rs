@@ -35,16 +35,18 @@ fn get_git_prune_info_blocking(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, St
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
     // Cross-reference worktree paths AND branch names against THIS mesh's
-    // non-archived agent nodes. Mesh-scoping matters more for branches
-    // than for worktrees: worktree paths are filesystem-unique on the
-    // host, so a global path-set happens to work; branch names are NOT
-    // — `feature-a` in `/repo1` would collide with `feature-a` in
-    // `/repo2` if a Mesh-A agent was on its own `feature-a`, falsely
-    // flagging Mesh-B's branch as `is_active` in the prune UI. The
-    // mesh-scoped query prevents that. `active_node_branches` further
-    // drops any `Archived` nodes defensively (the SQL query already
-    // filters them, but the helper enforces the contract for any future
-    // caller that passes unfiltered input).
+    // non-archived agent nodes (issue #661 — mesh-scoped symmetry).
+    // Branch names are not filesystem-unique like paths, so a `feature-a`
+    // in `/repo1` would collide with a `feature-a` in `/repo2` if a
+    // Mesh-A agent was on its own `feature-a`, falsely flagging Mesh-B's
+    // branch as `is_active` in the prune UI. Worktree paths happen to be
+    // host-unique on disk, but we still feed them through the same mesh-
+    // scoped query — the boundary is "this mesh's nodes" full stop, so
+    // a future nested-repo setup can't accidentally surface a sibling
+    // mesh's worktree as active. `active_node_branches` further drops any
+    // `Archived` nodes defensively (the SQL query already filters them,
+    // but the helper enforces the contract for any future caller that
+    // passes unfiltered input).
     let nodes = db::list_agent_nodes_by_mesh(mesh_id)
         .map_err(|e| format!("failed to list agent nodes: {}", e))?;
     let active_paths = active_node_paths(&nodes);
@@ -104,7 +106,7 @@ fn delete_branches_in_repo(
     // Partition: active branches are rejected up-front with a single combined
     // error so the user sees the full blocked set in one toast, not multiple
     // per-branch errors mixed with successful deletes. Mirrors the
-    // pool-path rejection in `remove_worktrees` above.
+    // pool-path rejection in `remove_worktrees` below.
     //
     // Note on the "continue past failures" contract: the original function
     // accumulated per-branch git2 errors and still attempted the rest of
@@ -114,25 +116,13 @@ fn delete_branches_in_repo(
     // deleting the deletable siblings would leave the user with a partial
     // state they may not want. The frontend disables active-branch rows so
     // this only fires for stale-UI / direct-API paths.
-    let mut active_blocked: Vec<&String> = Vec::new();
-    let mut deletable: Vec<&String> = Vec::new();
-    for name in branch_names {
-        if active_branches.iter().any(|b| b == name) {
-            active_blocked.push(name);
-        } else {
-            deletable.push(name);
-        }
-    }
-    if !active_blocked.is_empty() {
-        return Err(format!(
-            "cannot delete branches held by an active agent node: {}",
-            active_blocked
-                .iter()
-                .map(|n| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
+    let (active_blocked, deletable): (Vec<&String>, Vec<&String>) = branch_names
+        .iter()
+        .partition(|name| active_branches.iter().any(|b| b == *name));
+    reject_blocked(
+        &active_blocked,
+        "cannot delete branches held by an active agent node",
+    )?;
 
     let mut errors: Vec<String> = Vec::new();
     for name in deletable {
@@ -183,29 +173,21 @@ pub async fn delete_worktrees(worktree_paths: Vec<String>) -> Result<(), String>
 fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
     // Partition: pool paths are rejected up-front with a single combined
     // error so the user sees the full blocked set in one toast, not
-    // multiple per-path errors mixed with successful deletes.
-    let mut pool_paths: Vec<&String> = Vec::new();
-    let mut deletable: Vec<&String> = Vec::new();
-    for path in worktree_paths {
-        match db::is_warm_pool_path(path) {
-            Ok(true) => pool_paths.push(path),
-            Ok(false) => deletable.push(path),
-            // DB error: be conservative and treat as deletable — we don't
-            // want a transient DB read failure to silently swallow a
-            // legitimate prune request. The user can still retry.
-            Err(_) => deletable.push(path),
-        }
-    }
-    if !pool_paths.is_empty() {
-        return Err(format!(
-            "cannot delete pre-spawn pool entries (managed automatically): {}",
-            pool_paths
-                .iter()
-                .map(|p| p.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
+    // multiple per-path errors mixed with successful deletes. Mirror of
+    // the active-branch partition in `delete_branches_in_repo` — both
+    // route their blocked subset through `reject_blocked` so the
+    // combined-error contract lives in one place.
+    //
+    // DB error handling: `is_warm_pool_path`'s `Err` is treated as
+    // "not blocked" so a transient DB read failure doesn't silently
+    // swallow a legitimate prune request. The user can still retry.
+    let (pool_paths, deletable): (Vec<&String>, Vec<&String>) = worktree_paths
+        .iter()
+        .partition(|path| matches!(db::is_warm_pool_path(path), Ok(true)));
+    reject_blocked(
+        &pool_paths,
+        "cannot delete pre-spawn pool entries (managed automatically)",
+    )?;
 
     let mut errors: Vec<String> = Vec::new();
     for path in deletable {
@@ -219,6 +201,35 @@ fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
     } else {
         Err(errors.join("; "))
     }
+}
+
+/// Reject a batch request atomically when any of its members are blocked.
+///
+/// Returns `Err(<header>: <name1>, <name2>, …)` listing every blocked
+/// item, or `Ok(())` when the batch is clean. Shared by the branch
+/// (`delete_branches_in_repo`) and worktree (`remove_worktrees`) delete
+/// paths — both reject any-blocked requests atomically and surface every
+/// blocked item in one combined message rather than splitting the error
+/// across multiple per-item failures interleaved with successful deletes
+/// (issue #661). A stale-UI row or a misrouted direct API call must see
+/// every blocked item, not just the first failure.
+///
+/// Caller responsibility: build `blocked` by filtering the request items
+/// with the site-specific predicate first — branch-name membership for
+/// `delete_branches`, warm-pool path for `delete_worktrees`. The
+/// predicates genuinely differ between the two sites, so this helper is
+/// purely the combined-error formatting; the partition itself stays at
+/// each call site (typically via `iter().partition(...)`).
+fn reject_blocked<T: AsRef<str>>(blocked: &[&T], header: &str) -> Result<(), String> {
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    let names = blocked
+        .iter()
+        .map(|n| n.as_ref())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!("{header}: {names}"))
 }
 
 /// Prune stale remote-tracking refs by fetching with `--prune`.

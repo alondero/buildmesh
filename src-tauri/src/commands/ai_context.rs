@@ -27,7 +27,7 @@ use ts_rs::TS;
 
 /// Wall-clock timeout for the `git push` shell-out in
 /// [`create_ai_context_portability_pr_blocking`]. Push is network-bound
-/// (remote `receive-pack`); 5 minutes mirrors [`crate::git::sync::FETCH_TIMEOUT`]
+/// (remote `receive-pack`); 5 minutes mirrors [`crate::git::sync::MANUAL_FETCH_TIMEOUT`]
 /// so a flaky network doesn't leak a blocking-pool thread (issue #762 review).
 const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -138,7 +138,7 @@ fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, Str
     // **Timeout (issue #762 review):** a hung `git push` (SSH key prompt,
     // paused WSL interop, half-open TLS) leaks a blocking-pool thread since
     // this core already runs on one. `run_command_with_timeout` kills the
-    // child on the 5-min `FETCH_TIMEOUT` budget — same cap as `git fetch`
+    // child on the 5-min `MANUAL_FETCH_TIMEOUT` budget — same cap as `git fetch`
     // because push-side waits are dominated by the network + remote receive.
     let mut push_builder = git_command();
     push_builder

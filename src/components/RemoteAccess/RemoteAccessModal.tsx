@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import { useState, useEffect } from 'react';
 import QRCode from 'qrcode';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -209,7 +210,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // rejection here just hides it — the user keeps the connect
         // and Android paths.
       } catch (e) {
-        setError(String(e));
+        setError(formatError(e));
       }
     };
     init();

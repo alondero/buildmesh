@@ -330,7 +330,7 @@ pub(crate) fn do_sync(
     // write conflict markers on a diverged history.
     //
     // **Timeout (issue #762):** `git pull` shares the half-open-connection
-    // risk with `git fetch` (Step 4). Same `FETCH_TIMEOUT` bound.
+    // risk with `git fetch` (Step 4). Same `MANUAL_FETCH_TIMEOUT` bound.
     tracing::info!(
         "do_sync: running git pull --ff-only --no-rebase ({} new commit{} behind)",
         new_commits,
@@ -472,7 +472,7 @@ pub(crate) fn do_fetch_only(
     drop(remote_handle);
     // **Timeout (issue #762):** `git fetch` can wedge indefinitely on a
     // half-open connection. `run_command_with_timeout` kills the child
-    // and returns `Err` if it overruns `FETCH_TIMEOUT`. The wrapped
+    // and returns `Err` if it overruns `MANUAL_FETCH_TIMEOUT`. The wrapped
     // `FetchFailed { reason }` carries the timeout string to the toast
     // so the user can distinguish a network hang from a real fetch
     // failure.
@@ -534,14 +534,6 @@ const MANUAL_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
 /// `services::github::HTTP_REQUEST_TIMEOUT` so a half-open connection
 /// aborts at the same threshold from both directions (issue #762 review).
 pub(crate) const SPAWN_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Back-compat alias — [`do_fetch_only`] and [`do_sync`] (which are
-/// shared between the manual `git_sync` and the spawn-time
-/// `fetch_origin` paths) historically used the manual-path 5-minute
-/// cap. Renaming would touch every call site for no semantic gain, so we
-/// alias instead. New call sites that need per-path timeouts should
-/// pass [`MANUAL_FETCH_TIMEOUT`] or [`SPAWN_FETCH_TIMEOUT`] explicitly.
-pub(crate) const FETCH_TIMEOUT: Duration = MANUAL_FETCH_TIMEOUT;
 
 /// How long a *spawn-path* caller waits for the per-Mesh sync lock before
 /// giving up and proceeding from local HEAD. The lock's other holders are

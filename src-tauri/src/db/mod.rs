@@ -98,7 +98,7 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 26;
+const SCHEMA_VERSION: i32 = 27;
 
 /// Apply the per-connection pragmas every Buildmesh connection needs.
 ///
@@ -280,6 +280,9 @@ ensure_mesh_sandbox(&conn)?;
     ensure_mesh_color(&conn)?;
     // v26 — Autopilot Policy columns (issue #481, PRD #480).
     ensure_mesh_autopilot_columns(&conn)?;
+    // v27 — per-context build/run commands (issue #802). Nullable: a mesh
+    // without them falls back to build_command/run_command in both contexts.
+    ensure_mesh_root_command_columns(&conn)?;
     // v22 — Per-mesh pre-spawn pool target (issue #611). The column
     // doesn't exist on pre-v22 DBs; the safety net backfills it on every
     // init. Since v24 the column default (and the one-time backfill below)
@@ -687,6 +690,19 @@ pub(crate) fn ensure_mesh_autopilot_columns(conn: &Connection) -> SqlResult<()> 
     for (name, ty) in columns {
         if ensure_column(conn, "meshes", name, ty)? {
             tracing::warn!("ensure_mesh_autopilot_columns: added missing {} column", name);
+        }
+    }
+    Ok(())
+}
+
+/// Safety net (v27): ensure the per-context build/run command columns exist
+/// on `meshes` (issue #802). Both are nullable — a mesh that never sets them
+/// falls back to `build_command` / `run_command` in the root context, so the
+/// column absence IS the historical (PR #801) behaviour. No backfill needed.
+pub(crate) fn ensure_mesh_root_command_columns(conn: &Connection) -> SqlResult<()> {
+    for (name, ty) in [("root_build_command", "TEXT"), ("root_run_command", "TEXT")] {
+        if ensure_column(conn, "meshes", name, ty)? {
+            tracing::warn!("ensure_mesh_root_command_columns: added missing {} column", name);
         }
     }
     Ok(())
@@ -1874,7 +1890,8 @@ const MESH_COLUMNS: &str =
      COALESCE(pre_spawn_pool_size, 0), COALESCE(color, ''), \
      COALESCE(autopilot_enabled, 0), COALESCE(autopilot_trigger_label, ''), \
      COALESCE(autopilot_concurrency_limit, 2), COALESCE(autopilot_provider, ''), \
-     COALESCE(autopilot_action_on_success, '')";
+     COALESCE(autopilot_action_on_success, ''), \
+     COALESCE(root_build_command, ''), COALESCE(root_run_command, '')";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -1905,6 +1922,8 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         autopilot_concurrency_limit: row.get::<_, i32>(20)?,
         autopilot_provider: parse_str(row.get::<_, String>(21)?),
         autopilot_action_on_success: parse_str(row.get::<_, String>(22)?),
+        root_build_command: parse_str(row.get::<_, String>(23)?),
+        root_run_command: parse_str(row.get::<_, String>(24)?),
     })
 }
 
@@ -2182,11 +2201,6 @@ impl AutopilotRunState {
             "merged" => Self::Merged,
             _ => Self::Implementing,
         }
-    }
-
-    /// The active states that occupy a mesh's concurrency slot.
-    pub fn is_active(self) -> bool {
-        matches!(self, Self::Implementing | Self::Finishing)
     }
 }
 

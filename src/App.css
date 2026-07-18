@@ -124,6 +124,102 @@
   }
 }
 
+/* Light theme override — issue #734.
+   Re-points the SAME --color-* tokens declared in @theme above, so every
+   `bg-bg-card` / `text-accent-cyan` / `border-border-default` utility
+   flips at once without re-generating Tailwind output. Tokens declared
+   in @theme but not overridden here (e.g. typography, spacing, radius,
+   --font-*, --spacing-*, --radius-*) are colour-agnostic — no light
+   counterpart needed.
+
+   Contrast targets mirror the dark theme's WCAG AA contract (issue #732):
+   text-muted clears 4.5:1 on bg-base; the text-token hierarchy stays
+   monotonic (primary > secondary > muted > base). The companion
+   regression test in tests/unit/theme-tokens-light-contrast.test.ts
+   pins the maths so a future "let's soften the muted" PR fails the
+   gate, not a visual review.
+
+   The accent palette darkens one step (cyan-500 → cyan-600 etc.) because
+   the brand cyan (#00d4ff) sits at ~1.7:1 on a near-white bg — fine for
+   dark, invisible on light. cyan-600 (#0891b2) is the smallest step
+   that still reads as the same brand hue while clearing 3:1 for non-text
+   UI (WCAG 1.4.11). */
+[data-theme="light"] {
+  /* Backgrounds — layered light surfaces */
+  --color-bg-base: #fafafa;
+  --color-bg-surface: #ffffff;
+  --color-bg-overlay: #ffffff;
+  --color-bg-card: #f5f5f7;
+  --color-bg-card-hover: #ebebed;
+  --color-bg-input: #ffffff;
+  --color-bg-selection: #cce8ff;
+  --color-bg-highlight: rgba(8, 145, 178, 0.06);
+
+  /* Text. Inverted against dark — primary ~16.7:1 on bg-base, secondary
+     ~6.1:1, muted ~4.7:1 (pinned by the regression test, not just
+     eyeballed). text-inverse flips because "inverse" still means
+     "contrasts with primary" — anything drawn against text-primary in
+     dark mode now draws against text-primary in light mode too, so
+     inverse stays the same anchor. */
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-muted: #5b6471;
+  --color-text-inverse: #ffffff;
+
+  /* Accent — same hues, darken one step for AA on light bg */
+  --color-accent-cyan: #0891b2;
+  --color-accent-cyan-dim: rgba(8, 145, 178, 0.15);
+  --color-accent-cyan-glow: rgba(8, 145, 178, 0.08);
+  --color-accent-blue: #0284c7;
+  --color-accent-blue-dim: rgba(2, 132, 199, 0.15);
+
+  /* Accent — Violet (agent / AI actions) */
+  --color-accent-violet: #7c3aed;
+  --color-accent-violet-dim: rgba(124, 58, 237, 0.15);
+
+  /* Accent — Semantic green/red/amber (diff + status). */
+  --color-accent-green: #16a34a;
+  --color-accent-red: #dc2626;
+  --color-accent-amber: #d97706;
+
+  /* Semantic — Status */
+  --color-status-success: #16a34a;
+  --color-status-success-bg: rgba(22, 163, 74, 0.10);
+  --color-status-warning: #d97706;
+  --color-status-warning-bg: rgba(217, 119, 6, 0.10);
+  --color-status-error: #dc2626;
+  --color-status-error-bg: rgba(220, 38, 38, 0.10);
+  --color-status-idle: #64748b;
+  --color-status-idle-bg: rgba(100, 116, 139, 0.10);
+  --color-status-running: #0891b2;
+  --color-status-running-bg: rgba(8, 145, 178, 0.10);
+  --color-status-blocked: #d97706;
+
+  /* Borders & Dividers — light hairlines */
+  --color-border-subtle: #ebebed;
+  --color-border-default: #d4d4d8;
+  --color-border-strong: #a1a1aa;
+  --color-border-active: #0891b2;
+
+  /* Shadows — lower alpha on light bg; shadows read stronger there */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.12);
+  --shadow-glow-cyan: 0 0 0 1px rgba(8, 145, 178, 0.20), 0 0 12px rgba(8, 145, 178, 0.10);
+  --shadow-focus: 0 0 0 1.5px #0891b2;
+
+  /* Scrollbar — match the surface palette; the dark thumb is too low-contrast
+     on the light track. */
+  ::-webkit-scrollbar-track {
+    background: var(--color-bg-surface);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-border-default);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--color-border-strong);
+  }
+}
+
 /* Reset + base */
 *, *::before, *::after {
   box-sizing: border-box;

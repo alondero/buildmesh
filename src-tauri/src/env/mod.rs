@@ -398,10 +398,12 @@ pub fn active_node_paths(nodes: &[AgentNode]) -> Vec<String> {
 ///    so a `feature-a` in `/repo1` would collide with a `feature-a` in
 ///    `/repo2`. Callers that care about repo-scoped active-ness should
 ///    pre-filter `nodes` by mesh (`db::list_agent_nodes_by_mesh`) before
-///    calling this. `delete_branches` does this; `get_git_prune_info` does
-///    NOT (it uses `db::list_agent_nodes`) — that asymmetry is intentional
-///    because path collisions don't happen for branches the user is
-///    actively viewing in their currently-selected mesh.
+///    calling this. Both `delete_branches` and `get_git_prune_info`
+///    mesh-scope via `db::list_agent_nodes_by_mesh(mesh_id)` — the
+///    path asymmetry that previously existed (`get_git_prune_info` used
+///    the global `db::list_agent_nodes`) was closed in PR #660, and
+///    worktree path active-checks are now also mesh-scoped (defensive
+///    symmetry even though filesystem paths are host-unique on disk).
 /// 2. **Archived status** — enforced here. The function drops any node
 ///    whose `status == SessionStatus::Archived` so a closed agent node
 ///    doesn't keep its branch locked. This matches the contract

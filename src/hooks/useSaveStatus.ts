@@ -1,3 +1,4 @@
+import { formatError } from '../lib/errorUtils';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 /**
@@ -48,14 +49,13 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  *
  * Error-message contract
  * ----------------------
- * `fail(e)` accepts an unknown and uses `e instanceof Error ? e.message
- * : String(e)`. The IPC promise rejection carries an `Error` instance
- * from Rust (Tauri's command wrapper), so the message is user-readable
- * copy like "Failed to update mesh column: database is locked". This
- * is the same shape the project's planned `formatError` helper (issue
- * #663) will introduce globally — when #663 lands, swapping this
- * inline `e instanceof Error ? e.message : String(e)` for a
- * `formatError(e)` call is a one-liner.
+ * `fail(e)` accepts an unknown and normalises it through `formatError`
+ * (`src/lib/errorUtils.ts`, issue #663), which unwraps `e.message` for
+ * `Error` instances and coerces everything else. The IPC promise
+ * rejection carries an `Error` instance from Rust (Tauri's command
+ * wrapper), so the message is user-readable copy like "Failed to update
+ * mesh column: database is locked" — WITHOUT the `"Error: "` prefix that
+ * a bare `String(e)` would prepend.
  *
  * Field-text policy
  * -----------------
@@ -139,7 +139,7 @@ export function useSaveStatus(opts: UseSaveStatusOptions = {}): UseSaveStatusRes
 
   const fail = useCallback((e: unknown) => {
     cancelSavedTimer();
-    setError(e instanceof Error ? e.message : String(e));
+    setError(formatError(e));
     setStatus('error');
   }, [cancelSavedTimer]);
 

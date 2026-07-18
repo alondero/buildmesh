@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import { useEffect, useState } from 'react';
 import {
   detectAiContext,
@@ -50,7 +51,7 @@ export function AiContextSection({ meshId, meshPath, isAuthenticated }: AiContex
       const url = await createAiContextPortabilityPr(meshId);
       setPrUrl(url);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setSubmitting(false);
     }

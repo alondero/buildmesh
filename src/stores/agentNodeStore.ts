@@ -1,3 +1,4 @@
+import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import { listen } from '@tauri-apps/api/event';
@@ -36,7 +37,7 @@ async function persistPositions(
     const updates = updatedMeshNodes.map(n => [n.id, n.position] as [number, number]);
     await api.updateAgentNodePositions(updates);
   } catch (e) {
-    set({ error: String(e) });
+    set({ error: formatError(e) });
     await get().fetchAgentNodes();
   }
 }
@@ -159,7 +160,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       );
       set({ agentNodes, autopilotStates, loading: false });
     } catch (e) {
-      set({ error: String(e), loading: false });
+      set({ error: formatError(e), loading: false });
     }
   },
 
@@ -281,7 +282,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       set((state) => ({ agentNodes: [...state.agentNodes, node] }));
       return node;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -345,7 +346,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       }
     } catch (e) {
       clearClosing();
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       return;
     }
 
@@ -362,7 +363,16 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     // background (a failed cleanup surfaces later via the
     // 'worktree-cleanup-failed' event rather than holding the node on screen
     // while the slow delete runs).
-    disposeTerminal(id);
+    //
+    // Issue #647: `disposeTerminal(id)` is intentionally NOT called yet.
+    // Disposing here would blank the terminal before the delete IPC commits,
+    // and on rejection the restored row (issue #645 zombie-row fix) would
+    // re-mount an xterm bound to a dead PTY — the agent was killed by the
+    // warn-only `kill_agent` path while `delete_agent_node` was still
+    // pending. Disposal moves to AFTER the delete IPC succeeds below; on
+    // rejection the terminal stays live so the user can retry without
+    // losing scrollback. Trade-off: terminal lingers ~one IPC round-trip
+    // longer on the happy path.
     set((state) => {
       const closing = new Set(state.closingNodeIds);
       closing.delete(id);
@@ -399,12 +409,20 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // captured AFTER Phase 1's await so a `node-renamed` event fired
       // mid-flight (e.g. user renamed then closed) restores the post-rename
       // version, not a stale pre-rename snapshot.
+      //
+      // Issue #647: leave the terminal alive — the row is restored and
+      // needs its scrollback + live PTY for the user to retry.
       set((state) => ({
         agentNodes: nodeForRestore ? [...state.agentNodes, nodeForRestore] : state.agentNodes,
-        error: String(e),
+        error: formatError(e),
       }));
       throw e;
     }
+
+    // Issue #647: only now — after the delete IPC committed — is the
+    // terminal-persistence rule's "never dispose unless deleted" invariant
+    // satisfied. See the Phase-2 NOTE above for the failure-path reasoning.
+    disposeTerminal(id);
   },
 
   renameAgentNode: async (id, name) => {
@@ -427,7 +445,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
         agentNodes: state.agentNodes.map(s =>
           s.id === id ? { ...s, name: prior.name } : s
         ),
-        error: String(e),
+        error: formatError(e),
       }));
       throw e;
     }
@@ -496,7 +514,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // store-side catch keeps doing two things the wrapper does not: it
       // surfaces the error on `state.error` for the UI to render, and it
       // re-throws so the caller's catch can react.
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -520,7 +538,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       }
       return updated;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -532,7 +550,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       await get().fetchAgentNodes();
       return node;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
       throw e;
     }
   },
@@ -542,7 +560,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       await api.killAgent(nodeId);
       await get().fetchAgentNodes();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -550,7 +568,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     try {
       await api.sendToAgent(nodeId, input);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 
@@ -558,7 +576,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     try {
       await api.writeToAgent(nodeId, data);
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatError(e) });
     }
   },
 

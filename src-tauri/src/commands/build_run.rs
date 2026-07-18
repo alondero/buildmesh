@@ -236,17 +236,24 @@ fn build_run_blocking(
         }
     }
 
-    // 5. Get the command to run. Terminal mode spawns an interactive shell
-    //    directly, so no command string is needed.
-    let command = match mode {
-        BuildRunMode::Build => row.build_command.as_deref()
-            .ok_or_else(|| "build command not configured".to_string())?,
-        BuildRunMode::Run => row.run_command.as_deref()
-            .ok_or_else(|| "run command not configured".to_string())?,
-        BuildRunMode::Terminal => "",
-    };
+    // 5. Resolve the command for this (mode, context) tuple (issue #802).
+    //    Root context prefers the per-context `root_build_command` /
+    //    `root_run_command` and falls back to `build_command` /
+    //    `run_command`; worktree context always uses the latter. Terminal
+    //    mode spawns an interactive shell directly, so its command is empty.
+    //    `is_root` comes from `env::worktree_segment` — the SAME signal
+    //    `resolve_build_run_cwd` uses to choose the cwd — so the command
+    //    always matches the directory the shell actually spawns in.
+    let is_root = env::worktree_segment(&node).is_none();
+    let command = resolve_build_run_command(mode, is_root, &row).ok_or_else(|| {
+        match mode {
+            BuildRunMode::Run => "run command not configured".to_string(),
+            // Terminal always resolves to Some(""), so only Build reaches here.
+            _ => "build command not configured".to_string(),
+        }
+    })?;
 
-    // 5. Get shell working directory from resolved path
+    // 6. Get shell working directory from resolved path
     let shell_cwd = &resolved.spawn_path;
 
     // 7. Spawn PTY with shell
@@ -390,6 +397,36 @@ fn resolve_build_run_cwd(node: &crate::models::AgentNode) -> env::ResolvedPath {
     env::node_working_path(node)
 }
 
+/// Resolve the command string for a `(mode, context)` pair (issue #802).
+///
+/// Root context (`is_root == true`) prefers the per-context
+/// `root_build_command` / `root_run_command` and falls back to
+/// `build_command` / `run_command`; worktree context always uses the latter.
+/// Terminal mode needs no command, so it resolves to `Some("")` — never
+/// `None` — and callers spawn an interactive shell instead of running a
+/// one-shot command.
+///
+/// The fallback (`.or(build_command)`) preserves PR #801's behaviour: a mesh
+/// that never sets the `root_*` columns runs the same command in both
+/// contexts, exactly as before this feature.
+fn resolve_build_run_command(
+    mode: BuildRunMode,
+    is_root: bool,
+    row: &MeshRow,
+) -> Option<&str> {
+    match (mode, is_root) {
+        (BuildRunMode::Build, false) => row.build_command.as_deref(),
+        (BuildRunMode::Build, true) => {
+            row.root_build_command.as_deref().or(row.build_command.as_deref())
+        }
+        (BuildRunMode::Run, false) => row.run_command.as_deref(),
+        (BuildRunMode::Run, true) => {
+            row.root_run_command.as_deref().or(row.run_command.as_deref())
+        }
+        (BuildRunMode::Terminal, _) => Some(""),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,5 +543,107 @@ mod tests {
         let result = registry.resize_pty(42, 80, 24);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not running"));
+    }
+
+    // --- Per-context command resolution (issue #802) --------------------
+
+    /// Build a `MeshRow` with only the four command columns set — every other
+    /// field defaults. Goes through `MeshRow::from` so the mapping is exercised
+    /// alongside the resolver.
+    fn row(
+        build: Option<&str>,
+        run: Option<&str>,
+        root_build: Option<&str>,
+        root_run: Option<&str>,
+    ) -> MeshRow {
+        MeshRow::from(&crate::models::Mesh {
+            build_command: build.map(str::to_string),
+            run_command: run.map(str::to_string),
+            root_build_command: root_build.map(str::to_string),
+            root_run_command: root_run.map(str::to_string),
+            ..Default::default()
+        })
+    }
+
+    /// Worktree Build context always uses `build_command`, even when a
+    /// `root_build_command` is set — the root command must not leak into a
+    /// Worktree Node's build.
+    #[test]
+    fn resolve_command_build_worktree_uses_build_command() {
+        let r = row(Some("npm run build"), None, Some("cargo build --workspace"), None);
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Build, false, &r),
+            Some("npm run build")
+        );
+    }
+
+    /// Root Build context prefers `root_build_command` when set.
+    #[test]
+    fn resolve_command_build_root_uses_root_build_command() {
+        let r = row(Some("npm run build"), None, Some("cargo build --workspace"), None);
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Build, true, &r),
+            Some("cargo build --workspace")
+        );
+    }
+
+    /// Root Build with no `root_build_command` falls back to `build_command`
+    /// — PR #801's behaviour, unchanged for meshes without the new field.
+    #[test]
+    fn resolve_command_build_root_falls_back_to_build_command() {
+        let r = row(Some("npm run build"), None, None, None);
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Build, true, &r),
+            Some("npm run build")
+        );
+    }
+
+    /// Worktree Run context always uses `run_command`.
+    #[test]
+    fn resolve_command_run_worktree_uses_run_command() {
+        let r = row(None, Some("npm run dev"), None, Some("cargo run -p app"));
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Run, false, &r),
+            Some("npm run dev")
+        );
+    }
+
+    /// Root Run context prefers `root_run_command` when set.
+    #[test]
+    fn resolve_command_run_root_uses_root_run_command() {
+        let r = row(None, Some("npm run dev"), None, Some("cargo run -p app"));
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Run, true, &r),
+            Some("cargo run -p app")
+        );
+    }
+
+    /// Root Run with no `root_run_command` falls back to `run_command`.
+    #[test]
+    fn resolve_command_run_root_falls_back_to_run_command() {
+        let r = row(None, Some("npm run dev"), None, None);
+        assert_eq!(
+            resolve_build_run_command(BuildRunMode::Run, true, &r),
+            Some("npm run dev")
+        );
+    }
+
+    /// A mesh with no command configured at all resolves to `None` so the
+    /// caller surfaces the "not configured" error.
+    #[test]
+    fn resolve_command_unconfigured_is_none() {
+        let r = row(None, None, None, None);
+        assert_eq!(resolve_build_run_command(BuildRunMode::Build, true, &r), None);
+        assert_eq!(resolve_build_run_command(BuildRunMode::Build, false, &r), None);
+        assert_eq!(resolve_build_run_command(BuildRunMode::Run, true, &r), None);
+        assert_eq!(resolve_build_run_command(BuildRunMode::Run, false, &r), None);
+    }
+
+    /// Terminal mode needs no command in either context — always `Some("")`.
+    #[test]
+    fn resolve_command_terminal_is_empty_in_both_contexts() {
+        let r = row(Some("b"), Some("r"), Some("rb"), Some("rr"));
+        assert_eq!(resolve_build_run_command(BuildRunMode::Terminal, true, &r), Some(""));
+        assert_eq!(resolve_build_run_command(BuildRunMode::Terminal, false, &r), Some(""));
     }
 }

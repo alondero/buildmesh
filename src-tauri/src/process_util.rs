@@ -382,16 +382,15 @@ mod tests {
             "error must identify the operation and the timeout, got: {msg}"
         );
         // Bound verification: the kill fires within the deadline + a small
-        // slack (we sleep 100ms between polls, and Windows `taskkill /F /T`
-        // adds another 100-500ms on a busy host). 5s is generous enough to
-        // absorb Windows + parallel-cargo-test load variance (which has
-        // been observed to push `taskkill` up to ~3.5s under `cargo test`)
-        // but tight enough that a "no bound" regression — e.g. someone
-        // replaces `kill_process_tree` with a no-op and lets the 30s
-        // hang_cmd timeout fire — still fails this with elapsed ≈ 30s.
+        // slack (we sleep 100ms between polls, then `taskkill /F /T`
+        // walks the process tree). 3s absorbs Windows CI noise under
+        // parallel load (the 100ms poll can land near the deadline +
+        // taskkill latency is variable) but is still tight enough that a
+        // "no bound" regression (e.g. someone replaces `kill()` with a
+        // no-op) fails this — the un-killed `ping` would hang for 30s.
         assert!(
-            elapsed < Duration::from_secs(5),
-            "expected kill within ~1s + slack, took {elapsed:?}"
+            elapsed < Duration::from_secs(3),
+            "expected kill within ~1s, took {elapsed:?}"
         );
     }
 
