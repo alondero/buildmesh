@@ -7,10 +7,19 @@
 //! conversion) still belongs to `env`; this module takes an already-resolved
 //! host path and makes / inspects / removes the git worktree there.
 //!
-//! The `provision` submodule owns the warm-pool-side worktree helpers (PR-head
-//! fetch + fork-remote registration + the warm-claim adoption / upgrade /
-//! shared-checkout functions) that used to live in `agent::spawn`. Keeping
-//! them here completes ADR 0007's consolidation.
+//! The `provision` submodule is the **Worktree Provisioner** — the four-branch
+//! decision (Reused / Adopted / Upgraded / Created) that turns a Spawn Context
+//! into an on-disk worktree. ADR 0003's "Buildmesh Owns Worktree Creation" is
+//! realised end-to-end in [`provision::provision_for_spawn`]; the orchestrator
+//! (`agent/spawn.rs`) builds the Spawn Context and matches the outcome. This
+//! module provides the primitives (`create_git_worktree`, `add_worktree_impl`,
+//! `sanitize_git_worktree`, `prune_stale_worktrees`, `resolve_base_commit`,
+//! `apply_worktree_include`) that the Provisioner drives on every spawn.
+//! Issue #248 deepened the seam:
+//! - `base_ref` (`SpawnContext.base_ref`) reaches the primitive via
+//!   `provision_for_spawn` — pinned by `provision_for_spawn_cold_created_uses_spawn_context_base_ref_not_local_head`.
+//! - `.worktreeinclude` directory entries are now recursively copied via
+//!   `copy_dir_all` — pinned by `apply_worktree_include_copies_directory_recursively`.
 
 pub mod provision;
 
@@ -212,10 +221,66 @@ pub(crate) fn apply_worktree_include(project_root: &str, host_path: &std::path::
                     tracing::info!("Copied included file: {}", trimmed);
                 }
             } else if src.is_dir() {
-                tracing::warn!(".worktreeinclude: directory copying not yet implemented: {}", trimmed);
+                // #248: directory entries in `.worktreeinclude` are now
+                // recursively copied rather than log-and-skipped. The previous
+                // "not yet implemented" branch silently dropped `config/`,
+                // `build/`, `.env/` and similar untracked subtrees the agent
+                // needed, forcing users into per-file `.worktreeinclude`
+                // entries. `copy_dir_all` is std::fs-only (no `walkdir`/`fs_extra`
+                // dep — the tree doesn't carry either). Pinned by
+                // `apply_worktree_include_copies_directory_recursively` and
+                // `apply_worktree_include_directory_missing_source_is_noop`.
+                if let Err(e) = copy_dir_all(&src, &dest) {
+                    tracing::warn!(
+                        ".worktreeinclude: dir copy {} -> {} failed: {}",
+                        trimmed,
+                        dest.display(),
+                        e
+                    );
+                } else {
+                    tracing::info!("Copied included dir: {}", trimmed);
+                }
             }
         }
     }
+}
+
+/// Recursive `cp -r` for the `.worktreeinclude` directory-copy case (#248).
+///
+/// The `env::apply_worktree_include` walker hits `src.is_dir()` for entries
+/// like `config/`, `build/`, or `.env/` — previously these were log-and-skipped
+/// (mod.rs:215), forcing users into per-file entries. `copy_dir_all` walks the
+/// source subtree and mirrors it under `dest`, copying regular files and
+/// recursing into subdirectories. Symlinks, FIFOs, and sockets are
+/// intentionally skipped (carrying those into a freshly-checked-out worktree
+/// would be a surprise — a symlink to `../../secrets.env` is a leakage vector,
+/// not a feature).
+///
+/// **No `walkdir` dep:** the tree doesn't depend on it (`Cargo.toml`), and the
+/// handful of entries in any real `.worktreeinclude` (typically 1-3 dirs, 10-50
+/// files total) don't justify a new crate. `std::fs::read_dir` + a small
+/// recursive helper is the right shape.
+///
+/// Errors propagate up: a single failed entry bubbles; the caller
+/// (`apply_worktree_include`) logs and continues rather than failing the worktree
+/// materialisation (the agent can still operate on the parts that did copy).
+pub(crate) fn copy_dir_all(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
+    if !dest.exists() {
+        std::fs::create_dir_all(dest)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let src_child = entry.path();
+        let dest_child = dest.join(entry.file_name());
+        if ft.is_dir() {
+            copy_dir_all(&src_child, &dest_child)?;
+        } else if ft.is_file() {
+            std::fs::copy(&src_child, &dest_child)?;
+        }
+        // symlinks / fifos / sockets: silently skipped (see fn doc).
+    }
+    Ok(())
 }
 
 /// Resolve `base_ref` to a concrete 40-char commit SHA against the mesh repo,
@@ -1159,6 +1224,69 @@ mod tests {
             head_oid,
             "unresolvable base_ref must fall back to HEAD"
         );
+    }
+
+    // ── apply_worktree_include (.worktreeinclude, issue #248) ────────────────
+    //
+    // `.worktreeinclude` lists project-root-relative paths that should be
+    // copied into every freshly materialised worktree (typical entries:
+    // `.env`, build caches, plugin dirs). The current implementation copies
+    // individual files and log-and-skips directory entries (mod.rs:214-216)
+    // — issue #248 fills that gap so a directory listing copies recursively.
+    // These tests pin both the happy path AND the silent no-op contract for
+    // missing sources (mirrors the missing-file / missing-manifest semantics).
+
+    /// `apply_worktree_include` recursively copies a directory entry into the
+    /// worktree — both top-level files AND nested files inside the listed
+    /// directory. The companion no-op test pins that a missing source stays
+    /// silent rather than erroring.
+    #[test]
+    fn apply_worktree_include_copies_directory_recursively() {
+        let td = TestDir::new("wti_dir");
+        let project_root = td.path();
+        let wt = project_root.join(".claude").join("worktrees").join("wt");
+
+        // Build a `.worktreeinclude` that lists one regular file AND a
+        // directory with a nested file — verifies the recursive case is
+        // distinct from the existing per-file copy.
+        fs::create_dir_all(project_root.join("config/envs")).unwrap();
+        fs::write(project_root.join("config/envs/prod.env"), "PROD=1\n").unwrap();
+        fs::create_dir_all(project_root.join("config/nested")).unwrap();
+        fs::write(project_root.join("config/nested/.keep"), "keep\n").unwrap();
+        fs::write(project_root.join("README-top"), "top\n").unwrap();
+        fs::write(project_root.join(".worktreeinclude"), "README-top\nconfig\n").unwrap();
+
+        fs::create_dir_all(&wt).unwrap();
+        apply_worktree_include(project_root.to_str().unwrap(), &wt);
+
+        assert_eq!(fs::read_to_string(wt.join("README-top")).unwrap(), "top\n");
+        assert_eq!(
+            fs::read_to_string(wt.join("config/envs/prod.env")).unwrap(),
+            "PROD=1\n"
+        );
+        assert_eq!(
+            fs::read_to_string(wt.join("config/nested/.keep")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    /// A `.worktreeinclude` entry pointing at a non-existent path must be a
+    /// silent no-op — both for missing files (existing behaviour) and for
+    /// missing directories (the new code path). Pinned so a future cleanup
+    /// pass can't turn this into a hard error and break offline spawns.
+    #[test]
+    fn apply_worktree_include_directory_missing_source_is_noop() {
+        let td = TestDir::new("wti_missing_dir");
+        let project_root = td.path();
+        let wt = project_root.join(".claude/worktrees/wt");
+        fs::write(project_root.join(".worktreeinclude"), "does-not-exist\n").unwrap();
+        fs::create_dir_all(&wt).unwrap();
+
+        // Must not panic — a missing source is treated identically to a
+        // missing file or a missing manifest: the worktree is still usable.
+        apply_worktree_include(project_root.to_str().unwrap(), &wt);
+        // The worktree exists but no spurious directory was created.
+        assert!(!wt.join("does-not-exist").exists());
     }
 
     // ── close-safety ─────────────────────────────────────────────────────────
