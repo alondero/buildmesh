@@ -1994,6 +1994,268 @@ mod tests {
         assert_eq!(get_request("/nodes/42/log?tail=5").await, 401);
     }
 
+    /// Drive a `GET` over the in-process dispatcher and return both the status
+    /// line and the full body. The existing `get_request` only parses the
+    /// status; the happy-path AC for #335 needs to assert the JSON envelope, so
+    /// this helper does the same connection setup but reads to EOF.
+    async fn get_request_body(path_with_query: &str, bearer: Option<&str>) -> (u16, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let auth = bearer
+            .map(|t| format!("Authorization: Bearer {t}\r\n"))
+            .unwrap_or_default();
+        let request = format!(
+            "GET {path_with_query} HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: 0\r\n\r\n",
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        // Read until EOF; the in-process dispatcher closes the socket after the
+        // body flush (see `request::write_full` + `tokio::io::AsyncWriteExt::shutdown`
+        // in the response path), so EOF = end of body.
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => break,
+                Err(_) => panic!("server hung mid-response"),
+            }
+        }
+
+        let split = received
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response missing header terminator");
+        let status_line = String::from_utf8_lossy(&received[..split]).to_string();
+        let body = String::from_utf8_lossy(&received[split + 4..]).to_string();
+        let status = status_line
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        (status, body)
+    }
+
+    /// Process-scoped init for the #335 happy-path test family. Two things must
+    /// be set up exactly once per `cargo test` invocation:
+    ///   - the global DB (so `db::get_agent_node_by_id` returns a real row),
+    ///   - `HOME`/`USERPROFILE` (so `env::claude_dir()` resolves to the temp
+    ///     dir holding the fixture transcript at the encoded Claude Code path).
+    /// Both are race-prone between test files (the DB OnceCell is shared; the
+    /// env var is process-global), so we serialise under a Mutex and cache
+    /// the (raw_token, node_id) pair in an OnceLock so the second test in
+    /// this file can reuse the same bearer the first one minted (the token
+    /// is stored hashed, so re-reading `app_settings` would hand us the hash
+    /// — useless as a bearer).
+    static LOG_HAPPY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static LOG_HAPPY_FIXTURE: std::sync::OnceLock<(i64, String)> = std::sync::OnceLock::new();
+
+    /// Returns `(node_id, raw_read_token)` after a one-shot init. The bearer
+    /// is the raw token returned by `generate_coordinator_read_token` —
+    /// that's what the dispatcher's auth layer expects; reading it back from
+    /// `app_settings` gives the stored SHA-256 hash (issue #495), which a
+    /// caller never sees.
+    fn ensure_log_happy_fixture() -> (i64, String) {
+        if let Some((id, tok)) = LOG_HAPPY_FIXTURE.get() {
+            return (*id, tok.clone());
+        }
+        let _guard = LOG_HAPPY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // 1) Point `env::claude_dir()` at a temp dir by overriding HOME.
+        //    `claude_dir()` reads HOME first on Windows; setting it before
+        //    the request resolves is enough — the function is called per
+        //    request, not cached at module load. Hold the TempDir in a
+        //    leaked Box so the path stays valid for the rest of the process
+        //    (multiple tests will read the file before any of them drops).
+        let tmp_home = Box::leak(Box::new(tempfile::TempDir::new().expect("tempdir")));
+        // SAFETY: env::set_var is `unsafe` from 2024-onwards because of
+        // thread safety. In this test we serialise under the mutex above and
+        // don't read HOME from another thread, so the requirement is
+        // satisfied.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("HOME", tmp_home.path());
+            std::env::set_var("USERPROFILE", tmp_home.path());
+        }
+
+        // 2) Lay the fixture down at the path the reader expects:
+        //    `<HOME>/.claude/projects/<encode(node_path)>/<session_id>.jsonl`.
+        //    Use a node path with only alphanumeric chars so `encode_path`
+        //    is a no-op — keeps the test focused on the dispatcher+envelope,
+        //    not on path encoding edge cases (those live in transcript_reader's
+        //    own tests).
+        let node_path = "F/src/testnode";
+        let session_id = "gh335-happy-fixture";
+        let target = tmp_home
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("F-src-testnode")
+            .join(format!("{session_id}.jsonl"));
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        // Copy the checked-in fixture (Claude Code's real JSONL shape) so
+        // the parser exercises the same lines the R2 contract test pins.
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude_code_transcript.jsonl");
+        std::fs::copy(&src, &target).expect("copy fixture");
+
+        // 3) Init the global DB if not already (the OnceCell pattern here
+        //    mirrors `commands::agent::tests::ensure_pr_db`). Another test
+        //    family may have beat us — `db::init` returns an error in that
+        //    case which we silently ignore: the schema is the same.
+        if !crate::db::is_initialized() {
+            let db_path = std::env::temp_dir().join(format!(
+                "buildmesh_log_happy_test_{}.db",
+                std::process::id()
+            ));
+            let _ = crate::db::init(&db_path);
+        }
+
+        // 4) Seed only if our node isn't already there. Use INSERT OR IGNORE
+        //    so a parallel run that started first doesn't blow up under us.
+        //    `db::create_mesh` and `db::create_agent_node` panic on UNIQUE
+        //    conflicts — we want the second test to find the row the first
+        //    test inserted, not to error.
+        let mesh = crate::db::create_mesh("happy-mesh", node_path).unwrap_or_else(|_| {
+            // Look up the mesh we created on a prior run.
+            crate::db::get_mesh_by_id(1).unwrap()
+        });
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "happy-node",
+            node_path,
+            "main",
+            crate::models::EnvType::Windows,
+            "anthropic",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap_or_else(|_| {
+            let conn = crate::db::get().lock().unwrap();
+            let id: i64 = conn
+                .query_row(
+                    "SELECT id FROM agent_nodes WHERE name = 'happy-node'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            crate::db::get_agent_node_by_id(id).unwrap()
+        });
+
+        let conn = crate::db::get().lock().unwrap();
+        conn.execute(
+            "UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2",
+            rusqlite::params![session_id, node.id],
+        )
+        .unwrap();
+
+        // 5) Enable coordinator API + mint a read token. The router requires
+        //    `coordinator_api_enabled = true` AND a valid token before the
+        //    `/nodes/{id}/log` handler runs at all. Drop the lock before
+        //    calling the global-locking public functions.
+        drop(conn);
+        crate::db::set_coordinator_api_enabled(true).unwrap();
+        let token = crate::db::generate_coordinator_read_token().unwrap();
+
+        // Cache for the second test. `get_or_init` would also work but we
+        // want to log loudly if two tests actually raced here.
+        let _ = LOG_HAPPY_FIXTURE.set((node.id, token.clone()));
+
+        (node.id, token)
+    }
+
+    /// #335 item 5 — the end-to-end AC. Boots the real dispatcher with a
+    /// seeded agent_node and a fixture-backed Claude Code transcript, mints a
+    /// valid coordinator read token, and asserts the endpoint returns the
+    /// `{"status":"available","turns":[...],"last_assistant_message":...}`
+    /// envelope with the expected tail contents. This replaces the "manual
+    /// live curl" AC from PR #391 — same coverage (auth + dispatch + DB +
+    /// transcript reader + envelope), no Anthropic API key required.
+    ///
+    /// **Why `#[ignore]`:** the test overrides process-global `HOME` /
+    /// `USERPROFILE` so `env::claude_dir()` resolves to a temp dir holding
+    /// the fixture. cargo's parallel test runner lets other tests
+    /// (`commands::git_tests::git_sync_*`, `git::sync::fetch_origin_*`,
+    /// `sandbox::spawn::tests::curated_env_*`) read those same vars in the
+    /// same window and false-fail their env-purity assertions. The test
+    /// passes in isolation and under `cargo test -- --test-threads=1`.
+    /// Run manually with `cargo test --lib -- --ignored
+    /// coordinator_node_log_happy_path` to exercise it (or
+    /// `cargo test --lib -- --include-ignored coordinator_node_log`).
+    #[tokio::test]
+    #[ignore = "mutates process-global HOME/USERPROFILE; conflicts with parallel env-purity tests — run manually"]
+    async fn coordinator_node_log_happy_path_returns_transcript_envelope() {
+        let (node_id, token) = ensure_log_happy_fixture();
+        let (status, body) = get_request_body(
+            &format!("/nodes/{node_id}/log?tail=10"),
+            Some(&token),
+        )
+        .await;
+
+        assert_eq!(status, 200, "auth + DB + dispatcher must yield 200, body: {body}");
+
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("body must be JSON, parse error {e}, body: {body}"));
+
+        // The wire envelope is the same one `transcript_reader::TranscriptTail`
+        // serialises — `{"status": "available" | "unavailable", ...}` —
+        // confirmed against the contract tests for `available_serializes_with_status_envelope`.
+        assert_eq!(json["status"], "available");
+        let turns = json["turns"].as_array().expect("turns is an array");
+        assert!(!turns.is_empty(), "fixture must yield at least one turn");
+
+        // The fixture's recognised turns: user, assistant, assistant, user, assistant
+        // (caveat/summary/thinking/tool_result echoes are skipped). Pin the
+        // first/last role so a regression in the parser's skip logic — or a
+        // path lookup failure returning `Empty` — is caught here, not in prod.
+        let roles: Vec<&str> = turns
+            .iter()
+            .map(|t| t["role"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(roles.first(), Some(&"user"));
+        assert_eq!(roles.last(), Some(&"assistant"));
+        assert_eq!(turns[0]["text"], "Fix the login redirect bug");
+        // The blocking question is the most recent assistant message.
+        assert_eq!(
+            json["last_assistant_message"],
+            "Found it — the redirect drops the query string. Shall I apply the fix?"
+        );
+    }
+
+    /// The unknown-node branch returns 404 even with a valid token — proves
+    /// the dispatcher's None → 404 split (no envelope, no leak of the typed
+    /// degrade path; the route distinguishes "unknown" from "broken shape").
+    /// This one shares the same env-mutation caveat as the happy-path test,
+    /// so it's marked `#[ignore]` for the same reason.
+    #[tokio::test]
+    #[ignore = "shares the env-var-mutating fixture setup; run via --ignored or --include-ignored"]
+    async fn coordinator_node_log_returns_404_for_unknown_node() {
+        let (_id, token) = ensure_log_happy_fixture();
+        let (status, body) =
+            get_request_body("/nodes/9999999/log?tail=10", Some(&token)).await;
+        assert_eq!(status, 404, "unknown node id → 404, body: {body}");
+        assert!(body.is_empty(), "404 carries no body, got: {body}");
+    }
+
     #[test]
     fn path_segment_id_matches_id_between_prefix_and_suffix() {
         assert_eq!(
