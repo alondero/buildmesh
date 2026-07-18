@@ -13,6 +13,7 @@ import type {
 } from '../../lib/tauri';
 import { optimisticToggle } from '../../lib/optimisticToggle';
 import { Modal, ModalCloseButton } from '../shared/Modal';
+import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 
 interface AppSettingsModalProps {
   onClose: () => void;
@@ -434,6 +435,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // dirty comparison. A ref for the same closure-staleness reason as
   // `selectedRef` (issue #581).
   const poolSavedRef = useRef('');
+  // Issue #734: theme toggle. `themeDraft` mirrors currentTheme() so the
+  // radio reflects the active value on modal open; flipping it calls
+  // setTheme(), which writes localStorage, updates <html data-theme>,
+  // AND fires the module-level pub/sub that every ThemeManager listens
+  // to — so agent terminals and build-run terminals flip in lockstep
+  // without the modal touching either registry directly. No rollback
+  // path — setTheme is synchronous and writes to a synchronous
+  // localStorage key, so a "failed save" isn't possible.
+  const [themeDraft, setThemeDraft] = useState<ThemeName>(currentTheme);
   // `loaded` flag carries over from the existing hydration logic below;
   // mirrored here so the rename picker only enables after the
   // preferences load resolves.
@@ -712,6 +722,22 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     } finally {
       setNamingSaving(false);
     }
+  };
+
+  // Issue #734: persist the theme choice. `setTheme` is the single
+  // entry point — it writes localStorage, sets/clears <html data-theme>,
+  // and fires the module-level pub/sub that BOTH registries'
+  // ThemeManager instances subscribe to. So one call here updates the
+  // agent terminal AND the build/run terminal in lockstep. No rollback:
+//   localStorage writes are synchronous and the DOM/xterm flips are
+//   in-memory. The dirty-tracker is intentionally NOT involved — a
+//   theme flip is an instant visual change with no half-saved state,
+//   so a "Discard unsaved changes?" prompt would be more confusing
+//   than helpful.
+  const handleSaveTheme = (next: ThemeName) => {
+    if (next === themeDraft) return;
+    setThemeDraft(next);
+    setTheme(next);
   };
 
   // Commit the autopilot pool-size draft (blur / Enter). `''` clears the
@@ -1080,6 +1106,52 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             }}
             className="w-48 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           />
+        </div>
+
+        <div className="pt-6 border-t border-border-subtle space-y-4">
+          <label
+            htmlFor="theme-radio-group"
+            className="block text-lg font-medium text-text-secondary"
+          >
+            Appearance
+          </label>
+          <p className="text-base text-text-muted">
+            Pick the colour theme. Dark is the default; light inverts the
+            surface and text tokens while keeping the accent palette intact.
+            The choice is saved per machine — xterm.js terminals flip with
+            the rest of the app.
+          </p>
+          <fieldset
+            id="theme-radio-group"
+            aria-label="Theme"
+            className="flex flex-wrap gap-2"
+          >
+            {(['dark', 'light'] as const).map((name) => (
+              <label
+                key={name}
+                className={`flex items-center gap-2 px-4 py-2 rounded-md text-base cursor-pointer border transition-colors ${
+                  themeDraft === name
+                    ? 'bg-bg-card border-accent-cyan text-text-primary'
+                    : 'bg-bg-card border-border-subtle text-text-secondary hover:border-border-default'
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="theme"
+                  value={name}
+                  checked={themeDraft === name}
+                  // Controlled radio: the picker is always in step with the
+                  // active theme (setTheme is synchronous). Each click
+                  // commits immediately — no "Save" button, no dirty site,
+                  // no rollback. The visual transition is the persistence.
+                  onChange={() => handleSaveTheme(name)}
+                  className="accent-accent-cyan"
+                  data-testid={`theme-radio-${name}`}
+                />
+                <span className="capitalize">{name}</span>
+              </label>
+            ))}
+          </fieldset>
         </div>
 
         <div className="pt-6 border-t border-border-subtle">

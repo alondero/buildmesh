@@ -6,6 +6,8 @@ import { createTerminalOptions } from './terminalConfig';
 import { loadUnicode11Widths } from './loadUnicode11Widths';
 import { TerminalWriter } from './TerminalWriter';
 import { decodeBase64Bytes } from '../../lib/base64';
+import { ThemeManager } from './ThemeManager';
+import { setTheme, type ThemeName } from '../../lib/theme';
 
 /**
  * Sibling singleton for build/run terminal panes — mirrors `TerminalRegistry`
@@ -119,6 +121,13 @@ export class BuildRunTerminalRegistry {
    *  `doCreate`; exit listeners compare their captured value against the
    *  current value to drop stale events from previous PTY lifecycles. */
   private sessionGenerations = new Map<number, number>();
+  // Issue #734: live-update the xterm.js palette on theme flips. Subscribes
+  // to theme.ts's pub/sub at construction; walks `entries` on every flip;
+  // releases its listener in destroy(). Separate from TerminalRegistry's
+  // own ThemeManager because the two registries have independent
+  // lifecycles (a build-run X-button close should NOT unregister an agent
+  // terminal from the agent registry's theme map).
+  private themeManager = new ThemeManager();
 
   getInstance(sessionId: number, mode: BuildRunMode, useWorktree: boolean): BuildRunInstance | undefined {
     return this.instances.get(instanceKey(sessionId, mode, useWorktree));
@@ -285,6 +294,9 @@ export class BuildRunTerminalRegistry {
     if (inst.outputUnlisten) inst.outputUnlisten();
     if (inst.exitUnlisten) inst.exitUnlisten();
     inst.writer.unregister(inst.sessionId);
+    // Issue #734: symmetric with doCreate's register — same composite key,
+    // so a future flip doesn't push a stale palette into a dead xterm.
+    this.themeManager.unregister(key);
     if (inst.ptyAlive) {
       // Kill the Rust PTY. Only fire this if we believe one is alive —
       // otherwise a "double X click" or a stale close would be a no-op
@@ -312,6 +324,25 @@ export class BuildRunTerminalRegistry {
     }
     this.sessionGenerations.clear();
     this.sessionLocks.clear();
+    // Issue #734: release the theme-listener so a destroyed build-run
+    // registry doesn't keep firing flips into a now-empty entry map.
+    this.themeManager.destroy();
+  }
+
+  /**
+   * Push the named theme to every live build-run terminal AND the
+   * <html data-theme> attribute. Mirrors TerminalRegistry.applyTheme()
+   * so both registries present the same single entry point for code
+   * (and tests) that wants to flip the theme without going through
+   * `setTheme` directly. The actual palette push is delivered by this
+   * registry's own ThemeManager, which subscribes to theme.ts's
+   * pub/sub at construction and walks its entry map on every
+   * `changed` event — so the live xterm updates happen even when a
+   * caller flips the theme via `setTheme(...)` without going through
+   * this method. Issue #734.
+   */
+  applyTheme(theme: ThemeName): void {
+    setTheme(theme);
   }
 
   private async doCreate(
@@ -360,6 +391,13 @@ export class BuildRunTerminalRegistry {
         resizeObserver: null,
         ptyAlive: false,
       };
+
+      // Issue #734: register with ThemeManager so a later theme flip
+      // pushes the matching xterm palette into term.options.theme. Keyed
+      // by the same composite instance-key the registry uses for its
+      // `instances` Map (sessionId + mode + useWorktree), so the
+      // unregister path is symmetric.
+      this.themeManager.register(instanceKey(sessionId, mode, useWorktree), term);
 
       // Wire keystroke + resize handlers for interactive Terminal mode only.
       // Build/Run is one-way output — user input is ignored. Mirrors the
