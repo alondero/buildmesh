@@ -752,6 +752,11 @@ export const setAppDefaultProvider = (provider: string | null) =>
 export const setAppNamingProvider = (provider: string | null) =>
   _invoke('set_app_naming_provider', { provider });
 
+/** App-wide autopilot pool cap (`null` = uncapped, `0` = pause new spawns).
+ *  Semantics documented on `AppPreferences::autopilot_pool_size`. */
+export const setAppAutopilotPoolSize = (size: number | null) =>
+  _invoke('set_app_autopilot_pool_size', { size });
+
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });
 

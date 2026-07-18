@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import { openSettingsPane } from '../utils/settings-panes';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -60,6 +61,7 @@ describe('Coordinator Read API settings section', () => {
   it('shows the coordinator API as disabled by default', async () => {
     mockBackend({ enabled: false, hasToken: false });
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const toggle = await screen.findByRole('checkbox', { name: /coordinator read api/i });
     expect((toggle as HTMLInputElement).checked).toBe(false);
@@ -68,6 +70,7 @@ describe('Coordinator Read API settings section', () => {
   it('makes the loopback/LAN-bound, own-tunnel nature clear', async () => {
     mockBackend({ enabled: false, hasToken: false });
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /coordinator read api/i });
     // "loopback" now also appears in the LAN/VPN exposure section (issue #501),
@@ -81,6 +84,7 @@ describe('Coordinator Read API settings section', () => {
     const calls = mockBackend({ enabled: false, hasToken: false });
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const toggle = await screen.findByRole('checkbox', { name: /coordinator read api/i });
     await user.click(toggle);
@@ -100,6 +104,7 @@ describe('Coordinator Read API settings section', () => {
     // userEvent installs its own jsdom clipboard stub; read it back to assert.
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const mintBtn = await screen.findByRole('button', { name: /generate token/i });
     await user.click(mintBtn);
@@ -117,6 +122,7 @@ describe('Coordinator Read API settings section', () => {
     const calls = mockBackend({ enabled: true, hasToken: true });
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const toggle = await screen.findByRole('checkbox', { name: /coordinator read api/i });
     expect((toggle as HTMLInputElement).checked).toBe(true);

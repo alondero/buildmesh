@@ -127,14 +127,39 @@ fn run_poll_pass(app: &AppHandle) {
             return;
         }
     };
+    // App-wide pool budget (Settings → autopilot_pool_size): how many more
+    // autopilot nodes may spawn THIS PASS across every mesh combined. `None`
+    // = no global cap (the pre-setting behaviour). Computed once here and
+    // decremented by `poll_mesh` per successful spawn, so the meshes earlier
+    // in the loop can't be double-counted by the ones after them. A count
+    // failure fails CLOSED (budget 0, retried next pass) — the setting
+    // exists to protect the machine, so "unknown load" must not mean
+    // "unlimited".
+    let mut global_budget: Option<i64> = match crate::preferences::autopilot_pool_size() {
+        None => None,
+        Some(pool) => match db::count_active_autopilot_nodes_total() {
+            Ok(total) => Some(i64::from(pool) - total),
+            Err(e) => {
+                tracing::warn!(
+                    "autopilot: total active count failed, skipping spawns this pass: {}",
+                    e
+                );
+                Some(0)
+            }
+        },
+    };
     for mesh in meshes {
-        if let Err(e) = poll_mesh(app, &mesh) {
+        if let Err(e) = poll_mesh(app, &mesh, &mut global_budget) {
             tracing::warn!("autopilot: mesh {} ({}) pass failed: {}", mesh.id, mesh.name, e);
         }
     }
 }
 
-fn poll_mesh(app: &AppHandle, mesh: &Mesh) -> Result<(), String> {
+fn poll_mesh(
+    app: &AppHandle,
+    mesh: &Mesh,
+    global_budget: &mut Option<i64>,
+) -> Result<(), String> {
     // The merged-PR sweep runs BEFORE the capacity gate: a mesh at capacity
     // must still get its finished nodes archived (that's what clears grid
     // space), and the sweep costs no network when there's nothing to sweep.
@@ -142,7 +167,10 @@ fn poll_mesh(app: &AppHandle, mesh: &Mesh) -> Result<(), String> {
         db::list_completed_autopilot_runs_with_pr(mesh.id).unwrap_or_default();
 
     let active = db::count_active_autopilot_nodes(mesh.id).map_err(|e| e.to_string())?;
-    let capacity = i64::from(mesh.autopilot_concurrency_limit) - active;
+    let capacity = effective_capacity(
+        i64::from(mesh.autopilot_concurrency_limit) - active,
+        *global_budget,
+    );
     // PRD story 6: no spare capacity AND nothing to sweep → no GitHub
     // round-trip at all.
     if capacity <= 0 && sweep_candidates.is_empty() {
@@ -185,13 +213,21 @@ fn poll_mesh(app: &AppHandle, mesh: &Mesh) -> Result<(), String> {
         let trigger = AutopilotTrigger::from_issue(&owner, &repo, issue);
         match gate_trigger(&client, &trigger) {
             Ok(GateDecision::AutoRun) => {
-                if let Err(e) = spawn_autopilot_node(app, mesh, &owner, &repo, issue) {
-                    tracing::warn!(
+                match spawn_autopilot_node(app, mesh, &owner, &repo, issue) {
+                    // A successful spawn consumes one app-wide pool slot so the
+                    // meshes later in this pass see the reduced budget. Failed
+                    // spawns don't consume — nothing is running.
+                    Ok(()) => {
+                        if let Some(budget) = global_budget.as_mut() {
+                            *budget -= 1;
+                        }
+                    }
+                    Err(e) => tracing::warn!(
                         "autopilot: spawn for issue #{} on mesh {} failed: {}",
                         issue.number,
                         mesh.id,
                         e
-                    );
+                    ),
                 }
             }
             Ok(GateDecision::RequireApproval) => {
@@ -268,6 +304,18 @@ fn close_merged_nodes(
                 e
             ),
         }
+    }
+}
+
+/// Pure capacity combinator: how many nodes a mesh may actually spawn this
+/// pass, given its own spare per-mesh capacity and the remaining app-wide
+/// pool budget (Settings → autopilot pool size). `None` budget = no global
+/// cap. A negative budget (the pool was shrunk below the current active
+/// count) clamps to 0 — we stop spawning but never kill running nodes.
+pub(crate) fn effective_capacity(mesh_capacity: i64, global_budget: Option<i64>) -> i64 {
+    match global_budget {
+        Some(budget) => mesh_capacity.min(budget.max(0)),
+        None => mesh_capacity,
     }
 }
 
@@ -408,5 +456,27 @@ mod tests {
         // even with capacity free.
         let planned = plan_spawns(&[], &[42], 5);
         assert!(planned.is_empty());
+    }
+
+    #[test]
+    fn effective_capacity_without_global_cap_is_mesh_capacity() {
+        // No pool size set → per-mesh limits are the only gate (the
+        // pre-setting behaviour, so upgrades change nothing).
+        assert_eq!(effective_capacity(3, None), 3);
+    }
+
+    #[test]
+    fn effective_capacity_caps_at_remaining_global_budget() {
+        assert_eq!(effective_capacity(3, Some(1)), 1);
+        assert_eq!(effective_capacity(1, Some(3)), 1, "per-mesh limit still binds");
+    }
+
+    #[test]
+    fn effective_capacity_clamps_negative_budget_to_zero() {
+        // Pool shrunk below the current active count: stop spawning, but a
+        // negative capacity must not flow onward (it would corrupt the
+        // `capacity as usize` take in plan_spawns).
+        assert_eq!(effective_capacity(2, Some(-3)), 0);
+        assert_eq!(effective_capacity(2, Some(0)), 0, "pool size 0 pauses spawns");
     }
 }

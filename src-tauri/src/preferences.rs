@@ -307,6 +307,18 @@ pub struct AppPreferences {
     /// haiku tier instead of the user's main subscription default.
     #[serde(default)]
     pub naming_provider: Option<String>,
+    /// Buildmesh-wide cap on **concurrently active autopilot nodes across all
+    /// meshes** — the global "pool" the per-mesh `autopilot_concurrency_limit`
+    /// slots draw from. Per-mesh limits alone can't protect the machine: ten
+    /// meshes × 2 nodes each is still twenty concurrent agents. `None` (the
+    /// default) means no global cap — per-mesh limits alone apply, exactly the
+    /// pre-existing behaviour. `Some(0)` pauses all new autopilot spawns
+    /// without touching any mesh's enabled flag. Enforced by the poller
+    /// (`services::autopilot::run_poll_pass`), never by killing running nodes
+    /// — lowering the cap below the current active count just stops new
+    /// spawns until enough slots free up.
+    #[serde(default)]
+    pub autopilot_pool_size: Option<u32>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -422,6 +434,26 @@ pub fn naming_provider() -> Option<String> {
         Err(e) => {
             tracing::warn!(
                 "preferences::naming_provider load failed, falling back: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
+/// The global autopilot pool size — the app-wide cap on concurrently active
+/// autopilot nodes across every mesh (see [`AppPreferences::autopilot_pool_size`]).
+/// `None` means "no global cap" — the per-mesh `autopilot_concurrency_limit`
+/// values are the only gate, which was the behaviour before this setting
+/// existed. A load failure is logged and treated as "no cap" for the same
+/// reason as [`default_provider`]: the poller must keep working even when
+/// preferences are unreadable.
+pub fn autopilot_pool_size() -> Option<u32> {
+    match load() {
+        Ok(prefs) => prefs.autopilot_pool_size,
+        Err(e) => {
+            tracing::warn!(
+                "preferences::autopilot_pool_size load failed, treating as uncapped: {}",
                 e
             );
             None
@@ -1974,6 +2006,28 @@ mod tests {
         // with an empty Vec rather than failing.
         let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(prefs.harness_profiles, Vec::new());
+    }
+
+    // ─── Autopilot pool size ─────────────────────────────────────────────────
+
+    #[test]
+    fn app_preferences_defaults_autopilot_pool_size_to_none_when_key_absent() {
+        // Additive wire: an older preferences.json loads with no global cap,
+        // so upgrading changes no behaviour until the user sets a value.
+        let prefs: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert_eq!(prefs.autopilot_pool_size, None);
+    }
+
+    #[test]
+    fn autopilot_pool_size_round_trips_through_save_and_read() {
+        with_temp_dir(|_| {
+            assert_eq!(autopilot_pool_size(), None);
+            let mut prefs = load().unwrap();
+            prefs.autopilot_pool_size = Some(4);
+            save(prefs).unwrap();
+            *CACHE.lock().unwrap() = None; // force a disk read
+            assert_eq!(autopilot_pool_size(), Some(4));
+        });
     }
 
     // ─── Harness order (issue #573) ──────────────────────────────────────────

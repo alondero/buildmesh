@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import { openSettingsPane } from '../utils/settings-panes';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -58,6 +59,7 @@ describe('LAN / VPN exposure settings section (issue #501)', () => {
   it('shows exposure as disabled by default', async () => {
     mockBackend(false);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const toggle = await screen.findByRole('checkbox', { name: /expose to lan/i });
     expect((toggle as HTMLInputElement).checked).toBe(false);
@@ -66,6 +68,7 @@ describe('LAN / VPN exposure settings section (issue #501)', () => {
   it('makes the self-signed-TLS / loopback-default nature clear', async () => {
     mockBackend(false);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /expose to lan/i });
     // "self-signed" and "loopback" each appear in more than one place (the
@@ -79,6 +82,7 @@ describe('LAN / VPN exposure settings section (issue #501)', () => {
     const calls = mockBackend(false);
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const toggle = await screen.findByRole('checkbox', { name: /expose to lan/i });
     await user.click(toggle);
@@ -92,6 +96,7 @@ describe('LAN / VPN exposure settings section (issue #501)', () => {
     const calls = mockBackend(true);
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const toggle = await screen.findByRole('checkbox', { name: /expose to lan/i });
     await waitFor(() => expect((toggle as HTMLInputElement).checked).toBe(true));
@@ -130,6 +135,7 @@ describe('LAN / VPN exposure settings section (issue #501)', () => {
     });
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     const toggle = await screen.findByRole('checkbox', { name: /expose to lan/i });
     await user.click(toggle);
@@ -155,6 +161,7 @@ describe('Realized LAN exposure status (issue #586)', () => {
       { address: '10.0.0.2:1992', tls: true },
     ]);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /expose to lan/i });
     const items = await screen.findAllByTestId('lan-exposed-interface');
@@ -172,6 +179,7 @@ describe('Realized LAN exposure status (issue #586)', () => {
     // but realized = loopback only. The UI must say so.
     mockBackend(true, false, []);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /expose to lan/i });
     const warning = await screen.findByTestId('lan-exposure-warning');
@@ -186,6 +194,7 @@ describe('Realized LAN exposure status (issue #586)', () => {
     // connection is unencrypted.
     mockBackend(true, false, [{ address: '192.168.1.5:1992', tls: false }]);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /expose to lan/i });
     const items = await screen.findAllByTestId('lan-exposed-interface');
@@ -199,6 +208,7 @@ describe('Realized LAN exposure status (issue #586)', () => {
   it('renders no realized-state UI when the toggle is off', async () => {
     mockBackend(false, false, []);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByRole('checkbox', { name: /expose to lan/i });
     // The realized-status block is gated on `lanEnabled`, so even though the

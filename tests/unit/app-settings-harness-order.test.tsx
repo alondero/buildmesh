@@ -85,9 +85,9 @@ describe('Settings — spawn menu order (issue #573)', () => {
     render(<AppSettingsModal onClose={() => {}} />);
 
     // Wait for the modal to settle on a deterministic element before asserting
-    // the absence of the section. Issue #574 renamed "Accounts & Usage" to
-    // "Providers" — the modal is now organised around a Providers page.
-    await screen.findByText('Providers');
+    // the absence of the section. "Providers" is now ambiguous by text (it's
+    // both a nav-rail tab and a pane heading), so anchor on the tab role.
+    await screen.findByRole('tab', { name: 'Providers' });
     await waitFor(() => expect(screen.queryByText('Spawn menu order')).toBeNull());
   });
 });
