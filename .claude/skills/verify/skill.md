@@ -48,6 +48,7 @@ Run in order; on any failure, enter hill-climb (see below). All steps must pass 
 7. Launch the app via `scripts\run-dev.ps1`. The script kills any existing `buildmesh-dev` process (**never** the stable hub), verifies the binary, records the pre-launch log line count, starts the binary, and confirms startup.
 8. **Strict log scan** of `%APPDATA%\com.alond.buildmesh.dev\logs\buildmesh.log` against the line count captured before launch — see rules below.
 9. `npm run test:e2e` — Playwright e2e. Playwright's `webServer` config (`playwright.config.ts`) boots its own `npm run tauri dev`, which uses the **base** identity and ports **1991/1992** (not the dev profile). If a stable hub is running it holds 1991, so pause the hub for this step or run e2e separately. The dev exe launched in steps 6–8 uses 2991/2992 and does not collide with Playwright's dev server.
+10. **Verify-smoke (issue #157):** `npx playwright test --project=verify-smoke`. The project in `playwright.config.ts` is wired with `testMatch: /verify-smoke\.spec\.ts$/` and a Vite-only `webServer` (`npm run dev` on :1420, `reuseExistingServer: true`) so it never collides with the stable hub or pays the Rust compile cost. The spec installs the Tauri mock from `scripts/ui-mock/tauri-mock.mjs` via `page.addInitScript`, drives the real React UI (clicks the fixture node in the sidebar), pushes `agent-output` bytes through the mock, and asserts `.xterm-rows > div` has non-empty textContent. This is the "terminal actually rendered" check that closes the largest `/verify` gap: the strict log scan above only fires on ` ERROR ` / `panic`, so a regression where spawn succeeds but PTY bytes never reach xterm.js (e.g. the receiver-binding bug from #149) currently passes. The smoke spec fails with `TypeError: Illegal invocation at TerminalWriter.scheduleFlush` when #149 is reverted, and passes against current `main`. Pre-condition: `npm run dev` already serving :1420 (steps 6–7 don't start it); if not, run `npm run dev &` first or let the project's webServer auto-start it (timeout 60 s).
 
 ## Hill-climb protocol
 
@@ -197,6 +198,7 @@ Seed entries — pattern-match the failure against these first before diagnosing
 - **`vitest run tests/integration` fails with "ECONNREFUSED 127.0.0.1:1991"** → an integration test is hitting the HTTP test bridge instead of the mocked `invoke()`. Likely a test using `invokeViaHttp` from `tests/e2e/utils/tauri-http.ts`. Fix: that test belongs in `tests/e2e/`, not `tests/integration/`; move it or run it inside Playwright.
 - **Symptom: user reports "terminal blank after spawn" but `buildmesh.log` shows `Process spawned` / no `Failed to spawn`** → log says spawn worked; only the terminal-output WebSocket can prove the PTY actually piped bytes. Fix: connect to `ws://localhost:{1992|2992}/ws/terminal/{node_id}?ticket=<single-use ticket>` (mint ticket via `POST /api/ws-ticket` with bearer root token + body `{"surface":"terminal","node_id":<id>}`) and assert ≥1 byte received within 5 s — see *Diagnostic probes* below. 0 bytes ⇒ PTY dead; cross-check `await window.__TAURI_INTERNALS__.invoke('debug_list_agents')` to confirm `PROCESS_REGISTRY` still holds the node. Memory: `buildmesh-terminal-blank-probe`.
 - **`/verify full` log-scan fails on `panic.log` but `buildmesh.log` looks clean** → the main panic hook (`src-tauri/src/lib.rs:348-382`) writes only to `panic.log` + stderr; it never logs to the tracing pipeline. So a Rust panic during normal operation is invisible to the `buildmesh.log` pattern scan. Fix: surface the full panic entry (timestamp + thread + message + location + `Backtrace:` block) from `panic.log` in the failure summary, then read the stack frames to find the offending Rust file:line — the backtrace points at the *first* frame inside Buildmesh code, not the panic message origin (which is often inside `tracing`/`tauri`/etc.). If the entry is in `panic_early.log` instead, the panic fired BEFORE `setup()` installed the main hook — suspect Tauri config, app-data-dir resolution, or `db::init` failure. Memory: `buildmesh-panic-log-scan`.
+- **`verify-smoke` spec fails with `TypeError: Illegal invocation at TerminalWriter.scheduleFlush`** → issue #149 regression: `TerminalWriter.ts` is storing a bare `requestAnimationFrame` as `this.scheduler`, so `this.scheduler(cb)` rebinds the receiver from `window` to the writer instance and Chromium rejects it. Tauri's agent-output listener wrapper swallows the throw, so xterm never receives bytes even though the log shows normal spawn. Fix: wrap the default in `(cb) => requestAnimationFrame(cb)` (the `#149` form, see commit 9421f6e). Memory: `buildmesh-terminal-receiver-binding`.
 
 ## Reporting
 
@@ -231,6 +233,13 @@ Full:     ✓ tauri build  ✓ launch  ✗ log scan (panic.log)
 ```
 
 The user reads this to triage without opening `%APPDATA%\com.alond.buildmesh.dev\logs\panic.log` themselves.
+
+When step 10 (verify-smoke) is the failing step, surface the
+`TypeError: Illegal invocation at TerminalWriter.scheduleFlush` directly
+in the summary — the spec's own page-error handler surfaces the
+underlying stack trace inside Chromium, so the `└─` line should
+quote the stack from `TerminalWriter.ts` (line 62 in the buggy
+form, line 60 with the fix).
 
 ## Notes
 
