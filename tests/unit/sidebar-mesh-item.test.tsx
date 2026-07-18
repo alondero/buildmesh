@@ -476,6 +476,12 @@ describe('MeshItem', () => {
     });
 
     it('autofocuses the first menuitem on open (roving tabindex)', async () => {
+      // Issue #837 — the keyboard nav cycle (ArrowDown/Up wrap, Home/End
+      // jump), the focus-gate (ignore keystrokes when focus is outside),
+      // and the Tab-close behaviour are now covered by the hook tests
+      // in `tests/unit/use-aria-menu.test.tsx`. This smoke stays because
+      // it's the per-component wiring assertion: a regression that
+      // swapped the hook for a no-op would flip this.
       renderMeshItem();
       openContextMenu();
       const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
@@ -486,13 +492,16 @@ describe('MeshItem', () => {
         expect(items[i].getAttribute('tabindex')).toBe('-1');
       }
       // And the first menuitem is the document.activeElement. The focus
-      // is moved via setTimeout(0) inside the component, so wait one tick.
+      // is moved via useLayoutEffect inside the hook, so wait one tick.
       await waitFor(() => {
         expect(document.activeElement).toBe(items[0]);
       });
     });
 
-    it('ArrowDown moves focus to the next menuitem with wrap-around (#735)', async () => {
+    it('ArrowDown moves focus to the next menuitem (#837 — single smoke)', async () => {
+      // Single ArrowDown smoke — proves the hook's `setActiveIndex` is
+      // wired into MeshItem's render. The wrap-cycle (and Home/End) are
+      // covered by the hook tests.
       renderMeshItem();
       openContextMenu();
       const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
@@ -500,46 +509,13 @@ describe('MeshItem', () => {
       pressKey('ArrowDown');
       await waitFor(() => expect(document.activeElement).toBe(items[1]));
       expect(items[1].getAttribute('tabindex')).toBe('0');
-
-      pressKey('ArrowDown');
-      await waitFor(() => expect(document.activeElement).toBe(items[2]));
-      expect(items[2].getAttribute('tabindex')).toBe('0');
-
-      // Last → wrap to first.
-      for (let i = 0; i < 3; i++) pressKey('ArrowDown');
-      await waitFor(() => expect(document.activeElement).toBe(items[0]));
-      expect(items[0].getAttribute('tabindex')).toBe('0');
     });
 
-    it('ArrowUp moves focus to the previous menuitem with wrap-around (#735)', async () => {
-      renderMeshItem();
-      openContextMenu();
-      const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
-      // First → wrap to last.
-      pressKey('ArrowUp');
-      await waitFor(() => expect(document.activeElement).toBe(items[items.length - 1]));
-      expect(items[items.length - 1].getAttribute('tabindex')).toBe('0');
-    });
-
-    it('Home jumps to the first menuitem and End jumps to the last (#735)', async () => {
-      renderMeshItem();
-      openContextMenu();
-      const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
-      // Move away from index 0 first (two ArrowDowns → index 2 / "Sync Latest").
-      pressKey('ArrowDown');
-      pressKey('ArrowDown');
-      await waitFor(() => expect(document.activeElement).toBe(items[2]));
-
-      pressKey('Home');
-      await waitFor(() => expect(document.activeElement).toBe(items[0]));
-      expect(items[0].getAttribute('tabindex')).toBe('0');
-
-      pressKey('End');
-      await waitFor(() => expect(document.activeElement).toBe(items[items.length - 1]));
-      expect(items[items.length - 1].getAttribute('tabindex')).toBe('0');
-    });
-
-    it('Escape closes the menu and returns focus to the trigger row (#735)', async () => {
+    it('Escape closes the menu and returns focus to the trigger row (#735, #837)', async () => {
+      // Per-component rAF behavior — the hook fires `onClose`, the
+      // component's own closure does `requestAnimationFrame(() =>
+      // trigger.focus())`. The hook tests cover the Escape-dispatch
+      // path; this proves the trigger-focus return is wired.
       renderMeshItem();
       openContextMenu();
       // Sanity: the menu is in the DOM before we press Escape.
@@ -580,35 +556,30 @@ describe('MeshItem', () => {
       return waitFor(() => expect(document.activeElement).toBe(trigger));
     });
 
-    it('Tab closes the menu so the user can move focus to the next tabbable element (#735)', async () => {
-      // WAI-ARIA menu contract: Tab (and Shift+Tab) move focus out of
-      // the menu and close it. The menu is non-modal, so we let the
-      // browser perform the focus move and just close behind it.
+    it('Tab closes the menu so the user can move focus to the next tabbable element (#735, #837)', async () => {
+      // Issue #837 — the `closeOnTab` default in `useAriaMenu` is `true`,
+      // so Tab invokes the hook's `onClose`. This smoke proves the
+      // hook's default value is what MeshItem consumes.
       renderMeshItem();
       openContextMenu();
-      const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
-      // Move to a non-zero item so we can confirm close restores focus to trigger.
-      pressKey('ArrowDown');
-      await waitFor(() => expect(document.activeElement).toBe(items[1]));
+      expect(document.querySelector('[role="menu"]')).toBeTruthy();
 
       pressKey('Tab');
 
       await waitFor(() => {
         expect(document.querySelector('[role="menu"]')).toBeNull();
       });
-      const trigger = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
-      await waitFor(() => expect(document.activeElement).toBe(trigger));
     });
 
-    it('ArrowDown on a keydown target outside the menu does not move menu focus (#735)', () => {
-      // The document-level keydown handler must not hijack arrow keys
-      // typed when focus is on something other than the menu (e.g.,
-      // a sibling mesh row, the activity bar, or document.body). The
-      // menu container ref check short-circuits the handler.
+    it('ArrowDown on a keydown target outside the menu does not move menu focus (#735, #837)', () => {
+      // Issue #837 — the focus-gate (the hook's `rootRef.current.contains(
+      // document.activeElement)` check) is covered by the hook tests in
+      // detail. This smoke proves the same focus-gate is wired into
+      // MeshItem's render: a sibling trigger with focus must not be
+      // hijacked by the document-level listener.
       renderMeshItem();
       openContextMenu();
       const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
-      // Initially, the first menuitem should be focused (autofocus on open).
       // Force focus elsewhere to simulate the user having left the menu.
       const trigger = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
       (trigger as HTMLElement).focus();
@@ -618,7 +589,6 @@ describe('MeshItem', () => {
       // The menu stays open and the trigger (not a menuitem) keeps focus.
       expect(document.querySelector('[role="menu"]')).toBeTruthy();
       expect(document.activeElement).toBe(trigger);
-      // And the menuitems themselves didn't shift focus to items[1].
       expect(document.activeElement).not.toBe(items[1]);
     });
 

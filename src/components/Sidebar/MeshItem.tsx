@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { useState, useLayoutEffect, useRef } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
@@ -12,6 +12,7 @@ import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
 import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
@@ -123,11 +124,17 @@ export function MeshItem({
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Issue #735 — viewport clamping + ARIA menu keyboard navigation.
   // The menu container ref lets us measure its rendered size for clamping;
-  // the item refs hold the menuitem buttons so arrow keys can move focus
-  // between them (roving tabindex). The trigger ref remembers the row that
-  // opened the menu so Escape can return focus there.
+  // the trigger ref remembers the row that opened the menu so Escape can
+  // return focus there.
+  //
+  // Issue #837 — keyboard nav (Escape/Tab/Arrow/Home/End + auto-focus on
+  // open) is now the shared `useAriaMenu` hook below. The hook reads
+  // `itemCount` via a ref it owns and finds menuitems via
+  // `querySelectorAll('[role="menuitem"]')`, so the previous
+  // `menuItemRefs` + `itemCountRef` mirrors here are no longer needed
+  // (the hook handles the live-value closure and the per-item focus
+  // walk).
   const menuRef = useRef<HTMLDivElement>(null);
-  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const triggerRef = useRef<HTMLDivElement>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   // View on GitHub — only shown when the mesh's `origin` resolves to a
@@ -136,16 +143,10 @@ export function MeshItem({
   // `url === null` and the menu item is simply not rendered.
   const { url: githubUrl } = useMeshGitHubUrl(mesh.id, mesh.path);
   // Render-time item count: 5 always-present items + the conditional
-  // 6th when the mesh has a GitHub origin. Keyboard-nav handlers and
-  // the `End` jump read this so a non-GitHub mesh's menu correctly
-  // wraps at 5 and a GitHub mesh's wraps at 6.
+  // 6th when the mesh has a GitHub origin. The hook uses this as its
+  // `itemCount` so a non-GitHub mesh's menu correctly wraps at 5 and a
+  // GitHub mesh's wraps at 6.
   const itemCount = 5 + (githubUrl ? 1 : 0);
-  // Mirror `itemCount` into a ref so the keydown handler reads the
-  // LIVE count on every keystroke (the handler's effect deps are
-  // `[contextMenu]`, not `itemCount`, so without this the closure
-  // would freeze at the count that was current when the menu opened).
-  const itemCountRef = useRef(itemCount);
-  itemCountRef.current = itemCount;
   const { branchStatus, refresh: refreshBranchStatus } = useGitBranchStatus(mesh.path);
   const { health } = useMeshHealth(mesh.id, mesh.path);
   const behind = branchStatus?.behind ?? 0;
@@ -183,75 +184,20 @@ export function MeshItem({
     opacity: isDragging ? 0.5 : 1,
   };
 
-  useEffect(() => {
-    if (!contextMenu) return;
-    // Issue #814 — the outside-mousedown close path now goes through
-    // the shared `useClickOutside` hook (#492) below; the keydown
-    // listener here only handles the WAI-ARIA keyboard contract
-    // (Escape / Arrow / Home / End / Tab).
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // WAI-ARIA menu contract: keystrokes only apply while focus is
-      // inside the menu. The document-level listener would otherwise
-      // hijack arrow / Home / End typed elsewhere on the page. We check
-      // `document.activeElement` (not `e.target`) because in jsdom tests
-      // events are dispatched on `document` while focus is on a menuitem.
-      const menu = menuRef.current;
-      const active = document.activeElement;
-      if (menu && active instanceof Node && !menu.contains(active)) return;
-
-      // Issue #735 — WAI-ARIA menu keyboard pattern: Escape closes
-      // (returning focus to the trigger), arrow keys move focus between
-      // menuitems with wrap-around, Home/End jump to ends, Tab/Shift+Tab
-      // moves focus out of the menu and closes it.
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        closeContextMenu();
-        return;
-      }
-      if (e.key === 'Tab') {
-        // WAI-ARIA menu: Tab leaves the menu and closes it (a modal menu
-        // would trap focus, but `role="menu"` is a non-modal popover).
-        // Don't preventDefault — let the browser move focus normally.
-        closeContextMenu();
-        return;
-      }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setActiveIndex((i) => {
-          const next = (i + 1) % itemCountRef.current;
-          menuItemRefs.current[next]?.focus();
-          return next;
-        });
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setActiveIndex((i) => {
-          const next = (i - 1 + itemCountRef.current) % itemCountRef.current;
-          menuItemRefs.current[next]?.focus();
-          return next;
-        });
-        return;
-      }
-      if (e.key === 'Home') {
-        e.preventDefault();
-        setActiveIndex(0);
-        menuItemRefs.current[0]?.focus();
-        return;
-      }
-      if (e.key === 'End') {
-        e.preventDefault();
-        const last = itemCountRef.current - 1;
-        setActiveIndex(last);
-        menuItemRefs.current[last]?.focus();
-        return;
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [contextMenu]);
+  // Issue #837 — the WAI-ARIA keyboard handler + auto-focus on open
+  // are now the shared `useAriaMenu` hook (#837). The hook attaches
+  // the document-level keydown listener only while `enabled` is true
+  // (gated on `contextMenu` being open) and re-runs the auto-focus
+  // layout effect on every open flip — so `closeContextMenu()`'s
+  // trigger-focus return is the only thing left here.
+  useAriaMenu({
+    rootRef: menuRef,
+    itemCount,
+    activeIndex,
+    setActiveIndex,
+    onClose: closeContextMenu,
+    enabled: !!contextMenu,
+  });
 
   // Issue #814 — outside-mousedown close goes through the shared
   // `useClickOutside` hook. `mesh.id` scopes the selector so two
@@ -262,6 +208,13 @@ export function MeshItem({
   // read its rendered size; pushes the position back into state if it
   // would overflow the right or bottom edge. `useLayoutEffect` keeps the
   // adjustment off-screen so the user never sees the over-large position.
+  //
+  // Issue #837 — this `setState` repositioning shape is OUT OF SCOPE for
+  // the shared `useViewportClamp` hook (which only handles `translateY`).
+  // The MeshItem context menu is anchored at the right-click point
+  // (not at a trigger), so a `transform` doesn't help — we need to
+  // rewrite the `{x, y}` state object. Leaving it alone keeps the
+  // behaviour identical to pre-#837.
   useLayoutEffect(() => {
     if (!contextMenu) return;
     const el = menuRef.current;
@@ -283,17 +236,6 @@ export function MeshItem({
     if (nextX === contextMenu.x && nextY === contextMenu.y) return;
     setContextMenu({ x: nextX, y: nextY });
   }, [contextMenu]);
-
-  // Issue #735 — on open, reset the roving index and move focus to the
-  // first menuitem so keyboard nav starts somewhere. `useLayoutEffect`
-  // (not `useEffect` + setTimeout) — the layout effect fires synchronously
-  // after the menu commits, so subsequent arrow-key presses don't race
-  // against a deferred focus call clobbering them.
-  useLayoutEffect(() => {
-    if (!contextMenu) return;
-    setActiveIndex(0);
-    menuItemRefs.current[0]?.focus();
-  }, [contextMenu !== null]);
 
   return (
     <div ref={setNodeRef} style={style} className="mb-1 group/mesh">
@@ -457,7 +399,6 @@ export function MeshItem({
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button
-            ref={(el) => { menuItemRefs.current[0] = el; }}
             // Roving tabindex — only the active item is in the Tab order.
             role="menuitem"
             tabIndex={activeIndex === 0 ? 0 : -1}
@@ -471,7 +412,6 @@ export function MeshItem({
             Properties
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[1] = el; }}
             role="menuitem"
             tabIndex={activeIndex === 1 ? 0 : -1}
             onClick={() => { closeContextMenu(); onOpenFilesProbe(); }}
@@ -483,7 +423,6 @@ export function MeshItem({
             File Explorer
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[2] = el; }}
             role="menuitem"
             tabIndex={activeIndex === 2 ? 0 : -1}
             onClick={() => { closeContextMenu(); handleSync(); }}
@@ -499,7 +438,6 @@ export function MeshItem({
             {syncing ? 'Syncing...' : 'Sync Latest'}
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[3] = el; }}
             role="menuitem"
             tabIndex={activeIndex === 3 ? 0 : -1}
             onClick={() => { closeContextMenu(); onOpenSessionHistoryProbe(mesh.id); }}
@@ -513,7 +451,6 @@ export function MeshItem({
             Archive
           </button>
           <button
-            ref={(el) => { menuItemRefs.current[4] = el; }}
             role="menuitem"
             tabIndex={activeIndex === 4 ? 0 : -1}
             onClick={() => { closeContextMenu(); onOpenIssuesProbe(mesh.id); }}
@@ -537,7 +474,6 @@ export function MeshItem({
               explicit capability we don't grant). */}
           {githubUrl && (
             <button
-              ref={(el) => { menuItemRefs.current[5] = el; }}
               role="menuitem"
               tabIndex={activeIndex === 5 ? 0 : -1}
               onClick={() => {

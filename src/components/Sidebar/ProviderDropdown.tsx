@@ -1,7 +1,8 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useRef } from 'react';
 import { GroupedProviderMenu } from '../Providers/GroupedProviderMenu';
 import { SafeLink } from '../shared/SafeLink';
 import { hasSpawnableAgent, type SpawnOption } from '../../lib/groups';
+import { useViewportClamp } from '../../hooks/useViewportClamp';
 
 // `SpawnOption` is the frontend view of the Spawn Option wire shape
 // (issue #583) — produced by `mapBackendProviders` and consumed by the
@@ -60,40 +61,22 @@ export function ProviderDropdown({ meshId, providers, onSelect, onClose, menuId 
   const noAgent = !hasSpawnableAgent(providers);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Issue #814 — viewport clamping. The menu sits `absolute right-0 top-full
-  // mt-1` so it can overflow the bottom edge of the sidebar when the trigger
-  // lives near the bottom of a long mesh list. `useLayoutEffect` (not
-  // `useEffect`) reads the rendered height BEFORE the browser paints, so
-  // the user never sees the overflow position. If the menu's bottom edge
-  // would push past the viewport, we shift the menu up via a CSS
-  // `translateY` — keeping the existing `top-full mt-1` anchor intact so
-  // the close animation doesn't have to re-layout a repositioned popover.
+  // Issue #837 — viewport clamping is now the shared `useViewportClamp`
+  // hook (mirrors `BuildRunDropdown.tsx`). The menu sits `absolute
+  // right-0 top-full mt-1` so it can overflow the bottom edge of the
+  // sidebar when the trigger lives near the bottom of a long mesh list.
+  // The hook reads the rendered height BEFORE the browser paints (via
+  // `useLayoutEffect` internally) and applies `translateY(-shift)` to
+  // pull the menu up if it would overflow — keeping the existing
+  // `top-full mt-1` anchor intact so the close animation doesn't have
+  // to re-layout a repositioned popover.
   //
-  // `transform: translateY(-shift)` is applied as an inline style; the
-  // cleanup resets it so a remount starts from the unclamped position
-  // (the parent's `animate-scale-in` runs every open, so a stale transform
-  // would clip the opening frame).
-  useLayoutEffect(() => {
-    const menu = menuRef.current;
-    if (!menu) return;
-    const rect = menu.getBoundingClientRect();
-    const vh = window.innerHeight;
-    const MARGIN = 4;
-    const overflow = rect.bottom - (vh - MARGIN);
-    if (overflow <= 0) return;
-    // Bound the shift by the space ABOVE the menu's current top so the
-    // shifted-up top doesn't land at a negative y. The `maxShift` is
-    // `rect.top - MARGIN` (not `rect.top - rect.height - MARGIN` — that
-    // would double-subtract the menu's own height and produce too small
-    // a cap, leaving the menu still overflowing).
-    const maxShift = Math.max(0, rect.top - MARGIN);
-    const shift = Math.min(overflow, maxShift);
-    if (shift <= 0) return;
-    menu.style.transform = `translateY(-${shift}px)`;
-    return () => {
-      menu.style.transform = '';
-    };
-  }, [providers]);
+  // `deps: [providers]` — `ProviderDropdown` has no `isOpen` boolean
+  // (it's rendered only while its parent dropdown is open, so the
+  // parent owns the open lifecycle). The provider list is the right
+  // gate: re-measure when the rendered content changes (e.g. an
+  // archived-resume filter that drops proxied children).
+  useViewportClamp(menuRef, [providers]);
   return (
     <div
       ref={menuRef}

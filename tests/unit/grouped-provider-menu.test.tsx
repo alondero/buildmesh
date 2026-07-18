@@ -207,48 +207,23 @@ describe('GroupedProviderMenu — WAI-ARIA menu semantics (issue #814)', () => {
   });
 
   it('auto-focuses the first menuitem on mount so keyboard nav has a starting point', () => {
+    // Issue #837 — the keyboard nav cycle (ArrowDown/Up wrap, Home/End
+    // jump), the focus-gate (ignore keystrokes when focus is outside),
+    // and the Tab-close behaviour are all covered by the hook tests in
+    // `tests/unit/use-aria-menu.test.tsx`. This smoke stays because
+    // it's the per-component wiring assertion: a regression that
+    // swapped the hook for a no-op would flip this.
     render(<GroupedProviderMenu providers={PROVIDERS} onSelect={() => {}} />);
     // The first menuitem receives document focus synchronously after
-    // the menu commits (via useLayoutEffect). Reading document.activeElement
-    // is the right shape for jsdom (the menuitem has been focused).
+    // the menu commits (via useLayoutEffect inside the hook).
     const firstItem = screen.getAllByRole('menuitem')[0];
     expect(document.activeElement).toBe(firstItem);
   });
 
-  it('moves focus to the next menuitem on ArrowDown with wrap-around', () => {
-    render(<GroupedProviderMenu providers={PROVIDERS} onSelect={() => {}} />);
-    const items = screen.getAllByRole('menuitem');
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(items[1]);
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(items[2]);
-    // Wrap-around: ArrowDown from the last item loops to the first.
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowDown' });
-    expect(document.activeElement).toBe(items[0]);
-  });
-
-  it('moves focus to the previous menuitem on ArrowUp with wrap-around', () => {
-    render(<GroupedProviderMenu providers={PROVIDERS} onSelect={() => {}} />);
-    const items = screen.getAllByRole('menuitem');
-    // From the first (auto-focused) item, ArrowUp wraps to the last.
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowUp' });
-    expect(document.activeElement).toBe(items[2]);
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowUp' });
-    expect(document.activeElement).toBe(items[1]);
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowUp' });
-    expect(document.activeElement).toBe(items[0]);
-  });
-
-  it('Home and End jump focus to the first and last menuitems', () => {
-    render(<GroupedProviderMenu providers={PROVIDERS} onSelect={() => {}} />);
-    const items = screen.getAllByRole('menuitem');
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'End' });
-    expect(document.activeElement).toBe(items[2]);
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Home' });
-    expect(document.activeElement).toBe(items[0]);
-  });
-
   it('invokes onClose on Escape (the parent flips its isOpen to false)', () => {
+    // Issue #837 — same wiring-smoke rationale as the auto-focus test
+    // above. The hook's `onClose` dispatch is covered in `use-aria-menu.test.tsx`;
+    // this proves the component wires its `onClose` prop into the hook.
     const onClose = vi.fn();
     render(
       <GroupedProviderMenu providers={PROVIDERS} onSelect={() => {}} onClose={onClose} />,
@@ -259,29 +234,13 @@ describe('GroupedProviderMenu — WAI-ARIA menu semantics (issue #814)', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('ignores arrow / Escape keys when focus is outside the menu', () => {
-    const onClose = vi.fn();
-    render(
-      <div>
-        <button data-testid="outside">outside</button>
-        <GroupedProviderMenu providers={PROVIDERS} onSelect={() => {}} onClose={onClose} />
-      </div>,
-    );
-    // Move focus to the outside button — the menu's keyboard handler
-    // gates on `menuRef.current.contains(document.activeElement)` and
-    // should bail out.
-    const outside = screen.getByTestId('outside');
-    outside.focus();
-    fireEvent.keyDown(outside, { key: 'Escape' });
-    expect(onClose).not.toHaveBeenCalled();
-  });
-
   it('updates the roving tabindex as focus moves so only the active item is in the Tab order', () => {
+    // Single ArrowDown smoke — proves the hook's `setActiveIndex` is
+    // wired into GroupedProviderMenu's render. The wrap-cycle is
+    // covered by the hook tests.
     render(<GroupedProviderMenu providers={PROVIDERS} onSelect={() => {}} />);
     const items = screen.getAllByRole('menuitem');
     fireEvent.keyDown(document.activeElement ?? document.body, { key: 'ArrowDown' });
-    // After ArrowDown, index 1 is the active item; index 0 + 2 should
-    // fall back to tabIndex=-1.
     expect(items[0].tabIndex).toBe(-1);
     expect(items[1].tabIndex).toBe(0);
     expect(items[2].tabIndex).toBe(-1);

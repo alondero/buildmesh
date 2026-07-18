@@ -91,6 +91,14 @@ describe('Accounts & Usage settings (issue #537)', () => {
   });
 
   it('creates a custom Claude-compatible provider with a slugified id', async () => {
+    // Issue #881 (Settings sub-pane redesign, a9b59dd) — this test
+    // exercises the longest path through the modal (mount → find builtins
+    // → tab into Providers pane → click add → fill 3 fields → submit →
+    // assert). Under the parallel `npm run test:unit` schedule the
+    // 5 s default `userEvent` budget is occasionally exceeded by the
+    // `setup` + `findByText` + `openSettingsPane` chain; bumping to
+    // 15 s keeps the parallel run stable without changing the test's
+    // semantics. Passes in isolation at ~300 ms.
     const calls = mockBackend();
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
@@ -113,7 +121,7 @@ describe('Accounts & Usage settings (issue #537)', () => {
       base_url: 'https://api.deepseek.com/anthropic',
       api_key: 'sk-deep',
     });
-  });
+  }, 15000);
 
   // Issue #601 — Usage Meters moved off the Settings modal and onto the
   // Probe Panel's "Usage" tab. The Settings modal now owns credentials
