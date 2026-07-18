@@ -10,6 +10,26 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 
+// Issue #647: `agentNodeStore.deleteAgentNode` disposes the xterm terminal
+// BEFORE the `delete_agent_node` IPC commits. On failure the restored row
+// re-mounts an xterm bound to a dead PTY (the agent was already killed by
+// the warn-only `kill_agent` path), so the user sees a blank terminal +
+// a dead agent and has to click × again. Mock the dispose seam here so the
+// test can pin both:
+//   - "dispose runs AFTER delete_agent_node resolves successfully"
+//   - "dispose does NOT run if delete_agent_node rejects" (terminal stays
+//      live so the restored row can re-attach with its scrollback).
+// `Terminal.tsx` is a React component, so we mock it as a module — only
+// `disposeTerminal` is exercised here.
+vi.mock('../../src/components/Terminal/Terminal', () => ({
+  disposeTerminal: vi.fn(),
+  AgentTerminal: () => null,
+}));
+
+import { disposeTerminal } from '../../src/components/Terminal/Terminal';
+
+const mockDisposeTerminal = disposeTerminal as ReturnType<typeof vi.fn>;
+
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 const mockEmit = emit as ReturnType<typeof vi.fn>;
 
@@ -547,6 +567,86 @@ describe('useAgentNodeStore', () => {
       ).rejects.toThrow('db locked');
 
       expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
+    });
+
+    // Issue #647: `disposeTerminal(id)` ran BEFORE `delete_agent_node` was
+    // awaited, so on rejection the restored row re-mounted an xterm bound to
+    // a dead PTY (the agent was already killed by the warn-only `kill_agent`
+    // path). The terminal must outlive a failed delete so the user can
+    // retry the close without losing scrollback. The fix moves
+    // `disposeTerminal(id)` to AFTER the success path; on rejection it
+    // must NOT run at all.
+    it('does NOT dispose the terminal when delete_agent_node rejects (#647)', async () => {
+      const node = makeNode({ id: 45 });
+      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 45 });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') return Promise.resolve(makeSafety());
+        if (cmd === 'delete_agent_node') return Promise.reject(new Error('db locked'));
+        return Promise.resolve(undefined);
+      });
+
+      await expect(
+        useAgentNodeStore.getState().deleteAgentNode(45)
+      ).rejects.toThrow('db locked');
+
+      // The row is restored (issue #645 invariant) AND the terminal lives —
+      // so a re-mount sees its scrollback + a usable PTY, not a blank
+      // terminal bound to a dead agent.
+      expect(useAgentNodeStore.getState().agentNodes).toEqual([node]);
+      expect(mockDisposeTerminal).not.toHaveBeenCalled();
+    });
+
+    it('disposes the terminal AFTER delete_agent_node resolves successfully (#647)', async () => {
+      // On the happy path the row IS gone for good, so the terminal must
+      // still dispose — just after the IPC commits rather than before. Use
+      // a controlled `delete_agent_node` promise so we can observe the
+      // ordering against the store's optimistic remove + the IPC call.
+      const node = makeNode({ id: 46 });
+      useAgentNodeStore.setState({ agentNodes: [node], activeNodeId: 46 });
+      const callOrder: string[] = [];
+      let resolveDelete!: () => void;
+      const deletePending = new Promise<void>((r) => { resolveDelete = r; });
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_worktree_close_safety') {
+          return Promise.resolve(makeSafety());
+        }
+        if (cmd === 'kill_agent') {
+          return Promise.resolve(undefined);
+        }
+        if (cmd === 'delete_agent_node') {
+          callOrder.push('delete_agent_node:invoked');
+          return deletePending.then(() => {
+            callOrder.push('delete_agent_node:resolved');
+          });
+        }
+        return Promise.resolve(undefined);
+      });
+      mockDisposeTerminal.mockImplementation(() => {
+        callOrder.push('disposeTerminal');
+      });
+
+      const closePromise = useAgentNodeStore.getState().deleteAgentNode(46);
+
+      // Optimistic remove happens before the IPC resolves (already covered
+      // by the prior 'removes the node from the UI before the worktree
+      // cleanup resolves' test), but the terminal must NOT be disposed yet —
+      // the IPC has been invoked but not resolved.
+      await vi.waitFor(() => {
+        expect(useAgentNodeStore.getState().agentNodes).toHaveLength(0);
+      });
+      expect(mockDisposeTerminal).not.toHaveBeenCalled();
+
+      resolveDelete();
+      await closePromise;
+
+      // After success: terminal is disposed, AND it ran strictly AFTER the
+      // IPC resolved (not before the optimistic remove, which is the old
+      // ordering the bug report calls out).
+      expect(mockDisposeTerminal).toHaveBeenCalledTimes(1);
+      expect(mockDisposeTerminal).toHaveBeenCalledWith(46);
+      const disposeIdx = callOrder.indexOf('disposeTerminal');
+      const resolveIdx = callOrder.indexOf('delete_agent_node:resolved');
+      expect(disposeIdx).toBeGreaterThan(resolveIdx);
     });
 
     // Regression for #644 — pins the user-visible "stuck row" symptom.
