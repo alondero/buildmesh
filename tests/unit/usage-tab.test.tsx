@@ -393,16 +393,11 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
 
       const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
       await user.click(screen.getByRole('button', { name: /refresh usage/i }));
-      // The IPC rejection drives `setError(...)` — we have to
-      // resolve the pending promise BEFORE the indicator assertions
-      // can settle, otherwise the assertions race against the still-
-      // pending IPC. Note the existing UI surfaces the error in TWO
-      // places (the inline banner at the top of the tab body AND the
-      // body's `<ErrorState>`), so we use `findAllByText` and assert
-      // presence-not-uniqueness. Adding a follow-up to consolidate
-      // those would be out of scope for the indicator work.
+      // The IPC rejection drives `setError(...)` — we have to resolve the
+      // pending promise BEFORE the indicator assertions can settle,
+      // otherwise they race against the still-pending IPC.
       rejectRefresh(new Error('backend gone'));
-      await screen.findAllByText(/backend gone/i);
+      await screen.findByText(/backend gone/i);
 
       // Indicator stays at "5m ago" — lastRefreshedAt was not advanced.
       expect(screen.queryByText(/Refreshed 5m ago/)).toBeTruthy();
@@ -434,6 +429,45 @@ describe('UsageTab (issue #601 ProbePanel usage tab)', () => {
       captured?.({ payload: undefined });
 
       await screen.findByText(/Refreshed just now/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Issue #857 — IPC-error UI must render the error message EXACTLY once
+  // (a single `<ErrorState>` in the body), not twice via the now-removed
+  // inline alert banner above the rows region. `getAllByText` returns the
+  // matching nodes; asserting length === 1 pins the de-duplicated behaviour
+  // and catches a regression that reintroduces either copy of the message.
+  it('renders exactly one error element on a forced-refresh rejection after rows have loaded', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-07-17T14:23:00Z'));
+      mockBackend();
+      render(<UsageTab />);
+      await screen.findByText(/Refreshed just now/);
+
+      let rejectRefresh!: (err: Error) => void;
+      const refreshPending = new Promise<ProviderMeters[]>((_res, rej) => { rejectRefresh = rej; });
+      vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+        const a = args as { forceRefresh?: boolean } | undefined;
+        if (cmd === 'get_provider_meters') {
+          if (a?.forceRefresh === true) return refreshPending;
+          return Promise.resolve([]);
+        }
+        if (cmd === 'get_provider_accounts') return Promise.resolve(builtinAccounts());
+        return Promise.resolve({});
+      });
+
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+      await user.click(screen.getByRole('button', { name: /refresh usage/i }));
+      rejectRefresh(new Error('backend gone'));
+
+      // Body shows the standard `<ErrorState>` …
+      await screen.findByText(/backend gone/i);
+      expect(screen.getAllByText(/backend gone/i)).toHaveLength(1);
+      // … and no stray inline alert banner sits between the header and the rows.
+      expect(screen.queryAllByRole('alert')).toHaveLength(1);
     } finally {
       vi.useRealTimers();
     }
