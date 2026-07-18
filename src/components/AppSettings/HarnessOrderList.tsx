@@ -1,6 +1,14 @@
-import { DndContext, type DragEndEvent } from '@dnd-kit/core';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
 import {
   SortableContext,
+  sortableKeyboardCoordinates,
   verticalListSortingStrategy,
   useSortable,
   arrayMove,
@@ -54,9 +62,20 @@ function HarnessRow({ provider }: { provider: ProviderInfo }) {
       <span
         {...attributes}
         {...listeners}
-        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none"
-        title="Drag to reorder"
+        // Issue #727 — make the grab handle focusable so the
+        // KeyboardSensor can pick it up. dnd-kit's `attributes`
+        // spread already injects `role="button"` + `tabIndex={0}`
+        // + `aria-pressed` (the drag-active toggle); we override
+        // `aria-roledescription` to "sortable" (dnd-kit's default
+        // is "draggable", which doesn't tell assistive tech this
+        // row is a positional list item that can be reordered).
+        // The `aria-label` gives it a screen-reader friendly name.
+        tabIndex={0}
+        role="button"
+        aria-roledescription="sortable"
         aria-label={`Reorder ${provider.label}`}
+        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm"
+        title="Drag to reorder"
       >
         ⋮⋮
       </span>
@@ -90,8 +109,22 @@ export function HarnessOrderList({
     onReorder(next);
   };
 
+  // Issue #727 — register KeyboardSensor alongside the default
+  // PointerSensor so the harness-reorder drag handle is operable from
+  // the keyboard. `sortableKeyboardCoordinates` (from `@dnd-kit/sortable`)
+  // walks the active row across siblings on ArrowUp/Down — the generic
+  // defaultCoordinateGetter would translate freely, which doesn't fit a
+  // vertical list. Space picks up the focused handle, Enter picks it
+  // up too, Arrow keys move, Escape drops the item back where it
+  // started. No options on PointerSensor — matches the dnd-kit default
+  // sensor set so existing pointer behaviour is unchanged.
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
   return (
-    <DndContext onDragEnd={handleDragEnd}>
+    <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
       <SortableContext items={rows.map(p => p.id)} strategy={verticalListSortingStrategy}>
         <div className="space-y-2">
           {rows.map(p => (
