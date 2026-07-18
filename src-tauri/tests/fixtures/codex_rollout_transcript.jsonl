@@ -1,0 +1,9 @@
+{"type":"session_meta","payload":{"id":"c1234567-89ab-cdef-0123-456789abcdef","cwd":"F:\\src\\buildmesh","timestamp":"2026-07-18T10:00:00Z","cli_version":"0.144.0"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Search the directory for TypeScript files."}]}}
+{"type":"event_msg","payload":{"type":"function_call","name":"shell","arguments":{"command":"dir /s /b *.ts"},"call_id":"call_01"}}
+{"type":"event_msg","payload":{"type":"function_call_output","call_id":"call_01","output":"F:\\src\\buildmesh\\src\\index.ts\nF:\\src\\buildmesh\\src\\login.ts"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I found the following TypeScript files:\n- src/index.ts\n- src/login.ts\n\nWould you like me to inspect src/login.ts?"}]}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Yes, please check the login.ts file for any bugs."}]}}
+{"type":"event_msg","payload":{"type":"function_call","name":"read_file","arguments":{"file_path":"src/login.ts"},"call_id":"call_02"}}
+{"type":"event_msg","payload":{"type":"function_call_output","call_id":"call_02","output":"export function login(user: string) {\n  console.log('Logging in user: ' + user);\n}"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The file looks good. I don't see any bugs."}]}}
