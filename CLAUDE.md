@@ -10,7 +10,7 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 
 ## Hard rules — cause real breakage, do not violate
 - **Never** call `.dispose()` on an xterm.js terminal unless the agent node is deleted → permanent terminal blanking. `TerminalManager` is a singleton; instances survive React remounts.
-- **Never** pass Linux/WSL paths to Windows-side APIs. Convert via `env::to_host_path` (`src-tauri/src/env/mod.rs`); build `\\wsl$\` paths only inside that module.
+- **Never** pass Linux/WSL paths to Windows-side APIs. Convert via `env::to_host_path` (in `src-tauri/src/env/host_path.rs`, the `HostPath` sub-module); build `\\wsl$\` paths only inside that **module** (`HostPath`).
 - **Never** lock the DB mutex in nested calls → deadlock. Use `_inner(&Connection)` helpers; public fns lock once and pass the connection through (`src-tauri/src/db/mod.rs`).
 - Don't replicate PTY-side `session-id` capture or node auto-naming — backend-only (`session_naming.rs`).
 - New `#[command]` Tauri commands must be added to the `lib.rs` handler list, or they fail with "command not found" at runtime.
