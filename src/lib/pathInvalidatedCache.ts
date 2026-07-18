@@ -39,13 +39,15 @@
  *   invoke when the bus reports a match.
  * - On a `GIT_CHANGED` event, the listener iterates `pathSubscribers` and
  *   uses `pathMatchesGitEvent` to find matches. For each matched subscriber
- *   it calls **that subscriber's owning client's handler** (via
- *   `busHandlers.get(sub.clientId)`), not a global "invalidate every key in
- *   every client" sweep.
+ *   it calls **that subscriber's owning client's handler** (via the
+ *   per-variant handler maps — `keyedBusHandlers.get(sub.clientId)` or
+ *   `callbackBusHandlers.get(sub.clientId)` — keyed on the `kind`
+ *   discriminator), not a global "invalidate every key in every client"
+ *   sweep.
  * - The callback-only subscribers from `subscribeGitPathInvalidation` share
  *   a single `NOOP_CLIENT_ID` + stateless handler (`sub.notify()`), so
  *   they ride the same dispatch without per-callback entries in
- *   `busHandlers`.
+ *   `callbackBusHandlers`.
  *
  * Why the clientId-scoped dispatch matters (Footgun 1)
  * ----------------------------------------------------
@@ -76,14 +78,15 @@ import { pathMatchesGitEvent } from './paths';
 
 // Single shared clientId for all "callback-only" subscribers (see
 // `subscribeGitPathInvalidation` below). The handler registered for it is
-// stateless — it just calls `sub.notify()` — so one entry in `busHandlers`
-// serves every such caller. Generating a fresh symbol per call would be
-// functionally equivalent but would bloat `busHandlers` for no benefit.
+// stateless — it just calls `sub.notify()` — so one entry in
+// `callbackBusHandlers` serves every such caller. Generating a fresh
+// symbol per call would be functionally equivalent but would bloat
+// `callbackBusHandlers` for no benefit.
 const NOOP_CLIENT_ID = Symbol('subscribeGitPathInvalidation');
 // Stateless: dispatches to whichever subscriber the bus matched, regardless
 // of which `subscribeGitPathInvalidation` call added it. Hoisted to a const
-// so we register the SAME function reference in `busHandlers` on every call
-// (no fresh arrow allocation per component mount).
+// so we register the SAME function reference in `callbackBusHandlers` on
+// every call (no fresh arrow allocation per component mount).
 const NOOP_HANDLER: CallbackBusHandler = (sub) => sub.notify();
 
 // ------------------------------------------------------------------
@@ -213,13 +216,17 @@ type CallbackBusHandler = (sub: CallbackPathSubscriber) => void;
 // `subscribeGitPathInvalidation` callback-only API.
 // ------------------------------------------------------------------
 const pathSubscribers = new Map<string, Set<PathSubscriber>>();
-// `busHandlers` stores both keyed and callback handlers behind a single
-// `symbol` key. The bus dispatch calls whichever the subscriber's
-// `clientId` maps to. The value type widens to `KeyedBusHandler<any>` so
-// factories parameterised on any `K` can register without contravariance
-// complaints — the call site still narrows via the subscriber's `kind`
-// discriminator (issue #355).
-const busHandlers = new Map<symbol, KeyedBusHandler<any> | CallbackBusHandler>();
+// Per-variant handler maps. Splitting keyed vs callback lets each bus
+// dispatch do a single, well-typed lookup — `busHandlers.get(...)` on a
+// single mixed map would return `KeyedBusHandler<any> | CallbackBusHandler`
+// and force the dispatch to cast (`(handler as CallbackBusHandler)(sub)`),
+// because TypeScript can't narrow a map lookup from a sibling
+// discriminator. Two maps = two monomorphic lookups, no casts. The
+// subscriber's `kind` field still narrows the SUBSCRIBER (so `sub.key` is
+// always defined inside a keyed handler); the lookup-side narrowing is
+// what this split fixes. Issue #355.
+const keyedBusHandlers = new Map<symbol, KeyedBusHandler<any>>();
+const callbackBusHandlers = new Map<symbol, CallbackBusHandler>();
 let listenerInstalled = false;
 
 // Test-only: every client registers a closure that clears its own `cache` +
@@ -244,15 +251,13 @@ function installListener(): void {
       // subscriber. The first notify for a given (client, key) starts a
       // fetch that subsequent sibling subscribers dedup onto.
       for (const sub of subs) {
-        const handler = busHandlers.get(sub.clientId);
-        if (!handler) continue;
-        // The `kind` tag narrows to the right handler signature. Without
-        // it the union of `KeyedBusHandler<unknown> | CallbackBusHandler`
-        // is not callable without a cast (issue #355).
         if (isCallbackSubscriber(sub)) {
-          (handler as CallbackBusHandler)(sub);
+          // Single, monomorphic map lookup — no cast needed (issue #355).
+          const handler = callbackBusHandlers.get(sub.clientId);
+          if (handler) handler(sub);
         } else {
-          (handler as KeyedBusHandler<unknown>)(sub);
+          const handler = keyedBusHandlers.get(sub.clientId);
+          if (handler) handler(sub);
         }
       }
     }
@@ -263,28 +268,35 @@ function installListener(): void {
  * Test-only: clears all module-level state so each test can re-import and
  * start with a clean bus. The hook tests also use `vi.resetModules()` so
  * the freshly-imported module's `createPathKeyedCache` /
- * `createDualKeyCache` call gets a fresh `busHandlers` entry on top of this
- * cleared global state.
+ * `createDualKeyCache` call gets a fresh entry on top of this cleared
+ * global state.
  */
 export function resetPathInvalidatedCacheForTests(): void {
   pathSubscribers.clear();
-  busHandlers.clear();
+  keyedBusHandlers.clear();
+  callbackBusHandlers.clear();
   listenerInstalled = false;
   clientCacheResets.forEach((reset) => reset());
 }
 
 /**
- * Idempotently registers a bus handler for `clientId`. Called on every
- * `subscribe` (and on every factory call) so the bus keeps working after
- * `resetPathInvalidatedCacheForTests` wipes `busHandlers` between tests.
- * Issue #356: the contract used to be stated in three different comments;
- * it now lives once here.
+ * Idempotently registers a keyed bus handler for `clientId`. Called on
+ * every `subscribe` (and on every factory call) so the bus keeps working
+ * after `resetPathInvalidatedCacheForTests` wipes `keyedBusHandlers`
+ * between tests. Issue #355 split this from the callback variant so the
+ * dispatch-side lookup is monomorphic (no union cast).
  */
-function registerBusHandler(
-  clientId: symbol,
-  handler: KeyedBusHandler<any> | CallbackBusHandler,
-): void {
-  busHandlers.set(clientId, handler);
+function registerKeyedBusHandler(clientId: symbol, handler: KeyedBusHandler<any>): void {
+  keyedBusHandlers.set(clientId, handler);
+}
+
+/**
+ * Idempotently registers a callback bus handler for `clientId`. Same
+ * contract as `registerKeyedBusHandler` — split by variant so the bus
+ * dispatch lookup returns the right shape (issue #355).
+ */
+function registerCallbackBusHandler(clientId: symbol, handler: CallbackBusHandler): void {
+  callbackBusHandlers.set(clientId, handler);
 }
 
 /**
@@ -510,10 +522,10 @@ function createInternalClient<K, V>(
     },
 
     subscribeOn(key, path, onInvalidate) {
-      // Re-register the handler (idempotent — see `registerBusHandler`)
+      // Re-register the handler (idempotent — see `registerKeyedBusHandler`)
       // and install the global listener. Then add the subscriber via the
       // shared helper. Issue #356.
-      registerBusHandler(clientId, handler);
+      registerKeyedBusHandler(clientId, handler);
       installListener();
       const sub: KeyedPathSubscriber<K> = { kind: 'keyed', clientId, key, notify: onInvalidate };
       return addPathSubscriber(sub, path);
@@ -623,9 +635,10 @@ export function subscribeGitPathInvalidation(
   installListener();
   // The noop handler is stateless and shared across every
   // `subscribeGitPathInvalidation` caller. The re-register call
-  // (idempotent — see `registerBusHandler`) keeps the bus working after
-  // `resetPathInvalidatedCacheForTests` wipes `busHandlers` between tests.
-  registerBusHandler(NOOP_CLIENT_ID, NOOP_HANDLER);
+  // (idempotent — see `registerCallbackBusHandler`) keeps the bus working
+  // after `resetPathInvalidatedCacheForTests` wipes `callbackBusHandlers`
+  // between tests.
+  registerCallbackBusHandler(NOOP_CLIENT_ID, NOOP_HANDLER);
   const sub: CallbackPathSubscriber = { kind: 'callback', clientId: NOOP_CLIENT_ID, notify: cb };
   return addPathSubscriber(sub, path);
 }
