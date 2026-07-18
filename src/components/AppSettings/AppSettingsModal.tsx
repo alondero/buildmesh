@@ -573,6 +573,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // Revoke a paired device: optimistically drop it from the list, then call the
   // backend (which deletes the row and force-closes any live socket it holds).
   // Roll back on failure so the list never lies about what's still authorized.
+  // After a successful revoke, re-fetch the list so the panel stays authoritative
+  // — a device may have re-paired, or `last_active_at` may have ticked up, while
+  // the user was staring at the modal (issue #595). The refresh is best-effort:
+  // a list-fetch failure after a successful revoke must NOT roll back the row,
+  // because the revoke did happen — re-showing it would be a worse lie than
+  // briefly stale metadata. Mirrors `refreshNetworkStatus`'s pattern (#586).
   const handleRevokeDevice = async (id: number) => {
     const previous = devices;
     setConfirmingRevokeId(null);
@@ -581,6 +587,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     setDevices(prev => prev.filter(d => d.id !== id));
     try {
       await api.revokeDeviceSession(id);
+      try {
+        setDevices(await api.listDeviceSessions());
+      } catch (refreshErr) {
+        console.error('Failed to refresh device list after revoke:', refreshErr);
+      }
     } catch (e) {
       setDevices(previous);
       setError(formatError(e));
