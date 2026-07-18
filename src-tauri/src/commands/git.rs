@@ -516,7 +516,7 @@ fn sync_outcome_to_git_sync_result(
             new_commits,
             // Distinct wording from `FetchedButDiverged` so the user can
             // tell a network hang apart from a real history divergence
-            // (issue #762 review). The 5-min `FETCH_TIMEOUT` cap is what
+            // (issue #762 review). The 5-min `MANUAL_FETCH_TIMEOUT` cap is what
             // surfaced this; pre-#762 the pull path could only fail via
             // spawn-error or non-zero-exit.
             message: format!(

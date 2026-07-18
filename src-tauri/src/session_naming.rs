@@ -700,20 +700,18 @@ pub fn on_output(node_id: i64, data: &str) {
 /// and the actual rename fires on a later turn against clean post-startup content.
 ///
 /// Returns a [`RenameTrigger`] (not just the buffer) so the caller can
-/// resolve the naming-side-channel env from the node's own `provider` field
-/// without re-querying the DB. Sharing the read keeps the per-turn cost to
-/// one `get_agent_node_by_id` call (issue #824 review: previously the call
-/// happened twice per turn — once in `should_trigger_rename` for the
-/// default-name check, once in `on_turn_with` for the provider — see commit
-/// log for the review write-up).
+/// see what was harvested. The actual LLM-call backend is resolved in
+/// `on_turn_with` from `AppPreferences.naming_provider` (issue #824 v2),
+/// so the trigger no longer carries the node's `provider` — sharing the
+/// node read here keeps the per-turn cost to one `get_agent_node_by_id`
+/// call.
 fn should_trigger_rename(
     repo: &dyn SessionNamingRepository,
     node_id: i64,
 ) -> Option<RenameTrigger> {
-    // Single DB read, hoisted above both the default-name check and the
-    // provider passback. An Err here is non-fatal (default-name bypass
-    // falls through; provider default to "" so `naming_backend_env` falls
-    // back to the legacy-MiniMax probe).
+    // Single DB read, hoisted above the default-name check. An Err here
+    // is non-fatal: default-name bypass falls through, the trigger is
+    // skipped, and the next turn retries.
     let node = repo.get_agent_node_by_id(node_id).ok();
     if let Some(ref n) = node {
         if !is_default_name(&n.name) {
@@ -764,18 +762,15 @@ fn should_trigger_rename(
 
     Some(RenameTrigger {
         buffer: st.buffer.clone(),
-        provider: node.map(|n| n.provider).unwrap_or_default(),
     })
 }
 
 /// Bundle returned by [`should_trigger_rename`] when a rename fires:
-/// the harvested PTY buffer plus the node's `provider` (spawn-option id
-/// used by [`naming_backend_env`] to resolve the LLM-call env). Keeping
-/// these together in one struct avoids the double-read issue called out
-/// in the #824 code review.
+/// the harvested PTY buffer. The LLM-call backend is resolved in
+/// `on_turn_with` from `AppPreferences.naming_provider` (issue #824 v2),
+/// so the trigger no longer carries the node's `provider`.
 struct RenameTrigger {
     buffer: String,
-    provider: String,
 }
 
 /// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
@@ -798,7 +793,7 @@ fn on_turn_with(repo: &dyn SessionNamingRepository, node_id: i64, app: AppHandle
     let Some(trigger) = should_trigger_rename(repo, node_id) else {
         return;
     };
-    let RenameTrigger { buffer, provider: _ } = trigger;
+    let RenameTrigger { buffer } = trigger;
 
     tracing::info!("session_naming: triggering rename for node {} ({} chars)", node_id, buffer.len());
 
@@ -1926,11 +1921,6 @@ mod tests {
 
     struct MockRepo {
         node_name: String,
-        /// The node's `provider` (spawn-option id). Defaults to "" so tests
-        /// that only care about `node_name` keep working; pass-through
-        /// `with_provider` for tests that exercise the `RenameTrigger`
-        /// passback added by #824.
-        provider: String,
         should_fail: bool,
         updates: std::sync::Mutex<Vec<(i64, String)>>,
     }
@@ -1939,16 +1929,6 @@ mod tests {
         fn with_name(name: &str) -> Self {
             Self {
                 node_name: name.to_string(),
-                provider: String::new(),
-                should_fail: false,
-                updates: std::sync::Mutex::new(vec![]),
-            }
-        }
-
-        fn with_provider(name: &str, provider: &str) -> Self {
-            Self {
-                node_name: name.to_string(),
-                provider: provider.to_string(),
                 should_fail: false,
                 updates: std::sync::Mutex::new(vec![]),
             }
@@ -1960,12 +1940,11 @@ mod tests {
             if self.should_fail {
                 return Err("mock db error".into());
             }
-            // The renaming-path code only reads `node.name` and `node.provider`
-            // (issue #824 routing); the rest spreads through `..Default::default()`.
+            // The renaming-path code only reads `node.name`; the rest
+            // spreads through `..Default::default()`.
             Ok(AgentNode {
                 id,
                 name: self.node_name.clone(),
-                provider: self.provider.clone(),
                 ..Default::default()
             })
         }
@@ -2021,7 +2000,6 @@ mod tests {
         let second = should_trigger_rename(&repo, node_id);
         assert!(second.is_some(), "second call should trigger rename");
         assert_eq!(second.as_ref().unwrap().buffer.len(), 2000);
-        assert_eq!(second.as_ref().unwrap().provider, "");
 
         clear_renaming_in_progress(node_id);
         cleanup(node_id);
@@ -2071,28 +2049,25 @@ mod tests {
         cleanup(node_id);
     }
 
-    /// Issue #824 follow-up (code review): the rename-trigger return value
-    /// must carry the node's `provider` field alongside the buffer so the
-    /// caller can resolve the LLM-call env without re-querying the DB.
-    /// Pins the single-read invariant in the test layer too.
+    /// Issue #824 follow-up: the rename-trigger return value hands back
+    /// the harvested PTY buffer from the second `should_trigger_rename`
+    /// call onward. The LLM-call backend is now resolved from
+    /// `AppPreferences.naming_provider` in `on_turn_with`, so the
+    /// trigger no longer carries the node's `provider`.
     #[test]
-    fn should_trigger_rename_passes_provider_through_on_second_call() {
+    fn should_trigger_rename_passes_buffer_through_on_second_call() {
         let node_id = 70007;
         cleanup(node_id);
 
-        let repo = MockRepo::with_provider("bold-keen-brook", "claude:minimax");
+        let repo = MockRepo::with_name("bold-keen-brook");
         // First call opens the gate; no RenameTrigger yet.
         assert!(should_trigger_rename(&repo, node_id).is_none());
         on_output(node_id, &"x".repeat(2000));
 
-        // Second call should hand back BOTH buffer and provider.
+        // Second call should hand back the harvested buffer.
         let trigger = should_trigger_rename(&repo, node_id)
             .expect("second call should trigger rename");
         assert_eq!(trigger.buffer.len(), 2000);
-        assert_eq!(
-            trigger.provider, "claude:minimax",
-            "provider from the same row should travel with the buffer"
-        );
 
         clear_renaming_in_progress(node_id);
         cleanup(node_id);
@@ -2227,7 +2202,6 @@ mod tests {
         // the LLM slug still gets a chance to commit.
         let repo = MockRepo {
             node_name: String::new(),
-            provider: String::new(),
             should_fail: true,
             updates: std::sync::Mutex::new(vec![]),
         };

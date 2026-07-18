@@ -2183,11 +2183,6 @@ impl AutopilotRunState {
             _ => Self::Implementing,
         }
     }
-
-    /// The active states that occupy a mesh's concurrency slot.
-    pub fn is_active(self) -> bool {
-        matches!(self, Self::Implementing | Self::Finishing)
-    }
 }
 
 impl serde::Serialize for AutopilotRunState {
