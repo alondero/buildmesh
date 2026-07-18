@@ -1,7 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from './ProviderIcon';
 import { groupByHarness } from '../../lib/groups';
+import { useAriaMenu } from '../../hooks/useAriaMenu';
 
 export interface GroupedProviderMenuProps {
   /** Frontend view of the Spawn Menu (ADR-0016). Already in harness
@@ -85,74 +86,23 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
   const [activeIndex, setActiveIndex] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Issue #814 — auto-focus the first menuitem on mount. `useLayoutEffect`
-  // (not `useEffect`) fires synchronously after the menu commits, so the
-  // very first ArrowDown after open doesn't race a deferred focus call
-  // that would otherwise clobber the user's keystroke. Mirrors
-  // `MeshItem`'s pattern (issue #735).
-  useLayoutEffect(() => {
-    setActiveIndex(0);
-    menuRef.current
-      ?.querySelector<HTMLButtonElement>('[role="menuitem"]')
-      ?.focus();
-  }, []);
-
-  // Issue #814 — keyboard handler. WAI-ARIA menu contract: keystrokes
-  // only apply while focus is inside the menu. We check
-  // `document.activeElement` (not `e.target`) because in jsdom tests
-  // events are dispatched on `document` while focus is on a menuitem,
-  // and a real browser can deliver the keydown to the focused element
-  // while the listener is on `document`. Same shape as `MeshItem`'s
-  // handler (issue #735) and `KebabActions` (`GridNodeHeader.tsx`).
-  //
-  // `flatItems` and `activeIndex` are read via refs / re-bound in the
-  // deps so the listener always sees the current state — without this,
-  // the closure would freeze at the value current when the menu first
-  // mounted, and a long-lived menu would not respond to later changes.
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const root = menuRef.current;
-      if (!root) return;
-      const active = document.activeElement;
-      if (!(active instanceof Node) || !root.contains(active)) return;
-      const total = flatItems.length;
-      if (total === 0) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose?.();
-        return;
-      }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        const next = (activeIndex + 1) % total;
-        setActiveIndex(next);
-        focusMenuItem(root, next);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        const next = (activeIndex - 1 + total) % total;
-        setActiveIndex(next);
-        focusMenuItem(root, next);
-        return;
-      }
-      if (e.key === 'Home') {
-        e.preventDefault();
-        setActiveIndex(0);
-        focusMenuItem(root, 0);
-        return;
-      }
-      if (e.key === 'End') {
-        e.preventDefault();
-        const last = total - 1;
-        setActiveIndex(last);
-        focusMenuItem(root, last);
-        return;
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [activeIndex, flatItems, onClose]);
+  // Issue #837 — keyboard handler + auto-focus on mount are now
+  // subsumed by the shared `useAriaMenu` hook. The hook reads
+  // `flatItems.length` as `itemCount`, so a filter change that drops a
+  // row (re-render) is picked up live via the hook's ref-mirrored
+  // state. `onClose` is the parent's Escape callback — the hook
+  // forwards `onClose?.()` directly. `closeOnTab` is left at default
+  // (`true`) so the WAI-ARIA menu contract holds across every call
+  // site; pre-#837 this menu omitted Tab handling and the test for it
+  // (`grouped-provider-menu.test.tsx`) only covered Escape, but the
+  // hook's default is the canonical WAI-ARIA `menu` behaviour.
+  useAriaMenu({
+    rootRef: menuRef,
+    itemCount: flatItems.length,
+    activeIndex,
+    setActiveIndex,
+    onClose: () => onClose?.(),
+  });
 
   // Build a lookup so each render's `tabIndex` resolves the flat index
   // in O(1). The map is keyed by `SpawnOption.id` (unique per backend
@@ -238,14 +188,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
   );
 }
 
-/**
- * Move focus to the n-th menuitem inside `root`. Mirrors the
- * `submenuItemRefs.current[next]?.focus()` shape used by `NodeItem`
- * (#774) — `querySelectorAll` re-runs each call so a re-rendered
- * button (e.g. after a Proxied filter change) is always reachable,
- * even if a ref array went stale.
- */
-function focusMenuItem(root: HTMLElement, index: number) {
-  const all = root.querySelectorAll<HTMLButtonElement>('[role="menuitem"]');
-  all[index]?.focus();
-}
+// `focusMenuItem` was moved into the `useAriaMenu` hook (issue #837).
+// The hook uses the same `querySelectorAll('[role="menuitem"]')` walk
+// so a re-rendered button (e.g. after a Proxied filter change) is
+// always reachable, even if a caller-side ref array went stale.

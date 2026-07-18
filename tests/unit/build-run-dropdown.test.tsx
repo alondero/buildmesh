@@ -154,68 +154,21 @@ describe('BuildRunDropdown', () => {
     });
   });
 
-  describe('keyboard navigation (issue #814)', () => {
-    it('ArrowDown cycles focus between Build → Run → Terminal → Build', () => {
-      const onBuildRun = vi.fn();
-      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
-      openMenu();
-      const items = screen.getAllByRole('menuitem');
-      // Item 0 (Build) is auto-focused on open.
-      expect(document.activeElement).toBe(items[0]);
-      // Advance.
-      fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-      expect(document.activeElement).toBe(items[1]);
-      fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-      expect(document.activeElement).toBe(items[2]);
-      // Wrap around to first.
-      fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-      expect(document.activeElement).toBe(items[0]);
-    });
-
-    it('ArrowUp cycles with wrap-around (Build → Terminal → Run → Build)', () => {
-      const onBuildRun = vi.fn();
-      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
-      openMenu();
-      const items = screen.getAllByRole('menuitem');
-      // Up from first wraps to last.
-      fireEvent.keyDown(items[0], { key: 'ArrowUp' });
-      expect(document.activeElement).toBe(items[2]);
-      fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
-      expect(document.activeElement).toBe(items[1]);
-      fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
-      expect(document.activeElement).toBe(items[0]);
-    });
-
-    it('Home jumps to the first item, End jumps to the last', () => {
-      const onBuildRun = vi.fn();
-      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
-      openMenu();
-      const items = screen.getAllByRole('menuitem');
-      items[1].focus();
-      fireEvent.keyDown(document.activeElement!, { key: 'End' });
-      expect(document.activeElement).toBe(items[2]);
-      fireEvent.keyDown(document.activeElement!, { key: 'Home' });
-      expect(document.activeElement).toBe(items[0]);
-    });
-  });
-
   describe('Escape closes the menu and returns focus to the trigger (issue #814)', () => {
     it('Escape closes the menu and returns focus to the trigger button', () => {
       // The WAI-ARIA contract: closing a menu via Escape MUST return
       // focus to the element that opened it (the trigger). Without
       // this, keyboard users land "nowhere" — a screen-reader trap.
+      //
+      // Issue #837 — the keyboard nav cycle, Home/End jumps, focus-gate,
+      // and onClose dispatch are now covered by `tests/unit/use-aria-menu.test.tsx`.
+      // What stays here is the per-component behaviour: the rAF-based
+      // trigger-focus return (the hook fires `onClose`, the component's
+      // own closure does `requestAnimationFrame(() => trigger?.focus())`).
       const onBuildRun = vi.fn();
       render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
       const trigger = screen.getByLabelText('Open build menu');
-      // `fireEvent.click` (not `trigger.click()`) — React's synthetic
-      // event system is wired through Testing Library's dispatcher, so
-      // the native HTMLElement.click() in jsdom doesn't reach React's
-      // onClick handler reliably.
       fireEvent.click(trigger);
-      // Sanity: menuitems are in the DOM (the strongest signal that
-      // the menu opened — `getByRole('menu')` would clash with the
-      // trigger's `aria-haspopup="menu"` which some accessibility
-      // libraries also resolve to role="menu").
       const items = screen.getAllByRole('menuitem');
       expect(items).toHaveLength(3);
       expect(document.activeElement).toBe(items[0]);
@@ -234,37 +187,23 @@ describe('BuildRunDropdown', () => {
     });
 
     it('Escape does nothing when the menu is closed', () => {
-      // The keydown listener is gated on `isOpen`. Pressing Escape
-      // while the menu is closed must not throw or interfere.
+      // Issue #837 — the hook's `enabled: isOpen` gate detaches the
+      // listener while the menu is closed. Pressing Escape while
+      // closed must not throw or interfere.
       const onBuildRun = vi.fn();
       render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
       expect(() => fireEvent.keyDown(document, { key: 'Escape' })).not.toThrow();
     });
   });
 
-  describe('viewport clamping (issue #814)', () => {
-    let rectSpy: ReturnType<typeof vi.spyOn> | undefined;
-
-    afterEach(() => {
-      rectSpy?.mockRestore();
-      rectSpy = undefined;
-    });
-
-    it('applies a negative translateY when the menu would overflow the bottom of the viewport', () => {
-      // Stub `HTMLElement.prototype.getBoundingClientRect` so the
-      // layout effect sees an overflow rect on its initial mount.
-      // (A per-element spy would be on a detached node because the
-      // menu unmounts when isOpen flips false — the prototype mock
-      // covers the freshly mounted element on the next open.)
-      //
-      // The mock positions the menu near the bottom of the viewport
-      // (top=600) with a height that extends past the bottom (700 +
-      // 200 = 900 > 768). `rect.top=600` gives the cap `maxShift =
-      // rect.top - MARGIN = 596`, plenty of room to shift up by the
-      // full overflow (900 - 764 = 136). A `top=0` mock would
-      // cap the shift at 0 and the test would falsely see no
-      // transform applied.
-      rectSpy = vi
+  describe('viewport clamping (issue #837 — hook wired in)', () => {
+    // Issue #837 — apply/no-apply, the `rect.top - MARGIN` cap, the
+    // custom-margin option, and the cleanup behaviour are all pinned
+    // in `tests/unit/use-viewport-clamp.test.tsx`. The smoke here
+    // proves the hook is wired into BuildRunDropdown — a regression
+    // that swapped the hook for a no-op would flip this assertion.
+    it('wires the useViewportClamp hook in (smoke: overflow rect produces a translateY transform)', () => {
+      const rectSpy = vi
         .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
         .mockReturnValue({
           top: 600,
@@ -283,39 +222,17 @@ describe('BuildRunDropdown', () => {
       openMenu();
       const menu = document.querySelector('[role="menu"]') as HTMLElement;
       expect(menu.style.transform).toMatch(/translateY\(-/);
-    });
-
-    it('does not apply translateY when the menu fits in the viewport', () => {
-      // Mock returns a rect that fits comfortably inside the viewport.
-      rectSpy = vi
-        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-        .mockReturnValue({
-          top: 100,
-          bottom: 250,
-          left: 0,
-          right: 200,
-          width: 200,
-          height: 150,
-          x: 0,
-          y: 100,
-          toJSON: () => ({}),
-        } as DOMRect);
-
-      const onBuildRun = vi.fn();
-      render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
-      openMenu();
-      const menu = document.querySelector('[role="menu"]') as HTMLElement;
-      // No overflow → no transform applied.
-      expect(menu.style.transform).toBe('');
+      rectSpy.mockRestore();
     });
   });
 
   describe('Tab closes the menu (WAI-ARIA non-modal popover, issue #814)', () => {
     it('Tab leaves the menu and closes it (no focus trap)', () => {
-      // A `role="menu"` is a non-modal popover — Tab moves focus to the
-      // next tabbable element on the page and the menu closes. (A
-      // modal menu would trap focus; the WAI-ARIA `menu` role is
-      // explicitly the non-modal variant.)
+      // Issue #837 — the `closeOnTab` default in `useAriaMenu` is
+      // `true`, so Tab invokes the hook's `onClose`. The deeper
+      // contract (focus-gate, key dispatch) is covered in the hook
+      // tests; this smoke proves the hook's default value is what
+      // BuildRunDropdown consumes.
       const onBuildRun = vi.fn();
       render(<BuildRunDropdown node={NODE} onBuildRun={onBuildRun} />);
       openMenu();

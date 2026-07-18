@@ -169,60 +169,30 @@ describe('ProviderDropdown', () => {
     });
   });
 
-  describe('viewport clamping (issue #814)', () => {
-    let rectSpy: ReturnType<typeof vi.spyOn> | undefined;
+  // Issue #837 — the viewport-clamp assertions were moved to the
+  // `useViewportClamp` hook tests (`tests/unit/use-viewport-clamp.test.tsx`).
+  // The hook tests pin the apply/no-apply, the `rect.top - MARGIN` cap,
+  // the custom-margin option, and the cleanup behaviour. ProviderDropdown
+  // here just consumes the hook; the smoke below proves the hook is wired
+  // in (a regression that swapped the hook for a no-op would flip this).
+  it('wires the useViewportClamp hook in (smoke: overflow rect produces a translateY transform)', () => {
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockReturnValue({
+        top: 400,
+        bottom: window.innerHeight + 200,
+        left: 0,
+        right: 200,
+        width: 200,
+        height: 200,
+        x: 0,
+        y: 400,
+        toJSON: () => ({}),
+      } as DOMRect);
 
-    afterEach(() => {
-      rectSpy?.mockRestore();
-      rectSpy = undefined;
-    });
-
-    it('applies a negative translateY when the menu would overflow the bottom of the viewport', () => {
-      // Stub `HTMLElement.prototype.getBoundingClientRect` (NOT the
-      // individual menu element) so the layout effect sees the
-      // overflow rect on its initial mount. `top` must be > MARGIN
-      // (4px) or `maxShift` clamps to 0 and the effect bails out —
-      // the realistic case is a menu positioned mid-screen whose
-      // bottom extends past the viewport.
-      rectSpy = vi
-        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-        .mockReturnValue({
-          top: 400,
-          bottom: window.innerHeight + 200,   // 200 px past viewport bottom
-          left: 0,
-          right: 200,
-          width: 200,
-          height: 200,
-          x: 0,
-          y: 400,
-          toJSON: () => ({}),
-        } as DOMRect);
-
-      render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
-      const menu = document.querySelector('[data-dropdown-for="1"]') as HTMLElement;
-      expect(menu.style.transform).toMatch(/translateY\(-/);
-    });
-
-    it('does not apply translateY when the menu fits in the viewport', () => {
-      // Rect fits comfortably inside the viewport.
-      rectSpy = vi
-        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
-        .mockReturnValue({
-          top: 100,
-          bottom: 200,
-          left: 0,
-          right: 200,
-          width: 200,
-          height: 100,
-          x: 0,
-          y: 100,
-          toJSON: () => ({}),
-        } as DOMRect);
-
-      render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
-      const menu = document.querySelector('[data-dropdown-for="1"]') as HTMLElement;
-      // No overflow → no transform applied.
-      expect(menu.style.transform).toBe('');
-    });
+    render(<ProviderDropdown meshId={1} providers={PROVIDERS} onSelect={() => {}} />);
+    const menu = document.querySelector('[data-dropdown-for="1"]') as HTMLElement;
+    expect(menu.style.transform).toMatch(/translateY\(-/);
+    rectSpy.mockRestore();
   });
 });

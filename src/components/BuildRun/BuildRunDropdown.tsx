@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect, useLayoutEffect, useId } from 'react';
+import { useState, useRef, useId } from 'react';
 import { AgentNode } from '../../stores/agentNodeStore';
 import { useClickOutside } from '../../hooks/useClickOutside';
+import { useAriaMenu } from '../../hooks/useAriaMenu';
+import { useViewportClamp } from '../../hooks/useViewportClamp';
 
 interface BuildRunDropdownProps {
   node: AgentNode;
@@ -12,10 +14,12 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
   const [activeIndex, setActiveIndex] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  // The Build/Run/Terminal menu has a fixed 3-item order; index 0 = Build,
-  // 1 = Run, 2 = Terminal. The refs array is filled as the buttons mount
-  // and read by the keydown handler when an arrow key moves focus.
-  const itemRefs = useRef<(HTMLButtonElement | null)[]>([null, null, null]);
+  // Build/Run/Terminal is a fixed 3-item menu (index 0 = Build, 1 = Run,
+  // 2 = Terminal). The `useAriaMenu` hook reads this count directly and
+  // walks menuitems via `querySelectorAll('[role="menuitem"]')`, so
+  // there is no need for an `itemRefs` array here (the pre-#837 version
+  // owned one for O(1) focus targeting that the hook now does via the
+  // DOM walk).
 
   // Issue #814 — consolidated close-on-outside-click via the shared
   // `useClickOutside` hook (issue #492). The hook attaches a document-
@@ -27,111 +31,39 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
   // so a click on a sibling's body must close *this* one.
   useClickOutside<number>(isOpen ? node.id : null, () => setIsOpen(false));
 
-  // Issue #814 — Escape closes the menu and returns focus to the trigger.
-  // The listener is attached only while open (gated on `isOpen`) so the
+  // Issue #814 / #837 — Escape closes the menu and returns focus to the
+  // trigger. The `useAriaMenu` hook attaches the document-level keydown
+  // listener only while `enabled` is true (gated on `isOpen`), so the
   // page-level Escape binding (e.g. modal dismiss) isn't shadowed when
-  // the menu is closed. The handler reads `document.activeElement` (not
-  // `e.target`) for the same reason as `MeshItem`'s menu: in jsdom tests
-  // events dispatch on `document` while focus is on a menuitem.
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const menu = menuRef.current;
-      const active = document.activeElement;
-      // Only react if focus is in this menu — avoids hijacking Escape /
-      // ArrowUp / ArrowDown typed elsewhere on the page.
-      if (menu && active instanceof Node && !menu.contains(active)) return;
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        const trigger = triggerRef.current;
-        setIsOpen(false);
-        // Return focus to the trigger so the keyboard user lands somewhere
-        // predictable. `requestAnimationFrame` waits for the unmount so
-        // the trigger ref is still attached when focus() lands.
-        requestAnimationFrame(() => trigger?.focus());
-        return;
-      }
-      if (e.key === 'Tab') {
-        // WAI-ARIA menu: Tab leaves the menu and closes it. Don't
-        // preventDefault — let the browser move focus naturally.
-        setIsOpen(false);
-        return;
-      }
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setActiveIndex((i) => {
-          const next = (i + 1) % itemRefs.current.length;
-          itemRefs.current[next]?.focus();
-          return next;
-        });
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setActiveIndex((i) => {
-          const next = (i - 1 + itemRefs.current.length) % itemRefs.current.length;
-          itemRefs.current[next]?.focus();
-          return next;
-        });
-        return;
-      }
-      if (e.key === 'Home') {
-        e.preventDefault();
-        setActiveIndex(0);
-        itemRefs.current[0]?.focus();
-        return;
-      }
-      if (e.key === 'End') {
-        e.preventDefault();
-        const last = itemRefs.current.length - 1;
-        setActiveIndex(last);
-        itemRefs.current[last]?.focus();
-        return;
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen]);
+  // the menu is closed. The hook fires `onClose` on Escape; this closure
+  // flips `isOpen` and uses `requestAnimationFrame` so the trigger ref
+  // is still attached when `focus()` lands (the rAF runs after the
+  // unmount).
+  const closeAndReturnFocus = () => {
+    const trigger = triggerRef.current;
+    setIsOpen(false);
+    requestAnimationFrame(() => trigger?.focus());
+  };
+  useAriaMenu({
+    rootRef: menuRef,
+    // Build/Run/Terminal is a fixed 3-item menu.
+    itemCount: 3,
+    activeIndex,
+    setActiveIndex,
+    onClose: closeAndReturnFocus,
+    enabled: isOpen,
+  });
 
-  // Issue #814 — viewport clamping (flip-up when the menu would overflow
-  // the bottom of the viewport). Mirrors the pattern at
-  // `GridNodeHeader.tsx:439` (kebab menu). `useLayoutEffect` runs BEFORE
-  // the browser paints so the user never sees the unclamped position.
-  // `right-0 top-full mt-1` anchoring is preserved; only a `translateY`
-  // offset is applied, so the open animation (`animate-scale-in
-  // origin-top-right`) still plays cleanly.
-  //
-  // The shift cap is `rect.top - MARGIN` (the space above the menu's
-  // rendered top), NOT `rect.top - rect.height - MARGIN` — subtracting
-  // the menu's own height would under-cap and leave the menu still
-  // overflowing when the menu is taller than the gap between the
-  // trigger and the viewport's top.
-  useLayoutEffect(() => {
-    if (!isOpen) return;
-    const menu = menuRef.current;
-    if (!menu) return;
-    const rect = menu.getBoundingClientRect();
-    const vh = window.innerHeight;
-    const MARGIN = 4;
-    const overflow = rect.bottom - (vh - MARGIN);
-    if (overflow <= 0) return;
-    const maxShift = Math.max(0, rect.top - MARGIN);
-    const shift = Math.min(overflow, maxShift);
-    if (shift <= 0) return;
-    menu.style.transform = `translateY(-${shift}px)`;
-    return () => {
-      menu.style.transform = '';
-    };
-  }, [isOpen]);
-
-  // Issue #814 — on open, reset the roving index to the first item and
-  // move focus into the menu so subsequent arrow keys work. Mirrors the
-  // pattern at `MeshItem.tsx:284` (mesh context menu).
-  useLayoutEffect(() => {
-    if (!isOpen) return;
-    setActiveIndex(0);
-    itemRefs.current[0]?.focus();
-  }, [isOpen]);
+  // Issue #837 — viewport clamping is now the shared `useViewportClamp`
+  // hook. Mirrors the pattern at `ProviderDropdown.tsx:76`. The hook
+  // runs BEFORE the browser paints so the user never sees the unclamped
+  // position; `right-0 top-full mt-1` anchoring is preserved and only a
+  // `translateY` offset is applied, so the open animation
+  // (`animate-scale-in origin-top-right`) still plays cleanly. The
+  // shift cap (`rect.top - MARGIN`, not `rect.top - rect.height -
+  // MARGIN`) is the "subtle fix a hook would lock in once" the issue
+  // called out.
+  useViewportClamp(menuRef, [isOpen]);
 
   const handleBuild = async () => {
     setIsOpen(false);
@@ -212,7 +144,6 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
           className="absolute right-0 top-full mt-1 w-44 bg-bg-card border border-border-default rounded-md shadow-md z-50 animate-scale-in origin-top-right"
         >
           <button
-            ref={(el) => { itemRefs.current[0] = el; }}
             role="menuitem"
             tabIndex={activeIndex === 0 ? 0 : -1}
             onClick={handleBuild}
@@ -221,7 +152,6 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
             {node.use_worktree ? 'Build from worktree' : 'Build'}
           </button>
           <button
-            ref={(el) => { itemRefs.current[1] = el; }}
             role="menuitem"
             tabIndex={activeIndex === 1 ? 0 : -1}
             onClick={handleRun}
@@ -231,7 +161,6 @@ export function BuildRunDropdown({ node, onBuildRun }: BuildRunDropdownProps) {
           </button>
           <div className="my-1 border-t border-border-default" />
           <button
-            ref={(el) => { itemRefs.current[2] = el; }}
             role="menuitem"
             tabIndex={activeIndex === 2 ? 0 : -1}
             onClick={handleTerminal}
