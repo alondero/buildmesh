@@ -109,6 +109,20 @@ export const SHORTCUT_CATALOG: ReadonlyArray<ShortcutEntry> = [
     macKey: '?',
     splash: true,
   },
+  {
+    // Issue #64: jump to the next agent node with `status === 'awaiting_input'`.
+    // Surfaced in the splash (not just the cheatsheet) because the typical use
+    // case is "I just noticed a node needs my input while I'm focused on a
+    // terminal prompt" — the splash hint teaches the gesture before the user
+    // ever opens the help modal. `Ctrl+.` is the conventional "next" chord
+    // (matches `Cmd+.` for "next issue" in many editors).
+    action: 'jump-to-next-awaiting',
+    group: 'app',
+    description: 'Jump to next node awaiting input',
+    winKey: 'Ctrl+.',
+    macKey: '⌘+.',
+    splash: true,
+  },
 
   // --- Grid (window-global) -----------------------------------------------
   {
