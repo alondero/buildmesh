@@ -31,6 +31,7 @@ import { useRef } from 'react';
 import { useUIStore, type ProbeTab } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useProbeResize, PROBE_PANEL_BOUNDS } from './useProbeResize';
+import { EmptyState } from '../shared/Spinner';
 import { ProjectFilesTab } from './ProjectFilesTab';
 import { AgentChangesTab } from './AgentChangesTab';
 import { MeshPropertiesTab } from './MeshPropertiesTab';
@@ -284,10 +285,11 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
 
   if (activeMeshId === null) {
     return (
-      <ProbeEmptyState
+      <EmptyState
         icon="🧭"
-        title="No project selected"
-        message="Select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here."
+        label="No project selected"
+        hint="Select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here."
+        fill
       />
     );
   }
@@ -296,10 +298,11 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   // there's nothing to diff, even though a mesh is selected.
   if (tab === 'review' && activeNodeId === null) {
     return (
-      <ProbeEmptyState
+      <EmptyState
         icon="🔍"
-        title="No active agent node"
-        message="Focus an agent terminal to review the changes it has made."
+        label="No active agent node"
+        hint="Focus an agent terminal to review the changes it has made."
+        fill
       />
     );
   }
@@ -331,32 +334,11 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
 function ProbeTabPlaceholder({ tab }: { tab: ProbeTab }) {
   const def = PROBE_TABS.find((t) => t.tab === tab) ?? PROBE_TABS[0];
   return (
-    <ProbeEmptyState
+    <EmptyState
       icon={def.icon}
-      title={def.label}
-      message="This tab's content is coming soon."
+      label={def.label}
+      hint="This tab's content is coming soon."
+      fill
     />
-  );
-}
-
-function ProbeEmptyState({
-  icon,
-  title,
-  message,
-}: {
-  icon: string;
-  title: string;
-  message: string;
-}) {
-  return (
-    <div className="h-full flex items-center justify-center p-6 text-center">
-      <div className="max-w-[260px]">
-        <div className="text-2xl mb-2" aria-hidden="true">
-          {icon}
-        </div>
-        <p className="text-sm text-text-primary font-medium mb-1">{title}</p>
-        <p className="text-xs text-text-secondary leading-relaxed">{message}</p>
-      </div>
-    </div>
   );
 }

@@ -53,6 +53,7 @@ import {
   type ProjectPreset,
 } from '../../lib/projectPresets';
 import { LoadingState } from '../shared/Spinner';
+import { ProbeTabBody } from './ProbeTabBody';
 
 // Autopilot Policy (issue #481, PRD #480) — mirrors the backend's
 // `update_mesh_autopilot` validation: 1..=8 concurrency, known actions.
@@ -439,7 +440,7 @@ sandbox: config.sandbox,
   if (activeMeshId === null || !mesh || !activeMeshPath) return null;
 
   return (
-    <div className="p-4 space-y-4">
+    <ProbeTabBody padding="p-3" className="space-y-4">
       {/* Issue #729 — global SaveIndicator at the top of the tab.
           Renders the current `saveStatus`: "Saving…" mid-write,
           "Saved" after a successful write (auto-clearing), or
@@ -834,7 +835,7 @@ sandbox: config.sandbox,
           onCancel={() => setShowDeleteConfirm(false)}
         />
       )}
-    </div>
+    </ProbeTabBody>
   );
 }
 

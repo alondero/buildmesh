@@ -74,6 +74,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
+import { ProbeTabBody } from './ProbeTabBody';
 import { SafeLink } from '../shared/SafeLink';
 import {
   EmptyState,
@@ -616,7 +617,7 @@ export function GitPullRequestsTab() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-2">
+      <ProbeTabBody padding="p-3">
         {loading && prs.length === 0 ? (
           // First-load only: refreshes keep the prior list rendered.
           <LoadingState label="Loading pull requests..." />
@@ -799,7 +800,7 @@ export function GitPullRequestsTab() {
             })}
           </div>
         )}
-      </div>
+      </ProbeTabBody>
     </div>
   );
 }

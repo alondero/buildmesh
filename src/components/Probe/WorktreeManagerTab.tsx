@@ -57,7 +57,8 @@ import {
   type MeshHealth,
   type WorktreeInfo,
 } from '../../lib/tauri';
-import { LoadingState } from '../shared/Spinner';
+import { LoadingState, RefreshControl } from '../shared/Spinner';
+import { ProbeTabBody } from './ProbeTabBody';
 
 /** Lucide folder-open. */
 function FolderOpenIcon({ className }: { className?: string }) {
@@ -600,7 +601,7 @@ export function WorktreeManagerTab() {
   if (activeMeshId === null || !activeMeshPath) return null;
 
   return (
-    <div className="p-4 space-y-4">
+    <ProbeTabBody padding="p-3" className="space-y-4">
       {hasHealthSignal && health && (
         <HealthBlock
           health={health}
@@ -635,14 +636,17 @@ export function WorktreeManagerTab() {
 
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading || deleting}
-            className="text-xs text-text-muted hover:text-text-primary transition-colors disabled:opacity-50"
-          >
-            {loading ? 'Loading…' : 'Refresh'}
-          </button>
+          {/* `variant="muted"` keeps the refresh visually quieter than
+              the cyan Select-recommended / red Delete-Selected
+              neighbours — issue #842. The shared `<RefreshControl>`
+              picks up the spinner/busy state for free. */}
+          <RefreshControl
+            onRefresh={() => void load()}
+            isRefreshing={loading}
+            disabled={deleting}
+            variant="muted"
+            ariaLabel="Refresh worktrees"
+          />
           <button
             type="button"
             onClick={selectRecommended}
@@ -755,7 +759,7 @@ export function WorktreeManagerTab() {
           onCancel={() => setConfirming(false)}
         />
       )}
-    </div>
+    </ProbeTabBody>
   );
 }
 
