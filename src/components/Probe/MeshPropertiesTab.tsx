@@ -12,7 +12,7 @@
  *   • Display name (auto-save on blur, syncs the meshStore)
  *   • Directory (read-only — derived from the mesh row)
  *   • AI context portability (delegated to `<AiContextSection>`)
- *   • Default cwrap model
+ *   • Default Claude Code model
  *   • Effort level (low/medium/high/xhigh/max)
  *   • Default provider
  *   • Project preset (auto-fill build / run)
@@ -30,8 +30,10 @@ import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useSaveStatus } from '../../hooks/useSaveStatus';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { AiContextSection } from './AiContextSection';
+import { SaveIndicator } from '../shared/SaveIndicator';
 import { groupByHarness } from '../../lib/groups';
 import {
   checkGhAuth,
@@ -39,6 +41,7 @@ import {
   getAppPreferences,
   getMeshProperties,
   listProviders,
+  updateMeshAutopilot,
   updateMeshColumn,
   updateMeshSandbox,
   type ProviderInfo,
@@ -49,6 +52,17 @@ import {
   type DetectedProject,
   type ProjectPreset,
 } from '../../lib/projectPresets';
+import { LoadingState } from '../shared/Spinner';
+
+// Autopilot Policy (issue #481, PRD #480) — mirrors the backend's
+// `update_mesh_autopilot` validation: 1..=8 concurrency, known actions.
+const AUTOPILOT_CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8];
+const AUTOPILOT_ACTION_OPTIONS = [
+  { value: 'draft_pr', label: 'Open draft PR (default)' },
+  { value: 'pr', label: 'Open PR ready for review' },
+  { value: 'none', label: 'Push only (no PR)' },
+];
+const DEFAULT_AUTOPILOT_TRIGGER_LABEL = 'buildmesh:run';
 
 const EFFORT_OPTIONS = [
   { value: '', label: 'Not set' },
@@ -80,6 +94,11 @@ export function MeshPropertiesTab() {
     runCommand: '',
     defaultProvider: '',
 sandbox: false,
+    autopilotEnabled: false,
+    autopilotTriggerLabel: '',
+    autopilotConcurrencyLimit: 2,
+    autopilotProvider: '',
+    autopilotActionOnSuccess: '',
   });
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
@@ -209,6 +228,11 @@ sandbox: false,
           runCommand: config.run_command ?? '',
           defaultProvider: config.default_provider ?? '',
 sandbox: config.sandbox,
+          autopilotEnabled: config.autopilot_enabled,
+          autopilotTriggerLabel: config.autopilot_trigger_label ?? '',
+          autopilotConcurrencyLimit: config.autopilot_concurrency_limit || 2,
+          autopilotProvider: config.autopilot_provider ?? '',
+          autopilotActionOnSuccess: config.autopilot_action_on_success ?? '',
         });
         setLoading(false);
       })
@@ -231,36 +255,114 @@ sandbox: config.sandbox,
   // refresh because the `useMeshHealth` cache the sidebar consumes is
   // already refetched by its own GIT_CHANGED / focus invalidate path
   // (and `meshes` column writes don't change git health anyway).
+  //
+  // Issue #729 — every save goes through `saveStatus` so the top-of-tab
+  // "Saving… / Saved / Save failed" indicator tracks the most-recent
+  // write. We keep one hook instance for the tab (rather than one per
+  // field) because (a) issue AC says "and/or" — a single global
+  // indicator satisfies it, and (b) the tab has 7 auto-save fields,
+  // and 7 stacked tiny indicators would compete for the same attention
+  // as the form below them. The hook clears the prior error before
+  // each save and surfaces the rejection's `.message` on fail.
+  const saveStatus = useSaveStatus();
+
+  // Reset the indicator on mesh-switch so a stale "Save failed" from
+  // the outgoing mesh doesn't bleed onto the incoming mesh's form. A
+  // bare useEffect that tracks `activeMeshId` is sufficient — the
+  // hook's own reset() cancels the pending saved→idle timer cleanly.
+  useEffect(() => {
+    saveStatus.reset();
+  }, [activeMeshId, saveStatus.reset]);
+
+  // Ref mirror of `activeMeshId` so the IPC-`.then`/`.catch` in
+  // `wrappedSave` can read the CURRENT mesh id at resolve time, not
+  // the closure-captured value from the render where the IPC was
+  // fired. Without this, a slow save from the outgoing mesh would
+  // still see `activeMeshId === saveMeshId` (both are the stale value
+  // from the previous render) and surface its error on the new mesh
+  // — review finding #1.
+  const activeMeshIdRef = useRef(activeMeshId);
+  useEffect(() => {
+    activeMeshIdRef.current = activeMeshId;
+  }, [activeMeshId]);
+
+  /**
+   * Internal save wrapper. Drives the state machine on every IPC
+   * outcome, and on rejection surfaces the rejection's `.message`
+   * (previously swallowed — the issue's "don't swallow failures"
+   * complaint). The user's input value is intentionally NOT reverted
+   * on a failure (matching the existing `saveSandbox` optimistic rule
+   * and the issue AC "keep the field's text").
+   *
+   * Mesh-switch guard (review finding #1): we capture `activeMeshId`
+   * at the moment the IPC starts, then check it on resolve/reject
+   * via the ref (NOT the closure-captured prop — that would always
+   * equal the value at fire time, never the current one). If the user
+   * switched meshes while the IPC was in flight, the result belongs
+   * to the OUTGOING mesh, not the one the user is looking at —
+   * surfacing "Save failed" or "Saved" on the new mesh would be wrong.
+   * Same defensive pattern as `ScratchpadTab.tsx:158-168` (`if
+   * (pending.meshId === activeMeshId)`). The `saveStatus.reset()` in
+   * the `useEffect([activeMeshId])` above already clears the
+   * indicator on switch, but it cannot stop the IPC's later
+   * `.then`/`.catch` from re-applying state — this guard is the
+   * second line of defence.
+   */
+  const wrappedSave = async (op: () => Promise<void>) => {
+    const saveMeshId = activeMeshIdRef.current;
+    saveStatus.start();
+    try {
+      await op();
+      if (activeMeshIdRef.current !== saveMeshId) return;
+      saveStatus.success();
+    } catch (e) {
+      if (activeMeshIdRef.current !== saveMeshId) {
+        // Audit trail only — the user is looking at a different
+        // mesh's form; the indicator stays clean.
+        console.error('Mesh property save failed after mesh switch:', e);
+        return;
+      }
+      // Console.error preserves the audit trail in buildmesh.log for
+      // the dev / bug-report path; the rendered banner shows the same
+      // message to the user so the cause is actionable.
+      console.error('Mesh property save failed:', e);
+      saveStatus.fail(e);
+    }
+  };
+
   const saveName = async (name: string) => {
     if (activeMeshId === null) return;
-    if (name !== mesh?.name) {
-      await updateMeshName(activeMeshId, name);
+    if (name === mesh?.name) {
+      // No-op write: skip the IPC and avoid a false "Saved" flicker
+      // that would briefly show success for a no-op.
+      return;
     }
+    await wrappedSave(() => updateMeshName(activeMeshId, name));
   };
 
   const saveModel = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'model', value || '');
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'model', value || ''));
   };
 
   const saveEffort = async (value: string) => {
     if (activeMeshId === null || !value) return;
-    await updateMeshColumn(activeMeshId, 'effort', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'effort', value));
   };
 
   const saveBuildCommand = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'build_command', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'build_command', value));
   };
 
   const saveRunCommand = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'run_command', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'run_command', value));
   };
 
   const saveDefaultProvider = async (value: string) => {
     if (activeMeshId === null) return;
-    await updateMeshColumn(activeMeshId, 'default_provider', value);
+    await wrappedSave(() => updateMeshColumn(activeMeshId, 'default_provider', value));
   };
 
 // Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
@@ -271,16 +373,42 @@ sandbox: config.sandbox,
   const saveSandbox = async (value: boolean) => {
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, sandbox: value }));
-    await updateMeshSandbox(activeMeshId, value);
+    await wrappedSave(() => updateMeshSandbox(activeMeshId, value));
+  };
+
+  // Autopilot Policy save — the five fields persist atomically through one
+  // typed command, so every control funnels its *next* form state through
+  // this helper (passing the patched object, not reading `form`, avoids
+  // saving a stale closure snapshot). Optimistic like `saveSandbox`.
+  const saveAutopilot = async (next: typeof form) => {
+    if (activeMeshId === null) return;
+    await wrappedSave(() =>
+      updateMeshAutopilot(
+        activeMeshId,
+        next.autopilotEnabled,
+        next.autopilotTriggerLabel.trim() || null,
+        next.autopilotConcurrencyLimit,
+        next.autopilotProvider || null,
+        next.autopilotActionOnSuccess || null
+      )
+    );
+  };
+
+  const patchAutopilot = async (patch: Partial<typeof form>) => {
+    const next = { ...form, ...patch };
+    setForm(next);
+    await saveAutopilot(next);
   };
 
   const applyPreset = async (preset: ProjectPreset) => {
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, buildCommand: preset.build, runCommand: preset.run }));
-    await Promise.all([
-      updateMeshColumn(activeMeshId, 'build_command', preset.build),
-      updateMeshColumn(activeMeshId, 'run_command', preset.run),
-    ]);
+    await wrappedSave(async () => {
+      await Promise.all([
+        updateMeshColumn(activeMeshId, 'build_command', preset.build),
+        updateMeshColumn(activeMeshId, 'run_command', preset.run),
+      ]);
+    });
   };
 
   const applyPresetById = async (id: string) => {
@@ -312,8 +440,23 @@ sandbox: config.sandbox,
 
   return (
     <div className="p-4 space-y-4">
+      {/* Issue #729 — global SaveIndicator at the top of the tab.
+          Renders the current `saveStatus`: "Saving…" mid-write,
+          "Saved" after a successful write (auto-clearing), or
+          "Save failed: <message>" when the IPC rejects. The banner
+          sits above the form so a failed write is visible without
+          scrolling; empty / idle state is suppressed so the UI stays
+          quiet when nothing is happening. Lifted to a shared primitive
+          (issue #813) so `ScratchpadTab` adopts the same vocabulary
+          without re-implementing both the state machine and the
+          visual. */}
+      <SaveIndicator
+        status={saveStatus.status}
+        error={saveStatus.error}
+        onDismiss={saveStatus.reset}
+      />
       {loading ? (
-        <p className="text-xs text-text-muted text-center py-8">Loading…</p>
+        <LoadingState />
       ) : (
         <>
           <Field label="Name" htmlFor="mesh-prop-name">
@@ -326,7 +469,7 @@ sandbox: config.sandbox,
                 if (!mountedRef.current) return;
                 await saveName(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
@@ -336,7 +479,7 @@ sandbox: config.sandbox,
               type="text"
               value={activeMeshPath}
               readOnly
-              className="w-full bg-bg-surface border border-border-subtle rounded px-2 py-1.5 text-xs text-text-muted font-mono"
+              className="w-full bg-bg-surface border border-border-subtle rounded-md px-2 py-1.5 text-xs text-text-secondary font-mono"
             />
           </Field>
 
@@ -351,7 +494,7 @@ sandbox: config.sandbox,
 
           <Field
             label="Model"
-            hint="cwrap only"
+            hint="Claude Code only"
             htmlFor="mesh-prop-model"
           >
             <input
@@ -364,13 +507,13 @@ sandbox: config.sandbox,
                 await saveModel(e.target.value);
               }}
               placeholder="e.g., opus-4, sonnet-4"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
           <Field
             label="Effort"
-            hint="cwrap only"
+            hint="Claude Code only"
             htmlFor="mesh-prop-effort"
           >
             <select
@@ -380,7 +523,7 @@ sandbox: config.sandbox,
                 setForm((p) => ({ ...p, effort: e.target.value }));
                 await saveEffort(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               {EFFORT_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -398,7 +541,7 @@ sandbox: config.sandbox,
                 setForm((p) => ({ ...p, defaultProvider: e.target.value }));
                 await saveDefaultProvider(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               <option value="">&lt;Default&gt; ({appWideDefault})</option>
               {/* Issue #575 / ADR-0016 — group the Spawn Options by their
@@ -471,6 +614,130 @@ sandbox: config.sandbox,
             </p>
           </div>
 
+          {/* Autopilot Mode (issue #481, PRD #480). The policy fields only
+              render while enabled — the section stays one quiet checkbox
+              for meshes that never use Autopilot. */}
+          <div className="pt-3 border-t border-border-subtle space-y-3">
+            <label
+              htmlFor="mesh-prop-autopilot"
+              className="flex items-center gap-2 text-xs cursor-pointer"
+            >
+              <input
+                id="mesh-prop-autopilot"
+                type="checkbox"
+                checked={form.autopilotEnabled}
+                onChange={async (e) => {
+                  await patchAutopilot({ autopilotEnabled: e.target.checked });
+                }}
+                className="accent-accent-cyan"
+              />
+              <span className="text-text-primary">Autopilot Mode</span>
+            </label>
+            <p className="text-xs text-text-muted/70 -mt-2">
+              Poll GitHub for labelled issues and auto-spawn isolated agent
+              nodes that implement, verify, and raise a PR.
+            </p>
+
+            {form.autopilotEnabled && (
+              <>
+                <Field label="Trigger label" htmlFor="mesh-prop-autopilot-label">
+                  <input
+                    id="mesh-prop-autopilot-label"
+                    type="text"
+                    value={form.autopilotTriggerLabel}
+                    onChange={(e) =>
+                      setForm((p) => ({ ...p, autopilotTriggerLabel: e.target.value }))
+                    }
+                    onBlur={async (e) => {
+                      if (!mountedRef.current) return;
+                      await saveAutopilot({
+                        ...form,
+                        autopilotTriggerLabel: e.target.value,
+                      });
+                    }}
+                    placeholder={DEFAULT_AUTOPILOT_TRIGGER_LABEL}
+                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+                  />
+                </Field>
+
+                <Field
+                  label="Max concurrent autopilot nodes"
+                  htmlFor="mesh-prop-autopilot-concurrency"
+                >
+                  <select
+                    id="mesh-prop-autopilot-concurrency"
+                    value={form.autopilotConcurrencyLimit}
+                    onChange={async (e) => {
+                      await patchAutopilot({
+                        autopilotConcurrencyLimit: Number(e.target.value),
+                      });
+                    }}
+                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+                  >
+                    {AUTOPILOT_CONCURRENCY_OPTIONS.map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+
+                <Field label="Autopilot provider" htmlFor="mesh-prop-autopilot-provider">
+                  <select
+                    id="mesh-prop-autopilot-provider"
+                    value={form.autopilotProvider}
+                    onChange={async (e) => {
+                      await patchAutopilot({ autopilotProvider: e.target.value });
+                    }}
+                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+                  >
+                    <option value="">&lt;Mesh default&gt;</option>
+                    {groupByHarness(providers).map(([harnessId, group]) => {
+                      if (group.length === 1) {
+                        return (
+                          <option key={group[0].id} value={group[0].id}>
+                            {group[0].label}
+                          </option>
+                        );
+                      }
+                      const native = group.find((p) => !p.is_proxied) ?? group[0];
+                      return (
+                        <optgroup key={harnessId} label={native.label}>
+                          {group.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.is_proxied
+                                ? `  ${p.label} (via ${native.label})`
+                                : p.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                      );
+                    })}
+                  </select>
+                </Field>
+
+                <Field label="On success" htmlFor="mesh-prop-autopilot-action">
+                  <select
+                    id="mesh-prop-autopilot-action"
+                    value={form.autopilotActionOnSuccess || 'draft_pr'}
+                    onChange={async (e) => {
+                      await patchAutopilot({
+                        autopilotActionOnSuccess: e.target.value,
+                      });
+                    }}
+                    className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+                  >
+                    {AUTOPILOT_ACTION_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              </>
+            )}
+          </div>
+
           <Field label="Project preset" htmlFor="mesh-prop-preset">
             <select
               id="mesh-prop-preset"
@@ -478,7 +745,7 @@ sandbox: config.sandbox,
               onChange={(e) => {
                 if (e.target.value) void applyPresetById(e.target.value);
               }}
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary focus:outline-none focus:border-accent-cyan"
             >
               <option value="">Choose a preset to fill Build/Run…</option>
               {PROJECT_PRESETS.map((p) => (
@@ -492,7 +759,7 @@ sandbox: config.sandbox,
             {detected?.preset_id &&
               !form.buildCommand.trim() &&
               !form.runCommand.trim() && (
-                <div className="mt-2 flex items-start gap-2 bg-accent-cyan/5 border border-accent-cyan/30 rounded px-2 py-1.5">
+                <div className="mt-2 flex items-start gap-2 bg-accent-cyan/5 border border-accent-cyan/30 rounded-md px-2 py-1.5">
                   <span className="text-xs text-text-secondary flex-1">
                     Looks like a{' '}
                     <span className="text-text-primary">{detected.label}</span>{' '}
@@ -501,7 +768,7 @@ sandbox: config.sandbox,
                   <button
                     type="button"
                     onClick={() => void applyPresetById(detected.preset_id!)}
-                    className="text-xs text-accent-cyan hover:text-accent-cyan/80 font-medium"
+                    className="text-xs text-accent-cyan hover:text-accent-cyan/80 font-medium transition-colors"
                   >
                     Apply preset
                   </button>
@@ -520,7 +787,7 @@ sandbox: config.sandbox,
                 await saveBuildCommand(e.target.value);
               }}
               placeholder="e.g., npm run build — type to override, or pick a preset above"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
@@ -535,7 +802,7 @@ sandbox: config.sandbox,
                 await saveRunCommand(e.target.value);
               }}
               placeholder="e.g., npm run dev — type to override, or pick a preset above"
-              className="w-full bg-bg-overlay border border-border-subtle rounded px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
             />
           </Field>
 
@@ -550,7 +817,7 @@ sandbox: config.sandbox,
             <button
               type="button"
               onClick={() => setShowDeleteConfirm(true)}
-              className="w-full bg-status-error/10 hover:bg-status-error/20 text-status-error text-xs font-medium py-2 rounded transition-colors"
+              className="w-full bg-status-error/10 hover:bg-status-error/20 text-status-error text-xs font-medium py-2 rounded-md transition-colors"
             >
               Delete Mesh
             </button>

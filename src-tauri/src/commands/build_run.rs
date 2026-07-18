@@ -128,11 +128,8 @@ static BUILD_RUN_REGISTRY: once_cell::sync::Lazy<Arc<Mutex<BuildRunRegistry>>> =
 ///
 /// Shell choice per platform (terminal mode):
 /// - Wsl → `wsl.exe` (default user's login shell, cwd is the WSL path)
-/// - macOS → `sh`
+/// - macOS / native Linux → `sh` (any non-Windows host: no WSL, no PowerShell)
 /// - Windows → `powershell.exe` (per user preference; ANSI renders in PTY)
-/// - Linux → `sh` (matches the build/run macOS branch; both are
-///   `cfg!(target_os = "macos") == false` in practice on Windows builds,
-///   but the value is correct on macOS/Linux dev builds too)
 fn build_shell_command(
     mode: BuildRunMode,
     command: &str,
@@ -141,7 +138,8 @@ fn build_shell_command(
     if mode == BuildRunMode::Terminal {
         if env_type == crate::models::EnvType::Wsl {
             CommandBuilder::new("wsl.exe")
-        } else if cfg!(target_os = "macos") {
+        } else if !cfg!(target_os = "windows") {
+            // macOS and native Linux: POSIX `sh` (no WSL, no PowerShell).
             CommandBuilder::new("sh")
         } else {
             CommandBuilder::new("powershell.exe")
@@ -151,7 +149,8 @@ fn build_shell_command(
         c.arg("-e");
         c.arg(command);
         c
-    } else if cfg!(target_os = "macos") {
+    } else if !cfg!(target_os = "windows") {
+        // macOS and native Linux: POSIX `sh -c <command>`.
         let mut c = CommandBuilder::new("sh");
         c.arg("-c");
         c.arg(command);
@@ -185,29 +184,51 @@ pub async fn build_run(
     mode: BuildRunMode,
     app: AppHandle,
 ) -> Result<(), String> {
+    // Offload: the body opens the repo with git2 (worktree-registration
+    // check — a stat-heavy walk on large repos / WSL UNC paths) and then
+    // opens a ConPTY + spawns a shell. Both are blocking calls that must
+    // not park a Tauri async worker (Command Threading convention).
+    crate::commands::run_blocking("build_run", move || build_run_blocking(node_id, mode, app))
+        .await
+}
+
+/// Sync core for [`build_run`] — see the `*_blocking` + `run_blocking`
+/// convention in `commands/mod.rs`.
+fn build_run_blocking(
+    node_id: i64,
+    mode: BuildRunMode,
+    app: AppHandle,
+) -> Result<(), String> {
     // 1. Get agent node (node.path == mesh.path for all nodes)
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| format!("failed to get agent node {}: {}", node_id, e))?;
 
-    // 2. Read canonical mesh row from DB
+    // 2. Read canonical mesh row from DB (for build/run command strings).
+    // The worktree-vs-root decision below does NOT consult `row.use_worktree`
+    // — the per-node override (`SpawnButtonCluster`'s alt-click path
+    // bypasses the mesh setting and persists `use_worktree=false` on the
+    // node row) means the mesh-level flag is the wrong authority here.
     let mesh = db::get_mesh_by_path(&node.path)
         .map_err(|e| format!("failed to get mesh for path {}: {}", node.path, e))?;
     let row = MeshRow::from(&mesh);
 
-    // 3. If use_worktree is false, work directly in repo root
-    let use_worktree = row.use_worktree;
-    let spawn_worktree_name = if use_worktree {
-        node.worktree_name.as_deref()
-    } else {
-        None
-    };
+    // 3. Resolve cwd via the canonical Node Working Directory rule
+    //    (`resolve_build_run_cwd` → `env::node_working_path`). Gates on
+    //    `node.use_worktree` + non-empty trimmed `worktree_name`, so a Root
+    //    Node spawned in a worktree-enabled mesh resolves to the mesh root
+    //    — the bug the user reported surfaced here as "No worktree name set
+    //    for this agent node." for any Build/Run/Terminal click on a Root
+    //    Node.
+    let resolved = resolve_build_run_cwd(&node);
 
-    // 4. Resolve worktree path via centralized env module
-    let resolved = env::resolve_agent_path(&node.path, spawn_worktree_name);
-
-    // Only validate worktree exists if use_worktree is true
-    if use_worktree {
-        validate_worktree_exists(&resolved, spawn_worktree_name)?;
+    // 4. Validate + sanitize the worktree only for Worktree Nodes. Root
+    //    Nodes have no worktree to inspect and no `.git` worktree-link to
+    //    sanitize. Pulling `wt_name` from `env::worktree_segment` (not from
+    //    `node.worktree_name` directly) keeps the trim invariant in one
+    //    place — a DB row with stray whitespace around the name would
+    //    otherwise bypass the trim and fail the git2 worktree-list compare.
+    if let Some(wt_name) = env::worktree_segment(&node) {
+        validate_worktree_exists(&resolved, Some(wt_name))?;
 
         // Sanitize .git file to ensure proper worktree isolation across environments
         if let Err(e) = crate::git::worktree::sanitize_git_worktree(&resolved.host_path, resolved.env_type) {
@@ -349,9 +370,110 @@ pub fn resize_build_run(node_id: i64, rows: u16, cols: u16) -> Result<(), String
     registry.resize_pty(node_id, cols, rows)
 }
 
+// ---------------------------------------------------------------------------
+// Path decision
+// ---------------------------------------------------------------------------
+
+/// Where the build/run shell should be spawned for `node`.
+///
+/// Delegates to the canonical Node Working Directory rule
+/// (`env::node_working_path`), which gates on `node.use_worktree` +
+/// non-empty trimmed `worktree_name` — NOT on `mesh.use_worktree`. The
+/// previous inline implementation used `row.use_worktree`, which broke for
+/// Root Nodes spawned in a worktree-enabled mesh (`SpawnButtonCluster`'s
+/// alt-click path bypasses the mesh setting and persists `use_worktree=false`
+/// on the node row). The resulting `spawn_worktree_name = None` then hit
+/// `validate_worktree_exists` and surfaced as "No worktree name set for this
+/// agent node. Spawn the agent first to create a worktree." — exactly the
+/// regression the user reported for Build/Run/Terminal on a Root Node.
+fn resolve_build_run_cwd(node: &crate::models::AgentNode) -> env::ResolvedPath {
+    env::node_working_path(node)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::AgentNode;
+
+    fn node_fixture(use_worktree: bool, worktree_name: Option<&str>) -> AgentNode {
+        AgentNode {
+            path: "/home/user/my-repo".to_string(),
+            worktree_name: worktree_name.map(str::to_string),
+            use_worktree,
+            ..Default::default()
+        }
+    }
+
+    /// Regression: a Root Node (use_worktree=false, worktree_name=None) must
+    /// resolve to the mesh root even when the mesh has use_worktree=true. The
+    /// previous inline implementation used `row.use_worktree`, then fed
+    /// `spawn_worktree_name = None` into `validate_worktree_exists`, which
+    /// surfaced "No worktree name set for this agent node." for any Build/Run/
+    /// Terminal click on a Root Node inside a worktree-enabled mesh — the
+    /// bug the user reported.
+    ///
+    /// Asserts on `raw_path` (the input-pass-through POSIX form, mirrored by
+    /// the frontend's `getNodeGitPath`) rather than `host_path` — `host_path`
+    /// goes through `to_host_path`, which converts a `/home/...` fixture to
+    /// a WSL UNC path on Windows. The raw form is the contract this helper
+    /// is responsible for (issue #409).
+    #[test]
+    fn resolve_build_run_cwd_root_node_resolves_to_mesh_root() {
+        let resolved = resolve_build_run_cwd(&node_fixture(false, None));
+        assert_eq!(resolved.raw_path, "/home/user/my-repo");
+        assert!(
+            !resolved.raw_path.contains("worktrees"),
+            "Root Node raw_path must not contain a worktree subdir, got: {}",
+            resolved.raw_path
+        );
+    }
+
+    /// A stale `worktree_name` on a Root Node is ignored — same canonical
+    /// rule `env::node_working_path` uses everywhere else (issue #383).
+    #[test]
+    fn resolve_build_run_cwd_root_node_ignores_stale_worktree_name() {
+        let resolved = resolve_build_run_cwd(&node_fixture(false, Some("stale-name")));
+        assert!(
+            !resolved.raw_path.contains("worktrees"),
+            "stale worktree_name on Root Node must not leak into raw_path: {}",
+            resolved.raw_path
+        );
+    }
+
+    /// A Worktree Node still resolves into its `.claude/worktrees/<name>`
+    /// subdir — the canonical behaviour, preserved.
+    #[test]
+    fn resolve_build_run_cwd_worktree_node_resolves_worktree_subdir() {
+        let resolved = resolve_build_run_cwd(&node_fixture(true, Some("gentle-fox")));
+        assert_eq!(
+            resolved.raw_path,
+            "/home/user/my-repo/.claude/worktrees/gentle-fox"
+        );
+    }
+
+    /// The worktree validator gate must skip Root Nodes — otherwise we'd
+    /// call `git2::Repository::open` on the mesh root and look for a
+    /// non-existent worktree, tripping the user-facing "Worktree '...' not
+    /// found" error. This pins `env::worktree_segment`'s contract at the
+    /// call site: `Some(_)` only when the node is a Worktree Node.
+    #[test]
+    fn worktree_segment_is_some_only_for_worktree_nodes() {
+        assert!(env::worktree_segment(&node_fixture(false, None)).is_none());
+        assert!(env::worktree_segment(&node_fixture(false, Some("ignored"))).is_none());
+        assert_eq!(
+            env::worktree_segment(&node_fixture(true, Some("gentle-fox"))),
+            Some("gentle-fox"),
+        );
+        assert!(env::worktree_segment(&node_fixture(true, None)).is_none());
+        assert!(env::worktree_segment(&node_fixture(true, Some("   "))).is_none());
+
+        // Trim invariant (issue #383 — Root Node + stale `worktree_name`):
+        // the trimmed segment is what the git2 worktree-list compare sees.
+        assert_eq!(
+            env::worktree_segment(&node_fixture(true, Some("  gentle-fox  "))),
+            Some("gentle-fox"),
+        );
+    }
 
     #[test]
     fn build_run_mode_serializes_lowercase() {

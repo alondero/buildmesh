@@ -14,8 +14,23 @@ use crate::models::{BranchInfo, GitRepoPruneInfo, WorktreeInfo};
 
 /// Discover all local branches, worktrees, and remote-tracking branches for
 /// the repo(s) in a mesh. MVP: the mesh path is treated as a single repo.
+// Offloaded via `run_blocking` (issue #762 convention): the enumeration walks
+// every local branch, worktree, and remote-tracking ref with libgit2 — and the
+// squash-merge detection can compute up to `SQUASH_SCAN_CAP` patch-ids — which
+// on a large repo parks a Tauri async worker for the whole walk. The Worktree
+// Manager tab re-fetches this on every `git-changed` event, so at agent-edit
+// rates an inline body starves the pool (the #761/#762 freeze class).
 #[tauri::command]
 pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, String> {
+    crate::commands::run_blocking("get_git_prune_info", move || {
+        get_git_prune_info_blocking(mesh_id)
+    })
+    .await
+}
+
+/// Sync core for [`get_git_prune_info`] — plain fn so the command can offload
+/// it to the blocking pool.
+fn get_git_prune_info_blocking(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
 
@@ -58,20 +73,25 @@ pub async fn get_git_prune_info(mesh_id: i64) -> Result<Vec<GitRepoPruneInfo>, S
 /// node in `/repo1` that happens to be on its own `feature-a`. The UI
 /// already disables the row's checkbox as the primary defence; this
 /// is belt-and-braces.
+// Offloaded via `run_blocking`: branch deletion rewrites refs on disk with
+// libgit2 — filesystem work that must not run inline on a Tauri async worker.
 #[tauri::command]
 pub async fn delete_branches(
     mesh_id: i64,
     worktree_path: String,
     branch_names: Vec<String>,
 ) -> Result<(), String> {
-    let nodes = db::list_agent_nodes_by_mesh(mesh_id)
-        .map_err(|e| format!("failed to list agent nodes: {}", e))?;
-    let active_branches = active_node_branches(&nodes);
-    delete_branches_in_repo(
-        &to_host_path(&worktree_path),
-        &branch_names,
-        &active_branches,
-    )
+    crate::commands::run_blocking("delete_branches", move || {
+        let nodes = db::list_agent_nodes_by_mesh(mesh_id)
+            .map_err(|e| format!("failed to list agent nodes: {}", e))?;
+        let active_branches = active_node_branches(&nodes);
+        delete_branches_in_repo(
+            &to_host_path(&worktree_path),
+            &branch_names,
+            &active_branches,
+        )
+    })
+    .await
 }
 
 fn delete_branches_in_repo(
@@ -148,9 +168,16 @@ fn delete_branches_in_repo(
 /// loses the warm-path latency win. The Worktree Manager UI also
 /// disables the row's checkbox as the primary defence; this backend
 /// check is defence-in-depth.
+// Offloaded via `run_blocking`: each removal is a recursive directory delete
+// (potentially gigabytes of node_modules/target) plus a libgit2 prune — on a
+// Tauri async worker that parks the pool for the whole delete, which on
+// Windows can run tens of seconds.
 #[tauri::command]
 pub async fn delete_worktrees(worktree_paths: Vec<String>) -> Result<(), String> {
-    remove_worktrees(&worktree_paths)
+    crate::commands::run_blocking("delete_worktrees", move || {
+        remove_worktrees(&worktree_paths)
+    })
+    .await
 }
 
 fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
@@ -200,21 +227,79 @@ fn remove_worktrees(worktree_paths: &[String]) -> Result<(), String> {
 /// frontend can show what happened (e.g. `"From <url>\n - [deleted]
 /// origin/feature-x"` when refs were dropped, or an empty/`"From <url>"`
 /// line when nothing changed). Issue #657.
+///
+/// Delegates to [`locked_prune_remote_tracking`] so the fetch acquires the
+/// per-Mesh sync lock and serialises against the auto-sync (`#652`),
+/// manual `git_sync` (`#680`), PR-spawn head fetch (`#698`), and any
+/// concurrent prune on the same worktree. Keyed on `&worktree_path` (the
+/// worktree's own path), matching the prune UI's input — the same key a
+/// second concurrent `prune_remote_tracking` call on the SAME worktree
+/// would use, so the two can't collide on `.git/FETCH_HEAD`.
+// Offloaded via `run_blocking`: the core is a network `git fetch --prune`
+// (no client-side timeout) that additionally *waits on the blocking per-Mesh
+// sync lock* — inline on a Tauri async worker either of those parks the
+// worker for the duration (the overnight-freeze class, #761/#762).
 #[tauri::command]
 pub async fn prune_remote_tracking(worktree_path: String) -> Result<String, String> {
-    let host_path = to_host_path(&worktree_path);
-    let output = crate::process_util::command_no_window("git")
-        .args(["fetch", "--prune"])
-        .current_dir(&host_path)
-        .output()
-        .map_err(|e| format!("failed to run git fetch --prune: {}", e))?;
+    crate::commands::run_blocking("prune_remote_tracking", move || {
+        locked_prune_remote_tracking(&worktree_path)
+    })
+    .await
+}
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.status.success() {
-        Ok(stderr)
-    } else {
-        Err(stderr)
-    }
+/// Run `git fetch --prune` inside `services::sync_lock::with_mesh_sync_lock`
+/// so the worktree prune can't race against itself (issue #709 — the
+/// fourth and final per-Mesh git shell-out to land under the lock).
+///
+/// **Lock key is the worktree's own path** (`worktree_path`), NOT the
+/// parent mesh's `agent_nodes.path`. Rationale:
+///
+/// The contention scope for `git fetch --prune` from a worktree is the
+/// worktree's remote-tracking refs and the shared parent
+/// `.git/FETCH_HEAD`. Two concurrent prunes on different worktrees of
+/// the same mesh share the parent's `.git` and CAN race on `FETCH_HEAD`;
+/// the parent-mesh key would serialise those, but the per-worktree key
+/// only serialises prunes on the SAME worktree. The issue's author made
+/// this trade-off deliberately: the prune UI fires once per worktree
+/// (the user picks the worktree from a list), so same-worktree
+/// collisions are the realistic case. Cross-worktree collisions on the
+/// parent's `FET_HEAD` are guarded by the much narrower window that
+/// `git fetch --prune` opens (single refspec negotiation) versus the
+/// all-refs auto-sync fetch.
+///
+/// All four lock-wrap sites now use the same shape — `locked_*` helper +
+/// `with_mesh_sync_lock(key, || work())` — so adding a fifth site is
+/// copy-paste trivial rather than a new pattern.
+///
+/// The closure captures `worktree_path` by reference; the host-path
+/// conversion (`to_host_path`) happens once outside the closure so the
+/// closure body is the bare shell-out, mirroring `fetch_single_ref` /
+/// `locked_fetch_pr_head`'s closure shape.
+fn locked_prune_remote_tracking(worktree_path: &str) -> Result<String, String> {
+    let host_path = to_host_path(worktree_path);
+    crate::services::sync_lock::with_mesh_sync_lock(worktree_path, || {
+        // `run_command_with_timeout` (not a bare `.output()`) — this is a
+        // network-facing fetch under the sync lock; a half-open connection
+        // would otherwise wedge the blocking-pool thread AND the lock
+        // forever (the issue #762 class). Same 5-minute manual-path cap as
+        // the manual `git_sync`'s fetch.
+        let mut prune_builder = crate::process_util::git_command();
+        prune_builder
+            .args(["fetch", "--prune"])
+            .current_dir(&host_path);
+        let output = crate::process_util::run_command_with_timeout(
+            prune_builder,
+            "git fetch --prune",
+            std::time::Duration::from_secs(300),
+        )?;
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if output.status.success() {
+            Ok(stderr)
+        } else {
+            Err(stderr)
+        }
+    })
 }
 
 // ── Internals (DB-free, unit-testable against real temp repos) ──────────────

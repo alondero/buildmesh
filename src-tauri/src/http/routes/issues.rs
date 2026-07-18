@@ -1,6 +1,5 @@
 //! GitHub issue browsing + issue-driven agent spawning.
 
-use tokio::io::AsyncReadExt;
 use crate::http::MaybeTls;
 
 use crate::http::request;
@@ -9,7 +8,11 @@ pub async fn list(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     mesh_id: i64,
 ) {
-    match crate::commands::pr::get_repo_issues(mesh_id) {
+    // Await the async command wrapper (not the `*_blocking` core): this route
+    // runs inside `tauri::async_runtime::spawn` (http/mod.rs), so calling the
+    // blocking core directly would park a Tauri worker. The wrapper offloads to
+    // the blocking pool via `run_blocking`.
+    match crate::commands::pr::get_repo_issues(mesh_id).await {
         Ok(issues) => {
             let body = serde_json::to_string(&issues).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -39,15 +42,11 @@ pub async fn spawn(
     issue_number: i64,
     content_length: usize,
 ) {
-    if content_length > 256 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
+    let Some(body_bytes) =
+        request::read_body_or_send_error(lines, content_length, 256 * 1024).await
+    else {
         return;
-    }
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
+    };
 
     let req: SpawnRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,

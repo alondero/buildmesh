@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import type { ProviderAccount, ProviderPairing, ApiSurface } from '../../lib/tauri';
 
@@ -38,6 +38,7 @@ export function HarnessConfigList({
   accounts,
   onAttach,
   onDetach,
+  onDirtyChange,
 }: {
   harnesses: ProxyHarness[];
   compatibleByHarness: Record<string, ProviderAccount[]>;
@@ -47,6 +48,12 @@ export function HarnessConfigList({
   accounts: ProviderAccount[];
   onAttach: (harnessId: string, providerId: string, apiKey: string | null) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  /**
+   * Forwarded to each card so the parent can aggregate the modal-wide dirty
+   * signal (issue #730). Each card's form opens independently; any one
+   * having a half-typed key or a selected provider counts as dirty.
+   */
+  onDirtyChange?: (harnessId: string, dirty: boolean) => void;
 }) {
   const accountName = (id: string) => accounts.find((a) => a.id === id)?.name ?? id;
   const isKeyed = (id: string) => {
@@ -84,6 +91,7 @@ export function HarnessConfigList({
           isKeyed={isKeyed}
           onAttach={onAttach}
           onDetach={onDetach}
+          onDirtyChange={onDirtyChange ? (d) => onDirtyChange(harness.id, d) : undefined}
         />
       ))}
     </div>
@@ -99,6 +107,7 @@ function HarnessCard({
   isKeyed,
   onAttach,
   onDetach,
+  onDirtyChange,
 }: {
   harness: ProxyHarness;
   compatible: ProviderAccount[];
@@ -108,6 +117,9 @@ function HarnessCard({
   isKeyed: (id: string) => boolean;
   onAttach: (harnessId: string, providerId: string, apiKey: string | null) => Promise<void>;
   onDetach: (harnessId: string, providerId: string) => Promise<void>;
+  /** Dirty = the inline "Add proxied provider" form is open AND has a
+   *  selection or a half-typed key. See issue #730. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState('');
@@ -118,6 +130,18 @@ function HarnessCard({
   // Offer only compatible providers not already attached to this harness.
   const offerable = compatible.filter((a) => !attachedIds.has(a.id));
   const needsKey = selected !== '' && !isKeyed(selected);
+
+  // Dirty when the inline form is open and the user has entered either a
+  // provider selection or a half-typed key. The form opens empty (just the
+  // "+ Add proxied provider" button) — that's not dirty.
+  const isDirty = adding && (selected !== '' || key.trim() !== '');
+  // Only fire on dirty-state FLIPS — see AccountCard's comment.
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const reset = () => {
     setAdding(false);
@@ -165,7 +189,7 @@ function HarnessCard({
             return (
               <li
                 key={p.provider_id}
-                className="flex items-center gap-3 border border-border-subtle rounded px-3 py-2"
+                className="flex items-center gap-3 border border-border-subtle rounded-md px-3 py-2"
                 data-testid={`pairing-${p.harness_id}-${p.provider_id}`}
               >
                 <ProviderIcon providerId={p.provider_id} className="h-5 w-5" />
@@ -175,14 +199,14 @@ function HarnessCard({
                     <span className="ml-2 text-sm text-accent-cyan">{SURFACE_LABEL[p.surface]}</span>
                   </div>
                   {p.base_url && (
-                    <div className="text-sm text-text-muted truncate font-mono">{p.base_url}</div>
+                    <div className="text-sm text-text-secondary truncate font-mono">{p.base_url}</div>
                   )}
                 </div>
                 {detachable ? (
                   <button
                     onClick={() => detach(p.provider_id)}
                     disabled={busy}
-                    className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded hover:bg-status-error/25 disabled:opacity-50"
+                    className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
                     aria-label={`Detach ${accountName(p.provider_id)} from ${harness.label}`}
                   >
                     Detach
@@ -209,7 +233,7 @@ function HarnessCard({
               <select
                 value={selected}
                 onChange={(e) => setSelected(e.target.value)}
-                className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                 aria-label={`Provider to attach to ${harness.label}`}
               >
                 <option value="">Select a provider…</option>
@@ -229,7 +253,7 @@ function HarnessCard({
                     value={key}
                     onChange={(e) => setKey(e.target.value)}
                     placeholder="Enter API key…"
-                    className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                    className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                     aria-label={`${accountName(selected)} API key`}
                   />
                 </div>
@@ -240,7 +264,7 @@ function HarnessCard({
                   // A keyless provider needs a key to reach its endpoint, so gate
                   // Attach on the inline key when the provider has none stored.
                   disabled={busy || !selected || (needsKey && !key.trim())}
-                  className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+                  className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
                 >
                   {busy ? 'Attaching…' : 'Attach'}
                 </button>

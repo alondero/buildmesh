@@ -2,7 +2,7 @@
 
 /**
  * Per-tier Claude model overrides for a Claude-compatible provider account
- * (issue #567 — restores the cwrap capability).
+ * (issue #567 — restores the Claude Code model-tier capability).
  *
  * Claude Code asks its backend for several model *aliases*: a primary, a cheap
  * "small/fast" model for background tasks (titles, etc.), and the Sonnet / Opus
@@ -12,6 +12,7 @@
  *   - `small_fast` → `ANTHROPIC_SMALL_FAST_MODEL`
  *   - `sonnet`     → `ANTHROPIC_DEFAULT_SONNET_MODEL`
  *   - `opus`       → `ANTHROPIC_DEFAULT_OPUS_MODEL`
+ *   - `fable`      → `ANTHROPIC_DEFAULT_FABLE_MODEL`
  *   - `haiku`      → `ANTHROPIC_DEFAULT_HAIKU_MODEL`
  *
  * Only meaningful for Claude-compatible providers (MiniMax, Kimi, custom) — it's
@@ -38,6 +39,12 @@ sonnet: string | null,
  * `ANTHROPIC_DEFAULT_OPUS_MODEL`.
  */
 opus: string | null, 
+/**
+ * `ANTHROPIC_DEFAULT_FABLE_MODEL` — the Claude 5 Fable tier. Unset falls
+ * back to the `opus` tier at env-build time (Fable sits above Opus, so a
+ * provider's Opus-grade model is the closest configured substitute).
+ */
+fable: string | null, 
 /**
  * `ANTHROPIC_DEFAULT_HAIKU_MODEL`.
  */

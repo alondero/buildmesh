@@ -122,11 +122,25 @@ pub struct GitBranchStatus {
 /// Uses git2's `graph_ahead_behind` rather than `git rev-list HEAD..@{u}`: the
 /// brace syntax is silently mangled by `Command::args` on Windows
 /// (see commands/prune.rs for the same pattern).
-// `(async)` runs the command on a worker thread: git2 work (repo open, status
-// walk, diffs) can take hundreds of ms on large repos, and a bare `#[command]`
-// would execute it on the main thread, stalling the UI and every other IPC call.
-#[command(async)]
-pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
+///
+/// Thin async wrapper that offloads the libgit2 work onto the blocking pool
+/// (issue #762 — `#[command(async)]` would park a Tauri tokio worker; WSL UNC
+/// paths with a paused VM can make `open_from_host_path` stall). The sync
+/// core [`get_git_branch_status_blocking`] stays directly callable so the
+/// mobile `/git/branch` HTTP route can `.await` it through here.
+#[command]
+pub async fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, String> {
+    crate::commands::run_blocking("get_git_branch_status", move || {
+        get_git_branch_status_blocking(path)
+    })
+    .await
+}
+
+/// Sync core for [`get_git_branch_status`]. See its doc for the offload
+/// rationale.
+pub(crate) fn get_git_branch_status_blocking(
+    path: String,
+) -> Result<Option<GitBranchStatus>, String> {
     let repo = match primitives::open_from_host_path(&path) {
         Ok(r) => r,
         Err(_) => return Ok(None),
@@ -171,8 +185,15 @@ pub fn get_git_branch_status(path: String) -> Result<Option<GitBranchStatus>, St
 
 /// Get git status for a directory — returns list of changed files with per-file
 /// line additions/deletions for all uncommitted changes.
-#[command(async)]
-pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload rationale.
+#[command]
+pub async fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
+    crate::commands::run_blocking("get_git_status", move || get_git_status_blocking(path)).await
+}
+
+/// Sync core for [`get_git_status`].
+pub(crate) fn get_git_status_blocking(path: String) -> Result<Vec<GitStatus>, String> {
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
@@ -220,9 +241,16 @@ pub fn get_git_status(path: String) -> Result<Vec<GitStatus>, String> {
     Ok(changed_files)
 }
 
-/// Get aggregate git change summary for a directory
-#[command(async)]
-pub fn get_git_summary(path: String) -> Result<GitSummary, String> {
+/// Get aggregate git change summary for a directory.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload rationale.
+#[command]
+pub async fn get_git_summary(path: String) -> Result<GitSummary, String> {
+    crate::commands::run_blocking("get_git_summary", move || get_git_summary_blocking(path)).await
+}
+
+/// Sync core for [`get_git_summary`].
+pub(crate) fn get_git_summary_blocking(path: String) -> Result<GitSummary, String> {
     let repo = primitives::open_from_host_path(&path).map_err(|e| e.to_string())?;
 
     let mut opts = StatusOptions::new();
@@ -283,13 +311,30 @@ pub(crate) fn default_branch_from_repo(repo: &Repository) -> String {
 /// Get the default branch name for the remote named "origin".
 /// Reads the local symbolic ref (populated by clone/fetch) to avoid a network round-trip.
 /// Falls back to "main" if no remote is configured or HEAD ref is missing.
-#[command(async)]
-pub fn get_default_branch(path: String) -> String {
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload rationale.
+/// **Preserves the pre-#762 contract** of returning `String` directly (with
+/// `"main"` as the fallback), so `spawn.rs` / `agent.rs` callers continue to
+/// treat the return value as infallible. The `Result`-flavoured sync core
+/// is `pub(crate)` for callers that want the distinction (and for tests).
+#[command]
+pub async fn get_default_branch(path: String) -> String {
+    crate::commands::run_blocking("get_default_branch", move || {
+        get_default_branch_blocking(path)
+    })
+    .await
+    .unwrap_or_else(|_| "main".to_string())
+}
+
+/// Sync core for [`get_default_branch`]. Returns `Ok("main")` on any open
+/// failure so the async wrapper can preserve its infallible contract; the
+/// `Err` variant is reserved for genuine worker-pool join errors.
+pub(crate) fn get_default_branch_blocking(path: String) -> Result<String, String> {
     let repo = match Repository::open(&path) {
         Ok(r) => r,
-        Err(_) => return "main".to_string(),
+        Err(_) => return Ok("main".to_string()),
     };
-    default_branch_from_repo(&repo)
+    Ok(default_branch_from_repo(&repo))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -318,13 +363,12 @@ pub struct GitSyncResult {
 /// translate the shared `SyncOutcome` back to the `GitSyncResult`
 /// shape the frontend expects (the wire type is unchanged).
 ///
-/// Note: the shared helper performs a dirty-check and skips silently
-/// (returning `SkippedDirty` → "Skipped: working tree has
-/// uncommitted changes" in the result). This is new behaviour for
-/// `git_sync`; the pre-#274 inline code would have gone ahead and
-/// tried the fetch + ff-pull anyway, then reported a ff-pull
-/// failure. The new message is more informative and avoids the
-/// unnecessary network round-trip on a dirty click.
+/// Note: the shared helper always runs the fetch (a fetch never
+/// touches the working tree) and only skips the fast-forward pull
+/// when the tree is dirty (returning `FetchedButDirty` → "Fetched N
+/// new commits — fast-forward skipped: working tree has uncommitted
+/// changes"). A manual Sync click on a dirty mesh therefore still
+/// freshens the remote-tracking refs that worktree nodes are cut from.
 ///
 /// **Fetch scope trade-off:** the pre-#274 inline code did
 /// `git fetch` with NO arguments, which git resolves to "fetch the
@@ -340,6 +384,18 @@ pub struct GitSyncResult {
 /// here to recover the pre-#274 latency if user feedback warrants.
 #[command]
 pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
+    // `do_sync` shells out to `git fetch`/`git pull` (a network round-trip
+    // with no client-side timeout) behind a blocking per-Mesh mutex — that
+    // must run on the blocking pool, not a Tauri async worker, or a stalled
+    // fetch parks the worker (see the overnight-freeze investigation and
+    // [`crate::commands::run_blocking`]).
+    crate::commands::run_blocking("git_sync", move || git_sync_blocking(path)).await
+}
+
+/// Sync core for [`git_sync`]. Plain fn so the async command can offload it to
+/// the blocking pool; also keeps the git_tests call shape (`.await` on the
+/// command) intact.
+fn git_sync_blocking(path: String) -> Result<GitSyncResult, String> {
     let host_path = to_host_path(&path);
 
     // Resolve the remote the same way `git fetch` (no args) used to:
@@ -357,19 +413,39 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
     // `git_sync` is a manual user click, not a spawn-time path, so
     // the all-refs fetch is fine here (and matches the behaviour of
     // `git fetch` with no arguments that the pre-#274 code used).
-    let outcome = crate::git::sync::do_sync(&host_path, &remote, None);
+    //
+    // Issue #680 — wrap in the per-Mesh sync lock so a manual Sync
+    // click can't race against concurrent spawn-time `fetch_origin`
+    // (or against a second manual Sync) for the same Mesh. Without
+    // this lock, two `git fetch` shell-outs collide on
+    // `.git/FETCH_HEAD` / `refs/heads/<branch>.lock`. Keying on `&path`
+    // (the DB-stored canonical form, NOT `&host_path`) matches the
+    // spawn-time caller in `agent::spawn`, which keys on `node.path` —
+    // both call sites share one lock entry per Mesh row.
+    //
+    // Issue #709 — the wrap is consolidated into
+    // `git::sync::locked_do_sync` (issue #680's helper) so the lock-
+    // acquisition shape is identical to the spawn-time
+    // `locked_fetch_origin`, the PR-spawn's `locked_fetch_pr_head`,
+    // and the prune's `locked_prune_remote_tracking`. The wrap body
+    // used to live inline here.
+    let outcome =
+        crate::git::sync::locked_do_sync(&path, &host_path, &remote, None);
 
     // Ref-freshness (issue #613 AC3): a manual Sync that pulled new commits
     // moved the mesh's base ref, so its warm pool entries are now stale.
     // Kick a background freshness pass (serialized behind the pool fill lock)
     // to `git reset --hard` them onto the new commit. Fired only when new
     // commits actually arrived; `UpToDate` / skipped means nothing moved.
-    let ref_advanced = matches!(
-        &outcome,
-        crate::git::sync::SyncOutcome::Synced { .. }
-            | crate::git::sync::SyncOutcome::FetchedButDiverged { .. }
-    );
-    if ref_advanced {
+    // `SyncOutcome::advanced_ref()` is the single-sourced predicate that
+    // matches the spawn-time `FetchOutcome::advanced_ref()` — both kept in
+    // lockstep on `git::sync::SyncOutcome` / `git::sync::FetchOutcome`
+    // (issue #634).
+    // The `is_initialized` guard keeps this hermetic under `cargo test`:
+    // `db::get()` panics on an uninitialized global DB, and a filtered test
+    // run may execute `git_sync` before any DB-initializing test has run.
+    // In production the DB is always initialized at startup.
+    if outcome.advanced_ref() && crate::db::is_initialized() {
         if let Ok(mesh) = crate::db::get_mesh_by_path(&path) {
             let mesh_id = mesh.id;
             std::thread::spawn(move || {
@@ -384,19 +460,22 @@ pub async fn git_sync(path: String) -> Result<GitSyncResult, String> {
 /// Map a [`crate::git::sync::SyncOutcome`] to the [`GitSyncResult`]
 /// shape the frontend expects from the `git_sync` Tauri command. The
 /// four wire fields are unchanged; the messages match the prior
-/// `format!` strings where the variant maps cleanly, and introduce a
-/// clear message for the two skip variants (`SkippedDirty`,
-/// `SkippedNoRemote`) that the pre-#274 inline code never produced.
+/// `format!` strings where the variant maps cleanly.
 fn sync_outcome_to_git_sync_result(
     outcome: crate::git::sync::SyncOutcome,
 ) -> GitSyncResult {
     use crate::git::sync::SyncOutcome;
     match outcome {
-        SyncOutcome::SkippedDirty => GitSyncResult {
-            fetched: false,
+        SyncOutcome::FetchedButDirty { new_commits } => GitSyncResult {
+            fetched: true,
             pulled: false,
-            new_commits: 0,
-            message: "Skipped: working tree has uncommitted changes".to_string(),
+            new_commits,
+            message: format!(
+                "Fetched {} new commit{}; fast-forward skipped: working tree has \
+                 uncommitted changes",
+                new_commits,
+                plural_s(new_commits)
+            ),
         },
         SyncOutcome::SkippedNoRemote => GitSyncResult {
             fetched: false,
@@ -417,7 +496,7 @@ fn sync_outcome_to_git_sync_result(
             message: format!(
                 "Pulled {} new commit{}",
                 new_commits,
-                if new_commits == 1 { "" } else { "s" }
+                plural_s(new_commits)
             ),
         },
         SyncOutcome::FetchedButDiverged { new_commits, reason } => GitSyncResult {
@@ -427,7 +506,23 @@ fn sync_outcome_to_git_sync_result(
             message: format!(
                 "Fetched {} new commit{} but fast-forward failed: {}",
                 new_commits,
-                if new_commits == 1 { "" } else { "s" },
+                plural_s(new_commits),
+                reason
+            ),
+        },
+        SyncOutcome::PullTimedOut { new_commits, reason } => GitSyncResult {
+            fetched: true,
+            pulled: false,
+            new_commits,
+            // Distinct wording from `FetchedButDiverged` so the user can
+            // tell a network hang apart from a real history divergence
+            // (issue #762 review). The 5-min `FETCH_TIMEOUT` cap is what
+            // surfaced this; pre-#762 the pull path could only fail via
+            // spawn-error or non-zero-exit.
+            message: format!(
+                "Fetched {} new commit{} but pull timed out: {}",
+                new_commits,
+                plural_s(new_commits),
                 reason
             ),
         },
@@ -444,6 +539,12 @@ fn sync_outcome_to_git_sync_result(
             message: format!("Repository unusable: {}", reason),
         },
     }
+}
+
+/// `""` for `n == 1`, `"s"` otherwise. Used four times in
+/// `sync_outcome_to_git_sync_result` for the "N new commit[s]" wording.
+fn plural_s(n: u32) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 // ── Mesh health detection (issue #231) ──────────────────────────────────────
@@ -479,8 +580,20 @@ pub struct FreeResult {
 /// `BranchesWorktreesSection`. The active-paths list is sourced from
 /// the live agent-nodes table so the holder's `is_active` reflects
 /// whether a real agent is using the worktree.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale. The libgit2 status walk + holder lookup can take hundreds
+/// of ms on a large repo and must not park a Tauri tokio worker.
 #[command]
 pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
+    crate::commands::run_blocking("get_mesh_health", move || {
+        get_mesh_health_blocking(mesh_id)
+    })
+    .await
+}
+
+/// Sync core for [`get_mesh_health`].
+pub(crate) fn get_mesh_health_blocking(mesh_id: i64) -> Result<MeshHealth, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
@@ -510,6 +623,12 @@ pub async fn get_mesh_health(mesh_id: i64) -> Result<MeshHealth, String> {
 ///
 /// On success, emits a `git-changed` event for the mesh path so the
 /// sidebar `!` badge clears and the file explorer refreshes.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale. The mesh row is resolved ONCE up front and the derived
+/// `host_path` + `local_base` are passed into the blocking core, so the
+/// core doesn't pay for a second `db::get_mesh_by_id` (or `to_host_path`
+/// call). The emit payload after `run_blocking` reuses the same values.
 #[command]
 pub async fn restore_mesh_to_base(
     mesh_id: i64,
@@ -518,10 +637,35 @@ pub async fn restore_mesh_to_base(
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
     let host_path = to_host_path(&mesh.path);
-    let repo = Repository::open(&host_path)
-        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
     let local_base = health::parse_local_branch(&mesh.base_ref)
         .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
+
+    let host_path_for_emit = host_path.clone();
+    let result =
+        crate::commands::run_blocking("restore_mesh_to_base", move || {
+            restore_mesh_to_base_blocking(host_path, local_base)
+        })
+        .await?;
+    // Emit only on success — a failing restore never refreshes the panel.
+    let _ = app.emit(
+        "git-changed",
+        serde_json::json!({
+            "path": host_path_for_emit,
+            "internal_path": host_path_for_emit,
+        }),
+    );
+    Ok(result)
+}
+
+/// Sync core for [`restore_mesh_to_base`]. Takes the already-resolved
+/// `host_path` + `local_base` so the wrapper's DB lookup is the only one
+/// paid per invocation (issue #762 review).
+pub(crate) fn restore_mesh_to_base_blocking(
+    host_path: String,
+    local_base: String,
+) -> Result<RestoreResult, String> {
+    let repo = Repository::open(&host_path)
+        .map_err(|e| format!("failed to open repo at {}: {}", host_path, e))?;
 
     let moved = health::restore_to_base_impl(&repo, &local_base)?;
     let message = if moved {
@@ -529,12 +673,6 @@ pub async fn restore_mesh_to_base(
     } else {
         format!("already on {}", local_base)
     };
-
-    // Notify the frontend so the badge clears and the panel refreshes.
-    let _ = app.emit(
-        "git-changed",
-        serde_json::json!({ "path": host_path, "internal_path": host_path }),
-    );
 
     Ok(RestoreResult { restored: moved, message })
 }
@@ -547,6 +685,13 @@ pub async fn restore_mesh_to_base(
 ///
 /// On success, emits a `git-changed` event for the freed worktree's path
 /// so any open panel re-fetches.
+///
+/// Thin async wrapper; see [`get_git_branch_status`] for the offload
+/// rationale. The mesh row is resolved ONCE up front and the derived
+/// `mesh_host_path` + `local_base` are passed into the blocking core so
+/// the core doesn't pay for a second `db::get_mesh_by_id`. The freed
+/// worktree's `host_path` is the command's `worktree_path` arg (host-
+/// mapped) — the core doesn't need to compute it.
 #[command]
 pub async fn free_base_branch(
     mesh_id: i64,
@@ -555,11 +700,15 @@ pub async fn free_base_branch(
 ) -> Result<FreeResult, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| format!("mesh {} not found: {}", mesh_id, e))?;
+    let mesh_host_path = to_host_path(&mesh.path);
     let local_base = health::parse_local_branch(&mesh.base_ref)
         .ok_or_else(|| format!("base_ref '{}' is not a valid branch", mesh.base_ref))?;
-
     let host_wt_path = to_host_path(&worktree_path);
-    let detached_at_sha = health::free_base_branch_impl(&host_wt_path, &local_base)?;
+
+    let result = crate::commands::run_blocking("free_base_branch", move || {
+        free_base_branch_blocking(host_wt_path, local_base)
+    })
+    .await?;
 
     // Notify the frontend so the panel refreshes. The freed worktree's
     // `path` is what `get_git_prune_info` and the worktree list use to
@@ -567,10 +716,22 @@ pub async fn free_base_branch(
     let _ = app.emit(
         "git-changed",
         serde_json::json!({
-            "path": to_host_path(&mesh.path),
-            "internal_path": host_wt_path,
+            "path": mesh_host_path,
+            "internal_path": to_host_path(&worktree_path),
         }),
     );
+
+    Ok(result)
+}
+
+/// Sync core for [`free_base_branch`]. Takes the already-resolved
+/// `host_wt_path` + `local_base` so the wrapper's DB lookup is the only
+/// one paid per invocation (issue #762 review).
+pub(crate) fn free_base_branch_blocking(
+    host_wt_path: String,
+    local_base: String,
+) -> Result<FreeResult, String> {
+    let detached_at_sha = health::free_base_branch_impl(&host_wt_path, &local_base)?;
 
     Ok(FreeResult { detached_at_sha })
 }
@@ -598,7 +759,7 @@ pub struct MeshGitStatic {
 }
 
 /// Compute the static trio in one IPC. `check_gh_auth` is composed
-/// (delegated to the existing `commands::pr::check_gh_auth`) so the
+/// (delegated to the existing `commands::github::check_gh_auth`) so the
 /// mobile `/git/auth` HTTP route and `MeshPropertiesTab.tsx` keep using
 /// the same source of truth — the snapshot just bundles it with the
 /// repo-only fields the panel needs.
@@ -606,25 +767,37 @@ pub struct MeshGitStatic {
 /// The gh-auth call is wrapped in a process-global TTL'd cache (see
 /// [`check_gh_auth_cached`]) so a user with N meshes pays one gh
 /// round-trip per TTL window instead of N. The cache lives HERE, not in
-/// `commands::pr::check_gh_auth` itself, because that command is also
+/// `commands::github::check_gh_auth` itself, because that command is also
 /// called by the mobile `/git/auth` HTTP route and by
 /// `MeshPropertiesTab.tsx` on a user-triggered re-check — both want a
 /// fresh value, not a 30s-stale snapshot.
 ///
-/// `#[command(async)]` (not bare `#[command]`) dispatches the whole
-/// call to a worker thread: the `check_gh_auth` delegation does a
-/// blocking HTTPS GET to `https://api.github.com/user` (~100–500 ms),
-/// and we don't want that round-trip blocking the main thread (which
-/// would freeze the UI and stall every other IPC — see the trio's
-/// doc-comment at `check_gh_auth` for the same rationale).
+/// Offloaded to the blocking pool via `run_blocking`: the
+/// `check_gh_auth` delegation does a blocking HTTPS GET to
+/// `https://api.github.com/user` (bounded by the client request
+/// timeout), and this command fires on every sidebar mesh mount —
+/// running it on a Tauri async worker would park that worker for the
+/// call's duration and, across several simultaneous mounts, starve the
+/// pool (see *Command Threading* in `docs/knowledge-primer.md`). The
+/// sync core `get_mesh_git_static_blocking` stays directly callable
+/// (the cache-behaviour tests exercise it without a runtime).
 ///
 /// Never returns an error: a non-repo path yields `is_git_repo = false`
 /// with the auth check still attempted (a non-git directory can still
 /// have `gh` configured) and `default_branch = "main"`. That matches
 /// the hook's prior short-circuit (`if (!repoOk) return;`) and keeps the
 /// UI contract identical.
-#[command(async)]
-pub fn get_mesh_git_static(mesh_path: String) -> Result<MeshGitStatic, String> {
+#[command]
+pub async fn get_mesh_git_static(mesh_path: String) -> Result<MeshGitStatic, String> {
+    crate::commands::run_blocking("get_mesh_git_static", move || {
+        get_mesh_git_static_blocking(mesh_path)
+    })
+    .await
+}
+
+/// Sync core for [`get_mesh_git_static`] — see its doc for the offload
+/// rationale.
+pub(crate) fn get_mesh_git_static_blocking(mesh_path: String) -> Result<MeshGitStatic, String> {
     // Open once and reuse the handle for both `is_git_repo` and
     // `default_branch` (#431 — eliminates the pre-refactor double-open).
     let repo = git2::Repository::open(&mesh_path).ok();
@@ -663,7 +836,7 @@ static GH_AUTH_CACHE: OnceCell<Mutex<(Instant, bool)>> = OnceCell::new();
 /// other state (matches the convention in `http/mod.rs::SNAPSHOT_COUNTER`).
 static GH_AUTH_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
-/// Cached wrapper around `commands::pr::check_gh_auth()`. Returns the
+/// Cached wrapper around `commands::github::check_gh_auth()`. Returns the
 /// cached value when the TTL hasn't expired; otherwise re-invokes the
 /// underlying command and refreshes the cache.
 ///
@@ -687,7 +860,7 @@ fn check_gh_auth_cached() -> bool {
     let now = Instant::now();
     let mut guard = cell.lock().expect("gh-auth cache mutex poisoned");
     if now.duration_since(guard.0) >= GH_AUTH_CACHE_TTL {
-        guard.1 = crate::commands::pr::check_gh_auth();
+        guard.1 = crate::commands::github::check_gh_auth_blocking();
         guard.0 = now;
         GH_AUTH_CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     }

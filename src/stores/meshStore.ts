@@ -17,8 +17,9 @@ interface MeshState {
   fetchMeshes: () => Promise<void>;
   addMesh: () => Promise<void>;
   addTestMesh: (name: string) => Promise<Mesh | null>;
-  createMesh: (name: string, path: string) => Promise<void>;
+  createMesh: (name: string, path: string, color?: string | null) => Promise<Mesh | null>;
   deleteMesh: (id: number) => Promise<void>;
+  updateMeshColor: (id: number, color: string | null) => Promise<void>;
   selectMesh: (id: number | null) => void;
   updateMeshLayout: (id: number, layout: 'grid' | 'single') => Promise<void>;
   reorderMeshes: (meshId: number, newPosition: number) => Promise<void>;
@@ -70,12 +71,17 @@ export const useMeshStore = create<MeshState>((set) => ({
     }
   },
 
-  createMesh: async (name, path) => {
+  createMesh: async (name, path, color) => {
     try {
-      await api.createMesh(name, path);
-      await useMeshStore.getState().fetchMeshes();
+      const mesh = await api.createMesh(name, path, color);
+      set((state) => ({
+        meshes: [...state.meshes, mesh],
+        meshesById: new Map([...state.meshesById, [mesh.id, mesh]]),
+      }));
+      return mesh;
     } catch (e) {
       set({ error: String(e) });
+      return null;
     }
   },
 
@@ -140,6 +146,23 @@ export const useMeshStore = create<MeshState>((set) => ({
         return {
           meshes: state.meshes.map((m) => (m.id === id ? updated : m)),
           meshesById: new Map([...state.meshesById, [id, updated]])
+        };
+      });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  updateMeshColor: async (id, color) => {
+    try {
+      await api.updateMeshColor(id, color);
+      set((state) => {
+        const existing = state.meshesById.get(id);
+        if (!existing) return state;
+        const updated = { ...existing, color };
+        return {
+          meshes: state.meshes.map((m) => (m.id === id ? updated : m)),
+          meshesById: new Map([...state.meshesById, [id, updated]]),
         };
       });
     } catch (e) {

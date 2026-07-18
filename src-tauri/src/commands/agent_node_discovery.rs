@@ -12,7 +12,14 @@ use tauri::command;
 
 #[command]
 pub async fn discover_agent_nodes(mesh_id: i64, mesh_path: String) -> Result<Vec<ArchivedAgentNode>, String> {
-    agent_node_discovery::discover(mesh_id, &mesh_path)
+    // Offload: discovery walks every `~/.claude/projects/<mesh>*` directory
+    // and opens each session's JSONL transcript looking for the first real
+    // user message — unbounded filesystem I/O (slow on WSL UNC paths) that
+    // must not park a Tauri async worker while the Archive tab loads.
+    crate::commands::run_blocking("discover_agent_nodes", move || {
+        agent_node_discovery::discover(mesh_id, &mesh_path)
+    })
+    .await
 }
 
 /// Import a discovered session as a new agent node with the correct worktree/path settings,

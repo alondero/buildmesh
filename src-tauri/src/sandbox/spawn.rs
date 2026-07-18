@@ -383,11 +383,11 @@ mod tests {
     ///
     /// Run manually (default):
     /// ```text
-    /// cargo test -p buildmesh sandbox::spawn::tests::repro_cwrap_exit_in_sandbox -- --ignored --nocapture
+    /// cargo test -p buildmesh sandbox::spawn::tests::repro_claude_exit_in_sandbox -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "live: spawns real claude.exe into an AppContainer; needs the dev host toolchain"]
-    fn repro_cwrap_exit_in_sandbox() {
+    fn repro_claude_exit_in_sandbox() {
         use std::io::Read;
         use std::sync::mpsc;
         use std::time::{Duration, Instant};

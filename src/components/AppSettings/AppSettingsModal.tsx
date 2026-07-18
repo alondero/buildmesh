@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { HarnessOrderList } from './HarnessOrderList';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
@@ -11,6 +11,7 @@ import type {
   RealizedBind,
 } from '../../lib/tauri';
 import { optimisticToggle } from '../../lib/optimisticToggle';
+import { Modal, ModalCloseButton } from '../shared/Modal';
 
 interface AppSettingsModalProps {
   onClose: () => void;
@@ -21,12 +22,13 @@ const NO_OVERRIDE = '__no_override__';
 // Built-ins can only be disabled, never removed (a "remove" just reverts them to
 // the code default), so we hide the Remove action for these ids. Kept in sync with
 // `preferences::default_provider_accounts`.
-const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax', 'kimi'];
+const BUILTIN_PROVIDER_IDS = ['anthropic', 'codex', 'agy', 'minimax', 'kimi', 'openrouter'];
 
-// The five Claude model aliases a Claude-compatible provider can pin (issue #567).
+// The Claude model aliases a Claude-compatible provider can pin (issue #567).
 // `key` is the ProviderAccount.model_tiers field; `label` is the UI caption.
 const MODEL_TIER_FIELDS: { key: keyof ProviderAccount['model_tiers']; label: string }[] = [
   { key: 'default', label: 'Default model' },
+  { key: 'fable', label: 'Fable' },
   { key: 'opus', label: 'Opus' },
   { key: 'sonnet', label: 'Sonnet' },
   { key: 'haiku', label: 'Haiku' },
@@ -37,10 +39,19 @@ export function AccountCard({
   account,
   onSave,
   onRemove,
+  onDirtyChange,
 }: {
   account: ProviderAccount;
   onSave: (account: ProviderAccount) => Promise<boolean>;
   onRemove?: (id: string) => Promise<void>;
+  /**
+   * Fires with `true` when the editable draft diverges from the saved
+   * `account`, and `false` when they match again (or when the card
+   * unmounts). The parent aggregates these signals across the modal so a
+   * stray backdrop click can prompt before destroying half-typed credentials
+   * (issue #730).
+   */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState<ProviderAccount>(account);
   const [showCreds, setShowCreds] = useState(false);
@@ -53,6 +64,31 @@ export function AccountCard({
   // Re-sync the editable draft when the parent reloads accounts (e.g. after save).
   useEffect(() => setDraft(account), [account]);
   useEffect(() => setConfirmingRemove(false), [account.id]);
+
+  // Dirty = any editable field diverges from the saved account. The card is
+  // the only place that knows what was edited; the parent just sees a
+  // boolean. We compare each tier individually rather than JSON.stringify
+  // the whole record — cheaper and clearer about which field is dirty.
+  const isDirty = useMemo(() => {
+    if (draft.api_key !== account.api_key) return true;
+    if (draft.base_url !== account.base_url) return true;
+    if (draft.billing_mode !== account.billing_mode) return true;
+    if (draft.enabled !== account.enabled) return true;
+    for (const k of Object.keys(account.model_tiers) as (keyof ProviderAccount['model_tiers'])[]) {
+      if (draft.model_tiers[k] !== account.model_tiers[k]) return true;
+    }
+    return false;
+  }, [draft, account]);
+  // Track the last reported value so we only fire onDirtyChange when the
+  // dirty flag actually flips. The parent re-renders a lot, which would
+  // otherwise re-fire the effect (onDirtyChange is a new inline arrow on
+  // each render) and cause spurious setDirtySites calls.
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const isCustom = !BUILTIN_PROVIDER_IDS.includes(account.id);
   // Self-authenticating harnesses (Anthropic/Codex/Antigravity) hold no creds in
@@ -128,7 +164,7 @@ export function AccountCard({
               <button
                 onClick={confirmRemove}
                 disabled={busy}
-                className="px-3 py-1 bg-status-error text-white text-sm rounded hover:bg-status-error/90 disabled:opacity-50"
+                className="px-3 py-1 bg-status-error text-white text-sm rounded-md hover:bg-status-error/90 disabled:opacity-50"
                 aria-label={`Confirm remove ${account.name}`}
               >
                 Yes
@@ -136,7 +172,7 @@ export function AccountCard({
               <button
                 onClick={() => setConfirmingRemove(false)}
                 disabled={busy}
-                className="px-3 py-1 bg-bg-card text-text-secondary text-sm rounded hover:bg-bg-card/70 disabled:opacity-50"
+                className="px-3 py-1 bg-bg-card text-text-secondary text-sm rounded-md hover:bg-bg-card/70 disabled:opacity-50"
                 aria-label={`Cancel remove ${account.name}`}
               >
                 No
@@ -146,7 +182,7 @@ export function AccountCard({
             <button
               onClick={() => setConfirmingRemove(true)}
               disabled={busy}
-              className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded hover:bg-status-error/25 disabled:opacity-50"
+              className="px-3 py-1 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
               aria-label={`Remove ${account.name}`}
               title={`Remove ${account.name}`}
             >
@@ -174,7 +210,7 @@ export function AccountCard({
               value={draft.api_key ?? ''}
               onChange={e => setDraft({ ...draft, api_key: e.target.value || null })}
               placeholder="Enter API key..."
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} API key`}
             />
           </div>
@@ -185,7 +221,7 @@ export function AccountCard({
               value={draft.base_url ?? ''}
               onChange={e => setDraft({ ...draft, base_url: e.target.value || null })}
               placeholder="https://api.example.com/anthropic"
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} base URL`}
             />
           </div>
@@ -203,7 +239,7 @@ export function AccountCard({
                     value={draft.model_tiers[key] ?? ''}
                     onChange={e => setTier(key, e.target.value)}
                     placeholder="model id"
-                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+                    className="flex-1 min-w-0 bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
                     aria-label={`${account.name} ${label} model`}
                   />
                 </div>
@@ -215,7 +251,7 @@ export function AccountCard({
             <select
               value={draft.billing_mode}
               onChange={e => setDraft({ ...draft, billing_mode: e.target.value as ProviderAccount['billing_mode'] })}
-              className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
               aria-label={`${account.name} billing mode`}
             >
               <option value="plan">Plan / subscription (percentage)</option>
@@ -226,7 +262,7 @@ export function AccountCard({
             <button
               onClick={saveDraft}
               disabled={busy}
-              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
             >
               {busy ? 'Saving...' : 'Save'}
             </button>
@@ -241,14 +277,27 @@ export function AccountCard({
 export function AddCustomProviderForm({
   onAdd,
   onCancel,
+  onDirtyChange,
 }: {
   onAdd: (name: string, baseUrl: string, apiKey: string) => Promise<void>;
   onCancel: () => void;
+  /** Dirty = any of name / baseUrl / apiKey is non-empty. See issue #730. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [busy, setBusy] = useState(false);
+
+  const isDirty = name.trim() !== '' || baseUrl.trim() !== '' || apiKey.trim() !== '';
+  // Only fire on dirty-state FLIPS, not on every parent re-render (see
+  // AccountCard's matching comment for the rationale).
+  const lastReportedDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (lastReportedDirtyRef.current === isDirty) return;
+    onDirtyChange?.(isDirty);
+    lastReportedDirtyRef.current = isDirty;
+  }, [isDirty, onDirtyChange]);
 
   const submit = async () => {
     setBusy(true);
@@ -270,7 +319,7 @@ export function AddCustomProviderForm({
         value={name}
         onChange={e => setName(e.target.value)}
         placeholder="Name (e.g. DeepSeek via Claude Code)"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider name"
       />
       <input
@@ -278,7 +327,7 @@ export function AddCustomProviderForm({
         value={baseUrl}
         onChange={e => setBaseUrl(e.target.value)}
         placeholder="Base URL (https://api.deepseek.com/anthropic)"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider base URL"
       />
       <input
@@ -286,7 +335,7 @@ export function AddCustomProviderForm({
         value={apiKey}
         onChange={e => setApiKey(e.target.value)}
         placeholder="API key"
-        className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
+        className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan"
         aria-label="Custom provider API key"
       />
       <div className="flex gap-3">
@@ -296,7 +345,7 @@ export function AddCustomProviderForm({
           // URL + key it can't reach its endpoint, and the spawn menu only shows
           // keyed providers — a keyless add would save a row that never appears.
           disabled={busy || !name.trim() || !baseUrl.trim() || !apiKey.trim()}
-          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50"
+          className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
         >
           {busy ? 'Adding...' : 'Add provider'}
         </button>
@@ -342,6 +391,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [revokingId, setRevokingId] = useState<number | null>(null);
   const [lanEnabled, setLanEnabled] = useState(false);
   const [lanBusy, setLanBusy] = useState(false);
+  // Issue #824: the user-configured rename backend. `null` means
+  // auto-naming is OFF (the post-v2 default). Distinct from `selected`
+  // above (default provider for spawn), since rename runs frequently on
+  // trivial content and shouldn't inherit the node's model.
+  const [namingProvider, setNamingProvider] = useState<string | null>(null);
+  const [namingSaving, setNamingSaving] = useState(false);
+  // `loaded` flag carries over from the existing hydration logic below;
+  // mirrored here so the rename picker only enables after the
+  // preferences load resolves.
   // Realized exposure (issue #586). Mirrors `lanEnabled` (DB intent) until a
   // mismatch is detected — `lanEnabled=true` with no interfaces means the
   // toggle is on but the server is still loopback-only (TLS init failure, no
@@ -351,6 +409,50 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [exposedInterfaces, setExposedInterfaces] = useState<RealizedBind[]>(
     [],
   );
+
+  // Modal-wide dirty aggregator (issue #730). Every child that can be edited
+  // (AccountCard, AddCustomProviderForm, HarnessConfigList) reports via
+  // `onDirtyChange(site, dirty)`; the Set's size feeds the Modal's `dirty`
+  // prop so a stray Escape or backdrop click is intercepted by the inline
+  // "Discard unsaved changes?" banner. The function-form setDirtySites
+  // bails out when the site is already in the right state, so re-fires from
+  // a non-memoised child callback are cheap.
+  const [dirtySites, setDirtySites] = useState<Set<string>>(new Set());
+  const siteDirtyChange = useCallback((site: string, dirty: boolean) => {
+    setDirtySites(prev => {
+      if (dirty) {
+        if (prev.has(site)) return prev;
+        const next = new Set(prev);
+        next.add(site);
+        return next;
+      }
+      if (!prev.has(site)) return prev;
+      const next = new Set(prev);
+      next.delete(site);
+      return next;
+    });
+  }, []);
+
+  // Issue #581: mirror `providers` and `selected` into refs so the
+  // optimistic rollback handlers below read the *latest* committed value
+  // instead of whichever value the render that created the closure
+  // happened to hold. A closure-captured `previous = providers` goes stale
+  // the moment a re-render commits a new `providers`, and two reorders
+  // fired in quick succession would both roll back to the same stale
+  // snapshot. Mirrors `optimisticToggle`'s "explicit current argument"
+  // pattern (#587), generalised via refs for the non-toggling state.
+  const providersRef = useRef<ProviderInfo[]>([]);
+  useEffect(() => {
+    providersRef.current = providers;
+  }, [providers]);
+  const selectedRef = useRef<string>(NO_OVERRIDE);
+  // Mirror of `namingProvider` for the same closure-rollback reason as
+  // `selectedRef` (issue #581): a rapid second change rolls back to
+  // the value as of its own selection, not to a stale render snapshot.
+  const namingRef = useRef<string | null>(null);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
 
   // Re-read network status after a toggle completes so the realized state
   // reflects the post-rebind listeners. Without this the user flips the
@@ -388,6 +490,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         loadPairingData(providerList);
         const stored = prefs.default_provider;
         setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
+        // Issue #824: the rename-backend picker reads from the same
+        // `AppPreferences` snapshot. `null` here is intentional — that's
+        // the default (auto-naming off until the user opts in). Empty
+        // strings are normalised to `null` so the UI treats a frontend
+        // "" clear the same as the explicit None the backend accepts.
+        const storedNaming = prefs.naming_provider;
+        setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
         setDevices(deviceList);
@@ -496,12 +605,14 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // appended at the end, exactly as the backend re-derives them — and roll back
   // on failure so the visible order never lies about what was stored. The
   // backend emits `provider-list-changed`, so the sidebar / probes re-read live.
+  // `previous` is read from `providersRef` (issue #581) so a handler running
+  // against a stale closure still rolls back to the latest committed state.
   const handleReorderHarnesses = async (order: string[]) => {
-    const previous = providers;
-    const byId = new Map(providers.map(p => [p.id, p]));
+    const previous = providersRef.current;
+    const byId = new Map(previous.map(p => [p.id, p]));
     const reordered = [
       ...(order.map(id => byId.get(id)).filter(Boolean) as ProviderInfo[]),
-      ...providers.filter(p => !order.includes(p.id)),
+      ...previous.filter(p => !order.includes(p.id)),
     ];
     setProviders(reordered);
     setError(null);
@@ -513,8 +624,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
+  // Persist the default-provider dropdown. Reads `previous` from `selectedRef`
+  // (issue #581) so a rapid second change rolls back to the value as of its
+  // own selection, not to a snapshot from the render that captured the first
+  // change's closure.
   const handleSave = async (newValue: string) => {
-    const previous = selected;
+    const previous = selectedRef.current;
     setSelected(newValue);
     setSaving(true);
     setError(null);
@@ -526,6 +641,29 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setError(String(e));
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Issue #824: persist the rename backend. Distinct from `handleSave`
+  // above — auto-naming runs frequently on trivial content, so it lives
+  // on its own picker with its own optimistic-rollback ref. Empty
+  // string is normalised to `null` so the picker value reads as
+  // "auto-naming off" rather than as some bizarre empty id.
+  const handleSaveNaming = async (newValue: string | null) => {
+    const previous = namingRef.current;
+    const next = newValue && newValue.length > 0 ? newValue : null;
+    namingRef.current = next;
+    setNamingProvider(next);
+    setNamingSaving(true);
+    setError(null);
+    try {
+      await api.setAppNamingProvider(next);
+    } catch (e) {
+      namingRef.current = previous;
+      setNamingProvider(previous);
+      setError(String(e));
+    } finally {
+      setNamingSaving(false);
     }
   };
 
@@ -564,6 +702,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
   const handleRemoveAccount = async (id: string) => {
     setError(null);
+    // Clear the dirty site for the card being removed BEFORE the await —
+    // the form's own useEffect has no unmount cleanup, so if we wait for
+    // the network round-trip the user could trigger a backdrop click that
+    // surfaces the discard banner over a now-empty modal. Issue #730
+    // code-review catch.
+    siteDirtyChange(`account-${id}`, false);
     try {
       await api.removeProviderAccount(id);
       const [accountList, providerList] = await Promise.all([
@@ -600,11 +744,17 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       billing_mode: 'pay_as_you_go',
       api_key: apiKey.trim() || null,
       base_url: baseUrl.trim() || null,
-      model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, haiku: null },
+      model_tiers: { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null },
       models: [],
     });
     // Keep the form open (with the user's entries) if the backend rejected it.
-    if (ok) setAddingCustom(false);
+    if (ok) {
+      // Clear the dirty site before unmounting — the form's useEffect has no
+      // unmount cleanup, so without this the modal would stay in dirty mode
+      // for the rest of the session (issue #730 code-review catch).
+      siteDirtyChange('add-custom-form', false);
+      setAddingCustom(false);
+    }
   };
 
   // Flip the master kill-switch. Optimistic, with rollback on failure so the
@@ -677,25 +827,27 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/70" />
+    <Modal
+      onClose={onClose}
+      labelledBy="app-settings-title"
+      maxWidth="max-w-4xl"
+      className="p-0 max-h-[85vh] flex flex-col overflow-hidden"
+      dirty={dirtySites.size > 0}
+      dirtyMessage="Discard unsaved changes to your settings?"
+    >
+      {/* Non-scrolling header: title + close stay reachable no matter how far
+          the settings body is scrolled. */}
+      <div className="shrink-0 flex items-start justify-between gap-4 px-10 pt-8 pb-4 border-b border-border-subtle">
+        <div>
+          <h2 id="app-settings-title" className="text-2xl font-semibold text-text-primary mb-1">Settings</h2>
+          <p className="text-base text-text-muted">
+            Buildmesh-wide defaults. Per-mesh values in Mesh Properties take precedence.
+          </p>
+        </div>
+        <ModalCloseButton onClose={onClose} label="Close settings" />
+      </div>
 
-      <div
-        className="relative bg-bg-overlay border border-border-default rounded-lg shadow-2xl p-10 max-w-4xl w-full max-h-[80vh] overflow-y-auto"
-        onClick={e => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          className="absolute top-5 right-5 text-text-muted hover:text-text-secondary text-3xl"
-        >
-          ×
-        </button>
-
-        <h2 className="text-2xl font-semibold text-text-primary mb-2">Settings</h2>
-        <p className="text-base text-text-muted mb-6">
-          Buildmesh-wide defaults. Per-mesh values in Mesh Properties take precedence.
-        </p>
-
+      <div className="flex-1 overflow-y-auto px-10 pb-10 pt-6">
         <div className="space-y-4">
           <label className="block text-lg font-medium text-text-secondary">
             Default provider
@@ -704,16 +856,62 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             Used when a mesh has no `default_provider` of its own.
           </p>
           <select
+            aria-label="Default provider"
             value={selected}
             disabled={!loaded || saving}
             onChange={e => handleSave(e.target.value)}
-            className="w-full bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
           >
             <option value={NO_OVERRIDE}>Anthropic (built-in default)</option>
             {providers.map(p => (
               <option key={p.id} value={p.id}>{p.label}</option>
             ))}
           </select>
+        </div>
+
+        {/* Issue #824: Auto-naming. Distinct from default-provider above.
+            Auto-naming runs frequently on trivial content, so the user
+            explicitly opts in via this picker. The helper pins a cheap
+            haiku tier when "anthropic" is picked so the user's main
+            subscription default is never silently inherited. Empty /
+            "Disabled" leaves nodes with their random adj-adj-noun
+            slugs. */}
+        <div className="mt-8 pt-5 border-t border-border-subtle space-y-4">
+          <label className="block text-lg font-medium text-text-secondary">
+            Auto-naming
+          </label>
+          <p className="text-base text-text-muted">
+            When a node finishes a turn, Buildmesh can ask a small LLM to summarise
+            the work into a slug (e.g. <code>fix-auth-flow</code>) instead of the
+            default <code>bold-keen-brook</code>. Auto-naming runs frequently on
+            trivial content — pick a cheap backend so an Opus-class node doesn't
+            burn tokens on every rename.
+          </p>
+          <select
+            value={namingProvider ?? ''}
+            disabled={!loaded || namingSaving}
+            onChange={e => handleSaveNaming(e.target.value || null)}
+            className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          >
+            <option value="">Disabled (auto-naming off)</option>
+            {providers
+              .filter((p) => p.id !== 'terminal')
+              .map((p) => (
+                <option key={p.id} value={p.id}>{p.label}</option>
+              ))}
+          </select>
+          {namingProvider === 'anthropic' && (
+            <p className="text-sm text-text-muted">
+              Built-in Anthropic is pinned to a haiku tier so the rename doesn't
+              inherit your main subscription default.
+            </p>
+          )}
+          {namingProvider === null && (
+            <p className="text-sm text-text-muted">
+              Auto-naming is off. New nodes keep random adjective-adjective-noun
+              slugs. You can always rename manually from the sidebar.
+            </p>
+          )}
         </div>
 
         {error && (
@@ -749,6 +947,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             accounts={accounts}
             onAttach={handleAttachProvider}
             onDetach={handleDetachProvider}
+            onDirtyChange={siteDirtyChange}
           />
         </div>
 
@@ -775,12 +974,24 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                 account={account}
                 onSave={handleSaveAccount}
                 onRemove={handleRemoveAccount}
+                onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}
               />
             ))}
           </div>
 
           {addingCustom ? (
-            <AddCustomProviderForm onAdd={handleAddCustom} onCancel={() => setAddingCustom(false)} />
+            <AddCustomProviderForm
+              onAdd={handleAddCustom}
+              onCancel={() => {
+                // The form's useEffect has no unmount cleanup, so the parent
+                // has to clear the dirty site before unmounting the form.
+                // Otherwise the modal stays in dirty mode for the rest of
+                // the session. Issue #730 code-review catch.
+                siteDirtyChange('add-custom-form', false);
+                setAddingCustom(false);
+              }}
+              onDirtyChange={d => siteDirtyChange('add-custom-form', d)}
+            />
           ) : (
             <button
               onClick={() => setAddingCustom(true)}
@@ -822,11 +1033,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             <div className="mt-4" data-testid="lan-realized-status">
               {exposedInterfaces.length === 0 ? (
                 <div
-                  className="flex items-start gap-2 bg-bg-card border border-yellow-500/40 rounded px-3 py-2"
+                  className="flex items-start gap-2 bg-bg-card border border-status-warning/40 rounded-md px-3 py-2"
                   data-testid="lan-exposure-warning"
                   role="alert"
                 >
-                  <span className="text-base text-yellow-200">
+                  <span className="text-base text-status-warning">
                     <span className="font-medium">No interfaces are actually exposed.</span>{' '}
                     The toggle is on, but the server didn’t bind any LAN address —
                     either this machine has no non-loopback interface, or the
@@ -852,7 +1063,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   </ul>
                   {!tlsActive && (
                     <div
-                      className="mt-3 text-base text-yellow-200"
+                      className="mt-3 text-base text-status-warning"
                       data-testid="lan-tls-warning"
                       role="alert"
                     >
@@ -888,7 +1099,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           {coordEnabled && (
             <div className="mt-4 border border-border-subtle rounded-lg p-5">
-              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded px-3 py-2 mb-4">
+              <div className="flex items-start gap-2 bg-bg-card border border-accent-cyan/30 rounded-md px-3 py-2 mb-4">
                 <span className="text-base text-text-secondary">
                   Anyone who can reach this machine on the LAN <span className="font-medium">and</span>{' '}
                   holds the token can read your node statuses. The token is shown once, when
@@ -902,12 +1113,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   readOnly
                   value={coordToken ?? (coordHasToken ? '••••••••  (a token has already been minted)' : '')}
                   placeholder="No token yet — generate one to copy"
-                  className="flex-1 bg-bg-card border border-border-subtle rounded px-4 py-2.5 text-base font-mono text-text-primary focus:outline-none focus:border-accent-cyan"
+                  className="flex-1 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base font-mono text-text-primary focus:outline-none focus:border-accent-cyan"
                 />
                 {coordToken && (
                   <button
                     onClick={handleCopyToken}
-                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30"
+                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
                   >
                     {coordCopied ? 'Copied!' : 'Copy'}
                   </button>
@@ -915,7 +1126,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                 <button
                   onClick={handleGenerateToken}
                   disabled={coordBusy}
-                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
+                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
                 >
                   {coordBusy ? 'Working…' : coordHasToken ? 'Regenerate token' : 'Generate token'}
                 </button>
@@ -959,13 +1170,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                       <button
                         onClick={() => handleRevokeDevice(device.id)}
                         disabled={revokingId === device.id}
-                        className="px-4 py-2 bg-status-error text-white text-base rounded hover:bg-status-error/90 disabled:opacity-50"
+                        className="px-4 py-2 bg-status-error text-white text-base rounded-md hover:bg-status-error/90 disabled:opacity-50"
                       >
                         {revokingId === device.id ? 'Revoking…' : 'Confirm revoke'}
                       </button>
                       <button
                         onClick={() => setConfirmingRevokeId(null)}
-                        className="px-4 py-2 bg-bg-card text-text-secondary text-base rounded hover:bg-border-subtle"
+                        className="px-4 py-2 bg-bg-card text-text-secondary text-base rounded-md hover:bg-border-subtle"
                       >
                         Cancel
                       </button>
@@ -973,7 +1184,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
                   ) : (
                     <button
                       onClick={() => setConfirmingRevokeId(device.id)}
-                      className="px-4 py-2 bg-status-error/15 text-status-error text-base rounded hover:bg-status-error/25 whitespace-nowrap"
+                      className="px-4 py-2 bg-status-error/15 text-status-error text-base rounded-md hover:bg-status-error/25 whitespace-nowrap"
                     >
                       Revoke
                     </button>
@@ -992,6 +1203,6 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           </p>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 }

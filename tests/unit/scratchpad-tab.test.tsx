@@ -264,7 +264,10 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
         await vi.advanceTimersByTimeAsync(600);
       });
 
-      expect(screen.getByText('Save failed')).toBeTruthy();
+      // Issue #813 — shared `<SaveIndicator>` includes the error's
+      // `.message` ("Save failed: <message>"); regex pins the
+      // error-state transition without coupling to the suffix.
+      expect(screen.getByText(/Save failed/i)).toBeTruthy();
     } finally {
       saveError = false;
       vi.useRealTimers();

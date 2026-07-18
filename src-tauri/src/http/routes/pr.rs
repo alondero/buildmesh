@@ -6,7 +6,6 @@
 //! through the desktop UI. The desktop `POST /api/meshes/{id}/pr`
 //! (create-PR) endpoint already lives in this module and is unchanged.
 
-use tokio::io::AsyncReadExt;
 use crate::http::MaybeTls;
 
 use crate::db;
@@ -22,7 +21,10 @@ pub async fn list_pulls(
     mesh_id: i64,
     state: &str,
 ) {
-    match crate::commands::pr::get_repo_pulls(mesh_id, state.to_string()) {
+    // Await the async wrapper so the blocking GitHub call runs on the blocking
+    // pool, not this route's Tauri async-runtime worker (http/mod.rs spawns
+    // each connection on the runtime).
+    match crate::commands::pr::get_repo_pulls(mesh_id, state.to_string()).await {
         Ok(prs) => {
             let body = serde_json::to_string(&prs).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -42,7 +44,7 @@ pub async fn get_mergeability(
     mesh_id: i64,
     pr_number: i64,
 ) {
-    match crate::commands::pr::get_pr_mergeability(mesh_id, pr_number) {
+    match crate::commands::pr::get_pr_mergeability(mesh_id, pr_number).await {
         Ok(m) => {
             let body = serde_json::to_string(&m).unwrap_or_else(|_| "{}".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -75,15 +77,11 @@ pub async fn merge(
     pr_number: i64,
     content_length: usize,
 ) {
-    if content_length > 8 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
+    let Some(body_bytes) =
+        request::read_body_or_send_error(lines, content_length, 8 * 1024).await
+    else {
         return;
-    }
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
+    };
 
     let req: MergeRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
@@ -98,7 +96,7 @@ pub async fn merge(
         }
     };
 
-    match crate::commands::pr::merge_pr(req.url) {
+    match crate::commands::pr::merge_pr(req.url).await {
         Ok(merged_url) => {
             let body = serde_json::to_string(&serde_json::json!({
                 "url": merged_url,
@@ -127,16 +125,11 @@ pub async fn create(
     mesh_id: i64,
     content_length: usize,
 ) {
-    if content_length > 64 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
+    let Some(body_bytes) =
+        request::read_body_or_send_error(lines, content_length, 64 * 1024).await
+    else {
         return;
-    }
-
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
+    };
 
     let req: CreatePrRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
@@ -160,7 +153,9 @@ pub async fn create(
         req.title,
         req.body,
         req.base_branch,
-    ) {
+    )
+    .await
+    {
         Ok(url) => {
             let body = serde_json::to_string(&serde_json::json!({ "url": url }))
                 .unwrap_or_else(|_| "{}".to_string());

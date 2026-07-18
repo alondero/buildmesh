@@ -587,6 +587,125 @@ pub fn kimi_usage(api_key: &str) -> ProviderUsage {
     }
 }
 
+// ─── OpenRouter ──────────────────────────────────────────────────────────────
+//
+// OpenRouter exposes a simple "Anthropic Skin" for Claude Code (set
+// `ANTHROPIC_BASE_URL=https://openrouter.ai/api` + `ANTHROPIC_AUTH_TOKEN=$key`)
+// and a separate `GET /api/v1/credits` Bearer-authenticated endpoint that
+// reports `total_credits` (remaining wallet balance) and `total_usage` (lifetime
+// spend). Mirrors the `kimi_usage` shape — keyed fetcher, balance-style response,
+// no Anthropic-side windows to harvest — so the `ProviderUsage.balance` field is
+// the canonical surface.
+
+/// Response envelope from `GET https://openrouter.ai/api/v1/credits`.
+/// `total_usage` is also returned by OpenRouter but we intentionally drop it
+/// — it's a lifetime-cumulative figure, not a current-month spend, and the
+/// `BalanceCard` would label any number we put in `monthly_spend` as
+/// "Spent this month" (misleading). Serde ignores unknown fields by default,
+/// so the JSON's `total_usage` key is harmlessly discarded.
+#[derive(Deserialize, Debug)]
+struct OpenRouterResp {
+    data: OpenRouterData,
+}
+
+#[derive(Deserialize, Debug)]
+struct OpenRouterData {
+    total_credits: f64,
+}
+
+/// Parses the OpenRouter `/api/v1/credits` body into a `BillingBalance`. The
+/// endpoint contract is simple: `data.total_credits` is the remaining wallet
+/// balance in USD. The endpoint ALSO returns `data.total_usage`, but it's
+/// **lifetime cumulative spend** (not a current-month figure) — labelling
+/// that as "Spent this month" in the Usage tab would overstate the user's
+/// current-month spend by an order of magnitude. Until OpenRouter exposes a
+/// billing-period filter, we leave `monthly_spend = None` and let the
+/// "remaining" figure carry the visible signal. A missing required field is
+/// a hard parse error rather than a silent zero — OpenRouter might evolve
+/// the response and we want the failure to be obvious.
+fn parse_openrouter_response(body: &str) -> Result<BillingBalance, UsageError> {
+    let resp: OpenRouterResp =
+        serde_json::from_str(body).map_err(|e| UsageError::Shape(e.to_string()))?;
+    Ok(BillingBalance {
+        remaining: resp.data.total_credits,
+        monthly_spend: None,
+        // OpenRouter bills in USD per the platform's published pricing; the
+        // endpoint does not return a currency field.
+        currency: "USD".to_string(),
+    })
+}
+
+pub fn openrouter_usage(api_key: &str) -> ProviderUsage {
+    if api_key.is_empty() {
+        return logged_out("openrouter", "No API key configured".to_string());
+    }
+
+    let client = match Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return unavailable("openrouter", format!("Client error: {}", e)),
+    };
+
+    let auth = format!("Bearer {}", api_key);
+    let resp = match client
+        .get("https://openrouter.ai/api/v1/credits")
+        .header("Authorization", auth)
+        .send()
+    {
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status().as_u16();
+            // 401/403 → logged-out (bad / revoked key) so the UI prompts for
+            // re-entry; 429 → rate-limited "unavailable"; everything else →
+            // generic unavailable with the status for debug.
+            if code == 401 || code == 403 {
+                return logged_out("openrouter", "Invalid API key".to_string());
+            }
+            if code == 429 {
+                return unavailable(
+                    "openrouter",
+                    "Rate limited — usage data temporarily unavailable".to_string(),
+                );
+            }
+            // Body-read failure here is a transport issue, NOT a malformed
+            // payload — surface as "Request failed" rather than collapsing
+            // to an empty body that downstream parsing treats as a Shape error.
+            let body = match r.text() {
+                Ok(b) => b,
+                Err(e) => {
+                    return unavailable(
+                        "openrouter",
+                        format!("API error {}: failed to read error body: {}", code, e),
+                    )
+                }
+            };
+            return unavailable(
+                "openrouter",
+                format!("API error {}: {}", code, body),
+            );
+        }
+        Ok(r) => r,
+        Err(e) => return unavailable("openrouter", format!("Request failed: {}", e)),
+    };
+
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(e) => return unavailable("openrouter", format!("Failed to read response body: {}", e)),
+    };
+    match parse_openrouter_response(&body) {
+        Ok(balance) => ProviderUsage {
+            provider: "openrouter".to_string(),
+            logged_in: true,
+            windows: Vec::new(),
+            balance: Some(balance),
+            detail: None,
+            error: None,
+        },
+        Err(e) => unavailable("openrouter", format!("Failed to parse response: {}", e)),
+    }
+}
+
 // ─── Google / Antigravity (`agy`) ───────────────────────────────────────────
 //
 // The Antigravity CLI surfaces a per-model quota that is a DIFFERENT product
@@ -1297,5 +1416,59 @@ mod tests {
         let b = parse_kimi_response(json).unwrap();
         assert_eq!(b.remaining, 12.34);
         assert_eq!(b.currency, "USD");
+    }
+
+    // ─── OpenRouter ───────────────────────────────────────────────────────
+    //
+    // Mirrors the Kimi test set: the success-path parser, two required-field
+    // failure paths, and the empty-key "logged_out" defensive case. OpenRouter
+    // has no vendor-envelope (unlike Kimi's `code` field) so the only failure
+    // mode is missing required fields.
+
+    #[test]
+    fn parse_openrouter_response_extracts_credits_as_usd_balance_and_omits_monthly_spend() {
+        // The endpoint returns `total_credits` (remaining wallet) AND
+        // `total_usage` (lifetime cumulative), but lifetime figure can't be
+        // rendered as "Spent this month" without misleading the user. Pin
+        // `monthly_spend = None` so a future contributor can't silently
+        // re-enable the mislabel.
+        let json = r#"{
+            "data": {
+                "total_credits": 50.0,
+                "total_usage": 12.34
+            }
+        }"#;
+        let b = parse_openrouter_response(json).unwrap();
+        assert_eq!(b.remaining, 50.0);
+        assert_eq!(b.monthly_spend, None);
+        assert_eq!(b.currency, "USD");
+    }
+
+    #[test]
+    fn parse_openrouter_response_rejects_missing_data() {
+        // Required-field failure — a body without `data` is malformed.
+        let json = r#"{}"#;
+        let err = parse_openrouter_response(json).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)), "expected Shape error, got {err:?}");
+    }
+
+    #[test]
+    fn parse_openrouter_response_rejects_missing_total_credits() {
+        // Required-field failure — every successful response carries a balance.
+        let json = r#"{"data": {"total_usage": 12.34}}"#;
+        let err = parse_openrouter_response(json).unwrap_err();
+        assert!(matches!(err, UsageError::Shape(_)));
+    }
+
+    #[test]
+    fn openrouter_usage_with_empty_key_returns_logged_out() {
+        // Mirrors `kimi_usage_with_empty_key_returns_logged_out` — the upstream
+        // caller is expected to gate on key presence, but we still defend here
+        // so a misconfigured fetch surfaces as "no API key" rather than a 401.
+        let usage = openrouter_usage("");
+        assert!(!usage.logged_in);
+        assert_eq!(usage.provider, "openrouter");
+        assert!(usage.error.is_some());
+        assert!(usage.balance.is_none());
     }
 }

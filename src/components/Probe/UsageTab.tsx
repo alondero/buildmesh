@@ -21,26 +21,80 @@
  *     emits `provider-list-changed` on upsert/remove so a toggled or
  *     removed provider's meter updates without a manual Refresh click.
  *
+ * Cache staleness indicator (issue follow-up):
+ *   The header also renders a "Refreshed X ago" label next to the
+ *   count + Refresh button. The backend's `get_provider_meters` has a
+ *   5-minute TTL (#574) so a fresh read may be served from cache
+ *   without re-hitting each provider — the indicator tells the user
+ *   how stale their view could possibly be. It's set only on a
+ *   SUCCESSFUL load (initial mount, cross-surface invalidation, manual
+ *   Refresh); a failed refresh leaves the previous timestamp in place
+ *   so the label continues to refer to the last known-good moment.
+ *
  * Read-only by design (issue #601): the tab has no Edit-credentials /
  * enable-toggle / Remove affordance. Those live on the Settings-side
  * AccountCard, where the user goes to actually change something.
+ *
+ * Issue #813 — error colour + empty-state convergence
+ * ---------------------------------------------------
+ * The pre-#813 tab had three off-spec treatments:
+ *   1. The IPC-error banner used `status-warning` (yellow) instead of
+ *      the project's standard `status-error` (red). Every other
+ *      "fetch failed" indicator in the probe tabs renders in red, so
+ *      the yellow here read as "soft warning" rather than "fetch failed"
+ *      — flipped to `status-error` so the iconography matches the
+ *      Git Issues / PRs / Archive tab treatment.
+ *   2. The first-load placeholders used `LoadingState` from day one
+ *      (already converged); this commit routes the Refresh button
+ *      through the shared `<RefreshControl>` primitive so the spinner
+ *      colour, placement, and `aria-busy` semantics match Usage →
+ *      Issues / PRs / Archive.
+ *   3. The "no meters" case used to render *two* empty messages:
+ *      a "No meters to display" header counter AND a longer
+ *      onboarding hint in the body. Issue #813 called out the
+ *      redundancy; the header counter is now suppressed when
+ *      `rows.length === 0`, leaving the body's onboarding copy as
+ *      the single voice. The body copy is wrapped in `<EmptyState>`
+ *      so its i-icon pairs with `LoadingState` and `ErrorState`
+ *      exactly like the Git Issues/PRs/Archive tabs.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import * as api from '../../lib/tauri';
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
 import { UsagePanel } from '../AppSettings/UsageRender';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  RefreshControl,
+} from '../shared/Spinner';
+import { formatRelativeAge } from '../../lib/time';
 
 export function UsageTab() {
   const [meters, setMeters] = useState<ProviderMeters[] | null>(null);
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Flips true once the first load attempt has resolved (success or
+  // failure). Distinguishes "first fetch is still in flight" from
+  // "first fetch rejected" — the prior `meters === null` early-return
+  // hid a first-load rejection behind `<LoadingState>` indefinitely,
+  // leaving the user staring at a spinner even though `loadMeters`
+  // had already populated `error`. Issue #813 review caught this.
+  const [attempted, setAttempted] = useState(false);
   // Reset in `finally` so a rejected fetch can't leave the button stuck
   // disabled. The flag is set synchronously before the await so React
   // renders the busy state before the IPC roundtrip.
   const [isRefreshing, setIsRefreshing] = useState(false);
+  // Wall-clock timestamp of the last successful load. Updated only when
+  // `loadMeters` resolves without throwing — a failed refresh leaves the
+  // previous timestamp in place so the staleness indicator continues
+  // to point at the last known-good moment. `null` until the very
+  // first successful load completes (the header hides the indicator
+  // during the initial loading state and after a first-load rejection).
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
   const loadMeters = useCallback(async (force: boolean) => {
     try {
@@ -48,15 +102,21 @@ export function UsageTab() {
         api.getProviderMeters(force),
         api.getProviderAccounts(),
       ]);
+      // Stamp the indicator FIRST so the timestamp describes the data
+      // we're about to set. JS is single-threaded through the await
+      // resolve + these setStates, so there is no race — either all
+      // three setStates commit (and the indicator correctly reflects
+      // them) or the `Promise.all` rejects and none of them do (and
+      // the previous timestamp stays in place).
+      setLastRefreshedAt(new Date());
       setMeters(meterRows);
       setAccounts(accountRows);
       setError(null);
     } catch (e) {
-      // Non-fatal: the tab keeps the previous rows so a transient IPC
-      // failure doesn't blank the glance surface. The error surfaces
-      // as a small banner above the rows.
       console.error('Failed to load usage:', e);
       setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAttempted(true);
     }
   }, []);
 
@@ -75,14 +135,30 @@ export function UsageTab() {
   // constant lives in `useProviderListInvalidation.ts` (Rust+TS drift guard).
   useProviderListInvalidation(() => { void loadMeters(false); });
 
-  // Loading state: the tab has not yet received its first response.
-  // Render a neutral placeholder rather than an empty list, so a
-  // returning user doesn't read "0 meters" as "no providers
-  // configured".
-  if (meters === null) {
+  // Tick once a second so the "Refreshed X ago" label updates without
+  // a re-fetch. Cheap (one no-op render), and only mounted while the
+  // tab is alive — the cleanup drops the interval when the tab
+  // unmounts. `now` is the only piece of state this drives; `formatRelativeAge`
+  // is pure, so we don't need to track `lastRefreshedAt` in a ref. The
+  // 1s cadence is the smallest grain we display ("Ns ago"); the
+  // higher-grain labels ("Xm ago") tick on minute boundaries for free
+  // because the render recomputes from the fresh `Date.now()`.
+  const [, setTicker] = useState(0);
+  useEffect(() => {
+    if (lastRefreshedAt === null) return;
+    const id = window.setInterval(() => setTicker((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [lastRefreshedAt]);
+
+  // First-load placeholder. Only renders before the very first IPC
+  // settles — after that, the body renders either the error banner or
+  // the loaded rows, even on a refresh (the in-flight Refresh paints
+  // its busy state on the rows container rather than blanking the
+  // surface — mirrors GitIssuesTab / GitPullRequestsTab).
+  if (!attempted) {
     return (
-      <div className="flex items-center justify-center h-full p-6 text-text-muted">
-        <span className="text-sm">Loading usage…</span>
+      <div className="flex items-center justify-center h-full p-6">
+        <LoadingState label="Loading usage…" />
       </div>
     );
   }
@@ -92,61 +168,76 @@ export function UsageTab() {
   // silently dropped (issue #601: a bare meter without a name is
   // meaningless on a glance surface).
   const rows = meters
-    .map(meter => ({ meter, account: accounts.find(a => a.id === meter.provider) }))
-    .filter((row): row is { meter: ProviderMeters; account: ProviderAccount } => row.account != null);
+    ? meters
+        .map(meter => ({ meter, account: accounts.find(a => a.id === meter.provider) }))
+        .filter((row): row is { meter: ProviderMeters; account: ProviderAccount } => row.account != null)
+    : [];
 
-  // CLAUDE.md "user.click swallows async onClick rejections": `loadMeters` is
-  // async and rejects on backend failure. Wrap the Refresh click in a
-  // try/catch so any uncaught throw (e.g. a future refactor that escapes the
-  // internal try/catch) lands in the error banner instead of becoming an
-  // unhandled rejection that fails the test suite. `finally` resets
-  // `isRefreshing` so a rejected fetch can't leave the button stuck
-  // disabled (the safety-net catch on its own would silently swallow).
+  // CLAUDE.md "user.click swallows async onClick rejections": `loadMeters`
+  // rejects on backend failure; safety-net catch lands any escaped
+  // throw into the error banner instead of an unhandled rejection.
+  // `finally` resets `isRefreshing` so a rejected refresh can't leave
+  // the button stuck disabled.
   const handleRefresh = async () => {
     setIsRefreshing(true);
     try {
       await loadMeters(true);
     } catch {
-      // loadMeters already updates the error banner; this catch is just
-      // a safety net for anything that escapes its internal try/catch.
+      /* loadMeters already updates the error banner */
     } finally {
       setIsRefreshing(false);
     }
   };
 
+  // Staleness indicator values. Computed every render so the 1s tick
+  // effect can drive a re-render with a fresh `now`. Both are `null`
+  // until the first successful load completes — the header hides the
+  // indicator entirely in that window (the LoadingState placeholder
+  // is showing anyway, and a first-load rejection has no trustworthy
+  // timestamp to point at).
+  const refreshedRelative = lastRefreshedAt
+    ? formatRelativeAge(lastRefreshedAt, new Date(), { granularity: 'second' })
+    : null;
+  const refreshedAbsolute = lastRefreshedAt
+    ? lastRefreshedAt.toLocaleTimeString()
+    : null;
+
   return (
     <div className="flex flex-col h-full">
-      {/* Refresh + summary header. Stays light — the tab is a glance
-          surface, not a config one. The Refresh button forces a
-          refetch bypassing the backend's 5-min cache. */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-border-subtle">
-        <span className="text-xs text-text-muted">
-          {rows.length === 0
-            ? 'No meters to display'
-            : `${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
-        </span>
-        <button
-          type="button"
-          onClick={handleRefresh}
-          disabled={isRefreshing}
-          aria-busy={isRefreshing}
-          aria-label="Refresh usage"
-          className="text-xs text-accent-cyan hover:text-accent-cyan/80 disabled:cursor-not-allowed disabled:hover:text-accent-cyan inline-flex items-center gap-1.5"
-        >
-          {isRefreshing && (
-            <span
-              className="inline-block h-3 w-3 animate-spin rounded-full border border-current border-t-transparent"
-              aria-hidden="true"
-            />
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border-subtle">
+        <div className="flex items-center gap-2 min-w-0">
+          {rows.length > 0 && (
+            <span className="text-xs text-text-muted shrink-0">
+              {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
+            </span>
           )}
-          Refresh
-        </button>
+          {refreshedRelative !== null && (
+            <span
+              className="text-2xs text-text-muted/80 shrink-0"
+              data-testid="usage-last-refreshed"
+            >
+              <time
+                dateTime={lastRefreshedAt!.toISOString()}
+                aria-label={`Last refreshed at ${refreshedAbsolute}`}
+                title={refreshedAbsolute!}
+                className="cursor-default"
+              >
+                {`Refreshed ${refreshedRelative}`}
+              </time>
+            </span>
+          )}
+        </div>
+        <RefreshControl
+          onRefresh={handleRefresh}
+          isRefreshing={isRefreshing}
+          ariaLabel="Refresh usage"
+        />
       </div>
 
       {error && (
         <div
           role="alert"
-          className="mx-3 mt-2 px-3 py-2 bg-bg-card border border-status-warning/40 rounded text-xs text-status-warning"
+          className="mx-3 mt-2 px-3 py-2 bg-bg-card border border-status-error/40 rounded-md text-xs text-status-error"
         >
           {error}
         </div>
@@ -157,11 +248,13 @@ export function UsageTab() {
         aria-busy={isRefreshing}
         className={`flex-1 overflow-y-auto p-3 space-y-3 transition-opacity ${isRefreshing ? 'opacity-60' : ''}`}
       >
-        {rows.length === 0 ? (
-          <div className="text-center py-8 text-text-muted text-xs">
-            No usage meters available. Enable a provider in Settings to see
-            its quota or balance here.
-          </div>
+        {rows.length === 0 && !error ? (
+          <EmptyState
+            label="No usage meters available."
+            hint="Add credentials for a provider in Settings (API key for MiniMax/Kimi/OpenRouter, or log in to Claude/Codex/Antigravity's CLI) to see its quota or balance here."
+          />
+        ) : error ? (
+          <ErrorState title="Failed to load usage" detail={error} />
         ) : (
           rows.map(({ meter, account }) => (
             <UsagePanel key={meter.provider} account={account} meter={meter} />

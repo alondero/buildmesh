@@ -678,4 +678,91 @@ describe('GitIssuesTab (#378)', () => {
     const flag = downstreamRow.querySelector('[data-blocked-by]');
     expect(flag).toBeTruthy();
   });
+
+  // ----- "View on GitHub" header link (mesh context menu + Issues probe) -----
+  //
+  // The link is a `<SafeLink>` to `{githubUrl}/issues` — a git@github.com
+  // origin resolves to https://github.com/{owner}/{repo}, and the issues
+  // list is the natural destination from the Issues probe. SafeLink
+  // routes the click through `openUrl` (Tauri 2's `target="_blank"` is
+  // silently dropped without an explicit capability we don't grant).
+  // The non-GitHub case collapses to a `<span>` (SafeLink's empty-URL
+  // fallback) so the layout stays stable.
+
+  it('renders a "View on GitHub" header link to the repo issues list', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_github_url_for_mesh') {
+        return Promise.resolve('https://github.com/acme/demo');
+      }
+      return Promise.resolve({});
+    });
+    render(<GitIssuesTab />);
+
+    const link = await screen.findByLabelText("Open this repo's issues list on GitHub");
+    // SafeLink renders an <a> with the URL on the wire — assert on the
+    // href so a future refactor that drops SafeLink for a raw <a> is
+    // caught (the href is the part the browser actually uses).
+    expect(link.tagName).toBe('A');
+    expect(link.getAttribute('href')).toBe('https://github.com/acme/demo/issues');
+    expect(link.getAttribute('target')).toBe('_blank');
+  });
+
+  it('clicking the "View on GitHub" header link opens the issues list URL', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_github_url_for_mesh') {
+        return Promise.resolve('https://github.com/acme/demo');
+      }
+      return Promise.resolve({});
+    });
+    render(<GitIssuesTab />);
+
+    const link = await screen.findByLabelText("Open this repo's issues list on GitHub");
+    await userEvent.click(link);
+
+    // SafeLink routes through `openUrl` (Tauri 2 WebView drops
+    // `target="_blank"` clicks without an explicit capability). The
+    // URL must be the full `{base}/issues` form, NOT the bare repo URL
+    // — the probe's whole purpose is the issues list, not the repo home.
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/issues');
+  });
+
+  it('renders an inert label (no link, no link-style cursor) when the mesh has no GitHub origin', async () => {
+    // `get_github_url_for_mesh` returns `null` for non-GitHub meshes
+    // (GitLab origin, no origin, etc.). SafeLink falls back to a
+    // <span> for the "View on GitHub ↗" affordance — but a previous
+    // implementation applied the caller's link-styling classes
+    // verbatim, so the empty case LOOKED like a clickable link (cyan
+    // + hover) right next to working controls, and clicking did
+    // nothing. That was the user-reported "links aren't links"
+    // regression on the Issues probe header. The fix strips the
+    // link-styling tokens at the SafeLink level — pin the
+    // empty-URL shape here so a future regression that re-applies
+    // the cyan/hover classes to the fallback is caught at the seam
+    // that is most directly named in the user's bug report.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_issues') return Promise.resolve(ISSUES);
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_github_url_for_mesh') return Promise.resolve(null);
+      return Promise.resolve({});
+    });
+    render(<GitIssuesTab />);
+
+    await screen.findByText('Fix the wobble');
+    const fallback = await screen.findByText(/View on GitHub/);
+    expect(fallback.tagName).toBe('SPAN');
+    expect(fallback.getAttribute('href')).toBeNull();
+    expect(fallback.getAttribute('aria-label')).toBeNull();
+    // The user-reported "links aren't links" pin — visually inert,
+    // no link-style className escapes through.
+    expect(fallback.className).not.toMatch(/text-accent-cyan/);
+    expect(fallback.className).not.toMatch(/cursor-pointer/);
+    expect(fallback.className).toMatch(/cursor-default/);
+  });
 });

@@ -84,6 +84,12 @@ interface UIState {
   maximizedNodeId: number | null;
   toggleMaximizedNode: (nodeId: number) => void;
   clearMaximizedNode: () => void;
+  // Plain setter — used by the sidebar `onSelect` to retarget the solo view
+  // to whichever node was clicked without touching the toggle/exit semantics
+  // of `toggleMaximizedNode` (self-clicks must no-op, not exit). Idempotent:
+  // mirrors `setDragTargetNodeId` (line 132-136) so a same-value call does
+  // not fire a subscriber notification and re-trigger the auto-clear effect.
+  setMaximizedNode: (nodeId: number | null) => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -144,6 +150,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   clearMaximizedNode: () => {
     if (get().maximizedNodeId !== null) {
       set({ maximizedNodeId: null });
+    }
+  },
+
+  setMaximizedNode: (nodeId) => {
+    if (get().maximizedNodeId !== nodeId) {
+      set({ maximizedNodeId: nodeId });
     }
   },
 }));

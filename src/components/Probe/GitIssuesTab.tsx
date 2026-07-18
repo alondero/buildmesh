@@ -67,9 +67,17 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
+import { SafeLink } from '../shared/SafeLink';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  RefreshControl,
+} from '../shared/Spinner';
 
 /**
  * Build the human-readable tooltip text for the blocked-by flag.
@@ -98,7 +106,7 @@ function buildBlockedByTooltip(
 }
 
 export function GitIssuesTab() {
-  const { activeMeshId } = useProbeContext();
+  const { activeMeshId, activeMeshPath } = useProbeContext();
   // `getDefaultProvider` is mesh-scoped — the only call that needs the
   // meshId directly, since it resolves the per-mesh > app-wide > default
   // precedence chain server-side.
@@ -108,7 +116,17 @@ export function GitIssuesTab() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawning, setSpawning] = useState<number | null>(null);
-  // Only one dropdown open at a time, keyed by issue number — mirrors the
+  // Bump to force the load effect to re-run on a manual Refresh click
+  // (issue #813 — Git Issues/PRs/Archive previously had no manual
+  // refresh button). Mirrors the pattern `GitPullRequestsTab` already
+  // uses for refetching after a successful merge: bumping the key
+  // aborts the previous effect (useAsyncEffect's signal) and re-fires
+  // the IPC, so a stale in-flight load can't clobber the refreshed
+  // result.
+  // Bump to refetch on manual Refresh (issue #813 — `useAsyncEffect`
+  // aborts the previous effect's signal on dep change, so an
+  // in-flight first-load can't clobber the refreshed result).
+  const [reloadKey, setReloadKey] = useState(0);  // Only one dropdown open at a time, keyed by issue number — mirrors the
   // SessionBrowserModal pattern so the click-outside handling stays simple.
   const [openDropdown, setOpenDropdown] = useState<number | null>(null);
   // The provider list is fetched once at mount and reused for the lifetime
@@ -140,6 +158,14 @@ export function GitIssuesTab() {
     [issues],
   );
 
+  // "View on GitHub" header button — resolves the active mesh's
+  // `origin` to a `https://github.com/{owner}/{repo}/issues` URL.
+  // `null` for non-GitHub meshes falls through to SafeLink's inert
+  // `<span>` (no link, no dead click). The hook's dual-key cache
+  // dedupes the IPC across mount + mesh switches within the session.
+  const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
+  const issuesListUrl = githubUrl ? `${githubUrl}/issues` : '';
+
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
     const load = async () => {
@@ -165,7 +191,7 @@ export function GitIssuesTab() {
     setLoading(true);
     setError(null);
     load();
-  }, [activeMeshId]);
+  }, [activeMeshId, reloadKey]);
 
   // Fetch the provider list once at mount. Platform filtering (e.g.
   // macOS-only Anthropic) is enforced server-side via
@@ -253,31 +279,33 @@ export function GitIssuesTab() {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Header row mirrors the PRs tab. `SafeLink` falls back to an
+          inert <span> when the URL is empty (non-GitHub mesh), so
+          the layout stays stable whether or not the URL has resolved. */}
+      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-between gap-2">
+        <RefreshControl
+          onRefresh={() => setReloadKey((k) => k + 1)}
+          isRefreshing={loading && issues.length > 0}
+          ariaLabel="Refresh issues"
+        />
+        <SafeLink
+          url={issuesListUrl}
+          ariaLabel="Open this repo's issues list on GitHub"
+          title="Open this repo's issues list on GitHub"
+          className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+        >
+          View on GitHub ↗
+        </SafeLink>
+      </div>
       <div className="flex-1 overflow-y-auto p-2">
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-8 gap-3">
-            <div className="animate-spin w-5 h-5 border border-accent-cyan border-t-transparent rounded-full" />
-            <span className="text-xs text-text-muted">Loading issues...</span>
-          </div>
+        {loading && issues.length === 0 ? (
+          // First-load only: refreshes keep the prior list rendered
+          // so the user's reading position doesn't reset (mirrors PRs).
+          <LoadingState label="Loading issues..." />
         ) : error ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="15" y1="9" x2="9" y2="15"/>
-              <line x1="9" y1="9" x2="15" y2="15"/>
-            </svg>
-            <span className="text-xs text-red-400">Failed to load issues</span>
-            <span className="text-[10px] text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
-          </div>
+          <ErrorState title="Failed to load issues" detail={error} />
         ) : issues.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-text-muted mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="8" x2="12" y2="12"/>
-              <line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-            <span className="text-xs text-text-muted">No open issues</span>
-          </div>
+          <EmptyState label="No open issues" />
         ) : (
           <div className="space-y-1">
             {issues.map(issue => {
@@ -354,7 +382,7 @@ export function GitIssuesTab() {
                               e.stopPropagation();
                               if (firstBlockerUrl) openUrl(firstBlockerUrl).catch(console.error);
                             }}
-                            className="mt-1 inline-flex items-center gap-1 text-red-400 hover:text-red-300 transition-colors"
+                            className="mt-1 inline-flex items-center gap-1 text-status-error hover:text-status-error/80 transition-colors"
                           >
                             <svg
                               width="12"
@@ -370,7 +398,7 @@ export function GitIssuesTab() {
                               <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
                               <line x1="4" y1="22" x2="4" y2="15" />
                             </svg>
-                            <span className="text-[10px] font-medium leading-none">
+                            <span className="text-2xs font-medium leading-none">
                               Blocked by #{firstBlocker}
                             </span>
                           </button>

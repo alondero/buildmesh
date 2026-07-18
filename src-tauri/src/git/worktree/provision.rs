@@ -77,9 +77,32 @@
 
 /// Fetch a single ref from `origin` into the local repo. Used by the PR-spawn
 /// path (#420) to materialise `origin/<head_ref>` so the worktree can be cut
-/// from it. `head_ref` is the PR's source branch (e.g. `feat/420-pr-spawn`);
-/// the function runs `git fetch origin <head_ref>` and returns `true` on a
-/// clean exit, `false` on any failure.
+/// from it. `head_ref` is the PR's source branch (e.g. `feat/420-pr-spawn`).
+///
+/// As of issue #446, this is a thin wrapper over
+/// [`crate::git::sync::do_fetch_only`] — the fetch-only half of `do_sync`
+/// (the shared fetch+ff-pull algorithm used by `fetch_origin` and the manual
+/// `git_sync` command). Consolidating onto the shared algorithm means:
+///   - Windows quoting, ref-with-special-chars, and lock-contention fixes
+///     land in one place for both the auto-sync and the PR-head fetch.
+///   - A dirty parent does NOT block the fetch (2026-07-17): a fetch never
+///     touches the working tree, and the whole point here is materialising
+///     `refs/remotes/origin/<head_ref>` — the old pre-fetch dirty-skip
+///     silently cut the PR worktree from a stale ref (or fell back to
+///     `base_ref`) whenever the mesh root had uncommitted changes.
+///
+/// **Why fetch-only, not full `do_sync`:** the PR-head fetch is a
+/// single-ref materialisation; the goal is to populate
+/// `refs/remotes/origin/<head_ref>` so the worktree can be cut from it.
+/// `do_sync`'s Step 6 (`git pull --ff-only --no-rebase`) would mutate
+/// the mesh's currently-checked-out branch (typically `main`) as a side
+/// effect of spawning a PR agent — a behavioural surprise (the user's
+/// `main` advances on every PR spawn) AND wasted work (a few hundred ms
+/// of duplicate fast-forward on top of the `fetch_origin` call a few
+/// lines earlier in `spawn_agent_inner`, under the same per-Mesh
+/// `sync_lock`). `do_fetch_only` runs steps 1-3 (open, has-remote,
+/// `git fetch`) and stops before the `commits_behind`, dirty-gate and
+/// `git pull` tail.
 ///
 /// Best-effort by design: the caller falls back to the mesh's `base_ref` on
 /// `false` rather than failing the spawn (ADR 0001 offline pattern). The user
@@ -88,39 +111,40 @@
 /// alternative (strict-error spawn) is brittle to the very first offline
 /// session after a fresh install.
 ///
-/// `--` separator before `head_ref` defends against an adversarial / malformed
-/// ref starting with `-` (e.g. `--upload-pack=…`); `git fetch` would otherwise
-/// treat it as a flag. GitHub's branch-name validation blocks this in
-/// practice, but the cost of the separator is zero and the upside is hardening
-/// against a future refactor that lets a hand-entered or imported ref flow
-/// through.
+/// **Adversarial-ref guard:** `do_fetch_only` passes the branch as a single
+/// argv entry without a `--` separator (it doesn't know it's running in the
+/// spawn context, and the auto-sync + manual-sync callers both want git to
+/// parse the ref as a refspec). So the wrapper rejects any `head_ref`
+/// starting with `-` (e.g. `--upload-pack=evil`) up front — the same
+/// hardening the old shell-out had via `cmd.arg("--")`. GitHub's branch-name
+/// validation blocks this in practice, but the cost of the check is zero
+/// and the upside is defending against a future refactor that lets a
+/// hand-entered or imported ref flow through. Pinned by
+/// `fetch_single_ref_rejects_adversarial_dash_ref`.
 pub(crate) fn fetch_single_ref(project_root: &str, head_ref: &str) -> bool {
-    use crate::process_util::command_no_window;
-    let host_root = crate::env::to_host_path(project_root);
-    tracing::info!(
-        "fetch_single_ref: running git fetch origin -- {} in {}",
-        head_ref,
-        host_root
-    );
-    let mut cmd = command_no_window("git");
-    cmd.arg("fetch").arg("origin").arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
-        Ok(o) => o,
-        Err(e) => {
-            tracing::warn!("fetch_single_ref: failed to spawn git fetch: {}", e);
-            return false;
-        }
-    };
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // Adversarial-ref guard — see fn doc. Must run BEFORE we hand `head_ref`
+    // to `do_fetch_only`, because the helper passes it as a plain argv entry
+    // without a `--` separator.
+    if head_ref.starts_with('-') {
         tracing::warn!(
-            "fetch_single_ref: git fetch origin -- {} failed: {}",
-            head_ref,
-            stderr.trim()
+            "fetch_single_ref: rejecting adversarial ref {} (starts with '-')",
+            head_ref
         );
         return false;
     }
-    true
+
+    let host_root = crate::env::to_host_path(project_root);
+    // `do_fetch_only` returns the same `SyncOutcome` variants `do_sync` would,
+    // but without the count-behind / pull tail. `Ok(())` covers every fetch-
+    // succeeded case (UpToDate / Synced / FetchedButDiverged in `do_sync`'s
+    // world); every `Err` variant maps to `false` per the wrapper contract.
+    crate::git::sync::do_fetch_only(
+        &host_root,
+        "origin",
+        Some(head_ref),
+        crate::git::sync::SPAWN_FETCH_TIMEOUT,
+    )
+    .is_ok()
 }
 
 /// The alias used for a fork remote (issue #443). `fork-<login>` is
@@ -157,7 +181,7 @@ pub(crate) fn fetch_fork_head(
     head_repo_clone_url: &str,
     head_ref: &str,
 ) -> bool {
-    use crate::process_util::command_no_window;
+    use crate::process_util::git_command;
     let host_root = crate::env::to_host_path(project_root);
     let alias = fork_remote_alias(head_repo_owner);
     tracing::info!(
@@ -173,7 +197,7 @@ pub(crate) fn fetch_fork_head(
     // clone URL. If it doesn't, `remote add` registers it. This avoids
     // parsing `git remote add`'s non-zero stderr for the "already exists"
     // signal — easier to read, and works on every git version.
-    let mut get_url = command_no_window("git");
+    let mut get_url = git_command();
     get_url.arg("remote").arg("get-url").arg(&alias);
     let existing = get_url
         .current_dir(&host_root)
@@ -184,7 +208,7 @@ pub(crate) fn fetch_fork_head(
 
     let url_matches = existing.as_deref() == Some(head_repo_clone_url);
     if !url_matches {
-        let mut cmd = command_no_window("git");
+        let mut cmd = git_command();
         if existing.is_some() {
             cmd.arg("remote").arg("set-url").arg(&alias).arg(head_repo_clone_url);
             tracing::info!("fetch_fork_head: updating remote {} URL", alias);
@@ -219,12 +243,21 @@ pub(crate) fn fetch_fork_head(
         head_ref,
         host_root
     );
-    let mut cmd = command_no_window("git");
+    let mut cmd = git_command();
     cmd.arg("fetch").arg(&alias).arg("--").arg(head_ref);
-    let output = match cmd.current_dir(&host_root).output() {
+    cmd.current_dir(&host_root);
+    // Bounded like `fetch_single_ref`'s `do_fetch_only` call: this is a
+    // network fetch on the spawn path, run under the per-Mesh sync lock —
+    // a half-open connection must abort at the spawn budget, not wedge
+    // the lock (and every later spawn on this mesh) indefinitely.
+    let output = match crate::process_util::run_command_with_timeout(
+        cmd,
+        "git fetch (fork head)",
+        crate::git::sync::SPAWN_FETCH_TIMEOUT,
+    ) {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!("fetch_fork_head: failed to spawn git fetch: {}", e);
+            tracing::warn!("fetch_fork_head: {}", e);
             return false;
         }
     };
@@ -239,6 +272,66 @@ pub(crate) fn fetch_fork_head(
         return false;
     }
     true
+}
+
+/// Run the PR-spawn head fetch inside `services::sync_lock::with_mesh_sync_lock`
+/// so concurrent PR-spawns (or a PR-spawn racing the manual `git_sync` from
+/// #680) can't collide on `.git/FETCH_HEAD`, `.git/refs/remotes/<remote>/
+/// <ref>.lock`, or — for the fork branch — the config files `git remote add/
+/// set-url` write (issues #652, #680 follow-up #698).
+///
+/// The lock key is the mesh's **DB-stored path** (`project_root`), matching
+/// the key `spawn_agent_inner` uses for the auto-sync `fetch_origin` call
+/// two steps earlier. `sync_lock.rs` documents the key as the form stored on
+/// `agent_nodes.path` — the host-native form for Windows repos, the WSL
+/// form for WSL repos (the bare helpers internally re-map to the host
+/// path via `env::to_host_path`, but the lock key stays as the DB-stored
+/// string). Same-key contention serialises; different keys (different
+/// meshes) never wait on each other.
+///
+/// Both branches of the underlying match share one helper so `spawn_agent_inner`
+/// has a single, audit-able lock acquisition rather than two inline branches.
+/// The closure that `with_mesh_sync_lock` runs owns nothing: it captures all
+/// four arguments by reference, so the closure borrows are valid for the
+/// duration of the fetch and the lock is released as soon as `fetch_single_ref`
+/// or `fetch_fork_head` returns. Best-effort by design (ADR 0001) — the spawn
+/// falls through to `base_ref` on `false` rather than hard-failing.
+///
+/// The two underlying helpers (`fetch_single_ref`, `fetch_fork_head`) stay
+/// lock-free so the no-lock shape is testable in isolation (the issue #420 /
+/// #443 unit tests in `agent::spawn` call them directly with unique tempdir
+/// paths); `locked_fetch_pr_head` is the only caller that needs the
+/// serialization guarantee.
+pub(crate) fn locked_fetch_pr_head(
+    project_root: &str,
+    head_ref: &str,
+    head_repo_owner: Option<&str>,
+    head_repo_clone_url: Option<&str>,
+) -> bool {
+    // Bounded wait, matching `locked_fetch_origin`: a PR spawn must not
+    // queue for minutes behind a wedged manual sync holding this mesh's
+    // lock. On timeout we return `false`, which the spawn orchestrator
+    // already handles as "head unfetchable" — it falls back to the mesh's
+    // base_ref and raises the `pr_head_unfetchable` toast (ADR 0001).
+    crate::services::sync_lock::try_with_mesh_sync_lock_timeout(
+        project_root,
+        crate::git::sync::SPAWN_SYNC_LOCK_TIMEOUT,
+        || match (head_repo_owner, head_repo_clone_url) {
+            (Some(owner), Some(clone_url)) => {
+                fetch_fork_head(project_root, owner, clone_url, head_ref)
+            }
+            _ => fetch_single_ref(project_root, head_ref),
+        },
+    )
+    .unwrap_or_else(|| {
+        tracing::warn!(
+            "locked_fetch_pr_head: gave up waiting {}s for the mesh sync lock on {}; \
+             falling back to base_ref",
+            crate::git::sync::SPAWN_SYNC_LOCK_TIMEOUT.as_secs(),
+            project_root
+        );
+        false
+    })
 }
 
 /// Read the local SHA at `refs/remotes/origin/<head_ref>` — the ref
@@ -259,12 +352,12 @@ pub(crate) fn fetch_fork_head(
 /// `git rev-parse` accepts both the short and the fully-qualified
 /// `refs/remotes/origin/...` form.
 pub(crate) fn read_origin_ref_sha(project_root: &str, remote_ref: &str) -> Option<String> {
-    use crate::process_util::command_no_window;
+    use crate::process_util::git_command;
     let host_root = crate::env::to_host_path(project_root);
     // Read the symbolic SHA in one shot — `git rev-parse` exits non-zero
     // (and produces no stdout) when the ref doesn't exist, so we don't
     // need a separate "is this a ref?" probe first.
-    let mut cmd = command_no_window("git");
+    let mut cmd = git_command();
     cmd.arg("rev-parse").arg(remote_ref);
     let output = cmd.current_dir(&host_root).output().ok()?;
     if !output.status.success() {
@@ -361,6 +454,36 @@ pub(crate) fn adopt_warm_worktree_by_move(
     // BEFORE the move means a bad ref fails fast, before we disturb the pool
     // directory.
     let base_sha = super::resolve_base_ref_sha(project_root, base_ref)?;
+    // Same fail-fast principle for the branch: `checkout_worktree_to_base`'s
+    // `git checkout -b` refuses an existing branch, but by then the pool
+    // directory has already been moved — the spawn failure cleanup then
+    // deletes a half-adopted worktree, which can strand a stale admin entry
+    // (the phantom worktree from the 2026-07-17 gh252 duplicate-spawn
+    // incident). Refuse BEFORE the move so a refused adoption leaves the
+    // pool entry exactly where it was.
+    if mode == "branched" {
+        let host_root = crate::env::to_host_path(project_root);
+        match git2::Repository::open(&host_root) {
+            Ok(repo) => {
+                if repo.find_branch(branch_name, git2::BranchType::Local).is_ok() {
+                    return Err(format!(
+                        "a branch named '{}' already exists — refusing to adopt the warm worktree over it",
+                        branch_name
+                    ));
+                }
+            }
+            // Fail open: the post-move `git checkout -b` still refuses an
+            // existing branch, so an unopenable root degrades to the old
+            // (later) refusal rather than blocking every adoption.
+            Err(e) => tracing::warn!(
+                "adopt_warm_worktree_by_move: could not open {} to pre-check branch '{}' ({}); \
+                 relying on the post-move checkout refusal",
+                host_root,
+                branch_name,
+                e
+            ),
+        }
+    }
     super::move_git_worktree(project_root, old_host_path, new_host_path)?;
     checkout_worktree_to_base(new_host_path, branch_name, mode, &base_sha)?;
     super::apply_worktree_include(
@@ -401,8 +524,8 @@ fn checkout_worktree_to_base(
 /// future fix (arg quoting, lock-retry) lands for both callers at once; the
 /// deliberate flag differences (`-B` vs `-b`) stay explicit at the call sites.
 fn run_git_checkout(host_path: &str, args: &[&str]) -> Result<(), String> {
-    use crate::process_util::command_no_window;
-    let mut cmd = command_no_window("git");
+    use crate::process_util::git_command;
+    let mut cmd = git_command();
     cmd.arg("-C").arg(host_path).arg("checkout").args(args);
     let output = cmd
         .output()
@@ -944,6 +1067,16 @@ mod tests {
         assert!(
             result.unwrap_err().contains("already exists"),
             "error must name the clobber refusal"
+        );
+        // Fail-fast contract: the refusal happens BEFORE the pool directory
+        // is disturbed — see the pre-move guard in `adopt_warm_worktree_by_move`.
+        assert!(
+            pool_path.exists(),
+            "pool entry must be untouched after a refused adoption"
+        );
+        assert!(
+            !host_path.exists(),
+            "the target path must not have been materialised by a refused adoption"
         );
     }
 

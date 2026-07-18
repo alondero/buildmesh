@@ -54,7 +54,7 @@ pub enum BillingMode {
 }
 
 /// Per-tier Claude model overrides for a Claude-compatible provider account
-/// (issue #567 — restores the cwrap capability).
+/// (issue #567 — restores the Claude Code model-tier capability).
 ///
 /// Claude Code asks its backend for several model *aliases*: a primary, a cheap
 /// "small/fast" model for background tasks (titles, etc.), and the Sonnet / Opus
@@ -64,6 +64,7 @@ pub enum BillingMode {
 ///   - `small_fast` → `ANTHROPIC_SMALL_FAST_MODEL`
 ///   - `sonnet`     → `ANTHROPIC_DEFAULT_SONNET_MODEL`
 ///   - `opus`       → `ANTHROPIC_DEFAULT_OPUS_MODEL`
+///   - `fable`      → `ANTHROPIC_DEFAULT_FABLE_MODEL`
 ///   - `haiku`      → `ANTHROPIC_DEFAULT_HAIKU_MODEL`
 ///
 /// Only meaningful for Claude-compatible providers (MiniMax, Kimi, custom) — it's
@@ -87,6 +88,11 @@ pub struct ModelTiers {
     /// `ANTHROPIC_DEFAULT_OPUS_MODEL`.
     #[serde(default)]
     pub opus: Option<String>,
+    /// `ANTHROPIC_DEFAULT_FABLE_MODEL` — the Claude 5 Fable tier. Unset falls
+    /// back to the `opus` tier at env-build time (Fable sits above Opus, so a
+    /// provider's Opus-grade model is the closest configured substitute).
+    #[serde(default)]
+    pub fable: Option<String>,
     /// `ANTHROPIC_DEFAULT_HAIKU_MODEL`.
     #[serde(default)]
     pub haiku: Option<String>,
@@ -101,6 +107,7 @@ impl ModelTiers {
             && blank(&self.small_fast)
             && blank(&self.sonnet)
             && blank(&self.opus)
+            && blank(&self.fable)
             && blank(&self.haiku)
     }
 }
@@ -286,6 +293,20 @@ pub struct AppPreferences {
     /// with an empty list.
     #[serde(default)]
     pub provider_pairings: Vec<ProviderPairing>,
+    /// The backend that summaries PTY output into a slug (issue #824).
+    /// Distinct from the node's own provider — auto-rename runs frequently
+    /// and often sits well below the model's intelligence threshold, so the
+    /// user opts in via Settings rather than inheriting whatever expensive
+    /// tier the spawned node is on. `None` (the default) means auto-naming
+    /// is disabled — nodes keep their `adjective-adjective-noun` random
+    /// slugs until the user explicitly configures this. `Some(spawn_id)`
+    /// forwards through [`crate::preferences::resolve_provider_env`] so
+    /// whatever provider the user picks resolves through the same
+    /// configured-account pipeline that node spawns use. Built-in
+    /// Anthropic is special-cased in `session_naming` to pin a cheap
+    /// haiku tier instead of the user's main subscription default.
+    #[serde(default)]
+    pub naming_provider: Option<String>,
 }
 
 /// Set during Tauri `setup()` so callers don't need an `AppHandle`.
@@ -298,6 +319,13 @@ static CACHE: Mutex<Option<AppPreferences>> = Mutex::new(None);
 pub fn init(app_data_dir: PathBuf) {
     // Safe to ignore: setup runs once, so OnceLock::set never realistically fails.
     let _ = APP_DATA_DIR.set(app_data_dir);
+}
+
+/// The app-data directory `init` was wired to, for sibling config files
+/// that live next to `preferences.json` (e.g. Autopilot's `finish.md`,
+/// issue #484). `None` before `init` runs (tests without a Tauri setup).
+pub(crate) fn app_data_dir() -> Option<PathBuf> {
+    APP_DATA_DIR.get().cloned()
 }
 
 fn preferences_path() -> Result<PathBuf, String> {
@@ -363,6 +391,39 @@ pub fn default_provider() -> Option<String> {
         Ok(prefs) => prefs.default_provider.filter(|s| !s.is_empty()),
         Err(e) => {
             tracing::warn!("preferences::default_provider load failed, falling back: {}", e);
+            None
+        }
+    }
+}
+
+/// The user-configured backend the session-naming helper uses to summarise
+/// PTY output into a slug (issue #824). `None` means "auto-naming is off" —
+/// the session_naming module short-circuits and nodes retain their random
+/// `adjective-adjective-noun` slug. An empty string is normalised to `None`
+/// here so a save with `""` from the frontend acts the same as a clear.
+///
+/// Distinct from `default_provider`: the naming helper runs frequently on
+/// content that is well below the front-line model's intelligence
+/// threshold, so the user explicitly opts in via Settings rather than
+/// inheriting whatever provider a spawned node happens to be on (which can
+/// be an expensive tier like Opus with xhigh effort).
+///
+/// The naming helper treats this as a *spawn-option id* (e.g. `"minimax"`,
+/// `"claude:minimax"`, `"claude:openrouter"`) and resolves it through
+/// [`crate::preferences::resolve_provider_env`] the same way node spawns
+/// do — so a user who already configured a Provider Account can reuse it
+/// here for free. Built-in Anthropic (`"anthropic"`) is special-cased
+/// inside `session_naming` to pin a cheap haiku tier; the historical
+/// `minimax_backend_env()` side-channel is no longer the implicit
+/// default.
+pub fn naming_provider() -> Option<String> {
+    match load() {
+        Ok(prefs) => prefs.naming_provider.filter(|s| !s.is_empty()),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::naming_provider load failed, falling back: {}",
+                e
+            );
             None
         }
     }
@@ -595,6 +656,7 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "agy",       name: "Google / Antigravity",  self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "kimi",      name: "Kimi",                  self_auth: false },
+    BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
 ];
 
 /// Whether `id` names a Claude-compatible keyed provider — one that carries an
@@ -623,16 +685,9 @@ pub fn is_claude_compatible_id(id: &str) -> bool {
 ///
 /// **OpenAI-surface URLs are best-effort and unverified on this host** (no
 /// `codex` binary + provider OpenAI key to exercise them, issue #576); the
-/// Anthropic-surface URLs match the long-standing `cwrap`/account defaults and
+/// Anthropic-surface URLs match the long-standing Claude Code account defaults and
 /// are exercised end-to-end. Live Codex verification is tracked as a follow-up.
 pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
-    let anthropic_tiers = |default: &str, fast: &str| ModelTiers {
-        default: Some(default.to_string()),
-        small_fast: Some(fast.to_string()),
-        sonnet: Some(default.to_string()),
-        opus: Some(default.to_string()),
-        haiku: Some(fast.to_string()),
-    };
     // OpenAI surface only consumes `default` (→ OPENAI_MODEL); the other tiers
     // are left unset since Codex takes a single model.
     let openai_tiers = |model: &str| ModelTiers {
@@ -656,7 +711,7 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
             SurfaceEndpoint {
                 surface: ApiSurface::Anthropic,
                 base_url: "https://api.moonshot.ai/anthropic".to_string(),
-                model_tiers: anthropic_tiers("kimi-k2.6", "kimi-k2.5"),
+                model_tiers: kimi_default_tiers(),
             },
             SurfaceEndpoint {
                 surface: ApiSurface::OpenAI,
@@ -664,6 +719,14 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
                 model_tiers: openai_tiers("kimi-k2.6"),
             },
         ],
+        // Deliberately no `openrouter` arm — the OpenRouter integration ships
+        // Anthropic-skin ONLY by a conscious scope decision (paired with empty
+        // `model_tiers`, hand-rolled per-tier picks). Codex-under-OpenRouter
+        // works via a Generic custom-provider account (the Anthropic-surface
+        // pairing path derives from `account.base_url`); the documented
+        // OpenRouter OpenAI surface is reachable but not first-class here.
+        // Documented in PR #702 body so the asymmetry with MiniMax/Kimi is
+        // discoverable rather than silent.
         _ => Vec::new(),
     }
 }
@@ -785,6 +848,17 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
                     Some("https://api.moonshot.ai/anthropic".to_string()),
                     kimi_default_tiers(),
                 ),
+                "openrouter" => (
+                    // OpenRouter's "Anthropic Skin" integration — the same
+                    // `claude` CLI binary, but routed through OpenRouter's
+                    // `/api` endpoint with `ANTHROPIC_AUTH_TOKEN` set to the
+                    // user's `sk-or-…` key. Per-tier models are left empty
+                    // so the user picks providers/models via the 5-tier
+                    // fields in the UI (matches OpenRouter's polyglot
+                    // catalogue rather than pre-pinning Anthropic models).
+                    Some("https://openrouter.ai/api".to_string()),
+                    ModelTiers::default(),
+                ),
                 _ => (None, ModelTiers::default()),
             };
             // Kimi is opt-in — historically because it had no usage fetcher,
@@ -807,34 +881,39 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
         .collect()
 }
 
-/// MiniMax's cwrap-parity default tier map. **Single source** consumed by
+/// MiniMax's Claude-Code-parity default tier map. **Single source** consumed by
 /// (issue #571):
 /// - [`default_provider_accounts`] — the per-account `model_tiers` field
 /// - [`first_class_surfaces`] for `"minimax"` — the Anthropic surface tier
 /// - [`crate::agent::provider::provider_conf::minimax_backend_env`] — the
 ///   session-naming side-channel
+///
+/// Also the Anthropic surface tier map for MiniMax (Anthropic-surface pairings
+/// now live-derive from the account on every resolution; the account is
+/// authoritative).
 pub(crate) fn minimax_default_tiers() -> ModelTiers {
     ModelTiers {
         default: Some("MiniMax-M3[1m]".to_string()),
         small_fast: Some("MiniMax-M2.7".to_string()),
         sonnet: Some("MiniMax-M3[1m]".to_string()),
         opus: Some("MiniMax-M3[1m]".to_string()),
+        fable: Some("MiniMax-M3[1m]".to_string()),
         haiku: Some("MiniMax-M2.7".to_string()),
     }
 }
 
-/// Kimi's cwrap-parity default tier map. **Single source** consumed by
-/// [`default_provider_accounts`]. The Anthropic surface in
-/// [`first_class_surfaces`] for `"kimi"` intentionally does NOT consume this
-/// — the surface uses a different layout (k2.6 on sonnet vs the account's
-/// k2.5 on sonnet) that pre-dates this tidy-up; surfacing the account's
-/// k2.5-on-sonnet choice via new pairings is a separate behaviour change.
+/// Kimi's Claude-Code-parity default tier map. **Single source** consumed by
+/// [`default_provider_accounts`] and the Anthropic surface in
+/// [`first_class_surfaces`] for `"kimi"` (the surface's historical divergent
+/// layout — k2.6 on sonnet — was retired when account tiers became the live
+/// source for Anthropic-surface pairings; the account map is authoritative).
 pub(crate) fn kimi_default_tiers() -> ModelTiers {
     ModelTiers {
         default: Some("kimi-k2.6".to_string()),
         small_fast: Some("kimi-k2.5".to_string()),
         sonnet: Some("kimi-k2.5".to_string()),
         opus: Some("kimi-k2.6".to_string()),
+        fable: Some("kimi-k2.6".to_string()),
         haiku: Some("kimi-k2.5".to_string()),
     }
 }
@@ -904,6 +983,18 @@ pub fn kimi_api_key_resolved() -> Option<String> {
     merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
         .into_iter()
         .find(|a| a.id == "kimi")
+        .and_then(|a| a.api_key)
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolve the effective OpenRouter API key from the merged provider-accounts
+/// list. Brand-new id (post-#570 land) — no legacy flat field, identical
+/// lookup shape to [`kimi_api_key_resolved`] but kept as a separate symbol so
+/// each provider's single seam stays explicit.
+pub fn openrouter_api_key_resolved() -> Option<String> {
+    merge_provider_accounts(default_provider_accounts(), load().ok()?.provider_accounts)
+        .into_iter()
+        .find(|a| a.id == "openrouter")
         .and_then(|a| a.api_key)
         .filter(|v| !v.is_empty())
 }
@@ -1001,25 +1092,51 @@ pub fn provider_pairings() -> Vec<ProviderPairing> {
     }
 }
 
-/// The default **Anthropic-surface** pairing derived for a keyed account under
-/// the Claude Code harness (issue #576). This is the back-compat bridge: it
-/// reproduces the pre-#576 "keyed account → MiniMax-via-Claude row" with no
-/// migration. URL + model map come from the first-class published Anthropic
-/// endpoint when the provider is first-class, else from the account's own
-/// `base_url`/tiers (a custom Generic provider configured before pairings
-/// existed).
-fn default_anthropic_pairing(account: &ProviderAccount, claude_harness_id: &str) -> ProviderPairing {
-    let (base_url, model_tiers) = first_class_surfaces(&account.id)
+/// The **Anthropic-surface** model-tier map for an account — the precedence
+/// every Anthropic-side consumer (derived pairing, spawn preflight, the
+/// pairing menu renderer) shares. Account tiers (the Providers-page edits)
+/// win when set; the first-class published Anthropic endpoint fills only a
+/// fully-cleared account. A custom Generic provider has no published endpoint,
+/// so its account fields are the only source — the pre-pairings behaviour,
+/// unchanged.
+///
+/// Extracted from `default_anthropic_pairing` so the precedence lives in one
+/// place; the comment naming the smell (`Tier source mirrors`) is the one
+/// truth.
+fn anthropic_tiers_for(account: &ProviderAccount) -> ModelTiers {
+    let own = effective_tiers(account);
+    if !own.is_empty() {
+        return own;
+    }
+    first_class_surfaces(&account.id)
         .into_iter()
         .find(|e| e.surface == ApiSurface::Anthropic)
-        .map(|e| (Some(e.base_url), e.model_tiers))
-        .unwrap_or_else(|| (account.base_url.clone(), effective_tiers(account)));
+        .map(|e| e.model_tiers)
+        .unwrap_or_default()
+}
+
+/// The **Anthropic-surface** pairing derived for a keyed account under a
+/// Claude-backed harness (issue #576). Derived *live* on every resolution —
+/// never persisted — so Providers-page edits reach the next spawn.
+///
+/// Precedence: the account's own `base_url` wins when set; the first-class
+/// published Anthropic endpoint fills anything the account leaves empty.
+/// Tier source: [`anthropic_tiers_for`].
+fn default_anthropic_pairing(account: &ProviderAccount, claude_harness_id: &str) -> ProviderPairing {
+    let published = first_class_surfaces(&account.id)
+        .into_iter()
+        .find(|e| e.surface == ApiSurface::Anthropic);
+    let base_url = account
+        .base_url
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| published.as_ref().map(|e| e.base_url.clone()));
     ProviderPairing {
         harness_id: claude_harness_id.to_string(),
         provider_id: account.id.clone(),
         surface: ApiSurface::Anthropic,
         base_url,
-        model_tiers,
+        model_tiers: anthropic_tiers_for(account),
     }
 }
 
@@ -1035,30 +1152,34 @@ fn resolve_pairing(
     stored: &[ProviderPairing],
     surface_of: impl Fn(&str) -> Option<ApiSurface>,
 ) -> Option<ProviderPairing> {
-    if let Some(p) = stored
+    let stored_pairing = stored
         .iter()
-        .find(|p| p.harness_id == harness_id && p.provider_id == account.id)
-    {
+        .find(|p| p.harness_id == harness_id && p.provider_id == account.id);
+    let surface = stored_pairing
+        .map(|p| p.surface)
+        .or_else(|| surface_of(harness_id))?;
+    // Anthropic-surface pairings are attach-time snapshots — the UI never
+    // edits their payload, only attaches/detaches — so always re-derive from
+    // the account (see `default_anthropic_pairing`).
+    if surface == ApiSurface::Anthropic && account.claude_compatible {
+        return Some(default_anthropic_pairing(account, harness_id));
+    }
+    if let Some(p) = stored_pairing {
         return Some(p.clone());
     }
-    let surface = surface_of(harness_id)?;
-    if let Some(ep) = first_class_surfaces(&account.id)
+    // No stored pairing: derive from the published first-class endpoint for
+    // this surface. A Generic provider on a non-Anthropic surface has nothing
+    // to fall back to.
+    first_class_surfaces(&account.id)
         .into_iter()
         .find(|e| e.surface == surface)
-    {
-        return Some(ProviderPairing {
+        .map(|ep| ProviderPairing {
             harness_id: harness_id.to_string(),
             provider_id: account.id.clone(),
             surface,
             base_url: Some(ep.base_url),
             model_tiers: ep.model_tiers,
-        });
-    }
-    // No published endpoint for this surface. Only the Anthropic surface has a
-    // back-compat default (the account's own URL/tiers); a Generic provider on
-    // any other surface has nothing to fall back to.
-    (surface == ApiSurface::Anthropic && account.claude_compatible)
-        .then(|| default_anthropic_pairing(account, harness_id))
+        })
 }
 
 /// The full set of **Proxied Provider** pairings to render in the Spawn Menu
@@ -1094,12 +1215,24 @@ pub(crate) fn effective_pairings(
         if !proxiable_ids.contains(p.provider_id.as_str()) {
             continue;
         }
+        // Anthropic-surface pairings are attach-time snapshots — render the
+        // live account-derived config so the page matches what the spawn path
+        // injects (see `default_anthropic_pairing`).
+        let resolved = if p.surface == ApiSurface::Anthropic {
+            accounts
+                .iter()
+                .find(|a| a.id == p.provider_id)
+                .map(|a| default_anthropic_pairing(a, &p.harness_id))
+                .unwrap_or_else(|| p.clone())
+        } else {
+            p.clone()
+        };
         match out
             .iter_mut()
             .find(|o| o.harness_id == p.harness_id && o.provider_id == p.provider_id)
         {
-            Some(existing) => *existing = p.clone(),
-            None => out.push(p.clone()),
+            Some(existing) => *existing = resolved,
+            None => out.push(resolved),
         }
     }
     out
@@ -1150,6 +1283,71 @@ pub fn resolve_provider_env(spawn_option_id: &str) -> Vec<(String, String)> {
     }
 }
 
+/// Preflight gate run by `spawn_agent_inner` BEFORE [`resolve_provider_env`].
+/// Catches the silent-fail trap where a Claude-compatible custom endpoint
+/// (OpenRouter, or any Generic provider with a non-empty `base_url`) launches
+/// `claude` against a third-party backend without a primary model pinned —
+/// `claude` then sends its hardcoded `claude-3-5-sonnet-<date>` default, the
+/// third-party rejects it (OpenRouter expects `provider/model` slugs), and the
+/// user only sees a server-side `tracing::warn` they can't reach. Returning
+/// `Err` here surfaces the issue as the spawn result, so the UI can prompt
+/// the user to fill the `Default model` tier field on the Providers page.
+pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), String> {
+    let (harness_id, provider_id) =
+        crate::agent::provider::parse_spawn_option_id(spawn_option_id);
+    let accounts = provider_accounts();
+    // Mirror `resolve_provider_env`'s account resolution so the gate sees the
+    // same effective state as the env builder.
+    let account_opt: Option<&ProviderAccount> = match provider_id {
+        Some(pid) => {
+            let Some(account) = accounts.iter().find(|a| a.id == pid) else {
+                return Ok(());
+            };
+            let Some(_pairing) =
+                resolve_pairing(harness_id, account, &provider_pairings(), harness_surface)
+            else {
+                return Ok(());
+            };
+            Some(account)
+        }
+        None => accounts.iter().find(|a| a.id == spawn_option_id),
+    };
+    preflight_account_env(account_opt)
+}
+
+/// Pure helper shared with the unit tests — given the already-resolved
+/// account (or `None` for the vanilla-Anthropic path), returns `Err` iff the
+/// account routes through a non-empty `base_url` but has no primary model
+/// pinned at the surface the env builder would use. Split out from the
+/// disk-reading wrapper so the rule is testable without touching the global
+/// preferences cache.
+///
+/// Preflight gate for a custom Claude-compatible endpoint — refuses to spawn
+/// when no primary model is pinned (OpenRouter-style 400 trap). Tier source:
+/// [`anthropic_tiers_for`] — same precedence as `default_anthropic_pairing`,
+/// so a user-cleared MiniMax with empty `model_tiers` doesn't false-positive
+/// (the env builder still emits `ANTHROPIC_MODEL` from the published surface).
+fn preflight_account_env(account: Option<&ProviderAccount>) -> Result<(), String> {
+    let Some(account) = account else {
+        return Ok(());
+    };
+    let base_url_is_set = account
+        .base_url
+        .as_deref()
+        .is_some_and(|s| !s.is_empty());
+    if !base_url_is_set {
+        return Ok(());
+    }
+    let tiers = anthropic_tiers_for(account);
+    if tiers.default.is_none() {
+        return Err(format!(
+            "Custom Claude-compatible endpoint '{}' requires the 'Default model' tier to be set. Open the Providers page and configure it (e.g. 'anthropic/claude-3-5-sonnet-latest' for Claude via OpenRouter).",
+            account.id
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve an account's effective per-tier models: its [`ModelTiers`] if set,
 /// otherwise derived from the deprecated flat `models` list for back-compat
 /// (issue #567) — `models[0]` is the primary and Sonnet/Opus, `models[1]` (if
@@ -1169,6 +1367,10 @@ fn effective_tiers(account: &ProviderAccount) -> ModelTiers {
         small_fast: Some(fast.to_string()),
         sonnet: Some(primary.to_string()),
         opus: Some(primary.to_string()),
+        // fable left None — `anthropic_surface_env` falls back to the opus tier
+        // (which itself falls back to primary), so a legacy flat-list account
+        // doesn't pin a redundant fable = primary.
+        fable: None,
         haiku: Some(fast.to_string()),
     }
 }
@@ -1236,6 +1438,15 @@ fn anthropic_surface_env(
     let mut env = Vec::new();
     if let Some(base) = base_url {
         env.push(("ANTHROPIC_BASE_URL".to_string(), base.to_string()));
+        // Force `ANTHROPIC_API_KEY=""` so a shell-set Anthropic key can't
+        // make Claude Code fall back to direct Anthropic auth instead of
+        // routing through the configured third-party endpoint. Required
+        // by OpenRouter's Anthropic Skin; matches the behaviour `cwrap`
+        // applied for every Claude-compatible endpoint (MiniMax, Kimi,
+        // OpenRouter alike). `CLAUDE_BACKEND_ENV_VARS` deliberately omits
+        // this var — adding it there would break the default-Anthropic
+        // subscription path, which currently honours a shell-set key.
+        env.push(("ANTHROPIC_API_KEY".to_string(), String::new()));
     }
     if let Some(key) = api_key.filter(|s| !s.is_empty()) {
         env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), key.to_string()));
@@ -1245,12 +1456,16 @@ fn anthropic_surface_env(
         env.push(("ANTHROPIC_MODEL".to_string(), primary.clone()));
         if base_url.is_some() {
             // A custom endpoint needs every alias pinned. Each tier falls back to
-            // the primary so a partially-filled map never sends a `claude-*` slug.
+            // the primary so a partially-filled map never sends a `claude-*` slug;
+            // fable falls back to the opus pick (which itself falls back to
+            // primary), mirroring the tier precedence for Claude 5's newest alias.
             let fast = model(&tiers.small_fast).unwrap_or_else(|| primary.clone());
+            let opus = model(&tiers.opus).unwrap_or_else(|| primary.clone());
             for (k, v) in [
                 ("ANTHROPIC_SMALL_FAST_MODEL", fast.clone()),
                 ("ANTHROPIC_DEFAULT_SONNET_MODEL", model(&tiers.sonnet).unwrap_or_else(|| primary.clone())),
-                ("ANTHROPIC_DEFAULT_OPUS_MODEL", model(&tiers.opus).unwrap_or_else(|| primary.clone())),
+                ("ANTHROPIC_DEFAULT_OPUS_MODEL", opus.clone()),
+                ("ANTHROPIC_DEFAULT_FABLE_MODEL", model(&tiers.fable).unwrap_or(opus)),
                 ("ANTHROPIC_DEFAULT_HAIKU_MODEL", model(&tiers.haiku).unwrap_or(fast)),
             ] {
                 env.push((k.to_string(), v));
@@ -1852,24 +2067,31 @@ mod tests {
     #[test]
     fn default_provider_accounts_cover_the_builtin_providers() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "minimax", "kimi"]);
-        // MiniMax + Kimi are the pay-as-you-go, Claude-compatible exemplars; the
-        // self-auth built-ins are plans and not Claude-compatible.
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "minimax", "kimi", "openrouter"]);
+        // MiniMax + Kimi + OpenRouter are the pay-as-you-go, Claude-compatible
+        // exemplars; the self-auth built-ins are plans and not Claude-compatible.
         let by_id = |id: &str| default_provider_accounts().into_iter().find(|a| a.id == id).unwrap();
         assert_eq!(by_id("minimax").billing_mode, BillingMode::PayAsYouGo);
         assert!(by_id("minimax").claude_compatible);
         assert!(by_id("kimi").claude_compatible);
+        assert!(by_id("openrouter").claude_compatible);
         assert!(!by_id("anthropic").claude_compatible);
         assert!(!by_id("codex").claude_compatible);
-        // MiniMax + Kimi ship the cwrap base URL + per-tier map so a key is all
-        // the user needs to add.
+        // MiniMax + Kimi ship the cwrap launcher's base URL + per-tier map so a key is all
+        // the user needs to add. OpenRouter ships its API base URL + empty
+        // per-tier map so the user picks provider/model per slot.
         assert_eq!(by_id("minimax").base_url.as_deref(), Some("https://api.minimax.io/anthropic"));
         assert_eq!(by_id("kimi").base_url.as_deref(), Some("https://api.moonshot.ai/anthropic"));
+        assert_eq!(by_id("openrouter").base_url.as_deref(), Some("https://openrouter.ai/api"));
         assert_eq!(by_id("minimax").model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
+        assert_eq!(by_id("openrouter").model_tiers, ModelTiers::default());
         // Kimi ships disabled by default (opt-in via the Providers page) — wallet
         // meter fetcher is now wired up (see services::usage::kimi_usage), so the
         // "no fetcher" rationale that pre-dates this PR no longer applies.
         assert!(!by_id("kimi").enabled);
+        // OpenRouter ships a fetcher on day 1, so it lands enabled by default
+        // — same shape as MiniMax, opt-in via missing key rather than a flag.
+        assert!(by_id("openrouter").enabled);
     }
 
     #[test]
@@ -1907,11 +2129,12 @@ mod tests {
             custom_account("deepseek"),
         ];
         let merged = merge_provider_accounts(defaults, stored);
-        // Five built-ins, no duplicate minimax, plus the custom one.
+        // Six built-ins (anthropic/codex/agy/minimax/kimi/openrouter), no
+        // duplicate minimax, plus the custom one.
         assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
         assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
         assert!(merged.iter().any(|a| a.id == "deepseek"));
-        assert_eq!(merged.len(), 6);
+        assert_eq!(merged.len(), 7);
     }
 
     #[test]
@@ -2137,6 +2360,7 @@ mod tests {
             small_fast: Some("GLM-4-Flash".to_string()),
             sonnet: Some("GLM-4.6".to_string()),
             opus: Some("GLM-4.6-Max".to_string()),
+            fable: None,
             haiku: Some("GLM-4-Flash".to_string()),
         };
         let env = provider_account_env(Some(&account));
@@ -2145,11 +2369,41 @@ mod tests {
         assert!(env.contains(&("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), "GLM-4.6-Max".to_string())));
         assert!(env.contains(&("ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(), "GLM-4.6".to_string())));
         assert!(env.contains(&("ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(), "GLM-4-Flash".to_string())));
+        // Fable unset → falls back to the Opus pick, not the primary.
+        assert!(env.contains(&("ANTHROPIC_DEFAULT_FABLE_MODEL".to_string(), "GLM-4.6-Max".to_string())));
         assert!(!env.iter().any(|(_, v)| v == "IGNORED"), "flat models is superseded by tiers");
     }
 
+    /// The Fable alias (Claude 5) is pinned for custom endpoints: an explicit
+    /// `fable` tier wins; unset falls back to the opus pick (the nearest tier
+    /// below); the built-in first-class maps default fable = opus.
     #[test]
-    fn builtin_minimax_account_reproduces_cwrap_model_routing() {
+    fn anthropic_surface_env_pins_fable_alias_with_opus_fallback() {
+        let mut tiers = kimi_default_tiers();
+        assert_eq!(tiers.fable, tiers.opus, "built-in kimi defaults fable to the opus pick");
+        assert_eq!(
+            minimax_default_tiers().fable,
+            minimax_default_tiers().opus,
+            "built-in minimax defaults fable to the opus pick"
+        );
+
+        tiers.fable = Some("kimi-fable-x".to_string());
+        let env = anthropic_surface_env(Some("https://api.moonshot.ai/anthropic"), Some("sk"), &tiers);
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("kimi-fable-x"));
+
+        tiers.fable = None;
+        let env = anthropic_surface_env(Some("https://api.moonshot.ai/anthropic"), Some("sk"), &tiers);
+        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        assert_eq!(
+            get("ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            tiers.opus.as_deref(),
+            "unset fable must fall back to the opus tier"
+        );
+    }
+
+    #[test]
+    fn builtin_minimax_account_reproduces_claude_code_model_routing() {
         // The regression that motivated this change: a keyed MiniMax must pin the
         // full per-tier model map (byte-for-byte cwrap parity) so Claude Code never
         // sends a `claude-opus-*` slug to MiniMax.
@@ -2163,12 +2417,13 @@ mod tests {
         assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("MiniMax-M2.7"));
         assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("MiniMax-M3[1m]"));
         assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("MiniMax-M3[1m]"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("MiniMax-M3[1m]"));
         assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("MiniMax-M2.7"));
         assert_eq!(get("API_TIMEOUT_MS"), Some("3000000"));
     }
 
     #[test]
-    fn builtin_kimi_account_reproduces_cwrap_model_routing() {
+    fn builtin_kimi_account_reproduces_claude_code_model_routing() {
         let mut kimi = default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
         kimi.api_key = Some("sk-moon".to_string());
         let env = provider_account_env(Some(&kimi));
@@ -2177,6 +2432,7 @@ mod tests {
         assert_eq!(get("ANTHROPIC_MODEL"), Some("kimi-k2.6"));
         assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("kimi-k2.5"));
         assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("kimi-k2.6"));
+        assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("kimi-k2.6"));
         assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("kimi-k2.5"));
         assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("kimi-k2.5"));
     }
@@ -2199,10 +2455,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_provider_env_for_keyed_builtin_minimax_injects_cwrap_env() {
+    fn resolve_provider_env_for_keyed_builtin_minimax_injects_claude_code_env() {
         // The real spawn path: a node stored with provider="minimax" resolves the
         // built-in MiniMax account (merged with the user's stored key) and gets the
-        // full cwrap model routing — the end-to-end fix for "can't spawn MiniMax".
+        // full Claude Code model routing — the end-to-end fix for "can't spawn MiniMax".
         with_temp_dir(|_| {
             let mut prefs = AppPreferences::default();
             // Store only the key; base_url + tiers come from the code default.
@@ -2245,7 +2501,7 @@ mod tests {
     fn first_class_surfaces_publishes_both_surfaces_for_minimax() {
         let surfaces = first_class_surfaces("minimax");
         let by = |s: ApiSurface| surfaces.iter().find(|e| e.surface == s).unwrap();
-        // Anthropic surface matches the long-standing cwrap/account default.
+        // Anthropic surface matches the long-standing Claude Code account default.
         assert_eq!(by(ApiSurface::Anthropic).base_url, "https://api.minimax.io/anthropic");
         assert_eq!(by(ApiSurface::Anthropic).model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
         // OpenAI surface (best-effort) carries the v1 endpoint and a single model.
@@ -2294,6 +2550,162 @@ mod tests {
         assert!(anth.iter().any(|(k, _)| k == "ANTHROPIC_BASE_URL"));
         let oai = surface_env(ApiSurface::OpenAI, Some("https://x/v1"), Some("k"), &tiers);
         assert!(oai.iter().any(|(k, _)| k == "OPENAI_BASE_URL"));
+    }
+
+    /// Any Claude-compatible *custom* endpoint must force `ANTHROPIC_API_KEY=""`
+    /// so a shell-set Anthropic key can't make Claude Code fall back to direct
+    /// Anthropic auth. Required by OpenRouter's Anthropic Skin; defended for
+    /// every custom endpoint (MiniMax, Kimi, OpenRouter, future generic
+    /// accounts alike) — matches `cwrap`'s behaviour. The default-Anthropic
+    /// path (no base_url) must NOT emit the var, so a shell-set Anthropic
+    /// key still flows through for direct Anthropic usage.
+    #[test]
+    fn anthropic_surface_env_force_blanks_api_key_for_custom_endpoints_only() {
+        let tiers = ModelTiers { default: Some("m".into()), ..ModelTiers::default() };
+        // First-class built-in: OpenRouter.
+        let custom_first_class = anthropic_surface_env(Some("https://openrouter.ai/api"), Some("sk-or-x"), &tiers);
+        assert!(
+            custom_first_class.contains(&("ANTHROPIC_API_KEY".to_string(), String::new())),
+            "OpenRouter (first-class Anthropic-skin endpoint) must force ANTHROPIC_API_KEY=\"\" so Claude Code doesn't fall back to direct Anthropic auth (got {:?})",
+            custom_first_class
+        );
+        // Generic custom endpoint: same defence applies. A user with a
+        // hand-rolled relay that expects to receive `ANTHROPIC_API_KEY` from
+        // the user's shell would already be violating the Anthropic Skin
+        // contract — cwrap already blanked it for every custom endpoint,
+        // and breaking that compat is a deliberate behaviour shift.
+        let custom_generic = anthropic_surface_env(Some("https://relay.example.com/anthropic"), Some("sk-relay"), &tiers);
+        assert!(
+            custom_generic.contains(&("ANTHROPIC_API_KEY".to_string(), String::new())),
+            "Generic custom endpoint must ALSO force ANTHROPIC_API_KEY=\"\" — the defence is endpoint-scope, not id-scope (got {:?})",
+            custom_generic
+        );
+        // Default-Anthropic path (no base_url): the var must NOT be emitted
+        // so a shell-set Anthropic key still flows through for direct usage.
+        let default_path = anthropic_surface_env(None, None, &tiers);
+        assert!(
+            !default_path.iter().any(|(k, _)| k == "ANTHROPIC_API_KEY"),
+            "default-Anthropic path must NOT emit ANTHROPIC_API_KEY so a shell-set key still flows through"
+        );
+    }
+
+    /// Spawn-time preflight: refuses to spawn against a custom Claude-compatible
+    /// endpoint whose `model_tiers.default` is empty. Without this guard,
+    /// `claude` sends its hardcoded `claude-3-5-sonnet-<date>` to OpenRouter
+    /// and gets a 400 (OpenRouter expects `provider/model` slugs); the user
+    /// would see only a server-side `tracing::warn`. Surface the error at the
+    /// spawn path so the UI can prompt for the missing model field.
+    ///
+    /// The preflight runs BEFORE `resolve_provider_env` and reuses the same
+    /// account lookup; mirroring the lookup keeps gate and builder in sync.
+    #[test]
+    fn preflight_account_env_fails_for_custom_endpoint_with_empty_default_tier() {
+        let empty_tiers = ModelTiers::default();
+        let account = ProviderAccount {
+            id: "openrouter".to_string(),
+            name: "OpenRouter".to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-or-x".to_string()),
+            base_url: Some("https://openrouter.ai/api".to_string()),
+            model_tiers: empty_tiers,
+            models: Vec::new(),
+        };
+        let err = preflight_account_env(Some(&account)).unwrap_err();
+        assert!(
+            err.contains("Default model") && err.contains("openrouter"),
+            "preflight should name the missing tier and the account id, got: {err}"
+        );
+    }
+
+    /// Spawn-time preflight accepts a custom endpoint whose `default` tier is set.
+    #[test]
+    fn preflight_account_env_passes_for_custom_endpoint_with_default_tier_filled() {
+        let tiers = ModelTiers {
+            default: Some("anthropic/claude-3-5-sonnet-latest".to_string()),
+            ..ModelTiers::default()
+        };
+        let account = ProviderAccount {
+            id: "openrouter".to_string(),
+            name: "OpenRouter".to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-or-x".to_string()),
+            base_url: Some("https://openrouter.ai/api".to_string()),
+            model_tiers: tiers,
+            models: Vec::new(),
+        };
+        assert!(
+            preflight_account_env(Some(&account)).is_ok(),
+            "default-tier populated custom endpoint must pass preflight"
+        );
+    }
+
+    /// Default-Anthropic (no `base_url`) path is unaffected — openrouter
+    /// doesn't *appear* on this path, but `preflight(None)` mirrors what
+    /// happens when `provider_accounts()` returns nothing for an unknown id.
+    #[test]
+    fn preflight_account_env_passes_for_no_account() {
+        assert!(preflight_account_env(None).is_ok());
+    }
+
+    /// The extracted Anthropic-tier-source helper is the single source for the
+    /// derived-pairing + spawn-preflight precedence. Account tiers win; the
+    /// first-class published Anthropic endpoint fills a fully-cleared account;
+    /// a Generic provider's account tiers are the only source.
+    #[test]
+    fn anthropic_tiers_for_precedence_is_account_then_published() {
+        // Account set → account wins (Providers-page edit reaches the next spawn).
+        let edited = ProviderAccount {
+            model_tiers: ModelTiers {
+                default: Some("edited".into()),
+                ..ModelTiers::default()
+            },
+            ..custom_account("deepseek")
+        };
+        assert_eq!(anthropic_tiers_for(&edited).default.as_deref(), Some("edited"));
+
+        // First-class account fully cleared by the user → published surface
+        // fills defaults so ANTHROPIC_MODEL still emits (preflight gate relies
+        // on this — see `preflight_account_env_passes_for_cleared_first_class_account`).
+        let mut cleared = default_provider_accounts().into_iter().find(|a| a.id == "minimax").unwrap();
+        cleared.model_tiers = ModelTiers::default();
+        assert_eq!(anthropic_tiers_for(&cleared).default.as_deref(), Some("MiniMax-M3[1m]"));
+
+        // Generic account cleared → empty (the pre-pairings behaviour).
+        let generic_cleared = ProviderAccount {
+            model_tiers: ModelTiers::default(),
+            models: Vec::new(),
+            ..custom_account("deepseek")
+        };
+        assert!(anthropic_tiers_for(&generic_cleared).is_empty());
+    }
+
+    /// First-class surfaces (minimax/kimi) supply their OWN populated
+    /// `model_tiers` via `first_class_surfaces`. A user-cleared built-in
+    /// account (`model_tiers == ModelTiers::default()`) must NOT false-
+    /// positive — the env builder would still emit `ANTHROPIC_MODEL`
+    /// from the surface's tier map, so the spawn should be permitted.
+    #[test]
+    fn preflight_account_env_passes_for_cleared_first_class_account() {
+        let cleared = ModelTiers::default();
+        let account = ProviderAccount {
+            id: "minimax".to_string(),
+            name: "MiniMax".to_string(),
+            enabled: true,
+            billing_mode: BillingMode::PayAsYouGo,
+            claude_compatible: true,
+            api_key: Some("sk-mm".to_string()),
+            base_url: Some("https://api.minimax.io/anthropic".to_string()),
+            model_tiers: cleared,
+            models: Vec::new(),
+        };
+        assert!(
+            preflight_account_env(Some(&account)).is_ok(),
+            "first-class surfaces supply populated tiers via `first_class_surfaces`; the spawn's env builder emits ANTHROPIC_MODEL — preflight must not double-gate"
+        );
     }
 
     /// Surface lookup used by the pure pairing tests — mirrors `harness_surface`
@@ -2428,6 +2840,104 @@ mod tests {
             assert!(env.contains(&("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-mm".to_string())));
             assert!(env.contains(&("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string())));
             assert!(!env.iter().any(|(k, _)| k.starts_with("OPENAI_")));
+        });
+    }
+
+    /// Reproduces "edited Kimi settings don't reach a newly spawned session":
+    /// the Providers page edits `ProviderAccount.model_tiers`/`base_url`, but a
+    /// composite spawn id (`claude:kimi`) resolves a *pairing*, which used to
+    /// take the hardcoded published tiers from `first_class_surfaces` and
+    /// ignore the account's edits entirely.
+    #[test]
+    fn resolve_provider_env_composite_uses_edited_account_tiers() {
+        with_temp_dir(|_| {
+            let mut kimi =
+                default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
+            kimi.enabled = true;
+            kimi.api_key = Some("sk-moon".into());
+            kimi.model_tiers.opus = Some("kimi-k3-preview".into());
+            kimi.model_tiers.fable = Some("kimi-k3-fable".into());
+            kimi.base_url = Some("https://proxy.example.com/anthropic".into());
+            let mut prefs = AppPreferences::default();
+            upsert_provider_account(&mut prefs, kimi);
+            save(prefs).unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            let env = resolve_provider_env("claude:kimi");
+            let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+            assert_eq!(
+                get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+                Some("kimi-k3-preview"),
+                "a Providers-page tier edit must reach the composite spawn env"
+            );
+            assert_eq!(
+                get("ANTHROPIC_DEFAULT_FABLE_MODEL"),
+                Some("kimi-k3-fable"),
+                "a Providers-page fable-tier edit must reach the composite spawn env"
+            );
+            assert_eq!(
+                get("ANTHROPIC_BASE_URL"),
+                Some("https://proxy.example.com/anthropic"),
+                "a Providers-page base-URL edit must reach the composite spawn env"
+            );
+        });
+    }
+
+    /// Defaults: a keyed-but-untouched Kimi account emits the `fable` alias
+    /// pinned to the first-class provider's opus pick (the spec's default rule).
+    #[test]
+    fn resolve_provider_env_composite_kimi_default_fable_matches_opus() {
+        with_temp_dir(|_| {
+            let mut kimi =
+                default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
+            kimi.enabled = true;
+            kimi.api_key = Some("sk-moon".into());
+            let mut prefs = AppPreferences::default();
+            upsert_provider_account(&mut prefs, kimi);
+            save(prefs).unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            let env = resolve_provider_env("claude:kimi");
+            let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+            assert_eq!(
+                get("ANTHROPIC_DEFAULT_FABLE_MODEL"),
+                get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+                "first-class providers must default fable to the opus pick"
+            );
+        });
+    }
+
+    /// A stored Anthropic-surface pairing is an attach-time snapshot (there is
+    /// no UI to edit a pairing's tiers) — it must not shadow account edits made
+    /// on the Providers page after the attach.
+    #[test]
+    fn resolve_provider_env_composite_ignores_stale_stored_anthropic_pairing() {
+        with_temp_dir(|_| {
+            let mut kimi =
+                default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
+            kimi.enabled = true;
+            kimi.api_key = Some("sk-moon".into());
+            kimi.model_tiers.opus = Some("kimi-k3-preview".into());
+            let mut prefs = AppPreferences::default();
+            upsert_provider_account(&mut prefs, kimi);
+            // What `attach_proxied_provider` froze before the account was edited.
+            prefs.provider_pairings.push(ProviderPairing {
+                harness_id: "claude".into(),
+                provider_id: "kimi".into(),
+                surface: ApiSurface::Anthropic,
+                base_url: Some("https://api.moonshot.ai/anthropic".into()),
+                model_tiers: kimi_default_tiers(),
+            });
+            save(prefs).unwrap();
+            *CACHE.lock().unwrap() = None;
+
+            let env = resolve_provider_env("claude:kimi");
+            let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+            assert_eq!(
+                get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+                Some("kimi-k3-preview"),
+                "a stale attach-time pairing snapshot must not shadow later account edits"
+            );
         });
     }
 

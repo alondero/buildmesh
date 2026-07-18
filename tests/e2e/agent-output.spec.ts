@@ -59,7 +59,7 @@ test.describe('agent output', () => {
       // List projects and delete ones with test-related names
       const projects = await invokeViaHttp('list_meshes') as Array<{id: number; name: string}>;
       for (const project of projects) {
-        if (project.name.includes('Test') || project.name.includes('Agent Output') || project.name.includes('Cwrap')) {
+        if (project.name.includes('Test') || project.name.includes('Agent Output') || project.name.includes('Claude Code') || project.name.includes('Cwrap')) {
           await invokeViaHttp('delete_mesh', { meshId: project.id });
         }
       }
@@ -164,7 +164,7 @@ test.describe('agent output', () => {
     }
   });
 
-  test('cwrap process does not exit immediately when spawned', async () => {
+  test('Claude Code agent process does not exit immediately when spawned', async () => {
     // Start the built exe directly
     const appProcess = spawn(EXE_PATH, [], {
       stdio: 'ignore',
@@ -181,10 +181,10 @@ test.describe('agent output', () => {
     expect(serverReady).toBe(true);
 
     // Create project and session
-    const project = await invokeViaHttp('create_test_mesh', { name: 'Cwrap Exit Test' }) as { id: number };
+    const project = await invokeViaHttp('create_test_mesh', { name: 'Claude Code Exit Test' }) as { id: number };
     const session = await invokeViaHttp('create_agent_node', {
       meshId: project.id,
-      name: 'Cwrap Test',
+      name: 'Claude Code Test',
       path: 'X:\\src\\playbook',
       branch: 'main',
     }) as { id: number };
@@ -219,8 +219,8 @@ test.describe('agent output', () => {
         const timeDiff = new Date(exitTime).getTime() - new Date(startTime).getTime();
         console.log(`Reader lifetime for session ${session.id}: ${timeDiff}ms`);
 
-        // This assertion will fail if cwrap exits immediately (the bug we're testing for)
-        expect(timeDiff, `cwrap should keep running, not exit after ${timeDiff}ms`).toBeGreaterThan(2000);
+        // This assertion will fail if the Claude Code agent exits immediately (the bug we're testing for)
+        expect(timeDiff, `Claude Code agent should keep running, not exit after ${timeDiff}ms`).toBeGreaterThan(2000);
       }
     } else {
       // If we don't see both, something is wrong with the spawn

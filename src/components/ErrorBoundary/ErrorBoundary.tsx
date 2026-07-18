@@ -36,22 +36,22 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div className="flex h-screen w-screen items-center justify-center bg-[#09090f] text-[#e0e0e0] p-8">
-          <div className="max-w-2xl w-full bg-[#0d0d16] border border-[#ef4444]/50 rounded p-6 space-y-4">
+        <div className="flex h-screen w-screen items-center justify-center bg-bg-base text-text-primary p-8">
+          <div className="max-w-2xl w-full bg-bg-surface border border-status-error/50 rounded-md p-6 space-y-4">
             <div className="flex items-center gap-2">
-              <div className="text-[#ef4444] text-2xl">⚠</div>
+              <div className="text-status-error text-2xl">⚠</div>
               <h1 className="text-xl font-semibold">Buildmesh hit a render error</h1>
             </div>
-            <div className="text-sm text-[#94a3b8]">
-              The UI crashed. Details have been written to <code className="text-[#00d4ff]">buildmesh.log</code>.
+            <div className="text-sm text-text-secondary">
+              The UI crashed. Details have been written to <code className="text-accent-cyan">buildmesh.log</code>.
             </div>
-            <pre className="text-xs text-[#e0e0e0] bg-[#09090f] border border-[#1f1f2e] rounded p-3 overflow-auto max-h-64">
+            <pre className="text-xs text-text-primary bg-bg-base border border-border-subtle rounded-md p-3 overflow-auto max-h-64">
               {this.state.error.name}: {this.state.error.message}
               {this.state.error.stack ? `\n\n${this.state.error.stack}` : ''}
             </pre>
             <button
               onClick={this.handleReload}
-              className="px-4 py-2 bg-[#00d4ff] text-[#09090f] rounded hover:bg-[#00b8e0] font-medium"
+              className="px-4 py-2 bg-accent-cyan text-text-inverse rounded-md hover:bg-accent-cyan/85 font-medium"
             >
               Reload
             </button>

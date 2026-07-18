@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useMeshStore } from '../../stores/meshStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
@@ -8,6 +8,8 @@ import { useProviderListInvalidation } from '../../hooks/useProviderListInvalida
 import Wordmark from '../../assets/wordmark.png';
 import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
+import { MeshCreateModal } from '../Mesh/MeshCreateModal';
+import { defaultMeshColor } from '../../lib/meshColors';
 import { DndContext, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { MeshItem } from './MeshItem';
@@ -42,7 +44,6 @@ export function Sidebar() {
   useProviderListInvalidation(refreshProviders);
 
   const meshes = useMeshStore(state => state.meshes);
-  const addMesh = useMeshStore(state => state.addMesh);
   const selectedMeshId = useMeshStore(state => state.selectedMeshId);
   const selectMesh = useMeshStore(state => state.selectMesh);
   const reorderMeshes = useMeshStore(state => state.reorderMeshes);
@@ -61,6 +62,15 @@ export function Sidebar() {
   const [openDropdownFor, setOpenDropdownFor] = useState<number | null>(null);
   const [remoteAccessOpen, setRemoteAccessOpen] = useState(false);
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  const [createMeshOpen, setCreateMeshOpen] = useState(false);
+  // Per-mesh "spawn in flight" set so the mesh row's `+ ▾` cluster shows
+  // "Spawning…" and disables while `selectProviderForMesh` runs (an IPC
+  // round-trip that includes worktree setup — seconds on a large repo).
+  // The ref is the synchronous authority (guards a double-click that lands
+  // in the same frame before the disabled state has re-rendered); the state
+  // drives the render.
+  const spawningMeshRef = useRef<Set<number>>(new Set());
+  const [spawningMeshIds, setSpawningMeshIds] = useState<Set<number>>(new Set());
 
   // Close the provider dropdown when clicking outside of it.
   // Issue #492 — migrated to the shared `useClickOutside` hook. The
@@ -73,13 +83,25 @@ export function Sidebar() {
   const handleSelectMesh = (meshId: number) => selectMesh(selectedMeshId === meshId ? null : meshId);
   const handleToggleDropdown = (mesh: Mesh) => setOpenDropdownFor(openDropdownFor === mesh.id ? null : mesh.id);
 
-  // Issue #375 — the right-click "Properties" entry and the drift `!` badge
-  // both open the Probe Panel on the ⚙️ Mesh Properties tab. We select the
-  // mesh first so `useProbeContext` resolves to the right row, then flip the
-  // probe open.
+  // Issue #375 — the right-click "Properties" entry opens the Probe
+  // Panel on the ⚙️ Mesh Properties tab. We select the mesh first so
+  // `useProbeContext` resolves to the right row, then flip the probe open.
+  // Issue #767 split out the drift `!` badge (see handleOpenWorktreesProbe
+  // below) — the two intents ("edit config" vs "fix the drift") must
+  // not share a handler.
   const handleOpenPropertiesProbe = (meshId: number) => {
     selectMesh(meshId);
     openProbeTab('properties');
+  };
+
+  // Issue #767 — the drift `!` badge in the sidebar opens the Probe
+  // Panel on the 🌳 Worktree Manager tab, where the HealthBlock's
+  // Restore/Free actions live. The badge's intent is "your mesh is
+  // drifted and needs recovery"; the Properties tab has no such
+  // controls, so routing there (the pre-#767 behaviour) was a dead-end.
+  const handleOpenWorktreesProbe = (meshId: number) => {
+    selectMesh(meshId);
+    openProbeTab('worktrees');
   };
 
   // Issue #378 — the right-click "GitHub Issues" and "Archive" entries
@@ -97,12 +119,21 @@ export function Sidebar() {
 
   const handleSelectProvider = async (mesh: Mesh, providerId: string, useWorktree?: boolean) => {
     setOpenDropdownFor(null);
+    // Guard against a double-spawn: if a spawn for this mesh is already in
+    // flight, ignore the click (the button is also disabled once the state
+    // re-renders, but the ref covers the same-frame race).
+    if (spawningMeshRef.current.has(mesh.id)) return;
+    spawningMeshRef.current.add(mesh.id);
+    setSpawningMeshIds(new Set(spawningMeshRef.current));
     // The create→activate→select-mesh dance + its rollback contract live in
     // selectProviderForMesh (issue #283); this handler stays a thin UI shim.
     try {
       await selectProviderForMesh(mesh.id, mesh.name, mesh.path, providerId, useWorktree);
     } catch (e) {
       console.error('Failed to create node:', e);
+    } finally {
+      spawningMeshRef.current.delete(mesh.id);
+      setSpawningMeshIds(new Set(spawningMeshRef.current));
     }
   };
 
@@ -124,7 +155,12 @@ export function Sidebar() {
     <div className="relative flex h-full" style={{ width }}>
       <div
         onMouseDown={handleMouseDown}
-        className={`absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-accent-cyan/30 ${isResizing ? 'bg-accent-cyan/50' : 'bg-transparent'} transition-colors z-10`}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        className={`absolute top-0 -right-1 w-2.5 h-full cursor-col-resize z-10 after:absolute after:inset-y-0 after:left-1 after:w-0.5 after:transition-colors ${
+          isResizing ? 'after:bg-accent-cyan/60' : 'after:bg-transparent hover:after:bg-accent-cyan/40'
+        }`}
       />
 
       <div className="w-full bg-bg-surface border-r border-border-subtle flex flex-col h-full overflow-hidden">
@@ -132,9 +168,11 @@ export function Sidebar() {
         <div className="px-3 pb-2 pt-1.5 border-b border-border-subtle flex items-center gap-2">
           <img src={Wordmark} className="h-8 w-auto max-w-full" alt="Buildmesh" />
           <button
+            type="button"
             onClick={() => setAppSettingsOpen(true)}
-            className="ml-auto text-text-muted hover:text-accent-cyan transition-colors"
+            className="ml-auto p-1 rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors"
             title="Settings"
+            aria-label="Open settings"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3"/>
@@ -142,9 +180,11 @@ export function Sidebar() {
             </svg>
           </button>
           <button
+            type="button"
             onClick={() => setRemoteAccessOpen(true)}
-            className="text-accent-cyan hover:text-accent-blue transition-colors"
+            className="p-1 rounded-md text-accent-cyan hover:text-accent-blue hover:bg-bg-card transition-colors"
             title="Remote access"
+            aria-label="Open remote access"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
@@ -159,14 +199,29 @@ export function Sidebar() {
           />
         )}
         {remoteAccessOpen && <RemoteAccessModal onClose={() => setRemoteAccessOpen(false)} />}
+        {createMeshOpen && (
+          <MeshCreateModal
+            onClose={() => setCreateMeshOpen(false)}
+            defaultColor={defaultMeshColor(meshes.length)}
+          />
+        )}
 
         {/* Meshes list */}
         <div className="flex-1 overflow-y-auto">
           <div className="p-2">
             {meshes.length === 0 ? (
-              <p className="text-[11px] text-text-muted px-2 py-4 text-center font-sans">
-                No meshes yet. Click + New mesh to get started.
-              </p>
+              <div className="flex flex-col items-center gap-3 px-2 py-8 text-center">
+                <p className="text-xs text-text-muted font-sans">
+                  No meshes yet. Add a repository to start orchestrating agents.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCreateMeshOpen(true)}
+                  className="px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors"
+                >
+                  + New mesh
+                </button>
+              </div>
             ) : (
               <DndContext onDragEnd={handleDragEnd}>
                 <SortableContext items={meshes.map(p => p.id)} strategy={verticalListSortingStrategy}>
@@ -176,12 +231,14 @@ export function Sidebar() {
                       mesh={mesh}
                       isSelected={selectedMeshId === mesh.id}
                       isDropdownOpen={openDropdownFor === mesh.id}
+                      isSpawning={spawningMeshIds.has(mesh.id)}
                       providerList={providerData}
                       onSelectMesh={handleSelectMesh}
                       onNewNode={handleToggleDropdown}
                       onSelectProvider={handleSelectProvider}
                       onOpenFilesProbe={() => openProbeTab('files')}
                       onOpenPropertiesProbe={handleOpenPropertiesProbe}
+                      onOpenWorktreesProbe={handleOpenWorktreesProbe}
                       onOpenIssuesProbe={handleOpenIssuesProbe}
                       onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
                       meshNodes={agentNodes.filter(w => w.mesh_id === mesh.id)}
@@ -200,8 +257,8 @@ export function Sidebar() {
 
         {/* Add mesh */}
         <button
-          onClick={() => addMesh()}
-          className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-[12px] font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
+          onClick={() => setCreateMeshOpen(true)}
+          className="w-full px-3 py-2.5 flex items-center justify-center gap-1.5 text-xs font-sans text-accent-cyan hover:text-accent-blue border-t border-dashed border-border-subtle hover:bg-bg-card/40 transition-colors"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <line x1="12" y1="5" x2="12" y2="19"/>

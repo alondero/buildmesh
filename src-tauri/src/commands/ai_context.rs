@@ -16,14 +16,20 @@
 
 use crate::db;
 use crate::env::to_host_path;
-use crate::process_util::command_no_window;
+use crate::process_util::git_command;
 use crate::services::github::{self, GitHubClient};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::command;
 use ts_rs::TS;
+
+/// Wall-clock timeout for the `git push` shell-out in
+/// [`create_ai_context_portability_pr_blocking`]. Push is network-bound
+/// (remote `receive-pack`); 5 minutes mirrors [`crate::git::sync::FETCH_TIMEOUT`]
+/// so a flaky network doesn't leak a blocking-pool thread (issue #762 review).
+const PUSH_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// What AI-context files a project currently has, and what mirrors already exist.
 /// Drives the Mesh Properties panel: enables the button only when there is
@@ -47,9 +53,23 @@ pub struct AiContextStatus {
 }
 
 /// Detect the Claude AI context for a mesh path and report what can be ported.
-// `(async)` — filesystem probing; off the main thread.
-#[command(async)]
-pub fn detect_ai_context(mesh_path: String) -> Result<AiContextStatus, String> {
+///
+/// Thin async wrapper; see [`crate::commands::git::get_git_branch_status`]
+/// for the offload rationale. The filesystem probe (`is_dir`,
+/// `read_dir`, `is_file`) on a large `.claude/skills/` tree can take a few
+/// hundred ms; WSL UNC paths with paused VMs make that worse. Moving the
+/// work to the blocking pool keeps a stalled probe from parking a Tauri
+/// async worker.
+#[command]
+pub async fn detect_ai_context(mesh_path: String) -> Result<AiContextStatus, String> {
+    crate::commands::run_blocking("detect_ai_context", move || {
+        detect_ai_context_blocking(mesh_path)
+    })
+    .await
+}
+
+/// Sync core for [`detect_ai_context`].
+pub(crate) fn detect_ai_context_blocking(mesh_path: String) -> Result<AiContextStatus, String> {
     let host = to_host_path(&mesh_path);
     let root = Path::new(&host);
 
@@ -78,9 +98,19 @@ pub fn detect_ai_context(mesh_path: String) -> Result<AiContextStatus, String> {
 /// Build the portability commit and open a PR for review.
 ///
 /// Returns the GitHub PR URL on success.
-// `(async)` — git object writes plus a GitHub network round-trip; off the main thread.
-#[command(async)]
-pub fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, String> {
+#[command]
+pub async fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, String> {
+    // git object writes + `git push` + a GitHub REST round-trip — all blocking,
+    // so run on the blocking pool rather than a Tauri async worker (see the
+    // overnight-freeze investigation and [`crate::commands::run_blocking`]).
+    crate::commands::run_blocking("create_ai_context_portability_pr", move || {
+        create_ai_context_portability_pr_blocking(mesh_id)
+    })
+    .await
+}
+
+/// Sync core for [`create_ai_context_portability_pr`].
+fn create_ai_context_portability_pr_blocking(mesh_id: i64) -> Result<String, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let host_path = to_host_path(&mesh.path);
     let root = Path::new(&host_path);
@@ -104,11 +134,22 @@ pub fn create_ai_context_portability_pr(mesh_id: i64) -> Result<String, String> 
 
     // Push the new branch. Uses the user's configured git credentials via the CLI,
     // which is far more reliable than git2's manual credential callbacks.
-    let push_out = command_no_window("git")
+    //
+    // **Timeout (issue #762 review):** a hung `git push` (SSH key prompt,
+    // paused WSL interop, half-open TLS) leaks a blocking-pool thread since
+    // this core already runs on one. `run_command_with_timeout` kills the
+    // child on the 5-min `FETCH_TIMEOUT` budget — same cap as `git fetch`
+    // because push-side waits are dominated by the network + remote receive.
+    let mut push_builder = git_command();
+    push_builder
         .args(["push", "origin", &branch_name])
-        .current_dir(&host_path)
-        .output()
-        .map_err(|e| format!("Failed to run git push: {}", e))?;
+        .current_dir(&host_path);
+    let push_out = crate::process_util::run_command_with_timeout(
+        push_builder,
+        "git push",
+        PUSH_TIMEOUT,
+    )
+    .map_err(|e| format!("Failed to run git push: {}", e))?;
     if !push_out.status.success() {
         return Err(format!(
             "git push failed: {}",
@@ -405,7 +446,7 @@ mod tests {
             ],
         );
 
-        let status = detect_ai_context(tr.path().to_string_lossy().to_string()).unwrap();
+        let status = detect_ai_context_blocking(tr.path().to_string_lossy().to_string()).unwrap();
         assert!(status.claude_md_exists);
         assert!(!status.agents_md_exists);
         assert!(status.skills_dir_exists);

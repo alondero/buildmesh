@@ -69,10 +69,18 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useToggleSet } from '../../hooks/useToggleSet';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { useUIStore } from '../../stores/uiStore';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
+import { SafeLink } from '../shared/SafeLink';
+import {
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  RefreshControl,
+} from '../shared/Spinner';
 
 type StateFilter = 'open' | 'closed';
 
@@ -236,7 +244,17 @@ export function GitPullRequestsTab() {
   // is aborted by useAsyncEffect's cleanup, so any in-flight getRepoPulls
   // drops its setState instead of clobbering the new run's result. Used
   // by `handleMerge` to refetch after a successful squash-merge (issue #349).
+  // Bump to refetch on manual Refresh or after merge (issue #349
+  // refetch; #813 surfaced Refresh to the user). `useAsyncEffect`
+  // aborts the previous effect's signal on dep change.
   const [reloadKey, setReloadKey] = useState(0);
+  // "View on GitHub" header button — resolves the active mesh's
+  // `origin` to a `https://github.com/{owner}/{repo}/pulls` URL.
+  // Mirror of GitIssuesTab's hook call; both tabs share the same
+  // per-mesh cache so the IPC is deduped when the user toggles
+  // between the two probes on the same mesh.
+  const { url: githubUrl } = useMeshGitHubUrl(activeMeshId, activeMeshPath);
+  const pullsListUrl = githubUrl ? `${githubUrl}/pulls` : '';
 
   useAsyncEffect((signal) => {
     if (activeMeshId === null) return;
@@ -556,52 +574,56 @@ export function GitPullRequestsTab() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-end gap-2">
-        {/* Open / Closed segmented toggle */}
-        <div className="flex shrink-0 rounded overflow-hidden border border-border-subtle">
-          {(['open', 'closed'] as const).map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => setStateFilter(s)}
-              aria-pressed={stateFilter === s}
-              className={`px-2 py-0.5 text-[10px] font-medium capitalize transition-colors ${
-                stateFilter === s
-                  ? 'bg-accent-cyan/20 text-accent-cyan'
-                  : 'text-text-muted hover:text-text-secondary'
-              }`}
-            >
-              {s}
-            </button>
-          ))}
+      {/* Header row mirrors GitIssuesTab. Manual Refresh on the left,
+          "View on GitHub" link + Open/Closed toggle on the right. */}
+      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-between gap-2">
+        <RefreshControl
+          onRefresh={() => setReloadKey((k) => k + 1)}
+          isRefreshing={loading && prs.length > 0}
+          ariaLabel="Refresh pull requests"
+        />
+        <div className="flex items-center gap-2">
+          {/* "View on GitHub" — opens the repo's PR list. `SafeLink`
+              falls back to an inert <span> when the URL is empty
+              (non-GitHub mesh), so the layout stays stable across
+              meshes. */}
+          <SafeLink
+            url={pullsListUrl}
+            ariaLabel="Open this repo's pull requests list on GitHub"
+            title="Open this repo's pull requests list on GitHub"
+            className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+          >
+            View on GitHub ↗
+          </SafeLink>
+          {/* Open / Closed segmented toggle */}
+          <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
+            {(['open', 'closed'] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setStateFilter(s)}
+                aria-pressed={stateFilter === s}
+                className={`px-2 py-0.5 text-2xs font-medium capitalize transition-colors ${
+                  stateFilter === s
+                    ? 'bg-accent-cyan/20 text-accent-cyan'
+                    : 'text-text-muted hover:text-text-secondary hover:bg-bg-card'
+                }`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2">
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-8 gap-3">
-            <div className="animate-spin w-5 h-5 border border-accent-cyan border-t-transparent rounded-full" />
-            <span className="text-xs text-text-muted">Loading pull requests...</span>
-          </div>
+        {loading && prs.length === 0 ? (
+          // First-load only: refreshes keep the prior list rendered.
+          <LoadingState label="Loading pull requests..." />
         ) : error ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-red-400 mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="15" y1="9" x2="9" y2="15"/>
-              <line x1="9" y1="9" x2="15" y2="15"/>
-            </svg>
-            <span className="text-xs text-red-400">Failed to load pull requests</span>
-            <span className="text-[10px] text-text-muted mt-1 max-w-[280px] text-center">{error}</span>
-          </div>
+          <ErrorState title="Failed to load pull requests" detail={error} />
         ) : prs.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-text-muted mb-2">
-              <circle cx="12" cy="12" r="10"/>
-              <line x1="12" y1="8" x2="12" y2="12"/>
-              <line x1="12" y1="16" x2="12.01" y2="16"/>
-            </svg>
-            <span className="text-xs text-text-muted">No {stateFilter} pull requests</span>
-          </div>
+          <EmptyState label={`No ${stateFilter} pull requests`} />
         ) : (
           <div className="space-y-1">
             {prs.map((pr) => {
@@ -659,7 +681,7 @@ export function GitPullRequestsTab() {
                                 onClick={() => handleMerge(pr)}
                                 aria-label={`Confirm squash merge of pull request #${pr.number}`}
                                 title="Confirm squash merge"
-                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
+                                className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md bg-accent-green/15 text-accent-green hover:bg-accent-green/25 transition-colors"
                               >
                                 <CheckIcon className="w-3.5 h-3.5" />
                                 <span>Confirm</span>
@@ -669,7 +691,7 @@ export function GitPullRequestsTab() {
                                 onClick={() => setConfirming(null)}
                                 aria-label={`Cancel merge of pull request #${pr.number}`}
                                 title="Cancel"
-                                className="p-1.5 rounded text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
+                                className="p-1.5 rounded-md text-text-muted hover:text-text-secondary hover:bg-bg-card transition-colors"
                               >
                                 <XIcon className="w-3.5 h-3.5" />
                               </button>
@@ -681,14 +703,14 @@ export function GitPullRequestsTab() {
                               disabled={merging !== null}
                               aria-label={`Merge pull request #${pr.number}`}
                               title="Merge pull request"
-                              className="p-1.5 rounded bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                              className="p-1.5 rounded-md bg-accent-cyan/10 text-accent-cyan hover:bg-accent-cyan/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                             >
                               <GitMergeIcon className="w-3.5 h-3.5" />
                             </button>
                           ) : status.kind === 'checking' ? (
-                            <span className="px-2 py-1 text-[10px] text-text-muted">Checking…</span>
+                            <span className="px-2 py-1 text-2xs text-text-muted animate-pulse">Checking…</span>
                           ) : (
-                            <span className="px-2 py-1 text-[10px] rounded bg-bg-card text-text-muted" title="This pull request can't be merged">
+                            <span className="px-2 py-1 text-2xs rounded bg-bg-card text-text-muted" title="This pull request can't be merged">{/* allow-bare-rounded */}
                               {status.label}
                             </span>
                           )}
@@ -745,7 +767,7 @@ export function GitPullRequestsTab() {
                           onClick={() => handleViewChanges(pr)}
                           aria-label={`View changes in PR #${pr.number}`}
                           title="Open the PR's diff in the center overlay"
-                          className="p-1.5 rounded text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
+                          className="p-1.5 rounded-md text-text-secondary hover:text-accent-cyan hover:bg-accent-cyan/10 transition-colors"
                         >
                           <FileTextIcon className="w-3.5 h-3.5" />
                         </button>
@@ -765,10 +787,10 @@ export function GitPullRequestsTab() {
                     // which was almost certainly accidental anyway).
                     <>
                       {rowError && (
-                        <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowError}</p>
+                        <p className="text-2xs text-status-error mt-1 max-w-[260px]">{rowError}</p>
                       )}
                       {rowSpawnError && (
-                        <p className="text-[10px] text-red-400 mt-1 max-w-[260px]">{rowSpawnError}</p>
+                        <p className="text-2xs text-status-error mt-1 max-w-[260px]">{rowSpawnError}</p>
                       )}
                     </>
                   }

@@ -141,7 +141,7 @@ export function ProbeRow({
     <div
       data-issue-row={dataAttr === 'issue' ? rowKey : undefined}
       data-pr-row={dataAttr === 'pr' ? rowKey : undefined}
-      className="flex flex-col gap-1 px-2 py-2 rounded hover:bg-bg-card transition-colors"
+      className="flex flex-col gap-1 px-2 py-2 rounded-md hover:bg-bg-card transition-colors"
     >
       <div className="flex items-start gap-2">
         {/* Left column — clickable to expand/collapse. The title
@@ -149,14 +149,23 @@ export function ProbeRow({
             here, each with stopPropagation so the row handler
             doesn't fire when the user navigates to GitHub. */}
         <div
+          role="button"
+          tabIndex={0}
+          aria-expanded={isExpanded}
           className="flex-1 min-w-0 cursor-pointer"
           onClick={onToggle}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              onToggle();
+            }
+          }}
         >
           <div className="flex items-center gap-1 min-w-0">
             <span
               aria-hidden
               className={
-                'text-text-muted text-[10px] w-3 text-center shrink-0 transition-transform ' +
+                'text-text-muted text-2xs w-3 text-center shrink-0 transition-transform ' +
                 (isExpanded ? 'rotate-90' : '')
               }
             >
@@ -182,7 +191,7 @@ export function ProbeRow({
               <SafeLink
                 url={url}
                 ariaLabel={iconAriaLabel}
-                className="text-text-muted hover:text-accent-cyan transition-colors text-[11px] shrink-0"
+                className="text-text-muted hover:text-accent-cyan transition-colors text-xs shrink-0"
                 title="Open on GitHub"
               >
                 ↗
@@ -194,12 +203,12 @@ export function ProbeRow({
               <div
                 data-issue-body-expanded={dataAttr === 'issue' ? true : undefined}
                 data-pr-body-expanded={dataAttr === 'pr' ? true : undefined}
-                className="mt-1 max-h-48 overflow-y-auto text-[10px] text-text-muted whitespace-pre-wrap break-words"
+                className="mt-1 max-h-48 overflow-y-auto text-2xs text-text-muted whitespace-pre-wrap break-words"
               >
                 {body}
               </div>
             ) : (
-              <p className="text-[10px] text-text-muted mt-1 line-clamp-2">
+              <p className="text-2xs text-text-muted mt-1 line-clamp-2">
                 {body}
               </p>
             ))}

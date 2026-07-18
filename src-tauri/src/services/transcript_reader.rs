@@ -97,8 +97,11 @@ pub(crate) fn first_text_block(content: Option<&serde_json::Value>) -> String {
 /// Truncate to at most `max` *bytes* (the right unit for bounding payload
 /// size), appending `…` if cut. Respects UTF-8 boundaries so we never split a
 /// multi-byte character "— for non-ASCII text the result is therefore fewer than
-/// `max` characters.
-fn truncate(s: &str, max: usize) -> String {
+/// `max` characters. `pub(crate)` so the sibling Claude-Code JSONL consumers
+/// (`agent_node_discovery`, formerly `session_discovery`) share one truncation
+/// rule "— divergence here is how the two copies of this fn used to drift
+/// silently (issue #340).
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
@@ -250,7 +253,7 @@ pub fn read_tail_from_file(path: &Path, tail: usize) -> TranscriptTail {
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
 /// from a Claude Code transcript, bounded to a tail byte window so a single
-/// `GET /nodes` over many cwrap nodes with long histories doesn't parse every
+/// `GET /nodes` over many Claude Code nodes with long histories doesn't parse every
 /// line in every file. Falls back to a full read if the bounded window
 /// contains no assistant text "— rare in practice (the most recent assistant
 /// text is by construction near the end of the file) but keeps the reader
@@ -278,7 +281,7 @@ pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
     let size = metadata.len();
     // 256 KiB holds several hundred typical JSONL lines, enough to span the
     // last handful of turns for any agent that's been alive for more than a
-    // few minutes. Bounded so a 30s Coordinator poll over N cwrap nodes
+    // few minutes. Bounded so a 30s Coordinator poll over N Claude Code nodes
     // doesn't parse the entire transcript for each one (issue #341).
     const TAIL_BYTES: u64 = 256 * 1024;
     // The digest only needs the last assistant message, so keep just one turn

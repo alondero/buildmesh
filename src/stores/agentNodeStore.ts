@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { disposeTerminal } from '../components/Terminal/Terminal';
+import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
 import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
 import { useMeshStore } from './meshStore';
@@ -15,6 +15,7 @@ import { useMeshStore } from './meshStore';
 // it adds `env`, `source_issue`, and the `archived` status the hand-written
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
+import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
 export type { AgentNode };
 
 /// Apply a mesh's re-positioned nodes optimistically and persist them. The
@@ -54,8 +55,26 @@ export function setWorktreeCloseActionResolverForTests(resolver?: WorktreeCloseA
   worktreeCloseActionResolver = resolver ?? defaultWorktreeCloseActionResolver;
 }
 
+// A pending "send input at time T" schedule (issue #785), e.g. the
+// SchedulingPopover's "remind me in 5m" / "at usage reset" actions. Keyed by
+// node ID in `schedules` — one active schedule per node.
+export interface ScheduledTask {
+  nodeId: number;
+  targetTime: number;
+  // Empty string is the "just hit Enter" sentinel — the SchedulingPopover uses
+  // it for the "at usage reset" preset to wake the agent without new content.
+  message: string;
+  label: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
 interface AgentNodeState {
   agentNodes: AgentNode[];
+  // Autopilot pipeline state per piloted node id ('implementing' /
+  // 'finishing' / 'completed' / 'failed' / 'merged'). Absent key = not an
+  // autopilot node. Drives the header's Autopilot pill; refreshed with the
+  // node list and nudged by the `autopilot-*` lifecycle events.
+  autopilotStates: Record<number, AutopilotRunState>;
   activeNodeId: number | null;
   loading: boolean;
   error: string | null;
@@ -64,6 +83,11 @@ interface AgentNodeState {
   // the row, so we flag the node here the instant the user clicks and let
   // NodeItem show a spinner instead of looking frozen.
   closingNodeIds: Set<number>;
+  // Pending "send input at time T" schedules (issue #785), keyed by node ID.
+  // One active schedule per node — a new `scheduleInput` cancels the prior
+  // timer, and `deleteAgentNode` cancels the schedule outright so a stray
+  // timeout can't fire `sendToAgent` against a deleted node.
+  schedules: Record<number, ScheduledTask>;
 
   // Derived getters
   getActiveNode: () => AgentNode | null;
@@ -83,19 +107,32 @@ interface AgentNodeState {
   swapAgentNodes: (aId: number, bId: number) => Promise<void>;
   setActiveNode: (id: number | null) => void;
   spawnAgent: (nodeId: number, provider: string, rows?: number, cols?: number) => Promise<void>;
+  /// Issue #774 — swap a node's Model Provider. The backend preserves
+  /// worktree / branch / name / position; only `provider` changes. The
+  /// returned `AgentNode` reflects the post-swap state (the backend has
+  /// already updated the row), so the caller can patch the local entry
+  /// without an extra `fetchAgentNodes` round-trip on the happy path.
+  regenerateAgentNode: (nodeId: number, newProviderId: string) => Promise<AgentNode>;
   spawnHandoverAgent: (meshId: number, prefill: string, provider?: string) => Promise<AgentNode>;
   killAgent: (nodeId: number) => Promise<void>;
   sendToAgent: (nodeId: number, input: string) => Promise<void>;
   writeToAgent: (nodeId: number, data: string) => Promise<void>;
   initAttentionListeners: () => Promise<void>;
+  /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
+  /// after `delayMs`. Replaces any existing schedule for the node — only one
+  /// pending send per node at a time (issue #785).
+  scheduleInput: (nodeId: number, delayMs: number, message: string, label: string) => void;
+  cancelSchedule: (nodeId: number) => void;
 }
 
 export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   agentNodes: [],
+  autopilotStates: {},
   activeNodeId: null,
   loading: false,
   error: null,
   closingNodeIds: new Set(),
+  schedules: {},
 
   getActiveNode: () => {
     const { agentNodes, activeNodeId } = get();
@@ -111,8 +148,16 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
   fetchAgentNodes: async () => {
     set({ loading: true, error: null });
     try {
-      const agentNodes = await api.listAgentNodes();
-      set({ agentNodes, loading: false });
+      // Autopilot states ride along with every node refresh, but their
+      // failure must never blank the node list — degrade to "no pills".
+      const [agentNodes, autopilotRuns] = await Promise.all([
+        api.listAgentNodes(),
+        api.listAutopilotRuns().catch(() => []),
+      ]);
+      const autopilotStates = Object.fromEntries(
+        (Array.isArray(autopilotRuns) ? autopilotRuns : []).map((r) => [r.node_id, r.state]),
+      );
+      set({ agentNodes, autopilotStates, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -190,6 +235,31 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
           }));
         });
 
+        // Autopilot pipeline transitions: patch the pill state in place so
+        // the header tracks the run without waiting for the next full
+        // refetch (App.tsx separately refetches on the completion/failure
+        // events to pick up the node's own status change).
+        const patchAutopilotState = (nodeId: number, state: AutopilotRunState) =>
+          set((s) => ({ autopilotStates: { ...s.autopilotStates, [nodeId]: state } }));
+        await listen<{ node_id: number }>('autopilot-finishing', (event) => {
+          patchAutopilotState(event.payload.node_id, 'finishing');
+        });
+        await listen<{ node_id: number }>('autopilot-pr-created', (event) => {
+          patchAutopilotState(event.payload.node_id, 'completed');
+        });
+        await listen<{ node_id: number }>('autopilot-finish-failed', (event) => {
+          patchAutopilotState(event.payload.node_id, 'failed');
+        });
+        // Merged-PR auto-close: the backend archived the node (NOT deleted);
+        // refetch so the card leaves the grid. We deliberately do NOT dispose
+        // the terminal — archive keeps the row, branch, and scrollback alive
+        // for the Archive tab, and the terminal-persistence rule says only a
+        // node-delete may dispose. `TerminalManager` is a singleton; the
+        // instance survives the refetch.
+        await listen<{ node_id: number }>('autopilot-node-closed', async () => {
+          await get().fetchAgentNodes();
+        });
+
         // Two-stage spawn failure: backend already updated the node's DB
         // status to 'error' before emitting — we mirror it in the store so
         // the sidebar/title-bar renders the red badge without a refetch.
@@ -234,6 +304,10 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     // (common while the safety check makes the row look unresponsive) must not
     // fire a duplicate safety/kill/delete round-trip.
     if (get().closingNodeIds.has(id)) return;
+
+    // A scheduled send outlives the node it targets otherwise — cancel it
+    // up front so a stray timeout can't fire `sendToAgent` for a deleted node.
+    get().cancelSchedule(id);
 
     // Flag the node closing *synchronously* so the click registers instantly.
     // We can't drop the row yet — the safety check below decides whether to
@@ -427,6 +501,30 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     }
   },
 
+  regenerateAgentNode: async (nodeId, newProviderId) => {
+    try {
+      // The backend's returned `AgentNode` is the pre-spawn snapshot
+      // (services::agent_node::regenerate reloads after the provider
+      // UPDATE but BEFORE `spawn_agent_inner` mutates status / captures
+      // `cli_session_id` / fires the `agent-spawned` event). A local
+      // patch from that snapshot would clobber the event-driven state
+      // — match `spawnAgent`'s pattern below and refetch instead. The
+      // refetch reads the DB, which `spawn_agent_inner` has already
+      // written, so the new `provider` / `cli_session_id` / `status`
+      // all line up.
+      await api.regenerateAgentNode(nodeId, newProviderId);
+      await get().fetchAgentNodes();
+      const updated = get().agentNodes.find((n) => n.id === nodeId);
+      if (!updated) {
+        throw new Error(`regenerate_agent_node: node ${nodeId} not found after refetch`);
+      }
+      return updated;
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
   spawnHandoverAgent: async (meshId: number, prefill: string, provider?: string) => {
     try {
       const node = await api.spawnHandoverAgent(meshId, prefill, provider);
@@ -462,5 +560,40 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     } catch (e) {
       set({ error: String(e) });
     }
+  },
+
+  scheduleInput: (nodeId, delayMs, message, label) => {
+    get().cancelSchedule(nodeId);
+
+    const timeoutId = setTimeout(() => {
+      set((state) => {
+        const next = { ...state.schedules };
+        delete next[nodeId];
+        return { schedules: next };
+      });
+      if (message === '') {
+        get().writeToAgent(nodeId, '\n');
+      } else {
+        get().sendToAgent(nodeId, message);
+      }
+    }, delayMs);
+
+    set((state) => ({
+      schedules: {
+        ...state.schedules,
+        [nodeId]: { nodeId, targetTime: Date.now() + delayMs, message, label, timeoutId },
+      },
+    }));
+  },
+
+  cancelSchedule: (nodeId) => {
+    const existing = get().schedules[nodeId];
+    if (!existing) return;
+    clearTimeout(existing.timeoutId);
+    set((state) => {
+      const next = { ...state.schedules };
+      delete next[nodeId];
+      return { schedules: next };
+    });
   },
 }));

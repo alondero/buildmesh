@@ -65,6 +65,19 @@ function TerminalIcon({ className, title }: { className?: string; title?: string
   );
 }
 
+function OpenRouterIcon({ className, title }: { className?: string; title?: string }) {
+  // OpenRouter's mark abstracted to its primary silhouette — an outlined
+  // hexagon. Two concentric hex paths + `fillRule="evenodd"` produce the
+  // outline from a single filled element, matching the inline-SVG style
+  // of the rest of this module (single path, currentColor).
+  return (
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <title>{title}</title>
+      <path fillRule="evenodd" fill="currentColor" d="M12 2 L21 7 L21 17 L12 22 L3 17 L3 7 Z M12 6 L19 10 L19 14 L12 18 L5 14 L5 10 Z" />
+    </svg>
+  );
+}
+
 type InlineIconProps = { className?: string; title?: string };
 const INLINE_ICONS: Record<string, (props: InlineIconProps) => React.JSX.Element> = {
   anthropic: ClaudeCodeIcon,
@@ -79,6 +92,7 @@ const INLINE_ICONS: Record<string, (props: InlineIconProps) => React.JSX.Element
   opencode: OpenCodeIcon,
   kimi: KimiIcon,
   terminal: TerminalIcon,
+  openrouter: OpenRouterIcon,
 };
 
 const COLORED_IMAGES: Record<string, string> = {
@@ -121,6 +135,7 @@ const PROVIDER_CHIP_COLORS: Record<string, string> = {
   opencode:  '#f59e0b',
   terminal:  '#9ca3af',
   codex:     '#10a37f',
+  openrouter: '#615EFF', // OpenRouter brand purple-blue.
 };
 
 interface ProviderIconProps {
@@ -176,7 +191,7 @@ export function ProviderIcon({
       );
     }
     // Fallback: a neutral dot for unknown providers.
-    return <span aria-hidden="true" title={label} className={`${className} bg-gray-500 rounded-full inline-block shrink-0`} />;
+    return <span aria-hidden="true" title={label} className={`${className} bg-text-muted rounded-full inline-block shrink-0`} />;
   })();
 
   if (!withBackground) return inner;

@@ -183,26 +183,20 @@ pub struct PrFileEntry {
     pub status: String,
 }
 
-/// Check whether the user has a valid GitHub token (env var or gh config).
-///
-/// Every command in this module talks to the GitHub REST API (blocking HTTP);
-/// `(async)` moves them to a worker thread so a slow or offline network never
-/// freezes the main thread (which would stall the whole UI and all other IPC).
-#[command(async)]
-pub fn check_gh_auth() -> bool {
-    match GitHubClient::new() {
-        Ok(client) => client.check_auth(),
-        Err(_) => false,
-    }
-}
-
 /// Get open GitHub issues for a mesh.
 /// Returns an empty list if the mesh has no GitHub remote (or any error
 /// resolving one), with a `warn!` capturing the reason. The modal degrades
 /// gracefully — see [`resolve_github_owner_repo`] for the error wording the
 /// sibling spawn endpoint surfaces directly.
-#[command(async)]
-pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
+#[command]
+pub async fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
+    crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id)).await
+}
+
+/// Sync core for [`get_repo_issues`]. Kept as a plain fn so the mobile HTTP
+/// route (`http::routes::issues`) can call it directly; the Tauri command
+/// wraps it in `spawn_blocking` (see [`crate::commands::run_blocking`]).
+pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
 
@@ -246,8 +240,14 @@ pub fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
 /// the mesh has no GitHub origin, so the panel renders an empty state rather
 /// than an error. Mergeability is fetched separately per PR — see
 /// [`get_pr_mergeability`] — because the list endpoint omits it.
-#[command(async)]
-pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+#[command]
+pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+    crate::commands::run_blocking("get_repo_pulls", move || get_repo_pulls_blocking(mesh_id, state)).await
+}
+
+/// Sync core for [`get_repo_pulls`] — see [`get_repo_issues_blocking`] for the
+/// split rationale.
+pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
     // Only ever forward a known filter to GitHub; anything unexpected falls
     // back to "open" rather than letting an arbitrary string reach the API.
     let state = if state == "closed" { "closed" } else { "open" };
@@ -282,8 +282,16 @@ pub fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullReque
 /// Get a single PR's mergeability for a mesh's repo. The panel calls this once
 /// per open PR after the list loads. `mergeable` is `null`/`None` while GitHub
 /// computes the merge — surfaced as-is so the UI can show a "checking" state.
-#[command(async)]
-pub fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
+#[command]
+pub async fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
+    crate::commands::run_blocking("get_pr_mergeability", move || {
+        get_pr_mergeability_blocking(mesh_id, pr_number)
+    })
+    .await
+}
+
+/// Sync core for [`get_pr_mergeability`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_pr_mergeability_blocking(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
@@ -319,8 +327,19 @@ pub fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMergeabilit
 /// probe leaves the row in 'Checking…' rather than falsely claiming
 /// conflicts; the next list reload retries"`). The next list reload retries
 /// from scratch, and a successful retry overwrites the error entry.
-#[command(async)]
-pub fn get_prs_mergeability(
+#[command]
+pub async fn get_prs_mergeability(
+    mesh_id: i64,
+    pr_numbers: Vec<i64>,
+) -> Result<Vec<PrMergeabilityEntry>, String> {
+    crate::commands::run_blocking("get_prs_mergeability", move || {
+        get_prs_mergeability_blocking(mesh_id, pr_numbers)
+    })
+    .await
+}
+
+/// Sync core for [`get_prs_mergeability`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_prs_mergeability_blocking(
     mesh_id: i64,
     pr_numbers: Vec<i64>,
 ) -> Result<Vec<PrMergeabilityEntry>, String> {
@@ -418,8 +437,13 @@ where
 /// colour +/−/context rows in place. Mirrors the other PR commands:
 /// resolves owner/repo via the mesh's `origin` remote, hits the GitHub
 /// REST API, and forwards the HTTP error verbatim.
-#[command(async)]
-pub fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+#[command]
+pub async fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+    crate::commands::run_blocking("get_pr_files", move || get_pr_files_blocking(mesh_id, pr_number)).await
+}
+
+/// Sync core for [`get_pr_files`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
@@ -439,8 +463,17 @@ pub fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, St
 }
 
 /// Create a PR for the node
-#[command(async)]
-pub fn create_pr(
+#[command]
+pub async fn create_pr(
+    session_id: i64,
+    title: String,
+    body: String,
+) -> Result<String, String> {
+    crate::commands::run_blocking("create_pr", move || create_pr_blocking(session_id, title, body)).await
+}
+
+/// Sync core for [`create_pr`] — see [`get_repo_issues_blocking`].
+pub(crate) fn create_pr_blocking(
     session_id: i64,
     title: String,
     body: String,
@@ -465,8 +498,21 @@ pub fn create_pr(
 
 /// Create a PR directly from a mesh directory path (no node required).
 /// Detects the current branch via git2, then creates a PR targeting `base_branch`.
-#[command(async)]
-pub fn create_pr_for_mesh(
+#[command]
+pub async fn create_pr_for_mesh(
+    mesh_path: String,
+    title: String,
+    body: String,
+    base_branch: String,
+) -> Result<String, String> {
+    crate::commands::run_blocking("create_pr_for_mesh", move || {
+        create_pr_for_mesh_blocking(mesh_path, title, body, base_branch)
+    })
+    .await
+}
+
+/// Sync core for [`create_pr_for_mesh`] — see [`get_repo_issues_blocking`].
+pub(crate) fn create_pr_for_mesh_blocking(
     mesh_path: String,
     title: String,
     body: String,
@@ -488,8 +534,13 @@ pub fn create_pr_for_mesh(
 
 /// Merge a PR (squash + delete branch).
 /// Accepts a full GitHub PR URL like `https://github.com/owner/repo/pull/123`.
-#[command(async)]
-pub fn merge_pr(pr_url: String) -> Result<String, String> {
+#[command]
+pub async fn merge_pr(pr_url: String) -> Result<String, String> {
+    crate::commands::run_blocking("merge_pr", move || merge_pr_blocking(pr_url)).await
+}
+
+/// Sync core for [`merge_pr`] — see [`get_repo_issues_blocking`].
+pub(crate) fn merge_pr_blocking(pr_url: String) -> Result<String, String> {
     let (owner, repo, pr_number) = parse_pr_url(&pr_url)
         .ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
 
@@ -500,9 +551,22 @@ pub fn merge_pr(pr_url: String) -> Result<String, String> {
 
 // PR-spawn commands live in `commands/agent.rs` next to `create_issue_node`.
 
-/// Get the current branch for a node
-#[command(async)]
-pub fn get_current_branch(session_id: i64) -> Result<String, String> {
+/// Get the current branch for a node.
+///
+/// Thin async wrapper; see [`crate::commands::git::get_git_branch_status`]
+/// for the offload rationale. `repo_info` (a libgit2 walk over the working
+/// tree) can take hundreds of ms on a large repo and must not park a Tauri
+/// tokio worker.
+#[command]
+pub async fn get_current_branch(session_id: i64) -> Result<String, String> {
+    crate::commands::run_blocking("get_current_branch", move || {
+        get_current_branch_blocking(session_id)
+    })
+    .await
+}
+
+/// Sync core for [`get_current_branch`].
+pub(crate) fn get_current_branch_blocking(session_id: i64) -> Result<String, String> {
     let node = db::get_agent_node_by_id(session_id)
         .map_err(|e| e.to_string())?;
 
@@ -534,8 +598,13 @@ pub struct OpenPr {
 ///   - GitHub has no open PR for that branch (the common case)
 ///
 /// Returns `Err(_)` only for true internal failures (DB lookup blows up, etc.).
-#[command(async)]
-pub fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
+#[command]
+pub async fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
+    crate::commands::run_blocking("get_open_pr_for_node", move || get_open_pr_for_node_blocking(node_id)).await
+}
+
+/// Sync core for [`get_open_pr_for_node`] — see [`get_repo_issues_blocking`].
+pub(crate) fn get_open_pr_for_node_blocking(node_id: i64) -> Result<Option<OpenPr>, String> {
     let node = db::get_agent_node_by_id(node_id)
         .map_err(|e| e.to_string())?;
 
@@ -684,6 +753,43 @@ pub(crate) fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>,
         Some(u) => Ok(github::parse_owner_repo(&u)),
         None => Ok(None),
     }
+}
+
+/// Derive the `https://github.com/{owner}/{repo}` web URL for a local
+/// repo path. Returns `Ok(None)` when the path isn't a repo, has no
+/// `origin` remote, or the remote isn't a `github.com` URL — these are
+/// all the same outcome for the consumer (no GitHub link to show), so
+/// collapsing them keeps the IPC surface simple. `Err(_)` is reserved
+/// for actual git/libgit2 failures that should bubble up.
+///
+/// Pure helper extracted from `get_github_url_for_mesh` so the wire
+/// command is one line and the path → URL derivation is unit-testable
+/// against a `tempdir` without standing up a DB or Tauri runtime.
+pub(crate) fn github_url_for_path(path: &str) -> Result<Option<String>, String> {
+    Ok(resolve_owner_repo(path)?
+        .map(|(owner, repo)| format!("https://github.com/{}/{}", owner, repo)))
+}
+
+/// Return the `https://github.com/{owner}/{repo}` URL for a mesh's
+/// `origin` remote, or `None` if the origin isn't a GitHub URL (or the
+/// mesh has no origin at all). Thin wrapper around
+/// [`github_url_for_path`] for the contexts that only need the web URL
+/// (mesh context menu, probe header GitHub buttons) and would otherwise
+/// pay for the GitHubClient construction that the other `commands::pr`
+/// functions do.
+///
+/// Sync `#[command]` (not `async`) — `github_url_for_path` only does
+/// local git2 work, so the bounded tokio worker pool doesn't need to
+/// carry this. Matches the lesson in
+/// `[[buildmesh-overnight-freeze-reqwest-no-timeout]]`: keep
+/// synchronous local work off the async pool. If a future call site
+/// needs to hit the GitHub HTTP API for the URL (e.g. resolving a
+/// redirect to a renamed repo), the new path must go through
+/// `GitHubClient` with a `reqwest::Client` that has a real timeout.
+#[command]
+pub fn get_github_url_for_mesh(mesh_id: i64) -> Result<Option<String>, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    github_url_for_path(&mesh.path)
 }
 
 /// Parse a GitHub PR URL into (owner, repo, pr_number).
@@ -1225,6 +1331,55 @@ mod tests {
         // and the public accessor surfaces the original error wording
         let err = info.owner_repo().unwrap_err();
         assert!(err.contains("unrecognized remote URL"), "got: {}", err);
+    }
+
+    // ----- github_url_for_path (Issue: View on GitHub context-menu item) -----
+    //
+    // The helper is pure and takes a path string, so the tests don't need
+    // a DB or Tauri runtime — they reuse the `init_repo_with_origin` /
+    // `init_repo_unborn` helpers above. Three cases pin the wire
+    // contract the frontend relies on:
+    //   - GitHub origin (HTTPS) → `Some("https://github.com/owner/repo")`
+    //   - Non-GitHub origin → `None` (the menu item is hidden)
+    //   - No origin at all → `None` (the menu item is hidden)
+    // Plus a sanity check on the `.git` suffix and SSH form, mirroring
+    // the existing `parse_owner_repo` tests at lines 1092–1112.
+
+    #[test]
+    fn github_url_for_path_https_origin() {
+        let (_guard, path) = init_repo_with_origin("https://github.com/alondero/buildmesh.git");
+        let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
+        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+    }
+
+    #[test]
+    fn github_url_for_path_ssh_origin() {
+        let (_guard, path) = init_repo_with_origin("git@github.com:alondero/buildmesh.git");
+        let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
+        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+    }
+
+    #[test]
+    fn github_url_for_path_no_dot_git_suffix() {
+        let (_guard, path) = init_repo_with_origin("https://github.com/foo/bar");
+        let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
+        // The .git trim lives inside `parse_owner_repo`; pin the wire
+        // shape so a future refactor that re-adds the suffix is caught.
+        assert_eq!(url, Some("https://github.com/foo/bar".to_string()));
+    }
+
+    #[test]
+    fn github_url_for_path_non_github_origin_is_none() {
+        let (_guard, path) = init_repo_with_origin("https://gitlab.com/alondero/buildmesh.git");
+        let url = github_url_for_path(&path).expect("non-github origin should not error");
+        assert_eq!(url, None, "GitLab URLs must collapse to None so the menu hides the item");
+    }
+
+    #[test]
+    fn github_url_for_path_no_origin_is_none() {
+        let (_guard, path) = init_repo_with_commit();
+        let url = github_url_for_path(&path).expect("no origin should not error");
+        assert_eq!(url, None, "repos with no origin remote must collapse to None");
     }
 
     /// The agent's HEAD is on the worktree's branch (NOT the mesh root's branch).

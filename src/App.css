@@ -12,10 +12,14 @@
   --color-bg-selection: #1a2a3a;
   --color-bg-highlight: rgba(0, 212, 255, 0.06);
 
-  /* Text */
+  /* Text. --color-text-muted was bumped from #4a5568 → #7a8492 to clear
+     WCAG AA body-text on bg-base / bg-surface (5.2:1 / 5.1:1) while
+     staying subordinate to --color-text-secondary (7.7:1). The
+     regression test that pins this contract lives in
+     tests/unit/theme-tokens-contrast.test.ts. See issue #732. */
   --color-text-primary: #e2e8f0;
   --color-text-secondary: #94a3b8;
-  --color-text-muted: #4a5568;
+  --color-text-muted: #7a8492;
   --color-text-inverse: #09090f;
 
   /* Accent — Electric Cyan/Blue */
@@ -62,15 +66,14 @@
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
   --font-family-sans: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-family-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  --font-size-2xs: 10px;
-  --font-size-xs: 11px;
-  --font-size-sm: 12px;
-  --font-size-base: 13px;
-  --font-size-md: 14px;
-  --font-size-lg: 16px;
-  --font-size-xl: 20px;
-  --font-size-2xl: 24px;
-  --font-size-3xl: 32px;
+  /* `--text-2xs` is the one step below Tailwind's default scale (text-xs =
+     12px). It's the smallest legible size in the app — badges, gutter
+     labels, micro-captions. Nothing may go below it. (Tailwind v4 only
+     recognises the `--text-*` namespace for font-size utilities; the old
+     `--font-size-*` names were invisible to it.) */
+  --text-2xs: 10px;
+  --text-2xs--line-height: 1.4;
+  --font-size-base: 13px; /* html/body base below; not a Tailwind namespace */
 
   /* Spacing (4px base) */
   --spacing-1: 4px;
@@ -93,15 +96,71 @@
   --shadow-glow-cyan: 0 0 0 1px rgba(0, 212, 255, 0.15), 0 0 12px rgba(0, 212, 255, 0.08);
   --shadow-focus: 0 0 0 1.5px #00d4ff;
 
-  /* Animation */
+  /* Animation. The two --default-* variables retime every Tailwind
+     `transition-*` utility app-wide — this is what makes hovers and reveals
+     feel snappy without per-component duration classes. */
   --ease-snappy: cubic-bezier(0.16, 1, 0.3, 1);
   --duration-micro: 120ms;
   --duration-fast: 200ms;
+  --default-transition-duration: 150ms;
+  --default-transition-timing-function: var(--ease-snappy);
+
+  /* Entrance animations — used by toasts, modals, and overlays. */
+  --animate-fade-in: fade-in var(--duration-fast) var(--ease-snappy) both;
+  --animate-scale-in: scale-in var(--duration-fast) var(--ease-snappy) both;
+  --animate-slide-in-right: slide-in-right var(--duration-fast) var(--ease-snappy) both;
+
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+  @keyframes scale-in {
+    from { opacity: 0; transform: scale(0.96); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+  @keyframes slide-in-right {
+    from { opacity: 0; transform: translateX(12px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
 }
 
 /* Reset + base */
 *, *::before, *::after {
   box-sizing: border-box;
+}
+
+@layer base {
+  /* Tailwind v4's preflight sets buttons to `cursor: default`; every button
+     in this app is an action, so restore the pointer affordance globally.
+     Layered so a utility (e.g. cursor-grab) can still override. */
+  button:not(:disabled), [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+
+  /* Keyboard-only focus ring on button-like elements. Inputs keep their own
+     focus:border treatment (an outline on top would double up). */
+  button:focus-visible,
+  a:focus-visible,
+  select:focus-visible,
+  summary:focus-visible,
+  [role='button']:focus-visible,
+  [role='tab']:focus-visible,
+  [role='menuitem']:focus-visible,
+  [role='separator']:focus-visible {
+    outline: 1.5px solid var(--color-accent-cyan);
+    outline-offset: 1px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
 }
 
 html, body {

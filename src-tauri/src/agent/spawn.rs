@@ -10,9 +10,14 @@ use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
 use crate::git::worktree::provision::{
-    fetch_fork_head, fetch_single_ref, fork_remote_alias, provision_for_spawn, read_origin_ref_sha,
+    fork_remote_alias, locked_fetch_pr_head, provision_for_spawn, read_origin_ref_sha,
     ProvisionOutcome, SpawnContext, SpawnSource,
 };
+// The bare fetch helpers (`fetch_single_ref`, `fetch_fork_head`) are
+// re-exported under `#[cfg(test)]` below — production code goes through
+// `locked_fetch_pr_head` (issue #698), which wraps the per-Mesh
+// `with_mesh_sync_lock` around the bare helpers so callers can't forget to
+// serialize concurrent PR-spawn fetches.
 use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
@@ -45,6 +50,112 @@ pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 /// direction.
 pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// What the PTY reader thread's epilogue should do to the node's status
+/// after the read loop ends. Extracted as a pure decision so the
+/// deliberate-kill / early-exit / plain-terminal matrix is unit-testable
+/// without a live PTY.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PostExitAction {
+    /// Natural exit — flip the node to Idle.
+    MarkIdle,
+    /// The process died on its own within `EARLY_EXIT_WINDOW` of its
+    /// creation — almost always a `--resume <uuid>` that the CLI rejected
+    /// ("No conversation found…"). Mark Error and emit `resume-failed`.
+    MarkErrorResumeFailed,
+    /// `kill_session` tore the PTY down deliberately (node close, spawn
+    /// step-2 stale kill, app shutdown). The kill initiator owns the next
+    /// status; any write from the reader would race it. The pre-fix bug:
+    /// a <3s-old process killed by a respawn was stamped `Error`, which
+    /// then blocked the new spawn's Spawning→Running promotion (`Error`
+    /// is in that write's exclusion list) — the node showed "failed to
+    /// start" while the replacing agent booted fine seconds later.
+    LeaveStatusAlone,
+}
+
+pub(crate) fn post_exit_action(
+    is_plain_terminal: bool,
+    deliberately_killed: bool,
+    elapsed_since_process_creation: std::time::Duration,
+) -> PostExitAction {
+    if deliberately_killed {
+        return PostExitAction::LeaveStatusAlone;
+    }
+    if is_plain_terminal {
+        // A shell exiting — `exit`, window close — is a normal Idle,
+        // never an Error: a shell is not a --resume, so a fast exit
+        // isn't a resume-failure signal.
+        return PostExitAction::MarkIdle;
+    }
+    if elapsed_since_process_creation < EARLY_EXIT_WINDOW {
+        PostExitAction::MarkErrorResumeFailed
+    } else {
+        PostExitAction::MarkIdle
+    }
+}
+
+/// Session ids with a `spawn_agent_inner` call currently in flight.
+///
+/// `is_agent_already_running` only sees the PROCESS_REGISTRY, and
+/// registration happens seconds into the pipeline (after git fetch +
+/// worktree provisioning) — so two near-simultaneous spawn calls for the
+/// same node (e.g. the backend's `start_node_background` racing the
+/// frontend Terminal auto-spawn on an 'idle' row) both passed the check.
+/// The loser's step-2 stale-kill (or registry insert-replace) then killed
+/// the winner's freshly-booted process — the "failed to start, yet it
+/// boots seconds later" symptom — and, when the frontend had already
+/// picked up the captured `cli_session_id`, respawned with
+/// `--resume <uuid>` against a session that never persisted a
+/// conversation ("No conversation found with session ID").
+///
+/// This set closes the TOCTOU across the WHOLE pipeline: the claim is
+/// taken at function entry and held (RAII) until the spawn returns.
+///
+/// Implementation note: the lock is `std::sync::Mutex` rather than
+/// `tokio::sync::Mutex` because both the claim entry (synchronous) and
+/// the Drop (synchronous) are short, non-suspending operations on a
+/// tiny set. Holding the guard across `.await` suspension points is
+/// safe because Drop runs only at function scope exit (Rust's
+/// `NLL`-aware borrow checker keeps the binding alive across `.await`s
+/// without contending with the lock — a single contended acquire on
+/// Drop would be a tokio-worker-blocking scenario, but the only writer
+/// of contention is another concurrent claim, and `HashSet::insert` is
+/// bounded by the spawn rate which is ≪ 1k/s).
+static SPAWNS_IN_FLIGHT: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashSet<i64>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+/// RAII claim on a session id in [`SPAWNS_IN_FLIGHT`]. Dropping releases
+/// the claim on every exit path, including a cancelled async task.
+pub(crate) struct SpawnInFlightClaim {
+    session_id: i64,
+}
+
+impl SpawnInFlightClaim {
+    /// `Some(claim)` if no spawn is in flight for this session, `None` if
+    /// one already is (the caller should short-circuit as a duplicate).
+    pub(crate) fn try_claim(session_id: i64) -> Option<Self> {
+        // parking_lot::Mutex::lock is non-poisoning and a strict upgrade
+        // over std here: no unwrap on contention, and `try_lock` lets
+        // Drop fall back gracefully if the runtime is mid-shutdown.
+        let mut guard = SPAWNS_IN_FLIGHT.lock();
+        if guard.insert(session_id) {
+            Some(Self { session_id })
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for SpawnInFlightClaim {
+    fn drop(&mut self) {
+        // `lock` (blocking) is correct here: the guard's lifetime is the
+        // whole spawn function, so contention is at most a few µs of
+        // contended HashSet::remove — never long enough to starve a
+        // tokio worker. `try_lock` would silently leak the claim on
+        // contention, which is the opposite of what the bug requires.
+        SPAWNS_IN_FLIGHT.lock().remove(&self.session_id);
+    }
+}
+
 /// Resolve the `base_ref` string that `git::sync::fetch_origin` will use for
 /// the spawn-time auto-sync. The chain (each tier only runs if the previous
 /// one yields nothing useful):
@@ -70,7 +181,13 @@ pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_sec
 /// Extracted from `spawn_agent_inner` so the regression test in
 /// `mod tests` can call it directly without standing up the full async /
 /// PTY / DB machinery — the call site is a single expression.
-fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) -> String {
+///
+/// `pub(crate)` so the background mesh sync (`services::pool_worker`)
+/// resolves its fetch target through the exact same 3-tier chain the spawn
+/// uses — a worker that fetched a literal `origin/main` on a repo whose
+/// default branch is `master` would fail every pass and never satisfy the
+/// spawn-time freshness TTL.
+pub(crate) fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) -> String {
     const COALESCE_DEFAULT: &str = "origin/main";
     let user_set = config_base_ref.filter(|b| b.trim() != COALESCE_DEFAULT);
     if let Some(b) = user_set {
@@ -86,7 +203,14 @@ fn resolve_base_ref_for_spawn(mesh_path: &str, config_base_ref: Option<&str>) ->
     // so a non-repo / unconfigured mesh path still resolves to
     // "origin/main" — preserving pre-fix behaviour and never blocking the
     // spawn.
-    let branch = crate::commands::git::get_default_branch(mesh_path.to_string());
+    //
+    // Called from the synchronous spawn path — use the sync core directly
+    // (issue #762). The blocking pool offload that the async wrapper
+    // provides is irrelevant for this single repo-open + symbolic-ref read;
+    // the small wall-clock cost is well within the spawn budget and the
+    // outer spawn task already runs on a blocking-pool thread.
+    let branch = crate::commands::git::get_default_branch_blocking(mesh_path.to_string())
+        .unwrap_or_else(|_| "main".to_string());
     format!("origin/{}", branch)
 }
 
@@ -483,6 +607,8 @@ fn register_agent(
     reader_alive: Arc<AtomicBool>,
     job: Option<crate::process_util::JobHandle>,
     spawn_start: std::time::Instant,
+    mesh_id: i64,
+    deliberate_kill: Arc<AtomicBool>,
 ) {
     PROCESS_REGISTRY.insert(
         session_id,
@@ -493,6 +619,10 @@ fn register_agent(
             // out to drop the pseudoconsole (issue #300).
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive,
+            // Shared with the reader thread (started right after this
+            // insert) so a `kill_session` teardown is distinguishable
+            // from the child dying on its own — see the field docs.
+            deliberate_kill,
             job,
             // The handle is set after the reader thread is spawned, via
             // `AgentProcess::set_reader_handle`. We insert first so a
@@ -507,6 +637,12 @@ fn register_agent(
             // inner Arc is needed (the reader thread doesn't share this
             // flag).
             first_user_input_logged: AtomicBool::new(false),
+            // Issue #634: stored at registration so `write_bytes` and the
+            // PTY read loop can record per-mesh activity without a DB
+            // lookup on every chunk. `mesh_id` was already resolved at
+            // `spawn_agent_inner:797` via `db::get_mesh_by_path(&node.path)`
+            // — the value is in scope here.
+            mesh_id,
         },
     );
 }
@@ -539,6 +675,22 @@ pub fn pump_pty_output(
     }
 }
 
+/// Buffer a PTY chunk for session auto-naming — every chunk for LLM
+/// providers, never for a plain terminal. A terminal's rename buffer is
+/// never consumed: the rename LLM only fires from `on_turn`, which only
+/// the Claude stop hook calls. Ungated, each Terminal node would retain
+/// up to `MAX_BUFFER_CHARS` and contend the global NAMING mutex on every
+/// chunk for the node's whole lifetime (issue #296).
+///
+/// Extracted from `start_reader`'s pump callback so the gate is
+/// unit-testable without standing up an AppHandle / PTY (same seam
+/// pattern as `resolve_base_ref_for_spawn`).
+pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, text: &str) {
+    if !is_plain_terminal {
+        crate::session_naming::on_output(session_id, text);
+    }
+}
+
 /// Start the PTY reader thread. Returns the `JoinHandle` so the caller
 /// can store it on `AgentProcess` and let `kill_session` join with a
 /// bounded timeout (issue #300).
@@ -566,6 +718,8 @@ fn start_reader(
     reader_alive: Arc<AtomicBool>,
     is_plain_terminal: bool,
     spawn_start: std::time::Instant,
+    mesh_id: i64,
+    deliberate_kill: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -590,14 +744,21 @@ fn start_reader(
                     spawn_start.elapsed().as_millis()
                 );
             }
-            // Mark the app as active so the background warm-pool worker holds
-            // off its idle refills while an agent is actively producing output
-            // (issue #613 AC2) — a `git worktree add` must not compete with a
-            // live agent's I/O.
-            crate::services::pool_worker::note_activity();
+            // Mark THIS MESH as active so the background warm-pool worker
+            // holds off its idle refills for this mesh's pool while an agent
+            // is actively producing output (issue #613 AC2; issue #634 scopes
+            // the activity per-mesh so a chatty agent on mesh A doesn't
+            // starve mesh B's pool). `mesh_id` is captured from the spawn
+            // context at thread start — the closure outlives the agent's
+            // registry entry, so reading it from `PROCESS_REGISTRY` inside
+            // the closure would race with `kill_session`'s `remove`.
+            crate::services::pool_worker::note_activity_for_mesh(mesh_id);
 
             let text = String::from_utf8_lossy(data);
-            crate::session_naming::on_output(session_id, &text);
+            maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
+            // Autopilot state evaluator tail (issue #483) — one in-memory
+            // set lookup for non-piloted nodes.
+            crate::autopilot::evaluator::on_output(session_id, &text);
 
             if !session_captured.load(Ordering::Relaxed) {
                 if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
@@ -621,30 +782,31 @@ fn start_reader(
         tracing::debug!("PTY reader loop ended for session {}, reader exiting", session_id);
         reader_alive_clone.store(false, Ordering::SeqCst);
 
-        if is_plain_terminal {
-            // A plain terminal's shell exiting — whether via `exit`, the
-            // user closing the window, or the process being killed — is
-            // a normal Idle state, never an Error. Skip the LLM-specific
-            // 3-second "resume-failed" early-exit warning and event: a
-            // shell is not a --resume, so a fast exit isn't a resume
-            // signal; emitting one would confuse the frontend.
-            let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
-        } else {
-            // Detect early exit (likely a failed --resume). Uses
-            // `spawned_at` (process-creation time), NOT `spawn_start`,
-            // because the heuristic answers "did the process die
-            // almost immediately after it was created?" — a slow
-            // spawn pipeline followed by a 1s-later death should
-            // still trigger `resume-failed`. Switching the reference
-            // to `spawn_start` here would add the entire pipeline
-            // duration (often 2-14s) to the threshold and miss
-            // legitimate early-exit detections on slow spawns.
-            let elapsed = spawned_at.elapsed();
-            if elapsed < EARLY_EXIT_WINDOW {
+        // `spawned_at` is process-creation time, NOT `spawn_start`: the
+        // early-exit heuristic answers "did the process die almost
+        // immediately after it was created?" — a slow 14s pipeline
+        // followed by a 1s-later death must still read as an early exit.
+        match post_exit_action(
+            is_plain_terminal,
+            deliberate_kill.load(Ordering::SeqCst),
+            spawned_at.elapsed(),
+        ) {
+            PostExitAction::LeaveStatusAlone => {
+                // kill_session initiated this exit; the kill initiator
+                // owns the node's next status (see PostExitAction docs).
+                tracing::debug!(
+                    "Node {} reader exited after deliberate kill — leaving status to the kill initiator",
+                    session_id
+                );
+            }
+            PostExitAction::MarkIdle => {
+                let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
+            }
+            PostExitAction::MarkErrorResumeFailed => {
                 tracing::warn!(
                     "Node {} reader exited after {:?} — likely resume failure",
                     session_id,
-                    elapsed
+                    spawned_at.elapsed()
                 );
                 // Symmetric to the orchestrator's Spawning write (#654):
                 // never resurrect `Archived`, and don't double-write `Error`
@@ -661,8 +823,6 @@ fn start_reader(
                         "error": "Agent exited immediately after spawn — session may have expired"
                     }),
                 );
-            } else {
-                let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
             }
         }
 
@@ -691,6 +851,25 @@ pub async fn spawn_agent_inner(
     );
 
     let timer = SpawnTimer::new(session_id);
+
+    // 0. Claim the session for the WHOLE pipeline. `is_agent_already_running`
+    //    below only sees registered processes, and registration is seconds
+    //    away (git fetch + worktree provisioning) — without this claim a
+    //    concurrent duplicate call (backend stage-2 vs frontend Terminal
+    //    auto-spawn) passes that check and its step-2 stale-kill destroys
+    //    THIS call's freshly-booted process. Returning Ok mirrors the
+    //    already-running short-circuit: the node is being brought up, the
+    //    caller has nothing further to do.
+    let _spawn_claim = match SpawnInFlightClaim::try_claim(session_id) {
+        Some(claim) => claim,
+        None => {
+            tracing::info!(
+                "spawn_agent_inner: spawn already in flight for session {}, skipping duplicate call",
+                session_id
+            );
+            return Ok(());
+        }
+    };
 
     // 1. Check if already running
     if is_agent_already_running(&session_id) {
@@ -747,6 +926,18 @@ pub async fn spawn_agent_inner(
         .as_ref()
         .and_then(|r| r.worktree_mode.as_deref())
         .unwrap_or(DEFAULT_WORKTREE_MODE);
+    // Autopilot enforcement (issue #482, PRD #480): auto-spawned nodes must
+    // always work on a real branch (and in a worktree) — the wrap-up sequence
+    // pushes a branch and opens a PR, which a detached-HEAD worktree or a
+    // shared mesh root cannot do. The ledger row is written before stage-2
+    // starts, so this read is ordered correctly. The node row itself already
+    // carries `use_worktree = true` (spawn override in `services::autopilot`).
+    let is_autopilot = db::get_autopilot_run(session_id)
+        .ok()
+        .flatten()
+        .is_some();
+    let use_worktree = use_worktree || is_autopilot;
+    let worktree_mode = if is_autopilot { "branched" } else { worktree_mode };
     let base_ref = resolve_base_ref_for_spawn(
         &node.path,
         row.as_ref().and_then(|r| r.base_ref.as_deref()),
@@ -918,49 +1109,63 @@ pub async fn spawn_agent_inner(
             // against `upstream` rather than hardcoded `origin`. We move
             // `base_ref` into the closure because `spawn_blocking` needs
             // a `'static` closure.
-            let root = node.path.clone();
-            let base_ref_owned = base_ref.to_string();
-            timer.checkpoint("before_fetch_origin");
-            // Issue #652 — per-Mesh serialization. Without this lock, N
-            // concurrent spawns against the same Mesh race on
-            // .git/FETCH_HEAD, .git/index.lock, and refs/heads/<branch>.lock:
-            // one git fetch wins, the others fail with "another git process"
-            // and the spawn lands on a stale ref. The lock is *blocking*
-            // (not try_lock-or-skip), so caller #2 waits for caller #1 to
-            // populate the refs and then reuses them (its natural outcome
-            // is UpToDate, which is correct).
-            let sync_result = tokio::task::spawn_blocking(move || {
-                crate::services::sync_lock::with_mesh_sync_lock(&root, || {
-                    crate::git::sync::fetch_origin(&root, &base_ref_owned)
-                })
-            })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "spawn_agent_inner: fetch_origin task panicked: {}",
-                    e
+            // Freshness skip (ADR 0020): the background mesh sync in
+            // `services::pool_worker` (and any recent spawn / manual Sync)
+            // stamps `services::fetch_freshness` on every successful fetch.
+            // When the mesh was synced within `SPAWN_FETCH_TTL`, this whole
+            // network round-trip is redundant — the remote-tracking ref the
+            // worktree is cut from is already current to within minutes —
+            // so we skip it and the spawn goes straight to provisioning.
+            // `ref_advanced_for_pool` stays false: whichever path recorded
+            // the fresh fetch already ran the warm-pool freshness pass.
+            // The manual Sync button remains the "I need the latest RIGHT
+            // NOW" override — it fetches unconditionally.
+            if crate::services::fetch_freshness::spawn_can_skip_fetch(&node.path) {
+                tracing::info!(
+                    "spawn_agent_inner: skipping auto-sync for session {} — mesh {} was synced {}s ago (< TTL)",
+                    session_id,
+                    node.path,
+                    crate::services::fetch_freshness::time_since_success(&node.path).as_secs()
                 );
-                Err(crate::git::sync::FetchError::FetchFailed(format!(
-                    "sync task panicked: {}",
-                    e
-                )))
-            });
-            timer.checkpoint("after_fetch_origin");
-            // Ref-freshness (issue #613 AC3): if the fetch actually pulled new
-            // commits, the mesh's base ref has moved, so any OTHER warm pool
-            // entries for this mesh are now parked on a stale SHA and must be
-            // `git reset --hard`ed onto the new commit. Only `Synced` /
-            // `FetchedButDiverged` advance the ref — `UpToDate` / skipped means
-            // nothing moved. We record the fact here and let the single
-            // post-spawn maintenance task (at the end of this fn) run the
-            // freshness pass, so refresh and refill share one fill-lock
-            // acquisition instead of racing on two threads (issue #613 review).
-            ref_advanced_for_pool = matches!(
-                &sync_result,
-                Ok(crate::git::sync::FetchOutcome::Synced { .. })
-                    | Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. })
-            );
-            emit_sync_outcome_event(app, session_id, &node.path, sync_result);
+                timer.checkpoint("fetch_origin_skipped_fresh");
+            } else {
+                let root = node.path.clone();
+                let base_ref_owned = base_ref.to_string();
+                timer.checkpoint("before_fetch_origin");
+                // Issue #652 — per-Mesh serialization. Without this lock, N
+                // concurrent spawns against the same Mesh race on
+                // .git/FETCH_HEAD, .git/index.lock, and refs/heads/<branch>.lock:
+                // one git fetch wins, the others fail with "another git process"
+                // and the spawn lands on a stale ref. The lock is *blocking*
+                // (not try_lock-or-skip), so caller #2 waits for caller #1 to
+                // populate the refs and then reuses them (its natural outcome
+                // is UpToDate, which is correct).
+                //
+                // Issue #709 — the wrap is consolidated into
+                // `git::sync::locked_fetch_origin` so the lock-acquisition
+                // shape is identical to the manual `git_sync`'s
+                // `locked_do_sync`, the PR-spawn's `locked_fetch_pr_head`,
+                // and the prune's `locked_prune_remote_tracking`. The
+                // `tokio::task::spawn_blocking` + `with_mesh_sync_lock`
+                // pair used to live inline here.
+                let sync_result =
+                    crate::git::sync::locked_fetch_origin(root, base_ref_owned).await;
+                timer.checkpoint("after_fetch_origin");
+                // Ref-freshness (issue #613 AC3): if the fetch actually pulled new
+                // commits, the mesh's base ref has moved, so any OTHER warm pool
+                // entries for this mesh are now parked on a stale SHA and must be
+                // `git reset --hard`ed onto the new commit. Only `Synced` /
+                // `FetchedButDiverged` advance the ref — `UpToDate` / skipped means
+                // nothing moved. We record the fact here and let the single
+                // post-spawn maintenance task (at the end of this fn) run the
+                // freshness pass, so refresh and refill share one fill-lock
+                // acquisition instead of racing on two threads (issue #613 review).
+                ref_advanced_for_pool = sync_result
+                    .as_ref()
+                    .map(|o| o.advanced_ref())
+                    .unwrap_or(false);
+                emit_sync_outcome_event(app, session_id, &node.path, sync_result);
+            } // end freshness-gated fetch_origin block
 
             // Worktree adoption for PR-spawned nodes (issue #420, extended
             // by #443 for fork PRs). When the node carries a `source_pr`,
@@ -970,13 +1175,14 @@ pub async fn spawn_agent_inner(
             // same commits the PR is built from. Two cases:
             //
             //  - Same-repo PRs (`head_repo_owner` is `None`): the head
-            //    lives on `origin` — we call `fetch_single_ref` and use
-            //    `origin/<head_ref>` (the #420 path).
+            //    lives on `origin` — we call `locked_fetch_pr_head` and
+            //    use `origin/<head_ref>` (the #420 path).
             //  - Fork PRs (`head_repo_owner` is `Some`): the head lives on
-            //    the fork's clone URL — we call `fetch_fork_head`, which
-            //    registers the fork as a remote (`fork-<login>`) and fetches
-            //    from there (issue #443, follow-up to #36). The worktree
-            //    base_ref becomes `fork-<login>/<head_ref>`.
+            //    the fork's clone URL — `locked_fetch_pr_head` calls
+            //    `fetch_fork_head`, which registers the fork as a remote
+            //    (`fork-<login>`) and fetches from there (issue #443,
+            //    follow-up to #36). The worktree base_ref becomes
+            //    `fork-<login>/<head_ref>`.
             //
             // The fetch is best-effort: a network failure or stale local ref
             // falls back to the mesh's `base_ref` (the ADR 0001 offline
@@ -1000,20 +1206,25 @@ pub async fn spawn_agent_inner(
                 let fork_url_owned = node.head_repo_clone_url.clone();
                 timer.checkpoint("before_fetch_pr_head");
                 let fetch_ok = tokio::task::spawn_blocking(move || {
-                    // Fork path (#443): when the head repo's owner is
-                    // recorded, the head lives on the fork's clone URL, not
-                    // on `origin`. The clone URL is part of the row (set by
-                    // `create_pr_node` from `head_repo_clone_url`), so the
-                    // stage-2 spawn has everything it needs without a
-                    // second GitHub lookup. The same-repo path (#420)
-                    // passes `None` for both fork fields and takes the
-                    // `git fetch origin` branch via `fetch_single_ref`.
-                    match (fork_owner_owned.as_deref(), fork_url_owned.as_deref()) {
-                        (Some(owner), Some(clone_url)) => {
-                            fetch_fork_head(&root, owner, clone_url, &head_ref_owned)
-                        }
-                        _ => fetch_single_ref(&root, &head_ref_owned),
-                    }
+                    // Issue #698 — per-Mesh serialization for the PR-spawn
+                    // fetch. The match lives inside `locked_fetch_pr_head`
+                    // so both branches share one lock acquisition keyed on
+                    // `&root` (the mesh's DB-stored path, same key
+                    // `fetch_origin` uses two steps above). Without the
+                    // lock, two concurrent PR-spawns (or a PR-spawn racing
+                    // the manual `git_sync` from #680) collide on
+                    // `.git/FETCH_HEAD` / `refs/remotes/<remote>/<ref>.lock`
+                    // and the losing spawn silently falls back to `base_ref`.
+                    // The fork branch additionally writes `git remote add/
+                    // set-url` config that the next caller must observe,
+                    // so the lock covers both remote registration and
+                    // fetch in one critical section.
+                    locked_fetch_pr_head(
+                        &root,
+                        &head_ref_owned,
+                        fork_owner_owned.as_deref(),
+                        fork_url_owned.as_deref(),
+                    )
                 })
                 .await
                 .unwrap_or_else(|e| {
@@ -1312,6 +1523,12 @@ pub async fn spawn_agent_inner(
     // built-in/absent account yields an empty list → vanilla claude on the
     // Anthropic subscription.
     let backend_env = crate::preferences::resolve_provider_env(&node.provider);
+    // Custom-endpoint tiers preflight — refuses to spawn if a Claude-compatible
+    // third-party (OpenRouter, Generic) is configured without a primary model,
+    // which would otherwise silently 400 in the spawned `claude` (the binary
+    // sends its hardcoded `claude-*` default; OpenRouter wants `provider/model`).
+    crate::preferences::preflight_resolve_provider_env(&node.provider)
+        .map_err(|e| format!("spawn preflight failed: {}", e))?;
     let cmd = build_spawn_command(
         &resolved,
         provider,
@@ -1406,7 +1623,10 @@ pub async fn spawn_agent_inner(
         } else {
         }
     }
-    register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start());
+    // One flag instance shared three ways: the registry entry (kill_session
+    // sets it), the reader thread (its epilogue reads it), and nothing else.
+    let deliberate_kill = Arc::new(AtomicBool::new(false));
+    register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start(), mesh_id, deliberate_kill.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
 
     // 13. Start reader thread
@@ -1439,6 +1659,8 @@ pub async fn spawn_agent_inner(
         reader_alive,
         adapter.is_plain_terminal(),
         spawn_start,
+        mesh_id,
+        deliberate_kill,
     );
 
     // 13b. Start natural-exit watcher (issue #287). On Windows ConPTY
@@ -1615,7 +1837,7 @@ pub async fn spawn_agent_inner(
 /// listens for the event and shows a non-fatal warning toast.
 ///
 /// Per issue #213:
-/// - `SkippedDirty`, `SkippedNoRemote`, `UpToDate`, `Synced` are silent.
+/// - `FetchedButDirty`, `SkippedNoRemote`, `UpToDate`, `Synced` are silent.
 /// - `FetchedButDiverged`, `FetchFailed`, `RepoUnusable` emit a
 ///   warning so the user knows the spawn fell back to local HEAD.
 ///
@@ -1627,9 +1849,15 @@ fn emit_sync_outcome_event(
     outcome: Result<crate::git::sync::FetchOutcome, crate::git::sync::FetchError>,
 ) {
     let (event_name, payload) = match outcome {
-        Ok(crate::git::sync::FetchOutcome::SkippedDirty) => {
+        Ok(crate::git::sync::FetchOutcome::FetchedButDirty { new_commits }) => {
+            // Silent, like Synced/UpToDate: the fetch reached the remote and
+            // advanced the tracking refs the worktree is cut from — the new
+            // node IS fresh. Only the parent checkout's fast-forward was
+            // skipped, and the user already knows their own tree is dirty.
             tracing::info!(
-                "spawn_agent_inner: auto-sync skipped (parent dirty) for session {}",
+                "spawn_agent_inner: auto-sync fetched {} commit(s) but skipped the pull \
+                 (parent dirty) for session {}",
+                new_commits,
                 session_id
             );
             return;
@@ -1722,23 +1950,25 @@ fn emit_sync_outcome_event(
     let _ = app.emit(event_name, payload);
 }
 
-// The eight worktree-provision helpers — `fetch_single_ref`, `fork_remote_alias`,
-// `fetch_fork_head`, `read_origin_ref_sha`, `upgrade_warm_to_mode`,
-// `adopt_warm_worktree_by_move`, `checkout_worktree_to_base`, `run_git_checkout` —
-// live in `crate::git::worktree::provision` (ADR 0007 consolidation, issue
-// #677). The spawn path reaches them through the module-level `use` at the
-// top of this file; the call sites inside `spawn_agent_inner` use them
-// transparently.
+// The worktree-provision helpers — `fetch_single_ref`, `locked_fetch_pr_head`,
+// `fork_remote_alias`, `fetch_fork_head`, `read_origin_ref_sha`,
+// `upgrade_warm_to_mode`, `adopt_warm_worktree_by_move`,
+// `checkout_worktree_to_base`, `run_git_checkout` — live in
+// `crate::git::worktree::provision` (ADR 0007 consolidation, issue #677, plus
+// #698's `locked_fetch_pr_head` wrapper). The spawn path reaches them through
+// the module-level `use` at the top of this file; the call sites inside
+// `spawn_agent_inner` use them transparently.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     // The eight worktree-provision helpers were moved to
-    // `crate::git::worktree::provision` in PR #676 / issue #677; the tests
-    // here exercise them by name, so re-import at the test-module scope.
+    // `crate::git::worktree::provision` in PR #676 / issue #677, and #698
+    // added `locked_fetch_pr_head` on top. The tests here exercise them by
+    // name, so re-import at the test-module scope.
     use crate::git::worktree::provision::{
         adopt_warm_worktree_by_move, fetch_fork_head, fetch_single_ref, fork_remote_alias,
-        read_origin_ref_sha, upgrade_warm_to_mode,
+        locked_fetch_pr_head, read_origin_ref_sha, upgrade_warm_to_mode,
     };
     use tempfile::TempDir;
 
@@ -1747,6 +1977,238 @@ mod tests {
     #[test]
     fn default_worktree_mode_is_branched() {
         assert_eq!(DEFAULT_WORKTREE_MODE, "branched");
+    }
+
+    // -----------------------------------------------------------------------
+    // Reader-epilogue decision matrix (false "failed to start" fix).
+    //
+    // The reader thread's post-exit status write used to apply the 3s
+    // early-exit Error heuristic unconditionally, so a process that
+    // `kill_session` tore down deliberately (spawn step-2 stale kill, node
+    // close, app shutdown) within 3s of its creation was stamped `Error`
+    // + toasted `resume-failed` — and that stale Error then blocked the
+    // replacing spawn's Spawning→Running promotion. These tests pin the
+    // full matrix of `post_exit_action`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn deliberate_kill_never_writes_status_even_within_early_exit_window() {
+        // The heart of the fix: a deliberate kill 1s after process creation
+        // must NOT be misread as a failed --resume.
+        assert_eq!(
+            post_exit_action(false, true, std::time::Duration::from_secs(1)),
+            PostExitAction::LeaveStatusAlone,
+        );
+        // …nor may it write Idle over the replacing spawn's Spawning.
+        assert_eq!(
+            post_exit_action(false, true, std::time::Duration::from_secs(60)),
+            PostExitAction::LeaveStatusAlone,
+        );
+        // Plain terminals too: the kill initiator owns the next status.
+        assert_eq!(
+            post_exit_action(true, true, std::time::Duration::from_secs(1)),
+            PostExitAction::LeaveStatusAlone,
+        );
+    }
+
+    #[test]
+    fn natural_early_exit_still_flags_resume_failure() {
+        // The heuristic's true positive is preserved: an LLM process that
+        // dies on its own within the window (typically `--resume` against
+        // an expired session) still reads as a resume failure.
+        assert_eq!(
+            post_exit_action(false, false, std::time::Duration::from_secs(1)),
+            PostExitAction::MarkErrorResumeFailed,
+        );
+    }
+
+    #[test]
+    fn natural_exit_after_window_marks_idle() {
+        assert_eq!(
+            post_exit_action(false, false, EARLY_EXIT_WINDOW),
+            PostExitAction::MarkIdle,
+        );
+    }
+
+    #[test]
+    fn plain_terminal_natural_exit_is_idle_regardless_of_elapsed() {
+        // A shell exiting fast is not a resume signal.
+        assert_eq!(
+            post_exit_action(true, false, std::time::Duration::from_millis(10)),
+            PostExitAction::MarkIdle,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-session spawn claim (duplicate-spawn fix). `is_agent_already_running`
+    // only sees registered processes and registration is seconds into the
+    // pipeline, so the claim must cover the whole `spawn_agent_inner` body.
+    // Test ids are unique across the suite (tests share the process-global
+    // set and run in parallel).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn spawn_claim_rejects_concurrent_duplicate_for_same_session() {
+        let first = SpawnInFlightClaim::try_claim(-917_0001);
+        assert!(first.is_some(), "first claim must succeed");
+        assert!(
+            SpawnInFlightClaim::try_claim(-917_0001).is_none(),
+            "second claim for the same session while the first is held must \
+             be rejected — this is what stops a duplicate spawn_agent_inner \
+             from killing the in-flight spawn's freshly-booted process"
+        );
+    }
+
+    #[test]
+    fn spawn_claim_is_per_session() {
+        let _a = SpawnInFlightClaim::try_claim(-917_0002).expect("claim a");
+        assert!(
+            SpawnInFlightClaim::try_claim(-917_0003).is_some(),
+            "claims for different sessions must not contend"
+        );
+    }
+
+    #[test]
+    fn spawn_claim_released_on_drop() {
+        {
+            let _claim = SpawnInFlightClaim::try_claim(-917_0004).expect("claim");
+        }
+        assert!(
+            SpawnInFlightClaim::try_claim(-917_0004).is_some(),
+            "dropping the claim must release the session for the next spawn \
+             (RAII covers every return path, including cancelled tasks)"
+        );
+    }
+
+    /// Regression guard for the user-visible "failed to start" symptom.
+    ///
+    /// Spawn RACERS threads racing `try_claim` for the same session —
+    /// the first to acquire the HashSet entry wins, the rest see the
+    /// entry present and get `None`. Pins the entire atomicity story:
+    /// without it, two concurrent `spawn_agent_inner` calls for the
+    /// same node (backend stage-2 vs frontend Terminal auto-spawn on
+    /// `'idle'`) both passed the registry check and the loser's step-2
+    /// stale-kill destroyed the winner's freshly-booted process — the
+    /// "failed to start, yet it boots seconds later" symptom.
+    ///
+    /// Uses a fresh session id per round so the test doesn't depend on
+    /// the racing threads' Drop ordering vs the next round's claim —
+    /// the global HashSet could in principle still hold a stale entry
+    /// from a previous round's racer that hasn't yet been observed as
+    /// dropped by the test thread (parking_lot's Drop is synchronous,
+    /// but the test thread's join() happens-before the next round).
+    #[test]
+    fn concurrent_spawn_claim_exactly_one_winner() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
+
+        const RACERS: usize = 8;
+        const ROUNDS: usize = 200;
+
+        for round in 0..ROUNDS {
+            // Fresh session id per round so there's no cross-round
+            // dependency on Drop ordering.
+            let session: i64 = -917_1000 - round as i64;
+
+            let winners = Arc::new(AtomicUsize::new(0));
+            // Two barriers: gate the racers before the lock, AND gate
+            // them before the drop. Without the second gate, a racer
+            // that loses the lock race still releases its (empty) claim
+            // path before the next racer even tries — the second
+            // barrier forces every racer to attempt the lock with the
+            // claim held until the round-end signal.
+            let start_barrier = Arc::new(std::sync::Barrier::new(RACERS + 1));
+            let end_barrier = Arc::new(std::sync::Barrier::new(RACERS + 1));
+
+            let handles: Vec<_> = (0..RACERS)
+                .map(|_| {
+                    let winners = winners.clone();
+                    let start = start_barrier.clone();
+                    let end = end_barrier.clone();
+                    std::thread::spawn(move || {
+                        // Phase 1: align all racers at the lock.
+                        start.wait();
+                        let claim = SpawnInFlightClaim::try_claim(session);
+                        if claim.is_some() {
+                            winners.fetch_add(1, AOrd::SeqCst);
+                        }
+                        // Phase 2: hold the claim until the test thread
+                        // signals round end. Any racer arriving at the
+                        // lock now MUST see the existing entry (the
+                        // insert returns false → claim is None).
+                        end.wait();
+                        drop(claim);
+                    })
+                })
+                .collect();
+
+            // Fire the start gun — every racer races for the lock now.
+            start_barrier.wait();
+            // Give every racer time to acquire the lock, observe the
+            // entry, and reach the end barrier.
+            end_barrier.wait();
+            for h in handles {
+                h.join().unwrap();
+            }
+
+            assert_eq!(
+                winners.load(AOrd::SeqCst),
+                1,
+                "exactly one racer must win the claim (round {round}, session {session})"
+            );
+
+            // After the last racing thread joined, its _claim dropped,
+            // releasing the entry. Confirm by claiming it ourselves —
+            // this exercises the post-drop "slot is empty" invariant
+            // and prevents cross-round state pollution if a future
+            // refactor accidentally leaks entries.
+            assert!(
+                SpawnInFlightClaim::try_claim(session).is_some(),
+                "round {round}: racers all joined so their claims dropped — \
+                 the next try_claim for session {session} must find the slot empty"
+            );
+        }
+    }
+
+    /// RAII must release on a *cancelled* async task too — the field doc
+    /// on `SpawnInFlightClaim` makes that an explicit guarantee. A
+    /// `tokio::time::timeout` racing a future that holds the claim is
+    /// the cheapest reproduction: the future is dropped at the await
+    /// point, the claim's Drop runs synchronously, and the next
+    /// `try_claim` must succeed.
+    #[test]
+    fn spawn_claim_released_when_async_task_is_cancelled() {
+        // No real DB / PTY needed — the claim itself is what we're
+        // pinning. Drive it on a runtime so the cancellation path
+        // (Future::drop mid-await) actually runs.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let session = -917_0006;
+        rt.block_on(async {
+            // Spawn a task that holds the claim for "the whole pipeline"
+            // (here, forever). Cancel it via timeout.
+            let task = tokio::spawn(async move {
+                let _claim = SpawnInFlightClaim::try_claim(session)
+                    .expect("first claim must succeed");
+                // Park forever. The test cancels this task below.
+                std::future::pending::<()>().await;
+            });
+
+            // Let the task reach its pending await.
+            tokio::task::yield_now().await;
+            task.abort();
+            // The abort drops the task's locals → Drop runs → claim released.
+            let _ = task.await;
+
+            assert!(
+                SpawnInFlightClaim::try_claim(session).is_some(),
+                "aborting the holding task must release the claim (RAII covers \
+                 cancelled futures, not just successful return)"
+            );
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -1761,44 +2223,8 @@ mod tests {
 
     #[test]
     fn upgrade_warm_to_mode_reapplies_worktreeinclude_after_checkout() {
-        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
         use std::fs;
-        let td = TempDir::new().unwrap();
-        let root = td.path();
-
-        // Set up `.worktreeinclude` + a tracked source file at its original
-        // content. The pool will copy v1 into the prewarm-time worktree.
-        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
-        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
-        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
-        // Commit the manifest so `.worktreeinclude` is reachable for `git
-        // worktree add`; the pool helper copies files relative to the repo
-        // root regardless of whether the manifest itself is tracked, but
-        // committing keeps the test setup close to a realistic repo.
-        let repo = git2::Repository::open(root).unwrap();
-        commit_file(
-            &repo,
-            root,
-            ".worktreeinclude",
-            "secrets.env\n",
-        );
-
-        // Cut a detached warm worktree (matches the pool's on-disk shape).
-        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
-        crate::git::worktree::create_git_worktree(
-            root.to_str().unwrap(),
-            pool.to_str().unwrap(),
-            "warm-amber-fox",
-            "detached",
-            "HEAD",
-        )
-        .unwrap();
-        // Prewarm-time copy: `secrets.env` in the worktree must hold v1.
-        assert_eq!(
-            fs::read_to_string(pool.join("secrets.env")).unwrap(),
-            "v1=old\n",
-            "prewarm-time copy must reflect the original source"
-        );
+        let (_td, root, pool) = setup_warm_pool_with_include();
 
         // User edits the source file BETWEEN prewarm and manual spawn —
         // exactly the window the missing apply_worktree_include used to leak.
@@ -1826,10 +2252,10 @@ mod tests {
     fn upgrade_warm_to_mode_is_noop_when_no_worktreeinclude() {
         use crate::env::test_helpers::init_repo_with_commit;
         use std::fs;
+        // Skip the .worktreeinclude side of the helper — bare repo + pool.
         let td = TempDir::new().unwrap();
         let root = td.path();
-        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
-
+        let _ = init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
         let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
         crate::git::worktree::create_git_worktree(
             root.to_str().unwrap(),
@@ -1839,6 +2265,7 @@ mod tests {
             "HEAD",
         )
         .unwrap();
+        let _ = td; // keep alive for the duration of the test
 
         upgrade_warm_to_mode(root.to_str().unwrap(), pool.to_str().unwrap(), "bold-amber-fox", "branched")
             .expect("must succeed when no .worktreeinclude exists");
@@ -1859,32 +2286,8 @@ mod tests {
     /// snapshot, defeating the gap-1 fix for half the meshes.
     #[test]
     fn upgrade_warm_to_mode_reapplies_worktreeinclude_in_detached_mode() {
-        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
         use std::fs;
-        let td = TempDir::new().unwrap();
-        let root = td.path();
-
-        init_repo_with_commit(root, &[("f.txt", "tracked\n")]);
-        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
-        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
-        let repo = git2::Repository::open(root).unwrap();
-        commit_file(&repo, root, ".worktreeinclude", "secrets.env\n");
-
-        // Pool entry: detached (matches the on-disk shape the pool cuts).
-        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
-        crate::git::worktree::create_git_worktree(
-            root.to_str().unwrap(),
-            pool.to_str().unwrap(),
-            "warm-amber-fox",
-            "detached",
-            "HEAD",
-        )
-        .unwrap();
-        assert_eq!(
-            fs::read_to_string(pool.join("secrets.env")).unwrap(),
-            "v1=old\n",
-            "prewarm-time copy must reflect the original source"
-        );
+        let (_td, root, pool) = setup_warm_pool_with_include();
 
         // User edits the source — same window as the branched-mode test.
         fs::write(root.join("secrets.env"), "v1=NEW\n").unwrap();
@@ -1910,6 +2313,59 @@ mod tests {
             wt.head_detached().unwrap_or(false),
             "detached mode must leave the worktree detached"
         );
+    }
+
+    /// Shared setup for the two `upgrade_warm_to_mode` `.worktreeinclude`
+    /// re-application tests (#642.5). The third test
+    /// (`…_is_noop_when_no_worktreeinclude`) deliberately inlines its own
+    /// setup because the no-manifest case is the whole point of that test
+    /// — running it through the helper would materialise `secrets.env` and
+    /// `.worktreeinclude` in the worktree, defeating the no-op assertion.
+    ///
+    /// The helper stands up: a tempdir holding a real git repo with
+    /// `secrets.env` + `.worktreeinclude` (both tracked), AND a pool-shaped
+    /// DETACHED worktree under `.claude/worktrees/warm-amber-fox` that has
+    /// already had the include copied at prewarm time (so the tests assert
+    /// the upgrade re-applies, not the original copy). Both the branched and
+    /// the detached call-site tests cut the pool as detached (the pool's
+    /// on-disk shape) — the difference between them is the
+    /// `upgrade_warm_to_mode` mode argument, not the helper's setup.
+    ///
+    /// Returns `(tempdir, repo_root_path, pool_path)`. The tempdir is held
+    /// to keep the underlying directory alive for the duration of the test
+    /// — dropping it would delete the repo and break subsequent asserts.
+    fn setup_warm_pool_with_include() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
+        use crate::env::test_helpers::{commit_file, init_repo_with_commit};
+        use std::fs;
+
+        let td = TempDir::new().unwrap();
+        let root = td.path().to_path_buf();
+
+        init_repo_with_commit(&root, &[("f.txt", "tracked\n")]);
+        fs::write(root.join("secrets.env"), "v1=old\n").unwrap();
+        fs::write(root.join(".worktreeinclude"), "secrets.env\n").unwrap();
+        // Commit the manifest so `.worktreeinclude` is reachable for `git
+        // worktree add`; the pool helper copies files relative to the repo
+        // root regardless of whether the manifest itself is tracked, but
+        // committing keeps the test setup close to a realistic repo.
+        let repo = git2::Repository::open(&root).unwrap();
+        commit_file(&repo, &root, ".worktreeinclude", "secrets.env\n");
+
+        let pool = root.join(".claude").join("worktrees").join("warm-amber-fox");
+        crate::git::worktree::create_git_worktree(
+            root.to_str().unwrap(),
+            pool.to_str().unwrap(),
+            "warm-amber-fox",
+            "detached",
+            "HEAD",
+        )
+        .expect("prewarm-shape worktree must be creatable for this helper");
+        assert_eq!(
+            fs::read_to_string(pool.join("secrets.env")).unwrap(),
+            "v1=old\n",
+            "prewarm-time copy must reflect the original source"
+        );
+        (td, root, pool)
     }
 
     // -----------------------------------------------------------------------
@@ -1997,10 +2453,14 @@ mod tests {
         )
         .expect_err("adoption must refuse to overwrite an existing branch");
         assert!(
-            err.contains("git checkout"),
-            "the failure must come from the refusing `-b` checkout, got: {}",
+            err.contains("already exists"),
+            "the failure must name the existing branch refusal, got: {}",
             err
         );
+        // Fail-fast contract: refusal is pre-move — see the guard in
+        // `adopt_warm_worktree_by_move`.
+        assert!(pool.exists(), "pool entry must be untouched after a refused adoption");
+        assert!(!target.exists(), "target must not be materialised by a refused adoption");
     }
 
     // -----------------------------------------------------------------------
@@ -2632,15 +3092,25 @@ mod tests {
     //
     // Same-repo PR spawn (#420) — the worktree adoption path calls
     // `fetch_single_ref` to materialise `origin/<head_ref>` so the worktree
-    // can be cut from it. The function shells out to `git fetch origin -- <ref>`;
-    // the `--` separator is the security hardening (a ref starting with `-`
-    // would otherwise be parsed as a `git` flag like `--upload-pack=…`).
+    // can be cut from it. As of issue #446 the function is a thin wrapper
+    // over `git::sync::do_fetch_only` (the fetch-only half of `do_sync` —
+    // open + dirty-check + has-remote + `git fetch`, NO `git pull` tail);
+    // the `-`-adversarial-ref hardening is preserved at the wrapper
+    // boundary because `do_fetch_only` passes the branch as a plain argv
+    // entry without a `--` separator (it doesn't know about the spawn
+    // context).
     //
-    // These tests pin all four cases the issue calls out:
+    // These tests pin the cases the issue calls out:
     //   1. success — ref exists on origin
     //   2. ref-not-found — ref missing on origin (caller falls back to base_ref)
     //   3. non-git path — caller passed a directory that isn't a repo
-    //   4. adversarial ref — `--`-prefixed input is rejected by `git` itself
+    //   4. adversarial ref — `-`-prefixed input is rejected by the wrapper
+    //      before `do_fetch_only` sees it (the hardening migrated from the
+    //      shell-out's `--` separator to an upfront string check, since
+    //      `do_fetch_only` doesn't pass a `--` separator to `git fetch`)
+    //   5. dirty-skip (issue #446 acceptance #2) — a parent repo with
+    //      uncommitted changes must return `false` (mirrors
+    //      `fetch_origin_skips_dirty_parent` in `git/fetch_origin_tests.rs`)
     //
     // The fixture mirrors `init_fork_fixture` but for the same-repo path:
     // a bare repo holds a single branch, the local repo has `origin`
@@ -2793,7 +3263,223 @@ mod tests {
         assert!(
             !ok,
             "fetch_single_ref must return false for a ref starting with '-' \
-             (the '--' separator must block git from treating it as a flag)"
+             (the wrapper rejects it before do_sync sees it)"
+        );
+    }
+
+    /// Dirty-parent pin (issue #446 acceptance #2, inverted 2026-07-17): a
+    /// parent repo with uncommitted changes must STILL fetch the PR head.
+    /// A `git fetch` never touches the working tree — the pre-2026-07-17
+    /// dirty-skip meant a mesh whose root checkout stayed dirty silently
+    /// fell back to `base_ref` on every PR spawn, cutting the worktree
+    /// from the wrong commits. Pin the new contract so a future refactor
+    /// that re-introduces a pre-fetch dirty gate fails this test.
+    ///
+    /// `is_dirty` includes untracked files, so writing one to the freshly-
+    /// init'd local repo is enough to dirty it — no need to seed a tracked
+    /// file first.
+    #[test]
+    fn fetch_single_ref_fetches_despite_dirty_parent() {
+        let (local, _bare) = init_same_repo_fixture();
+        // Precondition: the fixture's local repo must start clean, then we
+        // make it dirty with an untracked file.
+        assert!(
+            !crate::env::test_helpers::repo_is_dirty(local.path()),
+            "precondition: freshly-init'd local repo must start clean"
+        );
+        std::fs::write(local.path().join("dirty-marker.txt"), "uncommitted\n").unwrap();
+        assert!(
+            crate::env::test_helpers::repo_is_dirty(local.path()),
+            "precondition: writing an untracked file must dirty the repo"
+        );
+
+        let ok = fetch_single_ref(local.path().to_str().unwrap(), "feat/420-pr-spawn");
+        assert!(
+            ok,
+            "fetch_single_ref must fetch on a dirty parent — a fetch never \
+             touches the working tree, and skipping cut PR worktrees from \
+             stale refs"
+        );
+        // The head ref must be materialised so the worktree can be cut
+        // from it — the whole point of the fetch.
+        let repo = git2::Repository::open(local.path()).unwrap();
+        assert!(
+            repo.find_reference("refs/remotes/origin/feat/420-pr-spawn")
+                .is_ok(),
+            "the fetch must materialise refs/remotes/origin/<head_ref>"
+        );
+        // And the dirty marker must be untouched.
+        assert_eq!(
+            std::fs::read_to_string(local.path().join("dirty-marker.txt")).unwrap(),
+            "uncommitted\n"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // locked_fetch_pr_head — per-Mesh sync_lock wrap (issue #698)
+    //
+    // `locked_fetch_pr_head` must run inside `services::sync_lock::with_mesh_
+    // sync_lock` so two concurrent PR-spawns (or a PR-spawn racing the manual
+    // `git_sync` from #680 / the spawn-time `fetch_origin` from #652) can't
+    // collide on `.git/FETCH_HEAD` / `.git/refs/remotes/<remote>/<ref>.lock`.
+    // Without the wrap the losing fetch fails with "another git process" and
+    // the spawn silently lands on `base_ref` (the wrong commits).
+    //
+    // We test the wrap with a wall-clock bound (mirroring the #680
+    // `git_sync_serializes_via_per_mesh_sync_lock_gh680` shape in
+    // `commands/git_tests.rs`). The `with_mesh_sync_lock` unit tests in
+    // `services::sync_lock` prove the primitive itself serialises; this test
+    // proves THIS specific call site uses the SAME key the spawn path uses,
+    // which is the bug class #698 closes.
+    //
+    // Holder enters the per-mesh lock and announces entry via an AtomicUsize
+    // flag before sleeping. Main thread spin-waits on the flag (deterministic
+    // — no `thread::sleep` race), then times `locked_fetch_pr_head`. With the
+    // wrap, `locked_fetch_pr_head` blocks ~450 ms waiting for the holder;
+    // without, it runs concurrently with the holder and finishes in tens of ms.
+    // -----------------------------------------------------------------------
+
+    /// Regression test for issue #698 — `locked_fetch_pr_head` must acquire
+    /// the per-Mesh `with_mesh_sync_lock` keyed on the spawn's `node.path`,
+    /// matching what `spawn_agent_inner` calls `fetch_origin` with two steps
+    /// earlier. Without this wrap, concurrent PR-spawns on the same Mesh
+    /// (and a PR-spawn racing the manual `git_sync` button) race on
+    /// `.git/FETCH_HEAD` / `refs/remotes/<remote>/<ref>.lock` and the loser
+    /// silently falls back to `base_ref`.
+    ///
+    /// Strategy: holder thread enters `with_mesh_sync_lock(&path_key, ...)`
+    /// and announces via an AtomicUsize flag, then sleeps. Main thread
+    /// spin-waits on the flag (deterministic — no `thread::sleep` race), then
+    /// times `locked_fetch_pr_head`. With the wrap, `locked_fetch_pr_head`
+    /// blocks waiting for the holder; without, it returns immediately while
+    /// the holder is still inside its critical section.
+    ///
+    /// Why wall-clock (not `fetch_add`): the per-Mesh lock is correctly
+    /// implemented (issue #652 + `services::sync_lock` unit tests prove it),
+    /// so it *prevents* simultaneous critical-section entries — `max_concurrent
+    /// == 1` even on a working lock. The only signal that `locked_fetch_pr_head`
+    /// shares the same key is that it waits for the holder to release the lock.
+    ///
+    /// The test uses the same-repo branch (passes `None, None` for fork
+    /// fields). The fork branch shares the same wrapper so the regression
+    /// coverage is sufficient with one call site — a #698 regression that
+    /// branched out of the wrapper entirely would fail this test and the
+    /// #443 fork tests would still pass on the unwrapped helper, surfacing
+    /// the gap.
+    #[test]
+    fn locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        use std::time::{Duration, Instant};
+
+        let (local, _bare) = init_same_repo_fixture();
+        let path_key = local.path().to_string_lossy().into_owned();
+
+        // Holder enters the per-mesh lock and announces entry via
+        // `entered_flag` before sleeping. Spinning on the flag avoids the
+        // `thread::sleep` race — CI jitter can't make `locked_fetch_pr_head`
+        // sneak in first.
+        let entered_flag = std::sync::Arc::new(AtomicUsize::new(0));
+        let holder_path = path_key.clone();
+        let entered_holder = std::sync::Arc::clone(&entered_flag);
+        let holder = std::thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                entered_holder.store(1, AOrdering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        // Spin-wait (bounded) for the holder to actually be inside the
+        // critical section. Cap at 2 s so a hung holder surfaces as a
+        // test panic, not a forever-wait.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered_flag.load(AOrdering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "holder thread never entered the per-mesh lock"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let start = Instant::now();
+        let _ = locked_fetch_pr_head(&path_key, "feat/420-pr-spawn", None, None);
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        // With wrap: elapsed >= ~450 ms (`locked_fetch_pr_head` waited for
+        // the holder). Without wrap: elapsed = tens of ms (the fetch ran
+        // concurrently with the holder's sleep). Bound is 400 ms — leaves
+        // 100 ms of slack for setup overhead and CI jitter on a busy box.
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "locked_fetch_pr_head did not block on the per-mesh lock \
+             (elapsed = {:?}); issue #698 wrap is missing — concurrent PR-spawn \
+             and spawn-time fetch_origin (or manual git_sync from #680) would \
+             race on .git/FETCH_HEAD and refs/remotes/<remote>/<ref>.lock",
+            elapsed,
+        );
+    }
+
+    /// Companion to `locked_fetch_pr_head_serializes_via_per_mesh_sync_lock_gh698`
+    /// — exercises the FORK branch (`Some/Some` → `fetch_fork_head`) of the
+    /// wrapper. The same-repo test alone leaves a CI blind spot: a #698
+    /// regression that bypassed the wrapper for fork PRs (e.g. an inlined
+    /// `fetch_fork_head` call in `spawn_agent_inner` to skip the remote-
+    /// config lock acquisition) would still pass the same-repo test and
+    /// every existing #443 fork unit test (those hit the bare helper
+    /// directly, no lock). This test closes the gap by hitting the fork
+    /// arm of the wrapper with the same wall-clock shape; its `git remote
+    /// add` then `git fetch` sequence MUST hold the lock for the holder's
+    /// 500 ms sleep.
+    #[test]
+    fn locked_fetch_pr_head_serializes_fork_branch_via_per_mesh_sync_lock_gh698() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
+        use std::time::{Duration, Instant};
+
+        let (local, bare_dir, _src) = init_fork_fixture();
+        let bare_dir_str = bare_dir.to_str().unwrap().to_string();
+        let path_key = local.path().to_string_lossy().into_owned();
+
+        // Holder enters the per-mesh lock (same key as the wrapper) and
+        // announces via `entered_flag` before sleeping.
+        let entered_flag = std::sync::Arc::new(AtomicUsize::new(0));
+        let holder_path = path_key.clone();
+        let entered_holder = std::sync::Arc::clone(&entered_flag);
+        let holder = std::thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                entered_holder.store(1, AOrdering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered_flag.load(AOrdering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "holder thread never entered the per-mesh lock"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        let start = Instant::now();
+        let _ = locked_fetch_pr_head(
+            &path_key,
+            "feat/443-fork",
+            Some("alice"),
+            Some(&bare_dir_str),
+        );
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "locked_fetch_pr_head (fork branch) did not block on the per-mesh \
+             lock (elapsed = {:?}); issue #698 wrap is missing for the fork path \
+             — concurrent fork-PR spawns would race on .git/FETCH_HEAD, \
+             refs/remotes/fork-<login>/<ref>.lock, AND the git remote add/config \
+             files that fetch_fork_head writes before its fetch",
+            elapsed,
         );
     }
 

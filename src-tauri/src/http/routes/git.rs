@@ -4,22 +4,31 @@
 //! summary in the header, and an inline diff for each tapped file. All
 //! routes resolve against the agent node's worktree (its `path` column),
 //! so they work whether the agent runs in-place or in a `git worktree`.
+//!
+//! **Threading model (issue #762):** every backing Tauri command was moved
+//! onto the blocking pool via `crate::commands::run_blocking`. The routes
+//! here `.await` the async wrapper so the actual libgit2 work runs on
+//! `tauri::async_runtime::spawn_blocking`'s pool rather than the bounded
+//! tokio worker pool — mirroring the desktop fix and keeping mobile
+//! sessions from parking their accept-loop worker on a stalled
+//! `Repository::open` (e.g. WSL UNC path with paused VM).
 
 use crate::db;
 use crate::http::request;
 use crate::http::MaybeTls;
 
-/// `GET /api/agents/{id}/git/status` — full file-by-file status. Empty list
-/// for a clean tree.
+/// `GET /api/agents/{id}/git/status` — the file-by-file tree of everything the
+/// node changed since it branched (ADR 0005), so it agrees with the per-file
+/// `/diff` endpoint below. Empty list for a node with no changes since base.
 pub async fn status(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
-    let Ok(node) = db::get_agent_node_by_id(agent_id) else {
+    if db::get_agent_node_by_id(agent_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
-    };
-    match crate::commands::git::get_git_status(node.path) {
+    }
+    match crate::commands::diff::node_changed_files(agent_id).await {
         Ok(status) => {
             let body = serde_json::to_string(&status).unwrap_or_else(|_| "[]".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -30,16 +39,18 @@ pub async fn status(
     }
 }
 
-/// `GET /api/agents/{id}/git/summary` — `{added, modified, deleted}` counts.
+/// `GET /api/agents/{id}/git/summary` — `{total, added, modified, deleted}`
+/// counts, folded from the same since-branch list as `/git/status` so the
+/// header and the tree agree.
 pub async fn summary(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
-    let Ok(node) = db::get_agent_node_by_id(agent_id) else {
+    if db::get_agent_node_by_id(agent_id).is_err() {
         request::send_json_error(lines, "404 Not Found", "Agent not found").await;
         return;
-    };
-    match crate::commands::git::get_git_summary(node.path) {
+    }
+    match crate::commands::diff::node_changed_summary(agent_id).await {
         Ok(summary) => {
             let body = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string());
             let _ = request::write_json(lines, "200 OK", &body).await;
@@ -55,7 +66,7 @@ pub async fn branch(
     lines: &mut tokio::io::BufStream<MaybeTls>,
     agent_id: i64,
 ) {
-    match crate::commands::pr::get_current_branch(agent_id) {
+    match crate::commands::pr::get_current_branch(agent_id).await {
         Ok(name) => {
             let body = serde_json::to_string(&serde_json::json!({ "branch": name }))
                 .unwrap_or_else(|_| "{}".to_string());
@@ -109,7 +120,9 @@ pub async fn diff(
 /// `GET /api/gh/auth` — whether `gh auth status` is happy on this host.
 /// Used to gate the mobile "Create PR" button.
 pub async fn gh_auth(lines: &mut tokio::io::BufStream<MaybeTls>) {
-    let ok = crate::commands::pr::check_gh_auth();
+    // Await the async wrapper so the blocking auth HTTPS GET runs on the
+    // blocking pool, not this route's Tauri async-runtime worker.
+    let ok = crate::commands::github::check_gh_auth().await;
     let body = serde_json::to_string(&serde_json::json!({ "ok": ok }))
         .unwrap_or_else(|_| "{}".to_string());
     let _ = request::write_json(lines, "200 OK", &body).await;

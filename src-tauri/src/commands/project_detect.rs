@@ -119,20 +119,25 @@ fn detect_in_dir(dir: &Path) -> DetectedProject {
     DetectedProject::empty()
 }
 
-// `(async)` — probes the filesystem for marker files; off the main thread.
-#[command(async)]
-pub fn detect_mesh_project(mesh_path: String) -> Result<DetectedProject, String> {
-    let host_path = env::to_host_path(&mesh_path);
-    let path_obj = Path::new(&host_path);
+// Offloaded via `run_blocking` (issue #762 convention): the marker-file
+// probes are filesystem stats that can stall on WSL UNC paths; a stalled
+// probe must not park a bounded tokio worker.
+#[command]
+pub async fn detect_mesh_project(mesh_path: String) -> Result<DetectedProject, String> {
+    crate::commands::run_blocking("detect_mesh_project", move || {
+        let host_path = env::to_host_path(&mesh_path);
+        let path_obj = Path::new(&host_path);
 
-    if !path_obj.exists() {
-        return Err(format!(
-            "Path does not exist: {} (mapped from {})",
-            host_path, mesh_path
-        ));
-    }
+        if !path_obj.exists() {
+            return Err(format!(
+                "Path does not exist: {} (mapped from {})",
+                host_path, mesh_path
+            ));
+        }
 
-    Ok(detect_in_dir(path_obj))
+        Ok(detect_in_dir(path_obj))
+    })
+    .await
 }
 
 #[cfg(test)]

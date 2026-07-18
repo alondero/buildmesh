@@ -54,12 +54,43 @@ pub fn log_json(node_id: i64, tail: usize) -> Option<String> {
     }))
 }
 
-/// The drive request body: `{"prompt": "..."}`. Strict (no serde default) so a
-/// malformed body is a 400, not a silent no-op — see the serde-default-fragility
-/// lesson the read side follows.
+/// The drive request body: `{"prompt": "...", "idempotency_key": "..."}`. Strict
+/// (no serde default) so a malformed body — or one missing the key — is a 400,
+/// not a silent no-op. The mandatory `idempotency_key` is #178's cardinal rule
+/// ("never let a prompt land twice") enforced at the contract: a Coordinator
+/// cannot drive without declaring a retry-dedup key (ADR-0008 §6, issue #320).
 #[derive(serde::Deserialize)]
 struct PromptRequest {
     prompt: String,
+    idempotency_key: String,
+}
+
+/// Upper bound on an idempotency key, in bytes (storage is bytes). A key is a
+/// caller-chosen opaque token (a UUID is ~36 chars); anything past this is a
+/// malformed request, capped so a hostile caller can't bloat the ledger row.
+const MAX_IDEMPOTENCY_KEY_LEN: usize = 256;
+
+/// Validate and normalize the drive body — a pure function so the 400 branches are
+/// unit-tested without standing up the socket (issue #320 review). On success it
+/// returns the *trimmed* idempotency key: the empty-check, the length cap, storage
+/// and lookup must all see the same bytes, or `" abc"` and `"abc"` would be
+/// distinct ledger keys and a retry could double-send. Returns `(status, message)`
+/// on rejection.
+fn validate_drive_request<'a>(
+    prompt: &str,
+    idempotency_key: &'a str,
+) -> Result<&'a str, (&'static str, &'static str)> {
+    if prompt.trim().is_empty() {
+        return Err(("400 Bad Request", "Prompt must not be empty"));
+    }
+    let key = idempotency_key.trim();
+    if key.is_empty() {
+        return Err(("400 Bad Request", "idempotency_key must not be empty"));
+    }
+    if key.len() > MAX_IDEMPOTENCY_KEY_LEN {
+        return Err(("400 Bad Request", "idempotency_key is too long"));
+    }
+    Ok(key)
 }
 
 /// `POST /nodes/{id}/prompt` — drive a live node by writing `prompt` to its PTY
@@ -69,23 +100,21 @@ struct PromptRequest {
 ///
 /// Outcomes:
 /// - unknown node id → `404`
-/// - empty prompt or malformed body → `400`
+/// - empty prompt, empty/oversized idempotency key, or malformed body → `400`
 /// - node not live (no agent process to write to) → `409` with a clear error
-/// - written → `200 {"verdict":"delivered"|"unverified"}` (honest verdict)
+/// - idempotency ledger unreadable (fail-safe, no send) → `503`, retryable
+/// - written → `200 {"verdict":..,"idempotency_key":..,"replayed":..}`
+/// - duplicate key → `200` replaying the original verdict, no second write
 pub async fn prompt(
     lines: &mut BufStream<MaybeTls>,
     node_id: i64,
     content_length: usize,
 ) {
-    if content_length > 256 * 1024 {
-        request::send_json_error(lines, "413 Content Too Large", "Body too large").await;
+    let Some(body_bytes) =
+        request::read_body_or_send_error(lines, content_length, 256 * 1024).await
+    else {
         return;
-    }
-    let mut body_bytes = vec![0u8; content_length];
-    if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-        let _ = request::write_status_only(lines, "400 Bad Request").await;
-        return;
-    }
+    };
 
     let req: PromptRequest = match serde_json::from_slice(&body_bytes) {
         Ok(r) => r,
@@ -95,34 +124,106 @@ pub async fn prompt(
             return;
         }
     };
-    if req.prompt.trim().is_empty() {
-        request::send_json_error(lines, "400 Bad Request", "Prompt must not be empty").await;
-        return;
-    }
+    let idempotency_key = match validate_drive_request(&req.prompt, &req.idempotency_key) {
+        Ok(key) => key,
+        Err((status, message)) => {
+            request::send_json_error(lines, status, message).await;
+            return;
+        }
+    };
 
-    // Distinguish "no such node" (404) from "node exists but isn't drivable"
-    // (409) — the latter comes back from the driver as `NotLive`.
-    if db::get_agent_node_by_id(node_id).is_err() {
-        request::send_json_error(lines, "404 Not Found", "Unknown node").await;
-        return;
-    }
-
-    match drive::drive_node(node_id, &req.prompt) {
-        Ok(verdict) => {
-            let body = serde_json::json!({ "verdict": verdict }).to_string();
+    // The idempotency replay lives *inside* `drive_node_with_key` and
+    // short-circuits before any liveness check, so a duplicate key is a clean
+    // no-op even for a since-vanished node. Only a genuinely fresh key that then
+    // fails to find a node surfaces as `NotLive`, which we split into 404
+    // (unknown) vs 409 (known but not drivable).
+    match drive::drive_node_with_key(node_id, idempotency_key, &req.prompt) {
+        Ok(outcome) => {
+            let body = serde_json::json!({
+                "verdict": outcome.verdict,
+                // Echo the *normalized* key — the value actually recorded, so the
+                // caller learns exactly what a retry must send to dedup.
+                "idempotency_key": idempotency_key,
+                "replayed": outcome.replayed,
+            })
+            .to_string();
             let _ = request::write_json(lines, "200 OK", &body).await;
         }
         Err(drive::DriveError::NotLive) => {
-            request::send_json_error(
-                lines,
-                "409 Conflict",
-                "Node is not live — only a node with a running agent can be driven",
-            )
-            .await;
+            if db::get_agent_node_by_id(node_id).is_err() {
+                request::send_json_error(lines, "404 Not Found", "Unknown node").await;
+            } else {
+                request::send_json_error(
+                    lines,
+                    "409 Conflict",
+                    "Node is not live — only a node with a running agent can be driven",
+                )
+                .await;
+            }
         }
         Err(drive::DriveError::WriteFailed(e)) => {
             request::send_json_error(lines, "500 Internal Server Error", &e).await;
         }
+        // The ledger couldn't be consulted, so we refused to risk a double-send.
+        // 503 tells the Coordinator this is transient and safe to retry.
+        Err(drive::DriveError::LedgerUnavailable(e)) => {
+            request::send_json_error(lines, "503 Service Unavailable", &e).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_drive_request, MAX_IDEMPOTENCY_KEY_LEN};
+
+    #[test]
+    fn rejects_empty_or_whitespace_prompt() {
+        assert_eq!(
+            validate_drive_request("", "k").unwrap_err().0,
+            "400 Bad Request"
+        );
+        assert_eq!(
+            validate_drive_request("   ", "k").unwrap_err().1,
+            "Prompt must not be empty"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_or_whitespace_key() {
+        assert_eq!(
+            validate_drive_request("hi", "").unwrap_err().1,
+            "idempotency_key must not be empty"
+        );
+        // A whitespace-only key trims to empty and is rejected — not stored as a
+        // blank key that every future blank-key retry would collide on.
+        assert_eq!(
+            validate_drive_request("hi", "  \t ").unwrap_err().1,
+            "idempotency_key must not be empty"
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_key() {
+        let big = "x".repeat(MAX_IDEMPOTENCY_KEY_LEN + 1);
+        assert_eq!(
+            validate_drive_request("hi", &big).unwrap_err().1,
+            "idempotency_key is too long"
+        );
+    }
+
+    #[test]
+    fn normalizes_by_trimming_surrounding_whitespace() {
+        // The headline reason to normalize: `" abc "` and `"abc"` must resolve to
+        // the SAME stored key, or a retry whose key gained/lost whitespace would
+        // dedup-miss and double-send.
+        assert_eq!(validate_drive_request("hi", " abc ").unwrap(), "abc");
+        assert_eq!(validate_drive_request("hi", "abc").unwrap(), "abc");
+    }
+
+    #[test]
+    fn accepts_a_normal_key_at_the_length_boundary() {
+        let max = "x".repeat(MAX_IDEMPOTENCY_KEY_LEN);
+        assert_eq!(validate_drive_request("hi", &max).unwrap(), max);
     }
 }
 

@@ -63,7 +63,7 @@ The Windows backend was pivoted off a per-node AppContainer ([ADR-0014](docs/adr
 ## Keyboard shortcuts
 
 - `Ctrl + T` / `Cmd + T` — new agent node
-- `Ctrl + ←/→/↑/↓` / `Cmd + ←/→/↑/↓` — traverse the on-screen node grid (wrap within row; Up/Down no-op when there's only one row; from a maximized solo view, the first press restores the grid)
+- `Ctrl + Alt + ←/→/↑/↓` / `Cmd + Option + ←/→/↑/↓` — traverse the on-screen node grid (wrap within row; Up/Down no-op when there's only one row; from a maximized solo view, the first press restores the grid). Uses two modifiers so the readline `backward-word` / `forward-word` gesture in any focused agent terminal (bash, zsh, fish, PSReadLine, REPLs) still works.
 - `Ctrl + 0` / `Cmd + 0` — reset terminal font size
 - `Ctrl + +` / `Cmd + +` — increase terminal font size
 - `Ctrl + -` / `Cmd + -` — decrease terminal font size

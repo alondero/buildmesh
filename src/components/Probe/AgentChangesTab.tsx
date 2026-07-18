@@ -21,6 +21,7 @@
  */
 
 import { AgentReviewPanel } from '../FileTree/AgentReviewPanel';
+import { PathHeader } from '../shared/PathHeader';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useUIStore } from '../../stores/uiStore';
 
@@ -36,6 +37,9 @@ export function AgentChangesTab() {
   // Clicking a file's "open in center" button pops it into the spacious
   // overlay. We capture the focused node/mesh as the lens so the overlay
   // auto-closes if the user later focuses a different node or project.
+  // FileDiffCard collapses itself in response to this callback (issue #758),
+  // so the inline expanded diff and the overlay don't render the same diff
+  // twice.
   const handleOpenFile = (filePath: string) =>
     openDiff({
       filePath,
@@ -45,7 +49,16 @@ export function AgentChangesTab() {
       source: 'base',
     });
 
+  // PathHeader must sit outside the scroll context so it stays pinned
+  // at the top while diffs scroll underneath.
   return (
-    <AgentReviewPanel nodeId={activeNodeId} rootPath={activePath} onOpenFile={handleOpenFile} />
+    <div className="flex flex-col h-full overflow-hidden">
+      <PathHeader path={activePath} />
+      <AgentReviewPanel
+        nodeId={activeNodeId}
+        rootPath={activePath}
+        onOpenFile={handleOpenFile}
+      />
+    </div>
   );
 }

@@ -4,6 +4,7 @@ use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -576,6 +577,52 @@ impl CollaboratorPermission {
     }
 }
 
+/// Max time to establish a TCP+TLS connection to the GitHub API.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Max time for a whole request (connect + send + receive body). Without a
+/// finite bound here, a half-open connection (laptop sleep/resume, dropped
+/// Wi-Fi) parks the calling thread *forever* — the probe UI spins endlessly
+/// and the thread never frees. The command layer offloads these calls onto
+/// the blocking pool (`crate::commands::run_blocking`), so the bound protects
+/// a blocking-pool thread rather than a tokio worker; either way an unbounded
+/// call is a resource leak — see the overnight-freeze investigation.
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Per-request timeout for **mutating** GitHub calls
+/// ([`GitHubClient::create_pull_request`], [`GitHubClient::merge_pull_request`]).
+///
+/// Read-side calls (issues/PRs listings, repo queries) use the client-level
+/// `HTTP_REQUEST_TIMEOUT` (30s) because they're cheap and bounded by GitHub's
+/// pagination guarantees. Write-side calls can take *much* longer on a
+/// congested network — a `create_pr` that triggers GitHub's CI hook
+/// initialisation can take 60–90s on the project's main repo, and `merge_pr`
+/// has to wait for any required status checks to clear. A 30s cap there
+/// aborts slow-but-progressing writes and forces the user to retry, risking
+/// a **duplicate PR** (issue #762). 180s is generous headroom while still
+/// bounding "stuck forever" — the underlying TLS read/write half still has
+/// the connect-timeout backstop at 10s, so a hard network failure aborts
+/// promptly and only legitimate progress extends the window.
+///
+/// **Retry/idempotency caveat:** the caller is responsible for not
+/// re-invoking `create_pr` on a transient failure unless it can confirm
+/// the previous attempt didn't succeed (e.g. by checking `find_open_pr_for_branch`
+/// first). The current caller (`commands::pr::create_pr_for_mesh`) doesn't
+/// pre-check — a 180s timeout keeps the retry window manageable, and the
+/// user-visible "PR was created" success path is preserved.
+const HTTP_WRITE_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Build the blocking HTTP client with bounded timeouts. Extracted as a seam
+/// so the timeout wiring is regression-tested against a never-responding
+/// server (`github_client_request_times_out_when_server_never_responds`).
+fn build_http_client(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .build()
+}
+
 /// A lightweight GitHub API client.
 pub struct GitHubClient {
     client: Client,
@@ -586,8 +633,7 @@ impl GitHubClient {
     /// Create a new client, resolving the token from environment or gh config.
     pub fn new() -> Result<Self, GitHubError> {
         let token = resolve_token()?;
-        let client = Client::builder()
-            .build()
+        let client = build_http_client(HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT)
             .map_err(GitHubError::Http)?;
         Ok(Self { client, token })
     }
@@ -683,6 +729,63 @@ impl GitHubClient {
         Ok(result.items)
     }
 
+    /// List open issues (excluding pull requests) carrying `label`. The
+    /// Autopilot poller's ingest query (issue #482): because it always asks
+    /// GitHub for the *current* open+labelled set, issues closed or untagged
+    /// while the app was offline simply never appear — state reconciliation
+    /// falls out of the query shape rather than needing a diff pass.
+    ///
+    /// The label is quoted in the search qualifier (labels may contain
+    /// spaces) and percent-encoded for the URL; embedded `"` are stripped
+    /// (GitHub label names can't contain them, and passing one through
+    /// would break the qualifier quoting).
+    pub fn list_open_issues_with_label(
+        &self,
+        owner: &str,
+        repo: &str,
+        label: &str,
+    ) -> Result<Vec<Issue>, GitHubError> {
+        let clean_label = label.replace('"', "");
+        let query = format!(
+            "repo:{}/{} is:issue state:open label:\"{}\"",
+            owner, repo, clean_label
+        );
+        let encoded: String = query
+            .chars()
+            .map(|c| match c {
+                ' ' => "+".to_string(),
+                '"' => "%22".to_string(),
+                '#' => "%23".to_string(),
+                '&' => "%26".to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+        let url = format!(
+            "https://api.github.com/search/issues?q={}&per_page=100",
+            encoded
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(GitHubError::Api(status.as_u16(), body));
+        }
+
+        #[derive(Deserialize)]
+        struct SearchResult {
+            items: Vec<Issue>,
+        }
+
+        let result: SearchResult = resp.json()?;
+        Ok(result.items)
+    }
+
     /// Create a pull request. Returns the PR URL.
     pub fn create_pull_request(
         &self,
@@ -709,6 +812,7 @@ impl GitHubClient {
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
             .json(&CreatePr { title, body, head, base })
+            .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
         let status = resp.status();
@@ -787,6 +891,38 @@ impl GitHubClient {
 
         let prs: Vec<PullRequest> = resp.json()?;
         Ok(prs)
+    }
+
+    /// Has this pull request been merged? Uses `GET /pulls/{n}/merge`, which
+    /// answers with a bare status: `204` = merged, `404` = not merged (or
+    /// closed without merging). Cheaper and less ambiguous than fetching the
+    /// full PR detail and combining `state` + `merged_at`.
+    pub fn pull_request_merged(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> Result<bool, GitHubError> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}/merge",
+            owner, repo, pr_number
+        );
+        let resp = self.client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(true);
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let body = resp.text().unwrap_or_default();
+        Err(GitHubError::Api(status.as_u16(), body))
     }
 
     /// Fetch a single PR's mergeability via the detail endpoint. The list
@@ -886,6 +1022,7 @@ impl GitHubClient {
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
             .json(&MergePr { merge_method: "squash" })
+            .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
         let status = resp.status();
@@ -908,11 +1045,17 @@ impl GitHubClient {
             "https://api.github.com/repos/{}/{}/pulls/{}",
             owner, repo, pr_number
         );
+        // Post-merge read: the merge already succeeded, so this GET is
+        // best-effort. The 30s default would otherwise abort the function
+        // with `Err` even though GitHub confirms the merge — use the write
+        // timeout so a slow followup can't undo a successful merge in the
+        // caller's view (issue #762 review).
         let pr_resp = self.client
             .get(&pr_url)
             .header(AUTHORIZATION, format!("Bearer {}", self.token))
             .header(USER_AGENT, "buildmesh")
             .header(ACCEPT, "application/vnd.github+json")
+            .timeout(HTTP_WRITE_REQUEST_TIMEOUT)
             .send()?;
 
         if pr_resp.status().is_success() {
@@ -973,12 +1116,30 @@ fn resolve_token() -> Result<String, GitHubError> {
     Err(GitHubError::NoToken)
 }
 
+/// Wall-clock timeout for the `gh auth token` shell-out. The CLI typically
+/// returns in <100ms (it reads from keyring/credential manager on disk);
+/// 5s is generous headroom for a slow disk while still bounding
+/// "filesystem hung" → resource leak on the blocking pool (issue #762).
+const GH_AUTH_TOKEN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Retrieve token via `gh auth token` (works when token is in secure storage).
+///
+/// **Timeout (issue #762):** the previous implementation called
+/// `Command::output()` with no bound. If the `gh` subprocess hung (waiting
+/// on a stuck keyring prompt, paused WSL interop, etc.) the calling
+/// blocking-pool thread leaked indefinitely. The `GH_AUTH_TOKEN_TIMEOUT`
+/// bound kills the child and returns `None` so the caller falls through
+/// to its `Err(GitHubError::NoToken)` error path — same observable
+/// behaviour as a missing-token user, which the UI already handles.
 fn run_gh_auth_token() -> Option<String> {
-    let output = command_no_window("gh")
-        .args(["auth", "token"])
-        .output()
-        .ok()?;
+    let mut cmd = command_no_window("gh");
+    cmd.args(["auth", "token"]);
+    let output = crate::process_util::run_command_with_timeout(
+        cmd,
+        "gh auth token",
+        GH_AUTH_TOKEN_TIMEOUT,
+    )
+    .ok()?;
 
     if !output.status.success() {
         return None;
@@ -1087,6 +1248,60 @@ pub fn parse_owner_repo(url: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for the overnight-freeze bug: a GitHub probe against a
+    /// server that accepts the TCP connection but never sends a response (a
+    /// half-open connection after laptop sleep / dropped Wi-Fi) must *error
+    /// out*, not hang forever. A hung blocking request parks a Tauri tokio
+    /// worker permanently; enough of them starve the pool and every async
+    /// command (agent keystrokes, other probes) stops responding while the
+    /// UI stays alive.
+    ///
+    /// The guard thread + `recv_timeout` turns a *hang* into a test
+    /// *failure*: without the client's `.timeout(...)` the `send()` never
+    /// returns, `recv_timeout` elapses, and we panic with a clear message
+    /// instead of wedging CI.
+    #[test]
+    fn github_client_request_times_out_when_server_never_responds() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+
+        // Acceptor: accept the connection and hold it open without ever
+        // writing a response, so only the request timeout can end the call.
+        thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf);
+                thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        // Short timeouts keep the test fast; this exercises the same builder
+        // wiring `GitHubClient::new` uses.
+        let client = build_http_client(Duration::from_secs(5), Duration::from_secs(1))
+            .expect("build client");
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = client.get(format!("http://{addr}/")).send();
+            let _ = tx.send(result.is_err());
+        });
+
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(true) => { /* request timed out and returned Err — correct */ }
+            Ok(false) => panic!("request unexpectedly succeeded against a silent server"),
+            Err(_) => panic!(
+                "client.send() did not return within 10s against a never-responding \
+                 server — the HTTP client has no request timeout, so a stalled probe \
+                 would park a tokio worker forever (worker-starvation freeze)"
+            ),
+        }
+    }
 
     #[test]
     fn test_parse_owner_repo_https() {

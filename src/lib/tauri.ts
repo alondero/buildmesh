@@ -5,6 +5,7 @@ import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
 import type { AppPreferences } from '../types/generated/AppPreferences';
+import type { AutopilotRunStateRow } from '../types/generated/AutopilotRunState';
 import type { BillingBalance } from '../types/generated/BillingBalance';
 import type { BillingMode } from '../types/generated/BillingMode';
 import type { BranchInfo } from '../types/generated/BranchInfo';
@@ -29,6 +30,7 @@ import type { MeshRow } from '../types/generated/MeshRow';
 import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { NetworkStatus } from '../types/generated/NetworkStatus';
+import type { PickedFolder } from '../types/generated/PickedFolder';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
@@ -129,8 +131,16 @@ export const updateAgentNodePositions = (updates: [number, number][]) =>
 export const addMesh = () =>
   _invoke<Mesh>('add_mesh');
 
-export const createMesh = (name: string, path: string) =>
-  _invoke<Mesh>('create_mesh', { name, path });
+/** Open the native folder picker; returns the chosen folder or null (cancel). */
+export const pickMeshFolder = () =>
+  _invoke<PickedFolder | null>('pick_mesh_folder');
+
+export const createMesh = (name: string, path: string, color?: string | null) =>
+  _invoke<Mesh>('create_mesh', { name, path, color: color ?? null });
+
+/** Set (or clear, with null) a mesh's accent colour hex. */
+export const updateMeshColor = (meshId: number, color: string | null) =>
+  _invoke('update_mesh_color', { meshId, color });
 
 export const createTestMesh = (name: string) =>
   _invoke<Mesh>('create_test_mesh', { name });
@@ -204,6 +214,38 @@ export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
  *  bool + zero-rows-is-an-error contract), like `updateMeshUseWorktree`. */
 export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
   _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
+
+/** Manually trigger the Autopilot wrap-up (`/finish`) sequence on a live
+ *  node (issue #484, PRD #480 story 15). Enrolls the node in the wrap-up
+ *  state machine so the self-correction loop and PR verification apply. */
+export const triggerFinish = (nodeId: number) =>
+  _invoke<void>('trigger_finish', { nodeId });
+
+/** Every live Autopilot run's `(node_id, state)` — the header pill's data.
+ *  Fetched alongside the node list in `fetchAgentNodes`. */
+export const listAutopilotRuns = () =>
+  _invoke<AutopilotRunStateRow[]>('list_autopilot_runs');
+
+/** Persist a mesh's Autopilot Policy in one write (issue #481, PRD #480).
+ *  Dedicated typed command like `updateMeshSandbox` — the backend
+ *  range-checks the concurrency limit (1..=8) and collapses blank
+ *  label/provider/action strings to NULL (poller defaults apply). */
+export const updateMeshAutopilot = (
+  meshId: number,
+  enabled: boolean,
+  triggerLabel: string | null,
+  concurrencyLimit: number,
+  provider: string | null,
+  actionOnSuccess: string | null
+) =>
+  _invoke<void>('update_mesh_autopilot', {
+    meshId,
+    enabled,
+    triggerLabel,
+    concurrencyLimit,
+    provider,
+    actionOnSuccess,
+  });
 
 /** Per-mesh target for the pre-spawn Worktree Pool
  *  (`services::warm_pool`, issue #611). `0` disables the pool for the
@@ -282,6 +324,12 @@ export const spawnAgent = (
   rows?: number,
   cols?: number,
 ) => _invoke('spawn_agent', { sessionId, provider, resume, rows, cols });
+
+// Issue #774 / #775 — swap a node's Model Provider. The worktree,
+// branch, name, and position are preserved; only `provider` changes. The
+// backend decides resume vs fresh from the new provider's harness.
+export const regenerateAgentNode = (nodeId: number, newProviderId: string) =>
+  _invoke<AgentNode>('regenerate_agent_node', { nodeId, newProviderId });
 
 export const killAgent = (sessionId: number) =>
   _invoke('kill_agent', { sessionId });
@@ -436,6 +484,17 @@ export type { OpenPr };
 
 export const getOpenPrForNode = (nodeId: number) =>
   _invoke<OpenPr | null>('get_open_pr_for_node', { nodeId });
+
+/** Return the `https://github.com/{owner}/{repo}` web URL for a mesh's
+ *  `origin` remote, or `null` when the origin isn't a GitHub URL (or the
+ *  mesh has no origin at all). The return is intentionally a plain
+ *  `string | null` — no generated wire type — so the IPC contract stays
+ *  a single string (issue #359's "no hand-declared TS interface for a
+ *  Rust wire type" rule is preserved trivially). Consumed by the mesh
+ *  context menu's "View on GitHub" item and by the Issues / PRs probe
+ *  headers' GitHub buttons. */
+export const getGitHubUrlForMesh = (meshId: number) =>
+  _invoke<string | null>('get_github_url_for_mesh', { meshId });
 
 // GitHub Issues — `GitHubIssue` is generated from the Rust struct
 // (src-tauri/src/commands/pr.rs) into src/types/generated/; see top import.
@@ -683,6 +742,16 @@ export const getAppPreferences = () =>
 export const setAppDefaultProvider = (provider: string | null) =>
   _invoke('set_app_default_provider', { provider });
 
+/** Issue #824: pick the backend that summarises PTY output into a slug.
+ *  Pass `null` (or empty) to **disable** auto-naming — nodes keep their
+ *  random `adjective-adjective-noun` slugs until the user picks a value
+ *  in Settings → Auto-naming. Distinct from `default_provider`: a
+ *  rename runs frequently on trivial content, so the user opts in
+ *  explicitly rather than inheriting whatever expensive tier the
+ *  spawned node happens to be on. */
+export const setAppNamingProvider = (provider: string | null) =>
+  _invoke('set_app_naming_provider', { provider });
+
 export const setMinimaxApiKey = (key: string | null) =>
   _invoke('set_minimax_api_key', { key });
 
@@ -858,6 +927,22 @@ export type { CertChainStatus };
 
 export const getCertChainStatus = () =>
   _invoke<CertChainStatus>('get_cert_chain_status');
+
+/** Root CA bytes for the phone-install QR (issue #702). Returns base64
+ *  (standard alphabet, '=' padding) — concatenate with the data: prefix
+ *  to produce the OS-installable URL. The desktop modal embeds this in
+ *  a second QR; scanning the QR on Android/iOS routes through the OS
+ *  CA installer instead of opening /install-cert.der in the desktop's
+ *  WebView2. */
+export const getRootCertDer = () =>
+  _invoke<string>('get_root_cert_der');
+
+/** App-level metadata (issue #826). The updater guard in `lib/updater.ts`
+ *  uses this to reject the dev profile (`*.dev` bundle id) from polling
+ *  the stable release feed — `tauri:build:dev` is a production-mode Vite
+ *  build, so an `import.meta.env.PROD` check alone can't tell them apart. */
+export const getAppIdentifier = () =>
+  _invoke<string>('get_app_identifier');
 
 /** Test-only: clear the module-level provider caches between cases. Exported
  *  with a leading-underscore name so accidental production use is loud. */

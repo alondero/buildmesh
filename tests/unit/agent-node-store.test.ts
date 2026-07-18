@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
 import {
@@ -47,6 +47,7 @@ describe('useAgentNodeStore', () => {
       loading: false,
       error: null,
       closingNodeIds: new Set(),
+      schedules: {},
     });
     vi.clearAllMocks();
     setWorktreeCloseActionResolverForTests();
@@ -724,6 +725,86 @@ describe('useAgentNodeStore', () => {
       await useAgentNodeStore.getState().swapAgentNodes(1, 2);
 
       expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('scheduleInput / cancelSchedule', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('stores schedule metadata with a computed targetTime', () => {
+      const now = Date.now();
+      useAgentNodeStore.getState().scheduleInput(1, 300_000, 'still there?', '5m');
+
+      const task = useAgentNodeStore.getState().schedules[1];
+      expect(task).toMatchObject({ nodeId: 1, message: 'still there?', label: '5m' });
+      expect(task.targetTime).toBeGreaterThanOrEqual(now + 300_000);
+      expect(task.timeoutId).toBeDefined();
+    });
+
+    it('sends the message and clears the schedule when the timeout fires', async () => {
+      mockInvoke.mockResolvedValue(undefined);
+      useAgentNodeStore.getState().scheduleInput(2, 1000, 'ping', '1m');
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(mockInvoke).toHaveBeenCalledWith('send_to_agent', { sessionId: 2, input: 'ping' });
+      expect(useAgentNodeStore.getState().schedules[2]).toBeUndefined();
+    });
+
+    it('writes a bare Enter instead of sendToAgent when message is empty', async () => {
+      mockInvoke.mockResolvedValue(undefined);
+      useAgentNodeStore.getState().scheduleInput(3, 1000, '', 'usage_reset');
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(mockInvoke).toHaveBeenCalledWith('write_to_agent', { sessionId: 3, data: '\n' });
+    });
+
+    it('replaces an existing schedule for the same node instead of stacking', async () => {
+      mockInvoke.mockResolvedValue(undefined);
+      useAgentNodeStore.getState().scheduleInput(4, 1000, 'first', '1m');
+      useAgentNodeStore.getState().scheduleInput(4, 2000, 'second', '2m');
+
+      await vi.advanceTimersByTimeAsync(1000);
+      // The first schedule was cancelled — nothing fires at its original delay.
+      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', { sessionId: 4, input: 'first' });
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockInvoke).toHaveBeenCalledWith('send_to_agent', { sessionId: 4, input: 'second' });
+    });
+
+    it('cancelSchedule clears the timeout and removes the entry', async () => {
+      mockInvoke.mockResolvedValue(undefined);
+      useAgentNodeStore.getState().scheduleInput(5, 1000, 'never sent', '1m');
+
+      useAgentNodeStore.getState().cancelSchedule(5);
+      expect(useAgentNodeStore.getState().schedules[5]).toBeUndefined();
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', { sessionId: 5, input: 'never sent' });
+    });
+
+    it('cancelSchedule is a no-op when there is no active schedule for the node', () => {
+      expect(() => useAgentNodeStore.getState().cancelSchedule(999)).not.toThrow();
+    });
+
+    it('deleteAgentNode cancels an active schedule for the node being deleted', async () => {
+      useAgentNodeStore.setState({ agentNodes: [makeNode({ id: 60 })], activeNodeId: 60 });
+      mockDeleteFlow(makeSafety());
+      useAgentNodeStore.getState().scheduleInput(60, 1000, 'ping', '1m');
+
+      await useAgentNodeStore.getState().deleteAgentNode(60);
+
+      expect(useAgentNodeStore.getState().schedules[60]).toBeUndefined();
+      mockInvoke.mockClear();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(mockInvoke).not.toHaveBeenCalledWith('send_to_agent', expect.anything());
     });
   });
 });

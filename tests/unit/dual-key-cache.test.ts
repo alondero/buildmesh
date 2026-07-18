@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { emit } from '@tauri-apps/api/event';
 import {
   createDualKeyCache,
@@ -234,5 +234,184 @@ describe('createDualKeyCache — bus dispatch is scoped to the owning client', (
     await emit('git-changed', { path: '/repoA' });
     expect(cb).toHaveBeenCalledTimes(1);
     expect(pathClient.read('/repoA')).toBeUndefined();
+  });
+});
+
+describe('minRefetchIntervalMs — freshness window on bus invalidation', () => {
+  // Fake timers drive Date.now() so the window boundary is exact.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('a matching event inside the window neither evicts nor notifies immediately', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    vi.advanceTimersByTime(29_999);
+    await emit('git-changed', { path: '/repo' });
+
+    expect(cb).not.toHaveBeenCalled();
+    expect(client.read(7)).toBe('fresh');
+
+    // …but the settled state still lands: a trailing evict+notify fires
+    // when the window expires (1ms later), so a burst that ends inside
+    // the window can never leave the panel permanently stale.
+    vi.advanceTimersByTime(1);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('a burst of suppressed events coalesces into ONE trailing notify', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    // Five events, all inside the window — an agent streaming edits.
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(1_000);
+      await emit('git-changed', { path: '/repo' });
+    }
+    expect(cb).not.toHaveBeenCalled();
+
+    // The single trailing refetch fires at window expiry (30s after the
+    // fetch, i.e. 25s after the last event) — once, not five times.
+    vi.advanceTimersByTime(25_000);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('a successful refresh cancels the pending trailing refetch', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    vi.advanceTimersByTime(1_000);
+    await emit('git-changed', { path: '/repo' }); // suppressed → trailing armed
+
+    // A manual refresh (user clicked Refresh) already delivers the state
+    // the suppressed event described — the trailing timer must be
+    // cancelled, or it would evict this fresh value one window later.
+    await client.refresh(7);
+    vi.advanceTimersByTime(60_000);
+    expect(cb).not.toHaveBeenCalled();
+    expect(client.read(7)).toBe('fresh');
+  });
+
+  it('a matching event after the window evicts and notifies as usual', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    vi.advanceTimersByTime(30_000);
+    await emit('git-changed', { path: '/repo' });
+
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('a key that has never fetched successfully is not gated', async () => {
+    vi.useFakeTimers();
+    // No refresh() — there is no lastFetchedAt stamp, so the event must
+    // notify (the subscriber may be waiting for its first load trigger).
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn(),
+      minRefetchIntervalMs: 30_000,
+    });
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('manual invalidate() is NOT gated — an explicit eviction always wins', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    expect(client.read(7)).toBe('fresh');
+
+    client.invalidate(7); // inside the window
+    expect(client.read(7)).toBeUndefined();
+  });
+
+  it('invalidate() clears the freshness stamp — a bus event after manual invalidation notifies', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    // Manual invalidation says "no longer authoritative" — the window must
+    // not keep suppressing bus notifications while the cache sits empty.
+    client.invalidate(7);
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it('createPathKeyedCache honours the window too', async () => {
+    vi.useFakeTimers();
+    const client = createPathKeyedCache<string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+      minRefetchIntervalMs: 30_000,
+    });
+    await client.refresh('/repo');
+    const cb = vi.fn();
+    client.subscribe('/repo', cb);
+
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).not.toHaveBeenCalled();
+    expect(client.read('/repo')).toBe('fresh');
+
+    // Advancing past the window fires the trailing refetch armed by the
+    // suppressed event above (one notify)…
+    vi.advanceTimersByTime(30_000);
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read('/repo')).toBeUndefined();
+
+    // …and with the stamp cleared, the next bus event notifies normally.
+    await emit('git-changed', { path: '/repo' });
+    expect(cb).toHaveBeenCalledTimes(2);
+    expect(client.read('/repo')).toBeUndefined();
+  });
+
+  it('defaults to 0 — every matching event evicts (original behaviour)', async () => {
+    vi.useFakeTimers();
+    const client = createDualKeyCache<number, string>({
+      fetcher: vi.fn().mockResolvedValue('fresh'),
+    });
+    await client.refresh(7);
+    const cb = vi.fn();
+    client.subscribeByPath(7, '/repo', cb);
+
+    await emit('git-changed', { path: '/repo' }); // zero ms later
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(client.read(7)).toBeUndefined();
   });
 });

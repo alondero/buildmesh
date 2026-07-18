@@ -16,6 +16,7 @@ import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
 import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 import { groupByHarness } from "../../lib/groups";
+import { STATUS_CONFIG } from "../../lib/status";
 
 type Props = {
   onOpenNode: (node: AgentNode) => void;
@@ -25,20 +26,17 @@ type Props = {
   onAuthFailed: () => void;
 };
 
-export const STATUS_META: Record<NodeStatus, { color: string; label: string }> = {
-  idle: { color: "#2196f3", label: "idle" },
-  running: { color: "#4caf50", label: "running" },
-  suspended: { color: "#9e9e9e", label: "suspended" },
-  error: { color: "#f44336", label: "error" },
-  awaiting_input: { color: "#ff9800", label: "needs input" },
-  archived: { color: "#555", label: "archived" },
-  // `pending` is part of the generated SessionStatus union (issue #359);
-  // the two-stage spawn flow sets it while stage-2 (worktree + PTY) runs.
-  pending: { color: "#9c27b0", label: "starting" },
-  // Issue #654 — transient state between process launch and the 3s
-  // conditional Running promotion.
-  spawning: { color: "#9c27b0", label: "starting" },
-};
+// `archived` sits outside the shared `STATUS_CONFIG` (desktop never shows a
+// status badge for it — see the "Regenerate unavailable" comment in
+// `Sidebar/NodeItem.tsx`). Mobile filters archived nodes out of the list
+// entirely (see `visibleNodes` below), but `statusMeta` must stay total
+// over the full `NodeStatus` union since `NodeRow` is a generic renderer.
+const ARCHIVED_STATUS_META = { hex: "#555555", label: "Archived" };
+
+function statusMeta(status: NodeStatus): { hex: string; label: string } {
+  if (status === "archived") return ARCHIVED_STATUS_META;
+  return STATUS_CONFIG[status];
+}
 
 // Offline fallback shown only when the /providers fetch fails. The live list is
 // the user's dynamic harness profiles; this is a degraded static default (issue
@@ -123,17 +121,22 @@ export default function NodeList({
   // Archived nodes are history, not actionable work — hide them on mobile.
   const visibleNodes = (nodes ?? []).filter((n) => n.status !== "archived");
 
-  const nodesByMesh = new Map<number, AgentNode[]>();
-  for (const node of visibleNodes) {
-    if (!nodesByMesh.has(node.mesh_id)) nodesByMesh.set(node.mesh_id, []);
-    nodesByMesh.get(node.mesh_id)!.push(node);
-  }
-
   // Mobile-only QoL: pin awaiting-input nodes at the top so attention
   // is one tap away no matter how many meshes you have configured.
   const attentionNodes = visibleNodes
     .filter((n) => n.status === "awaiting_input")
     .sort((a, b) => a.id - b.id);
+
+  // Bucket the remaining nodes by mesh. Attention nodes are EXCLUDED here
+  // because they're already rendered in the "Needs attention" section above;
+  // including them too would render each awaiting-input node twice (once
+  // pinned, once under its mesh).
+  const nodesByMesh = new Map<number, AgentNode[]>();
+  for (const node of visibleNodes) {
+    if (node.status === "awaiting_input") continue;
+    if (!nodesByMesh.has(node.mesh_id)) nodesByMesh.set(node.mesh_id, []);
+    nodesByMesh.get(node.mesh_id)!.push(node);
+  }
 
   return (
     <div className="screen">
@@ -177,6 +180,7 @@ export default function NodeList({
                   key={`attn-${node.id}`}
                   node={node}
                   onClick={() => onOpenNode(node)}
+                  providers={providers}
                 />
               ))}
             </section>
@@ -258,6 +262,7 @@ export default function NodeList({
                       key={node.id}
                       node={node}
                       onClick={() => onOpenNode(node)}
+                      providers={providers}
                     />
                   ))
                 )}
@@ -407,9 +412,22 @@ function SheetButton({
   );
 }
 
-export function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => void }) {
-  const meta = STATUS_META[node.status] ?? { color: "#555", label: node.status };
+export function NodeRow({
+  node,
+  onClick,
+  providers,
+}: {
+  node: AgentNode;
+  onClick: () => void;
+  providers?: Provider[];
+}) {
+  const meta = statusMeta(node.status);
   const needsInput = node.status === "awaiting_input";
+  // Friendly label from the backend-derived provider list (issue #815) —
+  // falls back to the raw id only if the node's provider isn't in the
+  // current list (e.g. a since-removed harness profile).
+  const providerLabel =
+    providers?.find((p) => p.id === node.provider)?.label ?? node.provider;
   return (
     <button
       onClick={onClick}
@@ -422,7 +440,7 @@ export function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => voi
         withBackground
         chipTestId="node-avatar"
         className="h-5 w-5"
-        title={node.provider}
+        title={providerLabel}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
@@ -449,18 +467,18 @@ export function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => voi
             whiteSpace: "nowrap",
           }}
         >
-          {node.provider} ·
+          {providerLabel} ·
           <span
             style={{
               width: 7,
               height: 7,
               borderRadius: "50%",
-              background: meta.color,
+              background: meta.hex,
               flexShrink: 0,
               display: "inline-block",
             }}
           />
-          <span style={{ color: meta.color }}>{meta.label}</span>
+          <span style={{ color: meta.hex }}>{meta.label}</span>
         </div>
       </div>
       <div
@@ -468,7 +486,7 @@ export function NodeRow({ node, onClick }: { node: AgentNode; onClick: () => voi
           width: 3,
           height: 34,
           borderRadius: 2,
-          background: meta.color,
+          background: meta.hex,
           flexShrink: 0,
         }}
       />

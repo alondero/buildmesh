@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState, useRef, type MouseEvent as ReactMouseEvent } from 'react';
+import { Fragment, useEffect, useMemo, useState, useRef } from 'react';
 import {
   DndContext, DragOverlay, PointerSensor, useSensor, useSensors, pointerWithin,
   type DragStartEvent, type DragMoveEvent, type DragEndEvent,
@@ -7,16 +7,16 @@ import { useAgentNodeStore, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
-import { isMac } from '../../lib/platform';
+import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { NodeCard, type BuildRunState } from './NodeCard';
 import { DropIntentContext, NodeDragPreview, computeDropIntent, type DropIntent } from './nodeDrag';
 import { equalSizes } from '../../hooks/useGridLayout';
+import { useResizable, SPLITTER_HANDLE_WIDTH } from '../../hooks/useResizable';
 
 const MIN_PANE_PERCENT = 15;
-const RESIZE_HANDLE_WIDTH = 4;
 
 interface ResizablePanesProps {
   nodes: AgentNode[];
@@ -27,78 +27,59 @@ interface ResizablePanesProps {
 
 function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: ResizablePanesProps) {
   const [widths, setWidths] = useState(() => equalSizes(nodes.length));
-  // Issue #301: keep a ref of the latest `widths` updated synchronously per
-  // render. The drag-state machine below snapshots from this ref in
-  // mousedown, NOT from the closed-over `widths` state — without the ref,
-  // a fast second drag would snapshot the pre-first-drag widths and the
-  // pane divider would visibly jump. The same pattern lives in
-  // GridSplitter (lines 41–46 there) and `src/hooks/useResizable.ts`.
-  const widthsRef = useRef(widths);
-  widthsRef.current = widths;
-  const resizingRef = useRef(false);
-  const startXRef = useRef(0);
-  const startWidthsRef = useRef<number[]>([]);
-  const dragIndexRef = useRef<number>(0);
-  const containerRef = useRef<HTMLElement | null>(null);
+  // `idxRef` records which separator the user clicked, since the shared
+  // `useResizable` hook fires `handleMouseDown` without knowing which divider
+  // it came from. The ref is read inside the `compute` callback on every
+  // mousemove. `containerRef` is the flex row's own div — used to
+  // measure width on demand inside the compute, no `getElementById` lookup.
+  const idxRef = useRef<number>(0);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setWidths(equalSizes(nodes.length));
   }, [nodes.length]);
 
-  const handleResizeMouseDown = (e: ReactMouseEvent, index: number) => {
-    e.preventDefault();
-    resizingRef.current = true;
-    dragIndexRef.current = index;
-    startXRef.current = e.clientX;
-    // BUG FIX (#301): snapshot from widthsRef (kept in sync per render),
-    // NOT from the closed-over `widths` state. See file-level comment.
-    startWidthsRef.current = [...widthsRef.current];
-    containerRef.current = document.getElementById('grid-panes-container');
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-  };
-
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!resizingRef.current) return;
-      const container = containerRef.current;
-      if (!container) return;
-      const containerWidth = container.getBoundingClientRect().width;
-      const deltaPercent = ((e.clientX - startXRef.current) / containerWidth) * 100;
-
-      const i = dragIndexRef.current;
-      const leftOrig = startWidthsRef.current[i];
-      const rightOrig = startWidthsRef.current[i + 1];
-      const clamped = Math.max(MIN_PANE_PERCENT - leftOrig, Math.min(deltaPercent, rightOrig - MIN_PANE_PERCENT));
-
+  // `compute` is called by the shared hook on every mousemove. The hook has
+  // already snapshotted the baseline `widths` at mousedown and the signed
+  // pointer delta along the col axis — we only need to apply the MIN clamp
+  // and copy out a new array. The same-value short-circuit (`prev[i] ===
+  // newLeft`) moves into the onChange wrapper so React still skips the
+  // re-render when the divider hasn't moved a renderable amount.
+  const { handleMouseDown } = useResizable<number[]>({
+    value: widths,
+    axis: 'col',
+    throttle: 'sync',
+    lockBody: true,
+    compute: (baseline, deltaPx) => {
+      const containerWidth = containerRef.current?.getBoundingClientRect().width;
+      if (!containerWidth) return baseline;
+      const deltaPercent = (deltaPx / containerWidth) * 100;
+      const i = idxRef.current;
+      const leftOrig = baseline[i];
+      const rightOrig = baseline[i + 1];
+      const clamped = Math.max(
+        MIN_PANE_PERCENT - leftOrig,
+        Math.min(deltaPercent, rightOrig - MIN_PANE_PERCENT),
+      );
       const newLeft = leftOrig + clamped;
       const newRight = rightOrig - clamped;
-      setWidths(prev => {
-        if (prev[i] === newLeft) return prev;
-        const next = [...startWidthsRef.current];
-        next[i] = newLeft;
-        next[i + 1] = newRight;
-        return next;
-      });
-    };
+      const next = [...baseline];
+      next[i] = newLeft;
+      next[i + 1] = newRight;
+      return next;
+    },
+    onChange: (next: number[]) => setWidths((prev) => {
+      const i = idxRef.current;
+      if (prev[i] === next[i]) return prev; // identical — skip the render.
+      return next;
+    }),
+    onEnd: () => terminalManager.fitAll(),
+  });
 
-    const handleMouseUp = () => {
-      if (resizingRef.current) {
-        resizingRef.current = false;
-        containerRef.current = null;
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-        terminalManager.fitAll();
-      }
-    };
-
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, []);
+  const onHandleMouseDown = (e: React.MouseEvent, index: number) => {
+    idxRef.current = index;
+    handleMouseDown(e);
+  };
 
   const activeNodeId = useAgentNodeStore(state => state.activeNodeId);
   const setActiveNode = useAgentNodeStore(state => state.setActiveNode);
@@ -106,6 +87,7 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
 
   return (
     <div
+      ref={containerRef}
       id="grid-panes-container"
       className={`flex-1 flex overflow-hidden ${isMultiPane ? 'p-1 bg-bg-surface' : 'flex-col'}`}
     >
@@ -127,9 +109,9 @@ function ResizablePanes({ nodes, onBuildRun, buildRunOpen, setBuildRunOpen }: Re
             </div>
             {isMultiPane && idx < nodes.length - 1 && (
               <div
-                onMouseDown={(e) => handleResizeMouseDown(e, idx)}
+                onMouseDown={(e) => onHandleMouseDown(e, idx)}
                 className="cursor-col-resize hover:bg-accent-cyan/30 active:bg-accent-cyan/50 transition-colors shrink-0 self-stretch rounded-sm"
-                style={{ width: RESIZE_HANDLE_WIDTH }}
+                style={{ width: SPLITTER_HANDLE_WIDTH }}
               />
             )}
           </Fragment>
@@ -359,19 +341,31 @@ export function AgentNodeView() {
                   </svg>
                   Add Mesh
                 </button>
-                <div className="mt-8 text-[11px] text-text-muted font-mono space-y-1">
-                  {/* Modifier prefix follows the platform convention used elsewhere
-                      (Terminal.tsx context menu, README): ⌘ on macOS, Ctrl on
-                      Windows/Linux. The arrow glyphs (←/→/↑/↓) read identically
-                      across platforms and match the key names bound by Tauri's
-                      global-shortcut plugin.
+                <div className="mt-8 text-xs text-text-muted font-mono space-y-1">
+                  {/* Issue #748: the splash now sources its rows from
+                      SHORTCUT_CATALOG (entries flagged `splash: true`) instead
+                      of hand-coding five inline strings. A future catalog edit
+                      (e.g. renaming `?` to `Ctrl+/`) now propagates here
+                      automatically — the previous hand-coded version would
+                      silently drift.
+
+                      Modifier prefix follows the platform convention used
+                      elsewhere (Terminal.tsx context menu, README): ⌘ on macOS,
+                      Ctrl on Windows/Linux. The arrow glyphs (←/→/↑/↓) read
+                      identically across platforms and match the key names
+                      bound by Tauri's global-shortcut plugin.
+
                       Issue #668 — Alt+G (Win/Linux) / ⌘+G (macOS) is the new
                       maximize/restore toggle. Listed here so users discover it
                       before they ever open a mesh. */}
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘' : 'Ctrl'}+T</kbd> New agent node</p>
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘' : 'Ctrl'}+←/→/↑/↓</kbd> Traverse nodes</p>
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">{isMac ? '⌘' : 'Alt'}+G</kbd> Toggle grid / single view</p>
-                  <p><kbd className="px-1 py-0.5 rounded bg-bg-card border border-border-default">Esc</kbd> Close dialogs / exit maximized view</p>
+                  {SHORTCUT_CATALOG.filter(e => e.splash).map(entry => (
+                    <p key={entry.action}>
+                      <kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">
+                        {shortcutLabel(entry)}
+                      </kbd>
+                      {' '}{entry.description}
+                    </p>
+                  ))}
                 </div>
               </div>
             </div>

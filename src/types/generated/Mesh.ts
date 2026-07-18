@@ -42,10 +42,50 @@ sandbox: boolean,
  * for this mesh (no warm entries created on startup, no refill
  * after claim); `1..=5` is the target the worker fills to.
  * Clamped at the IPC boundary (`update_mesh_pool_size`), not here
- * — this field is the typed integer the worker reads. Off by
- * default (`0`); opted into via the Worktrees Probe's
- * ConfigurationCard (issue #611). Persisted as
- * `meshes.pre_spawn_pool_size INTEGER NOT NULL DEFAULT 0`
- * (schema v22).
+ * — this field is the typed integer the worker reads. ON by
+ * default since schema v24 (`1`, ADR 0020); opted out via the
+ * Worktrees Probe's ConfigurationCard (issue #611). Persisted as
+ * `meshes.pre_spawn_pool_size INTEGER NOT NULL DEFAULT 1`
+ * (schema v22, default flipped in v24).
  */
-pre_spawn_pool_size: number, };
+pre_spawn_pool_size: number, 
+/**
+ * User-chosen accent colour for the mesh, as a `#rrggbb` hex string.
+ * Picked in the "New mesh" modal on creation and recolourable by
+ * clicking the mesh's colour swatch in the sidebar. `None` means the
+ * user never chose one, so the frontend falls back to the deterministic
+ * palette keyed on the mesh id (`src/lib/meshColors.ts`). Persisted as
+ * `meshes.color TEXT` (schema v25); empty/absent reads back as `None`.
+ */
+color: string | null, 
+/**
+ * Autopilot Mode master switch (issue #481, PRD #480). When `true` the
+ * background poller (`services::autopilot`) watches this mesh's GitHub
+ * repo for issues tagged [`Mesh::autopilot_trigger_label`] and spawns
+ * branched-worktree Agent Nodes for them automatically. Persisted as
+ * `meshes.autopilot_enabled INTEGER NOT NULL DEFAULT 0` (schema v26).
+ */
+autopilot_enabled: boolean, 
+/**
+ * GitHub issue label that marks an issue as an Autopilot task. `None`
+ * falls back to [`DEFAULT_AUTOPILOT_TRIGGER_LABEL`] at poll time.
+ */
+autopilot_trigger_label: string | null, 
+/**
+ * Maximum number of concurrently *active* auto-spawned nodes for this
+ * mesh. The poller only ingests new issues while the active count is
+ * below this limit (PRD #480 story 5/6). Clamped to `1..=8` at the IPC
+ * boundary; stored as `INTEGER NOT NULL DEFAULT 2`.
+ */
+autopilot_concurrency_limit: number, 
+/**
+ * Spawn Option id auto-spawned nodes use. `None` falls through the
+ * normal default-provider chain (mesh default → app default → claude).
+ */
+autopilot_provider: string | null, 
+/**
+ * What Autopilot asks the agent to do once the wrap-up verification
+ * passes: `"draft_pr"` (default) opens a draft PR, `"pr"` opens a
+ * ready-for-review PR, `"none"` stops after push.
+ */
+autopilot_action_on_success: string | null, };

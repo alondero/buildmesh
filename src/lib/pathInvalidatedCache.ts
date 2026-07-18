@@ -142,6 +142,27 @@ export interface PathInvalidatedCacheOptions<K, V> {
   fetcher: (key: K) => Promise<V | null>;
   /** Tag used in the dev-console warning when `fetcher` throws. */
   name?: string;
+  /**
+   * Freshness window for bus-driven invalidation, in milliseconds. While a
+   * key's last successful fetch is younger than this, a matching
+   * `GIT_CHANGED` event neither evicts the cache nor notifies subscribers
+   * immediately — the cached value stays authoritative. Instead, ONE
+   * trailing evict+notify is scheduled for the moment the window expires,
+   * so the settled on-disk state always lands (a burst of suppressed
+   * events collapses into a single deferred refetch rather than being
+   * silently dropped — the panel can never go permanently stale).
+   *
+   * Use for expensive fetchers: `useOpenPr`'s live GitHub request, and the
+   * git status/summary/branch/health walks — every agent file-write fires
+   * `GIT_CHANGED` (up to ~2/s per watched node via the backend coalescer),
+   * and refetching each of several full-repo status walks at that rate is
+   * the steady-state load that makes the app feel sluggish while agents
+   * stream edits. Manual `invalidate()`/`refresh()` are NOT gated — an
+   * explicit user refresh always wins (and cancels any pending trailing
+   * refetch). Defaults to `0` (evict on every matching event, the
+   * original behaviour).
+   */
+  minRefetchIntervalMs?: number;
 }
 
 // ------------------------------------------------------------------
@@ -313,6 +334,7 @@ interface InternalClient<K, V> {
 function createInternalClient<K, V>(
   fetcher: (key: K) => Promise<V | null>,
   name: string,
+  minRefetchIntervalMs = 0,
 ): InternalClient<K, V> {
   // Per-client state. A `Symbol` clientId is the load-bearing piece that
   // makes the cross-client dispatch scoping work — see module docstring.
@@ -324,11 +346,48 @@ function createInternalClient<K, V>(
   // `lastError(key)` so callers can disambiguate "fetch failed" from
   // "fetcher returned null" — issue #342.
   const errors = new Map<K, Error>();
+  // Per-key timestamp of the last successful refresh — drives the
+  // `minRefetchIntervalMs` freshness window in the bus handler below.
+  const lastFetchedAt = new Map<K, number>();
+  // Trailing-refetch state for the freshness window: when a bus event is
+  // suppressed (value still fresh), we remember the suppressed subscribers'
+  // notify callbacks and arm ONE timer per key for the window's expiry.
+  // Firing evicts + notifies, so the settled state after a burst always
+  // lands — suppression bounds the refetch RATE, it never drops the final
+  // refetch (the pre-existing behaviour left panels stale until the next
+  // unrelated event).
+  const trailingTimers = new Map<K, ReturnType<typeof setTimeout>>();
+  const trailingNotifies = new Map<K, Set<() => void>>();
+
+  const cancelTrailing = (key: K) => {
+    const timer = trailingTimers.get(key);
+    if (timer !== undefined) clearTimeout(timer);
+    trailingTimers.delete(key);
+    trailingNotifies.delete(key);
+  };
+
+  const fireTrailing = (key: K) => {
+    trailingTimers.delete(key);
+    const notifies = trailingNotifies.get(key);
+    trailingNotifies.delete(key);
+    cache.delete(key);
+    pending.delete(key);
+    // The stamp must go too: the value is no longer authoritative, so the
+    // next bus event (or this notify's refetch) must not be re-suppressed
+    // off the stale timestamp.
+    lastFetchedAt.delete(key);
+    notifies?.forEach((notify) => notify());
+  };
+
   // Let `resetPathInvalidatedCacheForTests` wipe this client's state too.
   clientCacheResets.add(() => {
     cache.clear();
     pending.clear();
     errors.clear();
+    lastFetchedAt.clear();
+    trailingTimers.forEach((timer) => clearTimeout(timer));
+    trailingTimers.clear();
+    trailingNotifies.clear();
   });
 
   // The bus calls this for every matched KEYED subscriber of THIS client. It
@@ -338,6 +397,30 @@ function createInternalClient<K, V>(
   // `KeyedBusHandler<K>` so the `sub.key` reads/writes are checked
   // against `K` — no `as K` cast (issue #355).
   const handler: KeyedBusHandler<K> = (sub) => {
+    // Freshness window (see `minRefetchIntervalMs` docs): a value fetched
+    // recently enough is authoritative — skip the immediate eviction and
+    // notify, but arm the trailing refetch so the settled state still
+    // lands once the window expires.
+    if (minRefetchIntervalMs > 0) {
+      const fetchedAt = lastFetchedAt.get(sub.key);
+      if (fetchedAt !== undefined && Date.now() - fetchedAt < minRefetchIntervalMs) {
+        let notifies = trailingNotifies.get(sub.key);
+        if (!notifies) {
+          notifies = new Set();
+          trailingNotifies.set(sub.key, notifies);
+        }
+        notifies.add(sub.notify);
+        if (!trailingTimers.has(sub.key)) {
+          const delay = minRefetchIntervalMs - (Date.now() - fetchedAt);
+          trailingTimers.set(
+            sub.key,
+            setTimeout(() => fireTrailing(sub.key), delay),
+          );
+        }
+        return;
+      }
+    }
+    cancelTrailing(sub.key);
     cache.delete(sub.key);
     pending.delete(sub.key);
     sub.notify();
@@ -358,9 +441,14 @@ function createInternalClient<K, V>(
         .then((result) => {
           cache.set(key, result === null ? HAS_NULL : result);
           pending.delete(key);
+          lastFetchedAt.set(key, Date.now());
           // A success erases the previous failure for this key — the hook
           // layer's `error` field will read `null` on the next state read.
           errors.delete(key);
+          // A fresh fetch already reflects any changes the suppressed
+          // events described — the pending trailing refetch would just
+          // duplicate this result one window later. Cancel it.
+          cancelTrailing(key);
           return result;
         })
         .catch((err) => {
@@ -388,6 +476,13 @@ function createInternalClient<K, V>(
     invalidate(key) {
       cache.delete(key);
       pending.delete(key);
+      // An explicit invalidation says the value is no longer authoritative:
+      // drop the freshness stamp so the `minRefetchIntervalMs` window can't
+      // keep suppressing bus notifications while the cache sits empty, and
+      // cancel any armed trailing refetch (the caller is about to drive its
+      // own refresh — a deferred second eviction would race it).
+      lastFetchedAt.delete(key);
+      cancelTrailing(key);
     },
 
     subscribeOn(key, path, onInvalidate) {
@@ -424,8 +519,8 @@ function createInternalClient<K, V>(
 export function createPathKeyedCache<V>(
   options: PathInvalidatedCacheOptions<string, V>,
 ): PathKeyedClient<V> {
-  const { fetcher, name = 'pathInvalidatedCache' } = options;
-  const internal = createInternalClient<string, V>(fetcher, name);
+  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs } = options;
+  const internal = createInternalClient<string, V>(fetcher, name, minRefetchIntervalMs);
 
   return {
     ...internal,
@@ -453,8 +548,8 @@ export function createPathKeyedCache<V>(
 export function createDualKeyCache<K, V>(
   options: PathInvalidatedCacheOptions<K, V>,
 ): DualKeyClient<K, V> {
-  const { fetcher, name = 'pathInvalidatedCache' } = options;
-  const internal = createInternalClient<K, V>(fetcher, name);
+  const { fetcher, name = 'pathInvalidatedCache', minRefetchIntervalMs } = options;
+  const internal = createInternalClient<K, V>(fetcher, name, minRefetchIntervalMs);
 
   // The `subscribe` and `subscribeOn` members are intentionally NOT
   // exposed on the dual-key public type — `subscribeByPath` is the only

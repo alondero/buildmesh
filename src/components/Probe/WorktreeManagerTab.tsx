@@ -57,6 +57,7 @@ import {
   type MeshHealth,
   type WorktreeInfo,
 } from '../../lib/tauri';
+import { LoadingState } from '../shared/Spinner';
 
 /** Lucide folder-open. */
 function FolderOpenIcon({ className }: { className?: string }) {
@@ -95,8 +96,9 @@ const openInExplorer = async (path: string) => {
 const Badge = ({ color, text, title }: { color: string; text: string; title?: string }) => (
   <span
     title={title}
-    className={`px-1 py-px rounded text-[9px] font-medium leading-none ${color}`}
+    className={`px-1 py-px rounded text-2xs font-medium leading-none ${color}`} /* allow-bare-rounded */
   >
+    {/* 2xs status badge — intentionally smallest radius, no interaction */}
     {text}
   </span>
 );
@@ -192,13 +194,20 @@ const formToWireBaseRef = (form: BaseRefForm): 'origin/main' | 'HEAD' =>
   form === 'head' ? 'HEAD' : 'origin/main';
 
 export function WorktreeManagerTab() {
-  const { activeMeshId, activePath } = useProbeContext();
+  // This is a MESH-scoped tab: the health snapshot and the Restore/Free
+  // recovery actions walk the mesh *root*, not a focused node's worktree.
+  // Use `activeMeshPath` (the mesh row's own path) — `activePath` resolves
+  // to the focused node's worktree subdir when a node is active, which would
+  // key the health file-watch subscription off the wrong directory and
+  // diverge from the sidebar `!` badge (which uses the mesh root). See the
+  // `useProbeContext` contract and `MeshPropertiesTab` (issue #809).
+  const { activeMeshId, activeMeshPath } = useProbeContext();
 
   // The health hook subscribes to the shared cache (used by the sidebar's
   // `!` badge too) and refetches on GIT_CHANGED / focus. The prune info is
   // local to this tab — only it cares about the full list, so it doesn't
   // share a cache.
-  const { health, refresh: refreshHealth } = useMeshHealth(activeMeshId, activePath);
+  const { health, refresh: refreshHealth } = useMeshHealth(activeMeshId, activeMeshPath);
 
   const [repos, setRepos] = useState<GitRepoPruneInfo[]>([]);
   const [loading, setLoading] = useState(false);
@@ -364,7 +373,7 @@ export function WorktreeManagerTab() {
 
   // Configuration card load (issue #451). Mirrors the dep discipline
   // from `MeshPropertiesTab.tsx:143-167`: the dep set is intentionally
-  // `[activeMeshId, activePath]` only — adding the form state (e.g.
+  // `[activeMeshId, activeMeshPath]` only — adding the form state (e.g.
   // `useWorktree`) would re-fire on every save and clobber the user's
   // in-flight edits to `baseRef` / `worktreeMode` with the just-saved
   // values. On a load failure we keep the stale form state rather
@@ -388,7 +397,7 @@ export function WorktreeManagerTab() {
           // MeshPropertiesTab's load-failure behaviour.
         });
     },
-    [activeMeshId, activePath],
+    [activeMeshId, activeMeshPath],
   );
 
   // Configuration card save handlers. Each: (1) update form state
@@ -588,7 +597,7 @@ export function WorktreeManagerTab() {
   // The probe shell's "No project selected" empty state already covers
   // the no-mesh case, so this is belt-and-braces in case the tab is ever
   // mounted standalone.
-  if (activeMeshId === null || !activePath) return null;
+  if (activeMeshId === null || !activeMeshPath) return null;
 
   return (
     <div className="p-4 space-y-4">
@@ -666,7 +675,7 @@ export function WorktreeManagerTab() {
       )}
 
       {loading && repos.length === 0 ? (
-        <p className="text-xs text-text-muted">Loading git objects…</p>
+        <LoadingState label="Loading git objects…" />
       ) : (
         <div className="space-y-4">
           {repos.map((repo) => (
@@ -815,8 +824,8 @@ function HealthBlock({ health, inFlight, onRestore, onFree, message }: HealthBlo
   })();
 
   return (
-    <div className="rounded border border-status-warning/40 bg-status-warning-bg/5 p-2 space-y-2">
-      <p className="text-[11px] text-status-warning font-medium">
+    <div className="rounded-md border border-status-warning/40 bg-status-warning/5 p-2 space-y-2">
+      <p className="text-xs text-status-warning font-medium">
         {healthOneLiner(health)}
       </p>
 
@@ -873,12 +882,12 @@ interface RepoBlockProps {
  */
 function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlockProps) {
   return (
-    <div className="space-y-3 rounded border border-border-subtle p-3">
+    <div className="space-y-3 rounded-md border border-border-subtle p-3">
       {/* Repo path + open-in-explorer. `min-w-0` lets the path truncate
           under the trailing icon instead of pushing it out of the card. */}
       <div className="flex items-center justify-between gap-2">
         <span
-          className="text-[10px] font-mono text-text-muted truncate flex-1 min-w-0"
+          className="text-2xs font-mono text-text-secondary truncate flex-1 min-w-0"
           title={repo.path}
         >
           {repo.path}
@@ -889,7 +898,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
           aria-label={`Open ${repo.path} in file explorer`}
           title="Open in file explorer"
           data-testid={`repo-open-${repo.path}`}
-          className="p-1 rounded text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors flex-shrink-0"
+          className="p-1 rounded-md text-text-muted hover:text-accent-cyan hover:bg-bg-card transition-colors flex-shrink-0"
         >
           <FolderOpenIcon className="w-3.5 h-3.5" />
         </button>
@@ -897,7 +906,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
 
       {/* Local branches */}
       <div>
-        <p className="text-[10px] uppercase tracking-wide text-text-muted mb-1">
+        <p className="text-2xs uppercase tracking-wide text-text-muted mb-1">
           Local branches
         </p>
         {repo.local_branches.length === 0 ? (
@@ -936,7 +945,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                       ? `Checked out in worktree "${inWorktreeName}" — remove the worktree above to delete this branch`
                       : undefined
                   }
-                  className={`flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
+                  className={`flex items-center gap-2 text-xs rounded-md px-1 py-0.5 ${
                     undeletable
                       ? 'opacity-60'
                       : 'cursor-pointer hover:bg-bg-overlay/40'
@@ -983,12 +992,12 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                         <Badge color="bg-bg-overlay text-text-muted" text="clean" />
                       )}
                       {(b.ahead > 0 || b.behind > 0) && (
-                        <span className="text-[9px] font-mono text-text-muted">
+                        <span className="text-2xs font-mono text-text-secondary">
                           ↑{b.ahead} ↓{b.behind}
                         </span>
                       )}
                       {b.last_commit_date && (
-                        <span className="text-[9px] text-text-muted">
+                        <span className="text-2xs text-text-secondary">
                           {formatDate(b.last_commit_date)}
                         </span>
                       )}
@@ -1003,7 +1012,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
 
       {/* Worktrees */}
       <div>
-        <p className="text-[10px] uppercase tracking-wide text-text-muted mb-1">
+        <p className="text-2xs uppercase tracking-wide text-text-muted mb-1">
           Worktrees
         </p>
         {repo.worktrees.length === 0 ? (
@@ -1029,7 +1038,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                       ? 'Pre-spawn Pool — managed automatically'
                       : w.path
                   }
-                  className={`group flex items-center gap-2 text-xs rounded px-1 py-0.5 ${
+                  className={`group flex items-center gap-2 text-xs rounded-md px-1 py-0.5 ${
                     undeletable
                       ? 'opacity-60'
                       : 'cursor-pointer hover:bg-bg-overlay/40'
@@ -1050,7 +1059,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                     <span className="text-text-primary truncate flex-1 min-w-0">
                       {name}
                       {w.branch && (
-                        <span className="text-text-muted"> · {w.branch}</span>
+                        <span className="text-text-secondary"> · {w.branch}</span>
                       )}
                     </span>
                     <span className="flex items-center gap-1 flex-shrink-0">
@@ -1086,7 +1095,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                     aria-label={`Open ${w.path} in file explorer`}
                     title="Open in file explorer"
                     data-testid={`worktree-open-${key}`}
-                    className="p-1 rounded text-text-muted opacity-0 group-hover:opacity-100 hover:!opacity-100 hover:text-accent-cyan hover:bg-bg-card transition-opacity flex-shrink-0"
+                    className="p-1 rounded-md text-text-muted opacity-0 group-hover:opacity-100 hover:!opacity-100 hover:text-accent-cyan hover:bg-bg-card transition-opacity flex-shrink-0"
                   >
                     <FolderOpenIcon className="w-3.5 h-3.5" />
                   </button>
@@ -1101,14 +1110,14 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
       {repo.remote_tracking_branches.length > 0 && (
         <div>
           <div className="flex items-center justify-between mb-1">
-            <p className="text-[10px] uppercase tracking-wide text-text-muted">
+            <p className="text-2xs uppercase tracking-wide text-text-muted">
               Remote-tracking
             </p>
             <button
               type="button"
               onClick={() => void onPruneRemote()}
               disabled={pruning}
-              className="text-[10px] text-text-muted hover:text-text-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="text-2xs text-text-muted hover:text-text-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pruning ? 'Pruning…' : 'Prune'}
             </button>
@@ -1117,7 +1126,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
             {repo.remote_tracking_branches.map((name) => (
               <div
                 key={name}
-                className="text-[10px] font-mono text-text-muted px-1 truncate"
+                className="text-2xs font-mono text-text-secondary px-1 truncate"
               >
                 {name}
               </div>
@@ -1208,8 +1217,8 @@ function ConfigurationCard({
   // the stale 0 (defensive; `poolEnabled` would already be false).
   const poolInputDisplay = preSpawnPoolSize || 1;
   return (
-    <div className="rounded border border-border-subtle p-3 space-y-3">
-      <p className="text-[10px] uppercase tracking-wide text-text-muted">
+    <div className="rounded-md border border-border-subtle p-3 space-y-3">
+      <p className="text-2xs uppercase tracking-wide text-text-muted">
         Worktree configuration
       </p>
 
@@ -1284,7 +1293,7 @@ function ConfigurationCard({
                     onChangePoolSize(Math.trunc(n));
                   }
                 }}
-                className="w-12 px-1 py-0.5 rounded border border-border-subtle bg-bg-overlay text-text-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-12 px-1 py-0.5 rounded-md border border-border-subtle bg-bg-overlay text-text-primary disabled:opacity-50 disabled:cursor-not-allowed"
                 title={
                   poolEnabled
                     ? '1 = one warm worktree pre-cut; 5 = five'
@@ -1292,7 +1301,7 @@ function ConfigurationCard({
                 }
               />
             </label>
-            <p className="text-[10px] text-text-muted pl-4">
+            <p className="text-2xs text-text-muted pl-4">
               Pre-warm worktree directories at startup. Manual spawns
               land on a pre-cut directory in &lt;500ms instead of ~11s.
             </p>
@@ -1382,7 +1391,7 @@ function PoolStatus({ count, target }: { count: number | null; target: number })
       aria-live="polite"
       aria-label={fullLabel}
       title={fullLabel}
-      className="flex items-center gap-2 pl-4 text-[10px] text-text-muted"
+      className="flex items-center gap-2 pl-4 text-2xs text-text-muted"
       data-testid="pool-status"
     >
       <div

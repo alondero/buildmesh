@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -6,16 +6,20 @@ import { Sidebar } from './components/Sidebar/Sidebar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
+import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
+import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useUIStore } from './stores/uiStore';
 import { createShortcutGuard } from './lib/shortcutGuard';
-import { isTextInputFocused } from './lib/focusGuard';
+import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
+import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { arrowTargetIndex } from './lib/gridTraversal';
 import { toggleGridMaximize } from './lib/gridShortcuts';
 import { isMac } from './lib/platform';
 import { getGridRows } from './hooks/useGridLayout';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
+import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
 import * as api from './lib/tauri';
 import {
   applyToastCap,
@@ -24,6 +28,7 @@ import {
   TOAST_MAX,
   TOAST_TTL_MS,
   type Toast,
+  type ToastSeverity,
 } from './lib/toastUtils';
 import './App.css';
 
@@ -33,6 +38,18 @@ const createNodeGuard = createShortcutGuard(300);
 // burst of toggles, short enough that a deliberate second press feels
 // responsive.
 const toggleMaximizeGuard = createShortcutGuard(300);
+// Cooldown for the ?-key cheatsheet toggle (issue #731). Belt-and-braces
+// against accidental double-taps (e.g. finger-roll on the keyboard) firing
+// the modal twice within 300 ms; the `e.repeat` guard inside the handler
+// is the primary defense against OS autorepeat (held `?`).
+const cheatsheetGuard = createShortcutGuard(300);
+// Leading-edge throttle (DIFFERENT primitive from the guards above —
+// block-all vs first-press-passes-then-rate-limit) for the arrow-traversal
+// handler below. 200ms = ~5 moves/sec on a held key; 100ms snappier than the
+// 300ms cooldowns because navigation benefits from responsiveness, while
+// still comfortably catching the OS autorepeat flood (~30 Hz Windows,
+// ~15 Hz macOS).
+const arrowThrottle = createKeyRepeatThrottle(200);
 
 type ErrorToast = Toast;
 
@@ -43,6 +60,11 @@ function App() {
 
   const [toasts, setToasts] = useState<ErrorToast[]>([]);
   const [isReady, setIsReady] = useState(false);
+  // Cheatsheet open state (issue #731). The <ShortcutCheatsheet> component
+  // mounts only while true, which is what arms the <Modal>-owned Escape
+  // listener — otherwise Escape would be stolen from agent terminals in
+  // the grid. Same mount/unmount discipline as WorktreeCloseDialog.
+  const [cheatsheetOpen, setCheatsheetOpen] = useState(false);
 
   // Track window focus state for conditional shortcut handling
   const isFocusedRef = useRef(false);
@@ -53,7 +75,15 @@ function App() {
   // Keyboard shortcuts — use Tauri's globalShortcut plugin so they work even when
   // an xterm.js terminal has keyboard focus (xterm intercepts window keydown events).
   // Only register shortcuts when the window is focused so they don't steal from other apps.
-  // Ctrl/Cmd+←/→/↑/↓ traverses the on-screen agent-node grid in the active mesh.
+  // Ctrl/Cmd+Alt+←/→/↑/↓ traverses the on-screen agent-node grid in the active mesh.
+  // We use TWO modifiers here (not bare Ctrl/Cmd+Arrow) because Ctrl+←/→ is
+  // the readline `backward-word` / `forward-word` gesture in bash/zsh/fish/
+  // PSReadLine and every node/python REPL — the global-shortcut plugin
+  // captures at the OS layer (before xterm sees the keydown), so bare
+  // Ctrl+Arrow would silently steal word-movement whenever the user tries to
+  // fix a typo in a long agent prompt. Adding `Alt+` matches the Windows
+  // Snap / tmux prefix+Arrow / i3 / VS Code "Move Editor Group" precedent
+  // for pane navigation and collides with nothing.
   // Alt+G (Win/Linux) / Cmd+G (macOS) toggles grid ↔ single-view (issue #668).
   useEffect(() => {
     // Tauri 2's global-shortcut plugin doesn't expose an `AltOrCommand`
@@ -68,10 +98,10 @@ function App() {
 
     const shortcuts = [
       { key: 'CommandOrControl+T', action: 'new-agent' },
-      { key: 'CommandOrControl+ArrowLeft', action: 'arrow-left' },
-      { key: 'CommandOrControl+ArrowRight', action: 'arrow-right' },
-      { key: 'CommandOrControl+ArrowUp', action: 'arrow-up' },
-      { key: 'CommandOrControl+ArrowDown', action: 'arrow-down' },
+      { key: 'CommandOrControl+Alt+ArrowLeft', action: 'arrow-left' },
+      { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
+      { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
+      { key: 'CommandOrControl+Alt+ArrowDown', action: 'arrow-down' },
       gridToggleShortcut,
     ];
     const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
@@ -202,6 +232,18 @@ function App() {
       }
 
       if (!isArrowAction(action)) return;
+      // Defensive focus guard (matches the Alt+G handler above). The binding
+      // is Ctrl/Cmd+Alt+Arrow, which has no readline collision, but if the
+      // user is focused on a real text input (an inline rename, a future
+      // search box) we'd rather not move the grid behind their typing. The
+      // xterm-helper-textarea carve-out in isTextInputFocused() means this
+      // guard is a no-op when an agent terminal has focus — exactly what we
+      // want.
+      if (isTextInputFocused()) return;
+      // Throttle sits BELOW the focus guard: a held arrow inside a rename box
+      // must not consume the budget, or the user's next real traversal press
+      // (after they tab out of the input) would also be blocked.
+      if (!arrowThrottle()) return;
       const direction: ArrowDirection = action.slice('arrow-'.length) as ArrowDirection;
 
       // Phase 1: if a node is maximized, the first arrow press restores the
@@ -237,16 +279,57 @@ function App() {
     return () => window.removeEventListener('shortcut-triggered', handleShortcut);
   }, []);
 
+  // ?-key cheatsheet toggle (issue #731). Plain window keydown listener
+  // (NOT a Tauri global-shortcut registration) for two reasons:
+  //
+  //   1. The `?` key is shifted on US layouts and unmodified on some
+  //      European layouts — registering it as a Tauri global-shortcut
+  //      would tie us to a single key-shape string per platform and force
+  //      two registrations. A window keydown listener matches `e.key`
+  //      semantically, which is what the user means.
+  //
+  //   2. The listener is intentionally NOT in the Tauri global-shortcut
+  //      list, so a focused xterm terminal sees the keystroke first
+  //      (terminals are the only place the user might want to type `?`
+  //      as a literal character).
+  //
+  // Three early-exit guards protect the user's keystroke:
+  //   - `e.repeat`: a held `?` autorepeats at ~30 Hz after ~500 ms on
+  //     Windows; without this guard the modal flickers open/closed for
+  //     as long as the user keeps the key down.
+  //   - `isTerminalFocused()`: typing `?` in an agent terminal is the
+  //     user asking the agent a question — the `?` is content, not a
+  //     help request. This is the inverse of the `isTextInputFocused`
+  //     xterm carve-out used by Alt+G (which DOES want to fire from a
+  //     terminal prompt).
+  //   - `isTextInputFocused()`: catches inline-renames, the terminal
+  //     search box, and any future text input — same as the other
+  //     handlers.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '?') return;
+      if (e.repeat) return;
+      if (isTerminalFocused()) return;
+      if (isTextInputFocused()) return;
+      e.preventDefault();
+      cheatsheetGuard(async () => {
+        setCheatsheetOpen(open => !open);
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   useEffect(() => {
     const unlisten = listen<{ provider: string; message: string }>('provider-error', (event) => {
-      addToast(event.payload.provider, event.payload.message);
+      addToast(event.payload.provider, event.payload.message, 'error');
     });
     return () => { unlisten.then((fn) => fn()); };
   }, [setToasts]);
 
   useEffect(() => {
     if (storeError) {
-      addToast('System', storeError);
+      addToast('System', storeError, 'error');
     }
   }, [storeError, setToasts]);
 
@@ -280,7 +363,7 @@ function App() {
 
   useEffect(() => {
     const unlisten = listen<{ node_id: number; error: string }>('resume-failed', (event) => {
-      addToast('Resume', `Node ${event.payload.node_id}: ${event.payload.error}`);
+      addToast('Resume', `Node ${event.payload.node_id}: ${event.payload.error}`, 'warning');
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
@@ -294,6 +377,7 @@ function App() {
         addToast(
           'Worktree',
           `Couldn't remove worktree for ${event.payload.node_name} — it'll be retried on next launch.`,
+          'warning',
         );
       },
     );
@@ -317,9 +401,83 @@ function App() {
       new_commits?: number;
       message: string;
     }>('mesh-sync-warning', (event) => {
-      addToast('Sync', event.payload.message);
+      addToast('Sync', event.payload.message, 'warning');
     });
     return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  // Autopilot lifecycle notifications (PRD #480 story 14). Same toast stack
+  // as Sync/Worktree; the `Autopilot` label groups all three outcomes. The
+  // node list refetch keeps status badges (Completed / Error) in step with
+  // the backend's direct DB writes, which emit no dedicated status event.
+  useEffect(() => {
+    const unlistenBlocked = listen<{ node_id: number; issue: number }>(
+      'autopilot-blocked',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `Agent on node ${event.payload.node_id} needs your input (issue #${event.payload.issue}).`,
+          'warning',
+        );
+      },
+    );
+    const unlistenPr = listen<{ node_id: number; issue: number; pr_url: string | null }>(
+      'autopilot-pr-created',
+      (event) => {
+        addToast(
+          'Autopilot',
+          event.payload.pr_url
+            ? `Wrap-up complete — PR opened: ${event.payload.pr_url}`
+            : `Wrap-up complete for node ${event.payload.node_id}.`,
+          'warning',
+        );
+        void useAgentNodeStore.getState().fetchAgentNodes();
+      },
+    );
+    const unlistenFailed = listen<{ node_id: number; issue: number; reasons: string[] }>(
+      'autopilot-finish-failed',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `Node ${event.payload.node_id} failed its wrap-up after 3 attempts: ${event.payload.reasons.join('; ')}`,
+          'error',
+        );
+        void useAgentNodeStore.getState().fetchAgentNodes();
+      },
+    );
+    // Launch watcher pressed Enter — the agent has actually started the
+    // task (the prefill alone only stages it). No refetch needed: nothing
+    // about the node row changed.
+    const unlistenSubmitted = listen<{ node_id: number; issue: number }>(
+      'autopilot-submitted',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `Started work on issue #${event.payload.issue} (node ${event.payload.node_id}).`,
+          'warning',
+        );
+      },
+    );
+    // Merged-PR sweep archived a finished node (the store refetches the
+    // node list on this same event; here we just tell the user why a card
+    // vanished from the grid).
+    const unlistenClosed = listen<{ node_id: number; pr_number: number }>(
+      'autopilot-node-closed',
+      (event) => {
+        addToast(
+          'Autopilot',
+          `PR #${event.payload.pr_number} merged — node ${event.payload.node_id} closed.`,
+          'warning',
+        );
+      },
+    );
+    return () => {
+      unlistenBlocked.then((fn) => fn());
+      unlistenPr.then((fn) => fn());
+      unlistenFailed.then((fn) => fn());
+      unlistenSubmitted.then((fn) => fn());
+      unlistenClosed.then((fn) => fn());
+    };
   }, []);
 
   // Auto-dismiss toasts after TOAST_TTL_MS. A 1s tick is coarse
@@ -334,11 +492,32 @@ function App() {
     return () => clearInterval(interval);
   }, [toasts.length]);
 
-  const addToast = (provider: string, message: string) => {
-    const now = Date.now();
-    const incoming: ErrorToast = { id: now, provider, message, createdAt: now };
-    setToasts((prev) => applyToastCap(dedupToasts(prev, incoming, now, TOAST_DEDUP_TTL_MS), TOAST_MAX));
-  };
+  const addToast = useCallback(
+    (provider: string, message: string, severity: ToastSeverity = 'error') => {
+      const now = Date.now();
+      const incoming: ErrorToast = { id: now, provider, message, createdAt: now, severity };
+      setToasts((prev) => applyToastCap(dedupToasts(prev, incoming, now, TOAST_DEDUP_TTL_MS), TOAST_MAX));
+    },
+    [],
+  );
+
+  // Issue #846: surface the sticky-lockout `naming-backend-failed` event as a
+  // toast. The backend has already burned MAX_RENAME_ATTEMPTS=3 retries on
+  // the LLM call before emitting (see `session_naming::on_turn_with`), so the
+  // severity is `error`, not `warning` — this is a real failure, not a hiccup.
+  // The toast points the user at Settings → Auto-naming (issue #824) so they
+  // can pick a working backend instead of giving up silently.
+  const handleNamingBackendFailure = useCallback(
+    ({ node_id, reason }: { node_id: number; reason: string }) => {
+      addToast(
+        'Auto-naming',
+        `Couldn't auto-name node ${node_id} after several retries (${reason}). Pick a name manually, or check Settings → Auto-naming.`,
+        'error',
+      );
+    },
+    [addToast],
+  );
+  useNamingBackendFailureToast(handleNamingBackendFailure);
 
   const dismissToast = (id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
@@ -346,41 +525,62 @@ function App() {
 
   if (!isReady) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-[#09090f]">
-        <div className="text-[#00d4ff] text-2xl animate-pulse">●</div>
+      <div
+        role="status"
+        aria-label="Loading Buildmesh"
+        className="flex h-screen w-screen items-center justify-center bg-bg-base"
+      >
+        <div className="text-accent-cyan text-2xl animate-pulse">●</div>
       </div>
     );
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#09090f] text-[#e0e0e0]">
+    <div className="flex h-screen w-screen overflow-hidden bg-bg-base text-text-primary">
       <Sidebar />
       <AgentNodeView />
       <ProbePanel />
 
       <WorktreeCloseDialog />
+      <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
+      <UpdatePrompt />
 
-      {/* Toast notifications */}
+      {/* Toast notifications. Each toast carries role="status" (implicit
+          aria-live=polite) so screen readers announce it on arrival without
+          moving focus — the container itself stays silent to avoid double
+          announcements. */}
       <div className="fixed bottom-32 right-4 flex flex-col gap-2 z-50">
-        {toasts.map((toast) => (
-          <div
-            key={toast.id}
-            className="bg-[#0d0d16] border border-[#ef4444]/50 text-white px-4 py-3 rounded flex items-start gap-2 min-w-[280px] max-w-[420px] shadow-lg"
-          >
-            <div className="flex-1 min-w-0">
-              <div className="text-[10px] font-bold text-red-500 uppercase">{toast.provider} Error</div>
-              <div className="text-xs text-[#94a3b8] break-words">{toast.message}</div>
-            </div>
-            <button
-              type="button"
-              onClick={() => dismissToast(toast.id)}
-              aria-label="Dismiss notification"
-              className="shrink-0 -m-1 p-1 rounded text-white/60 hover:text-white hover:bg-white/10 text-base leading-none"
+        {toasts.map((toast) => {
+          const isWarning = toast.severity === 'warning';
+          return (
+            <div
+              key={toast.id}
+              role="status"
+              className={`animate-slide-in-right bg-bg-surface border px-4 py-3 rounded-md flex items-start gap-2 min-w-[280px] max-w-[420px] shadow-md ${
+                isWarning ? 'border-status-warning/50' : 'border-status-error/50'
+              }`}
             >
-              ×
-            </button>
-          </div>
-        ))}
+              <div className="flex-1 min-w-0">
+                <div
+                  className={`text-2xs font-bold uppercase ${
+                    isWarning ? 'text-status-warning' : 'text-status-error'
+                  }`}
+                >
+                  {toast.provider}
+                </div>
+                <div className="text-xs text-text-secondary break-words">{toast.message}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => dismissToast(toast.id)}
+                aria-label="Dismiss notification"
+                className="shrink-0 -m-1 p-1 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 text-base leading-none transition-colors"
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

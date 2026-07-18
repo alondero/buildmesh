@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { diffFileAgainstHead, type DiffResult } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
+import { fileDiffStatusMeta } from '../../lib/status';
 
 /** Lucide chevron-right, rotated 90° when the section is expanded.
  *  Matches the FileTree rows' chevron — keeps the probe body's expand
@@ -31,22 +32,6 @@ interface ChangedFilesSectionProps {
   onChangedFileSelect: (path: string, diff: DiffResult) => void;
 }
 
-const statusColors: Record<string, string> = {
-  added: 'text-accent-green',
-  modified: 'text-accent-amber',
-  deleted: 'text-accent-red',
-  renamed: 'text-purple-400',
-  untracked: 'text-text-muted',
-};
-
-const statusPrefix: Record<string, string> = {
-  added: 'A',
-  modified: 'M',
-  deleted: 'D',
-  renamed: 'R',
-  untracked: '?',
-};
-
 export function ChangedFilesSection({
   rootPath,
   selectedFile,
@@ -74,7 +59,7 @@ export function ChangedFilesSection({
     <div className="border-b border-border-subtle">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-1 px-2 py-1.5 text-[11px] font-medium text-text-secondary hover:bg-bg-card transition-colors"
+        className="w-full flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-card transition-colors"
       >
         <span
           className={`w-3 h-3 flex items-center justify-center text-text-muted transition-transform ${
@@ -84,7 +69,7 @@ export function ChangedFilesSection({
           <ChevronRightIcon className="w-3 h-3" />
         </span>
         <span className="flex-1 text-left">Changed Files</span>
-        <span className="text-text-muted text-[10px]">{files.length}</span>
+        <span className="text-text-muted text-2xs">{files.length}</span>
       </button>
       {expanded && (
         <div className="pb-1">
@@ -93,7 +78,9 @@ export function ChangedFilesSection({
           ) : files.length === 0 ? (
             <div className="px-3 py-1.5 text-text-muted text-xs">No changes</div>
           ) : (
-            files.map((file) => (
+            files.map((file) => {
+              const meta = fileDiffStatusMeta(file.status);
+              return (
               <button
                 key={file.path}
                 onClick={() => handleClick(file.path)}
@@ -105,14 +92,15 @@ export function ChangedFilesSection({
                 `}
                 style={{ paddingLeft: 20 }}
               >
-                <span className={`font-bold w-3 flex-shrink-0 ${statusColors[file.status] ?? 'text-text-muted'}`}>
-                  {statusPrefix[file.status] ?? '?'}
+                <span className={`font-bold w-3 flex-shrink-0 ${meta.color}`} title={meta.label}>
+                  {meta.letter}
                 </span>
-                <span className="flex-1 truncate text-text-muted">{file.path}</span>
+                <span className="flex-1 truncate text-text-secondary">{file.path}</span>
                 <span className="text-accent-green flex-shrink-0">+{file.additions}</span>
                 <span className="text-accent-red flex-shrink-0">-{file.deletions}</span>
               </button>
-            ))
+              );
+            })
           )}
         </div>
       )}

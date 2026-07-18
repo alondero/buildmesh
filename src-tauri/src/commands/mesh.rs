@@ -1,14 +1,58 @@
 //! Mesh management commands
 
 use crate::db;
-use crate::models::Mesh;
+use crate::models::{Mesh, PickedFolder};
 use crate::services;
 use tauri::command;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::agent::spawn::inject_attention_hook;
 
-/// Add a mesh by opening a folder picker dialog
+/// Derive a display name (last path segment) from a picked folder, handling
+/// both the native `Path` case and the URL fallback the dialog can return.
+fn folder_display_name(folder_path: &tauri_plugin_dialog::FilePath, path: &str) -> String {
+    if let tauri_plugin_dialog::FilePath::Path(p) = folder_path {
+        std::path::Path::new(p)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                let path_str = p.to_string_lossy();
+                let sep = if path_str.contains('\\') { '\\' } else { '/' };
+                #[allow(clippy::manual_pattern_char_comparison)]
+                path_str
+                    .rsplit(|c| c == sep)
+                    .next()
+                    .unwrap_or(&p.to_string_lossy())
+                    .to_string()
+            })
+    } else {
+        // Url case — rsplit on '/' to get last path segment
+        services::mesh::name_from_path(path)
+    }
+}
+
+/// Open the native folder picker and return the chosen path + derived name,
+/// WITHOUT creating a mesh. The "New mesh" modal (location + colour) calls
+/// this so it can show the selection and let the user pick a colour before
+/// committing via `create_mesh`. Returns `None` when the user cancels.
+#[command]
+pub async fn pick_mesh_folder(app: tauri::AppHandle) -> Result<Option<PickedFolder>, String> {
+    tracing::debug!("pick_mesh_folder called");
+    let folder_path = app.dialog().file().blocking_pick_folder();
+    tracing::debug!("folder picker returned: {:?}", folder_path);
+    let Some(folder_path) = folder_path else {
+        return Ok(None);
+    };
+    let path = folder_path.to_string();
+    let name = folder_display_name(&folder_path, &path);
+    tracing::debug!("picked folder: {} ({})", path, name);
+    Ok(Some(PickedFolder { path, name }))
+}
+
+/// Add a mesh by opening a folder picker dialog. Retained for callers that
+/// want the one-shot "pick + create" behaviour; the desktop "New mesh" flow
+/// now splits this into `pick_mesh_folder` + `create_mesh` so a colour can be
+/// chosen in between.
 #[command]
 pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
     tracing::debug!("add_mesh called");
@@ -20,25 +64,7 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
 
     let path = folder_path.to_string();
     tracing::debug!("selected path: {}", path);
-    let name = if let tauri_plugin_dialog::FilePath::Path(p) = folder_path {
-        std::path::Path::new(&p)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                let path_str = p.to_string_lossy();
-                let sep = if path_str.contains('\\') { '\\' } else { '/' };
-                #[allow(clippy::manual_pattern_char_comparison)]
-                let result = path_str
-                    .rsplit(|c| c == sep)
-                    .next()
-                    .unwrap_or(&p.to_string_lossy())
-                    .to_string();
-                result
-            })
-    } else {
-        // Url case — rsplit on '/' to get last path segment
-        services::mesh::name_from_path(&path)
-    };
+    let name = folder_display_name(&folder_path, &path);
     tracing::debug!("mesh name: {}", name);
 
     let mesh = db::create_mesh(&name, &path).map_err(|e| {
@@ -49,12 +75,35 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
     Ok(mesh)
 }
 
-/// Create a new mesh
+/// Create a new mesh, optionally with a user-picked accent `color` (a
+/// `#rrggbb` hex string). `None` leaves the colour unset so the frontend
+/// falls back to the deterministic palette.
 #[command]
-pub async fn create_mesh(name: String, path: String) -> Result<Mesh, String> {
+pub async fn create_mesh(
+    name: String,
+    path: String,
+    color: Option<String>,
+) -> Result<Mesh, String> {
     let mesh = db::create_mesh(&name, &path).map_err(|e| e.to_string())?;
+    if let Some(color) = color.as_deref().filter(|c| !c.is_empty()) {
+        db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;
+    }
     inject_attention_hook(std::path::Path::new(&path));
-    Ok(mesh)
+    // Re-read so the returned mesh carries the colour we just wrote.
+    db::get_mesh_by_id(mesh.id).map_err(|e| e.to_string())
+}
+
+/// Set (or clear) a mesh's accent colour — used by the sidebar swatch's
+/// "recolour" flow. Passing `None`/empty clears it back to the palette
+/// fallback. Errors if the mesh no longer exists (zero rows updated).
+#[command]
+pub async fn update_mesh_color(mesh_id: i64, color: Option<String>) -> Result<(), String> {
+    let normalized = color.as_deref().filter(|c| !c.is_empty());
+    let rows = db::set_mesh_color(mesh_id, normalized).map_err(|e| e.to_string())?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
 }
 
 /// Create a mesh for testing without dialog (uses temp directory)
@@ -70,12 +119,20 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 }
 
 /// Delete a mesh and its nodes, including the on-disk pool directories
-/// (issue #639 gap 3). Shared sync body used by both the Tauri command below
-/// and the HTTP test server's `handle_delete_mesh` shim — `delete_mesh_inner`
-/// owns the disk-drain sequencing so the two call sites can't drift.
+/// (issue #639 gap 3, hardened by #642.1). Shared sync body used by both the
+/// Tauri command below and the HTTP test server's `handle_delete_mesh` shim —
+/// `delete_mesh_inner` owns the disk-drain sequencing so the two call sites
+/// can't drift.
 ///
 /// Sequence:
-///   1. Snapshot the mesh's pool directory paths (read-only, lock released).
+///   1. Snapshot the mesh's DROPPABLE pool directory paths (read-only, lock
+///      released). `claimed` rows are excluded — their directories may back a
+///      live agent process whose `agent_nodes` row was just deleted by step
+///      2's cascade, so we have no DB way to ask "is this still a live agent?".
+///      The conservative choice is to leave the dir on disk for the user to
+///      clean up by hand. (`process_pending_removals` does NOT cover this
+///      gap — the mesh's `agent_nodes` rows are cascade-deleted by the same
+///      transaction, so no `close` event ever fires to enqueue a tombstone.)
 ///   2. Cascade-delete the rows via `db::delete_mesh` (which removes the
 ///      `meshes` row + its `agent_nodes` + its `warm_worktrees` rows).
 ///   3. `git worktree remove --force` each snapshot'd directory, best-effort.
@@ -85,20 +142,21 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 /// runs AFTER it. A dir-remove failure is logged at WARN but never fails the
 /// delete — the row cascade has already happened.
 ///
-/// **Known race (accepted for #639)**: between step 1 (snapshot) and step 2
-/// (cascade-delete), a concurrent background prewarm on the same mesh can
-/// `INSERT` a new `warm_worktrees` row whose path won't appear in the snapshot
-/// but WILL be deleted by the cascade. The dir-remove loop never sees that
-/// new path, so its directory is orphaned. The orphan is recoverable by the
-/// user (manual `rm -rf`) and self-heals on a slug collision: the next
-/// prewarm that lands on the same path will hit `create_git_worktree`'s
-/// `if host_path.exists() { return Ok(()) }` short-circuit and reuse the
-/// stale tree — which is incorrect for that mesh's pool, but only until the
-/// next `git reset --hard` lands (issue #613's refresh pass). Fixing this
-/// would require restructuring the FILL_LOCK to block user-initiated deletes,
-/// which is out of scope for the gap-3 hygiene fix.
+/// **Known race (accepted for #639, tracked by #642.3)**: between step 1
+/// (snapshot) and step 2 (cascade-delete), a concurrent background prewarm on
+/// the same mesh can `INSERT` a new `warm_worktrees` row whose path won't
+/// appear in the snapshot but WILL be deleted by the cascade. The dir-remove
+/// loop never sees that new path, so its directory is orphaned. The orphan
+/// is recoverable by the user (manual `rm -rf`) and self-heals on a slug
+/// collision: the next prewarm that lands on the same path will hit
+/// `create_git_worktree`'s `if host_path.exists() { return Ok(()) }`
+/// short-circuit and reuse the stale tree — which is incorrect for that
+/// mesh's pool, but only until the next `git reset --hard` lands (issue
+/// #613's refresh pass). Fixing this would require restructuring the
+/// FILL_LOCK to block user-initiated deletes, which is out of scope.
 pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
-    let pool_paths = db::list_warm_paths_for_mesh(mesh_id).map_err(|e| e.to_string())?;
+    let pool_paths =
+        db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
     db::delete_mesh(mesh_id).map_err(|e| e.to_string())?;
     for path in pool_paths {
         if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {
@@ -114,7 +172,17 @@ pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
 
 #[command]
 pub async fn delete_mesh(mesh_id: i64) -> Result<(), String> {
-    delete_mesh_inner(mesh_id)
+    // `delete_mesh_inner` does blocking work — DB lock acquisition and N
+    // libgit2 `git worktree remove --force` calls (each one reopens the
+    // dir as a Repository and walks the admin gitdir). Calling it inline
+    // on the async runtime pins a Tokio worker thread for the full
+    // duration (#642.4); `spawn.rs` already wraps its libgit2 work in
+    // `tokio::task::spawn_blocking` (see `spawn_blocking(move ||
+    // provision_for_spawn(...))`), so the mesh-delete path should match
+    // that convention.
+    tokio::task::spawn_blocking(move || delete_mesh_inner(mesh_id))
+        .await
+        .map_err(|e| format!("delete_mesh task panicked: {}", e))?
 }
 
 /// Update a mesh's layout preference
@@ -138,35 +206,53 @@ pub async fn get_root_token() -> Result<String, String> {
 }
 
 /// Get the local machine's LAN IP address.
+///
+/// Returned for the mobile QR code's *display fallback* (`RemoteAccessModal.tsx`)
+/// — the actual QR URL comes from `status.exposed_interfaces` (the bind path's
+/// ranked snapshot). When the bind path has already refreshed the snapshot we
+/// reuse the cached `(IPs, IfaceClass)` so we don't pay for a second
+/// `GetAdaptersAddresses` walk (issue #630). On cold start / no-snapshot, we
+/// walk fresh via `tauri::async_runtime::spawn_blocking` — a stuck
+/// `GetAdaptersAddresses` pins one blocking-pool thread (cheap, large pool)
+/// instead of starving the Tokio worker pool (matches the convention in
+/// `http::interface_watcher`). The `tokio::time::timeout` is reintroduced as a
+/// load-bearing safety net (#630 review): without it, a stuck adapter driver
+/// can keep `spawn_blocking` alive indefinitely, the QR modal's `Promise.all`
+/// never resolves, and the user sees an indefinite blank modal rather than the
+/// graceful `.catch(() => '192.168.1.x')` fallback. 5 s matches the historical
+/// band-aid (PR #104 / commit 410cee8) — long enough for a real adapter walk,
+/// short enough that a stuck filter driver produces a usable UX degradation.
 #[command]
 pub async fn get_local_ip() -> Result<String, String> {
-    // Use a timeout because network interface enumeration can hang for 10+ seconds
-    // on Windows machines with VPNs, Docker, Hyper-V, or corporate networking software.
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        async {
-            let interfaces = local_ip_address::list_afinet_netifas()
-                .map_err(|e| format!("failed to list interfaces: {}", e))?;
-
-            pick_best_lan_ip(&interfaces).ok_or_else(|| "no suitable LAN interface found".to_string())
+    let (ips, classes) = if let Some(cached) = crate::http::local_classes_if_populated() {
+        (crate::http::local_interface_ips(), cached)
+    } else {
+        // `tokio::time::timeout` + `spawn_blocking` together: the blocking
+        // pool's stuck-thread cost is bounded by 5 s, after which the future
+        // returns `Err` and the wrapping `.catch(() => '192.168.1.x')` in
+        // RemoteAccessModal renders a placeholder rather than hanging. The
+        // blocking thread itself may stay stuck until its driver recovers
+        // (out of our hands) but the user's Tauri promise resolves.
+        let walk = tauri::async_runtime::spawn_blocking(
+            crate::http::interface_rank::enumerate_with_classes,
+        );
+        match tokio::time::timeout(std::time::Duration::from_secs(5), walk).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => {
+                return Err(format!("interface enumeration task panicked: {}", e));
+            }
+            Err(_elapsed) => {
+                return Err(
+                    "timeout enumerating interfaces (5s exceeded); \
+                     a stuck adapter driver may be blocking GetAdaptersAddresses"
+                        .to_string(),
+                );
+            }
         }
-    )
-    .await
-    .map_err(|_| "timeout detecting network interfaces (5s exceeded)".to_string())?
-}
-
-/// Pick the best LAN IP for the mobile QR code. Prefers 192.168.x.x (common
-/// home/office LAN) over 10.x.x.x (often VPN/corporate), because the QR is
-/// scanned by a phone on the same Wi-Fi as the hub — a VPN address is useless.
-///
-/// Two-pass scan: any 192.168.x.x match wins outright; only fall through to
-/// 10.x.x.x if no 192.168.x.x interface is present. See commit 66ed767 for
-/// the original priority fix and 410cee8 for the regression that collapsed it.
-fn pick_best_lan_ip(interfaces: &[(String, std::net::IpAddr)]) -> Option<String> {
-    if let Some(ip) = find_first_lan_ip(interfaces, &[0xC0, 0xA8]) {
-        return Some(ip);
-    }
-    find_first_lan_ip(interfaces, &[0x0A])
+    };
+    crate::http::interface_rank::pick_best_lan(&ips, &classes)
+        .map(|ip| ip.to_string())
+        .ok_or_else(|| "no suitable LAN interface found".to_string())
 }
 
 /// Get the default provider for a mesh, applying the precedence chain:
@@ -182,143 +268,4 @@ pub async fn get_default_provider(mesh_id: i64) -> Result<String, String> {
         mesh.default_provider,
         crate::preferences::default_provider(),
     ))
-}
-
-/// Find the first IP matching one of the given /8 prefixes (big-endian octets).
-fn find_first_lan_ip(
-    interfaces: &[(String, std::net::IpAddr)],
-    prefixes: &[u8],
-) -> Option<String> {
-    for (name, ip) in interfaces {
-        if let Some(ip_str) = _iface_addr_in_lan_range(name, ip, prefixes) {
-            return Some(ip_str);
-        }
-    }
-    None
-}
-
-/// Returns the IP address if this interface is a typical LAN address (not Docker/tunnel/VirtualBox).
-/// Only considers addresses matching one of the given /8 prefixes.
-fn _iface_addr_in_lan_range(_name: &str, ip: &std::net::IpAddr, prefixes: &[u8]) -> Option<String> {
-    let ip_str = ip.to_string();
-
-    // Skip Docker bridge (172.16-31.x), VirtualBox Host-Only (192.168.56.x),
-    // tunnel addresses (10.0.0.x), Loopback, and wildcard (0.0.0.0)
-    if ip.is_loopback() {
-        return None;
-    }
-    if let std::net::IpAddr::V4(ipv4) = ip {
-        let octets = ipv4.octets();
-        // Docker bridge: 172.16.0.0/12 (172.16–172.31)
-        if octets[0] == 172 && (16..=31).contains(&octets[1]) {
-            return None;
-        }
-        if octets[0] == 192 && octets[1] == 168 && octets[2] == 56 {
-            return None; // VirtualBox Host-Only
-        }
-        if octets[0] == 10 && octets[1] == 0 && octets[2] == 0 {
-            return None; // Tunnel
-        }
-        if octets[0] == 0 && octets[1] == 0 && octets[2] == 0 && octets[3] == 0 {
-            return None; // Wildcard
-        }
-    }
-
-    // Only accept addresses whose /8 prefix is in our allow-list
-    if let std::net::IpAddr::V4(ipv4) = ip {
-        let first_octet = ipv4.octets()[0];
-        if prefixes.contains(&first_octet) {
-            return Some(ip_str);
-        }
-    }
-
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    //! Tests for the LAN IP picker used by the mobile QR code.
-    //!
-    //! Regression context: when the OS returns a 10.x interface (VPN, corporate
-    //! client, Docker host network) BEFORE any 192.168.x interface, the QR code
-    //! must still encode the 192.168 LAN address — otherwise the phone can't
-    //! reach the hub. Originally fixed in #56 (commit 66ed767), regressed in
-    //! #104 (commit 410cee8) when the two-pass scan was collapsed into one.
-    use super::*;
-    use std::net::IpAddr;
-    use std::str::FromStr;
-
-    fn iface(name: &str, ip: &str) -> (String, IpAddr) {
-        (name.to_string(), IpAddr::from_str(ip).unwrap())
-    }
-
-    /// The headline regression test: 10.x appearing first in OS order must NOT
-    /// beat a later 192.168.x entry. With the bug, this returns "10.20.30.40".
-    /// Uses 10.20.x (not 10.0.0.x) to avoid the separate tunnel-exclusion rule.
-    #[test]
-    fn pick_best_prefers_192_168_when_10_appears_first() {
-        let interfaces = vec![
-            iface("vpn0", "10.20.30.40"),
-            iface("docker0", "172.17.0.1"),
-            iface("eth0", "192.168.1.100"),
-        ];
-        assert_eq!(
-            pick_best_lan_ip(&interfaces).as_deref(),
-            Some("192.168.1.100")
-        );
-    }
-
-    /// No 192.168 available → must fall back to 10.x.
-    #[test]
-    fn pick_best_falls_back_to_10_when_no_192_168() {
-        let interfaces = vec![
-            iface("vpn0", "10.20.30.40"),
-            iface("docker0", "172.17.0.1"),
-        ];
-        assert_eq!(pick_best_lan_ip(&interfaces).as_deref(), Some("10.20.30.40"));
-    }
-
-    #[test]
-    fn pick_best_returns_none_when_nothing_matches() {
-        let interfaces = vec![
-            iface("docker0", "172.17.0.1"),
-            iface("vboxnet0", "192.168.56.1"), // VirtualBox Host-Only — excluded
-            iface("tun0", "10.0.0.1"),         // Tunnel — excluded
-        ];
-        assert_eq!(pick_best_lan_ip(&interfaces), None);
-    }
-
-    #[test]
-    fn find_first_lan_ip_skips_loopback_and_wildcard() {
-        let interfaces = vec![
-            iface("lo", "127.0.0.1"),
-            iface("eth0", "0.0.0.0"),
-            iface("eth1", "192.168.1.50"),
-        ];
-        assert_eq!(
-            find_first_lan_ip(&interfaces, &[0xC0, 0xA8]).as_deref(),
-            Some("192.168.1.50")
-        );
-    }
-
-    #[test]
-    fn find_first_lan_ip_skips_docker_bridge_in_10_pass() {
-        // 172.16-31 is Docker's default bridge range — must never be returned.
-        let interfaces = vec![iface("docker0", "172.17.0.1")];
-        assert_eq!(find_first_lan_ip(&interfaces, &[0x0A]), None);
-    }
-
-    #[test]
-    fn find_first_lan_ip_skips_virtualbox_host_only() {
-        // 192.168.56.x is VirtualBox Host-Only — not a real LAN.
-        let interfaces = vec![iface("vboxnet0", "192.168.56.1")];
-        assert_eq!(find_first_lan_ip(&interfaces, &[0xC0, 0xA8]), None);
-    }
-
-    #[test]
-    fn find_first_lan_ip_skips_tunnel_range() {
-        // 10.0.0.x is sometimes a tunnel pseudo-interface — must be excluded.
-        let interfaces = vec![iface("tun0", "10.0.0.1")];
-        assert_eq!(find_first_lan_ip(&interfaces, &[0x0A]), None);
-    }
 }

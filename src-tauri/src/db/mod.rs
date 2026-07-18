@@ -19,6 +19,9 @@ mod sandbox_tests;
 mod device_session_tests;
 
 #[cfg(test)]
+mod drive_idempotency_tests;
+
+#[cfg(test)]
 mod warm_pool_tests;
 
 #[cfg(test)]
@@ -27,6 +30,7 @@ mod agent_node_tests;
 use rusqlite::{Connection, params};
 pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -36,6 +40,30 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 
 /// Current schema version.
 ///
+// v24 — Warm pool on by default (ADR 0020, spawn-latency work): a new
+// mesh now defaults to `pre_spawn_pool_size = 1` (one pre-warmed worktree)
+// instead of 0, and a ONE-TIME backfill flips existing worktree-enabled
+// meshes still at 0 to 1. The pool is the single biggest click-to-terminal
+// win (sub-500ms adopt vs multi-second cold checkout) and its lifecycle
+// has been hardened across #609–#653, so opt-out is the right polarity.
+// Deliberate trade-off: a user who explicitly set 0 pre-v24 is
+// indistinguishable from one who never touched the field, so the backfill
+// overrides both — once. The Worktrees Probe still sets it back to 0.
+// Ordering constraint: the `pre_spawn_pool_size` column is added by an
+// `ensure_*` net AFTER `migrate_if_needed` runs, so the backfill lives in
+// [`ensure_pool_default_backfill`] gated on its own app_settings flag
+// (crash-safe: the flag is written only after the UPDATE commits), not in
+// the version-gated migration ladder.
+//
+// v23 — Coordinator drive idempotency ledger (issue #320, ADR-0008 §6):
+// add the `coordinator_drive_prompts` table so a Coordinator retrying a
+// timed-out `POST /nodes/{id}/prompt` over a flaky network never lands the
+// prompt twice. Each row records the honest verdict under a caller-supplied
+// idempotency key, scoped to the node it drove; a duplicate `(node_id, key)`
+// replays the recorded verdict instead of re-sending. A brand-new table needs
+// no data migration — `CREATE TABLE IF NOT EXISTS` in `init` materializes it
+// for every DB; the version bump just records the shape moved forward.
+//
 /// v22 — Per-mesh pre-spawn pool size (issue #611): add the
 /// `meshes.pre_spawn_pool_size` INTEGER column (0 = feature off,
 /// 1..5 = target). The pool worker (issue #609 / v21) previously
@@ -70,11 +98,38 @@ static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
 // Spawn Menu without a permanent resolver shim. The rewrite is
 // unambiguous today because every Proxied Provider currently pairs with
 // Claude Code only. See [`migrate_agent_node_provider_id_to_composite`].
-const SCHEMA_VERSION: i32 = 22;
+const SCHEMA_VERSION: i32 = 26;
+
+/// Apply the per-connection pragmas every Buildmesh connection needs.
+///
+/// - `journal_mode=WAL`: the default rollback journal creates/deletes a
+///   journal file and double-fsyncs on *every* commit — with the whole DB
+///   behind one `Mutex`, each attention flip or status write stalls every
+///   other DB caller for the full fsync dance (worst on Windows, where
+///   antivirus scanning inflates file-create latency). WAL appends to one
+///   log instead. The mode is persistent in the DB file, but setting it is
+///   idempotent so we apply it on every init.
+/// - `synchronous=NORMAL`: the WAL-recommended pairing — one fsync per
+///   checkpoint rather than per commit; WAL guarantees the DB stays
+///   consistent after a crash (at most the last commits are lost, which for
+///   status flips is fine — startup reconciles agent state anyway).
+/// - `busy_timeout=5000`: if any second connection ever touches the file
+///   (e.g. a dev-profile instance pointed at the same dir by mistake), fail
+///   after 5s of retrying instead of an instant `SQLITE_BUSY`.
+fn apply_connection_pragmas(conn: &Connection) -> SqlResult<()> {
+    // `journal_mode` returns the resulting mode as a row, so it needs
+    // `query_row`, not `execute` (rusqlite errors on rows from execute).
+    let _mode: String =
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    Ok(())
+}
 
 /// Initialize the database
 pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     let conn = Connection::open(db_path)?;
+    apply_connection_pragmas(&conn)?;
 
     // Ensure app_settings exists first (needed by migrate_if_needed to check version)
     conn.execute_batch(
@@ -139,6 +194,20 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
             last_active_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
+        -- Coordinator drive idempotency ledger (issue #320, ADR-0008 §6). One
+        -- row per (node, caller-supplied key) the Coordinator drove: it records
+        -- the honest verdict so a retry with the same key replays that verdict
+        -- rather than sending the prompt a second time. Scoped by node so a key
+        -- accidentally reused across two nodes still drives each once. No data
+        -- migration — a fresh table, materialized here for every DB.
+        CREATE TABLE IF NOT EXISTS coordinator_drive_prompts (
+            node_id INTEGER NOT NULL,
+            idempotency_key TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (node_id, idempotency_key)
+        );
+
         -- Pre-spawn Worktree Pool (issue #609, PRD #608). One row per
         -- detached-HEAD worktree the background worker has pre-warmed under
         -- `{mesh.path}/.claude/worktrees/<slug>`. The pool is
@@ -168,12 +237,34 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
         CREATE INDEX IF NOT EXISTS idx_warm_worktrees_status ON warm_worktrees(status);
 
         CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
+
+        -- Autopilot runs (issue #482, PRD #480). One row per auto-spawned
+        -- Agent Node, keyed by the node so close/delete cascades. Kept as a
+        -- satellite table (not an agent_nodes column) so the positional
+        -- AGENT_NODE_COLUMNS projection and its consumers stay untouched.
+        -- `state` is the wrap-up pipeline machine: implementing (agent working
+        -- on the issue) -> finishing (wrap-up prompt injected, attempt N) ->
+        -- completed | failed. `attempts` counts wrap-up/self-correction
+        -- injections (capped by autopilot::MAX_FINISH_ATTEMPTS).
+        CREATE TABLE IF NOT EXISTS autopilot_runs (
+            node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
+            mesh_id INTEGER NOT NULL,
+            issue_number INTEGER NOT NULL,
+            state TEXT NOT NULL DEFAULT 'implementing',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            pr_number INTEGER,
+            pr_url TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_autopilot_runs_mesh ON autopilot_runs(mesh_id);
         "
     )?;
 
     // Safety nets: add any columns that may be missing on old or migrated DBs.
     // These are no-ops on fresh DBs (tables just created above have the base schema).
     ensure_mesh_columns(&conn)?;
+    ensure_autopilot_run_pr_columns(&conn)?;
     ensure_agent_node_source_issue(&conn)?;
     ensure_agent_node_use_worktree(&conn)?;
     ensure_agent_node_position(&conn)?;
@@ -184,12 +275,23 @@ pub fn init(db_path: &PathBuf) -> SqlResult<()> {
     ensure_checkpoints_dropped(&conn)?;
     ensure_mesh_scratchpad(&conn)?;
 ensure_mesh_sandbox(&conn)?;
+    // v25 — per-mesh accent colour (user-picked hex). Nullable: pre-v25 rows
+    // read back as `None` and fall back to the deterministic palette.
+    ensure_mesh_color(&conn)?;
+    // v26 — Autopilot Policy columns (issue #481, PRD #480).
+    ensure_mesh_autopilot_columns(&conn)?;
     // v22 — Per-mesh pre-spawn pool target (issue #611). The column
     // doesn't exist on pre-v22 DBs; the safety net backfills it on every
-    // init so existing rows read `0` (= pool off, preserving the v21
-    // hardcoded-target behaviour until the user opts in via the
-    // Worktrees Probe). Idempotent via `ensure_column`'s pragma check.
+    // init. Since v24 the column default (and the one-time backfill below)
+    // is `1` — pool ON by default; the Worktrees Probe sets `0` to opt out.
     ensure_mesh_pre_spawn_pool_size(&conn)?;
+    // v24 — one-time flip of existing worktree-enabled meshes from the old
+    // pool-off default (0) to the new default (1). Must run AFTER
+    // `ensure_mesh_pre_spawn_pool_size` (the column may have been created
+    // just now on an upgrading DB). Gated on its own app_settings flag so
+    // a crash between the version bump and this UPDATE can't skip it, and
+    // so a user's LATER explicit 0 is never overridden again.
+    ensure_pool_default_backfill(&conn)?;
     // v21 — Pre-spawn Worktree Pool (issue #609). The `warm_worktrees` table
     // is created inline above (it's a new table, not a column add), so this
     // safety net only needs to ensure it exists on a DB whose schema_version
@@ -512,6 +614,20 @@ pub(crate) fn ensure_checkpoints_dropped(conn: &Connection) -> SqlResult<()> {
 /// Called after migrate_if_needed to fix DBs that skipped migration due to
 /// the projects-table guard (existing DBs that already had schema_version=8
 /// but whose meshes table lacked those columns).
+/// Safety net: ensure the `pr_number`/`pr_url` columns exist on
+/// `autopilot_runs`. Added for the merged-PR auto-close sweep — a completed
+/// run records the wrap-up PR so the poller can later check GitHub for its
+/// merge and archive the node. Nullable; pre-existing rows stay `NULL` and
+/// are simply never swept.
+pub(crate) fn ensure_autopilot_run_pr_columns(conn: &Connection) -> SqlResult<()> {
+    for (name, ty) in [("pr_number", "INTEGER"), ("pr_url", "TEXT")] {
+        if ensure_column(conn, "autopilot_runs", name, ty)? {
+            tracing::warn!("ensure_autopilot_run_pr_columns: added missing {} column", name);
+        }
+    }
+    Ok(())
+}
+
 fn ensure_mesh_columns(conn: &Connection) -> SqlResult<()> {
     let columns = [
         ("build_command", "TEXT"),
@@ -558,6 +674,36 @@ pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
     Ok(())
 }
 
+/// Safety net (v26): ensure the Autopilot Policy columns exist on `meshes`
+/// (issue #481). Same one-line-per-column shape as `migrate_mesh_columns`.
+pub(crate) fn ensure_mesh_autopilot_columns(conn: &Connection) -> SqlResult<()> {
+    let columns = [
+        ("autopilot_enabled", "INTEGER NOT NULL DEFAULT 0"),
+        ("autopilot_trigger_label", "TEXT"),
+        ("autopilot_concurrency_limit", "INTEGER NOT NULL DEFAULT 2"),
+        ("autopilot_provider", "TEXT"),
+        ("autopilot_action_on_success", "TEXT"),
+    ];
+    for (name, ty) in columns {
+        if ensure_column(conn, "meshes", name, ty)? {
+            tracing::warn!("ensure_mesh_autopilot_columns: added missing {} column", name);
+        }
+    }
+    Ok(())
+}
+
+/// Safety net (v25): ensure the `color` column exists on `meshes`.
+/// Holds the user-picked accent colour as a `#rrggbb` hex string. Nullable —
+/// pre-v25 rows and meshes whose owner never picked a colour read back as
+/// `None`, and the frontend falls back to the deterministic id-keyed palette.
+/// No backfill: the fallback IS the historical behaviour.
+pub(crate) fn ensure_mesh_color(conn: &Connection) -> SqlResult<()> {
+    if ensure_column(conn, "meshes", "color", "TEXT")? {
+        tracing::warn!("ensure_mesh_color: added missing color column");
+    }
+    Ok(())
+}
+
 /// Safety net (v22): ensure the `pre_spawn_pool_size` column exists on
 /// `meshes`. The column is the per-mesh target for the pre-spawn Worktree
 /// Pool worker (issue #609 / v21), which previously hardcoded
@@ -567,20 +713,68 @@ pub(crate) fn ensure_mesh_sandbox(conn: &Connection) -> SqlResult<()> {
 /// boundary (`update_mesh_pool_size`), not here — this column is the
 /// typed integer the worker reads.
 ///
-/// Off by default (`0`): pre-v22 rows opt out of the pool, matching
-/// their pre-v22 behaviour (no pool entries). The user opts in via the
-/// Worktrees Probe's ConfigurationCard → "Pre-spawn warm worktrees"
-/// toggle (issue #611). No backfill needed — every pre-v22 mesh
-/// defaults to "pool off".
+/// ON by default (`1`) since v24 (ADR 0020) — the pool is the largest
+/// spawn-latency win and its lifecycle is hardened, so opt-out is the
+/// right polarity. The user opts out via the Worktrees Probe's
+/// ConfigurationCard → "Pre-spawn warm worktrees" toggle (issue #611).
+/// Pre-v24 rows (whose column was ALTER-added with the old `DEFAULT 0`)
+/// are flipped once by [`ensure_pool_default_backfill`].
 pub(crate) fn ensure_mesh_pre_spawn_pool_size(conn: &Connection) -> SqlResult<()> {
+    // DEFAULT 1 since v24 (ADR 0020): pool ON by default. A DB whose column
+    // was added by a pre-v24 build keeps its ALTER-time DEFAULT 0 — that's
+    // what `ensure_pool_default_backfill` and `create_mesh`'s explicit
+    // insert value are for.
     if ensure_column(
         conn,
         "meshes",
         "pre_spawn_pool_size",
-        "INTEGER NOT NULL DEFAULT 0",
+        "INTEGER NOT NULL DEFAULT 1",
     )? {
         tracing::warn!("ensure_mesh_pre_spawn_pool_size: added missing column");
     }
+    Ok(())
+}
+
+/// One-time v24 backfill (ADR 0020): flip worktree-enabled meshes still on
+/// the old pool-off default (`pre_spawn_pool_size = 0`) to the new default
+/// of 1 pre-warmed worktree. Runs at most once per DB, gated on the
+/// `pool_default_backfill_v24` app_settings flag — written only AFTER the
+/// UPDATE succeeds, so a crash mid-init retries next launch, and a user
+/// who sets a mesh back to 0 afterwards is never overridden again.
+///
+/// Worktree-disabled meshes are left at 0: the pool is meaningless for
+/// them, and leaving them untouched means enabling worktrees later starts
+/// from an explicit choice in the Worktrees Probe rather than a surprise
+/// background checkout.
+pub(crate) fn ensure_pool_default_backfill(conn: &Connection) -> SqlResult<()> {
+    let done: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key = 'pool_default_backfill_v24'",
+            [],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if done {
+        return Ok(());
+    }
+    let updated = conn.execute(
+        "UPDATE meshes
+         SET pre_spawn_pool_size = 1
+         WHERE COALESCE(pre_spawn_pool_size, 0) = 0
+           AND COALESCE(use_worktree, 1) = 1",
+        [],
+    )?;
+    if updated > 0 {
+        tracing::info!(
+            "ensure_pool_default_backfill: enabled the pre-spawn pool (size 1) on {} mesh(es); \
+             opt out per-mesh via the Worktrees Probe",
+            updated
+        );
+    }
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('pool_default_backfill_v24', '1')",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1369,6 +1563,67 @@ pub fn validate_coordinator_drive_token_inner(conn: &Connection, token: &str) ->
     }
 }
 
+// --- Coordinator drive idempotency ledger (issue #320, ADR-0008 §6) ---
+//
+// A Coordinator on a flaky network retries a timed-out drive; the caller-supplied
+// idempotency key lets Buildmesh recognise the retry and replay the original
+// verdict instead of sending the prompt twice. The store deals in the verdict's
+// wire string (`"delivered"`/`"unverified"`) so this layer never depends on the
+// `coordinator::drive` module — the drive side owns the string↔enum mapping.
+// Lock-once + `_inner(&Connection)` so the logic is unit-testable in memory.
+
+/// The verdict recorded under `(node_id, key)`, or `None` if that key is new for
+/// the node. `None` means "go drive"; `Some` means "replay this, do not re-send".
+/// A genuine read error (`Err`) is *propagated, never swallowed*: the caller must
+/// be able to tell "this key is new" from "I couldn't check", because on a retry
+/// the difference is deliver-again versus fail-safe (issue #320 review).
+pub fn lookup_drive_prompt_verdict(node_id: i64, key: &str) -> SqlResult<Option<String>> {
+    let db = get().lock().unwrap();
+    lookup_drive_prompt_verdict_inner(&db, node_id, key)
+}
+
+pub fn lookup_drive_prompt_verdict_inner(
+    conn: &Connection,
+    node_id: i64,
+    key: &str,
+) -> SqlResult<Option<String>> {
+    // Only "no such row" is `Ok(None)` (= key never seen → go drive). Any other
+    // error (IO, lock, corruption) propagates so the drive path can fail safe
+    // rather than mistake an unreadable ledger for "not delivered yet".
+    match conn.query_row(
+        "SELECT verdict FROM coordinator_drive_prompts
+             WHERE node_id = ?1 AND idempotency_key = ?2",
+        params![node_id, key],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(verdict) => Ok(Some(verdict)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Record the verdict a drive produced under its idempotency key. `INSERT OR
+/// IGNORE` keeps the *first* verdict authoritative: a racing duplicate that also
+/// slipped through the lookup cannot overwrite the original the retry will replay.
+pub fn record_drive_prompt_verdict(node_id: i64, key: &str, verdict: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    record_drive_prompt_verdict_inner(&db, node_id, key, verdict)
+}
+
+pub fn record_drive_prompt_verdict_inner(
+    conn: &Connection,
+    node_id: i64,
+    key: &str,
+    verdict: &str,
+) -> SqlResult<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO coordinator_drive_prompts (node_id, idempotency_key, verdict)
+         VALUES (?1, ?2, ?3)",
+        params![node_id, key, verdict],
+    )?;
+    Ok(())
+}
+
 // --- Persistent device sessions (issue #502, PRD #494) ---
 //
 // A paired phone is identified by its own token, minted at pairing and stored
@@ -1616,7 +1871,10 @@ const MESH_COLUMNS: &str =
      COALESCE(use_worktree, 1), COALESCE(worktree_mode, ''), \
      COALESCE(default_provider, ''), COALESCE(base_ref, 'origin/main'), \
      scratchpad, COALESCE(sandbox, 0), \
-     COALESCE(pre_spawn_pool_size, 0)";
+     COALESCE(pre_spawn_pool_size, 0), COALESCE(color, ''), \
+     COALESCE(autopilot_enabled, 0), COALESCE(autopilot_trigger_label, ''), \
+     COALESCE(autopilot_concurrency_limit, 2), COALESCE(autopilot_provider, ''), \
+     COALESCE(autopilot_action_on_success, '')";
 
 /// Map a row selected with `MESH_COLUMNS` into a `Mesh`. Single place that
 /// normalizes empty config strings to `None` (via `parse_str`).
@@ -1641,6 +1899,12 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
         scratchpad: row.get(14)?,
         sandbox: row.get::<_, i32>(15)? != 0,
         pre_spawn_pool_size: row.get::<_, i32>(16)?,
+        color: parse_str(row.get::<_, String>(17)?),
+        autopilot_enabled: row.get::<_, i32>(18)? != 0,
+        autopilot_trigger_label: parse_str(row.get::<_, String>(19)?),
+        autopilot_concurrency_limit: row.get::<_, i32>(20)?,
+        autopilot_provider: parse_str(row.get::<_, String>(21)?),
+        autopilot_action_on_success: parse_str(row.get::<_, String>(22)?),
     })
 }
 
@@ -1790,9 +2054,13 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
         |row| row.get(0),
     )?;
 
+    // `pre_spawn_pool_size = 1` is written explicitly (not left to the
+    // column default) because a DB upgraded from pre-v24 still carries the
+    // ALTER-time `DEFAULT 0` — new meshes must get the pool-on default
+    // regardless of when the DB was created (ADR 0020).
     db.execute(
-        "INSERT INTO meshes (name, path, layout, position, use_worktree, base_ref)
-         VALUES (?1, ?2, 'grid', ?3, 1, 'origin/main')",
+        "INSERT INTO meshes (name, path, layout, position, use_worktree, base_ref, pre_spawn_pool_size)
+         VALUES (?1, ?2, 'grid', ?3, 1, 'origin/main', 1)",
         params![name, path, next_position],
     )?;
     let id = db.last_insert_rowid();
@@ -1802,6 +2070,297 @@ pub fn create_mesh(name: &str, path: &str) -> SqlResult<Mesh> {
 pub fn get_mesh_by_id(id: i64) -> SqlResult<Mesh> {
     let db = get().lock().unwrap();
     get_mesh_by_id_inner(&db, id)
+}
+
+/// Set (or clear) a mesh's accent colour. `Some(hex)` stores the `#rrggbb`
+/// string; `None` clears it back to the deterministic-palette fallback.
+/// Returns the number of rows updated so callers can surface a "mesh not
+/// found" error rather than a silent no-op (matches the zero-rows contract
+/// used by `set_mesh_sandbox` / `update_mesh_pool_size`).
+pub fn set_mesh_color(id: i64, color: Option<&str>) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET color = ?1 WHERE id = ?2",
+        params![color, id],
+    )
+}
+
+// --- Autopilot (issues #481/#482/#485, PRD #480) ---
+
+/// Persist the full Autopilot Policy for a mesh in one write. Empty strings
+/// for the optional TEXT columns store NULL so they read back as `None`
+/// (matching `parse_str`). Returns the number of rows updated so the caller
+/// can surface "mesh not found" (same zero-rows contract as
+/// `update_mesh_pool_size`).
+pub fn set_mesh_autopilot(
+    id: i64,
+    enabled: bool,
+    trigger_label: Option<&str>,
+    concurrency_limit: i32,
+    provider: Option<&str>,
+    action_on_success: Option<&str>,
+) -> SqlResult<usize> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE meshes SET autopilot_enabled = ?1, autopilot_trigger_label = ?2, \
+         autopilot_concurrency_limit = ?3, autopilot_provider = ?4, \
+         autopilot_action_on_success = ?5 WHERE id = ?6",
+        params![
+            if enabled { 1 } else { 0 },
+            trigger_label,
+            concurrency_limit,
+            provider,
+            action_on_success,
+            id
+        ],
+    )
+}
+
+/// Every mesh with Autopilot enabled — the poller's work list.
+pub fn list_autopilot_enabled_meshes() -> SqlResult<Vec<Mesh>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM meshes WHERE COALESCE(autopilot_enabled, 0) = 1 ORDER BY id",
+        MESH_COLUMNS
+    ))?;
+    let rows = stmt.query_map([], map_mesh_row)?;
+    rows.collect()
+}
+
+/// Record an auto-spawned node in the `autopilot_runs` ledger (state
+/// `implementing`). Idempotent per node (PRIMARY KEY node_id).
+pub fn create_autopilot_run(node_id: i64, mesh_id: i64, issue_number: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "INSERT OR IGNORE INTO autopilot_runs (node_id, mesh_id, issue_number) \
+         VALUES (?1, ?2, ?3)",
+        params![node_id, mesh_id, issue_number],
+    )?;
+    Ok(())
+}
+
+/// Typed view of the `autopilot_runs.state` column (migrates the stringly-
+/// typed surface that issue #855 tracked). The DB column stays TEXT for
+/// backward-compat; `to_db_str` matches the column constraint and every
+/// existing row's stored value. Wire shape is the same snake-case union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ts_rs::TS)]
+#[ts(rename_all = "snake_case", export_to = "AutopilotRunStateKind.ts")]
+pub enum AutopilotRunState {
+    Implementing,
+    Finishing,
+    Completed,
+    Failed,
+    /// Terminal state set by the merged-PR auto-close sweep. The node row
+    /// has also been `archived` by then — `Merged` is purely a pipeline
+    /// marker so the sweep can fast-skip without re-fetching the GitHub
+    /// merge endpoint. Distinct from `Completed` (the agent PR'd the work)
+    /// and from `Failed`.
+    Merged,
+}
+
+impl AutopilotRunState {
+    pub fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Implementing => "implementing",
+            Self::Finishing => "finishing",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Merged => "merged",
+        }
+    }
+
+    /// Parse back from the DB column. Unknown strings degrade to
+    /// `Implementing` (the safest default; the sweep never re-fetches, so
+    /// an unknown row simply costs one extra GitHub round-trip the next
+    /// pass) rather than `None` — every call site wants a value.
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "implementing" => Self::Implementing,
+            "finishing" => Self::Finishing,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "merged" => Self::Merged,
+            _ => Self::Implementing,
+        }
+    }
+
+    /// The active states that occupy a mesh's concurrency slot.
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Implementing | Self::Finishing)
+    }
+}
+
+impl serde::Serialize for AutopilotRunState {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(self.as_db_str())
+    }
+}
+
+/// The pipeline row for a node, if it is Autopilot-managed:
+/// `(issue_number, state, attempts)`. `Ok(None)` for hand-spawned nodes.
+pub fn get_autopilot_run(node_id: i64) -> SqlResult<Option<(i64, AutopilotRunState, i32)>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT issue_number, state, attempts FROM autopilot_runs WHERE node_id = ?1",
+    )?;
+    let mut rows = stmt.query_map(params![node_id], |row| {
+        let s: String = row.get(1)?;
+        Ok((
+            row.get(0)?,
+            AutopilotRunState::from_db_str(&s),
+            row.get(2)?,
+        ))
+    })?;
+    rows.next().transpose()
+}
+
+/// Advance a node's Autopilot pipeline state, optionally bumping the
+/// wrap-up attempt counter.
+pub fn set_autopilot_run_state(
+    node_id: i64,
+    state: AutopilotRunState,
+    attempts: Option<i32>,
+) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    let state_str = state.as_db_str();
+    match attempts {
+        Some(n) => db.execute(
+            "UPDATE autopilot_runs SET state = ?1, attempts = ?2, \
+             updated_at = datetime('now') WHERE node_id = ?3",
+            params![state_str, n, node_id],
+        )?,
+        None => db.execute(
+            "UPDATE autopilot_runs SET state = ?1, updated_at = datetime('now') \
+             WHERE node_id = ?2",
+            params![state_str, node_id],
+        )?,
+    };
+    Ok(())
+}
+/// Record the wrap-up PR a completed run produced, so the merged-PR sweep
+/// can later find and close the node without re-deriving the branch.
+pub fn set_autopilot_run_pr(node_id: i64, pr_number: i64, pr_url: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE autopilot_runs SET pr_number = ?1, pr_url = ?2, \
+         updated_at = datetime('now') WHERE node_id = ?3",
+        params![pr_number, pr_url, node_id],
+    )?;
+    Ok(())
+}
+
+/// Completed runs on this mesh whose wrap-up PR is known and whose node is
+/// still on the grid — the merged-PR auto-close sweep's work list:
+/// `(node_id, pr_number)`.
+pub fn list_completed_autopilot_runs_with_pr(mesh_id: i64) -> SqlResult<Vec<(i64, i64)>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT r.node_id, r.pr_number FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE r.mesh_id = ?1 AND r.state = 'completed' \
+         AND r.pr_number IS NOT NULL AND a.status != 'archived'",
+    )?;
+    let rows = stmt.query_map(params![mesh_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// Remove a node's Autopilot ledger row. Called from the node-delete path
+/// (`services::agent_node::delete`) — the table declares `ON DELETE
+/// CASCADE`, but this codebase never turns on SQLite's `foreign_keys`
+/// pragma (see `apply_connection_pragmas`), so the cascade is decorative
+/// and the delete must be explicit. Deleting the row also un-dedupes the
+/// issue (`list_known_autopilot_issue_numbers`), which is the intended
+/// behaviour: closing a bad autopilot node while the issue stays labelled
+/// lets the poller retry it.
+pub fn delete_autopilot_run(node_id: i64) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "DELETE FROM autopilot_runs WHERE node_id = ?1",
+        params![node_id],
+    )?;
+    Ok(())
+}
+
+/// Number of *active* Autopilot nodes for a mesh — rows still in the
+/// pipeline (`implementing`/`finishing`) whose node hasn't been archived.
+/// This is the count the poller compares against
+/// `autopilot_concurrency_limit`; completed/failed runs free their slot.
+pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
+    let db = get().lock().unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE r.mesh_id = ?1 AND r.state IN ('implementing', 'finishing') \
+         AND a.status != 'archived'",
+        params![mesh_id],
+        |row| row.get(0),
+    )
+}
+
+/// Node ids of `finishing` runs (all meshes) whose ledger row hasn't
+/// advanced for at least `stale_minutes` — the poller re-drive's candidates.
+/// The wrap-up pipeline is otherwise purely turn-driven, so a run whose
+/// final Node Turn was lost (dropped by the in-flight guard, or a missed
+/// attention callback) would stall in `finishing` forever, occupying a
+/// concurrency slot (node 2328, 2026-07-17). Deliberately NOT scoped to
+/// autopilot-enabled meshes: disabling a mesh's autopilot must not strand
+/// its already-running wrap-ups. `updated_at` is bumped on every
+/// state/attempt write, so "stale" means "no pipeline activity", not
+/// "agent quiet".
+pub fn list_stalled_finishing_autopilot_runs(stale_minutes: i64) -> SqlResult<Vec<i64>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT r.node_id FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE r.state = 'finishing' AND a.status != 'archived' \
+         AND r.updated_at <= datetime('now', '-' || ?1 || ' minutes')",
+    )?;
+    let rows = stmt.query_map(params![stale_minutes], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// Node ids of every run still in the pipeline, across all meshes. Startup
+/// hydration for the evaluator's piloted-node registry — a restart must not
+/// silently drop live autopilot nodes out of the wrap-up loop.
+pub fn list_active_autopilot_node_ids() -> SqlResult<Vec<i64>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT node_id FROM autopilot_runs WHERE state IN ('implementing', 'finishing')",
+    )?;
+    let rows = stmt.query_map([], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// Every active run's `(node_id, state)` across all meshes — the frontend's
+/// autopilot-pill data (which nodes are piloted, and where in the pipeline
+/// each one is). Excludes archived nodes: their cards aren't on the grid.
+pub fn list_autopilot_run_states() -> SqlResult<Vec<(i64, AutopilotRunState)>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT r.node_id, r.state FROM autopilot_runs r \
+         JOIN agent_nodes a ON a.id = r.node_id \
+         WHERE a.status != 'archived'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let s: String = row.get(1)?;
+        Ok((row.get(0)?, AutopilotRunState::from_db_str(&s)))
+    })?;
+    rows.collect()
+}
+
+/// Every GitHub issue number this mesh already has a node for — union of the
+/// Autopilot ledger and manually issue-spawned nodes — so the poller never
+/// double-spawns an issue (including issues whose node completed or errored).
+pub fn list_known_autopilot_issue_numbers(mesh_id: i64) -> SqlResult<Vec<i64>> {
+    let db = get().lock().unwrap();
+    let mut stmt = db.prepare(
+        "SELECT issue_number FROM autopilot_runs WHERE mesh_id = ?1 \
+         UNION \
+         SELECT source_issue FROM agent_nodes \
+         WHERE mesh_id = ?1 AND source_issue IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![mesh_id], |row| row.get(0))?;
+    rows.collect()
 }
 
 pub fn update_mesh_layout(id: i64, layout: &str) -> SqlResult<()> {
@@ -2013,6 +2572,27 @@ pub fn set_agent_node_worktree_name(id: i64, worktree_name: &str) -> SqlResult<(
     db.execute(
         "UPDATE agent_nodes SET worktree_name = ?1 WHERE id = ?2",
         params![worktree_name, id],
+    )?;
+    Ok(())
+}
+
+/// Update an agent node's `provider` column. Used by the Regenerate
+/// command (issue #774 / #775) to swap a node's Model Provider on
+/// respawn. Stores the opaque harness/profile id verbatim — the
+/// resolver shim normalises to a `Provider` enum at the spawn seam,
+/// so the caller can pass either a bare `harness` id or a composite
+/// `<harness>:<provider_id>` Spawn Option id (issue #575). The
+/// underlying SQL is a plain one-column UPDATE; passing the same
+/// value the column already carries rewrites the row to itself,
+/// which is harmless (the trigger is a Regenerate, not a hot loop)
+/// and avoids the need for an `AND provider <> ?1` guard that could
+/// silently drop a real rewrite if the comparison string ever drifted
+/// from the column's storage form.
+pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
+    let db = get().lock().unwrap();
+    db.execute(
+        "UPDATE agent_nodes SET provider = ?1 WHERE id = ?2",
+        params![provider, id],
     )?;
     Ok(())
 }
@@ -2543,14 +3123,20 @@ pub(crate) fn delete_warm_worktrees_for_mesh_inner(
     Ok(n)
 }
 
-/// List every warm pool directory path for a mesh (issue #639 gap 3). Called
-/// by `commands::mesh::delete_mesh` BEFORE the row cascade so the caller can
-/// `git worktree remove --force` each path — otherwise the on-disk
-/// `.claude/worktrees/<slug>` directories outlive the mesh as orphans and a
-/// subsequent prewarm on the same path can collide with the leftover slug.
+/// List every warm pool directory path for a mesh, regardless of status
+/// (issue #639 gap 3). The "everything" view — kept for diagnostic /
+/// audit tools that want the full set of warm paths for a mesh,
+/// INCLUDING `claimed` rows whose directories may back live agents.
+/// Safe force-removal must exclude `claimed` rows (their directories may
+/// back live agent processes); use [`list_warm_paths_for_mesh_droppable`]
+/// for that path (#642.1).
 ///
 /// Returns absolute host paths. Cheap: a `SELECT path` over a small index.
-/// Companion helper is `delete_warm_worktrees_for_mesh_inner`.
+/// `#[allow(dead_code)]` because no production code path currently needs
+/// the everything view; preserving the public surface so diagnostic tools
+/// and the next issue can reach it without going through the `pub(crate)`
+/// inner.
+#[allow(dead_code)]
 pub fn list_warm_paths_for_mesh(mesh_id: i64) -> SqlResult<Vec<String>> {
     let db = get().lock().unwrap();
     list_warm_paths_for_mesh_inner(&db, mesh_id)
@@ -2561,6 +3147,33 @@ pub(crate) fn list_warm_paths_for_mesh_inner(
     mesh_id: i64,
 ) -> SqlResult<Vec<String>> {
     let mut stmt = conn.prepare("SELECT path FROM warm_worktrees WHERE mesh_id = ?1")?;
+    let rows = stmt.query_map(params![mesh_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// List warm pool directory paths for a mesh that are SAFE to force-remove —
+/// every status EXCEPT `claimed`. This is the correct view for `delete_mesh`:
+/// a `claimed` row's directory may back a live agent process, and force-
+/// removing it would destroy the agent's working tree (#642.1). The mesh's
+/// `agent_nodes` rows are also deleted by the cascade, so we can't ask the DB
+/// "is there a live agent for this path?" — the conservative choice is to
+/// skip every claimed row and leave the dir behind. The user opted to delete
+/// the mesh; if they want the claimed dir gone too they can remove it by
+/// hand. The dir is leaked (not data-lost) — `process_pending_removals` does
+/// NOT help here because the mesh's `agent_nodes` rows are cascade-deleted
+/// by the same transaction, so no `close` event ever fires for them.
+pub fn list_warm_paths_for_mesh_droppable(mesh_id: i64) -> SqlResult<Vec<String>> {
+    let db = get().lock().unwrap();
+    list_warm_paths_for_mesh_droppable_inner(&db, mesh_id)
+}
+
+pub(crate) fn list_warm_paths_for_mesh_droppable_inner(
+    conn: &Connection,
+    mesh_id: i64,
+) -> SqlResult<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT path FROM warm_worktrees WHERE mesh_id = ?1 AND status != 'claimed'",
+    )?;
     let rows = stmt.query_map(params![mesh_id], |row| row.get::<_, String>(0))?;
     rows.collect()
 }
@@ -2652,35 +3265,197 @@ pub(crate) fn list_warm_worktrees_to_reconcile_inner(
     Ok(out)
 }
 
-/// Delete rows that are stuck in `claimed` status (their directories exist
-/// — `list_warm_worktrees_to_reconcile` deliberately excludes `claimed` rows
-/// because their directory may back a live node). The only path that
+/// Delete rows that are stuck in `claimed` status. The only path that
 /// produces a `claimed` row is `claim_warm_entry_for_mesh_inner`; the only
 /// path that should remove it is `forget_after_spawn`, called from the
 /// spawn's success branch. If that DELETE fails (DB error after a
 /// successful spawn) the row sits at `claimed` forever — `claim_warm_entry`
 /// won't pick it up again (the `status='available'` filter blocks it) and
-/// the missing-dir scan won't prune it. This function closes that hole by
-/// pruning EVERY `claimed` row unconditionally — the only way to safely
-/// remove a row whose directory may already belong to a live agent node is
-/// to drop the bookkeeping row without touching the filesystem (the dir is
-/// already adopted as the agent's worktree). No age guard: a fresh `claimed`
-/// row is just as stuck as an old one if the `forget_after_spawn` delete
-/// fails. Called once from `reconcile_on_startup` (step 1a, before the
-/// missing-dir scan).
+/// the missing-dir scan (`list_warm_worktrees_to_reconcile` deliberately
+/// excludes `claimed` rows because their directory may back a live node)
+/// won't prune it either. This function closes that hole.
+///
+/// **#697 algorithm — per-row classification against the live session
+/// snapshot it receives (production: `PROCESS_REGISTRY.session_ids()`):**
+///
+/// 1. **Adopted** — a live session exists on the warm row's mesh. The
+///    spawn that claimed this row necessarily attached to that mesh, so
+///    a live session there is sufficient evidence to refuse teardown.
+///    Drop the row, **preserve** the directory. We deliberately do NOT
+///    gate on `agent_nodes.worktree_name` matching `preassigned_name`
+///    here — the #642.2 revert showed that gate fails open in the silent-
+///    UPDATE-failure corner case (`set_agent_node_worktree_name` errored,
+///    `agent_nodes.worktree_name` stays at the throwaway stage-1 slug,
+///    GC misclassifies the row as orphan and tears down the live CWD).
+///
+/// 2. **Crashed-spawn orphan** — no live session on the mesh AND the
+///    directory exists on disk. The spawn crashed mid-claim without
+///    `forget_after_spawn` firing (so the row is stuck at `claimed` and
+///    the directory is on disk with no agent to adopt it). Tear down the
+///    git worktree metadata via `git::worktree::remove_one_worktree`,
+///    then drop the row. This is the orphan leak #697 closes.
+///
+/// 3. **Mid-move / pre-missing** — no live session AND no directory on
+///    disk. The Issue/PR spawn moves the directory onto a `gh{N}-`/`pr{N}-`
+///    path (#612) before `forget_after_spawn` fires; if the spawn crashes
+///    between the move and the row drop, the original pool path is empty
+///    and the bookkeeping row is safe to drop with no fs action. The
+///    pre-#697 row-only GC also handled this case (and still does here).
+///
+/// **Why "any live session on the mesh" rather than "live session whose
+/// derived worktree path == warm.path":** the strict path-equality check
+/// is the algorithm the issue body sketches, but it inherits the #642.2
+/// data-loss bug — when `agent_nodes.worktree_name` is stale, the derived
+/// path doesn't match the warm row's `path`, the strict check classifies
+/// the row as orphan, and the GC tears down the LIVE agent's CWD. The
+/// `any session on this mesh` predicate is a strictly looser (and
+/// therefore safer) sufficient condition. The trade-off is more directory
+/// leaks if a spawn is mid-flight on a different row of the same mesh
+/// when GC runs — bounded by `claimed` rows per mesh, no data loss.
+///
+/// **No age guard:** a fresh `claimed` row is just as stuck as an old one
+/// if `forget_after_spawn` delete fails. Called once from
+/// `reconcile_on_startup` (step 1a, before the missing-dir scan).
 pub fn delete_orphaned_claimed_warm_worktrees() -> SqlResult<usize> {
+    // Snapshot live sessions ONCE before taking the DB lock. The call is
+    // cheap (a `Vec` clone over the registry's session-id set) and the
+    // snapshot is what the inner function uses to classify rows. Holding
+    // the snapshot outside the lock closes a tiny but real race: a spawn
+    // that register-then-dies between our snapshot and our iteration
+    // would otherwise intermittently flip a row from "adopted" to
+    // "orphan" mid-pass.
+    let live_session_ids = crate::agent::process::PROCESS_REGISTRY.session_ids();
     let db = get().lock().unwrap();
-    delete_orphaned_claimed_warm_worktrees_inner(&db)
+    delete_orphaned_claimed_warm_worktrees_inner(&db, &live_session_ids)
 }
 
 pub(crate) fn delete_orphaned_claimed_warm_worktrees_inner(
     conn: &Connection,
+    live_session_ids: &[i64],
 ) -> SqlResult<usize> {
-    let n = conn.execute(
-        "DELETE FROM warm_worktrees WHERE status = 'claimed'",
-        [],
+    // Read the full set of claimed rows up front, then drop the prepared
+    // statement so the loop below doesn't keep a statement handle alive
+    // across the `remove_one_worktree` shell-out (which can take seconds
+    // on a slow disk and would otherwise hold an `&mut Connection`
+    // borrow that blocks the agent_node lookup we issue against the same
+    // connection).
+    let mut stmt = conn.prepare(
+        "SELECT id, mesh_id, path FROM warm_worktrees WHERE status = 'claimed'",
     )?;
-    Ok(n)
+    let claimed: Vec<(i64, i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    if claimed.is_empty() {
+        return Ok(0);
+    }
+
+    // Which meshes currently have a live session? Build the lookup set
+    // from PROCESS_REGISTRY's session-id snapshot + agent_nodes.mesh_id.
+    // Returns `None` if the agent_nodes query errored (rather than an
+    // empty set) — an empty set would let the loop below tear down a
+    // live agent's CWD because we "couldn't see" any live sessions. With
+    // `None`, the loop falls back to row-only behaviour (the same shape
+    // as the pre-#697 GC: drop rows, leave the filesystem alone).
+    let live_mesh_ids = match live_mesh_ids_for(conn, live_session_ids) {
+        Some(set) => Some(set),
+        None => {
+            tracing::warn!(
+                "delete_orphaned_claimed_warm_worktrees_inner: could not resolve \
+                 live_mesh_ids ({} live session ids in snapshot); falling back to \
+                 row-only behaviour (no filesystem teardown) to be safe",
+                live_session_ids.len()
+            );
+            None
+        }
+    };
+
+    let mut deleted = 0;
+    for (id, mesh_id, path) in claimed {
+        let treat_as_orphan = match &live_mesh_ids {
+            // Couldn't query live sessions → be conservative. Even though
+            // there almost certainly is no live agent (startup reconcile
+            // runs before user-facing spawn), a transient DB error is not
+            // an excuse to destroy a working tree. Drop the row but leave
+            // the dir intact — the next reconcile (with a recovered DB)
+            // can retry the teardown.
+            None => false,
+            Some(live) => !live.contains(&mesh_id),
+        };
+        if treat_as_orphan {
+            // Branch 2: crashed-spawn orphan. Best-effort: a partial
+            // git-worktree state is acceptable to leak if the call fails
+            // (the next reconcile pass will retry — see #610 / #642.3
+            // for the same "best-effort" pattern). We never block the
+            // row drop on a filesystem failure: a stuck orphan row is
+            // strictly less harmful than not dropping it.
+            //
+            // Two-step teardown: `remove_one_worktree` is the polite
+            // path that clears `git worktree remove --force` metadata;
+            // if it returns Err (test fixture was a plain tempdir, OR
+            // production hit a locked handle / non-worktree state), the
+            // `remove_dir_all` fallback guarantees the on-disk leak
+            // actually closes. Order matters — `remove_one_worktree`
+            // first so a real git worktree loses its bookkeeping before
+            // the dir goes (which is what unblocks a future
+            // `git worktree add` for the same slug).
+            if crate::git::worktree::remove_one_worktree(&path).is_err()
+                && std::path::Path::new(&path).exists()
+            {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
+        // Branch 1 (live session on this mesh) and Branch 3 (no dir on
+        // disk) both fall through to a row-only delete. Same for the
+        // conservative-fallback `treat_as_orphan = false` case.
+        conn.execute(
+            "DELETE FROM warm_worktrees WHERE id = ?1",
+            params![id],
+        )?;
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
+/// Resolve `live_session_ids` (`PROCESS_REGISTRY.session_ids()` in
+/// production) into the set of `mesh_id`s whose agents are currently live.
+/// Returns `None` on any query error so the caller can choose the safe
+/// fallback (row-only, no filesystem action). Returning an empty set
+/// here would be ambiguous — "no live sessions" and "I couldn't tell"
+/// are different facts and the caller's teardown decision depends on
+/// which one is true.
+///
+/// `SELECT DISTINCT mesh_id FROM agent_nodes WHERE id IN (...)` is one
+/// round-trip regardless of how many sessions are live. SQLite's variable
+/// cap (999 by default) is generous compared to realistic session
+/// counts; a future scale-up switch to a temp-table join would survive
+/// this limit transparently.
+fn live_mesh_ids_for(
+    conn: &Connection,
+    live_session_ids: &[i64],
+) -> Option<HashSet<i64>> {
+    if live_session_ids.is_empty() {
+        // An empty PROCESS_REGISTRY snapshot IS a known fact (not an
+        // error): no agents are currently running. Returning `Some(empty)`
+        // here is what tells the caller it's safe to consider every
+        // claimed row a candidate for orphan teardown.
+        return Some(HashSet::new());
+    }
+    let placeholders = vec!["?"; live_session_ids.len()].join(",");
+    let sql = format!(
+        "SELECT DISTINCT mesh_id FROM agent_nodes WHERE id IN ({})",
+        placeholders
+    );
+    let mut stmt = conn.prepare(&sql).ok()?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params_from_iter(live_session_ids.iter()),
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()?;
+    let mesh_ids: HashSet<i64> = rows.filter_map(Result::ok).collect();
+    Some(mesh_ids)
 }
 
 /// How many `available` warm entries a mesh currently has. The pool worker

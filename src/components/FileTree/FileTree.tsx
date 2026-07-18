@@ -7,7 +7,8 @@ import {
 } from '../../lib/tauri';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
-import { statusMeta } from '../Diff/Diff';
+import { fileDiffStatusMeta as statusMeta } from '../../lib/status';
+import { LoadingState } from '../shared/Spinner';
 
 /** Lucide-style glyphs for the tree rows. */
 function ChevronRightIcon({ className }: { className?: string }) {
@@ -134,10 +135,18 @@ export function FileTree({
     [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect]
   );
 
-  if (loadingState || gitLoading) {
+  // Block on the initial file-listing fetch, and on the initial git-status
+  // fetch only while the tree hasn't rendered yet (so a file's changed/
+  // unchanged state is settled before it's first clickable). Once
+  // `treeState` exists, a background GIT_CHANGED refresh must NOT blank
+  // the tree — that unmounts every `TreeNode`, snapping shut whatever
+  // folders the user had expanded (issue #804). `gitFiles` keeps its last
+  // value during the refresh (see `pathInvalidatedCache.ts`), so badges
+  // just update in place once the new status resolves.
+  if (loadingState || (gitLoading && !treeState)) {
     return (
-      <div className="flex items-center justify-center h-20 text-text-muted text-xs">
-        Loading...
+      <div className="flex items-center justify-center h-20">
+        <LoadingState label="Loading files…" />
       </div>
     );
   }
@@ -225,7 +234,7 @@ function TreeNode({
     <div>
       <div
         className={`
-          flex items-center gap-1 px-2 py-0.5 rounded cursor-pointer
+          flex items-center gap-1 px-2 py-0.5 rounded-md cursor-pointer
           hover:bg-bg-card transition-colors
           ${isSelected ? 'bg-bg-overlay' : ''}
         `}

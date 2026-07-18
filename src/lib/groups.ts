@@ -77,6 +77,27 @@ export function mapBackendProviders(backend: ProviderInfo[]): SpawnOption[] {
 }
 
 /**
+ * True when the spawn menu offers at least one real agent harness — any
+ * option that isn't the plain `terminal` shell.
+ *
+ * On a fresh machine with no agent CLI on `PATH` (`agent/detection.rs`)
+ * and no keyed provider account, the backend's `compose_provider_menu`
+ * emits only the code-defined Terminal harness
+ * (`preferences::default_harness_profiles`) — so the spawn menu is
+ * effectively empty. This predicate is that "near-empty" signal: it drives
+ * the onboarding empty state in the Spawn Menu (issue #822). A keyed
+ * provider always surfaces a Proxied row under a non-terminal harness id
+ * (even when the Claude binary is absent — see
+ * `preferences::claude_harness_id_from`), so "no CLI AND no key" is exactly
+ * the terminal-only case this catches.
+ */
+export function hasSpawnableAgent(
+  providers: Pick<SpawnOption, 'harness_id'>[],
+): boolean {
+  return providers.some((p) => p.harness_id !== 'terminal');
+}
+
+/**
  * Bucket a flat Spawn Option list by `group_key` into
  * `[harness_id, rows]` tuples, preserving input order within each
  * bucket so the native harness row lands first (the backend emits it

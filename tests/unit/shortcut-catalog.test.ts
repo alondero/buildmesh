@@ -1,0 +1,170 @@
+/**
+ * Tests for the keyboard shortcut catalog (issue #731).
+ *
+ * The catalog is the single source of truth for the cheatsheet: every
+ * shortcut the user can press in Buildmesh, with a platform-aware label
+ * and a grouping for the cheatsheet's section headings. App.tsx owns the
+ * Tauri-binding side; the cheatsheet modal reads from this catalog.
+ *
+ * Drift here would be visible — the cheatsheet would either lie (listing
+ * shortcuts that don't fire) or omit a shortcut a user just learned about
+ * elsewhere in the UI. These tests pin the contract.
+ */
+import { describe, it, expect } from 'vitest';
+import {
+  SHORTCUT_CATALOG,
+  shortcutLabel,
+  groupedShortcutEntries,
+  type ShortcutEntry,
+  type ShortcutGroup,
+} from '../../src/lib/shortcutCatalog';
+
+describe('shortcutCatalog', () => {
+  it('exports a non-empty catalog with one entry per shipped shortcut', () => {
+    expect(SHORTCUT_CATALOG.length).toBeGreaterThanOrEqual(10);
+  });
+
+  it('gives every entry a unique action id so App.tsx can key on it', () => {
+    const actions = SHORTCUT_CATALOG.map(s => s.action);
+    expect(new Set(actions).size).toBe(actions.length);
+  });
+
+  it('gives every entry a non-empty description, group, and both platform labels', () => {
+    for (const entry of SHORTCUT_CATALOG) {
+      expect(entry.description.trim().length, `${entry.action} description`).toBeGreaterThan(0);
+      expect(entry.winKey.trim().length, `${entry.action} winKey`).toBeGreaterThan(0);
+      expect(entry.macKey.trim().length, `${entry.action} macKey`).toBeGreaterThan(0);
+      expect(['app', 'grid', 'terminal', 'modal']).toContain(entry.group);
+    }
+  });
+
+  it('surfaces the canonical window-global shortcuts (issue #731 acceptance criteria)', () => {
+    const actions = new Set(SHORTCUT_CATALOG.map(s => s.action));
+    // From src/App.tsx Tauri global-shortcut registrations:
+    expect(actions.has('new-agent')).toBe(true);
+    expect(actions.has('toggle-maximize-grid')).toBe(true);
+    expect(actions.has('arrow-left')).toBe(true);
+    expect(actions.has('arrow-right')).toBe(true);
+    expect(actions.has('arrow-up')).toBe(true);
+    expect(actions.has('arrow-down')).toBe(true);
+  });
+
+  it('surfaces terminal-zoom shortcuts (issue #667) wired in Terminal.tsx', () => {
+    const actions = new Set(SHORTCUT_CATALOG.map(s => s.action));
+    expect(actions.has('zoom-reset')).toBe(true);
+    expect(actions.has('zoom-in')).toBe(true);
+    expect(actions.has('zoom-out')).toBe(true);
+  });
+
+  it('surfaces terminal context-menu actions wired in TerminalRegistry.attachCustomKeyEventHandler', () => {
+    const actions = new Set(SHORTCUT_CATALOG.map(s => s.action));
+    expect(actions.has('term-copy')).toBe(true);
+    expect(actions.has('term-paste')).toBe(true);
+    expect(actions.has('term-select-all')).toBe(true);
+    expect(actions.has('term-find')).toBe(true);
+    expect(actions.has('term-clear')).toBe(true);
+  });
+
+  it('surfaces Escape (close-modal) — owned by the <Modal> primitive, not Tauri', () => {
+    const close = SHORTCUT_CATALOG.find(s => s.action === 'close-modal');
+    expect(close).toBeDefined();
+    expect(close?.winKey).toBe('Esc');
+    expect(close?.macKey).toBe('Esc');
+    expect(close?.group).toBe('modal');
+  });
+
+  it('uses the same Alt+G / Cmd+G split for toggle-maximize-grid as App.tsx (#668)', () => {
+    const toggle = SHORTCUT_CATALOG.find(s => s.action === 'toggle-maximize-grid');
+    expect(toggle?.winKey).toBe('Alt+G');
+    expect(toggle?.macKey).toBe('⌘+G');
+  });
+
+  it('does not advertise the obsolete Ctrl+Alt+D shortcut the README once phantom-documented', () => {
+    // The keyboard-shortcut-conventions memory notes: "drift here has
+    // shipped at least once (Ctrl+Alt+D was phantom-documented)".
+    // Regression guard against reintroducing it.
+    const actions = new Set(SHORTCUT_CATALOG.map(s => s.action));
+    expect(actions.has('delete-mesh')).toBe(false);
+    expect(actions.has('open-debug')).toBe(false);
+  });
+
+  it('flags the empty-state splash subset (issue #748)', () => {
+    // The empty-state splash in AgentNodeView.tsx renders one row per
+    // entry flagged `splash: true`. Pin the exact set so a refactor that
+    // accidentally drops one (e.g. when deleting an entry) is caught here
+    // instead of leaving a hole in the user-facing discoverability hint.
+    const splashActions = SHORTCUT_CATALOG.filter(e => e.splash).map(e => e.action).sort();
+    expect(splashActions).toEqual([
+      'arrow-down',
+      'arrow-left',
+      'arrow-right',
+      'arrow-up',
+      'close-modal',
+      'new-agent',
+      'open-cheatsheet',
+      'toggle-maximize-grid',
+    ]);
+  });
+
+  it('does not flag terminal-only shortcuts in the splash (splash is the discoverability hint, not the full catalog)', () => {
+    // Terminal zoom / copy / paste / find / clear shortcuts are bound on
+    // focused xterm instances, not on the empty-state splash. The splash
+    // appears BEFORE any agent has spawned, so none of those actions are
+    // meaningful to advertise there yet. Regression guard against a
+    // refactor that blanket-flags every catalog entry with `splash: true`.
+    const splashActions = new Set(
+      SHORTCUT_CATALOG.filter(e => e.splash).map(e => e.action),
+    );
+    const terminalOnly = [
+      'zoom-reset', 'zoom-in', 'zoom-out',
+      'term-copy', 'term-paste', 'term-select-all', 'term-find', 'term-clear',
+    ];
+    for (const action of terminalOnly) {
+      expect(splashActions.has(action), `${action} should NOT be splash`).toBe(false);
+    }
+  });
+});
+
+describe('shortcutLabel', () => {
+  const entry: ShortcutEntry = {
+    action: 'new-agent',
+    group: 'app',
+    description: 'New agent node',
+    winKey: 'Ctrl+T',
+    macKey: '⌘+T',
+  };
+
+  it('returns the macKey on macOS (matches the isMac convention in src/lib/platform.ts)', () => {
+    expect(shortcutLabel(entry, true)).toBe('⌘+T');
+  });
+
+  it('returns the winKey on Windows/Linux', () => {
+    expect(shortcutLabel(entry, false)).toBe('Ctrl+T');
+  });
+});
+
+describe('groupedShortcutEntries', () => {
+  it('groups entries under their group name in display order: app, grid, terminal, modal', () => {
+    const groups = groupedShortcutEntries(SHORTCUT_CATALOG);
+    const order = groups.map(g => g.group);
+    // The first four group slots should be the canonical display order.
+    expect(order.slice(0, 4)).toEqual<ShortcutGroup[]>(['app', 'grid', 'terminal', 'modal']);
+  });
+
+  it('preserves the original entry order within a group', () => {
+    const groups = groupedShortcutEntries(SHORTCUT_CATALOG);
+    for (const g of groups) {
+      const actionsInGroup = SHORTCUT_CATALOG
+        .filter(s => s.group === g.group)
+        .map(s => s.action);
+      expect(g.entries.map(e => e.action)).toEqual(actionsInGroup);
+    }
+  });
+
+  it('only emits groups that have at least one entry (no empty sections)', () => {
+    const groups = groupedShortcutEntries(SHORTCUT_CATALOG);
+    for (const g of groups) {
+      expect(g.entries.length).toBeGreaterThan(0);
+    }
+  });
+});

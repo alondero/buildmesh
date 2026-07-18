@@ -1208,4 +1208,94 @@ describe('GitPullRequestsTab', () => {
     expect(mergeBtn.getAttribute('title')).toMatch(/merge/i);
     expect(viewBtn.getAttribute('title')).toMatch(/view changes|diff/i);
   });
+
+  // ----- "View on GitHub" header link (PRs probe) -----
+  //
+  // The link is a `<SafeLink>` to `{githubUrl}/pulls` — same shape as
+  // the Issues probe's header, just the `/pulls` list URL. Mirrors
+  // git-issues-tab.test.tsx's "View on GitHub" cluster; the
+  // `mockBackend` helper here doesn't wire `get_github_url_for_mesh`
+  // because most tests don't care about the header, so the new tests
+  // set up the mock inline.
+
+  it('renders a "View on GitHub" header link to the repo pull requests list', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_prs_mergeability') {
+        return Promise.resolve(mergeabilityEntriesFor([201, 202, 203, 204]));
+      }
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_github_url_for_mesh') {
+        return Promise.resolve('https://github.com/acme/demo');
+      }
+      return Promise.resolve({});
+    });
+    render(<GitPullRequestsTab />);
+
+    const link = await screen.findByLabelText("Open this repo's pull requests list on GitHub");
+    expect(link.tagName).toBe('A');
+    expect(link.getAttribute('href')).toBe('https://github.com/acme/demo/pulls');
+    expect(link.getAttribute('target')).toBe('_blank');
+  });
+
+  it('clicking the "View on GitHub" header link opens the pull requests list URL', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_prs_mergeability') {
+        return Promise.resolve(mergeabilityEntriesFor([201, 202, 203, 204]));
+      }
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_github_url_for_mesh') {
+        return Promise.resolve('https://github.com/acme/demo');
+      }
+      return Promise.resolve({});
+    });
+    render(<GitPullRequestsTab />);
+
+    const link = await screen.findByLabelText("Open this repo's pull requests list on GitHub");
+    await userEvent.click(link);
+
+    // The full {base}/pulls URL must be the one routed to openUrl —
+    // pin the wire shape so a future "open the repo home instead"
+    // regression is caught.
+    expect(openUrlMock).toHaveBeenCalledWith('https://github.com/acme/demo/pulls');
+  });
+
+  it('renders an inert label (no link, no link-style cursor) when the mesh has no GitHub origin', async () => {
+    // Mirrors the same test in git-issues-tab.test.tsx. A null URL
+    // collapses SafeLink to a <span> with the link-styling tokens
+    // stripped — see the "Empty-URL span is INERT" note in SafeLink's
+    // file header. Pin the empty-URL shape here so a future
+    // regression that re-applies the cyan/hover classes to the
+    // fallback is caught at the seam named in the user's "links
+    // aren't links" bug report.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_prs_mergeability') {
+        return Promise.resolve(mergeabilityEntriesFor([201, 202, 203, 204]));
+      }
+      if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
+      if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
+      if (cmd === 'get_github_url_for_mesh') return Promise.resolve(null);
+      return Promise.resolve({});
+    });
+    render(<GitPullRequestsTab />);
+
+    await screen.findByText('Add widget');
+    const fallback = await screen.findByText(/View on GitHub/);
+    expect(fallback.tagName).toBe('SPAN');
+    expect(fallback.getAttribute('href')).toBeNull();
+    expect(fallback.getAttribute('aria-label')).toBeNull();
+    // User-reported "links aren't links" pin — visually inert.
+    expect(fallback.className).not.toMatch(/text-accent-cyan/);
+    expect(fallback.className).not.toMatch(/cursor-pointer/);
+    expect(fallback.className).toMatch(/cursor-default/);
+    // The Open/Closed toggle must keep working — pin it so a future
+    // refactor that breaks the header row when githubUrl is null
+    // doesn't pass vacuously.
+    expect(screen.getByRole('button', { name: 'open' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'closed' })).toBeTruthy();
+  });
 });

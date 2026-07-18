@@ -9,7 +9,10 @@
 mod tests {
     use std::fs;
     use std::path::Path;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -335,6 +338,171 @@ mod tests {
         assert!(local.path().join("remote-change.txt").exists());
     }
 
+    /// 2026-07-17 incident (pixelcache): a mesh whose `origin` was wired
+    /// URL-only — `remote.origin.url` present, `remote.origin.fetch`
+    /// refspec MISSING — reported "Already up to date" from the sidebar
+    /// Sync button while a terminal `git pull` in the same directory
+    /// pulled a five-days' backlog. Two compounding failures:
+    /// `git fetch origin` updated only FETCH_HEAD (no refspec → no
+    /// tracking-ref update), and git2's refspec-based upstream mapping
+    /// failed so the behind-count error was swallowed into `UpToDate`.
+    /// The command must instead fetch (explicit refspec), count via the
+    /// branch-config fallback, and fast-forward.
+    #[tokio::test]
+    async fn git_sync_pulls_when_remote_has_no_fetch_refspec() {
+        let remote = TempGitRepo::new();
+        fs::create_dir_all(remote.path()).unwrap();
+        git2::Repository::init_bare(remote.path()).unwrap();
+
+        let seed = TempGitRepo::new();
+        let seed_repo = init_git_repo(seed.path());
+        run_git(seed.path(), &["branch", "-M", "main"]);
+        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let local = TempGitRepo::new();
+        run_git_without_dir(&[
+            "clone",
+            "-b",
+            "main",
+            remote.path().to_str().unwrap(),
+            local.path().to_str().unwrap(),
+        ]);
+        // Recreate the incident config: URL-only remote. The clone wrote
+        // the standard refspec; drop it, and drop the now-unmappable
+        // tracking ref state back to the clone-time SHA (it's already
+        // there — the remote hasn't moved yet).
+        run_git(local.path(), &["config", "--unset-all", "remote.origin.fetch"]);
+
+        // Remote gains a commit AFTER the clone.
+        stage_file(&seed_repo, seed.path(), "remote-change.txt", "remote change");
+        commit_staged(&seed_repo, "add remote change");
+        run_git(seed.path(), &["push", "origin", "main"]);
+
+        let result = crate::commands::git::git_sync(local.path().to_string_lossy().into_owned())
+            .await
+            .unwrap();
+
+        assert!(result.fetched, "expected fetch to succeed: {}", result.message);
+        assert!(
+            result.pulled,
+            "expected fast-forward pull despite the missing fetch refspec \
+             (got: {})",
+            result.message
+        );
+        assert_eq!(result.new_commits, 1, "message: {}", result.message);
+        assert!(local.path().join("remote-change.txt").exists());
+        // Confidence contract (ADR 0022): a successful manual Sync must
+        // stamp the freshness registry so a subsequent spawn within the
+        // TTL skips its own fetch. The spawn path's `spawn_can_skip_fetch`
+        // gate reads `time_since_success`, so that's the call we check.
+        assert!(
+            crate::services::fetch_freshness::time_since_success(local.path().to_str().unwrap())
+                < std::time::Duration::from_secs(60),
+            "manual Sync that pulled new commits must stamp the freshness \
+             registry — without it the user's confidence contract fails on \
+             the very next spawn"
+        );
+    }
+
+    /// Regression test for issue #680 — the manual `git_sync` Tauri
+    /// command must run inside `services::sync_lock::with_mesh_sync_lock`
+    /// so a manual Sync click on a Mesh can't race against concurrent
+    /// spawn-time `fetch_origin` calls (or against a second manual Sync)
+    /// for the same Mesh. Without the wrap, two `git fetch` shell-outs
+    /// collide on `.git/FETCH_HEAD` / `refs/heads/<branch>.lock`.
+    ///
+    /// Strategy: a holder thread sets a flag once it's inside the
+    /// per-mesh lock and sleeps there; the test waits on the flag
+    /// (deterministic — no `thread::sleep` race), then times `git_sync`.
+    /// With the wrap, `git_sync` blocks ~450 ms waiting for the holder;
+    /// without, it runs concurrently with the holder and finishes in
+    /// tens of ms.
+    ///
+    /// Why wall-clock (not `fetch_add`): the per-mesh lock is correctly
+    /// implemented (issue #652 tests), so it *prevents* simultaneous
+    /// critical-section entries — `max_concurrent == 1` even on a
+    /// working lock. The only signal that `git_sync` shares the same
+    /// lock key is that it waits for the holder to release.
+    ///
+    /// Test setup deliberately leaves the clone at the same commit as
+    /// the remote so `do_sync` returns `UpToDate` — that keeps the
+    /// outcome out of the `Synced` / `FetchedButDiverged` branches
+    /// (`git_sync` looks up the Mesh in the DB to fire the warm-pool
+    /// freshness pass, and the test binary doesn't initialise the DB).
+    /// `UpToDate` still goes through the full `git fetch` shell-out,
+    /// which is the operation we need to serialize.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn git_sync_serializes_via_per_mesh_sync_lock_gh680() {
+        use std::sync::atomic::AtomicUsize;
+
+        let remote = TempGitRepo::new();
+        fs::create_dir_all(remote.path()).unwrap();
+        git2::Repository::init_bare(remote.path()).unwrap();
+
+        let seed = TempGitRepo::new();
+        init_git_repo(seed.path());
+        run_git(seed.path(), &["branch", "-M", "main"]);
+        run_git(seed.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run_git(seed.path(), &["push", "-u", "origin", "main"]);
+
+        let local = TempGitRepo::new();
+        run_git_without_dir(&[
+            "clone",
+            "-b",
+            "main",
+            remote.path().to_str().unwrap(),
+            local.path().to_str().unwrap(),
+        ]);
+
+        let path_key = local.path().to_string_lossy().into_owned();
+
+        // Holder enters the per-mesh lock and announces entry via
+        // `entered_flag` before sleeping, so the main thread can
+        // deterministically start timing only once the holder holds
+        // the lock (no `thread::sleep` race — CI jitter can't make
+        // `git_sync` sneak in first).
+        let entered_flag = Arc::new(AtomicUsize::new(0));
+        let holder_path = path_key.clone();
+        let entered_holder = Arc::clone(&entered_flag);
+        let holder = thread::spawn(move || {
+            crate::services::sync_lock::with_mesh_sync_lock(&holder_path, || {
+                entered_holder.store(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(500));
+            });
+        });
+
+        // Spin-wait (bounded) for the holder to actually be inside the
+        // critical section. Cap at 2s so a hung holder surfaces as a
+        // test panic, not a forever-wait.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entered_flag.load(Ordering::SeqCst) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "holder thread never entered the per-mesh lock"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let start = Instant::now();
+        let _ = crate::commands::git::git_sync(path_key.clone()).await;
+        let elapsed = start.elapsed();
+
+        holder.join().unwrap();
+
+        // With wrap: elapsed >= ~450 ms (`git_sync` waited for holder).
+        // Without wrap: elapsed = tens of ms (`git_sync` ran
+        // concurrently with the holder's sleep). Bound is 400 ms —
+        // leaves 100 ms of slack for setup overhead and CI jitter.
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "git_sync did not block on the per-mesh lock (elapsed = {:?}); \
+             issue #680 wrap is missing — concurrent manual Sync and \
+             spawn-time fetch_origin would race on .git/FETCH_HEAD",
+            elapsed,
+        );
+    }
+
     #[test]
     fn test_count_status_worktree_isolation() {
         let _repo = TempGitRepo::new();
@@ -386,7 +554,7 @@ mod tests {
         fs::write(_repo.path().join("new.txt"), "x\ny\nz\n").unwrap();
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         let entry = find_status(&statuses, "new.txt");
@@ -406,7 +574,7 @@ mod tests {
         fs::write(_repo.path().join("edit.txt"), "a\nB\nc\nd\n").unwrap();
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         let entry = find_status(&statuses, "edit.txt");
@@ -426,7 +594,7 @@ mod tests {
         fs::remove_file(_repo.path().join("gone.txt")).unwrap();
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         let entry = find_status(&statuses, "gone.txt");
@@ -441,7 +609,7 @@ mod tests {
         let _ = init_git_repo(_repo.path());
 
         let statuses =
-            crate::commands::git::get_git_status(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_status_blocking(_repo.path().to_string_lossy().into_owned())
                 .unwrap();
 
         assert!(statuses.is_empty(), "clean repo has no changed files: {statuses:?}");
@@ -455,7 +623,7 @@ mod tests {
         fs::create_dir_all(dir.path()).unwrap();
 
         let result =
-            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
                 .unwrap();
         assert!(result.is_none(), "non-git dir should return None");
     }
@@ -467,7 +635,7 @@ mod tests {
         run_git(repo_dir.path(), &["branch", "-M", "main"]);
 
         let status =
-            crate::commands::git::get_git_branch_status(repo_dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(repo_dir.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("repo with a commit should report a branch");
 
@@ -487,7 +655,7 @@ mod tests {
         // get_git_branch_status returns Ok(None) for an unborn HEAD (the existing
         // path in get_git_branch_status short-circuits on `repo.head()` Err).
         let result =
-            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
                 .unwrap();
         assert!(result.is_none(), "unborn HEAD should return None");
     }
@@ -521,7 +689,7 @@ mod tests {
         run_git(local.path(), &["fetch", "origin"]);
 
         let status =
-            crate::commands::git::get_git_branch_status(local.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(local.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("clone should report a branch");
 
@@ -547,7 +715,7 @@ mod tests {
         commit_staged(&local_repo, "add local change");
 
         let status =
-            crate::commands::git::get_git_branch_status(local.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(local.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("repo should report a branch");
 
@@ -570,7 +738,7 @@ mod tests {
         repo.set_head_detached(head_oid).unwrap();
 
         let status =
-            crate::commands::git::get_git_branch_status(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_git_branch_status_blocking(dir.path().to_string_lossy().into_owned())
                 .unwrap()
                 .expect("detached HEAD on a commit should still report a status");
 
@@ -591,7 +759,7 @@ mod tests {
     /// first mesh) + 1 per TTL expiry, instead of 1 per mesh.
     ///
     /// The cache must live in `get_mesh_git_static`, NOT in
-    /// `commands::pr::check_gh_auth` itself: that command is also called by
+    /// `commands::github::check_gh_auth` itself: that command is also called by
     /// the mobile `/git/auth` HTTP route (`http/routes/git.rs:112`) and by
     /// `MeshPropertiesTab.tsx` when the user clicks "re-check", and both
     /// want a fresh value.
@@ -605,15 +773,17 @@ mod tests {
         // path. `is_git_repo` will be `false` for all of them, but the
         // gh-auth branch runs unconditionally (a non-git dir can still have
         // `gh` configured), which is exactly the path we're caching.
-        let r1 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-1".to_string())
+        // Exercise the sync core directly (the async `#[command]` wrapper
+        // just offloads this onto the blocking pool via `run_blocking`).
+        let r1 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-1".to_string())
             .expect("first call should succeed");
-        let r2 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-2".to_string())
+        let r2 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-2".to_string())
             .expect("second call should succeed");
-        let r3 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-3".to_string())
+        let r3 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-3".to_string())
             .expect("third call should succeed");
-        let r4 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-4".to_string())
+        let r4 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-4".to_string())
             .expect("fourth call should succeed");
-        let r5 = crate::commands::git::get_mesh_git_static("/tmp/fake-mesh-5".to_string())
+        let r5 = crate::commands::git::get_mesh_git_static_blocking("/tmp/fake-mesh-5".to_string())
             .expect("fifth call should succeed");
 
         // All 5 must agree on the process-wide gh-auth state. The value
@@ -689,7 +859,7 @@ mod tests {
         let _ = make_repo_with_origin_head(_repo.path(), "develop");
 
         let snapshot =
-            crate::commands::git::get_mesh_git_static(_repo.path().to_string_lossy().into_owned())
+            crate::commands::git::get_mesh_git_static_blocking(_repo.path().to_string_lossy().into_owned())
                 .expect("snapshot should succeed for a valid repo");
 
         assert!(
@@ -710,7 +880,7 @@ mod tests {
         fs::create_dir_all(dir.path()).unwrap();
 
         let snapshot =
-            crate::commands::git::get_mesh_git_static(dir.path().to_string_lossy().into_owned())
+            crate::commands::git::get_mesh_git_static_blocking(dir.path().to_string_lossy().into_owned())
                 .expect("non-repo path must not error");
 
         assert!(!snapshot.is_git_repo);

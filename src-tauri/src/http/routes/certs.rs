@@ -12,8 +12,8 @@
 //! that needs the path — for the QR modal's "Re-install" affordance that
 //! copies it to the clipboard.
 //!
-//! `GET /install-cert.der` — one-tap root CA install (issue #636). Same
-//! pre-auth, Host-guarded placement as `/__certs/status`; serves the raw
+//! `GET /install-cert.der` — manual root CA install fallback (issue #702).
+//! Same pre-auth, Host-guarded placement as `/__certs/status`; serves the raw
 //! `ca.der` bytes with the Android-friendly `application/x-x509-ca-cert`
 //! MIME so Chrome's auto-routing into the system cert installer fires.
 //! Windows opens its own Certificate Import Wizard from this same MIME;
@@ -21,6 +21,13 @@
 //! `Content-Length` header MUST match the exact byte count of the file
 //! served — Chrome aborts mismatched downloads with `ERR_CONTENT_LENGTH_MISMATCH`
 //! and the user is left with a half-truncated cert that won't install.
+//!
+//! Role after issue #702: the desktop modal's PRIMARY install path is a
+//! `data:application/x-x509-ca-cert;base64,...` QR (handled by
+//! `commands::network::get_root_cert_der`). This HTTP route is the
+//! manual fallback for users who can't scan the install-QR (older
+//! Android, custom camera apps, ad-blockers) — they open the URL in
+//! the phone's browser and Chrome's MIME-routed install takes over.
 
 use std::path::Path;
 

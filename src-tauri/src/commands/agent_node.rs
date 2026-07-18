@@ -95,8 +95,15 @@ pub async fn update_agent_node_positions(updates: Vec<(i64, i64)>) -> Result<(),
 /// Check whether the node's worktree can be removed safely on close.
 #[command]
 pub async fn get_worktree_close_safety(node_id: i64) -> Result<WorktreeCloseSafety, String> {
-    services::agent_node::get_worktree_close_safety(node_id)
-        .map_err(|e| e.to_string())
+    // Offload: the safety check runs a full `git status` walk plus an
+    // ahead/behind graph walk on the node's worktree (`worktree::close_safety`)
+    // — seconds on a large repo, and the frontend awaits it on every node
+    // close while showing a spinner. Running it inline parked a Tauri async
+    // worker for the duration (the Command Threading anti-pattern).
+    crate::commands::run_blocking("get_worktree_close_safety", move || {
+        services::agent_node::get_worktree_close_safety(node_id).map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Trim and validate a user-supplied rename. Returns the canonical (trimmed)
@@ -143,6 +150,34 @@ pub async fn rename_agent_node(
         }),
     );
     Ok(())
+}
+
+/// Swap an agent node's Model Provider (issue #774 / #775). The
+/// worktree, branch, name, position, and all other state are preserved;
+/// the new agent resumes from the existing `cli_session_id` when both
+/// providers share the same Agent Harness and the new adapter supports
+/// resume, else starts fresh. Cross-harness swaps are allowed (the user
+/// may pick any Spawn Option) but always start fresh — the existing
+/// `cli_session_id` is bound to the old harness's session format.
+///
+/// Frontend trigger: right-click context menu on `NodeItem` (see
+/// ticket #776). UI flow: confirmation dialog for running nodes
+/// (ticket #778). Returns the updated `AgentNode` on success so the
+/// caller's store can patch the local entry without a refetch; on
+/// failure the caller gets an `Err` (the `provider` column has
+/// already been updated at that point — the user can retry, and the
+/// local store stays on the old provider). The existing
+/// `agent-spawned` event from `spawn_agent_inner` drives PTY /
+/// resize sync on the frontend.
+#[command]
+pub async fn regenerate_agent_node(
+    node_id: i64,
+    new_provider_id: String,
+    app: tauri::AppHandle,
+) -> Result<crate::models::AgentNode, String> {
+    services::agent_node::regenerate(node_id, &new_provider_id, &app)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

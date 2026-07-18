@@ -93,7 +93,7 @@ fn add_worktree_impl(
         .ok_or_else(|| "cannot add a worktree to a bare repository".to_string())?;
 
     // `command_no_window` applies CREATE_NO_WINDOW on Windows (no per-OS cfg here).
-    let mut cmd = crate::process_util::command_no_window("git");
+    let mut cmd = crate::process_util::git_command();
     cmd.arg("-C").arg(workdir).arg("worktree").arg("add");
     if use_branched {
         cmd.arg("-b").arg(branch_name);
@@ -270,7 +270,7 @@ pub fn move_git_worktree(
         return Err(format!("git worktree move target already exists: {}", new));
     }
 
-    let mut cmd = crate::process_util::command_no_window("git");
+    let mut cmd = crate::process_util::git_command();
     cmd.arg("-C")
         .arg(&host_root)
         .arg("worktree")
@@ -304,7 +304,7 @@ pub fn move_git_worktree(
 pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String> {
     let host = to_host_path(worktree_path);
 
-    let mut cmd = crate::process_util::command_no_window("git");
+    let mut cmd = crate::process_util::git_command();
     cmd.arg("-C")
         .arg(&host)
         .arg("reset")
@@ -325,8 +325,58 @@ pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Sanitize the .git file in a worktree to ensure it uses the correct path format
-/// for the target environment (Windows vs WSL).
+/// Convert a worktree link-file path to the target environment's format
+/// (Windows drive path vs WSL `/mnt/...`). Shared by both halves of
+/// [`sanitize_git_worktree`] so the gitlink and the back-pointer can't drift
+/// onto different conversion rules.
+fn convert_link_path_for_env(path: &str, env_type: EnvType) -> String {
+    match env_type {
+        EnvType::Wsl => {
+            // Ensure it's a WSL-friendly path
+            if path.contains(':') || path.starts_with("\\\\") {
+                // Convert Windows path to WSL (/mnt/c/...)
+                let path_str = path.replace('\\', "/");
+                if let Some(pos) = path_str.find(':') {
+                    let drive = path_str[..pos].to_lowercase();
+                    format!("/mnt/{}{}", drive, &path_str[pos + 1..])
+                } else {
+                    path_str
+                }
+            } else if path.len() >= 2
+                && path.starts_with('/')
+                && path.as_bytes()[1].is_ascii_alphabetic()
+                && (path.len() == 2 || path.as_bytes()[2] == b'/')
+            {
+                // Git-Bash drive style `/f/...` (what an MSYS git writes —
+                // the 2026-07-17 corruption): WSL wants it as `/mnt/f/...`.
+                // Real WSL paths (`/mnt/...`, `/home/...`) have a multi-char
+                // first segment, so they never match this arm.
+                let drive = path.as_bytes()[1].to_ascii_lowercase() as char;
+                format!("/mnt/{}{}", drive, &path[2..])
+            } else {
+                path.to_string()
+            }
+        }
+        EnvType::Windows => {
+            // Target is Windows. to_host_path handles /mnt/, /home/, and /c/ styles.
+            to_host_path(path)
+        }
+    }
+}
+
+/// Sanitize a worktree's git link files to the correct path format for the
+/// target environment (Windows vs WSL). Repairs BOTH sides of the link:
+///
+/// - the worktree's `.git` gitlink (`gitdir: <admin dir>`), and
+/// - the repo-side back-pointer (`<admin dir>/gitdir` → `<worktree>/.git`).
+///
+/// The back-pointer matters because libgit2 resolves it when opening a
+/// worktree: an MSYS-flavoured git writes Git-Bash-style `/f/...` paths that
+/// the Git CLI tolerates but `git2::Repository::open` reports as NotFound.
+/// In the 2026-07-17 gh252 incident that mismatch made the autopilot wrap-up
+/// verifier see a healthy, already-PR'd worktree as unopenable; fixing only
+/// the gitlink (this function's pre-incident behaviour) left libgit2 locked
+/// out through the admin side.
 pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Result<(), String> {
     let git_file_path = std::path::Path::new(worktree_host_path).join(".git");
 
@@ -346,34 +396,32 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
         return Err("invalid .git file: empty gitdir path".to_string());
     }
 
-    // Convert the path to the target environment's format
-    let new_path = match env_type {
-        EnvType::Wsl => {
-            // Ensure it's a WSL-friendly path
-            if git_dir_path.contains(':') || git_dir_path.starts_with("\\\\") {
-                // Convert Windows path to WSL (/mnt/c/...)
-                let path_str = git_dir_path.replace('\\', "/");
-                if let Some(pos) = path_str.find(':') {
-                    let drive = path_str[..pos].to_lowercase();
-                    format!("/mnt/{}{}", drive, &path_str[pos + 1..])
-                } else {
-                    path_str
-                }
-            } else {
-                git_dir_path.to_string()
-            }
-        }
-        EnvType::Windows => {
-            // Target is Windows. to_host_path handles /mnt/, /home/, and /c/ styles.
-            to_host_path(git_dir_path)
-        }
-    };
+    let new_path = convert_link_path_for_env(git_dir_path, env_type);
 
     if new_path != git_dir_path {
         tracing::info!("Sanitizing .git file: {} -> {}", git_dir_path, new_path);
         // Ensure we use Unix line endings for the .git file as Git expects
         std::fs::write(&git_file_path, format!("gitdir: {}\n", new_path))
             .map_err(|e| format!("Failed to write sanitized .git file: {}", e))?;
+    }
+
+    // Repo-side back-pointer. The admin dir itself is a host filesystem
+    // access, so resolve it host-side regardless of the target env format.
+    let backpointer_path = std::path::Path::new(&to_host_path(&new_path)).join("gitdir");
+    if backpointer_path.is_file() {
+        let existing = std::fs::read_to_string(&backpointer_path)
+            .map_err(|e| format!("Failed to read worktree gitdir back-pointer: {}", e))?;
+        let existing = existing.trim();
+        let converted = convert_link_path_for_env(existing, env_type);
+        if converted != existing {
+            tracing::info!(
+                "Sanitizing worktree gitdir back-pointer: {} -> {}",
+                existing,
+                converted
+            );
+            std::fs::write(&backpointer_path, format!("{}\n", converted))
+                .map_err(|e| format!("Failed to write sanitized gitdir back-pointer: {}", e))?;
+        }
     }
 
     Ok(())
@@ -441,18 +489,21 @@ fn head_has_unpushed_or_unmerged_commits(
     if !is_detached {
         if let Some(refname) = current_refname {
             if let Ok(upstream_buf) = repo.branch_upstream_name(refname) {
-                let Some(upstream_refname) = upstream_buf.as_str() else {
-                    return true;
-                };
-                let Ok(upstream_ref) = repo.find_reference(upstream_refname) else {
-                    return true;
-                };
-                let Some(upstream_oid) = upstream_ref.target() else {
-                    return true;
-                };
-                return primitives::ahead_behind(repo, head_oid, upstream_oid)
-                    .map(|(ahead, _)| ahead > 0)
-                    .unwrap_or(true);
+                // Each step short-circuits on success only. A missing or
+                // unreadable tracking ref is the everyday post-merge state
+                // (`git status` shows `[gone]` after a squash-merge + remote
+                // auto-delete); the reachability walk below is the better
+                // safety net there, so we fall through instead of warning
+                // unconditionally (#252).
+                if let Some(upstream_refname) = upstream_buf.as_str() {
+                    if let Ok(upstream_ref) = repo.find_reference(upstream_refname) {
+                        if let Some(upstream_oid) = upstream_ref.target() {
+                            return primitives::ahead_behind(repo, head_oid, upstream_oid)
+                                .map(|(ahead, _)| ahead > 0)
+                                .unwrap_or(true);
+                        }
+                    }
+                }
             }
         }
     }
@@ -858,6 +909,111 @@ mod tests {
         );
     }
 
+    // ── sanitize (unix-style link corruption, 2026-07-17 gh252 incident) ─────
+
+    /// Turn `F:\a\b` into the Git-Bash-style `/f/a/b` an MSYS-flavoured git
+    /// writes into worktree link files.
+    #[cfg(windows)]
+    fn to_msys_style(p: &Path) -> String {
+        let s = p.to_str().unwrap().replace('\\', "/");
+        let drive = s.chars().next().unwrap().to_ascii_lowercase();
+        format!("/{}{}", drive, &s[2..])
+    }
+
+    /// A worktree whose link files carry Git-Bash-style `/f/...` paths opens
+    /// fine under the Git CLI but is NotFound to libgit2 — which made the
+    /// autopilot wrap-up verifier report a healthy, PR'd worktree as broken.
+    /// `sanitize_git_worktree` must repair BOTH sides of the link (the
+    /// worktree's `.git` gitlink AND the repo-side `gitdir` back-pointer) so
+    /// libgit2 can open it again.
+    #[cfg(windows)]
+    #[test]
+    fn sanitize_repairs_unix_style_links_on_both_sides_for_libgit2() {
+        let td = TestDir::new("sanitize_unix_links");
+        let parent = td.path();
+        init_repo_with_commit(parent, &[("README.md", "# p\n")]);
+        let wt = make_branched_worktree(parent, "wt-unix");
+        let admin_dir = parent.join(".git").join("worktrees").join("wt-unix");
+
+        fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", to_msys_style(&admin_dir)),
+        )
+        .unwrap();
+        fs::write(
+            admin_dir.join("gitdir"),
+            format!("{}/.git\n", to_msys_style(&wt)),
+        )
+        .unwrap();
+        assert!(
+            git2::Repository::open(&wt).is_err(),
+            "precondition (the bug): unix-style link files must break libgit2 open"
+        );
+
+        sanitize_git_worktree(wt.to_str().unwrap(), EnvType::Windows)
+            .expect("sanitize must succeed");
+
+        git2::Repository::open(&wt)
+            .expect("libgit2 must open the worktree after sanitize");
+        let backpointer = fs::read_to_string(admin_dir.join("gitdir")).unwrap();
+        assert!(
+            !backpointer.trim_start().starts_with('/'),
+            "repo-side gitdir back-pointer must be host-format, got: {}",
+            backpointer
+        );
+    }
+
+    /// Pure conversion table for both env targets — in particular the
+    /// Git-Bash `/f/...` drive style (what an MSYS git writes into link
+    /// files, the 2026-07-17 corruption) must repair under BOTH targets,
+    /// and already-correct paths must pass through unchanged.
+    #[test]
+    fn convert_link_path_covers_git_bash_drive_style_for_both_envs() {
+        // → WSL
+        assert_eq!(
+            convert_link_path_for_env("/f/src/repo/.git/worktrees/wt", EnvType::Wsl),
+            "/mnt/f/src/repo/.git/worktrees/wt"
+        );
+        assert_eq!(
+            convert_link_path_for_env("F:\\src\\repo", EnvType::Wsl),
+            "/mnt/f/src/repo"
+        );
+        // Real WSL paths must NOT be re-mangled by the drive-style arm.
+        assert_eq!(convert_link_path_for_env("/mnt/f/src", EnvType::Wsl), "/mnt/f/src");
+        assert_eq!(convert_link_path_for_env("/home/u/repo", EnvType::Wsl), "/home/u/repo");
+        // → Windows (host conversion is a Windows-host behaviour)
+        #[cfg(windows)]
+        assert_eq!(
+            convert_link_path_for_env("/f/src/repo", EnvType::Windows),
+            "F:\\src\\repo"
+        );
+    }
+
+    /// The common case — healthy Windows-format link files — must pass through
+    /// sanitize byte-identical (no churn on every spawn).
+    #[cfg(windows)]
+    #[test]
+    fn sanitize_leaves_healthy_link_files_untouched() {
+        let td = TestDir::new("sanitize_noop");
+        let parent = td.path();
+        init_repo_with_commit(parent, &[("README.md", "# p\n")]);
+        let wt = make_branched_worktree(parent, "wt-ok");
+        let admin_gitdir = parent
+            .join(".git")
+            .join("worktrees")
+            .join("wt-ok")
+            .join("gitdir");
+        let gitlink_before = fs::read_to_string(wt.join(".git")).unwrap();
+        let backpointer_before = fs::read_to_string(&admin_gitdir).unwrap();
+
+        sanitize_git_worktree(wt.to_str().unwrap(), EnvType::Windows)
+            .expect("sanitize must succeed");
+
+        assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), gitlink_before);
+        assert_eq!(fs::read_to_string(&admin_gitdir).unwrap(), backpointer_before);
+        git2::Repository::open(&wt).expect("worktree must still open");
+    }
+
     #[test]
     fn resolve_base_ref_sha_resolves_and_falls_back_to_head() {
         let td = TestDir::new("resolve_sha");
@@ -1100,6 +1256,101 @@ mod tests {
 
         assert_eq!(safety.worktree_path, None);
         assert!(!safety.has_uncommitted);
+    }
+
+    // ── close-safety: [gone] upstream (#252) ─────────────────────────────────
+    //
+    // After a squash-merge + auto-delete, git config still points the local
+    // branch at `refs/remotes/origin/<branch>`, but the tracking ref has been
+    // pruned. `find_reference` then fails and the old code wrongly fell into
+    // `return true`. The fix falls through to the reachability check so the
+    // common "work is on main, branch is just dead weight" case closes cleanly.
+
+    /// Configure `branch.<name>.remote`/`.merge` to point at `origin/<name>`
+    /// without ever creating the `refs/remotes/origin/<name>` tracking ref —
+    /// the post-prune `[gone]` state from issue #252. Mirrors `git remote add`
+    /// closely enough for git2 to resolve the upstream: `remote.origin.url`,
+    /// the standard fetch refspec, and the per-branch remote/merge pointers.
+    fn configure_upstream_without_tracking_ref(repo: &git2::Repository, branch: &str) {
+        let mut cfg = repo.config().unwrap();
+        cfg.set_str("remote.origin.url", "https://example.invalid/repo.git")
+            .unwrap();
+        cfg.set_str(
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        )
+        .unwrap();
+        cfg.set_str(&format!("branch.{}.remote", branch), "origin")
+            .unwrap();
+        cfg.set_str(
+            &format!("branch.{}.merge", branch),
+            &format!("refs/heads/{}", branch),
+        )
+        .unwrap();
+        // Sanity: the tracking ref really is absent (the bug only triggers here).
+        assert!(
+            repo.find_reference(&format!("refs/remotes/origin/{}", branch))
+                .is_err(),
+            "test precondition: tracking ref must be pruned"
+        );
+    }
+
+    #[test]
+    fn close_safety_reports_gone_upstream_with_merged_work_as_safe() {
+        // Squash-merge + auto-delete: HEAD on the feature branch points at the
+        // same commit as main (the work is safely on main), upstream config
+        // exists, but the tracking ref has been pruned. Must NOT warn — closing
+        // should be allowed. The current bug returns true from the
+        // `find_reference` Err path and never consults reachability.
+        let td = TestDir::new("safe_gone_upstream_merged");
+        init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        let wt = make_branched_worktree(td.path(), "wt-merged");
+        let wt_repo = git2::Repository::open(&wt).unwrap();
+
+        // Sanity: HEAD on wt-merged is at the same commit as the parent's
+        // default branch — that's the reachable-from-another-ref precondition
+        // the fix relies on.
+        let wt_head_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
+        let parent_repo = git2::Repository::open(td.path()).unwrap();
+        let parent_head_oid = parent_repo.head().unwrap().peel_to_commit().unwrap().id();
+        assert_eq!(
+            wt_head_oid, parent_head_oid,
+            "test precondition: wt-merged HEAD must equal main HEAD (FF-merged)"
+        );
+
+        configure_upstream_without_tracking_ref(&wt_repo, "wt-merged");
+
+        let safety = close_safety(&wt.to_string_lossy());
+
+        assert!(!safety.is_detached);
+        assert!(!safety.has_uncommitted);
+        assert!(
+            !safety.has_unpushed,
+            "configured-but-gone upstream with work reachable from another ref must not warn \
+             (issue #252: false-positive 'unpushed' on squash-merged branches)"
+        );
+    }
+
+    #[test]
+    fn close_safety_reports_gone_upstream_with_unmerged_work_as_unpushed() {
+        // Safety net: when the upstream tracking ref is gone AND HEAD is not
+        // reachable from any other branch, we must still warn — closing would
+        // otherwise lose the only copy of the work.
+        let td = TestDir::new("safe_gone_upstream_orphan");
+        init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        let wt = make_branched_worktree(td.path(), "wt-orphan");
+        let wt_repo = git2::Repository::open(&wt).unwrap();
+        commit_file(&wt_repo, &wt, "exclusive.txt", "only on wt-orphan");
+
+        configure_upstream_without_tracking_ref(&wt_repo, "wt-orphan");
+
+        let safety = close_safety(&wt.to_string_lossy());
+
+        assert!(!safety.is_detached);
+        assert!(
+            safety.has_unpushed,
+            "orphan branch with [gone] upstream must still warn — closing would lose work"
+        );
     }
 
     // ── remove ───────────────────────────────────────────────────────────────

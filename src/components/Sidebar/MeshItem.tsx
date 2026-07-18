@@ -1,15 +1,20 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
+import { useUIStore } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
 import type { MeshHealth } from '../../lib/tauri';
 import { useGitBranchStatus } from '../../hooks/useGitBranchStatus';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
+import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
+import { useClickOutside } from '../../hooks/useClickOutside';
 import { NodeItem } from './NodeItem';
 import { NodeCreationForm } from './NodeCreationForm';
+import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
 import type { SpawnOption } from '../../lib/groups';
 
 /// Build the tooltip text for the sidebar drift `!` badge. Lists the
@@ -39,6 +44,9 @@ interface MeshItemProps {
   mesh: Mesh;
   isSelected: boolean;
   isDropdownOpen: boolean;
+  /** A spawn for this mesh is in flight — the `+ ▾` cluster shows
+   *  "Spawning…" and disables to prevent duplicate nodes. */
+  isSpawning: boolean;
   providerList: SpawnOption[];
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
@@ -62,18 +70,26 @@ interface MeshItemProps {
   onOpenSessionHistoryProbe: (meshId: number) => void;
   getDefaultProvider: (meshId: number) => Promise<string>;
   /**
-   * Issue #375 — the right-click "Properties" item and the drift `!` badge
-   * both jump straight to the Probe Panel on the ⚙️ Mesh Properties tab.
-   * The handler is responsible for selecting the mesh (so `useProbeContext`
-   * resolves to the right row) before flipping the probe open.
+   * Issue #375 — the right-click "Properties" item jumps to the Probe
+   * Panel on the ⚙️ Mesh Properties tab. The handler is responsible for
+   * selecting the mesh (so `useProbeContext` resolves to the right row)
+   * before flipping the probe open.
    */
   onOpenPropertiesProbe: (meshId: number) => void;
+  /**
+   * Issue #767 — the drift `!` badge routes to the 🌳 Worktree Manager
+   * tab (where the HealthBlock + Restore/Free actions live), not to
+   * the ⚙️ Properties tab. The Properties tab is purely configuration
+   * and has no recovery controls.
+   */
+  onOpenWorktreesProbe: (meshId: number) => void;
 }
 
 export function MeshItem({
   mesh,
   isSelected,
   isDropdownOpen,
+  isSpawning,
   providerList,
   onSelectMesh,
   onNewNode,
@@ -88,6 +104,7 @@ export function MeshItem({
   onOpenSessionHistoryProbe,
   getDefaultProvider,
   onOpenPropertiesProbe,
+  onOpenWorktreesProbe,
 }: MeshItemProps) {
   const {
     setNodeRef,
@@ -99,10 +116,36 @@ export function MeshItem({
   } = useSortable({ id: mesh.id });
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const meshColor = getMeshColor(mesh.id);
+  const [recolorOpen, setRecolorOpen] = useState(false);
+  const meshColor = getMeshColor(mesh.id, mesh.color);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Issue #735 — viewport clamping + ARIA menu keyboard navigation.
+  // The menu container ref lets us measure its rendered size for clamping;
+  // the item refs hold the menuitem buttons so arrow keys can move focus
+  // between them (roving tabindex). The trigger ref remembers the row that
+  // opened the menu so Escape can return focus there.
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuItemRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  // View on GitHub — only shown when the mesh's `origin` resolves to a
+  // github.com URL. The hook fires the IPC on mount so by the time the
+  // user right-clicks the value is in the cache; non-GitHub meshes get
+  // `url === null` and the menu item is simply not rendered.
+  const { url: githubUrl } = useMeshGitHubUrl(mesh.id, mesh.path);
+  // Render-time item count: 5 always-present items + the conditional
+  // 6th when the mesh has a GitHub origin. Keyboard-nav handlers and
+  // the `End` jump read this so a non-GitHub mesh's menu correctly
+  // wraps at 5 and a GitHub mesh's wraps at 6.
+  const itemCount = 5 + (githubUrl ? 1 : 0);
+  // Mirror `itemCount` into a ref so the keydown handler reads the
+  // LIVE count on every keystroke (the handler's effect deps are
+  // `[contextMenu]`, not `itemCount`, so without this the closure
+  // would freeze at the count that was current when the menu opened).
+  const itemCountRef = useRef(itemCount);
+  itemCountRef.current = itemCount;
   const { branchStatus, refresh: refreshBranchStatus } = useGitBranchStatus(mesh.path);
   const { health } = useMeshHealth(mesh.id, mesh.path);
   const behind = branchStatus?.behind ?? 0;
@@ -124,6 +167,16 @@ export function MeshItem({
     }
   };
 
+  // Issue #735 — close the menu and return focus to the trigger. Used by
+  // Escape and any menuitem click so the user's focus stays predictable
+  // across menu interactions. The `requestAnimationFrame` runs after the
+  // unmount so the trigger ref is still attached when the focus() lands.
+  const closeContextMenu = () => {
+    const trigger = triggerRef.current;
+    setContextMenu(null);
+    requestAnimationFrame(() => trigger?.focus());
+  };
+
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -132,23 +185,130 @@ export function MeshItem({
 
   useEffect(() => {
     if (!contextMenu) return;
-    const handleClick = () => setContextMenu(null);
+    // Issue #814 — the outside-mousedown close path now goes through
+    // the shared `useClickOutside` hook (#492) below; the keydown
+    // listener here only handles the WAI-ARIA keyboard contract
+    // (Escape / Arrow / Home / End / Tab).
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setContextMenu(null);
+      // WAI-ARIA menu contract: keystrokes only apply while focus is
+      // inside the menu. The document-level listener would otherwise
+      // hijack arrow / Home / End typed elsewhere on the page. We check
+      // `document.activeElement` (not `e.target`) because in jsdom tests
+      // events are dispatched on `document` while focus is on a menuitem.
+      const menu = menuRef.current;
+      const active = document.activeElement;
+      if (menu && active instanceof Node && !menu.contains(active)) return;
+
+      // Issue #735 — WAI-ARIA menu keyboard pattern: Escape closes
+      // (returning focus to the trigger), arrow keys move focus between
+      // menuitems with wrap-around, Home/End jump to ends, Tab/Shift+Tab
+      // moves focus out of the menu and closes it.
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeContextMenu();
+        return;
+      }
+      if (e.key === 'Tab') {
+        // WAI-ARIA menu: Tab leaves the menu and closes it (a modal menu
+        // would trap focus, but `role="menu"` is a non-modal popover).
+        // Don't preventDefault — let the browser move focus normally.
+        closeContextMenu();
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveIndex((i) => {
+          const next = (i + 1) % itemCountRef.current;
+          menuItemRefs.current[next]?.focus();
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveIndex((i) => {
+          const next = (i - 1 + itemCountRef.current) % itemCountRef.current;
+          menuItemRefs.current[next]?.focus();
+          return next;
+        });
+        return;
+      }
+      if (e.key === 'Home') {
+        e.preventDefault();
+        setActiveIndex(0);
+        menuItemRefs.current[0]?.focus();
+        return;
+      }
+      if (e.key === 'End') {
+        e.preventDefault();
+        const last = itemCountRef.current - 1;
+        setActiveIndex(last);
+        menuItemRefs.current[last]?.focus();
+        return;
+      }
     };
-    document.addEventListener('mousedown', handleClick);
     document.addEventListener('keydown', handleKeyDown);
     return () => {
-      document.removeEventListener('mousedown', handleClick);
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [contextMenu]);
+
+  // Issue #814 — outside-mousedown close goes through the shared
+  // `useClickOutside` hook. `mesh.id` scopes the selector so two
+  // sidebar meshes with open context menus don't interfere.
+  useClickOutside<number>(contextMenu ? mesh.id : null, () => closeContextMenu());
+
+  // Issue #735 — viewport clamping. Runs after the menu mounts so we can
+  // read its rendered size; pushes the position back into state if it
+  // would overflow the right or bottom edge. `useLayoutEffect` keeps the
+  // adjustment off-screen so the user never sees the over-large position.
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const MARGIN = 4;
+    // Compute the deltas needed to bring the rect inside the viewport;
+    // only apply when an actual overflow exists.
+    const overX = rect.right - (vw - MARGIN);
+    const overY = rect.bottom - (vh - MARGIN);
+    if (overX <= 0 && overY <= 0) return;
+    const nextX = Math.max(MARGIN, contextMenu.x - (overX > 0 ? overX : 0));
+    const nextY = Math.max(MARGIN, contextMenu.y - (overY > 0 ? overY : 0));
+    // No-op guard — without this, a stubbed `getBoundingClientRect` that
+    // doesn't track the rendered position can put us in an infinite setState
+    // loop (effect re-fires because the state object identity changes).
+    if (nextX === contextMenu.x && nextY === contextMenu.y) return;
+    setContextMenu({ x: nextX, y: nextY });
+  }, [contextMenu]);
+
+  // Issue #735 — on open, reset the roving index and move focus to the
+  // first menuitem so keyboard nav starts somewhere. `useLayoutEffect`
+  // (not `useEffect` + setTimeout) — the layout effect fires synchronously
+  // after the menu commits, so subsequent arrow-key presses don't race
+  // against a deferred focus call clobbering them.
+  useLayoutEffect(() => {
+    if (!contextMenu) return;
+    setActiveIndex(0);
+    menuItemRefs.current[0]?.focus();
+  }, [contextMenu !== null]);
 
   return (
     <div ref={setNodeRef} style={style} className="mb-1 group/mesh">
       {/* Mesh header — double height with color accent */}
       <div
-        className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${meshColor.border} ${
+        ref={triggerRef}
+        // Issue #735 — `tabIndex={-1}` makes the row programmatically
+        // focusable so the per-mesh menu can return focus to its trigger
+        // on Escape, without putting the row in the natural Tab order.
+        tabIndex={-1}
+        // The left accent shows the mesh colour. Rendered via inline style
+        // (not a Tailwind class) so a user-picked custom hex works, not just
+        // the eight palette entries.
+        style={{ borderLeftColor: meshColor.hex }}
+        className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${
           isSelected ? 'bg-bg-card' : 'hover:bg-bg-card/50'
         }`}
         onClick={() => onSelectMesh(mesh.id)}
@@ -161,13 +321,25 @@ export function MeshItem({
           <span
             {...attributes}
             {...listeners}
-            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-[10px] select-none"
+            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none"
             title="Drag to reorder"
           >
             ⋮⋮
           </span>
+          {/* Colour swatch — clicking it opens the colour picker (issue:
+              mesh colour picker). stopPropagation so it doesn't also
+              select/deselect the mesh row. */}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setRecolorOpen(true); }}
+            title="Change mesh colour"
+            aria-label="Change mesh colour"
+            className="h-3 w-3 shrink-0 rounded-full border border-black/20 hover:scale-125 transition-transform"
+            style={{ backgroundColor: meshColor.hex }}
+          />
           <span
-            className="font-sans font-semibold text-[15px] text-text-primary truncate flex-1"
+            id={`mesh-item-name-${mesh.id}`}
+            className="font-sans font-semibold text-sm text-text-primary truncate flex-1"
           >
             {mesh.name}
           </span>
@@ -176,10 +348,10 @@ export function MeshItem({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                onOpenPropertiesProbe(mesh.id);
+                onOpenWorktreesProbe(mesh.id);
               }}
               title={buildDriftTooltip(health)}
-              className="text-[11px] font-bold text-status-warning bg-status-warning-bg/15 hover:bg-status-warning-bg/30 rounded px-1.5 leading-[18px] transition-colors"
+              className="text-xs font-bold text-status-warning bg-status-warning/15 hover:bg-status-warning/30 rounded-md px-1.5 leading-[18px] transition-colors"
               aria-label="Mesh health issue"
             >
               !
@@ -187,7 +359,7 @@ export function MeshItem({
           )}
           {behind > 0 && (
             <span
-              className="text-[11px] font-semibold text-status-warning leading-none tabular-nums"
+              className="text-xs font-semibold text-status-warning leading-none tabular-nums"
               title={`${behind} commit${behind === 1 ? '' : 's'} behind upstream`}
             >
               ↓{behind}
@@ -210,6 +382,7 @@ export function MeshItem({
           <NodeCreationForm
             mesh={mesh}
             isDropdownOpen={isDropdownOpen}
+            isSpawning={isSpawning}
             providers={providerList}
             onToggleDropdown={onNewNode}
             onSelectProvider={onSelectProvider}
@@ -218,7 +391,7 @@ export function MeshItem({
         </div>
       </div>
       {syncMessage && (
-        <div className="ml-2 mr-2 mb-1 px-2 py-1 rounded text-xs bg-bg-overlay border border-border-subtle text-text-secondary">
+        <div className="ml-2 mr-2 mb-1 px-2 py-1 rounded-md text-xs bg-bg-overlay border border-border-subtle text-text-secondary">
           {syncMessage}
         </div>
       )}
@@ -230,23 +403,65 @@ export function MeshItem({
           node={node}
           meshColor={meshColor}
           isActive={activeNodeId === node.id}
+          // Issue #774 — the Regenerate submenu shows every available
+          // Spawn Option as a picker; threading `providerList` keeps the
+          // submenu visually consistent with `ProviderDropdown` (same
+          // harness-grouped render, same icons).
+          providerList={providerList}
           onSelect={() => {
             setActiveNode(node.id);
             selectMesh(node.mesh_id);
+            // Retarget the solo view if one is open. The `null` check
+            // preserves "click-while-nothing-maximised leaves maximise
+            // null"; the store's idempotency guard handles self-clicks.
+            // Deferred: Ctrl+Arrow from maximised still exits in
+            // App.tsx:251-256 — revisit keyboard parity as a follow-up
+            // so mouse and keyboard agree.
+            const currentMaximized = useUIStore.getState().maximizedNodeId;
+            if (currentMaximized !== null) {
+              useUIStore.getState().setMaximizedNode(node.id);
+            }
           }}
           onDelete={(e) => onDeleteNode(e, node.id)}
         />
       ))}
 
+      {recolorOpen && (
+        <MeshRecolorModal
+          meshId={mesh.id}
+          meshName={mesh.name}
+          currentColor={meshColor.hex}
+          onClose={() => setRecolorOpen(false)}
+        />
+      )}
+
       {/* Context menu — periphery actions */}
       {contextMenu && (
         <div
-          className="fixed bg-bg-overlay border border-border-default rounded shadow-lg z-[100] py-1 min-w-[180px]"
+          ref={menuRef}
+          // Issue #814 — scoped attribute for `useClickOutside`. `mesh.id`
+          // ensures sibling meshes' menus don't satisfy this menu's
+          // "inside" check (the previous hand-rolled ref.contains shape
+          // was scoped per-instance via the same `mesh.id`-keyed
+          // selector inside the closure).
+          data-dropdown-for={mesh.id}
+          // Issue #735 — WAI-ARIA `menu` role; `aria-labelledby` points at
+          // the mesh-name span added above so screen readers can announce
+          // the menu's accessible name. Viewport clamping happens in the
+          // `useLayoutEffect` above; `style={{ top, left }}` reflects the
+          // potentially-repositioned coordinates.
+          role="menu"
+          aria-labelledby={`mesh-item-name-${mesh.id}`}
+          className="fixed bg-bg-overlay border border-border-default rounded-md shadow-md animate-scale-in origin-top-left z-[100] py-1 min-w-[180px]"
           style={{ top: contextMenu.y, left: contextMenu.x }}
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button
-            onClick={() => { setContextMenu(null); onOpenPropertiesProbe(mesh.id); }}
+            ref={(el) => { menuItemRefs.current[0] = el; }}
+            // Roving tabindex — only the active item is in the Tab order.
+            role="menuitem"
+            tabIndex={activeIndex === 0 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenPropertiesProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -256,7 +471,10 @@ export function MeshItem({
             Properties
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenFilesProbe(); }}
+            ref={(el) => { menuItemRefs.current[1] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 1 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenFilesProbe(); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -265,7 +483,10 @@ export function MeshItem({
             File Explorer
           </button>
           <button
-            onClick={() => { setContextMenu(null); handleSync(); }}
+            ref={(el) => { menuItemRefs.current[2] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 2 ? 0 : -1}
+            onClick={() => { closeContextMenu(); handleSync(); }}
             disabled={syncing}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2 disabled:opacity-50"
           >
@@ -278,7 +499,10 @@ export function MeshItem({
             {syncing ? 'Syncing...' : 'Sync Latest'}
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenSessionHistoryProbe(mesh.id); }}
+            ref={(el) => { menuItemRefs.current[3] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 3 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenSessionHistoryProbe(mesh.id); }}
             title="Archived Nodes"
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
@@ -289,7 +513,10 @@ export function MeshItem({
             Archive
           </button>
           <button
-            onClick={() => { setContextMenu(null); onOpenIssuesProbe(mesh.id); }}
+            ref={(el) => { menuItemRefs.current[4] = el; }}
+            role="menuitem"
+            tabIndex={activeIndex === 4 ? 0 : -1}
+            onClick={() => { closeContextMenu(); onOpenIssuesProbe(mesh.id); }}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -299,6 +526,34 @@ export function MeshItem({
             </svg>
             GitHub Issues
           </button>
+          {/* "View on GitHub" — only rendered when the mesh has a
+              github.com origin (conditional render so non-GitHub meshes
+              keep their 5-item menu and the keyboard-nav count in
+              `itemCount` stays accurate). The arrow-out-of-a-box icon
+              matches the `↗` glyph used in the rest of the codebase
+              (SafeLink, GridNodeHeader's open-PR chip). The click goes
+              through `openUrl()` per the knowledge primer's anti-pattern
+              note (Tauri 2 silently drops `target="_blank"` without an
+              explicit capability we don't grant). */}
+          {githubUrl && (
+            <button
+              ref={(el) => { menuItemRefs.current[5] = el; }}
+              role="menuitem"
+              tabIndex={activeIndex === 5 ? 0 : -1}
+              onClick={() => {
+                closeContextMenu();
+                openUrl(githubUrl).catch(console.error);
+              }}
+              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card flex items-center gap-2"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                <polyline points="15 3 21 3 21 9"/>
+                <line x1="10" y1="14" x2="21" y2="3"/>
+              </svg>
+              View on GitHub
+            </button>
+          )}
         </div>
       )}
     </div>

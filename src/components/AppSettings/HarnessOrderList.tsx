@@ -49,12 +49,12 @@ function HarnessRow({ provider }: { provider: ProviderInfo }) {
     <div
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-3 border border-border-subtle rounded px-3 py-2 bg-bg-card"
+      className="flex items-center gap-3 border border-border-subtle rounded-md px-3 py-2 bg-bg-card"
     >
       <span
         {...attributes}
         {...listeners}
-        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-[10px] select-none"
+        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none"
         title="Drag to reorder"
         aria-label={`Reorder ${provider.label}`}
       >

@@ -9,6 +9,13 @@ import { getGitSummary, type GitSummary } from '../lib/tauri';
 const summaryClient = createPathKeyedCache<GitSummary>({
   fetcher: getGitSummary,
   name: 'useGitSummary',
+  // The fetcher is a full-repo `git status` walk. While an agent streams
+  // edits, the backend coalescer fires GIT_CHANGED up to ~2/s per watched
+  // node; refetching the walk at that rate (times every visible panel) is
+  // part of the steady-state load that made the app feel sluggish. 2s
+  // bounds the rate; the primitive's trailing refetch still lands the
+  // settled state after a burst.
+  minRefetchIntervalMs: 2_000,
 });
 
 /**

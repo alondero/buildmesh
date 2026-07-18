@@ -51,11 +51,13 @@ describe('SafeLink (#463)', () => {
 
   it('renders plain text (no <a>) when url is empty', () => {
     render(<SafeLink url="" className="text-sm">Title</SafeLink>);
-    const span = screen.getByText('Title');
-    expect(span.tagName).toBe('SPAN');
     // No <a> in the DOM at all — the empty-URL case must not render a
     // bare <a href=""> (Tauri 2 WebView self-navigation hazard).
     expect(screen.queryByRole('link')).toBeNull();
+    // The children survive so callers that rely on the title text
+    // (e.g. ProbeRow's issue title) still see something useful — the
+    // span is inert, not absent.
+    expect(screen.getByText('Title').tagName).toBe('SPAN');
   });
 
   it('does NOT forward title or aria-label to the empty-URL span', () => {
@@ -79,6 +81,45 @@ describe('SafeLink (#463)', () => {
     expect(span.tagName).toBe('SPAN');
     expect(span.getAttribute('title')).toBeNull();
     expect(span.getAttribute('aria-label')).toBeNull();
+  });
+
+  it('does NOT style the empty-URL fallback as a clickable link', () => {
+    // User-reported bug — "View on GitHub" appeared as cyan-with-hover
+    // text in the Issues / PRs probe headers even when the underlying
+    // URL didn't resolve. The fallback <span> used to inherit the
+    // caller's link-styling classes verbatim, so the empty case
+    // looked exactly like the working <a> (cyan text + hover brighten)
+    // right next to working controls — clicking it did nothing
+    // because the span has no `href` / `onClick`. The fix strips the
+    // link-styling tokens (`text-accent-cyan`, `hover:text-accent-cyan/*`,
+    // `transition-colors`, `cursor-pointer`) via `stripLinkStyling`
+    // and replaces them with `cursor-default` so the span reads as
+    // inert text. Layout tokens (text-2xs, font-medium, ml-1, etc.)
+    // pass through so the row doesn't reflow. Pin the regex set so
+    // adding a new link-styling token at a call site (without also
+    // extending the strip) is caught here as a regression.
+    render(
+      <SafeLink
+        url=""
+        className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+      >
+        View on GitHub ↗
+      </SafeLink>,
+    );
+    const fallback = screen.getByText('View on GitHub ↗');
+    expect(fallback.tagName).toBe('SPAN');
+    // Link-styling tokens are gone — the span no longer LOOKS clickable.
+    expect(fallback.className).not.toMatch(/text-accent-cyan/);
+    expect(fallback.className).not.toMatch(/cursor-pointer/);
+    expect(fallback.className).not.toMatch(/hover:text-accent-cyan/);
+    expect(fallback.className).not.toMatch(/transition-colors/);
+    // And the inert cue is applied — cursor stays default so the
+    // user doesn't get a pointer hand over text that does nothing.
+    expect(fallback.className).toMatch(/cursor-default/);
+    // Layout tokens survive — the row must NOT reflow when the URL
+    // resolves from null to the real string.
+    expect(fallback.className).toMatch(/text-2xs/);
+    expect(fallback.className).toMatch(/font-medium/);
   });
 
   it('still renders an <a> when url is a non-empty placeholder string', () => {

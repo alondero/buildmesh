@@ -66,17 +66,78 @@ provider compiled in and no aws-lc-rs in the tree. We enable the `ring` provider
 and build every `ServerConfig`/`ClientConfig` with `builder_with_provider(ring)`
 so TLS never depends on a process-default provider.
 
-**7. The interface snapshot refreshes on each bind (issue #585).** The bind path
-calls `refresh_local_interface_ips` (which re-runs `local_ip_address::
-list_afinet_netifas` and replaces a `parking_lot::RwLock<Vec<IpAddr>>` cache)
-before constructing `bind_specs` and the TLS cert. A VPN or Wi-Fi adapter that
-connects **after** the first enumeration is therefore picked up on the next
-LAN-toggle rebind — no app restart. The per-request Host guard still reads the
-cached snapshot via a shared-lock + `Vec::clone`; it never pays for enumeration,
-which can stall for seconds behind a VPN/Docker stack on Windows. The old
-`0.0.0.0` wildcard bind (replaced in #501) had this for free — every interface
-the box held at the moment of `accept` was reachable — so the refresh is the
-smallest change that restores that reachability for per-interface TLS binds.
+**7. The interface snapshot refreshes on each bind (issue #585), and one walk
+produces both data sets (issue #630).** The bind path calls
+`refresh_local_interface_ips`, which delegates to
+`http::interface_rank::enumerate_with_classes`. On Windows that walks
+`GetAdaptersAddresses` **once**, returning both the unicast IP list AND the
+per-IP routing classification (`IfaceClass { has_gateway, is_physical }`).
+macOS/Linux fall back to `list_afinet_netifas` with an empty classes map (the
+range heuristic decides; the VPN-adapter trap is Windows-specific). The
+resulting IP list replaces a `parking_lot::RwLock<Vec<IpAddr>>` cache; the
+classes map lands in a sibling `RwLock<HashMap<IpAddr, IfaceClass>>` so the
+QR-display fallback (`get_local_ip`) can reuse them on a hit. Both caches
+together mean one bind = one `GetAdaptersAddresses` (was two, issue #630
+fix). A VPN or Wi-Fi adapter that connects **after** the first enumeration is
+picked up on the next LAN-toggle rebind — no app restart. The per-request
+Host guard still reads the cached snapshot via a shared-lock + `Vec::clone`; it
+never pays for enumeration, which can stall for seconds behind a VPN/Docker
+stack on Windows. The old `0.0.0.0` wildcard bind (replaced in #501) had this
+for free — every interface the box held at the moment of `accept` was
+reachable — so the refresh is the smallest change that restores that
+reachability for per-interface TLS binds.
+
+**7a. The QR-display fallback shares the bind-path snapshot — Windows-only
+"no second syscall" (issue #630 + #630 review).** `commands::mesh::get_local_ip`
+is the Tauri command the QR modal polls for a display fallback when no LAN
+listener is bound (`status.exposed_interfaces` empty). **On Windows** it
+reads the cached `(IPs, IfaceClass)` from §7 when present — the no-second-
+syscall path; the QR modal opens in <200 ms regardless of how heavy the
+user's VPN/Docker/Hyper-V stack is. **On macOS/Linux** the cached classes map
+is always empty (no `GetAdaptersAddresses` on those platforms), so the QR
+fallback still issues a single `list_afinet_netifas` walk on every modal
+open — the cache short-circuit only saves work on Windows. **On both
+platforms** the fall-through path on cold start (no snapshot yet) is
+`tauri::async_runtime::spawn_blocking` wrapped in `tokio::time::timeout(5s)`
+— load-bearing: the #630 review surfaced that without the timeout, a stuck
+filter driver leaves `spawn_blocking` alive indefinitely, the QR modal's
+`Promise.all` never resolves, and the user sees an indefinite blank modal
+instead of the `.catch(() => '192.168.1.x')` fallback. Both surfaces funnel
+through the same `interface_rank::pick_best_lan` / `rank_with_classes` core,
+so the bind order and the display fallback cannot diverge. `10.0.0.x`
+consumer-router LANs (Apple Airport default, many ISP gateways) surface
+correctly — previously the fallback hard-excluded this range (#291
+closed-out).
+
+**8. OS-level interface events drive the rebind (issue #591).** Even with the
+per-bind refresh in §7, the rebind only fires when something *triggers* it — a
+user LAN toggle or startup. An interface that appears **without** a user action
+(VPN connecting mid-session, DHCP lease change, Wi-Fi reconnect) was
+previously not picked up until the user re-toggled LAN exposure or restarted.
+The `http::interface_watcher` module closes this: it listens for OS-level
+interface notifications and re-runs `apply_binding` after a 250 ms debounce,
+so one network change produces one rebind — not one per kernel signal.
+
+The split is platform-specific:
+
+- **Windows** — `NotifyAddrChange` from `Iphlpapi.dll`, called via
+  `tokio::task::spawn_blocking`. The syscall blocks the thread until any
+  address change occurs; the watcher loops so a single watcher call outlives
+  any number of changes. Returns `NO_ERROR` on a successful wake-up; non-zero
+  logs and exits (the next user toggle recovers). `windows-sys 0.61` is pinned
+  (the crate is already in the tree transitively via `rustix`/`signal-hook`).
+- **macOS / Linux** — polling fallback. The watcher re-enumerates interfaces
+  every second via `list_afinet_netifas` and emits only when the snapshot
+  differs from the previous one, so a stable network stays silent. The 1 s
+  latency is invisible to the user; the debouncer collapses DHCP bursts.
+
+The watcher callback reads `lan_exposure_enabled` from the DB and is a no-op
+when LAN exposure is off — a user who has never opted in pays nothing for the
+background work. When LAN exposure is on, the callback reuses the existing
+`apply_binding` path; TLS cert regeneration, SAN update, and `bind_specs`
+rebuild are unchanged. Tests drive the debouncer directly through an
+`mpsc::Sender<()>` so the production source code path is exercised by smoke-
+test, not unit-test.
 
 ## Consequences
 
@@ -97,15 +158,11 @@ smallest change that restores that reachability for per-interface TLS binds.
   SAN/IP mismatch; a shrunk set keeps the cert (a stale extra SAN is harmless).
 - The DNS-rebinding `Host` guard (ADR-0012/#496) and the two-tier header auth
   (ADR-0015/#500) are unchanged and still run on every request, TLS or not.
-- **Refresh is on user action, not on OS events.** The bind path re-enumerates
-  interfaces only when triggered (`set_lan_exposure_enabled` toggling the LAN
-  switch, or the initial startup). An interface that appears **without** a
-  user toggle — a VPN connecting mid-session, a DHCP lease change, a Wi-Fi
-  reconnect — is not picked up until the user re-toggles LAN exposure (off→on)
-  or restarts the app. The TLS cert is missing the new IP from its SAN list,
-  and the per-request Host guard rejects it. Listening for OS-level interface
-  events (Windows `NotifyAddrChange`, `netlink` on Linux) and forcing a rebind
-  on change is a follow-up.
+- **Interface changes mid-session are picked up automatically (issue #591).**
+  The watcher re-runs `apply_binding` on every debounced OS event, so the
+  realised bind set stays in lockstep with the host's actual interface set
+  without user action. A burst of DHCP renews (the noisy case) collapses to
+  a single rebind; the user never sees a stale QR URL.
 
 ### Known limitations (tracked follow-ups)
 

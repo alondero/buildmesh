@@ -28,11 +28,12 @@ mod tests {
         claim_warm_entry_for_mesh_inner, count_available_warm_for_mesh_inner,
         count_droppable_warm_entries_for_mesh_inner,
         delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktrees_for_mesh_inner,
-        ensure_mesh_pre_spawn_pool_size, ensure_warm_worktables_table,
+        ensure_mesh_pre_spawn_pool_size, ensure_pool_default_backfill,
+        ensure_warm_worktables_table,
         insert_warm_worktree_inner, is_warm_pool_path_inner,
         warm_pool_claims_path_inner,
         list_oldest_warm_entries_for_mesh_inner,
-        list_warm_paths_for_mesh_inner,
+        list_warm_paths_for_mesh_droppable_inner, list_warm_paths_for_mesh_inner,
         list_warm_worktrees_to_reconcile_inner,
         list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
         WarmWorktreeStatus,
@@ -387,15 +388,33 @@ mod tests {
         );
     }
 
-    /// `delete_orphaned_claimed_warm_worktrees_inner` (issue #639 gap 4) is
-    /// the orphan-row GC: it deletes EVERY `claimed` row, regardless of age,
-    /// because the directory may be backing a live agent node's worktree so
-    /// the only safe thing to do is drop the bookkeeping row. Called from
-    /// `services::warm_pool::reconcile_on_startup` (step 1a). A claim that
-    /// succeeds but whose post-spawn `forget_after_spawn` delete fails leaves
-    /// the row at `claimed` forever otherwise — the claim filter only matches
-    /// `available` and the missing-dir scan excludes `claimed`, so without
-    /// this GC the row leaks forever and `available` stays below target.
+    /// `delete_orphaned_claimed_warm_worktrees_inner` (#639 gap 4, reworked
+    /// for #697) is the orphan-row GC. It walks every `claimed` row and
+    /// classifies each against the live session snapshot it receives:
+    ///   * **Adopted (live agent present on this mesh)** — the row's
+    ///     directory MAY back a live agent process, so the GC drops the row
+    ///     but leaves the directory alone. Even when
+    ///     `set_agent_node_worktree_name` silently failed upstream (the
+    ///     #642.2 corner case), the live PROCESS_REGISTRY session alone is
+    ///     sufficient evidence to refuse teardown — the spawn that
+    ///     produced the session necessarily attached to that mesh.
+    ///   * **Crashed-spawn orphan** — no live session on this mesh AND the
+    ///     directory exists on disk. Tear down the git worktree metadata
+    ///     (`remove_one_worktree`), then drop the row. The slug was baked
+    ///     into the directory by the pool's checkout and survives a crash
+    ///     that didn't reach `forget_after_spawn`, so this is the channel
+    ///     for recovering the leak from a crashed mid-claim spawn.
+    ///   * **Issue/PR mid-move / pre-missing** — no live session AND no
+    ///     directory on disk. The Issue/PR spawn moves the directory onto a
+    ///     `gh{N}-`/`pr{N}-` path (#612) before `forget_after_spawn`
+    ///     fires; if the spawn crashes between the move and the row drop,
+    ///     the original pool path is empty and the bookkeeping row is safe
+    ///     to drop with no fs action.
+    ///
+    /// Called from `services::warm_pool::reconcile_on_startup` (step 1a).
+    /// The live-session snapshot is `PROCESS_REGISTRY.session_ids()` at
+    /// call time, snapshotted once so a concurrent spawn-then-die race
+    /// can't reach into the GC's view mid-iteration.
     #[test]
     fn delete_orphaned_claimed_prunes_every_claimed_row() {
         let conn = v20_schema_with_mesh(true);
@@ -428,7 +447,8 @@ mod tests {
             .unwrap();
         }
 
-        let deleted = delete_orphaned_claimed_warm_worktrees_inner(&conn).unwrap();
+        let deleted =
+            delete_orphaned_claimed_warm_worktrees_inner(&conn, &[]).unwrap();
         assert_eq!(deleted, 3, "exactly the three claimed rows must be pruned");
 
         // The claimed rows are gone.
@@ -453,21 +473,102 @@ mod tests {
         assert_eq!(available_remaining, 2, "every available row must survive the GC");
     }
 
-    /// A `claimed` row pointing at a directory that's still on disk is GC'd
-    /// row-only — the directory belongs to a live agent node by definition,
-    /// so the GC must NOT touch the filesystem. The pin lives in the doc
-    /// comment; this test is the behaviour-level guard so a future refactor
-    /// that confused "drop the row" with "drop the worktree" surfaces as a
-    /// test failure rather than a lost agent's worktree.
+    /// The `claimed`-row GC's safety contract is **per-row classification**,
+    /// not "never touches the filesystem" (#697 reworks the design from the
+    /// pre-#642 row-only GC). A claimed row is:
+    ///
+    ///   * **Adopted** (live PROCESS_REGISTRY session on the same mesh):
+    ///     drop the row, **preserve** the directory. The agent is alive;
+    ///     the directory is its CWD. Even when
+    ///     `set_agent_node_worktree_name` silently failed (#642.2 corner
+    ///     case), the live session alone is sufficient evidence.
+    ///   * **Orphan** (no live session, directory exists on disk):
+    ///     **tear down** the directory, drop the row. This is the leak
+    ///     #697 closes — a crashed mid-claim spawn left the directory
+    ///     without a corresponding row drop.
+    ///   * **Mid-move / pre-missing** (no live session, no directory):
+    ///     drop the row only (no fs action).
+    ///
+    /// The four tests below pin each branch and the #642.2 corner case.
+    /// The old `delete_orphaned_claimed_does_not_touch_directories` test
+    /// (pre-#697, "never touches the filesystem" — see PR #696) was
+    /// obsolete by design: that contract is exactly the leak the new
+    /// PROCESS_REGISTRY-based algorithm exists to close. The replacement
+    /// tests use the looser "live session on this mesh ⇒ preserve" guard,
+    /// which is safe against the silent-UPDATE-failure corner case AND
+    /// sharp enough to recover orphan dirs.
+
+    // -----------------------------------------------------------------------
+    // Issue #697 — PROCESS_REGISTRY-based claimed-row GC
+    //
+    // The original GC (#639 gap 4, hardened in #642.2, reverted for data
+    // loss) used a DB-only check that misclassified rows when both
+    // `set_agent_node_worktree_name` and `forget_after_spawn` silently
+    // failed. The PROCESS_REGISTRY is the source of truth for "is there
+    // a live agent on this mesh?" — a live session is sufficient evidence
+    // to refuse teardown, no matter what the DB's `agent_nodes.worktree_name`
+    // says.
+    //
+    // The four tests below pin the new contract's three branches
+    // (live-agent-preserve, orphan-teardown, mid-move-drop) plus the
+    // #642.2 corner case that drove the revert in the first place.
+    // -----------------------------------------------------------------------
+
+    /// Build a v22-ish schema that ALSO carries an `agent_nodes` table. The
+    /// live-session classification reads `agent_nodes.mesh_id` to decide
+    /// whether a session counts as "live on the warm row's mesh", so the
+    /// table must exist for the GC's `IN (...)` query to do anything other
+    /// than return an empty set.
+    fn v22_schema_with_agent_nodes(pool_size: i64) -> Connection {
+        let conn = v22_schema_with_mesh(pool_size);
+        // Mirror the production CREATE TABLE from `db::init` (just the
+        // columns the GC's `SELECT DISTINCT mesh_id WHERE id IN (...)`
+        // actually references). The full production schema also gets the
+        // safety-net column adds; a test that grew a column add wouldn't
+        // trip here, but it would trip the production call sites that
+        // SELECT through the column.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS agent_nodes (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 mesh_id INTEGER NOT NULL REFERENCES meshes(id),
+                 name TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 branch TEXT NOT NULL DEFAULT 'main',
+                 env TEXT NOT NULL DEFAULT 'windows',
+                 provider TEXT NOT NULL DEFAULT 'anthropic',
+                 status TEXT NOT NULL DEFAULT 'idle',
+                 cli_session_id TEXT,
+                 worktree_name TEXT,
+                 use_worktree INTEGER NOT NULL DEFAULT 1,
+                 position INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                 status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                 source_pr INTEGER,
+                 head_repo_owner TEXT,
+                 head_repo_clone_url TEXT,
+                 source_pr_pinned_sha TEXT
+             );
+             CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Pin the **adopted** branch: a live PROCESS_REGISTRY session on the
+    /// warm row's mesh means the directory MAY back a live agent, so the
+    /// GC must drop the row but leave the directory INTACT. Without this
+    /// guarantee the GC would tear down a live agent's working tree on
+    /// the next startup reconcile.
     #[test]
-    fn delete_orphaned_claimed_does_not_touch_directories() {
-        let conn = v20_schema_with_mesh(true);
-        ensure_warm_worktables_table(&conn).unwrap();
+    fn delete_orphaned_claimed_preserves_dir_when_session_live_on_mesh() {
+        let conn = v22_schema_with_agent_nodes(0);
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = tmp.path().join("claimed-live");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("CLAIMED.md"), "live agent's work").unwrap();
-        let _id = insert_warm_worktree_inner(
+
+        // mesh_id = 1, claimed row at the live dir's path.
+        let _row_id = insert_warm_worktree_inner(
             &conn,
             1,
             dir.to_str().unwrap(),
@@ -477,10 +578,361 @@ mod tests {
         )
         .unwrap();
 
-        let n = delete_orphaned_claimed_warm_worktrees_inner(&conn).unwrap();
+        // A live session on mesh 1: register an agent_nodes row keyed by
+        // the session_id. We then pass `[session_id]` as the live snapshot.
+        conn.execute(
+            "INSERT INTO agent_nodes (mesh_id, name, path, worktree_name) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![1_i64, "live-agent", "/some/host/mesh", "claimed-live"],
+        )
+        .unwrap();
+        let session_id = conn.last_insert_rowid();
+
+        let n = delete_orphaned_claimed_warm_worktrees_inner(
+            &conn,
+            std::slice::from_ref(&session_id),
+        )
+        .unwrap();
+        assert_eq!(n, 1, "the claimed row must be pruned");
+
+        // Row gone, directory INTACT.
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE status = 'claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            remaining, 0,
+            "the GC must delete the bookkeeping row even when preserving the directory"
+        );
+        assert!(
+            dir.join("CLAIMED.md").exists(),
+            "the GC must NOT tear down a directory when a live PROCESS_REGISTRY \
+             session on the same mesh exists — the dir may back the live agent's \
+             CWD, even if the DB's `agent_nodes.worktree_name` is stale"
+        );
+    }
+
+    /// Pin the **crashed-spawn orphan** branch (the hole #697 closes): no
+    /// live session on the mesh + directory exists on disk = the spawn
+    /// crashed mid-claim without `forget_after_spawn` firing, leaving a
+    /// `.claude/worktrees/<slug>/` directory that nobody owns. The GC must
+    /// tear it down so the directory doesn't leak across restarts.
+    #[test]
+    fn delete_orphaned_claimed_tears_down_orphan_dir_when_no_session() {
+        let conn = v22_schema_with_agent_nodes(0);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("claimed-orphan");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ORPHAN.md"), "abandoned by a crashed spawn").unwrap();
+
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            dir.to_str().unwrap(),
+            "claimed-orphan",
+            Some("dd"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        // Empty live-session snapshot = no PROCESS_REGISTRY entry on this mesh.
+        let n = delete_orphaned_claimed_warm_worktrees_inner(&conn, &[]).unwrap();
         assert_eq!(n, 1);
 
-        // Row gone, directory INTACT — the live agent's work is preserved.
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE status = 'claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "the orphan row must be deleted");
+
+        assert!(
+            !dir.exists(),
+            "the GC must tear down an orphan dir (no live PROCESS_REGISTRY \
+             session on this mesh) — this is the leak #697 closes"
+        );
+    }
+
+    /// Pin the **mid-move / pre-missing** branch: no live session + no
+    /// directory on disk = the spawn is gone AND its directory was already
+    /// moved away (Issue/PR #612) or hand-deleted by the user. The row is
+    /// a bookkeeping artefact with nothing on disk to clean up; the GC
+    /// just drops it.
+    #[test]
+    fn delete_orphaned_claimed_drops_row_when_dir_missing() {
+        let conn = v22_schema_with_agent_nodes(0);
+        // Path deliberately under a unique key that does NOT exist on disk.
+        // (We don't point at `tmp.path()` because the GC's `remove_one_worktree`
+        // would race against the tempdir teardown.)
+        let ghost_path = "/this/path/does/not/exist/anywhere/claimed-ghost";
+
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            ghost_path,
+            "claimed-ghost",
+            Some("dd"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        let n = delete_orphaned_claimed_warm_worktrees_inner(&conn, &[]).unwrap();
+        assert_eq!(
+            n, 1,
+            "the missing-dir `claimed` row must still be pruned (the row-only \
+             path is the same as it was pre-#697 — the row leak is the part \
+             this PR closes; the missing-dir case was never the issue)"
+        );
+
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees WHERE status = 'claimed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    /// Pin the **#642.2 corner case** (the data-loss path that drove the
+    /// revert that #697 supersedes):
+    ///
+    ///   * A spawn claimed this warm pool row → agent_nodes row exists →
+    ///     PROCESS_REGISTRY has the session.
+    ///   * `set_agent_node_worktree_name(session_id, &preassigned_name)`
+    ///     silently failed (DB lock timeout, etc.) — so the agent's
+    ///     `worktree_name` STAYS at the stage-1 throwaway slug and no
+    ///     longer matches `warm.preassigned_name`.
+    ///   * `forget_after_spawn` also silently failed → the warm row is
+    ///     still at `claimed`.
+    ///
+    /// At GC time: a live PROCESS_REGISTRY session exists whose
+    /// `agent_nodes.worktree_name` is the throwaway slug (≠ `preassigned_name`).
+    /// A path-equality check ("derived worktree path == warm.path") would
+    /// misclassify this row as orphan and tear down the live agent's CWD.
+    /// The PROCESS_REGISTRY-based check (`any live session on this mesh?`)
+    /// correctly refuses to tear down, because the spawn that claimed this
+    /// row necessarily attaches to this mesh. **This test pins the
+    /// data-loss guard for the issue #697 algorithm.**
+    #[test]
+    fn delete_orphaned_claimed_preserves_dir_when_worktree_name_stale() {
+        let conn = v22_schema_with_agent_nodes(0);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("claimed-stale");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("STALE.md"), "live agent whose DB row is stale").unwrap();
+
+        // Warm row adopts the pool-preassigned slug `claimed-stale`.
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            dir.to_str().unwrap(),
+            "claimed-stale",
+            Some("dd"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        // Live agent nodes row whose `worktree_name` is the THROWAWAY stage-1
+        // slug — `set_agent_node_worktree_name` silently failed and left the
+        // column at its stage-1 value. The derived worktree path would be
+        // `<mesh>/.claude/worktrees/untitled-stage-1/`, NOT
+        // `<mesh>/.claude/worktrees/claimed-stale/`. **A path-equality GC
+        // would tear this dir down — the data-loss bug.**
+        conn.execute(
+            "INSERT INTO agent_nodes (mesh_id, name, path, worktree_name) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                1_i64,
+                "ghost-name",
+                "/some/host/mesh",
+                "untitled-stage-1" // NOT "claimed-stale"
+            ],
+        )
+        .unwrap();
+        let session_id = conn.last_insert_rowid();
+
+        let n = delete_orphaned_claimed_warm_worktrees_inner(
+            &conn,
+            std::slice::from_ref(&session_id),
+        )
+        .unwrap();
+        assert_eq!(n, 1, "the claimed row must be pruned");
+
+        // The dir MUST be preserved — a live process exists on this mesh,
+        // even if the DB's `worktree_name` doesn't reflect it.
+        assert!(
+            dir.join("STALE.md").exists(),
+            "the GC must NOT tear down a directory when a live PROCESS_REGISTRY \
+             session on the same mesh exists even if `agent_nodes.worktree_name` \
+             is stale (the #642.2 data-loss corner case — silent best-effort \
+             UPDATE failure upstream of the GC's view must not be misread as 'orphan')"
+        );
+    }
+
+    /// Pin **multi-row, mixed-classification across two meshes**: mesh 1 has
+    /// a live session (preserve its claimed row + dir); mesh 2 has NO live
+    /// session and a real orphan dir on disk (tear down). This exercises
+    /// the per-`mesh_id` lookup and ensures the GC isn't treating a single
+    /// session as a global "preserve everything" override.
+    ///
+    /// NOTE: the GC's "any live session on this mesh preserves ALL claimed
+    /// rows on that mesh" trade-off (vs the issue body's strict
+    /// path-equality check) is intentional — it's the looser/safer
+    /// classification that closes the #642.2 silent-UPDATE-failure bug.
+    /// A live session on mesh 1 means a row on mesh 1 is treated as
+    /// adopted; it does NOT mean rows on mesh 2 are adopted. This test
+    /// pins both halves of that distinction in a single GC pass.
+    #[test]
+    fn delete_orphaned_claimed_mixed_adopted_and_orphan_across_meshes() {
+        let conn = v22_schema_with_agent_nodes(0);
+        // Add a second mesh so we can put the orphan on a different mesh
+        // than the live session.
+        conn.execute(
+            "INSERT INTO meshes (name, path) VALUES ('m2', '/repo/m2')",
+            [],
+        )
+        .unwrap();
+        let mesh_2_id: i64 = conn.last_insert_rowid();
+
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // mesh 1, claimed row backed by a live session.
+        let live_dir = tmp.path().join("mesh1-live");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        std::fs::write(live_dir.join("LIVE.md"), "live agent on mesh 1").unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            live_dir.to_str().unwrap(),
+            "mesh1-live",
+            Some("ll"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        // mesh 1, mid-move claimed row (path doesn't exist on disk).
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            "/this/path/does/not/exist/mid-move",
+            "mesh1-midmove",
+            Some("mm"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        // mesh 2, claimed row with NO live session + on-disk dir = orphan.
+        let orphan_dir = tmp.path().join("mesh2-orphan");
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        std::fs::write(orphan_dir.join("ORPHAN.md"), "abandoned on mesh 2").unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            mesh_2_id,
+            orphan_dir.to_str().unwrap(),
+            "mesh2-orphan",
+            Some("oo"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        // Live PROCESS_REGISTRY session is on mesh 1 only.
+        conn.execute(
+            "INSERT INTO agent_nodes (mesh_id, name, path, worktree_name) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![1_i64, "live-agent", "/some/host/mesh1", "mesh1-live"],
+        )
+        .unwrap();
+        let live_session_id = conn.last_insert_rowid();
+
+        let n = delete_orphaned_claimed_warm_worktrees_inner(
+            &conn,
+            std::slice::from_ref(&live_session_id),
+        )
+        .unwrap();
+        assert_eq!(n, 3, "all three claimed rows must be pruned");
+
+        // mesh 1 dirs survive (live session on this mesh).
+        assert!(
+            live_dir.join("LIVE.md").exists(),
+            "the mesh-1 claimed row's dir must be preserved (live session on mesh 1)"
+        );
+        // mesh 2 orphan dir GONE (no live session on mesh 2).
+        assert!(
+            !orphan_dir.exists(),
+            "the mesh-2 claimed row's dir must be torn down (no live session on mesh 2)"
+        );
+        // Mid-move row's path was already absent; nothing to verify on disk.
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM warm_worktrees",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "every `claimed` row must be pruned");
+    }
+
+    /// Pin the **safety fallback** for `live_mesh_ids_for` SQL errors: when
+    /// the GC cannot resolve the live-session snapshot to `mesh_id`s
+    /// (transient DB error, schema mismatch, dropped `agent_nodes`
+    /// table — any reason), it MUST fall back to row-only behaviour and
+    /// leave the on-disk directories intact. Treating the snapshot as
+    /// "no live sessions anywhere" would let the loop tear down a live
+    /// agent's CWD on a transient error — the same data-loss class the
+    /// PROCESS_REGISTRY check exists to avoid. The contract is: an error
+    /// means "couldn't tell" → err on the side of NOT touching the
+    /// filesystem; a snapshot of zero sessions means "no live sessions"
+    /// → orphan teardown is correct (separately tested above).
+    ///
+    /// We trigger the fallback by dropping the `agent_nodes` table (so
+    /// the `IN (SELECT ... FROM agent_nodes ...)` query errors out at
+    /// prepare), then call the GC with a non-empty live snapshot.
+    #[test]
+    fn delete_orphaned_claimed_falls_back_to_row_only_on_live_mesh_lookup_error() {
+        // Start from the v22-with-agent_nodes fixture so the live snapshot
+        // has SOMETHING to look up; then drop `agent_nodes` to force the
+        // prepare to error. This mirrors the post-init schema-drift
+        // failure mode the safety fallback exists to survive.
+        let conn = v22_schema_with_agent_nodes(0);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("claimed-on-disk");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("MAYBE-LIVE.md"), "don't tear this down").unwrap();
+        insert_warm_worktree_inner(
+            &conn,
+            1,
+            dir.to_str().unwrap(),
+            "claimed-on-disk",
+            Some("dd"),
+            WarmWorktreeStatus::Claimed,
+        )
+        .unwrap();
+
+        // Drop the `agent_nodes` table — the live_mesh_ids_for query
+        // SELECTs from it, so prepare() will fail. This is the only
+        // production-realistic way I can simulate "snapshot says non-
+        // empty but I couldn't tell which meshes" without re-architecting
+        // the helper to take an injected error source. In production the
+        // same condition triggers on a transient DB error during startup
+        // reconcile.
+        conn.execute("DROP TABLE agent_nodes", []).unwrap();
+        let live_snapshot = vec![999_i64, 998_i64]; // arbitrary non-empty
+
+        let n = delete_orphaned_claimed_warm_worktrees_inner(&conn, &live_snapshot).unwrap();
+        assert_eq!(
+            n, 1,
+            "the row must still be pruned even when the live lookup errors \
+             (row-only behaviour matches the pre-#697 contract)"
+        );
+
+        // Row gone, directory INTACT — the safety fallback prevents
+        // the GC from destroying a working tree on a transient query error.
         let remaining: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM warm_worktrees WHERE status = 'claimed'",
@@ -490,8 +942,10 @@ mod tests {
             .unwrap();
         assert_eq!(remaining, 0);
         assert!(
-            dir.join("CLAIMED.md").exists(),
-            "the GC must not touch a `claimed` row's on-disk directory (it may back a live agent)"
+            dir.join("MAYBE-LIVE.md").exists(),
+            "the GC must NOT touch the filesystem when the live-lookup query \
+             errors — a transient DB failure is not an excuse to destroy a \
+             working tree (data-loss guard for the safety fallback)"
         );
     }
 
@@ -553,11 +1007,11 @@ mod tests {
         assert_eq!(remaining, 1, "mesh-2 row must not be touched");
     }
 
-    /// `list_warm_paths_for_mesh_inner` (issue #639 gap 3) returns every
-    /// pool row's `path` for the given mesh, regardless of status. The
-    /// `commands::mesh::delete_mesh` caller reads this list BEFORE the row
-    /// cascade so it can `git worktree remove --force` each directory — the
-    /// DB delete alone leaves on-disk directories orphaned forever.
+    /// `list_warm_paths_for_mesh_inner` (issue #639 gap 3, retained for
+    /// diagnostics under #642) returns every pool row's `path` for the
+    /// given mesh, regardless of status. The mesh-delete path (`#642.1`)
+    /// uses the safer `list_warm_paths_for_mesh_droppable_inner` instead,
+    /// but the "everything" view is kept for diagnostic / audit tools.
     ///
     /// Exercises ALL four statuses (`Available`, `Filling`, `Refreshing`,
     /// `Claimed`) so a future refactor that narrows the WHERE clause to a
@@ -641,6 +1095,56 @@ mod tests {
         assert!(
             !paths.contains(&path_m2),
             "a path belonging to a different mesh must not leak into the list"
+        );
+    }
+
+    /// `list_warm_paths_for_mesh_droppable_inner` (#642.1) is the
+    /// force-remove-safe view: every status EXCEPT `claimed`. The mesh-delete
+    /// path uses this view because a `claimed` row's directory may back a
+    /// live agent process — force-removing it would destroy the agent's
+    /// working tree. Mirrors the `status != 'claimed'` filter convention used
+    /// by `count_droppable_warm_entries_for_mesh_inner` and
+    /// `list_oldest_warm_entries_for_mesh_inner` (#613).
+    #[test]
+    fn list_paths_droppable_excludes_claimed_rows() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_warm_worktables_table(&conn).unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Available + Filling + Refreshing come back; Claimed is dropped.
+        let path_a = tmp.path().join("a").to_str().unwrap().to_string();
+        let path_b = tmp.path().join("b").to_str().unwrap().to_string();
+        let path_c = tmp.path().join("c").to_str().unwrap().to_string();
+        let path_d = tmp.path().join("d").to_str().unwrap().to_string();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_a, "pool-warm-a", Some("a"),
+            WarmWorktreeStatus::Available,
+        ).unwrap();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_b, "pool-warm-b", None,
+            WarmWorktreeStatus::Filling,
+        ).unwrap();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_c, "pool-warm-c", None,
+            WarmWorktreeStatus::Refreshing,
+        ).unwrap();
+        insert_warm_worktree_inner(
+            &conn, 1, &path_d, "pool-warm-d", Some("d"),
+            WarmWorktreeStatus::Claimed,
+        ).unwrap();
+
+        let paths = list_warm_paths_for_mesh_droppable_inner(&conn, 1).unwrap();
+        let mut got = paths.clone();
+        got.sort();
+        let mut expected = vec![path_a, path_b, path_c];
+        expected.sort();
+        assert_eq!(
+            got, expected,
+            "the droppable view must include Available + Filling + Refreshing \
+             but exclude Claimed (whose dir may back a live agent)"
+        );
+        assert!(
+            !paths.contains(&path_d),
+            "the claimed row's path must not appear in the droppable view"
         );
     }
 
@@ -1086,6 +1590,103 @@ mod tests {
         assert!(
             !warm_pool_claims_path_inner(&conn, &p).unwrap(),
             "after the row is dropped, the path must no longer be claimed — the next drain proceeds"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // v24 pool-default-on backfill (ADR 0020). One-time flip of
+    // worktree-enabled meshes from the old pool-off default (0) to the new
+    // default (1), gated on the `pool_default_backfill_v24` flag.
+    // -------------------------------------------------------------------
+
+    /// Build a v22-era DB with three meshes covering the backfill's
+    /// decision table: worktree-enabled at 0 (flips), worktree-disabled at
+    /// 0 (stays), worktree-enabled with an explicit size (stays).
+    fn v22_schema_for_backfill() -> Connection {
+        let conn = v20_schema_with_mesh(true); // mesh 1: use_worktree=1
+        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
+        ensure_warm_worktables_table(&conn).unwrap();
+        // The v22-era default was 0 — simulate rows that predate v24.
+        conn.execute("UPDATE meshes SET pre_spawn_pool_size = 0 WHERE id = 1", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO meshes (name, path, use_worktree, pre_spawn_pool_size)
+             VALUES ('no-wt', '/repo/no-wt', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO meshes (name, path, use_worktree, pre_spawn_pool_size)
+             VALUES ('sized', '/repo/sized', 1, 3)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn pool_size_for(conn: &Connection, path: &str) -> i64 {
+        conn.query_row(
+            "SELECT pre_spawn_pool_size FROM meshes WHERE path = ?1",
+            rusqlite::params![path],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn backfill_enables_pool_only_for_worktree_enabled_zero_meshes() {
+        let conn = v22_schema_for_backfill();
+        ensure_pool_default_backfill(&conn).unwrap();
+        assert_eq!(
+            pool_size_for(&conn, "/repo/m"),
+            1,
+            "a worktree-enabled mesh on the old 0 default must flip to 1"
+        );
+        assert_eq!(
+            pool_size_for(&conn, "/repo/no-wt"),
+            0,
+            "a worktree-disabled mesh stays at 0 — the pool is meaningless for it"
+        );
+        assert_eq!(
+            pool_size_for(&conn, "/repo/sized"),
+            3,
+            "an explicitly-sized pool must never be touched"
+        );
+    }
+
+    /// The flag makes the backfill strictly one-time: a user who opts a
+    /// mesh back OUT (sets 0) after the flip must never be overridden on a
+    /// later startup — that would make the Worktrees Probe's off switch
+    /// useless.
+    #[test]
+    fn backfill_runs_at_most_once_per_db() {
+        let conn = v22_schema_for_backfill();
+        ensure_pool_default_backfill(&conn).unwrap();
+        // User opts back out.
+        conn.execute("UPDATE meshes SET pre_spawn_pool_size = 0 WHERE path = '/repo/m'", [])
+            .unwrap();
+        // Every subsequent init re-calls the ensure — it must be a no-op.
+        ensure_pool_default_backfill(&conn).unwrap();
+        assert_eq!(
+            pool_size_for(&conn, "/repo/m"),
+            0,
+            "a post-backfill explicit 0 must survive later startups (flag-gated one-time)"
+        );
+    }
+
+    /// A brand-new v24 DB gets the column with DEFAULT 1, so a mesh row
+    /// inserted without naming the column lands pool-on. Pins the
+    /// `ensure_column` default that `create_mesh`'s explicit value mirrors.
+    #[test]
+    fn fresh_column_default_is_pool_on() {
+        let conn = v20_schema_with_mesh(true);
+        ensure_mesh_pre_spawn_pool_size(&conn).unwrap();
+        // The fixture mesh predates the column add — it reads the ALTER
+        // default.
+        assert_eq!(
+            pool_size_for(&conn, "/repo/m"),
+            1,
+            "the v24 column default is 1 (pool on); pre-v24 DBs are covered by the backfill"
         );
     }
 }

@@ -41,7 +41,7 @@ describe('ProviderIcon', () => {
     const { container } = render(<ProviderIcon providerId="mystery" />);
     const span = container.querySelector('span');
     expect(span).toBeTruthy();
-    expect(span?.className).toContain('bg-gray-500');
+    expect(span?.className).toContain('bg-text-muted');
   });
 
   it('withBackground wraps known providers in a 34×34 colored chip', () => {
@@ -67,7 +67,7 @@ describe('ProviderIcon', () => {
     // The inner fallback dot is still a span.
     const span = chip.querySelector('span');
     expect(span).toBeTruthy();
-    expect(span?.className).toContain('bg-gray-500');
+    expect(span?.className).toContain('bg-text-muted');
   });
 
   it('without withBackground, the chip wrapper is NOT rendered (desktop default)', () => {
@@ -99,7 +99,7 @@ describe('ProviderIcon', () => {
     // must NOT be the gray-dot fallback <span>.
     const img = container.querySelector('img');
     expect(img).toBeTruthy();
-    expect(container.querySelector('span.bg-gray-500')).toBeNull();
+    expect(container.querySelector('span.bg-text-muted')).toBeNull();
   });
 
   it('renders the Kimi inline SVG for a Proxied row with id "claude:kimi"', () => {
@@ -108,7 +108,7 @@ describe('ProviderIcon', () => {
     );
     // Kimi is an inline SVG.
     expect(container.querySelector('svg')).toBeTruthy();
-    expect(container.querySelector('span.bg-gray-500')).toBeNull();
+    expect(container.querySelector('span.bg-text-muted')).toBeNull();
   });
 
   it('uses the brand-color chip background for a Proxied row (MiniMax indigo, not Claude blue)', () => {

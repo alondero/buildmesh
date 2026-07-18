@@ -1,17 +1,41 @@
 //! Per-Mesh **synchronous** mutex for `git fetch` + `git pull --ff-only` runs.
 //!
-//! Why this exists (issue #652)
-//! ----------------------------
-//! The spawn-time auto-sync (`git::sync::fetch_origin`) shells out to
-//! `git fetch <remote> <branch>` then `git pull --ff-only --no-rebase` on the
-//! parent Mesh. Without serialization, N concurrent spawns against the same
-//! mesh race on `.git/FETCH_HEAD`, `.git/index.lock`, and
-//! `.git/refs/heads/<branch>.lock` — one process's `git fetch` succeeds
-//! while another's fails with `FetchFailed("... another git process ...")`,
-//! leaving the losers parked on a stale ref. A local bare-remote repro at
-//! N=2/5/10 produced zero failures (git's per-process fetch lock serializes
-//! and the fetch is too fast to overlap meaningfully); real GitHub remotes
-//! have wide enough timing windows to expose the collision.
+//! Why this exists (issues #652, #680)
+//! -----------------------------------
+//! The spawn-time auto-sync (`git::sync::fetch_origin`) and the manual
+//! `git_sync` Tauri command (`commands::git::git_sync`) both shell out
+//! to `git fetch <remote> <branch>` then `git pull --ff-only --no-rebase`
+//! on the parent Mesh. Without serialization, N concurrent callers
+//! against the same mesh race on `.git/FETCH_HEAD`, `.git/index.lock`,
+//! and `.git/refs/heads/<branch>.lock` — one process's `git fetch`
+//! succeeds while another's fails with
+//! `FetchFailed("... another git process ...")`, leaving the losers
+//! parked on a stale ref. A local bare-remote repro at N=2/5/10
+//! produced zero failures (git's per-process fetch lock serializes
+//! and the fetch is too fast to overlap meaningfully); real GitHub
+//! remotes have wide enough timing windows to expose the collision.
+//!
+//! #652 wired the spawn-time auto-sync into this lock; #680 added the
+//! manual `git_sync` command so a Sync click can't race against an
+//! in-flight spawn; #698 wrapped the PR-spawn head fetch (the
+//! `locked_fetch_pr_head` helper at `git::worktree::provision`,
+//! covering both the same-repo `fetch_single_ref` and the fork
+//! `fetch_fork_head` calls) so two concurrent PR-spawns (or a PR-spawn
+//! racing a manual `git_sync`) can't collide on `.git/FETCH_HEAD`,
+//! `.git/refs/remotes/<remote>/<ref>.lock`, or — for the fork branch —
+//! the config files `git remote add/set-url` write.
+//!
+//! #709 added the worktree prune's `git fetch --prune` as the fourth and
+//! final per-Mesh shell-out to route through this lock (the
+//! `locked_prune_remote_tracking` helper at `commands::prune`), AND
+//! consolidated the four sites into a uniform `locked_*` helper shape:
+//! each underlying shell-out function (`do_sync`, `fetch_origin`,
+//! `fetch_single_ref` / `fetch_fork_head`, the prune shell-out) has a
+//! matching `locked_*` wrapper whose entire body is one
+//! `with_mesh_sync_lock(key, || work())` call. The wrap is auditable in
+//! one place per site rather than scattered across the call sites — and
+//! the next per-Mesh shell-out site added (the issue's "copy-paste
+//! trivial, not a new helper" AC) is a five-line `locked_*` function.
 //!
 //! The existing `services::pool_worker::FILL_LOCK` is `try_lock`-or-skip and
 //! is the wrong shape here — a *skipped* fetch would leave the spawn without
@@ -34,13 +58,6 @@
 //! `Arc` on the inner mutex lets the address survive any future map
 //! compaction. Today the map is append-only (Meshes are a small fixed set
 //! per app session — typically a handful), so memory growth is bounded.
-//!
-//! Out of scope
-//! ------------
-//! The manual `git_sync` Tauri command (`commands::git::git_sync`) is
-//! interactive and not burst-triggered; routing it through the same mutex
-//! would benefit it but is not the user's pain point and is left for a
-//! follow-up (issue #680). Only the spawn-time auto-sync is wrapped here.
 //!
 //! Key shape
 //! ---------
@@ -110,6 +127,64 @@ where
     };
 
     f()
+}
+
+/// Like [`with_mesh_sync_lock`], but gives up after `timeout` instead of
+/// waiting indefinitely. Returns `Some(f())` if the lock was acquired
+/// within the deadline, `None` if the current holder didn't release in time.
+///
+/// Why this exists: the spawn-time auto-sync and the PR-head fetch used to
+/// wait *unboundedly* on this lock. A manual Sync click (`git_sync` — up to
+/// 300s fetch timeout plus 300s pull timeout under the same lock) or a
+/// wedged remote could therefore stall every new-node spawn on that mesh
+/// for many minutes: the "new nodes take minutes or never start" failure
+/// mode. The spawn path's sync is best-effort by contract (ADR 0001:
+/// always proceed from local HEAD on any sync failure), so a bounded wait
+/// that degrades to the existing `mesh-sync-warning` toast is strictly
+/// better than queueing behind a stuck sync.
+///
+/// `std::sync::Mutex` has no timed lock on stable, so this polls
+/// `try_lock` on a 100ms tick — the same pattern (and justification) as
+/// `process_util::run_command_with_timeout`. Callers run on the blocking
+/// pool, so sleeping the polling thread is fine. Poison recovery matches
+/// [`with_mesh_sync_lock`].
+pub fn try_with_mesh_sync_lock_timeout<F, R>(
+    mesh_path: &str,
+    timeout: std::time::Duration,
+    f: F,
+) -> Option<R>
+where
+    F: FnOnce() -> R,
+{
+    let arc_mutex = {
+        let mut map = match MESH_LOCKS.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        map.entry(mesh_path.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match arc_mutex.try_lock() {
+            Ok(_guard) => return Some(f()),
+            // A poisoned lock means a prior holder panicked mid-sync; the
+            // guarded unit `()` has no state to corrupt, so proceed — same
+            // policy as the blocking acquire above.
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                let _guard = poisoned.into_inner();
+                return Some(f());
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -183,52 +258,69 @@ mod tests {
         );
     }
 
-    /// Different keys do NOT serialize: two threads with two distinct
-    /// keys sleep 100ms each, and the wallclock must be ≪ 2*100ms (i.e.
-    /// the inner locks were never contended). This guards against an
-    /// accidental global-mutex regression — the same-key test above
-    /// already proves serialization *works*; this one proves it doesn't
-    /// *over*-serialize.
+    /// Different keys do NOT serialize: two threads with two distinct keys
+    /// sleep 100ms each, and the maximum simultaneous-thread count inside
+    /// the critical section must reach 2 at some point during the run.
+    /// If the per-key lock were secretly global, only one thread could
+    /// ever be inside at once, and the peak would stay at 1.
     ///
-    /// The bound is intentionally generous (1.9x the parallel-expected
-    /// elapsed vs. 2x the serialized-expected elapsed) because Windows
-    /// can co-schedule 2 threads on the same core under contention,
-    /// costing up to one full `SLEEP_MS` of scheduler latency on a busy
-    /// CI box. Tight bounds here flake on slow machines without adding
-    /// real coverage — the same-key test is the precise correctness
-    /// check; this one is a smoke test against "did I accidentally
-    /// replace the per-Mesh map with a single global".
+    /// This replaces the prior wallclock-bound assertion (`elapsed <
+    /// 1.9 * SLEEP_MS`), which flaked on Windows whenever a busy CI box
+    /// co-scheduled both threads on the same core. The handshake is the
+    /// same pattern `same_key_serializes_concurrent_callers` already uses
+    /// (issue #652 / commit 771bc79), so the test is now deterministic —
+    /// no timing assumptions — while still catching the regression it's
+    /// targeted at: a per-Mesh map accidentally replaced by a single
+    /// global mutex. The wide 100ms sleep on each thread gives the OS
+    /// scheduler plenty of room to actually overlap them — the assertion
+    /// checks the overlap was *possible*, not how fast it happened.
     #[test]
     fn different_keys_run_in_parallel() {
         const SLEEP_MS: u64 = 100;
 
-        let start = Instant::now();
-        let h1 = thread::spawn(|| {
-            with_mesh_sync_lock("mesh://alpha", || {
-                thread::sleep(Duration::from_millis(SLEEP_MS));
-            });
-        });
-        let h2 = thread::spawn(|| {
-            with_mesh_sync_lock("mesh://beta", || {
-                thread::sleep(Duration::from_millis(SLEEP_MS));
-            });
-        });
-        h1.join().unwrap();
-        h2.join().unwrap();
-        let elapsed = start.elapsed();
+        // Threads INSIDE the critical section + the peak count seen
+        // across the whole run. `fetch_add` returns the *previous* value,
+        // so `prev + 1` is the count after the increment; `fetch_max`
+        // records the peak.
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
 
-        // Serialized bound (worst case): 2 * SLEEP_MS = 200ms.
-        // Parallel ceiling: 1.9x the parallel-expected elapsed of
-        // SLEEP_MS = 190ms — leaves 10ms of headroom over a fully-
-        // serialized run, generous enough for Windows scheduler
-        // co-scheduling on a busy CI box.
-        let parallel_ceiling = Duration::from_millis((SLEEP_MS as f64 * 1.9) as u64);
-        assert!(
-            elapsed < parallel_ceiling,
-            "elapsed ({:?}) reached the serialized bound (~{:?}); \
-             different keys unexpectedly serialized",
-            elapsed,
-            2 * SLEEP_MS,
+        let i1 = Arc::clone(&in_flight);
+        let p1 = Arc::clone(&peak);
+        let h1 = thread::spawn(move || {
+            with_mesh_sync_lock("mesh://alpha", move || {
+                let new = i1.fetch_add(1, Ordering::SeqCst) + 1;
+                p1.fetch_max(new, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(SLEEP_MS));
+                i1.fetch_sub(1, Ordering::SeqCst);
+            });
+        });
+        let i2 = Arc::clone(&in_flight);
+        let p2 = Arc::clone(&peak);
+        let h2 = thread::spawn(move || {
+            with_mesh_sync_lock("mesh://beta", move || {
+                let new = i2.fetch_add(1, Ordering::SeqCst) + 1;
+                p2.fetch_max(new, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(SLEEP_MS));
+                i2.fetch_sub(1, Ordering::SeqCst);
+            });
+        });
+        h1.join().expect("alpha thread panicked");
+        h2.join().expect("beta thread panicked");
+
+        // Sanity: counter must be back to 0 after both threads exit.
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+
+        // The peak inside the critical section must reach 2, i.e. at some
+        // moment both threads were inside their (different) per-key locks
+        // simultaneously. A global-lock regression would keep the peak at 1.
+        let observed_peak = peak.load(Ordering::SeqCst);
+        assert_eq!(
+            observed_peak, 2,
+            "peak simultaneous per-key lock holders was {} (expected 2); \
+             the per-Mesh lock was unexpectedly serialized \
+             (issue #652 / different-keys regression)",
+            observed_peak,
         );
     }
 
@@ -280,5 +372,92 @@ mod tests {
 
         let s = with_mesh_sync_lock("mesh://return-value", || "hello".to_string());
         assert_eq!(s, "hello");
+    }
+
+    // ── try_with_mesh_sync_lock_timeout (bounded spawn-path wait) ──────────
+
+    /// Uncontended: the closure runs and its value round-trips.
+    #[test]
+    fn timeout_variant_runs_when_lock_is_free() {
+        let result = try_with_mesh_sync_lock_timeout(
+            "mesh://timeout-free",
+            Duration::from_secs(1),
+            || 7_i32,
+        );
+        assert_eq!(result, Some(7));
+    }
+
+    /// The headline regression for the "new nodes take minutes or never
+    /// start" failure mode: a spawn-path caller must give up (return
+    /// `None`, closure NOT run) when another sync holds the mesh lock past
+    /// the deadline, instead of queueing behind it indefinitely.
+    #[test]
+    fn timeout_variant_gives_up_when_holder_outlives_deadline() {
+        const KEY: &str = "mesh://timeout-held";
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
+        // Holder: takes the lock and keeps it until told to release —
+        // stands in for a wedged manual `git_sync`.
+        let holder = thread::spawn(move || {
+            with_mesh_sync_lock(KEY, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("holder never acquired the lock");
+
+        let start = Instant::now();
+        let mut ran = false;
+        let result =
+            try_with_mesh_sync_lock_timeout(KEY, Duration::from_millis(300), || ran = true);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "must give up while the lock is held");
+        assert!(!ran, "the closure must NOT run when the deadline expires");
+        // Bound check: gave up near the deadline (generous slack for CI),
+        // not after some multi-second internal retry.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "gave up too slowly: {elapsed:?}"
+        );
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // Once released, the same key acquires again.
+        let after = try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(1), || 1_i32);
+        assert_eq!(after, Some(1), "lock must be reusable after release");
+    }
+
+    /// A caller that starts while the lock is held but whose deadline
+    /// outlives the holder acquires once the holder releases — the bounded
+    /// wait is a wait, not a `try_lock`-or-skip.
+    #[test]
+    fn timeout_variant_acquires_when_holder_releases_in_time() {
+        const KEY: &str = "mesh://timeout-releases";
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+
+        let holder = thread::spawn(move || {
+            with_mesh_sync_lock(KEY, || {
+                started_tx.send(()).unwrap();
+                // Short hold — well inside the waiter's deadline.
+                thread::sleep(Duration::from_millis(200));
+            });
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("holder never acquired the lock");
+
+        let result =
+            try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(5), || 99_i32);
+        assert_eq!(
+            result,
+            Some(99),
+            "waiter with headroom must acquire after the holder releases"
+        );
+        holder.join().unwrap();
     }
 }

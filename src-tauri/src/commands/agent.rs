@@ -187,18 +187,33 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
 /// and its slot is restored verbatim when it reappears.
 ///
 /// Pure and stable (no disk / globals) so the ordering is the unit-test seam:
-/// the `(is_terminal, rank)` tuple key sorts Terminal last via the bool, ranks
-/// the rest by stored harness order, and the stable sort keeps equal-rank
-/// rows in their input order (a harness's native row is built first in
-/// `compose_provider_menu`, so it lands first in each group).
+/// the `(is_terminal, rank, harness_id)` tuple key sorts Terminal last via the
+/// bool, ranks the rest by stored harness order, and the `harness_id`
+/// tiebreak pins multiple *newcomers* — all sharing `rank = usize::MAX - 1` —
+/// into a deterministic alphabetical order rather than relying on the input
+/// order from `harness_profiles()` (issue #581). Listed harnesses always have
+/// distinct ranks so the tiebreak is moot for them; Proxied rows share their
+/// parent's `harness_id` and the stable sort keeps the native header ahead
+/// of its children (the native row is built first in `compose_provider_menu`).
 fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]) -> Vec<ProviderInfo> {
-    providers.sort_by_key(|p| {
-        let is_terminal = p.harness_id == "terminal";
-        let rank = order
-            .iter()
-            .position(|id| *id == p.harness_id)
-            .unwrap_or(usize::MAX - 1);
-        (is_terminal, rank)
+    providers.sort_by(|a, b| {
+        let key_a = (
+            a.harness_id == "terminal",
+            order
+                .iter()
+                .position(|id| *id == a.harness_id)
+                .unwrap_or(usize::MAX - 1),
+            a.harness_id.as_str(),
+        );
+        let key_b = (
+            b.harness_id == "terminal",
+            order
+                .iter()
+                .position(|id| *id == b.harness_id)
+                .unwrap_or(usize::MAX - 1),
+            b.harness_id.as_str(),
+        );
+        key_a.cmp(&key_b)
     });
     providers
 }
@@ -255,7 +270,12 @@ async fn spawn_new_agent_impl(
         crate::preferences::default_provider(),
     );
 
-    let branch = crate::commands::git::get_default_branch(mesh.path.clone());
+    // `.await` the async wrapper, NOT call the sync core directly — these
+    // sites are `async fn` so the caller is on a Tauri tokio worker, and a
+    // direct `_blocking` call would park that worker on a `Repository::open`
+    // (issue #762 review). The wrapper offloads onto the blocking pool.
+    let branch = crate::commands::git::get_default_branch(mesh.path.clone())
+        .await;
 
     let node = crate::services::agent_node::create(
         mesh.id,
@@ -436,7 +456,15 @@ pub fn create_issue_node(
         mesh.default_provider.clone(),
         crate::preferences::default_provider(),
     );
-    let branch = crate::commands::git::get_default_branch(mesh.path.clone());
+    // Sync `#[command]` IPC — body runs on Tauri's tokio worker pool
+    // without our wrapping. Adding `.await` to a sync fn is a syntax
+    // error, so use the sync core directly here. `create_issue_node` is
+    // stage-1 of the spawn flow (returns ~20ms after creating the row),
+    // and the repo-open is bounded by the IPC dispatch latency budget.
+    // The async `spawn_new_agent_impl` path above (where the offload
+    // matters) does `.await` the wrapper (issue #762 review).
+    let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
+        .unwrap_or_else(|_| "main".to_string());
 
     let node = crate::services::agent_node::create_pending(
         mesh.id,
@@ -467,6 +495,75 @@ pub fn create_issue_node(
     );
 
     Ok(IssueNodeDraft { node, prefill })
+}
+
+/// Manually trigger the Autopilot wrap-up sequence on a live node (issue
+/// #484 / PRD #480 story 15). Injects the same `/finish` prompt the
+/// automated pipeline uses AND enrolls the node in the wrap-up state
+/// machine, so the self-correction loop + PR verification (#485) apply to
+/// hand-started tasks exactly as to auto-spawned ones.
+///
+/// Idempotent-ish: re-triggering resets the node to `finishing` attempt 1
+/// (a deliberate "run the wrap-up again now" affordance).
+#[command]
+pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
+        return Err("Node has no live agent process to finish".to_string());
+    }
+    let mesh = db::get_mesh_by_id(node.mesh_id).map_err(|e| e.to_string())?;
+    let action = mesh
+        .autopilot_action_on_success
+        .clone()
+        .unwrap_or_else(|| "draft_pr".to_string());
+
+    // Enroll (or re-arm) the node in the pipeline. `source_issue` may be
+    // absent for hand-spawned nodes — 0 is the "no originating issue"
+    // sentinel the prompt renderer filters out.
+    db::create_autopilot_run(node_id, node.mesh_id, node.source_issue.unwrap_or(0))
+        .map_err(|e| e.to_string())?;
+    db::set_autopilot_run_state(
+        node_id,
+        crate::db::AutopilotRunState::Finishing,
+        Some(1),
+    )
+    .map_err(|e| e.to_string())?;
+    crate::autopilot::evaluator::register(node_id);
+
+    let prompt = crate::autopilot::finish::finish_prompt(node.source_issue, Some(&action));
+    crate::autopilot::pipeline::write_prompt_to_pty(node_id, &prompt, &app)?;
+    crate::autopilot::pipeline::clear_attention_after_injection(node_id, &app);
+    let _ = app.emit(
+        "autopilot-finishing",
+        serde_json::json!({ "node_id": node_id, "issue": node.source_issue }),
+    );
+    tracing::info!("trigger_finish: injected wrap-up prompt into node {}", node_id);
+    Ok(())
+}
+
+/// One Autopilot-managed node's pipeline position, for the header pill.
+/// `state` is the typed `autopilot_runs.state` union
+/// (`implementing`/`finishing`/`completed`/`failed`/`merged`).
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "AutopilotRunState.ts")]
+pub struct AutopilotRunStateRow {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    pub state: crate::db::AutopilotRunState,
+}
+
+/// Every live (non-archived) Autopilot run, so the frontend can badge
+/// piloted nodes. Fetched alongside the node list; kept fresh by the
+/// `autopilot-*` lifecycle events triggering a refetch.
+#[command]
+pub fn list_autopilot_runs() -> Result<Vec<AutopilotRunStateRow>, String> {
+    db::list_autopilot_run_states()
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(node_id, state)| AutopilotRunStateRow { node_id, state })
+                .collect()
+        })
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -918,15 +1015,44 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
 
 #[command]
 pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
-    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
-
-    if data.bytes().any(|b| b == b'\n' || b == b'\r')
-        && !should_skip_attention_signals(session_id)
-    {
-        db::update_agent_node_status(session_id, SessionStatus::Running).ok();
+    // Offload to the blocking pool — the PTY write (`write_all` + `flush`,
+    // can park on a full pipe) plus a DB read + UPDATE in the same body
+    // would otherwise pin a Tauri async worker for the full call. See the
+    // [`crate::commands::run_blocking`] seam (introduced for GitHub/git
+    // probes in #761) for the convention.
+    let should_signal =
+        crate::commands::run_blocking("write_to_agent", move || {
+            write_to_agent_blocking(session_id, data)
+        })
+        .await?;
+    if should_signal {
         let _ = app.emit("attention-cleared", serde_json::json!({ "session_id": session_id }));
     }
     Ok(())
+}
+
+/// Sync core for [`write_to_agent`]. Offloaded to the blocking pool by the
+/// async wrapper above; kept `pub(crate)` so the mobile HTTP routes under
+/// `src/http/` can call it directly when an equivalent endpoint is added
+/// (the same forward-compat reason every other `*_blocking` core here is
+/// `pub(crate)`). Returns `Ok(true)` when the caller should emit
+/// `attention-cleared`.
+///
+/// PTY write happens first; a failed write must NOT claim "user input
+/// accepted" — the reader thread's exit-detector would see no signal for
+/// the dead child, and the status flip would land on a session that
+/// never received the byte.
+pub(crate) fn write_to_agent_blocking(
+    session_id: i64,
+    data: String,
+) -> Result<bool, String> {
+    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
+    let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
+        && !should_skip_attention_signals(session_id);
+    if should_signal {
+        db::update_agent_node_status(session_id, SessionStatus::Running).ok();
+    }
+    Ok(should_signal)
 }
 
 /// Returns true if a newline in `write_to_agent` should NOT flip the
@@ -957,6 +1083,19 @@ pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Re
 
 #[command]
 pub async fn kill_agent(session_id: i64) -> Result<(), String> {
+    // Offload to the blocking pool: `kill_session` shells out to
+    // `taskkill /F /T` on Windows (a synchronous `.output()` wait) and then
+    // joins the PTY reader thread with a bounded 2s timeout — up to several
+    // seconds parked on a Tauri async worker per call. This command runs on
+    // every node close AND at step 2 of every spawn (`spawn_agent_inner`
+    // kills stale processes first), so leaving it inline is exactly the
+    // pool-starvation class from the Command Threading convention.
+    crate::commands::run_blocking("kill_agent", move || kill_agent_blocking(session_id)).await
+}
+
+/// Sync core for [`kill_agent`] — see the `*_blocking` + `run_blocking`
+/// convention in `commands/mod.rs`.
+pub(crate) fn kill_agent_blocking(session_id: i64) -> Result<(), String> {
     crate::session_naming::reset_buffers(session_id);
     PROCESS_REGISTRY.kill_session(session_id);
     PROCESS_REGISTRY.remove(&session_id);
@@ -1132,6 +1271,38 @@ mod tests {
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["claude", "codex", "newbie", "terminal"]);
+    }
+
+    /// Issue #581: multiple *newcomers* (harnesses not yet in the stored
+    /// order) all share `rank = usize::MAX - 1`. Without a tiebreak the
+    /// relative order between them depends on the input order from
+    /// `harness_profiles()` — which is deterministic today but is a
+    /// hidden coupling. The `harness_id` tiebreak pins them into a
+    /// deterministic alphabetical order, independent of how the upstream
+    /// row derivation is implemented.
+    #[test]
+    fn order_providers_multiple_newcomers_sort_alphabetically() {
+        // No stored order — every real harness is a newcomer.
+        let order: Vec<String> = vec![];
+        // The input is in *detection* order (claude, codex, agy, opencode),
+        // NOT alphabetical. The assertion pins the alphabetical tiebreak,
+        // not the input order.
+        let ordered = order_providers(
+            vec![
+                row_native("terminal"),
+                row_native("claude"),
+                row_native("codex"),
+                row_native("agy"),
+                row_native("opencode"),
+            ],
+            &order,
+        );
+        let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["agy", "claude", "codex", "opencode", "terminal"],
+            "newcomers must sort alphabetically by harness_id, not by input order"
+        );
     }
 
     /// Issue #573 AC: an uninstalled harness keeps its saved slot — when it
@@ -2084,5 +2255,21 @@ mod tests {
                 "legacy id {id:?} resolves to Anthropic (issue #538) and must be resumable"
             );
         }
+    }
+
+    // Regression test for the sync core: an unregistered session must short-
+    // circuit on the PTY write before the DB read. Without the `?` ordering
+    // the unit-test DB-not-initialised panic surfaces as a test failure.
+    // The full PTY-write + DB-update path needs a registered agent
+    // (real `portable_pty` handles) and is covered by integration tests.
+
+    #[test]
+    fn write_to_agent_blocking_unknown_session_short_circuits_before_db() {
+        let result = write_to_agent_blocking(999_999_999, "x".to_string());
+        let err = result.expect_err("unknown session must surface an error");
+        assert!(
+            err.contains("Agent not running"),
+            "expected 'Agent not running' error, got {err:?}"
+        );
     }
 }

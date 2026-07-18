@@ -7,6 +7,7 @@ pub mod assets;
 pub mod auth;
 pub mod events;
 pub mod interface_rank;
+pub mod interface_watcher;
 pub mod request;
 pub mod revocation;
 pub mod routes;
@@ -45,6 +46,18 @@ pub(crate) fn app_handle() -> Option<&'static tauri::AppHandle> {
 
 const HTTP_PORT_START: u16 = 1992;
 const HTTP_PORT_END: u16 = 1994;
+
+/// How long the server will wait for a client to finish sending its request line
+/// and headers before dropping the connection. Bounds slowloris-style holds: a
+/// LAN peer (exposure on) that opens a socket and then dribbles or stalls can't
+/// pin a connection open indefinitely. Each connection reads exactly one request
+/// (no keep-alive loop here), so a single deadline covers the whole request head.
+const REQUEST_HEAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Upper bound on the combined size of a request's header block. A well-formed
+/// mobile/coordinator request is a few KB; anything past this is malformed or
+/// hostile, so we reject with `431` rather than let `headers` grow unbounded.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
 
 /// Default/expected port for the attention webhook hook.
 /// The actual server may bind 1993 or 1994 if 1992 is taken; the hook will
@@ -212,6 +225,18 @@ pub fn start_http_server(app: tauri::AppHandle, port_offset: u16) {
     PORT_OFFSET.store(port_offset, Ordering::SeqCst);
     tauri::async_runtime::spawn(async move {
         apply_binding(port_offset).await;
+    });
+    // OS-level interface-change watcher (issue #591). A VPN connecting mid-
+    // session, a DHCP lease change, or a Wi-Fi reconnect would otherwise leave
+    // the LAN-exposure listeners stale until the user re-toggles or restarts.
+    // The watcher fires `reapply_binding` after a 250 ms debounce so one
+    // network change produces one rebind (not one per kernel signal). When
+    // LAN exposure is off, `reapply_binding` is a loopback-only no-op, so a
+    // non-LAN user pays nothing beyond the platform source's idle work.
+    interface_watcher::spawn_interface_watcher(|| {
+        tauri::async_runtime::spawn(async move {
+            reapply_binding().await;
+        });
     });
 }
 
@@ -743,6 +768,217 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Parse the `Content-Length` request header, defaulting to `0` when it's
+/// absent or unparseable. One home for what used to be copy-pasted at every
+/// body-reading route.
+fn content_length(headers: &str) -> usize {
+    request::extract_header_value(headers, "Content-Length")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Complete the WebSocket handshake on an already-authorized upgrade: derive the
+/// `Sec-WebSocket-Accept` key, write the `101 Switching Protocols` response, and
+/// hand back the framed stream. Returns `None` (after writing the matching error
+/// status) when the client omitted `Sec-WebSocket-Key` or the socket died
+/// mid-handshake. Shared by both `/ws/*` upgrades — only the ticket-consume,
+/// target binding, and spawned handler differ between them.
+async fn ws_upgrade(
+    mut lines: tokio::io::BufStream<MaybeTls>,
+    headers: &str,
+) -> Option<WebSocketStream<MaybeTls>> {
+    let Some(ws_key) = request::extract_header_value(headers, "Sec-WebSocket-Key") else {
+        let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+        return None;
+    };
+    let accept_key = derive_accept_key(ws_key.as_bytes());
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Accept: {}\r\n\
+         \r\n",
+        accept_key
+    );
+    let mut stream = lines.into_inner();
+    if stream.write_all(response.as_bytes()).await.is_err() {
+        return None;
+    }
+    if stream.flush().await.is_err() {
+        return None;
+    }
+    Some(WebSocketStream::from_raw_socket(stream, Role::Server, None).await)
+}
+
+/// How a [`Route`] matches a request path and captures its integer id(s).
+enum RouteMatch {
+    /// The path must equal this literal exactly.
+    Exact(&'static str),
+    /// `prefix{id}suffix` — one integer segment (e.g. `/api/agents/{id}/diff`).
+    OneId {
+        prefix: &'static str,
+        suffix: &'static str,
+    },
+    /// `prefix{id1}mid{id2}suffix` — two integer segments (e.g.
+    /// `/api/meshes/{id}/pulls/{n}/merge`).
+    TwoId {
+        prefix: &'static str,
+        mid: &'static str,
+        suffix: &'static str,
+    },
+}
+
+impl RouteMatch {
+    /// Match `path_without_query`, returning the captured ids on success. The
+    /// two-tuple is `(first_id, second_id)`; an `Exact` route captures neither,
+    /// a `OneId` route the first, a `TwoId` route both. A non-integer segment
+    /// fails the match (reusing `path_segment_id`'s numeric parse), so a
+    /// malformed id falls through to the catch-all rather than reaching a
+    /// handler.
+    fn captures(&self, path: &str) -> Option<(Option<i64>, Option<i64>)> {
+        match self {
+            RouteMatch::Exact(p) => (path == *p).then_some((None, None)),
+            RouteMatch::OneId { prefix, suffix } => {
+                path_segment_id(path, prefix, suffix).map(|id| (Some(id), None))
+            }
+            RouteMatch::TwoId {
+                prefix,
+                mid,
+                suffix,
+            } => path_two_segment_ids(path, prefix, mid, suffix).map(|(a, b)| (Some(a), Some(b))),
+        }
+    }
+}
+
+/// One homogeneous route: which handler runs for each `Handler` variant is
+/// resolved by [`dispatch_route`], keeping this table pure data.
+#[derive(Clone, Copy)]
+enum Handler {
+    AdminDevices,
+    AdminRevoke,
+    CoordinatorNodes,
+    CoordinatorLog,
+    CoordinatorPrompt,
+    NodesCreate,
+    PrCreate,
+    PrMerge,
+    ImportResume,
+    IssuesSpawn,
+    GitStatus,
+    GitSummary,
+    GitBranch,
+    GitDiff,
+    GhAuth,
+    AgentNodesDiscover,
+    IssuesList,
+    PullsList,
+    PrMergeability,
+}
+
+/// A declaratively-routed request: method + path shape + the auth scope the
+/// dispatch loop enforces before the handler runs.
+struct Route {
+    method: &'static str,
+    m: RouteMatch,
+    scope: auth::RequiredScope,
+    handler: Handler,
+}
+
+/// The homogeneous routes — every one is `guard(scope) -> handler`, with no
+/// bespoke response headers or stream hijack. This table is the single
+/// scope-audit surface for them; the specials (WS upgrades, `/api/session`,
+/// `/api/ws-ticket`, the `/admin/*` catch-all, assets, the SPA shell) are
+/// declared in `SPECIAL_ROUTES` below for the same audit, but dispatched by
+/// their own explicit branches because they need bespoke behaviour. Order is
+/// preserved from the original if-chain; the only load-bearing constraint is
+/// that `/admin/devices*` precede the `/admin/*` catch-all, which it does
+/// because the loop runs before that special.
+const ROUTES: &[Route] = &[
+    Route { method: "GET", m: RouteMatch::Exact("/admin/devices"), scope: auth::RequiredScope::Admin, handler: Handler::AdminDevices },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/admin/devices/", suffix: "/revoke" }, scope: auth::RequiredScope::Admin, handler: Handler::AdminRevoke },
+    Route { method: "GET", m: RouteMatch::Exact("/nodes"), scope: auth::RequiredScope::CoordinatorRead, handler: Handler::CoordinatorNodes },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/log" }, scope: auth::RequiredScope::CoordinatorRead, handler: Handler::CoordinatorLog },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/nodes/", suffix: "/prompt" }, scope: auth::RequiredScope::CoordinatorWrite, handler: Handler::CoordinatorPrompt },
+    Route { method: "POST", m: RouteMatch::Exact("/api/nodes/create"), scope: auth::RequiredScope::Admin, handler: Handler::NodesCreate },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/pr" }, scope: auth::RequiredScope::Admin, handler: Handler::PrCreate },
+    Route { method: "POST", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/pulls/", suffix: "/merge" }, scope: auth::RequiredScope::Admin, handler: Handler::PrMerge },
+    Route { method: "POST", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/agent-nodes/import-and-resume" }, scope: auth::RequiredScope::Admin, handler: Handler::ImportResume },
+    Route { method: "POST", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/issues/", suffix: "/spawn" }, scope: auth::RequiredScope::Admin, handler: Handler::IssuesSpawn },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/status" }, scope: auth::RequiredScope::Admin, handler: Handler::GitStatus },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/summary" }, scope: auth::RequiredScope::Admin, handler: Handler::GitSummary },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/git/branch" }, scope: auth::RequiredScope::Admin, handler: Handler::GitBranch },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/agents/", suffix: "/diff" }, scope: auth::RequiredScope::Admin, handler: Handler::GitDiff },
+    Route { method: "GET", m: RouteMatch::Exact("/api/gh/auth"), scope: auth::RequiredScope::Admin, handler: Handler::GhAuth },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/agent-nodes/discover" }, scope: auth::RequiredScope::Admin, handler: Handler::AgentNodesDiscover },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/issues" }, scope: auth::RequiredScope::Admin, handler: Handler::IssuesList },
+    Route { method: "GET", m: RouteMatch::OneId { prefix: "/api/meshes/", suffix: "/pulls" }, scope: auth::RequiredScope::Admin, handler: Handler::PullsList },
+    Route { method: "GET", m: RouteMatch::TwoId { prefix: "/api/meshes/", mid: "/pulls/", suffix: "/mergeability" }, scope: auth::RequiredScope::Admin, handler: Handler::PrMergeability },
+];
+
+/// Run a homogeneous route's handler. The dispatch loop has already enforced
+/// `route.scope`; this match owns the per-route arity (which id, which query
+/// param, whether it reads a body) so [`ROUTES`] can stay pure data. Each arm
+/// preserves the exact behaviour of the original inline branch — including the
+/// two JSON-string producers (written via `write_json`) and the `/nodes/{id}/log`
+/// `Some -> 200 / None -> 404` split.
+async fn dispatch_route(
+    handler: Handler,
+    lines: &mut tokio::io::BufStream<MaybeTls>,
+    ids: (Option<i64>, Option<i64>),
+    path_with_query: &str,
+    headers: &str,
+) {
+    let id0 = ids.0.unwrap_or(0);
+    let id1 = ids.1.unwrap_or(0);
+    match handler {
+        Handler::AdminDevices => {
+            let _ = request::write_json(lines, "200 OK", &routes::admin::list_devices_json()).await;
+        }
+        Handler::AdminRevoke => routes::admin::revoke(lines, id0).await,
+        Handler::CoordinatorNodes => {
+            let _ = request::write_json(lines, "200 OK", &routes::coordinator::list_nodes_json()).await;
+        }
+        Handler::CoordinatorLog => {
+            let tail = tail_param(path_with_query);
+            match routes::coordinator::log_json(id0, tail) {
+                Some(body) => {
+                    let _ = request::write_json(lines, "200 OK", &body).await;
+                }
+                None => {
+                    let _ = request::write_status_only(lines, "404 Not Found").await;
+                }
+            }
+        }
+        Handler::CoordinatorPrompt => {
+            routes::coordinator::prompt(lines, id0, content_length(headers)).await
+        }
+        Handler::NodesCreate => routes::nodes::create(lines, content_length(headers)).await,
+        Handler::PrCreate => routes::pr::create(lines, id0, content_length(headers)).await,
+        Handler::PrMerge => routes::pr::merge(lines, id0, id1, content_length(headers)).await,
+        Handler::ImportResume => {
+            routes::agent_nodes::import_and_resume(lines, id0, content_length(headers)).await
+        }
+        Handler::IssuesSpawn => {
+            routes::issues::spawn(lines, id0, id1, content_length(headers)).await
+        }
+        Handler::GitStatus => routes::git::status(lines, id0).await,
+        Handler::GitSummary => routes::git::summary(lines, id0).await,
+        Handler::GitBranch => routes::git::branch(lines, id0).await,
+        Handler::GitDiff => {
+            let file_path = query_param(path_with_query, "path").unwrap_or_default();
+            routes::git::diff(lines, id0, &file_path).await;
+        }
+        Handler::GhAuth => routes::git::gh_auth(lines).await,
+        Handler::AgentNodesDiscover => routes::agent_nodes::discover(lines, id0).await,
+        Handler::IssuesList => routes::issues::list(lines, id0).await,
+        Handler::PullsList => {
+            let state = query_param(path_with_query, "state").unwrap_or_default();
+            routes::pr::list_pulls(lines, id0, &state).await;
+        }
+        Handler::PrMergeability => routes::pr::get_mergeability(lines, id0, id1).await,
+    }
+}
+
 /// Snapshot override for `enumerate_interfaces`. `None` means "use the system
 /// call"; tests install a deterministic value so they can simulate a VPN
 /// adapter appearing later in the session (issue #585). The override is read
@@ -754,6 +990,19 @@ fn percent_decode(s: &str) -> String {
 /// the override; otherwise the hot path sees whatever was last refreshed.
 static INTERFACE_SNAPSHOT_OVERRIDE: std::sync::Mutex<Option<Vec<IpAddr>>> =
     std::sync::Mutex::new(None);
+
+/// Read the test seam at the entry points that need it. Returns the
+/// override when a test has installed one via `set_interface_enumerator_for_testing`,
+/// or `None` in production builds (the static starts as `None` and is never
+/// written outside tests). `pub(crate)` so `interface_rank::enumerate_with_classes`
+/// AND `enumerate_interfaces` can both short-circuit on the same flag
+/// (#630 review).
+pub(crate) fn read_interface_override_for_test() -> Option<Vec<IpAddr>> {
+    INTERFACE_SNAPSHOT_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+}
 
 /// RAII guard returned by `set_interface_enumerator_for_testing`. Drops restore
 /// the override to the value it had before the guard was created, so test
@@ -788,17 +1037,16 @@ pub(crate) fn set_interface_enumerator_for_testing(
     TestEnumeratorGuard { prev }
 }
 
-/// Enumerate the host's interface IPs. Honours a test override if set; otherwise
-/// reads the system via `local_ip_address::list_afinet_netifas`. Failures log
-/// a warning and return an empty list — the bind path then sees no LAN
-/// interfaces, which is a safe degrade (loopback still binds).
+/// Enumerate the host's interface IPs via `local_ip_address::list_afinet_netifas`,
+/// honouring the test override. On Windows this is the FALLBACK path — used
+/// only when `interface_rank::windows_impl::walk_adapters` fails (#630 review);
+/// the happy path walks `GetAdaptersAddresses` once. On macOS/Linux this is
+/// the primary path (no `GetAdaptersAddresses`). Failures log a warning and
+/// return an empty list — the bind path then sees no LAN interfaces, which is
+/// a safe degrade (loopback still binds).
 fn enumerate_interfaces() -> Vec<IpAddr> {
-    let override_value = INTERFACE_SNAPSHOT_OVERRIDE
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone());
-    if let Some(ips) = override_value {
-        return ips;
+    if let Some(override_ips) = read_interface_override_for_test() {
+        return override_ips;
     }
     match local_ip_address::list_afinet_netifas() {
         Ok(v) => v.into_iter().map(|(_, ip)| ip).collect(),
@@ -809,14 +1057,45 @@ fn enumerate_interfaces() -> Vec<IpAddr> {
     }
 }
 
+/// Fallback for `interface_rank::enumerate_with_classes` on Windows — when
+/// `walk_adapters` (the primary `GetAdaptersAddresses` walk) errors, return
+/// the `list_afinet_netifas` IP list with an empty classes map. The bind path
+/// can still proceed with range-heuristic ranking; LAN exposure degrades to
+/// "no gateway awareness" but stays functional (#630 review).
+pub(crate) fn enumerate_interfaces_with_classes_fallback()
+-> (Vec<IpAddr>, HashMap<IpAddr, interface_rank::IfaceClass>)
+{
+    (enumerate_interfaces(), HashMap::new())
+}
+
 /// The cached interface snapshot. Refreshed by `refresh_local_interface_ips`
 /// on each bind; the per-request Host guard reads it via `local_interface_ips`
 /// without paying for enumeration (which can stall for seconds behind a
 /// VPN/Docker stack on Windows).
-static LOCAL_IPS: OnceLock<parking_lot::RwLock<Vec<IpAddr>>> = OnceLock::new();
+///
+/// `LOCAL_SNAPSHOT` holds IPs and classes in ONE lock to make refresh atomic
+/// — a reader that observes a new IP always sees its class (which may be
+/// `None` on non-Windows or after a `walk_adapters` failure fallback). Splitting
+/// them into two locks left a cross-cache window where the new ranked IPs
+/// could be paired with stale classes (#630 review).
+type LocalSnapshot = (Vec<IpAddr>, HashMap<IpAddr, interface_rank::IfaceClass>);
 
-fn local_ips_lock() -> &'static parking_lot::RwLock<Vec<IpAddr>> {
-    LOCAL_IPS.get_or_init(|| parking_lot::RwLock::new(Vec::new()))
+static LOCAL_SNAPSHOT: OnceLock<parking_lot::RwLock<LocalSnapshot>> = OnceLock::new();
+
+fn local_snapshot_lock() -> &'static parking_lot::RwLock<LocalSnapshot> {
+    LOCAL_SNAPSHOT.get_or_init(|| parking_lot::RwLock::new((Vec::new(), HashMap::new())))
+}
+
+/// Reader paired with `local_interface_ips`. Returns the cached classes map
+/// regardless of whether the most recent refresh was the happy path (Windows
+/// `walk_adapters` succeeded — non-empty map) or the fallback path (non-Windows
+/// or `walk_adapters` failed — empty map). The QR fallback uses both signals
+/// to short-circuit on a prior bind without re-walking (#630 review).
+pub(crate) fn local_classes_if_populated()
+    -> Option<HashMap<IpAddr, interface_rank::IfaceClass>>
+{
+    let snapshot = local_snapshot_lock().read();
+    Some(snapshot.1.clone())
 }
 
 /// Enumerate the host's interface IPs and replace the cached snapshot. Returns
@@ -824,21 +1103,33 @@ fn local_ips_lock() -> &'static parking_lot::RwLock<Vec<IpAddr>> {
 /// A VPN or Wi-Fi adapter that appears AFTER the first enumeration is picked up
 /// the next time this runs — issue #585 lifts the `OnceLock` cache limitation.
 fn refresh_local_interface_ips() -> Vec<IpAddr> {
-    // Rank best-LAN-first so the realized-bind order (→ cert SANs →
+    // Single walk on Windows (issue #630): `enumerate_with_classes` returns
+    // both the IP list and the per-IP routing classification from one
+    // `GetAdaptersAddresses` call. On failure it falls back to
+    // `local_ip_address::list_afinet_netifas` for the IPs alone (range
+    // heuristic decides), preserving the pre-#630 bind path coverage (#630
+    // review). Rank best-LAN-first so the realized-bind order (→ cert SANs →
     // `exposed_interfaces`) leads with the interface the phone can actually
-    // reach. Without this the raw OS enumeration order leaks through and the QR's
-    // "first IPv4 TLS bind" pick can land on a VPN tunnel (e.g. NordLynx
-    // `10.5.0.2`) the phone has no route to. See `interface_rank`.
-    let snapshot = interface_rank::rank_interface_ips(enumerate_interfaces());
-    *local_ips_lock().write() = snapshot.clone();
-    snapshot
+    // reach; without this the raw OS enumeration order leaks through and the
+    // QR's "first IPv4 TLS bind" pick can land on a VPN tunnel (e.g. NordLynx
+    // `10.5.0.2`) the phone has no route to.
+    let (ips, classes) = interface_rank::enumerate_with_classes();
+    let ranked = interface_rank::rank_with_classes(ips, &classes);
+    // Atomic write of `(ranked, classes)` — readers see the new IPs and their
+    // matching classes together (or both the previous values). Always write
+    // even when the classes map is empty so the snapshot reflects the most
+    // recent refresh (#630 review).
+    *local_snapshot_lock().write() = (ranked.clone(), classes);
+    ranked
 }
 
 /// The cached interface snapshot for the per-request Host guard. Cloned per
 /// call so the snapshot outlives any concurrent refresh — the hot path reads
-/// a stable view and never blocks the bind path's writer.
-fn local_interface_ips() -> Vec<IpAddr> {
-    local_ips_lock().read().clone()
+/// a stable view and never blocks the bind path's writer. `pub(crate)` so the
+/// QR-fallback (`commands::mesh::get_local_ip`) can share the bind snapshot
+/// on a hit instead of doing its own walk (issue #630).
+pub(crate) fn local_interface_ips() -> Vec<IpAddr> {
+    local_snapshot_lock().read().0.clone()
 }
 
 /// Validate a request's `Host` header against this machine's identities to
@@ -863,8 +1154,47 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // to gate the `Secure` session cookie below (issue #553).
     let secure = stream.is_tls();
     let mut lines = tokio::io::BufStream::new(stream);
-    let mut request_line = String::new();
-    if lines.read_line(&mut request_line).await.is_err() {
+
+    // Read the request head under one deadline. The EOF short-circuit is the
+    // load-bearing detail: `read_line` returns `Ok(0)` on EOF, which is not an
+    // error — without the explicit break the loop spun at 100% CPU on any
+    // half-closed / slowloris peer, pinning a worker and a connection.
+    let head = match tokio::time::timeout(REQUEST_HEAD_TIMEOUT, async {
+        let mut request_line = String::new();
+        match lines.read_line(&mut request_line).await {
+            Ok(0) | Err(_) => return None, // EOF or read error before any request
+            Ok(_) => {}
+        }
+
+        let mut headers = String::new();
+        while !headers.ends_with("\r\n\r\n") {
+            match lines.read_line(&mut headers).await {
+                // EOF mid-headers: the client closed without terminating the
+                // block. Stop instead of re-reading Ok(0) forever.
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            if headers.len() > MAX_HEADER_BYTES {
+                return Some((request_line, headers, true));
+            }
+            // A blank line (just the CRLF) terminates a header-less request.
+            if headers.trim().is_empty() {
+                break;
+            }
+        }
+        Some((request_line, headers, false))
+    })
+    .await
+    {
+        Ok(Some(head)) => head,
+        // Timed out, or EOF/error before a usable request line — drop the socket.
+        Ok(None) | Err(_) => return,
+    };
+    let (request_line, headers, header_overflow) = head;
+
+    if header_overflow {
+        let _ = request::write_status_only(&mut lines, "431 Request Header Fields Too Large").await;
         return;
     }
 
@@ -878,16 +1208,6 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     }
     let method = parts[0].as_str();
     let path_with_query = parts[1].clone();
-
-    let mut headers = String::new();
-    while headers.lines().count() == 0 || !headers.ends_with("\r\n\r\n") {
-        if lines.read_line(&mut headers).await.is_err() {
-            break;
-        }
-        if headers.trim().is_empty() {
-            break;
-        }
-    }
 
     // DNS-rebinding guard (issue #496 / ADR-0012): every request — including the
     // WebSocket upgrades below — must carry a `Host` that targets this machine.
@@ -926,27 +1246,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                 return;
             }
         };
-        let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
-            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+        let Some(ws_stream) = ws_upgrade(lines, &headers).await else {
             return;
         };
-        let accept_key = derive_accept_key(ws_key.as_bytes());
-        let response = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Connection: Upgrade\r\n\
-             Upgrade: websocket\r\n\
-             Sec-WebSocket-Accept: {}\r\n\
-             \r\n",
-            accept_key
-        );
-        let mut stream = lines.into_inner();
-        if stream.write_all(response.as_bytes()).await.is_err() {
-            return;
-        }
-        if stream.flush().await.is_err() {
-            return;
-        }
-        let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
         tracing::info!("/ws/events client connected");
         tauri::async_runtime::spawn(ws::handle_events_ws_connection(ws_stream, device_id));
         return;
@@ -990,30 +1292,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
             }
         };
 
-        let Some(ws_key) = request::extract_header_value(&headers, "Sec-WebSocket-Key") else {
-            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
+        let Some(ws_stream) = ws_upgrade(lines, &headers).await else {
             return;
         };
-
-        let accept_key = derive_accept_key(ws_key.as_bytes());
-        let response = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Connection: Upgrade\r\n\
-             Upgrade: websocket\r\n\
-             Sec-WebSocket-Accept: {}\r\n\
-             \r\n",
-            accept_key
-        );
-
-        let mut stream = lines.into_inner();
-        if stream.write_all(response.as_bytes()).await.is_err() {
-            return;
-        }
-        if stream.flush().await.is_err() {
-            return;
-        }
-
-        let ws_stream = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
         tracing::info!("WebSocket connected for node {}", node_id);
         tauri::async_runtime::spawn(ws::handle_ws_connection(ws_stream, node_id, device_id));
         return;
@@ -1032,9 +1313,7 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // 204 No Content so the SPA's fetch resolves cleanly. Matched before
     // `/api/*` so a debug POST never gets confused for a real API call.
     if method == "POST" && path_without_query == "/__debug/log" {
-        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let content_length = content_length(&headers);
         if content_length <= 64 * 1024 {
             let mut body_bytes = vec![0u8; content_length];
             if content_length == 0 || lines.read_exact(&mut body_bytes).await.is_ok() {
@@ -1089,15 +1368,23 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // GET /install-cert.der — one-tap root CA install (issue #636). Same
-    // pre-auth, Host-guarded placement as `/__certs/status` above; serves the
-    // raw `ca.der` bytes with the Android-friendly `application/x-x509-ca-cert`
-    // MIME so Chrome auto-routes the download into the system cert installer.
-    // Windows opens its Certificate Import Wizard from this same MIME; macOS
-    // Safari/Firefox download the file for a manual Keychain drag. `Content-
-    // Length` is taken from the in-memory byte count of the file we are about
-    // to send (not from `Path::metadata`) so a concurrent `load_or_generate`
-    // mid-handle can't trip Chrome's `ERR_CONTENT_LENGTH_MISMATCH`.
+    // GET /install-cert.der — manual root CA install fallback (issue #702).
+    // Same pre-auth, Host-guarded placement as `/__certs/status` above; serves
+    // the raw `ca.der` bytes with the Android-friendly
+    // `application/x-x509-ca-cert` MIME so Chrome auto-routes the download
+    // into the system cert installer. Windows opens its Certificate Import
+    // Wizard from this same MIME; macOS Safari/Firefox download the file for
+    // a manual Keychain drag. `Content-Length` is taken from the in-memory
+    // byte count of the file we are about to send (not from `Path::metadata`)
+    // so a concurrent `load_or_generate` mid-handle can't trip Chrome's
+    // `ERR_CONTENT_LENGTH_MISMATCH`.
+    //
+    // After issue #702, the desktop modal's primary install path is a
+    // `data:application/x-x509-ca-cert;base64,...` QR (handled by
+    // `commands::network::get_root_cert_der`). This HTTP route is the
+    // manual fallback for users who can't scan the install-QR (older
+    // Android, custom camera apps, ad-blockers) — they open the URL in
+    // the phone's browser and Chrome's MIME-routed install takes over.
     //
     // The download filename is profile-aware (CLAUDE.local.md: stable vs dev
     // produce distinct app-data dirs and binaries). Hardcoding `buildmesh-dev-
@@ -1124,14 +1411,16 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                      Content-Length: {}\r\n\r\n",
                     bytes.len()
                 );
-                let writer = lines.get_mut();
-                if writer.write_all(resp.as_bytes()).await.is_err() {
-                    return;
-                }
-                if writer.write_all(&bytes).await.is_err() {
-                    return;
-                }
-                let _ = writer.flush().await;
+                // Coalesce headers + body, write+flush atomically via
+                // the same helper as every other route. Previously this
+                // site hand-rolled the flush and split the write across
+                // two calls — kept that behaviour then, but consolidating
+                // here closes the systemic race and removes a class of
+                // bug we never want to chase again.
+                let mut combined = Vec::with_capacity(resp.len() + bytes.len());
+                combined.extend_from_slice(resp.as_bytes());
+                combined.extend_from_slice(&bytes);
+                let _ = request::write_full(&mut lines, &combined).await;
             }
             Err(_) => {
                 let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
@@ -1140,34 +1429,25 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // GET /admin/devices — list paired devices for the "Authorized Devices"
-    // panel (issue #502). Admin-only; the first real operation in the namespace
-    // #500 reserved. Matched before the `/admin/*` catch-all below.
-    if method == "GET" && path_without_query == "/admin/devices" {
-        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-            .await
-            .is_none()
-        {
-            return;
-        }
-        let _ = request::write_json(&mut lines, "200 OK", &routes::admin::list_devices_json()).await;
-        return;
-    }
-
-    // POST /admin/devices/{id}/revoke — revoke a device and kick its live socket
-    // (issue #502). Admin-only.
-    if method == "POST" {
-        if let Some(device_id) =
-            path_segment_id(&path_without_query, "/admin/devices/", "/revoke")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
+    // Table-driven dispatch for the homogeneous routes (guard -> handler). One
+    // loop enforces each route's scope and captures its id(s) once, then
+    // `dispatch_route` runs the handler; the `ROUTES` table is the single
+    // scope-audit surface for them. Placed here so `/admin/devices*` is matched
+    // before the `/admin/*` catch-all special below — the one load-bearing
+    // ordering constraint. The specials that follow (session, ws-ticket,
+    // attention, assets, SPA) match distinct paths no table route claims.
+    for route in ROUTES {
+        if route.method == method {
+            if let Some(ids) = route.m.captures(&path_without_query) {
+                if auth::guard(&mut lines, &headers, route.scope)
+                    .await
+                    .is_none()
+                {
+                    return;
+                }
+                dispatch_route(route.handler, &mut lines, ids, &path_with_query, &headers).await;
                 return;
             }
-            routes::admin::revoke(&mut lines, device_id).await;
-            return;
         }
     }
 
@@ -1226,7 +1506,13 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
                             cookie,
                             body
                         );
-                        let _ = lines.get_mut().write_all(response.as_bytes()).await;
+                        // Login response carries the long-lived device token
+                        // (issue #502). A truncated body here silently breaks
+                        // auth on every subsequent call (401s that look
+                        // unrelated to this endpoint). Same systemic concern
+                        // as `serve_asset`: must flush the whole response to
+                        // the wire before the function returns.
+                        let _ = request::write_full(&mut lines, response.as_bytes()).await;
                     }
                     _ => {
                         let _ = request::write_status_only(&mut lines, "401 Unauthorized").await;
@@ -1254,18 +1540,11 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         // its `{ surface, node_id }` arrives in the request body. A missing or
         // malformed target is a 400 — we never mint a ticket that could never
         // match an upgrade.
-        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        if content_length > 8 * 1024 {
-            let _ = request::write_status_only(&mut lines, "413 Content Too Large").await;
+        let Some(body_bytes) =
+            request::read_body_or_send_error(&mut lines, content_length(&headers), 8 * 1024).await
+        else {
             return;
-        }
-        let mut body_bytes = vec![0u8; content_length];
-        if content_length > 0 && lines.read_exact(&mut body_bytes).await.is_err() {
-            let _ = request::write_status_only(&mut lines, "400 Bad Request").await;
-            return;
-        }
+        };
         let target = match ws_ticket::parse_mint_target(&body_bytes) {
             Ok(t) => t,
             Err(()) => {
@@ -1290,69 +1569,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // Coordinator read API (ADR-0008): GET /nodes — spine-only Node Digests.
-    // Distinct from the mobile `/api/nodes`: it authenticates with the
-    // off-by-default, read-scoped coordinator token (NOT the root token), so a
-    // disabled API or a missing/wrong token is rejected here. Loopback/LAN
-    // binding is inherited from the embedded server; no internet port is opened.
-    if method == "GET" && path_without_query == "/nodes" {
-        if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorRead)
-            .await
-            .is_none()
-        {
-            return;
-        }
-        let body = routes::coordinator::list_nodes_json();
-        let _ = request::write_json(&mut lines, "200 OK", &body).await;
-        return;
-    }
-
-    // Coordinator read API (ADR-0008): GET /nodes/{id}/log?tail=N — the
-    // on-demand drill-in returning a node's raw recent transcript turns. Same
-    // read-scoped token as GET /nodes. An unknown node id is a 404; every other
-    // degrade (no session, missing/unreadable transcript) is a 200 carrying a
-    // typed unavailable envelope, so a Coordinator never sees a bare error.
-    if method == "GET" {
-        if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/log") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorRead)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let tail = tail_param(&path_with_query);
-            match routes::coordinator::log_json(node_id, tail) {
-                Some(body) => {
-                    let _ = request::write_json(&mut lines, "200 OK", &body).await;
-                }
-                None => {
-                    let _ = request::write_status_only(&mut lines, "404 Not Found").await;
-                }
-            }
-            return;
-        }
-    }
-
-    // Coordinator drive API (ADR-0008 §5, issue #319): POST /nodes/{id}/prompt —
-    // write a prompt into a live node's PTY and return an honest verdict.
-    // Authenticated with the DRIVE-scoped token (a read-only token is rejected
-    // here) behind the drive kill-switch; both sit under the coordinator master
-    // switch, so disabling the surface disables drive too.
-    if method == "POST" {
-        if let Some(node_id) = path_segment_id(&path_without_query, "/nodes/", "/prompt") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::CoordinatorWrite)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::coordinator::prompt(&mut lines, node_id, content_length).await;
-            return;
-        }
-    }
+    // (Coordinator GET /nodes, GET /nodes/{id}/log, and POST /nodes/{id}/prompt
+    // are dispatched by the ROUTES table loop above, with their CoordinatorRead
+    // / CoordinatorWrite scopes declared there.)
 
     // Attention webhook: POST /api/attention/{session_id}
     // Called by Claude Code's Stop hook — no token required, so the handler
@@ -1363,216 +1582,9 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         return;
     }
 
-    // POST /api/nodes/create
-    if method == "POST" && path_without_query == "/api/nodes/create" {
-        if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-            .await
-            .is_none()
-        {
-            return;
-        }
-        let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        routes::nodes::create(&mut lines, content_length).await;
-        return;
-    }
-
-    // POST /api/meshes/{id}/pr — create a GitHub PR for the mesh's branch.
-    if method == "POST" {
-        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pr") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::pr::create(&mut lines, mesh_id, content_length).await;
-            return;
-        }
-        // POST /api/meshes/{id}/pulls/{n}/merge — merge a PR (issue #422).
-        // Pairs with the GET `/pulls/{n}/mergeability` route; the GET
-        // branch (which checks the longer suffix first) handles the auth
-        // gate for the read path, and this branch owns the write path.
-        if let Some((mesh_id, pr_number)) = path_two_segment_ids(
-            &path_without_query,
-            "/api/meshes/",
-            "/pulls/",
-            "/merge",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::pr::merge(&mut lines, mesh_id, pr_number, content_length).await;
-            return;
-        }
-        // POST /api/meshes/{id}/agent-nodes/import-and-resume
-        if let Some(mesh_id) = path_segment_id(
-            &path_without_query,
-            "/api/meshes/",
-            "/agent-nodes/import-and-resume",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::agent_nodes::import_and_resume(&mut lines, mesh_id, content_length).await;
-            return;
-        }
-        // POST /api/meshes/{mid}/issues/{inum}/spawn
-        if let Some((mesh_id, issue_number)) = path_two_segment_ids(
-            &path_without_query,
-            "/api/meshes/",
-            "/issues/",
-            "/spawn",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let content_length: usize = request::extract_header_value(&headers, "Content-Length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            routes::issues::spawn(&mut lines, mesh_id, issue_number, content_length).await;
-            return;
-        }
-    }
-
-    // GET /api/agents/{id}/git/{status|summary|branch} and /api/agents/{id}/diff
-    if method == "GET" {
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/status")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::status(&mut lines, agent_id).await;
-            return;
-        }
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/summary")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::summary(&mut lines, agent_id).await;
-            return;
-        }
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/git/branch")
-        {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::branch(&mut lines, agent_id).await;
-            return;
-        }
-        if let Some(agent_id) = path_segment_id(&path_without_query, "/api/agents/", "/diff") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let file_path = query_param(&path_with_query, "path").unwrap_or_default();
-            routes::git::diff(&mut lines, agent_id, &file_path).await;
-            return;
-        }
-        if path_without_query == "/api/gh/auth" {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::git::gh_auth(&mut lines).await;
-            return;
-        }
-        // GET /api/meshes/{id}/agent-nodes/discover
-        if let Some(mesh_id) = path_segment_id(
-            &path_without_query,
-            "/api/meshes/",
-            "/agent-nodes/discover",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::agent_nodes::discover(&mut lines, mesh_id).await;
-            return;
-        }
-        // GET /api/meshes/{id}/issues
-        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/issues") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::issues::list(&mut lines, mesh_id).await;
-            return;
-        }
-        // GET /api/meshes/{id}/pulls?state=open|closed — list PRs (issue #422).
-        // Mirrors the issues route above; the `state` query param defaults
-        // to "open" inside the handler.
-        if let Some(mesh_id) = path_segment_id(&path_without_query, "/api/meshes/", "/pulls") {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            let state = query_param(&path_with_query, "state").unwrap_or_default();
-            routes::pr::list_pulls(&mut lines, mesh_id, &state).await;
-            return;
-        }
-        // GET /api/meshes/{id}/pulls/{n}/mergeability — per-PR enrichment
-        // (issue #422). The POST `/merge` route lives in its own `method
-        // == "POST"` branch below, so a GET to this URL can never
-        // collide with it; the two-segment helper also rejects the
-        // cross-suffix case (`/merge` with `/mergeability` suffix) via
-        // its numeric-only parse, so dispatch is safe regardless of the
-        // order the two GET-side PR routes are listed in.
-        if let Some((mesh_id, pr_number)) = path_two_segment_ids(
-            &path_without_query,
-            "/api/meshes/",
-            "/pulls/",
-            "/mergeability",
-        ) {
-            if auth::guard(&mut lines, &headers, auth::RequiredScope::Admin)
-                .await
-                .is_none()
-            {
-                return;
-            }
-            routes::pr::get_mergeability(&mut lines, mesh_id, pr_number).await;
-            return;
-        }
-    }
+    // (The homogeneous /api mobile routes — nodes/create, meshes PR/merge/
+    // import-and-resume/issues-spawn, and the GET agent-git / mesh reads —
+    // are dispatched by the ROUTES table loop above.)
 
     // GET /assets/* — bundled mobile assets (JS/CSS/etc). Public, like the SPA
     // shell (issue #500): the static bundle holds no secrets and is identical
@@ -1580,6 +1592,12 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     // can run POST /api/session to authenticate; all data APIs stay gated, and
     // the DNS-rebinding Host guard above still runs on every request. Legacy
     // `/v2/assets/*` paths still resolve for any cached mobile bundle.
+    //
+    // `Range:` is honoured so module scripts can stream-parse without
+    // tripping Chrome's `ERR_CONTENT_LENGTH_MISMATCH` — Chrome issues
+    // `Range: bytes=0-` for `<script type="module">` and a server that
+    // ignores it sends the full body, which Chrome then rejects because
+    // the bytes received don't match the slice it asked for.
     if method == "GET"
         && (path_without_query.starts_with("/assets/")
             || path_without_query.starts_with("/v2/assets/"))
@@ -1587,7 +1605,8 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
         let normalized = path_without_query
             .strip_prefix("/v2")
             .unwrap_or(&path_without_query);
-        let _ = assets::serve_asset(&mut lines, normalized).await;
+        let range_header = request::extract_header_value(&headers, "Range");
+        let _ = assets::serve_asset(&mut lines, normalized, range_header).await;
         return;
     }
 
@@ -1603,7 +1622,11 @@ async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
             "HTTP/1.1 301 Moved Permanently\r\nLocation: /{}\r\nContent-Length: 0\r\n\r\n",
             preserve_query
         );
-        let _ = lines.get_mut().write_all(response.as_bytes()).await;
+        // Same invariant as every other route: flush atomically via the
+        // shared helper. The response here is small enough that truncation
+        // is unlikely, but the systematic-fix point is to never hand-roll
+        // write+flush at call sites.
+        let _ = request::write_full(&mut lines, response.as_bytes()).await;
         return;
     }
 
@@ -1748,6 +1771,74 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// Regression pin for the header-read CPU spin: a client that sends a partial
+    /// header line and then half-closes WITHOUT the terminating blank line used to
+    /// make `read_line` return `Ok(0)` (EOF) forever, and neither loop `break`
+    /// fired — a spun CPU core and a pinned connection (a trivial LAN DoS when
+    /// exposure is on). The handler must instead stop on EOF and drop the socket.
+    /// The test's own timeout is the assertion: pre-fix it never returns.
+    #[tokio::test]
+    async fn partial_headers_then_eof_does_not_hang() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        // Request line + one header, but NO terminating CRLFCRLF, then close the
+        // write half so the server sees EOF mid-headers.
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+
+        // The server must finish (respond or drop) — a read that reaches EOF or a
+        // response both mean the loop terminated. Pre-fix this read never returns.
+        let mut buf = [0u8; 512];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut buf))
+            .await
+            .expect("server spun on partial headers instead of stopping at EOF");
+        // Either EOF (0) or a written status line is acceptable — both prove the
+        // header loop exited rather than spinning.
+        let _ = n.expect("read failed");
+    }
+
+    /// The other half of the head-read fix: oversize headers must trip the
+    /// `MAX_HEADER_BYTES` cap and produce a `431`, not unbounded `String`
+    /// growth that a slow-loris could blow past `usize::MAX`.
+    #[tokio::test]
+    async fn oversize_headers_return_431() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        // Header value alone exceeds the cap; line + name is well over 64 KB.
+        // No terminating CRLFCRLF so the cap is the only thing that triggers.
+        let huge = "x".repeat(70 * 1024);
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nX-Pad: {huge}\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        let mut buf = vec![0u8; 512];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut buf))
+            .await
+            .expect("server hung on oversize headers instead of rejecting them")
+            .expect("read failed");
+        let response = String::from_utf8_lossy(&buf[..n]).into_owned();
+        assert!(
+            response.starts_with("HTTP/1.1 431"),
+            "oversize headers must produce 431; got: {response:?}"
+        );
+    }
+
     #[tokio::test]
     async fn root_serves_shell_without_credentials() {
         // Post-#500: the SPA shell is public so its JS can load and POST the
@@ -1762,6 +1853,82 @@ mod tests {
         // built filename (the bundle is content-hashed), so it 404s — the point
         // is that it is NOT gated behind 401 anymore.
         assert_eq!(get_request("/assets/index.js").await, 404);
+    }
+
+    /// Regression pin for the byte-framing bug that surfaced as
+    /// `ERR_CONTENT_LENGTH_MISMATCH` on Android Chrome: every HTTP
+    /// response must flush its body to the wire before the connection
+    /// drops, otherwise the last partial chunk of a multi-buffer body
+    /// sits in `BufStream` and never reaches the client. The fix routes
+    /// every write through `request::write_full` (single write+flush)
+    /// and this test asserts that contract end-to-end.
+    ///
+    /// Asks for the real built `index.html` (the SPA shell), reads the
+    /// full response, parses `Content-Length`, and asserts the body
+    /// byte count matches — that's the exact signal Chrome would see
+    /// as a mismatch.
+    #[tokio::test]
+    async fn response_body_byte_count_matches_content_length() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = "GET / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+        stream.write_all(request.as_bytes()).await.unwrap();
+
+        // Read until the server closes the connection. Buffer grows as
+        // needed; the SPA shell with the inline shim is small but we
+        // don't hardcode its size — the test asserts the framing
+        // contract rather than the payload.
+        let mut received = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                stream.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(0)) => break, // EOF
+                Ok(Ok(n)) => received.extend_from_slice(&buf[..n]),
+                Ok(Err(_)) => break,
+                Err(_) => panic!("server hung mid-response"),
+            }
+        }
+
+        // Split headers from body on the first CRLFCRLF.
+        let split = received
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response missing header terminator");
+        let headers = &received[..split];
+        let body = &received[split + 4..];
+
+        let content_length: usize = headers
+            .split(|&b| b == b'\r' || b == b'\n')
+            .filter_map(|line| {
+                let mut parts = line.splitn(2, |&b| b == b':');
+                let name = parts.next()?;
+                let value = parts.next()?.trim_ascii();
+                if name.eq_ignore_ascii_case(b"Content-Length") {
+                    std::str::from_utf8(value).ok()?.parse().ok()
+                } else {
+                    None
+                }
+            })
+            .next()
+            .expect("Content-Length header missing");
+
+        assert_eq!(
+            body.len(),
+            content_length,
+            "body byte count must equal Content-Length (no truncation)"
+        );
     }
 
     #[tokio::test]
@@ -1969,6 +2136,151 @@ mod tests {
             get_request("/api/meshes/1/pulls/42/merge").await,
             401
         );
+    }
+
+    /// Drive one request with an explicit method and no credentials, returning
+    /// the status code. Generalises `get_request` so the table-driven routes can
+    /// be exercised with their declared method (a POST route must be tested as a
+    /// POST, not smuggled through the GET `/api/*` catch-all).
+    async fn request_status(method: &str, path: &str) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(MaybeTls::Plain(stream), peer).await;
+        });
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n",
+            method, path
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .expect("request hung")
+            .expect("read failed");
+        buf.truncate(n);
+        String::from_utf8_lossy(&buf)
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Fill a `RouteMatch` with concrete integer ids to get a request path.
+    fn sample_path(m: &RouteMatch) -> String {
+        match m {
+            RouteMatch::Exact(p) => p.to_string(),
+            RouteMatch::OneId { prefix, suffix } => format!("{}1{}", prefix, suffix),
+            RouteMatch::TwoId { prefix, mid, suffix } => format!("{}1{}2{}", prefix, mid, suffix),
+        }
+    }
+
+    /// Render a `RouteMatch` as a stable pattern string for the golden snapshot.
+    /// Two-id captures get distinct placeholders (`{mesh_id}` / `{pr_number}` or
+    /// `{mesh_id}` / `{issue_number}`) so the audit surface distinguishes them —
+    /// the dispatcher reads them as `id0`/`id1`, but a snapshot that reads
+    /// `{id}/{id}` would mislead anyone reading the scope table.
+    fn pattern_str(m: &RouteMatch) -> String {
+        match m {
+            RouteMatch::Exact(p) => p.to_string(),
+            RouteMatch::OneId { prefix, suffix } => format!("{}{{id}}{}", prefix, suffix),
+            RouteMatch::TwoId { prefix, mid, suffix } => {
+                let (left, right) = if *mid == "/pulls/" {
+                    ("{mesh_id}", "{pr_number}")
+                } else {
+                    ("{mesh_id}", "{issue_number}")
+                };
+                format!("{}{}{}{}{}", prefix, left, mid, right, suffix)
+            }
+        }
+    }
+
+    /// Enforcement: every homogeneous route is guarded. Driving each with its
+    /// declared method and NO credentials must short-circuit to 401 before any
+    /// handler runs (coordinator routes are off-by-default in the test binary, so
+    /// they also 401). This one parametric test subsumes the per-route
+    /// `*_requires_token` cases — a new ROUTES entry is covered automatically, so
+    /// a route can't ship unguarded. (The 403 wrong-scope path needs a seeded DB
+    /// and stays covered by the coordinator integration tests.)
+    #[tokio::test]
+    async fn every_table_route_requires_credentials() {
+        for route in ROUTES {
+            let path = sample_path(&route.m);
+            let status = request_status(route.method, &path).await;
+            assert_eq!(
+                status, 401,
+                "{} {} must reject an uncredentialed request with 401",
+                route.method, path
+            );
+        }
+    }
+
+    /// Golden snapshot of the whole HTTP surface's auth scopes — the ROUTES table
+    /// (dispatched by the loop) plus the specials (dispatched by their own
+    /// branches, listed here so the scope audit lives in one place). Any added,
+    /// removed, or rescoped route fails this test loudly, forcing a deliberate
+    /// review of the security surface.
+    #[test]
+    fn route_table_scope_snapshot() {
+        let table: Vec<String> = ROUTES
+            .iter()
+            .map(|r| format!("{} {} -> {:?}", r.method, pattern_str(&r.m), r.scope))
+            .collect();
+        // Specials are not in ROUTES (they need bespoke dispatch), but their
+        // scopes are audited here alongside the table.
+        let specials = "\
+GET /ws/events -> WsTicket
+GET /ws/terminal/{id} -> WsTicket
+POST /__debug/log -> Public
+GET /__certs/status -> Public
+GET /install-cert.der -> Public
+* /admin/* -> Admin (catch-all, 404 on authorized)
+POST /api/session -> Public (credential path)
+POST /api/ws-ticket -> Admin
+POST /api/attention/{id} -> Public (loopback-verified)
+GET /assets/* -> Public
+GET /v2 -> Public (301 redirect)
+GET /api/* -> Admin (mobile read catch-all)
+ANY / -> Public (SPA shell)";
+        let actual = format!("{}\n---specials---\n{}", table.join("\n"), specials);
+        let expected = "\
+GET /admin/devices -> Admin
+POST /admin/devices/{id}/revoke -> Admin
+GET /nodes -> CoordinatorRead
+GET /nodes/{id}/log -> CoordinatorRead
+POST /nodes/{id}/prompt -> CoordinatorWrite
+POST /api/nodes/create -> Admin
+POST /api/meshes/{id}/pr -> Admin
+POST /api/meshes/{mesh_id}/pulls/{pr_number}/merge -> Admin
+POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin
+POST /api/meshes/{mesh_id}/issues/{issue_number}/spawn -> Admin
+GET /api/agents/{id}/git/status -> Admin
+GET /api/agents/{id}/git/summary -> Admin
+GET /api/agents/{id}/git/branch -> Admin
+GET /api/agents/{id}/diff -> Admin
+GET /api/gh/auth -> Admin
+GET /api/meshes/{id}/agent-nodes/discover -> Admin
+GET /api/meshes/{id}/issues -> Admin
+GET /api/meshes/{id}/pulls -> Admin
+GET /api/meshes/{mesh_id}/pulls/{pr_number}/mergeability -> Admin
+---specials---
+GET /ws/events -> WsTicket
+GET /ws/terminal/{id} -> WsTicket
+POST /__debug/log -> Public
+GET /__certs/status -> Public
+GET /install-cert.der -> Public
+* /admin/* -> Admin (catch-all, 404 on authorized)
+POST /api/session -> Public (credential path)
+POST /api/ws-ticket -> Admin
+POST /api/attention/{id} -> Public (loopback-verified)
+GET /assets/* -> Public
+GET /v2 -> Public (301 redirect)
+GET /api/* -> Admin (mobile read catch-all)
+ANY / -> Public (SPA shell)";
+        assert_eq!(actual, expected);
     }
 
     #[test]

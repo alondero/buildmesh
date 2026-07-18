@@ -43,6 +43,18 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot   # scripts/ -> repo root
 $failed = @()
 
+# A non-Git-for-Windows git.exe earlier in PATH (seen: devkitPro's MSYS2 git
+# shadowing it in Buildmesh agent sessions) writes POSIX-style worktree gitdir
+# paths ("/home/<user>/AppData/...") that Windows libgit2 can't resolve — ~20
+# git::worktree / agent::spawn / commands::pr tests fail with
+# "failed to resolve path '/home/<user>/...'". Pin Git for Windows first.
+$gitForWindows = 'C:\Program Files\Git\cmd'
+$gitOnPath = (Get-Command git -ErrorAction SilentlyContinue).Source
+if ((Test-Path (Join-Path $gitForWindows 'git.exe')) -and ($gitOnPath -notlike "$gitForWindows*")) {
+  Write-Host "== PATH git is '$gitOnPath' -> pinning $gitForWindows first ==" -ForegroundColor Yellow
+  $env:PATH = "$gitForWindows;$env:PATH"
+}
+
 function Ensure-MobileBuilt {
   # Rebuild when index.html is missing OR empty — an interrupted prior build (Ctrl-C /
   # Defender lock) can leave a zero-byte/truncated index.html that a Test-Path-only gate

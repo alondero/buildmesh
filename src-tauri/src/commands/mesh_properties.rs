@@ -224,6 +224,64 @@ pub async fn update_mesh_sandbox(mesh_id: i64, sandbox: bool) -> Result<(), Stri
         .map_err(|e| format!("failed to update sandbox: {}", e))
 }
 
+/// Persist a mesh's Autopilot Policy (issue #481, PRD #480) in one write.
+/// Dedicated typed command (not the string-only `update_mesh_column`
+/// catch-all) so the enabled flag stays a real `bool`, the concurrency
+/// limit is range-checked here, and the five columns land atomically —
+/// the poller (`services::autopilot`) reads them as one policy.
+///
+/// Validation and normalisation, mirroring `validate_pr_spawn_inputs`'
+/// trim-then-collapse contract:
+/// - `concurrency_limit` must be `1..=8` (PRD example is 2; 8 is a sane
+///   local-machine ceiling).
+/// - `trigger_label` / `provider` / `action_on_success` are trimmed;
+///   empty-after-trim collapses to NULL so the model reads back `None`
+///   and the poller applies its defaults (`buildmesh:run`, the normal
+///   provider chain, `draft_pr`).
+#[tauri::command]
+pub async fn update_mesh_autopilot(
+    mesh_id: i64,
+    enabled: bool,
+    trigger_label: Option<String>,
+    concurrency_limit: i32,
+    provider: Option<String>,
+    action_on_success: Option<String>,
+) -> Result<(), String> {
+    if !(1..=8).contains(&concurrency_limit) {
+        return Err(format!(
+            "invalid autopilot concurrency limit {}: must be 1..=8",
+            concurrency_limit
+        ));
+    }
+    let clean = |v: Option<String>| {
+        v.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let trigger_label = clean(trigger_label);
+    let provider = clean(provider);
+    let action_on_success = clean(action_on_success);
+    if let Some(action) = action_on_success.as_deref() {
+        if !["draft_pr", "pr", "none"].contains(&action) {
+            return Err(format!("unknown autopilot action_on_success: {}", action));
+        }
+    }
+    let rows = db::set_mesh_autopilot(
+        mesh_id,
+        enabled,
+        trigger_label.as_deref(),
+        concurrency_limit,
+        provider.as_deref(),
+        action_on_success.as_deref(),
+    )
+    .map_err(|e| format!("failed to update autopilot policy: {}", e))?;
+    if rows == 0 {
+        return Err(format!("mesh {} not found (no rows updated)", mesh_id));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn update_worktree_base_ref(mesh_id: i64, base_ref: String) -> Result<(), String> {
     let mesh = db::get_mesh_by_id(mesh_id)

@@ -52,6 +52,13 @@ const MESH_CONFIG = {
   worktree_mode: 'branched',
   default_provider: 'anthropic',
   sandbox: true,
+  // Autopilot Policy (issue #481) — disabled by default in the fixture;
+  // the dedicated tests below flip it on via a per-test override.
+  autopilot_enabled: false,
+  autopilot_trigger_label: null,
+  autopilot_concurrency_limit: 2,
+  autopilot_provider: null,
+  autopilot_action_on_success: null,
 };
 
 /**
@@ -137,9 +144,11 @@ describe('MeshPropertiesTab (issue #375)', () => {
   it('renders the config form when the ⚙️ tab is open and a mesh is selected', async () => {
     await openPropertiesTab();
 
-    // Config fields that the new tab must keep. Model / Effort carry a
-    // "(cwrap only)" hint next to the visible label, so the regex lets
-    // the matcher accept the trailing hint without us hard-coding it.
+    // Config fields that the new tab must keep. The label regex anchors
+    // at the start with `\b` because the Field component renders the
+    // visible label + hint as one accessible name inside `<label>`
+    // (e.g. "Model (Claude Code only)"); the open end lets the suffix
+    // pass through so a future hint rewrite doesn't break the matcher.
     expect(await screen.findByLabelText('Name')).toBeTruthy();
     expect(screen.getByLabelText('Directory')).toBeTruthy();
     expect(screen.getByLabelText(/^Model\b/)).toBeTruthy();
@@ -422,6 +431,98 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(sandboxes).toHaveLength(1);
   });
 
+  // ── Autopilot Policy (issue #481, PRD #480) ─────────────────────────────
+
+  it('renders the Autopilot toggle collapsed (policy fields hidden while disabled)', async () => {
+    await openPropertiesTab();
+    const toggle = (await screen.findByLabelText('Autopilot Mode')) as HTMLInputElement;
+    expect(toggle.type).toBe('checkbox');
+    expect(toggle.checked).toBe(false);
+    // Policy fields must not render while disabled.
+    expect(screen.queryByLabelText('Trigger label')).toBeNull();
+    expect(screen.queryByLabelText('Max concurrent autopilot nodes')).toBeNull();
+  });
+
+  it('enabling Autopilot saves the full policy and reveals the policy fields', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const toggle = (await screen.findByLabelText('Autopilot Mode')) as HTMLInputElement;
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: true,
+        triggerLabel: null,
+        concurrencyLimit: 2,
+        provider: null,
+        actionOnSuccess: null,
+      });
+    });
+    // Policy fields appear once enabled.
+    expect(await screen.findByLabelText('Trigger label')).toBeTruthy();
+    expect(screen.getByLabelText('Max concurrent autopilot nodes')).toBeTruthy();
+    expect(screen.getByLabelText('Autopilot provider')).toBeTruthy();
+    expect(screen.getByLabelText('On success')).toBeTruthy();
+  });
+
+  it('preloads a saved Autopilot policy and saves edits to the policy fields', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_mesh_properties') {
+        return Promise.resolve({
+          ...MESH_CONFIG,
+          autopilot_enabled: true,
+          autopilot_trigger_label: 'buildmesh:run',
+          autopilot_concurrency_limit: 3,
+          autopilot_provider: 'codex',
+          autopilot_action_on_success: 'draft_pr',
+        });
+      }
+      if (cmd === 'list_providers')
+        return Promise.resolve([
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+          { id: 'codex', label: 'Codex', color: '#000', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
+        ]);
+      if (cmd === 'detect_mesh_project')
+        return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context')
+        return Promise.resolve({
+          claude_md_exists: false,
+          agents_md_exists: false,
+          skills_dir_exists: false,
+          skill_count: 0,
+          agents_skills_exists: false,
+        });
+      return Promise.resolve({});
+    });
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const label = (await screen.findByLabelText('Trigger label')) as HTMLInputElement;
+    expect(label.value).toBe('buildmesh:run');
+    const concurrency = screen.getByLabelText(
+      'Max concurrent autopilot nodes'
+    ) as HTMLSelectElement;
+    expect(concurrency.value).toBe('3');
+    const provider = screen.getByLabelText('Autopilot provider') as HTMLSelectElement;
+    expect(provider.value).toBe('codex');
+
+    // Editing the concurrency limit persists the whole policy in one write,
+    // carrying the untouched fields along (atomic-policy contract).
+    await user.selectOptions(concurrency, '5');
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_autopilot', {
+        meshId: 42,
+        enabled: true,
+        triggerLabel: 'buildmesh:run',
+        concurrencyLimit: 5,
+        provider: 'codex',
+        actionOnSuccess: 'draft_pr',
+      });
+    });
+  });
+
   it('renders nothing when no mesh is selected (the probe shell handles the empty state)', () => {
     useMeshStore.setState({ meshes: [], meshesById: new Map(), selectedMeshId: null });
     useUIStore.setState({ probeOpen: true, probeTab: 'properties' });
@@ -606,5 +707,244 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
     // Legacy parity: closing the drawer after delete. The probe is the
     // drawer now, so `toggleProbe()` flips probeOpen to false.
     expect(useUIStore.getState().probeOpen).toBe(false);
+  });
+});
+
+// Save-feedback (issue #729) — `MeshPropertiesTab` was the only probe tab
+// without a Saving…/Saved/Save failed indicator, and its blur handlers
+// produced unhandled rejections on IPC failure (the field still showed
+// the user's unsaved text with no message). These tests pin the fix:
+//   - successful writes flip the global SaveIndicator to "Saved"
+//   - a rejected write flips it to "Save failed" with the error message
+//     (the unhandled-rejection path is gone — the catch lives inside
+//      the save hook, the IPC promise resolves cleanly)
+//   - the field's text is preserved after a failed save (acceptance
+//     criterion: don't revert on failure)
+//   - a slow save from the outgoing mesh does NOT surface its result
+//     on the new mesh (review finding #1; the `wrappedSave` adapter
+//     discards late results on mesh-switch)
+//   - a re-saved-then-resolved write clears the prior "Save failed"
+//
+// The third test ("does NOT leak an unhandled rejection…") attaches its
+// own per-test `unhandledrejection` listener because there is no
+// project-wide listener for jsdom-emitted promise rejections. The
+// listener captures the rejection reason and the test fails if any
+// rejection lands.
+describe('MeshPropertiesTab — save feedback (issue #729)', () => {
+  // The store has only one mesh configured by `beforeEach` in the outer
+  // suite (MESH = id 42, name "demo"). For the mesh-switch test we
+  // need a second mesh to switch INTO.
+  const MESH_B: Mesh = {
+    ...MESH,
+    id: 99,
+    name: 'other',
+    path: '/repos/other',
+  };
+
+  function rejectNextColumnWrite(message: string) {
+    let armed = true;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      if (armed && cmd === 'update_mesh_column') {
+        armed = false;
+        return Promise.reject(new Error(message));
+      }
+      if (cmd === 'list_providers') {
+        return Promise.resolve([
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+        ]);
+      }
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project')
+        return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context')
+        return Promise.resolve({
+          claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false,
+          skill_count: 0, agents_skills_exists: false,
+        });
+      if (cmd === 'get_mesh_health')
+        return Promise.resolve({
+          is_dirty: false, is_drifted: false, unpushed_ahead: 0,
+          base_branch_holder: null, local_base_branch: 'main',
+          current_branch: 'main', current_short_sha: 'abc1234', authenticated: false,
+        });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+  }
+
+  it('shows a global "Saved" indicator after a successful blur save', async () => {
+    const user = userEvent.setup();
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'sonnet-4');
+    fireEvent.blur(model);
+
+    // Wait for the save's transition: Saving… → Saved. The save itself
+    // is fire-and-await'd inside onBlur, so the indicator resolves once
+    // the IPC's `.then` runs.
+    expect(await screen.findByText('Saved')).toBeTruthy();
+    // And the IPC fired with the right payload.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 42, column: 'model', value: 'sonnet-4',
+      });
+    });
+  });
+
+  it('shows "Save failed: <message>" and keeps the field\'s text when the IPC rejects', async () => {
+    const user = userEvent.setup();
+    rejectNextColumnWrite('boom-model-save');
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'sonnet-4');
+    fireEvent.blur(model);
+
+    // The error message surfaces in the global banner. The "Save failed:"
+    // prefix is part of the indicator copy so the user distinguishes it
+    // from any other surface; the rest is the rejection's `.message`.
+    expect(await screen.findByText(/Save failed.*boom-model-save/)).toBeTruthy();
+
+    // The field's text is preserved — the user typed "sonnet-4" and we
+    // did NOT snap back to the loaded value ("opus-4"). Matching the
+    // acceptance criterion: "keep the field's text" on error.
+    expect(model.value).toBe('sonnet-4');
+  });
+
+  it('does NOT leak an unhandled rejection on a failing blur save', async () => {
+    const user = userEvent.setup();
+    let captured: unknown = null;
+    const listener = (ev: PromiseRejectionEvent) => {
+      captured = ev.reason;
+      ev.preventDefault();
+    };
+    // Listen on the actual `unhandledrejection` channel so a leak lands
+    // in `captured` even if the tab's component tree ate the warning.
+    window.addEventListener('unhandledrejection', listener);
+
+    rejectNextColumnWrite('boom-leak-test');
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'opus-4-fail');
+    fireEvent.blur(model);
+
+    // Wait past the awaited IPC + the next microtask boundary.
+    await waitFor(() => {
+      expect(screen.queryByText(/Save failed/)).toBeTruthy();
+    });
+
+    // Give the event loop a tick to dispatch any leaked rejection.
+    await new Promise((r) => setTimeout(r, 0));
+    if (captured !== null) {
+      throw new Error(
+        `Unhandled rejection detected: ${captured instanceof Error ? captured.message : String(captured)}`,
+      );
+    }
+    window.removeEventListener('unhandledrejection', listener);
+  });
+
+  it('discards a stale save result when the user switches meshes mid-flight (review finding #1)', async () => {
+    const user = userEvent.setup();
+    // Register Mesh B so the sidebar can switch to it. The store's
+    // beforeEach wires Mesh (id 42) as the selected mesh; we add B
+    // alongside without unselecting A.
+    useMeshStore.setState({
+      meshes: [MESH, MESH_B],
+      meshesById: new Map<number, Mesh>([
+        [MESH.id, MESH],
+        [MESH_B.id, MESH_B],
+      ]),
+      selectedMeshId: MESH.id,
+    });
+    // Make the FIRST `update_mesh_column` reject on the slow side
+    // (returns after a small delay) so we have time to switch meshes
+    // before the rejection lands.
+    let armed = true;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (armed && cmd === 'update_mesh_column') {
+        armed = false;
+        return new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('boom-after-switch')), 50),
+        );
+      }
+      if (cmd === 'list_providers') {
+        return Promise.resolve([
+          { id: 'claude', label: 'Claude Code', color: '#000', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
+        ]);
+      }
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project') return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context') return Promise.resolve({ claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false, skill_count: 0, agents_skills_exists: false });
+      if (cmd === 'get_mesh_health') return Promise.resolve({ is_dirty: false, is_drifted: false, unpushed_ahead: 0, base_branch_holder: null, local_base_branch: 'main', current_branch: 'main', current_short_sha: 'abc1234', authenticated: false });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+
+    await openPropertiesTab();
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'mesh-a-edit');
+    fireEvent.blur(model);
+
+    // Switch to mesh B before the 50ms-delayed rejection lands. The
+    // SaveIndicator's `useEffect([activeMeshId])` reset already wipes
+    // the indicator to idle; the `wrappedSave` mesh-switch guard must
+    // additionally stop the late reject() from re-applying "Save failed".
+    await act(async () => {
+      useMeshStore.getState().selectMesh(MESH_B.id);
+    });
+
+    // Wait long enough for the 50ms-delayed rejection to fire AND for
+    // the post-resolve setState to flush.
+    await new Promise((r) => setTimeout(r, 100));
+
+    // The indicator must NOT show "Save failed: boom-after-switch" —
+    // that error belongs to mesh A's edit, not to mesh B's view.
+    expect(screen.queryByText(/Save failed.*boom-after-switch/)).toBeNull();
+    // And the `console.error` from the adapter's stale-rejection path
+    // is the only visible trace of the failure (the indicator stays clean).
+  });
+
+  it('clears the previous "Save failed" indicator when a subsequent save succeeds', async () => {
+    const user = userEvent.setup();
+    rejectNextColumnWrite('first-failure');
+    await openPropertiesTab();
+
+    const model = (await screen.findByLabelText(/^Model\b/)) as HTMLInputElement;
+    await user.clear(model);
+    await user.type(model, 'fail-then-succeed');
+    fireEvent.blur(model);
+
+    expect(await screen.findByText(/Save failed/)).toBeTruthy();
+
+    // Re-arm — the next `update_mesh_column` will succeed (the next
+    // blur on the same field). Default mock resolver returns `{}`, which
+    // the IPC treats as a clean resolution.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'update_mesh_column') return Promise.resolve();
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project') return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context') return Promise.resolve({ claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false, skill_count: 0, agents_skills_exists: false });
+      if (cmd === 'get_mesh_health') return Promise.resolve({ is_dirty: false, is_drifted: false, unpushed_ahead: 0, base_branch_holder: null, local_base_branch: 'main', current_branch: 'main', current_short_sha: 'abc1234', authenticated: false });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    // Avoid the auto-clear of "saved" racing this assertion — we just
+    // want to confirm the error copy disappears, not test the timer.
+    // (The timer is independently covered in `useSaveStatus` tests.)
+
+    await user.clear(model);
+    await user.type(model, 'recovered');
+    fireEvent.blur(model);
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Save failed/)).toBeNull();
+    });
   });
 });

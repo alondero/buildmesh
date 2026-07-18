@@ -6,6 +6,7 @@ pub mod autopilot;
 mod commands;
 mod coordinator;
 mod db;
+mod diagnostics;
 mod env;
 mod git;
 mod http;
@@ -25,11 +26,118 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Early panic hook — captures panics that fire BEFORE the main panic
+    // hook is installed later in `setup` (Tauri setup can panic on misconfig,
+    // and those panics would otherwise die with only the truncated "disabled
+    // backtrace" tail in `panic.log`). Writes to a separate
+    // `panic_early.log` so it doesn't interleave with the main hook's output,
+    // and syncs to disk so the message survives `panic = "abort"` killing
+    // the process via __fastfail before the OS file buffer flushes.
+    //
+    // Cross-platform + dev-profile aware: derives the bundle id from the binary
+    // name (buildmesh.exe → stable, buildmesh-dev.exe → dev) so dev-profile
+    // crashes go to their own `com.alond.buildmesh.dev` dir, not the stable
+    // hub's. macOS/Linux resolve `$HOME` / `$XDG_DATA_HOME` instead of APPDATA.
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic".to_string()
+        };
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let line = format!(
+            "[{}] msg={} loc={}",
+            chrono::Utc::now().to_rfc3339(),
+            msg,
+            loc
+        );
+        // Always echo to stderr — if the file write fails (no APPDATA, no
+        // HOME, missing parent dir, permission), the panic payload is at
+        // least visible in the launcher's terminal.
+        eprintln!("{}", line);
+
+        // Derive the bundle id from the running binary name so dev-profile
+        // panics don't pollute the stable profile's logs (and vice versa).
+        // `cargo tauri:build:dev` emits `buildmesh-dev.exe`; the stable CLI
+        // emits `buildmesh.exe`.
+        let bundle_id = std::env::args()
+            .next()
+            .map(|a| {
+                let leaf = std::path::Path::new(&a)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if leaf.contains("dev") {
+                    "com.alond.buildmesh.dev"
+                } else {
+                    "com.alond.buildmesh"
+                }
+            })
+            .unwrap_or("com.alond.buildmesh");
+
+        // Per-platform data dir: APPDATA on Windows, XDG_DATA_HOME (fallback
+        // ~/.local/share) on Linux, $HOME/Library/Application Support on macOS.
+        let data_dir: Option<std::path::PathBuf> = if cfg!(target_os = "windows") {
+            std::env::var_os("APPDATA").map(std::path::PathBuf::from)
+        } else if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::PathBuf::from(home);
+            if cfg!(target_os = "macos") {
+                Some(home.join("Library").join("Application Support"))
+            } else {
+                Some(
+                    std::env::var_os("XDG_DATA_HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| home.join(".local").join("share")),
+                )
+            }
+        } else {
+            None
+        };
+
+        if let Some(dir) = data_dir {
+            let log_path = dir.join(bundle_id).join("logs").join("panic_early.log");
+            // Create the parent dirs — `OpenOptions::create(true)` only
+            // creates the file, not the path. On a fresh install neither
+            // `%APPDATA%\com.alond.buildmesh\` nor its `logs/` subdir exist
+            // when the first panic fires.
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                let _ = writeln!(f, "{}", line);
+                // `flush()` + `sync_all()`: the hook runs to completion
+                // BEFORE `panic = "abort"` calls `__fastfail` to terminate
+                // the process, so both syscalls return normally — `sync_all`
+                // is the durability guarantee that survives the abrupt
+                // termination. Drop them only if you also drop `panic=abort`.
+                let _ = f.flush();
+                let _ = f.sync_all();
+            }
+        }
+    }));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // In-app auto-update (issue #826). `updater` checks the GitHub Releases
+        // feed configured in tauri.conf.json and verifies each package against
+        // the committed minisign pubkey; `process` provides the `relaunch()`
+        // the frontend calls after `downloadAndInstall()`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // Initialize database
             let app_dir = app.path().app_data_dir().unwrap();
@@ -119,10 +227,23 @@ pub fn run() {
                 Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
             }
 
-            // Set up file-based logging with tracing
+            // Set up file-based logging with tracing.
+            //
+            // Size-bounded, NOT `rolling::never`: a long multi-node session at
+            // `debug` level (esp. during a build storm) would otherwise grow a
+            // single `buildmesh.log` without bound — a disk-fill risk, and a
+            // log that eventually eats the disk is the opposite of a
+            // diagnostic. `diagnostics::main_log_writer` rotates by BYTES at a
+            // fixed cap while keeping the file's name `buildmesh.log`: the
+            // `/use`, `/verify`, `/verify-ui` skills and `scripts/*log*.ps1`
+            // tail that exact path, so a time-based appender (which renames to
+            // `buildmesh.YYYY-MM-DD-HH.log`) would break them AND fail to bound
+            // a single hour's size. Wrapped in `non_blocking` so log writes
+            // never block the async runtime.
             let log_dir = app_dir.join("logs");
             std::fs::create_dir_all(&log_dir)?;
-            let file_appender = tracing_appender::rolling::never(&log_dir, "buildmesh.log");
+            let file_appender = diagnostics::main_log_writer(&log_dir)
+                .expect("failed to open rotating buildmesh.log");
             let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
             tracing_subscriber::fmt()
                 .with_writer(non_blocking)
@@ -204,9 +325,25 @@ pub fn run() {
             // `refill_after_claim`, so concurrent spawns can't trigger
             // overlapping `git worktree add` fills.
             //
-            // The handle is captured so `maintain_all_pools` can emit
-            // `pool-count-changed` from its inner drain/fill calls.
+            // The handle is captured so `drain_and_fill_for_mesh` (called per-mesh
+            // by the worker, not the legacy `maintain_all_pools` aggregator)
+            // can emit `pool-count-changed` from its inner drain/fill calls.
             services::pool_worker::start_background_worker(app.handle().clone());
+
+            // Autopilot polling daemon (issue #482, PRD #480). Walks every
+            // autopilot-enabled mesh on a 2-minute cadence and auto-spawns
+            // branched-worktree Agent Nodes for newly-labelled GitHub
+            // issues, capacity-gated per mesh. No-op while no mesh has
+            // Autopilot enabled.
+            services::autopilot::start_autopilot_worker(app.handle().clone());
+
+            // Always-on resource diagnostics (issue: background-refresh grind).
+            // A low-frequency sampler writes process vitals (memory, handles,
+            // threads, live child processes) + per-subsystem counters to a
+            // dedicated, size-bounded `logs/diagnostics.log` the user can hand
+            // back after a session degrades. Off the hot path; opt out with
+            // `BUILDMESH_DIAG=0`, retune with `BUILDMESH_DIAG_INTERVAL_MS`.
+            diagnostics::start_sampler(log_dir.clone());
 
             // Install panic hook that logs thread ID + backtrace on every panic
             let app_dir = app.path().app_data_dir().unwrap();
@@ -237,6 +374,10 @@ pub fn run() {
                 {
                     use std::io::Write;
                     let _ = writeln!(file, "{}", panic_msg);
+                    // panic = "abort" kills the process via __fastfail; the OS
+                    // file buffer would otherwise discard this write.
+                    let _ = file.flush();
+                    let _ = file.sync_all();
                 }
             }));
 
@@ -251,9 +392,12 @@ pub fn run() {
             commands::agent_node::get_worktree_close_safety,
             commands::agent_node::rename_agent_node,
             commands::agent_node::update_agent_node_positions,
+            commands::agent_node::regenerate_agent_node,
             // Mesh (renamed from `*_project` to `*_mesh`).
             commands::mesh::add_mesh,
+            commands::mesh::pick_mesh_folder,
             commands::mesh::create_mesh,
+            commands::mesh::update_mesh_color,
             commands::mesh::create_test_mesh,
             commands::mesh::list_meshes,
             commands::mesh::delete_mesh,
@@ -265,6 +409,7 @@ pub fn run() {
             // App preferences (buildmesh-wide)
             commands::preferences::get_app_preferences,
             commands::preferences::set_app_default_provider,
+            commands::preferences::set_app_naming_provider,
             commands::preferences::set_harness_order,
             commands::preferences::get_provider_accounts,
             commands::preferences::upsert_provider_account,
@@ -289,6 +434,11 @@ pub fn run() {
             // user whose installed root CA is stale can see "your cert is X,
             // server is now Y" without reaching for openssl.
             commands::network::get_cert_chain_status,
+            // Root CA bytes for the QR-modal one-tap phone install (issue
+            // #702). Same disk read as the /install-cert.der route, encoded
+            // as base64 for embedding in a data: URL the phone's OS CA
+            // installer intercepts.
+            commands::network::get_root_cert_der,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,
@@ -304,6 +454,8 @@ pub fn run() {
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,
             commands::agent::start_node_background,
+            commands::agent::trigger_finish,
+            commands::agent::list_autopilot_runs,
             // Build/Run
             commands::build_run::build_run,
             commands::build_run::get_mesh_row,
@@ -318,6 +470,7 @@ pub fn run() {
             commands::mesh_properties::remove_worktree_base_ref,
             commands::mesh_properties::update_mesh_use_worktree,
             commands::mesh_properties::update_mesh_sandbox,
+            commands::mesh_properties::update_mesh_autopilot,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
             // Scratch Pad (Probe Panel "📝 Scratch Pad" tab)
@@ -330,6 +483,8 @@ pub fn run() {
             commands::diff::diff_file_against_head,
             commands::diff::diff_node_against_base,
             commands::diff::diff_node_file_against_base,
+            commands::diff::node_changed_files,
+            commands::diff::node_changed_summary,
             // File tree
             commands::file_tree::list_directory,
             commands::file_tree::open_in_editor,
@@ -366,7 +521,6 @@ pub fn run() {
             commands::pr::create_pr,
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
-            commands::pr::check_gh_auth,
             commands::pr::create_pr_for_mesh,
             commands::agent::create_pr_node,
             commands::pr::get_repo_issues,
@@ -375,6 +529,17 @@ pub fn run() {
             commands::pr::get_pr_mergeability,
             commands::pr::get_prs_mergeability,
             commands::pr::get_pr_files,
+            commands::pr::get_github_url_for_mesh,
+            // General GitHub auth (issue #433 — moved out of `commands::pr`:
+            // no PR call sites, used by git/mobile/UI auth checks).
+            commands::github::check_gh_auth,
+            // App-level metadata (issue #826). The frontend uses
+            // `get_app_identifier` to guard the in-app updater: the dev
+            // profile (`com.alond.buildmesh.dev`) must not poll the stable
+            // release feed, since `tauri:build:dev` is also a production Vite
+            // build and a simple `import.meta.env.PROD` check can't tell
+            // them apart.
+            commands::app::get_app_identifier,
             // AI context portability
             commands::ai_context::detect_ai_context,
             commands::ai_context::create_ai_context_portability_pr,
