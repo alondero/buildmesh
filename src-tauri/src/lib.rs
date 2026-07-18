@@ -441,6 +441,12 @@ pub fn run() {
             // as base64 for embedding in a data: URL the phone's OS CA
             // installer intercepts.
             commands::network::get_root_cert_der,
+            // Signed `.mobileconfig` profile for the iOS install-QR (issue
+            // #713). DER-encoded PKCS#7/CMS SignedData wrapping the
+            // unsigned Apple Configurator 2 plist, base64-encoded — the
+            // frontend prepends `data:application/x-apple-aspen-config;base64,`
+            // to produce the data: URL Safari intercepts.
+            commands::network::get_root_cert_mobileconfig,
             // Agent
             commands::agent::spawn_agent,
             commands::agent::resize_agent,

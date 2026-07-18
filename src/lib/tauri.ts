@@ -942,6 +942,19 @@ export const getCertChainStatus = () =>
 export const getRootCertDer = () =>
   _invoke<string>('get_root_cert_der');
 
+/** Signed `.mobileconfig` profile for the iOS install-QR (issue #713).
+ *  Returns base64 of a DER-encoded PKCS#7/CMS SignedData wrapping the
+ *  unsigned Apple Configurator 2 plist — the same wire format as
+ *  `openssl cms -sign -binary -outform DER -nodetach`. The frontend
+ *  concatenates `data:application/x-apple-aspen-config;base64,` to
+ *  produce the data: URL Safari intercepts on iOS ≥ 14. Sibling to
+ *  `getRootCertDer` (the Android path) — kept as a separate command
+ *  rather than a parameter so the failure surfaces cleanly per platform
+ *  and the modal can hide the iOS tab on its own rejection without
+ *  affecting the Android one. */
+export const getRootCertMobileconfig = () =>
+  _invoke<string>('get_root_cert_mobileconfig');
+
 /** App-level metadata (issue #826). The updater guard in `lib/updater.ts`
  *  uses this to reject the dev profile (`*.dev` bundle id) from polling
  *  the stable release feed — `tauri:build:dev` is a production-mode Vite

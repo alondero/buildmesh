@@ -42,8 +42,17 @@ pub struct SelfSignedCert {
 /// `CaUsedAsEndEntity`) and chains to the root via a real signature, so
 /// Chrome/Safari/Android validate the leaf → root path and the install
 /// path is satisfied.
+///
+/// `root_key_der` (issue #713) is the PKCS#8 DER form of the root CA's
+/// private key — needed to sign the iOS `.mobileconfig` install profile.
+/// Pre-#713 installs regenerated the chain on the next LAN-exposure toggle
+/// without persisting it, so a missing `ca.key.der` is a one-time migration
+/// trigger: `load_or_generate` falls through to `generate` and writes a
+/// fresh root (which incidentally also rotates the user's installed root —
+/// they re-trust via the new install-QR).
 pub struct CertChain {
     pub root_cert_der: Vec<u8>,
+    pub root_key_der: Vec<u8>,
     pub leaf: SelfSignedCert,
 }
 
@@ -153,6 +162,10 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
     let root_key = KeyPair::generate()?;
     let root_cert = root_params.self_signed(&root_key)?;
     let root_cert_der = root_cert.der().as_ref().to_vec();
+    // Issue #713: the root key is now persisted so we can sign the iOS
+    // `.mobileconfig` install profile. Same PKCS#8 DER shape as the leaf
+    // key below (`KeyPair::serialize_der()`).
+    let root_key_der = root_key.serialize_der();
 
     // Leaf — TLS server cert shape (CA:FALSE, serverAuth EKU, DigitalSignature
     // KU) signed by the root above.
@@ -164,6 +177,7 @@ pub fn generate(interface_ips: &[IpAddr]) -> Result<CertChain, rcgen::Error> {
 
     Ok(CertChain {
         root_cert_der,
+        root_key_der,
         leaf: SelfSignedCert {
             cert_der: leaf_cert_der,
             key_der: leaf_key_der,
@@ -213,21 +227,27 @@ fn persisted_covers(sans_path: &Path, wanted: &[String]) -> bool {
 /// cert" gesture.
 pub fn load_or_generate(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<CertChain> {
     let ca_path = dir.join("ca.der");
+    let ca_key_path = dir.join("ca.key.der");
     let cert_path = dir.join("cert.der");
     let key_path = dir.join("key.der");
     let sans_path = dir.join("sans.txt");
 
     let wanted = interface_san_key(interface_ips);
-    if let (Ok(ca_der), Ok(cert_der), Ok(key_der)) = (
+    if let (Ok(ca_der), Ok(ca_key_der), Ok(cert_der), Ok(key_der)) = (
         std::fs::read(&ca_path),
+        std::fs::read(&ca_key_path),
         std::fs::read(&cert_path),
         std::fs::read(&key_path),
     ) {
-        if !ca_der.is_empty() && !cert_der.is_empty() && !key_der.is_empty()
+        if !ca_der.is_empty()
+            && !ca_key_der.is_empty()
+            && !cert_der.is_empty()
+            && !key_der.is_empty()
             && persisted_covers(&sans_path, &wanted)
         {
             return Ok(CertChain {
                 root_cert_der: ca_der,
+                root_key_der: ca_key_der,
                 leaf: SelfSignedCert { cert_der, key_der },
             });
         }
@@ -236,6 +256,11 @@ pub fn load_or_generate(dir: &Path, interface_ips: &[IpAddr]) -> io::Result<Cert
     let chain = generate(interface_ips).map_err(io::Error::other)?;
     std::fs::create_dir_all(dir)?;
     std::fs::write(&ca_path, &chain.root_cert_der)?;
+    // Issue #713: persist the root key alongside `ca.der`. Pre-#713 installs
+    // are missing this file; the absence is one of the four fall-through
+    // triggers above (we don't special-case it — any missing file triggers
+    // regeneration, which is what we want for the migration too).
+    std::fs::write(&ca_key_path, &chain.root_key_der)?;
     std::fs::write(&cert_path, &chain.leaf.cert_der)?;
     std::fs::write(&key_path, &chain.leaf.key_der)?;
     std::fs::write(&sans_path, wanted.join("\n"))?;
@@ -501,6 +526,10 @@ mod tests {
     fn generate_produces_non_empty_der() {
         let chain = generate(&[]).unwrap();
         assert!(!chain.root_cert_der.is_empty(), "root cert must be non-empty");
+        // Issue #713: root key is now part of CertChain — sign the iOS
+        // .mobileconfig with it. An empty key would fail the CMS sign
+        // handshake with `KeyParseError`, so we pin non-empty here.
+        assert!(!chain.root_key_der.is_empty(), "root key must be non-empty");
         assert!(!chain.leaf.cert_der.is_empty(), "leaf cert must be non-empty");
         assert!(!chain.leaf.key_der.is_empty(), "leaf key must be non-empty");
     }
@@ -520,8 +549,52 @@ mod tests {
         // Second call must reuse the persisted bytes, not regenerate.
         let second = load_or_generate(dir.path(), &[]).unwrap();
         assert_eq!(first.root_cert_der, second.root_cert_der);
+        // Issue #713: root key must round-trip too — it's the secret the
+        // iOS `.mobileconfig` signer needs. A regression that fails to
+        // persist `ca.key.der` would silently produce a fresh keypair on
+        // every load, breaking the "same profile, same install" property
+        // a re-scan relies on (the signed blob's signing cert would no
+        // longer chain to the on-disk root).
+        assert_eq!(first.root_key_der, second.root_key_der);
         assert_eq!(first.leaf.cert_der, second.leaf.cert_der);
         assert_eq!(first.leaf.key_der, second.leaf.key_der);
+    }
+
+    /// Regression pin for the pre-#713 migration: a persisted `ca.der` with
+    /// no `ca.key.der` sibling must trigger a fresh `generate()`, which
+    /// writes `ca.key.der` so the iOS install path can sign the next
+    /// `.mobileconfig`. We accept the implicit root-rotation here — the
+    /// user's installed phone root becomes stale, but the new install-QR
+    /// picks up the new fingerprint (and the Re-install section of the
+    /// modal already nudges them to re-install on rotation).
+    #[test]
+    fn load_or_generate_migrates_missing_root_key() {
+        let dir = tempfile::tempdir().unwrap();
+        // Seed the disk state with a fresh chain so we can then delete
+        // `ca.key.der` to simulate a pre-#713 install. The returned
+        // `CertChain` is unused — `load_or_generate`'s side-effect is the
+        // disk write, which the subsequent `remove_file` mutates.
+        let _first = load_or_generate(dir.path(), &[]).unwrap();
+        // Simulate a pre-#713 install by deleting `ca.key.der` but leaving
+        // `ca.der`, `cert.der`, `key.der`, `sans.txt` intact.
+        std::fs::remove_file(dir.path().join("ca.key.der")).unwrap();
+        let second = load_or_generate(dir.path(), &[]).unwrap();
+        // The persisted `ca.der` was rejected → fresh chain → root keypair
+        // rotated (different bytes from the first call). The migration
+        // *intentionally* rotates the root, not the leaf — but our
+        // `generate()` mints both, so the leaf is also fresh.
+        assert!(
+            !second.root_key_der.is_empty(),
+            "missing ca.key.der migration must produce a non-empty root key"
+        );
+        // The new `ca.key.der` must now exist on disk for the next call.
+        assert!(
+            dir.path().join("ca.key.der").exists(),
+            "load_or_generate must write ca.key.der after migrating"
+        );
+        // A subsequent call must round-trip without regenerating again.
+        let third = load_or_generate(dir.path(), &[]).unwrap();
+        assert_eq!(second.root_key_der, third.root_key_der);
     }
 
     #[test]
