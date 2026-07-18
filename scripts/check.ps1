@@ -55,6 +55,18 @@ if ((Test-Path (Join-Path $gitForWindows 'git.exe')) -and ($gitOnPath -notlike "
   $env:PATH = "$gitForWindows;$env:PATH"
 }
 
+# Same shadowing class for openssl.exe: devkitPro's MSYS2 copy crashes on
+# startup ("add_item ... failed, errno 1" cygwin heap error), failing the 4
+# http::tls chain-verification tests that shell out to `openssl`. Pin Git for
+# Windows' usr\bin (which ships a working OpenSSL but no git.exe, so the git
+# pin above is unaffected) ahead of it.
+$gitUsrBin = 'C:\Program Files\Git\usr\bin'
+$opensslOnPath = (Get-Command openssl -ErrorAction SilentlyContinue).Source
+if ((Test-Path (Join-Path $gitUsrBin 'openssl.exe')) -and ($opensslOnPath -notlike "$gitUsrBin*")) {
+  Write-Host "== PATH openssl is '$opensslOnPath' -> pinning $gitUsrBin first ==" -ForegroundColor Yellow
+  $env:PATH = "$gitUsrBin;$env:PATH"
+}
+
 function Ensure-MobileBuilt {
   # Rebuild when index.html is missing OR empty — an interrupted prior build (Ctrl-C /
   # Defender lock) can leave a zero-byte/truncated index.html that a Test-Path-only gate
