@@ -6,7 +6,6 @@
 
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
-use crate::agent::spawn_diag;
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
@@ -765,16 +764,6 @@ fn start_reader(
                 if let Some(uuid) = crate::session_capture::try_extract_session_id(&text) {
                     let _ = db::update_cli_session_id(session_id, uuid);
                     session_captured.store(true, Ordering::Relaxed);
-                    // [DEBUG-concurrent-spawn] Reader-thread capture. The
-                    // `pty_output` source means we matched the regex from
-                    // the live PTY stream (vs. the orchestrator's
-                    // pre-assigned UUID in Assign mode). Two reads from
-                    // this stream while the orchestrator is still
-                    // in-flight would surface as two reader_event lines
-                    // with overlapping timestamps; a capture AFTER
-                    // `phase=exit` in the orchestrator's stream is the
-                    // "stale UUID on auto-resume" failure mode.
-                    crate::agent::spawn_diag::reader_event(session_id, "pty_output", uuid);
                     tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
                 }
             }
@@ -862,18 +851,6 @@ pub async fn spawn_agent_inner(
     );
 
     let timer = SpawnTimer::new(session_id);
-    // [DEBUG-concurrent-spawn] RAII counter — guards `IN_FLIGHT` across the
-    // entire function body (Ok/Err/?-returns all decrement via Drop). One
-    // log line on enter, one on exit, with a delta in between. The label
-    // discriminates manual vs Issue vs PR spawns so the dev log can group
-    // a single burst.
-    let diag_label: &'static str = match (&preloaded_node, resume.as_deref()) {
-        (_, Some(_)) => "resume",
-        (Some(n), _) if n.source_pr.is_some() => "pr-spawn",
-        (Some(n), _) if n.source_issue.is_some() => "issue-spawn",
-        _ => "manual-spawn",
-    };
-    let diag = spawn_diag::InFlightGuard::enter(session_id, diag_label);
 
     // 0. Claim the session for the WHOLE pipeline. `is_agent_already_running`
     //    below only sees registered processes, and registration is seconds
@@ -890,22 +867,18 @@ pub async fn spawn_agent_inner(
                 "spawn_agent_inner: spawn already in flight for session {}, skipping duplicate call",
                 session_id
             );
-            diag.checkpoint("duplicate_spawn_short_circuit");
             return Ok(());
         }
     };
 
     // 1. Check if already running
     if is_agent_already_running(&session_id) {
-        diag.checkpoint("already_running_short_circuit");
         return Ok(());
     }
-    diag.checkpoint("after_already_running_check");
 
     // 2. Kill any stale process for this session
     tracing::debug!("spawn_agent_inner: killing stale processes for session {}", session_id);
     crate::commands::agent::kill_agent(session_id).await.ok();
-    diag.checkpoint("after_kill_stale");
 
     // 3. Get node and resolve paths (skip DB read if caller provided the node)
     let node = match preloaded_node {
@@ -918,7 +891,6 @@ pub async fn spawn_agent_inner(
     };
     tracing::info!("spawn_agent_inner: node path={}, env={:?}", node.path, node.env);
     timer.checkpoint("after_node_db_read");
-    diag.checkpoint("after_node_db_read");
 
     let adapter = provider.adapter();
 
@@ -933,7 +905,6 @@ pub async fn spawn_agent_inner(
                     let cli_uuid = uuid::Uuid::new_v4().to_string();
                     db::update_cli_session_id(session_id, &cli_uuid).map_err(|e| e.to_string())?;
                     tracing::info!("spawn_agent_inner: assigned cli_session_id={}", cli_uuid);
-                    diag.db_write("cli_session_id", &cli_uuid);
                     SessionIdMode::Assign(cli_uuid)
                 }
             }
@@ -973,7 +944,6 @@ pub async fn spawn_agent_inner(
     );
 
     timer.checkpoint("after_mesh_row_read");
-    diag.checkpoint("after_mesh_row_read");
 
     // 6. Compute spawn path. The pool claim (issue #609/#612) decides whether
     //    the spawn adopts a pre-warmed worktree (Manual: pool slug IS the
@@ -1017,7 +987,6 @@ pub async fn spawn_agent_inner(
                         entry.preassigned_name,
                         entry.base_sha.as_deref().unwrap_or("none"),
                     );
-                    spawn_diag::warm_claim_event(mesh_id, session_id, &format!("ok:id={}:path={}", entry.id, entry.path));
                     // Issue #653 use-site guard: `try_claim` just checked
                     // the directory exists, but the spawn then waits
                     // seconds inside `fetch_origin` + git worktree move;
@@ -1033,12 +1002,9 @@ pub async fn spawn_agent_inner(
                         warm_claimed = Some(entry);
                         pool_was_drained_by_this_spawn = true;
                     } else {
-                        spawn_diag::warm_claim_event(mesh_id, session_id, "none:dir_vanished");
                         // Note: `recheck_after_claim` already logs the
-                        // reason (claimed row N's directory disappeared...).
-                        // Don't duplicate that WARN here — the spawn-diag
-                        // event is enough structured signal; logging twice
-                        // is just operator noise for one race event.
+                        // reason (claimed row N's directory disappeared...),
+                        // so don't duplicate that WARN here.
                         // warm_claimed stays None — do NOT adopt. The row
                         // was already dropped by recheck_after_claim, but
                         // the pool inventory is still down by one; the
@@ -1049,14 +1015,12 @@ pub async fn spawn_agent_inner(
                     }
                 }
                 Ok(None) => {
-                    spawn_diag::warm_claim_event(mesh_id, session_id, "none:pool_empty_or_already_claimed");
                     tracing::info!(
                         "spawn_agent_inner: warm pool empty for mesh {}; cold spawn",
                         mesh_id
                     );
                 }
                 Err(e) => {
-                    spawn_diag::warm_claim_event(mesh_id, session_id, &format!("err:{}", e));
                     tracing::warn!(
                         "spawn_agent_inner: warm pool claim failed (non-fatal, falling back to cold): {}",
                         e
@@ -1164,12 +1128,10 @@ pub async fn spawn_agent_inner(
                     crate::services::fetch_freshness::time_since_success(&node.path).as_secs()
                 );
                 timer.checkpoint("fetch_origin_skipped_fresh");
-                diag.git_event("fetch_origin", "skip:fresh");
             } else {
                 let root = node.path.clone();
                 let base_ref_owned = base_ref.to_string();
                 timer.checkpoint("before_fetch_origin");
-                diag.git_event("fetch_origin", "start");
                 // Issue #652 — per-Mesh serialization. Without this lock, N
                 // concurrent spawns against the same Mesh race on
                 // .git/FETCH_HEAD, .git/index.lock, and refs/heads/<branch>.lock:
@@ -1188,17 +1150,6 @@ pub async fn spawn_agent_inner(
                 // pair used to live inline here.
                 let sync_result =
                     crate::git::sync::locked_fetch_origin(root, base_ref_owned).await;
-                let fetch_outcome: &'static str = match &sync_result {
-                    Ok(crate::git::sync::FetchOutcome::Synced { .. }) => "ok:synced",
-                    Ok(crate::git::sync::FetchOutcome::UpToDate) => "ok:up_to_date",
-                    Ok(crate::git::sync::FetchOutcome::FetchedButDirty { .. }) => {
-                        "ok:fetched_dirty"
-                    }
-                    Ok(crate::git::sync::FetchOutcome::SkippedNoRemote) => "skip:no_remote",
-                    Ok(crate::git::sync::FetchOutcome::FetchedButDiverged { .. }) => "ok:diverged",
-                    Err(_) => "err",
-                };
-                diag.git_event("fetch_origin", fetch_outcome);
                 timer.checkpoint("after_fetch_origin");
                 // Ref-freshness (issue #613 AC3): if the fetch actually pulled new
                 // commits, the mesh's base ref has moved, so any OTHER warm pool
@@ -1463,7 +1414,6 @@ pub async fn spawn_agent_inner(
         host_path: resolved.host_path.clone(),
     };
     timer.checkpoint("before_provision");
-    diag.git_event("provision_for_spawn", "start");
     let provision_result = tokio::task::spawn_blocking(move || provision_for_spawn(provision_ctx))
         .await
         .unwrap_or_else(|e| Err(format!("provision_for_spawn task panicked: {}", e)));
@@ -1485,7 +1435,6 @@ pub async fn spawn_agent_inner(
             //     than a fatal error (issue #612).
             // (b) No warm claim — `provision_for_spawn` failed on the cold
             //     create itself; surface the error.
-            diag.git_event("provision_for_spawn", &format!("err:{}", e));
             tracing::warn!(
                 "spawn_agent_inner: provision_for_spawn failed ({}); warm_entry_present={}",
                 e,
@@ -1528,15 +1477,8 @@ pub async fn spawn_agent_inner(
                         });
                 timer.checkpoint("after_cold_fallback");
                 match cold_result {
-                    Ok(o) => {
-                        diag.git_event("provision_for_spawn", "ok_cold_fallback");
-                        o
-                    }
+                    Ok(o) => o,
                     Err(cold_e) => {
-                        diag.git_event(
-                            "provision_for_spawn",
-                            &format!("err_cold_fallback:{}", cold_e),
-                        );
                         let msg = format!(
                             "spawn_agent_inner: provision_for_spawn failed AND cold fallback failed: \
                              warm={}, cold={}",
@@ -1553,14 +1495,6 @@ pub async fn spawn_agent_inner(
             }
         }
     };
-    let wt_outcome: String = match &provision_outcome {
-        ProvisionOutcome::Reused { .. } => "reused".to_string(),
-        ProvisionOutcome::Adopted { .. } => "adopted".to_string(),
-        ProvisionOutcome::Upgraded { .. } => "upgraded".to_string(),
-        ProvisionOutcome::Created { .. } => "created".to_string(),
-    };
-    diag.git_event("provision_for_spawn", &wt_outcome);
-
     // Rebuild `warm_claimed` from the outcome so the post-spawn bookkeeping
     // (`forget_after_spawn` + name adoption) sees the entry on
     // Adopted/Upgraded and None on Reused/Created. The Manual `Upgraded`
@@ -1687,16 +1621,13 @@ pub async fn spawn_agent_inner(
                 e
             );
         } else {
-            diag.db_write("worktree_name", &entry.preassigned_name);
         }
     }
-    diag.checkpoint("before_register_agent");
     // One flag instance shared three ways: the registry entry (kill_session
     // sets it), the reader thread (its epilogue reads it), and nothing else.
     let deliberate_kill = Arc::new(AtomicBool::new(false));
     register_agent(session_id, child, writer, master, reader_alive.clone(), job, timer.start(), mesh_id, deliberate_kill.clone());
     tracing::info!("spawn_agent_inner: stored agent process");
-    diag.checkpoint("after_register_agent");
 
     // 13. Start reader thread
     let spawned_at = std::time::Instant::now();
@@ -1758,7 +1689,6 @@ pub async fn spawn_agent_inner(
     // the orchestrator from resurrecting a reader-written Error back to
     // Spawning (which would let the delayed promotion later write Running
     // onto a dead node — same ghost-Running bug, other direction).
-    diag.db_write("status", "Spawning");
     db::update_agent_node_status_unless_in(
         session_id,
         SessionStatus::Spawning,
@@ -1769,28 +1699,16 @@ pub async fn spawn_agent_inner(
         // Promote to Running iff the reader hasn't already written Error.
         // Both delay and reader check must share `EARLY_EXIT_WINDOW`.
         std::thread::sleep(EARLY_EXIT_WINDOW);
-        match db::update_agent_node_status_if(
+        if let Err(e) = db::update_agent_node_status_if(
             session_id,
             SessionStatus::Running,
             SessionStatus::Spawning,
         ) {
-            Ok(true) => {
-                crate::agent::spawn_diag::promotion_event(session_id, "running");
-            }
-            Ok(false) => {
-                crate::agent::spawn_diag::promotion_event(session_id, "noop");
-            }
-            Err(e) => {
-                // Log under `phase=promotion` so a single grep reconstructs
-                // the four-way race outcome; the old free-form warn swallowed
-                // this signal.
-                crate::agent::spawn_diag::promotion_event(session_id, "err");
-                tracing::warn!(
-                    "spawn_agent_inner: conditional Running promotion failed for session {}: {}",
-                    session_id,
-                    e
-                );
-            }
+            tracing::warn!(
+                "spawn_agent_inner: conditional Running promotion failed for session {}: {}",
+                session_id,
+                e
+            );
         }
     });
 
