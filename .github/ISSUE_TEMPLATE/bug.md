@@ -1,7 +1,6 @@
 ---
 name: Bug report
 about: Something in Buildmesh broke or behaves wrong
-title: "[bug] "
 labels: ["needs-triage"]
 ---
 

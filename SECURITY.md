@@ -14,10 +14,12 @@ are visible to everyone and give attackers a free roadmap before a fix
 ships.
 
 Use GitHub's private vulnerability-reporting channel — the
-[Report a vulnerability](../../security/advisories/new) button on the
-**Security** tab — so the report stays between you and the maintainer
-until disclosure. GitHub will email the maintainer; you do not need to
-know the maintainer's email address to report.
+"Report a vulnerability" button that GitHub auto-shows on the
+**Security** tab when this file exists — so the report stays between
+you and the maintainer until disclosure. The direct URL is
+<https://github.com/alondero/buildmesh/security/advisories/new>.
+GitHub will email the maintainer; you do not need to know the
+maintainer's email address to report.
 
 If GitHub's advisory flow is unavailable for any reason, email
 [alondero@gmail.com](mailto:alondero@gmail.com) with the subject prefix

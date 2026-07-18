@@ -1,7 +1,6 @@
 ---
 name: Feature request
 about: A change you want to see in Buildmesh
-title: "[feat] "
 labels: ["needs-triage"]
 ---
 
