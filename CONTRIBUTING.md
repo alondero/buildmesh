@@ -99,9 +99,23 @@ silence on an open PR or issue.
 ## Security
 
 If you find a security issue (sandbox bypass, RCE via agent output, exposed
-credential, etc.), **please email before filing a public issue** so we can
-disclose responsibly. Standard GitHub security advisories work once the
-project has a `SECURITY.md`; for now, contact the maintainer directly.
+credential, etc.), **please do not file a public issue**. See
+[`SECURITY.md`](SECURITY.md) for the private vulnerability-reporting flow
+(GitHub Security Advisories, with email fallback).
+
+## Code of Conduct
+
+By participating, you agree to the
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — Contributor Covenant v2.1.
+Report CoC violations to [alondero@gmail.com](mailto:alondero@gmail.com).
+
+## Filing issues & PRs
+
+Issue and PR templates live under
+[`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE) and
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md).
+GitHub will surface them automatically when you open a new issue or PR;
+following them speeds up triage.
 
 ## License
 
