@@ -6,7 +6,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import * as api from '../../lib/tauri';
-import { createTerminalOptions, terminalThemeFor } from './terminalConfig';
+import { createTerminalOptions } from './terminalConfig';
 import { resolveKeyAction } from './terminalKeyAction';
 import { isMac } from '../../lib/platform';
 import { TerminalWriter, type TerminalWriteData } from './TerminalWriter';
