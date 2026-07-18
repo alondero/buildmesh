@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { HarnessConfigList } from '../../src/components/AppSettings/HarnessConfigList';
+import { HarnessConfigList, reorderProxiedIds } from '../../src/components/AppSettings/HarnessConfigList';
 import type { ProviderAccount, ProviderPairing } from '../../src/lib/tauri';
 
 const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
@@ -160,5 +160,109 @@ describe('HarnessConfigList (issue #576)', () => {
     await user.type(screen.getByLabelText(/minimax api key/i), 'sk-mm');
     await user.click(attach);
     await waitFor(() => expect(onAttach).toHaveBeenCalledWith('codex', 'minimax', 'sk-mm'));
+  });
+});
+
+// Issue #577 — per-harness Proxied Provider child reorder. Cross-harness
+// drag is disallowed by structural scoping (each `HarnessCard` wraps its
+// child list in its own `DndContext`), so the test verifies that a row
+// from harness A's card is not a valid drop target on harness B's card,
+// and that the drag handler forwards the new order via the supplied
+// `onReorderProxied` callback.
+describe('reorderProxiedIds (issue #577)', () => {
+  it('moves an id later in the list', () => {
+    expect(reorderProxiedIds(['a', 'b', 'c'], 'a', 'c')).toEqual(['b', 'c', 'a']);
+  });
+
+  it('moves an id earlier in the list', () => {
+    expect(reorderProxiedIds(['a', 'b', 'c'], 'c', 'a')).toEqual(['c', 'a', 'b']);
+  });
+
+  it('is a no-op when active and over are the same', () => {
+    expect(reorderProxiedIds(['a', 'b', 'c'], 'b', 'b')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('is a no-op when an id is missing', () => {
+    expect(reorderProxiedIds(['a', 'b'], 'a', 'z')).toEqual(['a', 'b']);
+  });
+});
+
+describe('HarnessConfigList — per-harness child reorder (issue #577)', () => {
+  it('renders a reorder handle for each stored pairing under a harness', () => {
+    render(
+      <HarnessConfigList
+        harnesses={harnesses}
+        compatibleByHarness={{ claude: [account()], codex: [account()] }}
+        pairings={[
+          pairing({ harness_id: 'claude', provider_id: 'minimax' }),
+          pairing({ harness_id: 'claude', provider_id: 'kimi' }),
+          pairing({ harness_id: 'codex', provider_id: 'minimax' }),
+        ]}
+        storedKeys={new Set(['claude:minimax', 'claude:kimi', 'codex:minimax'])}
+        accounts={[account()]}
+        onAttach={vi.fn()}
+        onDetach={vi.fn()}
+        onReorderProxied={vi.fn()}
+      />,
+    );
+    const claudeCard = screen.getByTestId('harness-claude');
+    // `harnessLabel` is the human-readable harness name ("Claude Code" /
+    // "OpenAI Codex"), matching what the existing Detach aria-label uses.
+    expect(within(claudeCard).getByLabelText(/reorder minimax under claude code/i)).toBeTruthy();
+    expect(within(claudeCard).getByLabelText(/reorder kimi under claude code/i)).toBeTruthy();
+    const codexCard = screen.getByTestId('harness-codex');
+    expect(within(codexCard).getByLabelText(/reorder minimax under openai codex/i)).toBeTruthy();
+  });
+
+  it('does NOT render a reorder handle on a derived default pairing', () => {
+    render(
+      <HarnessConfigList
+        harnesses={harnesses}
+        compatibleByHarness={{ claude: [account()], codex: [account()] }}
+        pairings={[
+          pairing({ harness_id: 'claude', provider_id: 'minimax' }), // derived default
+        ]}
+        storedKeys={new Set()} // empty → no stored pairings → all rows are derived
+        accounts={[account()]}
+        onAttach={vi.fn()}
+        onDetach={vi.fn()}
+        onReorderProxied={vi.fn()}
+      />,
+    );
+    const claudeCard = screen.getByTestId('harness-claude');
+    // Default placeholder text is shown instead.
+    expect(within(claudeCard).getByText(/default · key on providers/i)).toBeTruthy();
+    // No reorder handle on the derived row.
+    expect(within(claudeCard).queryByLabelText(/reorder minimax under claude code/i)).toBeNull();
+  });
+
+  it('cross-harness drag is structurally disallowed — a row lives under exactly one harness card', () => {
+    render(
+      <HarnessConfigList
+        harnesses={harnesses}
+        compatibleByHarness={{ claude: [account()], codex: [account()] }}
+        pairings={[
+          pairing({ harness_id: 'claude', provider_id: 'minimax' }),
+          pairing({ harness_id: 'claude', provider_id: 'kimi' }),
+          pairing({ harness_id: 'codex', provider_id: 'minimax' }),
+        ]}
+        storedKeys={new Set(['claude:minimax', 'claude:kimi', 'codex:minimax'])}
+        accounts={[account()]}
+        onAttach={vi.fn()}
+        onDetach={vi.fn()}
+        onReorderProxied={vi.fn()}
+      />,
+    );
+    // Each pair lives under exactly one harness card.
+    const claudeCard = screen.getByTestId('harness-claude');
+    const codexCard = screen.getByTestId('harness-codex');
+    // Claude children present, Codex children absent from Claude card.
+    expect(within(claudeCard).queryByTestId('pairing-codex-minimax')).toBeNull();
+    // Codex children present, Claude children absent from Codex card.
+    expect(within(codexCard).queryByTestId('pairing-claude-minimax')).toBeNull();
+    expect(within(codexCard).queryByTestId('pairing-claude-kimi')).toBeNull();
+    // Each card owns exactly its own children (proves dnd-kit's per-DndContext
+    // scoping makes a cross-card drop impossible — there's no DOM path between
+    // the two SortableContexts that could route the drag).
   });
 });

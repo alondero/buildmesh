@@ -668,6 +668,45 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
+  // Issue #577 — persist the per-harness Proxied Provider child order.
+  // Optimistically reorders the local `pairings` slice for the affected
+  // harness (cross-harness drag is disallowed at the UI layer — each
+  // `HarnessCard` is its own `DndContext`, so the harnessId here always
+  // matches the card the drag started in). Rolls back on failure so the
+  // visible order never lies about what was stored. The backend emits
+  // `provider-list-changed`, so the sidebar / probes re-read live — same
+  // pattern as `handleReorderHarnesses`.
+  const handleReorderProxiedProviders = async (
+    harnessId: string,
+    newProviderIds: string[],
+  ) => {
+    const previous = pairings;
+    // Partition the prior pairings once: this harness's children go through
+    // the reorder; every other harness's pairings stay put.
+    const within = previous.filter((p) => p.harness_id === harnessId);
+    const outside = previous.filter((p) => p.harness_id !== harnessId);
+    // Fallback to the prior index for any id the user didn't touch (a
+    // dnd-kit drag only reorders the items the user interacted with, so
+    // the dragged subset is the only re-ranked input — but a paired
+    // provider that's currently rendered but not in `newProviderIds`
+    // would otherwise land at the very bottom by accident).
+    const previousIndex = new Map(within.map((p, i) => [p.provider_id, i]));
+    const rank = new Map(newProviderIds.map((id, i) => [id, i]));
+    const reorderedWithin = [...within].sort(
+      (a, b) =>
+        (rank.get(a.provider_id) ?? previousIndex.get(a.provider_id) ?? 0) -
+        (rank.get(b.provider_id) ?? previousIndex.get(b.provider_id) ?? 0),
+    );
+    setPairings([...outside, ...reorderedWithin]);
+    setError(null);
+    try {
+      await api.setProxiedProviderOrder(harnessId, newProviderIds);
+    } catch (e) {
+      setPairings(previous);
+      setError(formatError(e));
+    }
+  };
+
   // Persist a new spawn-menu harness order (issue #573). Optimistically reorder
   // the local `providers` list to match — keeping any non-listed rows (Terminal)
   // appended at the end, exactly as the backend re-derives them — and roll back
@@ -1209,6 +1248,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             accounts={accounts}
             onAttach={handleAttachProvider}
             onDetach={handleDetachProvider}
+            // Issue #577 — per-harness child reorder handler.
+            onReorderProxied={handleReorderProxiedProviders}
             // Prefixed so `paneForDirtySite` can route a harness card's
             // unsaved edits to the Harnesses nav dot (the list reports raw
             // harness ids like "claude").
