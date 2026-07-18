@@ -133,12 +133,26 @@ describe('RemoteAccessModal', () => {
 
   function mockBackend(
     s: NetworkStatus,
-    opts: { localIp?: string; cert?: CertChainStatus | null } = {},
+    opts: {
+      localIp?: string;
+      cert?: CertChainStatus | null;
+      mobileconfig?: string | null;
+    } = {},
   ) {
     const localIp = opts.localIp ?? '192.168.1.10';
     // Default to returning the sample cert; tests that want to exercise the
     // "fetch failed" path pass `cert: null`.
     const cert = opts.cert === undefined ? SAMPLE_CERT : opts.cert;
+    // Issue #713: default to a sample base64 string for the iOS
+    // `.mobileconfig` path so existing tests don't need to opt in.
+    // Tests that want to exercise the iOS-failed path pass
+    // `mobileconfig: null`.
+    const mobileconfig =
+      opts.mobileconfig === undefined
+        ? // A handful of ASCII chars is fine for the QR mock — we only
+          // assert on the data: URL prefix, not the base64 contents.
+          'QUJDREVGRw=='
+        : opts.mobileconfig;
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
         case 'get_root_token':
@@ -151,6 +165,10 @@ describe('RemoteAccessModal', () => {
           return cert === null
             ? Promise.reject(new Error('cert status unavailable'))
             : Promise.resolve(cert);
+        case 'get_root_cert_mobileconfig':
+          return mobileconfig === null
+            ? Promise.reject(new Error('mobileconfig unavailable'))
+            : Promise.resolve(mobileconfig);
         default:
           return Promise.resolve({});
       }
@@ -267,24 +285,29 @@ describe('RemoteAccessModal', () => {
   // side-by-side layout squeezed both into 160px which failed at scan
   // distance — see commit history on the modal for that experiment.
 
-  it('shows both tabs when LAN is realized, with Connect as the default', async () => {
+  it('shows all three tabs when LAN is realized and both install paths succeed', async () => {
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
     );
     render(<RemoteAccessModal onClose={() => {}} />);
 
-    // Both tab buttons appear. Connect is the default — its QR is in the
-    // DOM, install-QR is not until the user clicks the tab.
+    // All three tab buttons appear. Connect is the default — its QR is
+    // in the DOM, the two install QRs are not until the user clicks
+    // their tab. (Issue #713: a third iOS install tab joins the existing
+    // Connect | Install — Android bar.)
     const connectTab = await screen.findByTestId('remote-access-tab-connect');
-    const installTab = await screen.findByTestId('remote-access-tab-install');
+    const installAndroidTab = await screen.findByTestId('remote-access-tab-install-android');
+    const installIosTab = await screen.findByTestId('remote-access-tab-install-ios');
     expect(connectTab.getAttribute('aria-selected')).toBe('true');
-    expect(installTab.getAttribute('aria-selected')).toBe('false');
+    expect(installAndroidTab.getAttribute('aria-selected')).toBe('false');
+    expect(installIosTab.getAttribute('aria-selected')).toBe('false');
 
     await waitFor(() => expect(screen.getByTestId('remote-access-connect-qr')).toBeTruthy());
-    expect(screen.queryByTestId('remote-access-install-qr')).toBeNull();
+    expect(screen.queryByTestId('remote-access-install-android-qr')).toBeNull();
+    expect(screen.queryByTestId('remote-access-install-ios-qr')).toBeNull();
   });
 
-  it('swaps to the install cert QR when the Install tab is clicked', async () => {
+  it('swaps to the Android install QR when the Install — Android tab is clicked', async () => {
     const user = userEvent.setup();
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
@@ -292,18 +315,39 @@ describe('RemoteAccessModal', () => {
     render(<RemoteAccessModal onClose={() => {}} />);
 
     // Wait for connect QR to render (proves the initial load settled),
-    // then click the Install tab. Install QR should appear; connect QR
-    // should leave the DOM (single-active-QR design keeps the inactive
-    // <img> out of the DOM — a stray connect QR visible after the user
-    // switches tabs would be a screen-grab hazard).
+    // then click the Android install tab. Install QR should appear;
+    // connect QR should leave the DOM (single-active-QR design keeps the
+    // inactive <img> out of the DOM — a stray connect QR visible after
+    // the user switches tabs would be a screen-grab hazard).
     await screen.findByTestId('remote-access-connect-qr');
-    await user.click(await screen.findByTestId('remote-access-tab-install'));
+    await user.click(await screen.findByTestId('remote-access-tab-install-android'));
 
-    await waitFor(() => expect(screen.getByTestId('remote-access-install-qr')).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByTestId('remote-access-install-android-qr')).toBeTruthy(),
+    );
     expect(screen.queryByTestId('remote-access-connect-qr')).toBeNull();
 
-    const installTab = await screen.findByTestId('remote-access-tab-install');
-    expect(installTab.getAttribute('aria-selected')).toBe('true');
+    const installAndroidTab = await screen.findByTestId('remote-access-tab-install-android');
+    expect(installAndroidTab.getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('swaps to the iOS install QR when the Install — iOS tab is clicked', async () => {
+    // Sibling to the Android tab test above; locks the iOS tab's
+    // mount/unmount behaviour on tab-click (issue #713).
+    const user = userEvent.setup();
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await screen.findByTestId('remote-access-connect-qr');
+    await user.click(await screen.findByTestId('remote-access-tab-install-ios'));
+
+    await waitFor(() => expect(screen.getByTestId('remote-access-install-ios-qr')).toBeTruthy());
+    expect(screen.queryByTestId('remote-access-connect-qr')).toBeNull();
+
+    const installIosTab = await screen.findByTestId('remote-access-tab-install-ios');
+    expect(installIosTab.getAttribute('aria-selected')).toBe('true');
   });
 
   it('renders the active QR at full size (w-96 h-96) for scan-friendly distance', async () => {
@@ -325,44 +369,47 @@ describe('RemoteAccessModal', () => {
     expect(img!.className).toMatch(/h-96/);
   });
 
-  it('encodes both QRs at the same pixel size as their render box (no upscale blur)', async () => {
+  it('encodes all three QRs at the same pixel size as their render box (no upscale blur)', async () => {
     // Regression guard for code-review finding: the install-QR was
     // encoded at width=256 but rendered at w-96 (384px), causing the
-    // browser to upscale the raster and blur the QR modules. Both QRs
-    // MUST encode at width=384 to match the w-96 h-96 render box.
-    // Asserts on the `width` option of each `QRCode.toDataURL` call,
-    // order-agnostic (parallel Promise.allSettled).
+    // browser to upscale the raster and blur the QR modules. All three
+    // QRs (issue #713 adds the iOS install-QR) MUST encode at width=384
+    // to match the w-96 h-96 render box. Asserts on the `width` option
+    // of each `QRCode.toDataURL` call, order-agnostic (parallel
+    // Promise.allSettled).
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
     );
     render(<RemoteAccessModal onClose={() => {}} />);
 
-    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(3));
 
     const widths = toDataURL.mock.calls.map(c => {
       const opts = c[1] as { width?: number } | undefined;
       return opts?.width;
     });
-    // Both calls present and both at 384.
-    expect(widths).toHaveLength(2);
-    expect(widths).toEqual([384, 384]);
+    // Three calls present (connect + Android install + iOS install) and
+    // all at 384.
+    expect(widths).toHaveLength(3);
+    expect(widths).toEqual([384, 384, 384]);
   });
 
-  it('encodes the install-QR payload as an https URL to /install-cert.der on the realized bind', async () => {
+  it('encodes the Android install-QR payload as an https URL to /install-cert.der on the realized bind', async () => {
     const user = userEvent.setup();
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
     );
     render(<RemoteAccessModal onClose={() => {}} />);
 
-    // Wait for BOTH QR generation calls (parallel Promise.allSettled).
-    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(2));
-    // Switch to the Install tab so the install QR is rendered — both
-    // QRs are still in mock.calls regardless of which tab is active.
-    await user.click(await screen.findByTestId('remote-access-tab-install'));
+    // Wait for all three QR generation calls (parallel Promise.allSettled).
+    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(3));
+    // Switch to the Android install tab so the install QR is rendered
+    // — all QRs are still in mock.calls regardless of which tab is
+    // active.
+    await user.click(await screen.findByTestId('remote-access-tab-install-android'));
 
-    // Find the install-QR call — order-agnostic, since the two QR
-    // generations run in parallel and may resolve in either order.
+    // Find the install-QR call — order-agnostic, since the QR
+    // generations run in parallel and may resolve in any order.
     const payloads = toDataURL.mock.calls.map(c => c[0]);
     const installPayload = payloads.find(
       (p): p is string =>
@@ -378,13 +425,38 @@ describe('RemoteAccessModal', () => {
     expect(payloads.some(p => typeof p === 'string' && p.startsWith('data:application/x-x509-ca-cert'))).toBe(false);
   });
 
+  it('encodes the iOS install-QR payload as a data:application/x-apple-aspen-config;base64 URL', async () => {
+    // Sibling to the Android install-QR test above (issue #713).
+    // The base64 suffix is the value `getRootCertMobileconfig()` resolves
+    // to (mocked here); the data: URL prefix is what Safari intercepts
+    // for `.mobileconfig` install. Lock the prefix so a refactor that
+    // swaps to the HTTPS install path can't silently break iOS.
+    const user = userEvent.setup();
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(3));
+    await user.click(await screen.findByTestId('remote-access-tab-install-ios'));
+
+    const payloads = toDataURL.mock.calls.map(c => c[0]);
+    const iosPayload = payloads.find(
+      (p): p is string =>
+        typeof p === 'string' && p.startsWith('data:application/x-apple-aspen-config'),
+    );
+    expect(iosPayload).toBe(
+      'data:application/x-apple-aspen-config;base64,QUJDREVGRw==',
+    );
+  });
+
   it('encodes the connect QR payload with the realized bind (unchanged behavior)', async () => {
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
     );
     render(<RemoteAccessModal onClose={() => {}} />);
 
-    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(3));
 
     // Order-agnostic find for the connect URL — same rationale as the
     // install-QR test above (Promise.allSettled means resolution order
@@ -396,7 +468,7 @@ describe('RemoteAccessModal', () => {
     expect(connectPayload).toBe('https://192.168.1.10:1992/?token=root-tok');
   });
 
-  it('matches the install-QR scheme to the realized bind (http when LAN exposure is plain)', async () => {
+  it('matches the Android install-QR scheme to the realized bind (http when LAN exposure is plain)', async () => {
     // A plain (non-TLS) realized bind → the install-QR payload is also
     // http://. The route doesn't gate on scheme, but a phone reaching
     // the server over the wrong scheme hits the wrong port — symmetry
@@ -409,7 +481,7 @@ describe('RemoteAccessModal', () => {
     );
     render(<RemoteAccessModal onClose={() => {}} />);
 
-    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(toDataURL.mock.calls.length).toBeGreaterThanOrEqual(3));
 
     const payloads = toDataURL.mock.calls.map(c => c[0]);
     const installPayload = payloads.find(
@@ -419,7 +491,7 @@ describe('RemoteAccessModal', () => {
     expect(installPayload).toBe('http://192.168.1.10:1992/install-cert.der');
   });
 
-  it('hides both tabs and both QRs when LAN exposure is not realized', async () => {
+  it('hides all tabs and all QRs when LAN exposure is not realized', async () => {
     // `reachable: false` ⇒ the effect bails before QR generation, so
     // neither QR is rendered and the tab bar is also absent. The
     // warning UI takes over.
@@ -427,21 +499,78 @@ describe('RemoteAccessModal', () => {
     render(<RemoteAccessModal onClose={() => {}} />);
 
     await screen.findByTestId('remote-access-warning');
-    expect(screen.queryByTestId('remote-access-install-qr')).toBeNull();
+    expect(screen.queryByTestId('remote-access-install-android-qr')).toBeNull();
+    expect(screen.queryByTestId('remote-access-install-ios-qr')).toBeNull();
     expect(screen.queryByTestId('remote-access-connect-qr')).toBeNull();
     expect(screen.queryByTestId('remote-access-tabs')).toBeNull();
   });
 
-  it('hides the Install cert tab when the install-QR render fails (connect still works)', async () => {
-    // The two QR generations run in parallel via Promise.allSettled —
-    // a failure on one must not undo the other. Simulate the install-QR
-    // rejecting (e.g. future renderer bug) by having it throw on the
-    // second call; the connect QR (first call) must still render, and
-    // the Install cert tab itself must be absent so the user is never
-    // offered a tab that would render nothing.
+  it('hides the Android install tab when the Android install-QR render fails (connect + iOS still work)', async () => {
+    // The three QR generations run in parallel via Promise.allSettled —
+    // a failure on one must not undo the others. Simulate the Android
+    // install-QR rejecting (e.g. future renderer bug) by having it
+    // throw on the second call; the connect QR (first call) and the
+    // iOS QR (third call) must still render, and the Android install
+    // tab itself must be absent so the user is never offered a tab
+    // that would render nothing.
     toDataURL.mockImplementationOnce(async () => 'data:image/png;base64,connect');
     toDataURL.mockImplementationOnce(async () => {
-      throw new Error('install QR capacity overflow');
+      throw new Error('android install QR capacity overflow');
+    });
+    toDataURL.mockImplementationOnce(async () => 'data:image/png;base64,ios');
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('remote-access-connect-qr')).toBeTruthy(),
+    );
+    // Android install tab and QR both hidden — silent failure path
+    // mirrors the Re-install section's "the install URL is already a
+    // copy-link fallback" rationale.
+    expect(screen.queryByTestId('remote-access-install-android-qr')).toBeNull();
+    expect(screen.queryByTestId('remote-access-tab-install-android')).toBeNull();
+    // Connect + iOS tabs both still present.
+    expect(screen.getByTestId('remote-access-tab-connect')).toBeTruthy();
+    expect(screen.getByTestId('remote-access-tab-install-ios')).toBeTruthy();
+  });
+
+  it('hides the iOS install tab when the iOS mobileconfig fetch fails (Android still works)', async () => {
+    // Sibling to the Android-failure test above (issue #713). A
+    // pre-#713 install with no `ca.key.der` on disk rejects
+    // `get_root_cert_mobileconfig`; the tab must hide but the Android
+    // path keeps working so the user still has a remediation route.
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+      { mobileconfig: null },
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId('remote-access-connect-qr')).toBeTruthy(),
+    );
+    // iOS tab + QR hidden; Android tab + QR still present (the QR
+    // generation for the Android install URL doesn't depend on the iOS
+    // mobileconfig fetch, so it succeeded).
+    expect(screen.queryByTestId('remote-access-tab-install-ios')).toBeNull();
+    expect(screen.queryByTestId('remote-access-install-ios-qr')).toBeNull();
+    expect(screen.getByTestId('remote-access-tab-install-android')).toBeTruthy();
+  });
+
+  it('hides both install tabs when both install-QR renders fail (connect still works)', async () => {
+    // Three-way independent failure path: connect succeeds, both
+    // install QRs reject. The Connect tab must remain; both install
+    // tabs must hide. This is the worst-case "user can connect with a
+    // previously-installed root CA but can't install on a fresh phone"
+    // scenario — they fall back to the Re-install section's manual
+    // instructions below.
+    toDataURL.mockImplementationOnce(async () => 'data:image/png;base64,connect');
+    toDataURL.mockImplementationOnce(async () => {
+      throw new Error('android install QR capacity overflow');
+    });
+    toDataURL.mockImplementationOnce(async () => {
+      throw new Error('ios install QR capacity overflow');
     });
     mockBackend(
       status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
@@ -451,12 +580,8 @@ describe('RemoteAccessModal', () => {
     await waitFor(() =>
       expect(screen.getByTestId('remote-access-connect-qr')).toBeTruthy(),
     );
-    // Install tab and QR both hidden — silent failure path mirrors the
-    // Re-install section's "the install URL is already a copy-link
-    // fallback" rationale.
-    expect(screen.queryByTestId('remote-access-install-qr')).toBeNull();
-    expect(screen.queryByTestId('remote-access-tab-install')).toBeNull();
-    // The Connect tab is the only one rendered.
+    expect(screen.queryByTestId('remote-access-tab-install-android')).toBeNull();
+    expect(screen.queryByTestId('remote-access-tab-install-ios')).toBeNull();
     expect(screen.getByTestId('remote-access-tab-connect')).toBeTruthy();
   });
 

@@ -78,6 +78,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // `data:application/x-x509-ca-cert` URL as an image, so we use
   // QRCode.toDataURL to produce a viewable PNG of the data: URL.
   const [installQrDataUrl, setInstallQrDataUrl] = useState<string | null>(null);
+  // The rendered QR PNG of the iOS `.mobileconfig` data: URL (issue #713).
+  // Sibling to `installQrDataUrl` — kept separate so a failure on either
+  // path is independently hideable. iOS Safari does NOT intercept the
+  // Android path's HTTPS URL or the `application/x-x509-ca-cert` data:
+  // MIME; it needs an Apple Configurator 2 `.mobileconfig` profile signed
+  // with the root CA's private key, which `getRootCertMobileconfig` builds
+  // and base64-encodes for embedding in this QR.
+  const [installIosQrDataUrl, setInstallIosQrDataUrl] = useState<string | null>(null);
   // HTTPS URL of `/install-cert.der` for the manual install fallback
   // (issue #702 review finding). The Re-install section surfaces this
   // so a user whose phone can't scan the install-QR (older Android,
@@ -92,7 +100,11 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // 'connect' is the default — modal opens for the common case. Tabs
   // let each QR render at full modal width so a phone can scan from
   // across the room; a side-by-side layout made both QRs too small.
-  const [activeTab, setActiveTab] = useState<'connect' | 'install'>('connect');
+  // Issue #713: a third tab was added for the iOS-specific `.mobileconfig`
+  // install path; same full-width rationale (each tab → one QR → 384px).
+  const [activeTab, setActiveTab] = useState<'connect' | 'install-android' | 'install-ios'>(
+    'connect',
+  );
 
   useEffect(() => {
     const init = async () => {
@@ -126,21 +138,28 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         setInstallUrl(installUrlValue);
 
         if (!reachable) {
-          // Skip both QRs when the LAN isn't actually exposed — the
+          // Skip all QRs when the LAN isn't actually exposed — the
           // warning UI below takes over. Generating a QR for a
           // `reachable: false` URL would hand the user a dead link.
           return;
         }
 
-        // Both QRs are independent. Run them in parallel so React 19
-        // auto-batches the two setStates. `Promise.allSettled` so an
+        // Three QRs are independent. Run them in parallel so React 19
+        // auto-batches the setStates. `Promise.allSettled` so any
         // install-QR failure cannot undo the connect-QR's successful
         // setState — the install URL is already exposed as a fallback
-        // link below.
+        // link below, and each install tab is gated on its own QR
+        // presence so a failure on one platform hides only that tab.
         //
         // `installUrlValue!` is sound: the early-return above guarantees
         // non-null whenever this line is reached.
-        const [connectResult, installResult] = await Promise.allSettled([
+        //
+        // Issue #713: `getRootCertMobileconfig` is awaited alongside
+        // the other two — it does the PKCS#7/CMS sign server-side, which
+        // is ~5–15 ms on a fresh root. Failure here (e.g. pre-#713 install
+        // with no `ca.key.der`) is silently swallowed and the iOS tab is
+        // hidden, matching the existing Android tab's failure semantics.
+        const [connectResult, installResult, installIosResult] = await Promise.allSettled([
           QRCode.toDataURL(url, {
             width: 384,
             margin: 2,
@@ -155,6 +174,20 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
             margin: 2,
             color: { dark: '#e0e0e0', light: '#1a1a1a' },
           }),
+          // iOS `.mobileconfig` QR (issue #713). Payload is a
+          // `data:application/x-apple-aspen-config;base64,…` URL —
+          // built inline because the base64 string lives only here
+          // (it's the QR's content, not a separate render artifact).
+          api
+            .getRootCertMobileconfig()
+            .then(b64 => `data:application/x-apple-aspen-config;base64,${b64}`)
+            .then(payload =>
+              QRCode.toDataURL(payload, {
+                width: 384,
+                margin: 2,
+                color: { dark: '#e0e0e0', light: '#1a1a1a' },
+              }),
+            ),
         ]);
         if (connectResult.status === 'fulfilled') {
           setQrDataUrl(connectResult.value);
@@ -169,6 +202,13 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // Install-QR failure is silent — the install URL is exposed as
         // a copy-link fallback, so the user has a working remediation
         // path even when the QR fails to render.
+        if (installIosResult.status === 'fulfilled') {
+          setInstallIosQrDataUrl(installIosResult.value);
+        }
+        // Same silent-failure contract as the Android install-QR: the
+        // iOS tab is gated on `installIosQrDataUrl` presence, so a
+        // rejection here just hides it — the user keeps the connect
+        // and Android paths.
       } catch (e) {
         setError(formatError(e));
       }
@@ -237,9 +277,11 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
           <div className="flex flex-col items-center">
             {/* Tab bar. Connect is the default — the modal opens for the
                 common case (phone already has the root, user wants to
-                connect). Install is opt-in for the fresh-phone /
-                rotated-cert case. Each tab renders its QR at full modal
-                width so the phone can scan from a comfortable distance. */}
+                connect). Each install tab is opt-in for the fresh-phone /
+                rotated-cert case and renders only when its QR is available
+                (a failed Android fetch hides the Android tab; a failed iOS
+                fetch hides the iOS tab). Each tab renders its QR at full
+                modal width so the phone can scan from a comfortable distance. */}
             <div
               data-testid="remote-access-tabs"
               role="tablist"
@@ -261,22 +303,38 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
               </button>
               {installQrDataUrl && (
                 <button
-                  data-testid="remote-access-tab-install"
+                  data-testid="remote-access-tab-install-android"
                   role="tab"
-                  aria-selected={activeTab === 'install'}
-                  onClick={() => setActiveTab('install')}
+                  aria-selected={activeTab === 'install-android'}
+                  onClick={() => setActiveTab('install-android')}
                   className={`flex-1 px-3 py-2 text-sm font-medium ${
-                    activeTab === 'install'
+                    activeTab === 'install-android'
                       ? 'text-accent-cyan border-b-2 border-accent-cyan'
                       : 'text-text-muted hover:text-text-secondary'
                   }`}
                   type="button"
                 >
-                  Install cert
+                  Install — Android
+                </button>
+              )}
+              {installIosQrDataUrl && (
+                <button
+                  data-testid="remote-access-tab-install-ios"
+                  role="tab"
+                  aria-selected={activeTab === 'install-ios'}
+                  onClick={() => setActiveTab('install-ios')}
+                  className={`flex-1 px-3 py-2 text-sm font-medium ${
+                    activeTab === 'install-ios'
+                      ? 'text-accent-cyan border-b-2 border-accent-cyan'
+                      : 'text-text-muted hover:text-text-secondary'
+                  }`}
+                  type="button"
+                >
+                  Install — iOS
                 </button>
               )}
             </div>
-            {/* Single active QR at full size. Both tabs render the same
+            {/* Single active QR at full size. All three tabs render the same
                 w-96 h-96 size as the original connect QR — the side-by-side
                 attempt squeezed both into w-40 which failed at scan
                 distance. Mounting only the active QR avoids keeping the
@@ -297,18 +355,35 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 </div>
               </div>
             )}
-            {activeTab === 'install' && installQrDataUrl && (
+            {activeTab === 'install-android' && installQrDataUrl && (
               <div
-                data-testid="remote-access-install-qr"
+                data-testid="remote-access-install-android-qr"
                 className="flex flex-col items-center"
               >
                 <img
                   src={installQrDataUrl}
-                  alt="QR Code to install Buildmesh root CA"
+                  alt="QR Code to install Buildmesh root CA on Android"
                   className="w-96 h-96 rounded-md border border-border-subtle"
                 />
                 <div className="mt-2 text-sm text-text-muted text-center">
-                  Scan with your phone to install the root CA.
+                  Scan with your Android phone to install the root CA.
+                </div>
+              </div>
+            )}
+            {activeTab === 'install-ios' && installIosQrDataUrl && (
+              <div
+                data-testid="remote-access-install-ios-qr"
+                className="flex flex-col items-center"
+              >
+                <img
+                  src={installIosQrDataUrl}
+                  alt="QR Code to install Buildmesh root CA on iOS"
+                  className="w-96 h-96 rounded-md border border-border-subtle"
+                />
+                <div className="mt-2 text-sm text-text-muted text-center">
+                  Scan with your iPhone to install the profile, then enable
+                  trust in Settings → General → About → Certificate Trust
+                  Settings.
                 </div>
               </div>
             )}
@@ -420,10 +495,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                         iOS
                       </div>
                       <ol className="list-decimal list-inside space-y-0.5">
-                        <li>Transfer <code className="font-mono">ca.der</code> to the phone.</li>
-                        <li>Settings → General → VPN &amp; Device Management → tap the profile → Install.</li>
-                        <li>Settings → General → About → Certificate Trust Settings → enable the new root.</li>
+                        <li>Scan the <span className="font-medium text-text-secondary">Install — iOS</span> QR above — Safari installs the signed <code className="font-mono">.mobileconfig</code> profile with a single tap.</li>
+                        <li>Settings → General → About → Certificate Trust Settings → enable the new root. (Self-signed roots always need this one tap; signing only removes the "Not Signed" warning, it does not auto-trust.)</li>
                       </ol>
+                      <div className="mt-1 text-text-muted/80">
+                        If scanning fails (older iOS, custom camera apps), transfer
+                        {' '}<code className="font-mono">ca.der</code> to the phone and
+                        install via Settings → General → VPN &amp; Device Management.
+                      </div>
                     </div>
                   </div>
                 )}

@@ -8,6 +8,7 @@ pub mod coordinator;
 pub mod git;
 pub mod issues;
 pub mod meshes;
+pub mod mobileconfig;
 pub mod nodes;
 pub mod pr;
 pub mod providers;
