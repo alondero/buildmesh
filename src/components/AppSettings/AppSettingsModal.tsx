@@ -19,6 +19,31 @@ interface AppSettingsModalProps {
 
 const NO_OVERRIDE = '__no_override__';
 
+/** The Settings sub-panes. One long scroll of unrelated sections outgrew
+ *  itself; each pane groups settings by concern (behaviour defaults /
+ *  provider credentials / spawn-menu composition / network reachability).
+ *  All panes stay MOUNTED (inactive ones get the `hidden` attribute) — the
+ *  modal's dirty tracking (issue #730) lives in child component state, so
+ *  unmounting a pane on tab-switch would destroy half-typed credentials
+ *  while the modal still reports itself dirty. */
+const SETTINGS_TABS = [
+  { id: 'general', label: 'General' },
+  { id: 'providers', label: 'Providers' },
+  { id: 'harnesses', label: 'Harnesses' },
+  { id: 'remote', label: 'Remote Access' },
+] as const;
+type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
+
+/** Which pane a dirty site belongs to, so its nav item can show the
+ *  unsaved-changes dot. Site keys: `autopilot-pool` (General), `harness-*`
+ *  (Harnesses, prefixed where the modal wires HarnessConfigList), and
+ *  `account-*` / `add-custom-form` (Providers). */
+function paneForDirtySite(site: string): SettingsTabId {
+  if (site === 'autopilot-pool') return 'general';
+  if (site.startsWith('harness-')) return 'harnesses';
+  return 'providers';
+}
+
 // Built-ins can only be disabled, never removed (a "remove" just reverts them to
 // the code default), so we hide the Remove action for these ids. Kept in sync with
 // `preferences::default_provider_accounts`.
@@ -397,6 +422,17 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // trivial content and shouldn't inherit the node's model.
   const [namingProvider, setNamingProvider] = useState<string | null>(null);
   const [namingSaving, setNamingSaving] = useState(false);
+  const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
+  // Autopilot pool size (app-wide cap on concurrent autopilot nodes). The
+  // draft is a string so the input can hold a cleared/in-progress value;
+  // `''` means "no global cap". Committed on blur / Enter rather than per
+  // keystroke — a half-typed "1" of "10" must not briefly cap the pool at 1.
+  const [poolDraft, setPoolDraft] = useState('');
+  const [poolSaving, setPoolSaving] = useState(false);
+  // Last value confirmed saved (canonical string form), for rollback and
+  // dirty comparison. A ref for the same closure-staleness reason as
+  // `selectedRef` (issue #581).
+  const poolSavedRef = useRef('');
   // `loaded` flag carries over from the existing hydration logic below;
   // mirrored here so the rename picker only enables after the
   // preferences load resolves.
@@ -432,6 +468,13 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       return next;
     });
   }, []);
+
+  // Which panes hold unsaved edits — drives the amber dot on the nav rail so
+  // a dirty pane stays discoverable after the user tabs away from it.
+  const dirtyPanes = useMemo(
+    () => new Set([...dirtySites].map(paneForDirtySite)),
+    [dirtySites],
+  );
 
   // Issue #581: mirror `providers` and `selected` into refs so the
   // optimistic rollback handlers below read the *latest* committed value
@@ -497,6 +540,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         // "" clear the same as the explicit None the backend accepts.
         const storedNaming = prefs.naming_provider;
         setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
+        const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
+        setPoolDraft(storedPool);
+        poolSavedRef.current = storedPool;
         setCoordEnabled(coord.enabled);
         setCoordHasToken(coord.has_token);
         setDevices(deviceList);
@@ -664,6 +710,45 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setError(String(e));
     } finally {
       setNamingSaving(false);
+    }
+  };
+
+  // Commit the autopilot pool-size draft (blur / Enter). `''` clears the
+  // global cap; anything else is clamped to a non-negative integer (0 =
+  // pause new autopilot spawns). Optimistic with rollback, mirroring the
+  // other settings writes; the dirty site clears optimistically too so a
+  // successful save never leaves a phantom discard banner.
+  const commitPoolSize = async () => {
+    const trimmed = poolDraft.trim();
+    const numeric = Number(trimmed);
+    if (trimmed !== '' && Number.isNaN(numeric)) {
+      // Unreachable via the DOM (type=number sanitises non-numeric input to
+      // ''), but guards the IPC from ever carrying NaN if the input type
+      // changes: revert to the saved value rather than sending garbage.
+      setPoolDraft(poolSavedRef.current);
+      siteDirtyChange('autopilot-pool', false);
+      return;
+    }
+    const parsed = trimmed === '' ? null : Math.max(0, Math.floor(numeric));
+    const canonical = parsed === null ? '' : String(parsed);
+    setPoolDraft(canonical);
+    if (canonical === poolSavedRef.current) {
+      siteDirtyChange('autopilot-pool', false);
+      return;
+    }
+    const previous = poolSavedRef.current;
+    poolSavedRef.current = canonical;
+    siteDirtyChange('autopilot-pool', false);
+    setPoolSaving(true);
+    setError(null);
+    try {
+      await api.setAppAutopilotPoolSize(parsed);
+    } catch (e) {
+      poolSavedRef.current = previous;
+      setPoolDraft(previous);
+      setError(String(e));
+    } finally {
+      setPoolSaving(false);
     }
   };
 
@@ -847,7 +932,51 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         <ModalCloseButton onClose={onClose} label="Close settings" />
       </div>
 
-      <div className="flex-1 overflow-y-auto px-10 pb-10 pt-6">
+      <div className="flex-1 flex min-h-0">
+        <nav
+          role="tablist"
+          aria-orientation="vertical"
+          aria-label="Settings sections"
+          className="w-44 shrink-0 border-r border-border-subtle py-5 px-3 space-y-1 overflow-y-auto"
+        >
+          {SETTINGS_TABS.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`w-full flex items-center justify-between text-left px-3 py-2 rounded-md text-base ${
+                activeTab === tab.id
+                  ? 'bg-bg-card text-accent-cyan font-medium'
+                  : 'text-text-secondary hover:bg-bg-card/60 hover:text-text-primary'
+              }`}
+            >
+              <span>{tab.label}</span>
+              {dirtyPanes.has(tab.id) && (
+                <span
+                  className="h-1.5 w-1.5 rounded-full bg-status-warning"
+                  title="Unsaved changes"
+                  data-testid={`settings-tab-dirty-${tab.id}`}
+                />
+              )}
+            </button>
+          ))}
+        </nav>
+
+        <div className="flex-1 overflow-y-auto px-8 pb-10 pt-6">
+        {/* Shared error surface — outside the panes so a failed save is
+            visible no matter which pane the user is looking at. */}
+        {error && (
+          <div className="mb-4 text-status-error text-base">{error}</div>
+        )}
+
+        <section
+          role="tabpanel"
+          aria-label="General"
+          hidden={activeTab !== 'general'}
+          className="space-y-8"
+        >
         <div className="space-y-4">
           <label className="block text-lg font-medium text-text-secondary">
             Default provider
@@ -876,7 +1005,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             subscription default is never silently inherited. Empty /
             "Disabled" leaves nodes with their random adj-adj-noun
             slugs. */}
-        <div className="mt-8 pt-5 border-t border-border-subtle space-y-4">
+        <div className="pt-6 border-t border-border-subtle space-y-4">
           <label className="block text-lg font-medium text-text-secondary">
             Auto-naming
           </label>
@@ -914,12 +1043,61 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           )}
         </div>
 
-        {error && (
-          <div className="mt-4 text-status-error text-base">{error}</div>
-        )}
+        <div className="pt-6 border-t border-border-subtle space-y-4">
+          <label
+            htmlFor="autopilot-pool-size"
+            className="block text-lg font-medium text-text-secondary"
+          >
+            Autopilot pool size
+          </label>
+          <p className="text-base text-text-muted">
+            The most autopilot nodes allowed to run at once across{' '}
+            <span className="font-medium">all</span> meshes. Each mesh still
+            respects its own concurrency limit (set in Mesh Properties) — this
+            caps the total, so ten meshes with two slots each can't put twenty
+            agents on your machine. Leave empty for no global cap; 0 pauses new
+            autopilot spawns. Running nodes are never stopped — lowering the cap
+            just holds new spawns until slots free up.
+          </p>
+          <input
+            id="autopilot-pool-size"
+            type="number"
+            min={0}
+            step={1}
+            inputMode="numeric"
+            aria-label="Autopilot pool size"
+            placeholder="No global cap"
+            value={poolDraft}
+            disabled={!loaded || poolSaving}
+            onChange={e => {
+              setPoolDraft(e.target.value);
+              siteDirtyChange('autopilot-pool', e.target.value.trim() !== poolSavedRef.current);
+            }}
+            onBlur={commitPoolSize}
+            onKeyDown={e => {
+              if (e.key === 'Enter') commitPoolSize();
+            }}
+            className="w-48 bg-bg-card border border-border-subtle rounded-md px-4 py-2.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+          />
+        </div>
 
+        <div className="pt-6 border-t border-border-subtle">
+          <p className="text-base text-text-muted">
+            Provider defaults are stored in your app data directory at{' '}
+            <span className="font-mono">preferences.json</span>; coordinator settings and
+            authorized devices live in the app database.
+          </p>
+        </div>
+        </section>
+
+        <section
+          role="tabpanel"
+          aria-label="Harnesses"
+          hidden={activeTab !== 'harnesses'}
+          className="space-y-8"
+        >
         {providers.filter(p => p.id !== 'terminal').length >= 2 && (
-          <div className="mt-8 pt-5 border-t border-border-subtle">
+          <div className="pt-6 border-t border-border-subtle first:pt-0 first:border-t-0">
             <h3 className="text-xl font-semibold text-text-primary mb-2">Spawn menu order</h3>
             <p className="text-base text-text-muted mb-4">
               Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last.
@@ -928,7 +1106,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           </div>
         )}
 
-        <div className="mt-8 pt-5 border-t border-border-subtle">
+        <div className="pt-6 border-t border-border-subtle first:pt-0 first:border-t-0">
           <h3 className="text-xl font-semibold text-text-primary mb-2">Harnesses & proxied providers</h3>
           <p className="text-base text-text-muted mb-4">
             Proxy a model provider through a harness over a compatible API surface
@@ -947,11 +1125,20 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             accounts={accounts}
             onAttach={handleAttachProvider}
             onDetach={handleDetachProvider}
-            onDirtyChange={siteDirtyChange}
+            // Prefixed so `paneForDirtySite` can route a harness card's
+            // unsaved edits to the Harnesses nav dot (the list reports raw
+            // harness ids like "claude").
+            onDirtyChange={(site, d) => siteDirtyChange(`harness-${site}`, d)}
           />
         </div>
+        </section>
 
-        <div className="mt-8 pt-5 border-t border-border-subtle">
+        <section
+          role="tabpanel"
+          aria-label="Providers"
+          hidden={activeTab !== 'providers'}
+        >
+        <div>
           <h3 className="text-xl font-semibold text-text-primary mb-2">Providers</h3>
           <p className="text-base text-text-muted mb-4">
             Enable / disable each model provider and edit its credentials.
@@ -1001,8 +1188,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             </button>
           )}
         </div>
+        </section>
 
-        <div className="mt-8 pt-5 border-t border-border-subtle">
+        <section
+          role="tabpanel"
+          aria-label="Remote Access"
+          hidden={activeTab !== 'remote'}
+          className="space-y-8"
+        >
+        <div>
           <h3 className="text-xl font-semibold text-text-primary mb-2">LAN / VPN Exposure</h3>
           <p className="text-base text-text-muted mb-4">
             Off by default — the server is reachable only from this machine
@@ -1078,7 +1272,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           )}
         </div>
 
-        <div className="mt-8 pt-5 border-t border-border-subtle">
+        <div className="pt-6 border-t border-border-subtle">
           <h3 className="text-xl font-semibold text-text-primary mb-2">Coordinator Read API</h3>
           <p className="text-base text-text-muted mb-4">
             A read-only HTTP view of every node's status for an external coordinator.
@@ -1135,7 +1329,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           )}
         </div>
 
-        <div className="mt-8 pt-5 border-t border-border-subtle">
+        <div className="pt-6 border-t border-border-subtle">
           <h3 className="text-xl font-semibold text-text-primary mb-2">Authorized Devices</h3>
           <p className="text-base text-text-muted mb-4">
             Phones you've paired keep their own session token, so they stay
@@ -1194,13 +1388,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             </ul>
           )}
         </div>
-
-        <div className="mt-8 pt-5 border-t border-border-subtle">
-          <p className="text-base text-text-muted">
-            Provider defaults are stored in your app data directory at{' '}
-            <span className="font-mono">preferences.json</span>; coordinator settings and
-            authorized devices live in the app database.
-          </p>
+        </section>
         </div>
       </div>
     </Modal>

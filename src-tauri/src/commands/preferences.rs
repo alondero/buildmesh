@@ -35,6 +35,17 @@ pub async fn set_app_naming_provider(provider: Option<String>) -> Result<(), Str
     preferences::save(prefs)
 }
 
+/// Set the app-wide autopilot pool size — the cap on concurrently active
+/// autopilot nodes across **all** meshes. `None` clears the cap (per-mesh
+/// limits alone apply); `Some(0)` pauses all new autopilot spawns. Takes
+/// effect on the poller's next pass — running nodes are never killed.
+#[command]
+pub async fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.autopilot_pool_size = size;
+    preferences::save(prefs)
+}
+
 /// Persist the user's spawn-menu harness order (issue #573). `order` is the list
 /// of harness-row ids in the desired top-to-bottom order; `Terminal` is filtered
 /// out backend-side (it's always forced last). Emits `provider-list-changed` so

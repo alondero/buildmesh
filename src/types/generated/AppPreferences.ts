@@ -71,4 +71,17 @@ provider_pairings: Array<ProviderPairing>,
  * Anthropic is special-cased in `session_naming` to pin a cheap
  * haiku tier instead of the user's main subscription default.
  */
-naming_provider: string | null, };
+naming_provider: string | null, 
+/**
+ * Buildmesh-wide cap on **concurrently active autopilot nodes across all
+ * meshes** — the global "pool" the per-mesh `autopilot_concurrency_limit`
+ * slots draw from. Per-mesh limits alone can't protect the machine: ten
+ * meshes × 2 nodes each is still twenty concurrent agents. `None` (the
+ * default) means no global cap — per-mesh limits alone apply, exactly the
+ * pre-existing behaviour. `Some(0)` pauses all new autopilot spawns
+ * without touching any mesh's enabled flag. Enforced by the poller
+ * (`services::autopilot::run_poll_pass`), never by killing running nodes
+ * — lowering the cap below the current active count just stops new
+ * spawns until enough slots free up.
+ */
+autopilot_pool_size: number | null, };

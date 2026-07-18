@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import { openSettingsPane } from '../utils/settings-panes';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -54,6 +55,7 @@ describe('Authorized Devices settings section', () => {
   it('lists each paired device with its label, IP and last-active time', async () => {
     mockBackend([device({ id: 1, label: 'Safari on iPhone', last_ip: '10.0.0.5' })]);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByText('Safari on iPhone');
     expect(screen.getByText(/10\.0\.0\.5/)).toBeTruthy();
@@ -63,6 +65,7 @@ describe('Authorized Devices settings section', () => {
   it('shows an empty state when no devices are paired', async () => {
     mockBackend([]);
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByText(/no paired devices yet/i);
   });
@@ -73,6 +76,7 @@ describe('Authorized Devices settings section', () => {
     ]);
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByText('Chrome on Android');
 
@@ -92,6 +96,7 @@ describe('Authorized Devices settings section', () => {
     const calls = mockBackend([device({ id: 3 })]);
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
 
     await screen.findByText('Safari on iPhone');
     await user.click(screen.getByRole('button', { name: /^revoke$/i }));

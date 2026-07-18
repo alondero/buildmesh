@@ -2281,20 +2281,35 @@ pub fn delete_autopilot_run(node_id: i64) -> SqlResult<()> {
     Ok(())
 }
 
-/// Number of *active* Autopilot nodes for a mesh — rows still in the
-/// pipeline (`implementing`/`finishing`) whose node hasn't been archived.
-/// This is the count the poller compares against
-/// `autopilot_concurrency_limit`; completed/failed runs free their slot.
+/// Shared "active autopilot node" count shape: runs still in the pipeline
+/// (`implementing`/`finishing`) whose node hasn't been archived. The single
+/// definition both counters below share, so the per-mesh gate and the
+/// app-wide pool gate can never drift on what "active" means.
+const COUNT_ACTIVE_AUTOPILOT_SQL: &str = "SELECT COUNT(*) FROM autopilot_runs r \
+     JOIN agent_nodes a ON a.id = r.node_id \
+     WHERE r.state IN ('implementing', 'finishing') \
+     AND a.status != 'archived'";
+
+/// Number of *active* Autopilot nodes for a mesh. This is the count the
+/// poller compares against `autopilot_concurrency_limit`; completed/failed
+/// runs free their slot.
 pub fn count_active_autopilot_nodes(mesh_id: i64) -> SqlResult<i64> {
     let db = get().lock().unwrap();
     db.query_row(
-        "SELECT COUNT(*) FROM autopilot_runs r \
-         JOIN agent_nodes a ON a.id = r.node_id \
-         WHERE r.mesh_id = ?1 AND r.state IN ('implementing', 'finishing') \
-         AND a.status != 'archived'",
+        &format!("{} AND r.mesh_id = ?1", COUNT_ACTIVE_AUTOPILOT_SQL),
         params![mesh_id],
         |row| row.get(0),
     )
+}
+
+/// Number of *active* Autopilot nodes across **all** meshes — the same
+/// active predicate as [`count_active_autopilot_nodes`] minus the mesh
+/// filter. This is what the poller compares against the app-wide
+/// `autopilot_pool_size` preference: per-mesh limits bound each mesh, but
+/// only this total bounds the machine.
+pub fn count_active_autopilot_nodes_total() -> SqlResult<i64> {
+    let db = get().lock().unwrap();
+    db.query_row(COUNT_ACTIVE_AUTOPILOT_SQL, [], |row| row.get(0))
 }
 
 /// Node ids of `finishing` runs (all meshes) whose ledger row hasn't

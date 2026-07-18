@@ -14,6 +14,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
+import { openSettingsPane } from '../utils/settings-panes';
 
 const NO_TIERS = { default: null, small_fast: null, sonnet: null, opus: null, fable: null, haiku: null };
 
@@ -79,6 +80,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     const { container } = render(<AppSettingsModal onClose={onClose} />);
 
     await screen.findByText('Anthropic / Claude');
+    await openSettingsPane('Providers');
     await user.click(screen.getByRole('button', { name: /add custom provider/i }));
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
@@ -94,6 +96,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     render(<AppSettingsModal onClose={onClose} />);
 
     await screen.findByText('Anthropic / Claude');
+    await openSettingsPane('Providers');
     await user.click(screen.getByRole('button', { name: /add custom provider/i }));
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
@@ -112,6 +115,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     const { container } = render(<AppSettingsModal onClose={onClose} />);
 
     await screen.findByText('Anthropic / Claude');
+    await openSettingsPane('Providers');
     await user.click(screen.getByRole('button', { name: /add custom provider/i }));
     await user.type(screen.getByLabelText(/custom provider name/i), 'Foo');
 
@@ -140,6 +144,7 @@ describe('AppSettingsModal dirty-check wiring (issue #730)', () => {
     render(<AppSettingsModal onClose={onClose} />);
 
     await screen.findByText('DeepSeek via Claude Code');
+    await openSettingsPane('Providers');
     // Open the credentials editor.
     await user.click(screen.getByRole('button', { name: /edit credentials/i }));
     // Type a half-typed API key.

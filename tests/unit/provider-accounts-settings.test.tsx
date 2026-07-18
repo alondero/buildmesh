@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import { openSettingsPane } from '../utils/settings-panes';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -94,6 +95,7 @@ describe('Accounts & Usage settings (issue #537)', () => {
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={() => {}} />);
     await screen.findByText('Anthropic / Claude');
+    await openSettingsPane('Providers');
 
     await user.click(screen.getByRole('button', { name: /add custom provider/i }));
     await user.type(screen.getByLabelText(/custom provider name/i), 'DeepSeek via Claude Code');
