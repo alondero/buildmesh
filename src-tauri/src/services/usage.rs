@@ -1006,6 +1006,33 @@ pub fn get_cached_usage(provider: &str) -> Option<ProviderUsage> {
     })
 }
 
+// ── Cache-age wire gap (issue #857 follow-up — deferred) ─────────────────
+//
+// The UI's "Refreshed X ago" indicator is currently stamped on the React side
+// at the moment `loadMeters` resolves, NOT at the moment each provider's vendor
+// endpoint returned. Because [`get_cached_usage`] may short-circuit before any
+// HTTP round-trip, the indicator mislabels a pure cache hit as a fresh fetch.
+//
+// The clean fix is a wire-shape change, deliberately deferred to its own PR
+// (issue #857 body flags the cross-cutting consequences — Rust struct +
+// ts-rs regen + new React-side cache-vs-fresh semantics — as warranting a
+// separate commit). When picked up:
+//
+//   1. Add `cached_at: Option<i64>` (epoch ms) to [`ProviderMeters`] with
+//      `#[ts(rename = "cachedAt")]`. `None` means "freshly fetched on this
+//      call"; `Some(_)` means "served from the in-process cache at that instant".
+//   2. Change this function's signature to also expose the cache instant, e.g.
+//      `Option<(ProviderUsage, Instant)>`, so callers can stamp `cached_at`.
+//   3. Have [`commands::usage::cached_or_fetch`] (commands/usage.rs:205) thread
+//      the Optional instant through to `assemble_meters`, which sets
+//      `cached_at` per row in the returned [`ProviderMeters`].
+//   4. Run `cargo test` to regenerate `src/types/generated/ProviderMeters.ts`
+//      (the project's ts-rs gate; CLAUDE.md hard rule on wire-type drift).
+//   5. The React side (`src/components/Probe/UsageTab.tsx`) then picks the
+//      display timestamp: if every row carries `cachedAt`, the oldest one
+//      drives a "Cached Xs ago" label; otherwise `Date.now()` keeps the
+//      existing "Refreshed Xs ago" semantics for the fresh-row case.
+
 pub fn set_cached_usage(provider: &str, usage: ProviderUsage) {
     let mut guard = USAGE_CACHE.lock().unwrap();
     guard.insert(provider.to_string(), (Instant::now(), usage));

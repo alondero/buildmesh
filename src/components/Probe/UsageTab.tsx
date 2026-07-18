@@ -21,15 +21,23 @@
  *     emits `provider-list-changed` on upsert/remove so a toggled or
  *     removed provider's meter updates without a manual Refresh click.
  *
- * Cache staleness indicator (issue follow-up):
- *   The header also renders a "Refreshed X ago" label next to the
- *   count + Refresh button. The backend's `get_provider_meters` has a
- *   5-minute TTL (#574) so a fresh read may be served from cache
- *   without re-hitting each provider — the indicator tells the user
- *   how stale their view could possibly be. It's set only on a
- *   SUCCESSFUL load (initial mount, cross-surface invalidation, manual
- *   Refresh); a failed refresh leaves the previous timestamp in place
- *   so the label continues to refer to the last known-good moment.
+ * Cache staleness indicator (issue #856):
+ *   The header renders a "Refreshed X ago" label next to the count +
+ *   Refresh button. The backend's `get_provider_meters` has a 5-minute
+ *   TTL (#574) so a fresh read may be served from cache without
+ *   re-hitting each provider — the indicator tells the user how stale
+ *   their view could possibly be. It's set only on a SUCCESSFUL load
+ *   (initial mount, cross-surface invalidation, manual Refresh); a
+ *   failed refresh leaves the previous timestamp in place so the label
+ *   continues to refer to the last known-good moment.
+ *
+ *   OPEN FOLLOW-UP (issue #857, deferred — see "Cache age wire gap"
+ *   below): the indicator currently labels every successful read
+ *   "Refreshed X ago" even when the Rust 5-minute cache served the
+ *   response without contacting any vendor. The wire shape needs
+ *   `cachedAt: Option<i64>` on `ProviderMeters` so the React side can
+ *   distinguish "fresh fetch" from "cache hit" — see the comment block
+ *   for the proposed design.
  *
  * Read-only by design (issue #601): the tab has no Edit-credentials /
  * enable-toggle / Remove affordance. Those live on the Settings-side
@@ -57,6 +65,50 @@
  *      the single voice. The body copy is wrapped in `<EmptyState>`
  *      so its i-icon pairs with `LoadingState` and `ErrorState`
  *      exactly like the Git Issues/PRs/Archive tabs.
+ *
+ * Issue #857 — fetch-failure error UI de-duplication
+ * --------------------------------------------------
+ * Pre-#857 the tab rendered the IPC error message in *two* places when
+ * `loadMeters` rejected after rows had loaded: the inline red alert
+ * banner above the rows region AND the body's `<ErrorState>`. The
+ * duplicated copy is the exact pattern the shared vocabulary was
+ * created to prevent (issue #813). The fix drops the inline banner
+ * entirely so the body renders a single `<ErrorState>` — matching
+ * GitIssuesTab / GitPullRequestsTab / ArchivedNodesTab. The
+ * previously-existing test had to use `findAllByText` + an explicit
+ * "presence-not-uniqueness" comment to dodge the duplication; that
+ * test now uses `findByText` (uniqueness) and is pinned by a new
+ * regression test (`renders exactly one error element on a forced-
+ * refresh rejection after rows have loaded`).
+ *
+ * Cache age wire gap (issue #857 follow-up — out of scope here)
+ * -------------------------------------------------------------
+ * The "Refreshed just now" / "Xs ago" indicator is stamped on the
+ * React side at the moment `loadMeters` resolves, NOT at the moment
+ * each provider's vendor endpoint returned. The Rust cache
+ * (`services/usage.rs::CACHE_TTL`, 5 min) means a request can come
+ * back fast without any vendor being contacted — the indicator
+ * then mislabels a cache hit as a fresh fetch. The fix is a wire-
+ * shape change:
+ *
+ *   1. Add `cachedAt: Option<i64>` (epoch ms) to `ProviderMeters`.
+ *      `None` = freshly fetched on this call; `Some(ms)` = served
+ *      from the in-process cache at that instant.
+ *   2. `services::usage::get_cached_usage` already keeps the
+ *      `Instant` next to the cached `ProviderUsage`; expose it
+ *      alongside the usage (e.g. `Option<(ProviderUsage, Instant)>`)
+ *      and have `cached_or_fetch` thread the Optional instant through
+ *      to `assemble_meters`, which stamps `cachedAt` on each row.
+ *   3. `cargo test` regenerates `src/types/generated/ProviderMeters.ts`
+ *      with `cachedAt: number | null` per the project's ts-rs gate.
+ *   4. The React side computes a single display timestamp: the
+ *      `cachedAt` if every row carried one (pure cache hit, label
+ *      switches to "Cached Xs ago"), otherwise `Date.now()` (at
+ *      least one row is fresh, keep "Refreshed Xs ago").
+ *
+ * Deferred to its own PR per issue #857 (the body flags the
+ * cross-cutting consequences — Rust struct, ts-rs regen, mixed-cache
+ * UI semantics — as warranting a separate commit).
  */
 
 import { useState, useCallback, useEffect } from 'react';
@@ -233,15 +285,6 @@ export function UsageTab() {
           ariaLabel="Refresh usage"
         />
       </div>
-
-      {error && (
-        <div
-          role="alert"
-          className="mx-3 mt-2 px-3 py-2 bg-bg-card border border-status-error/40 rounded-md text-xs text-status-error"
-        >
-          {error}
-        </div>
-      )}
 
       <div
         data-testid="usage-rows"
