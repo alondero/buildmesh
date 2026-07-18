@@ -364,17 +364,15 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
     // 'worktree-cleanup-failed' event rather than holding the node on screen
     // while the slow delete runs).
     //
-    // NOTE (issue #647): `disposeTerminal(id)` is intentionally NOT called
-    // here. The pre-fix ordering disposed the xterm BEFORE `delete_agent_node`
-    // committed, so on rejection the restored row (issue #645's zombie-row
-    // fix) re-mounted an xterm bound to a dead PTY — the agent was killed
-    // by the warn-only `kill_agent` path but `delete_agent_node` was still
-    // pending when `.dispose()` ran, leaving the user with a blank
-    // terminal + a dead agent and forcing them to click × again. We now
-    // move disposal to AFTER `delete_agent_node` resolves successfully;
-    // on rejection the terminal survives so the restored row has a live
-    // xterm + scrollback. The tradeoff is the terminal lingers ~one IPC
-    // round-trip longer on the happy path (a few hundred ms).
+    // Issue #647: `disposeTerminal(id)` is intentionally NOT called yet.
+    // Disposing here would blank the terminal before the delete IPC commits,
+    // and on rejection the restored row (issue #645 zombie-row fix) would
+    // re-mount an xterm bound to a dead PTY — the agent was killed by the
+    // warn-only `kill_agent` path while `delete_agent_node` was still
+    // pending. Disposal moves to AFTER the delete IPC succeeds below; on
+    // rejection the terminal stays live so the user can retry without
+    // losing scrollback. Trade-off: terminal lingers ~one IPC round-trip
+    // longer on the happy path.
     set((state) => {
       const closing = new Set(state.closingNodeIds);
       closing.delete(id);
@@ -412,9 +410,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       // mid-flight (e.g. user renamed then closed) restores the post-rename
       // version, not a stale pre-rename snapshot.
       //
-      // Issue #647: do NOT dispose the terminal on this branch — the row
-      // is restored to the UI and needs its scrollback + live PTY so the
-      // user can retry the close without losing context.
+      // Issue #647: leave the terminal alive — the row is restored and
+      // needs its scrollback + live PTY for the user to retry.
       set((state) => ({
         agentNodes: nodeForRestore ? [...state.agentNodes, nodeForRestore] : state.agentNodes,
         error: formatError(e),
@@ -422,11 +419,9 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => ({
       throw e;
     }
 
-    // Issue #647: only dispose the terminal AFTER `delete_agent_node`
-    // resolves successfully. The row is gone for good at this point, so the
-    // terminal-persistence rule's `never dispose unless deleted` invariant
-    // holds. Disposing earlier (pre-fix ordering) blanked the terminal on
-    // failure — see the Phase-2 NOTE above for the full reasoning.
+    // Issue #647: only now — after the delete IPC committed — is the
+    // terminal-persistence rule's "never dispose unless deleted" invariant
+    // satisfied. See the Phase-2 NOTE above for the failure-path reasoning.
     disposeTerminal(id);
   },
 
