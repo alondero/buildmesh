@@ -87,7 +87,23 @@ function Ensure-MobileBuilt {
 function Invoke-Unit {
   Write-Host '== unit (vitest --pool=threads) ==' -ForegroundColor Cyan
   Push-Location $repo
-  try { & npx vitest run --pool=threads tests/unit } finally { Pop-Location }
+  # PowerShell 5.1 promotes any stderr line from a native exe (vitest's child
+  # node) into a NativeCommandError record. Under the script-wide
+  # $ErrorActionPreference = 'Stop' that becomes a *terminating* error and
+  # aborts the `& npx vitest ...` call before vitest can even run its suite.
+  # jsdom's "HTMLCanvasElement.getContext() without canvas npm package"
+  # warning is the trigger we keep hitting on Windows.
+  # Fix: locally downgrade to 'Continue' so the warning passes through as
+  # text, then trust $LASTEXITCODE for the pass/fail signal (real vitest
+  # failures exit non-zero and still surface as a unit failure).
+  $prevPref = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    & npx vitest run --pool=threads tests/unit
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
   if ($LASTEXITCODE -ne 0) { $script:failed += 'unit' }
 }
 
@@ -97,14 +113,24 @@ function Invoke-Rust {
   $env:BUILDMESH_PREFILL = $null
   $manifest = Join-Path $repo 'src-tauri\Cargo.toml'
   Push-Location $repo
+  # Same PowerShell-5.1 NativeCommandError trap as Invoke-Unit: cargo's
+  # "   Compiling …" progress lines arrive on stderr and would otherwise
+  # become terminating errors under the script-wide `Stop` preference.
+  # Locally downgrade for the cargo invocation; pass/fail still tracks
+  # $LASTEXITCODE so a real test failure surfaces as a rust failure.
+  $prevPref = $ErrorActionPreference
   try {
+    $ErrorActionPreference = 'Continue'
     if ($CleanRust) {
       & cargo clean -p buildmesh --manifest-path $manifest
     }
     $cargoArgs = @('test', '--manifest-path', $manifest)
     if ($SerialRust) { $cargoArgs += @('--', '--test-threads=1') }
     & cargo @cargoArgs
-  } finally { Pop-Location }
+  } finally {
+    $ErrorActionPreference = $prevPref
+    Pop-Location
+  }
   if ($LASTEXITCODE -ne 0) { $script:failed += 'rust' }
 }
 
