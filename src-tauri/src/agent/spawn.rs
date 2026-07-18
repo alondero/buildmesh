@@ -414,6 +414,45 @@ pub fn build_spawn_command(
         }
     }
 
+    // Codex ignores `OPENAI_BASE_URL` / `OPENAI_MODEL` env vars (issue #599,
+    // live-verified against `codex-cli 0.144.0`). The supported way to route
+    // codex to a custom OpenAI-compatible endpoint is a per-pairing profile
+    // config at `$CODEX_HOME/<name>.config.toml` layered with `-p <name>`.
+    // `proxy_pair` returns `Some` only for Proxied Provider pairings (the
+    // `OPENAI_BASE_URL` env marker) so native Codex is untouched — and it
+    // returns the resolved `(base_url, model)` alongside the profile name so
+    // this site doesn't have to re-scan `backend_env` (which would risk
+    // inconsistency between scan results).
+    if matches!(provider_enum, Provider::Codex) {
+        if let Some(pair) =
+            crate::agent::provider::adapters::codex::proxy_pair(backend_env)
+        {
+            if let Err(e) =
+                crate::agent::provider::adapters::codex::ensure_proxy_profile(
+                    &pair.profile_name,
+                    pair.base_url,
+                    pair.model,
+                    None,
+                )
+            {
+                // The user still gets a Codex spawn (their own auth), just
+                // without the proxied routing. Warn so a stuck "why is my
+                // Codex still hitting api.openai.com?" gets a hit in the log.
+                tracing::warn!(
+                    "spawn_agent: codex proxy profile write failed; falling back to native endpoint: {e}"
+                );
+            } else {
+                tracing::info!(
+                    "spawn_agent: codex proxy profile applied (profile={})",
+                    pair.profile_name
+                );
+                recipe.base_args.extend(
+                    crate::agent::provider::adapters::codex::proxy_p_flag(&pair.profile_name),
+                );
+            }
+        }
+    }
+
     let mut cmd =
         spawn_environment::wrap(recipe, resolved.env_type, &resolved.spawn_path, session_id, sandbox);
 

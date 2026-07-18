@@ -1522,15 +1522,29 @@ fn anthropic_surface_env(
 /// takes a single model, so only `ModelTiers::default` is consumed
 /// (→ `OPENAI_MODEL`); the per-tier alias map is Anthropic-only.
 ///
-/// **Best-effort / unverified on this host.** `OPENAI_BASE_URL` /
-/// `OPENAI_API_KEY` is the documented way to point an OpenAI-compatible client
-/// at a custom endpoint, but the exact contract the installed `codex` build
-/// honours (env vs `~/.codex/config.toml` `model_providers`) couldn't be
-/// exercised here without a `codex` binary and a provider OpenAI key. Live Codex
-/// verification is tracked as a #576 follow-up; the Anthropic surface is
-/// exercised end-to-end. Like the Anthropic emitter, only non-empty fields emit
-/// a var, and native Codex (no pairing) injects nothing — so the user's own
-/// `OPENAI_API_KEY` / `codex login` is untouched.
+/// **Live-verified on `codex-cli 0.144.0` (issue #599, 2026-07-18):**
+/// - `OPENAI_API_KEY` **IS** honoured — codex's `auth.credentials` reports it
+///   under `auth env vars present` and uses it for API-key auth. Keep.
+/// - `OPENAI_BASE_URL` / `OPENAI_MODEL` are **NOT** honoured as env vars —
+///   `codex doctor --json` reports `endpoint: wss://api.openai.com/v1/...`
+///   regardless of what `OPENAI_BASE_URL` was exported. The Anthropic surface
+///   doesn't have this trap (`claude` reads `ANTHROPIC_*` env vars natively).
+///
+/// The emitter therefore still **writes** all three vars (forward-compat for
+/// any future codex release that picks them up) but the **effective routing**
+/// happens one level out: `agent::spawn::build_spawn_command` derives a
+/// per-pairing profile name from the same `OPENAI_*` pairs via
+/// `crate::agent::provider::adapters::codex::proxy_pair`, idempotently writes
+/// `$CODEX_HOME/<name>.config.toml` (a `[model_providers.<name>]` block Codex
+/// actually consumes) via `codex::ensure_proxy_profile`, and passes `-p <name>`
+/// to the codex CLI. Without that translation, a Proxied Provider Codex spawn
+/// would silently target OpenAI's real endpoint on the user's own credentials
+/// — the very leak issue #599 closes.
+///
+/// Like the Anthropic emitter, only non-empty fields emit a var, and **native
+/// Codex (no pairing) injects nothing** — so the user's own `OPENAI_API_KEY`
+/// / `codex login` is untouched (regression-pinned by
+/// `codex::proxy_pair_none_for_native_codex`).
 fn openai_surface_env(
     base_url: Option<&str>,
     api_key: Option<&str>,
