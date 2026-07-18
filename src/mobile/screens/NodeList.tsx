@@ -13,7 +13,6 @@ import {
   listProviders,
 } from "../api";
 import { AppBar, CenterNote, PulseDots, Sheet } from "../ui";
-import { ProviderIcon } from "../../components/Providers/ProviderIcon";
 import { useAsyncEffect } from "../../hooks/useAsyncEffect";
 import { groupByHarness } from "../../lib/groups";
 import { STATUS_CONFIG } from "../../lib/status";
@@ -38,24 +37,10 @@ function statusMeta(status: NodeStatus): { hex: string; label: string } {
   return STATUS_CONFIG[status];
 }
 
-// Offline fallback shown only when the /providers fetch fails. The live list is
-// the user's dynamic harness profiles; this is a degraded static default (issue
-// #538 dropped the legacy enum rows / `legacy` flag).
-// `resumable` mirrors the Rust derivation in `ProviderInfo`:
-// `supports_resume() && produces_readable_transcript()` (models/mod.rs).
-// Anthropic is the only adapter that produces a readable transcript, so it's
-// the only fallback row the resume picker (issue #550) should surface. Keeping
-// the flag honest here matters: if /providers 401s and we fall back, the user
-// still won't see ghost rows they can't actually resume.
-// Issue #575 — every fallback row also populates the Spawn Option wire
-// shape (harness_id, provider_id, is_proxied, group_key) so the
-// `ProviderPicker` group render doesn't have to special-case the
-// offline fallback.
-const FALLBACK_PROVIDERS: Provider[] = [
-  { id: "claude", label: "Claude Code", color: "#1d7cfc", icon: "A", resumable: true, harness_id: "claude", provider_id: null, is_proxied: false, group_key: "claude" },
-  { id: "agy", label: "Antigravity CLI", color: "#10b981", icon: "G", resumable: false, harness_id: "agy", provider_id: null, is_proxied: false, group_key: "agy" },
-  { id: "opencode", label: "OpenCode", color: "#f59e0b", icon: "O", resumable: false, harness_id: "opencode", provider_id: null, is_proxied: false, group_key: "opencode" },
-];
+// Issue #328 — the badge and the provider picker both consume the live
+// `listProviders()` payload directly (no fallback list). Before the fetch
+// resolves, `providers` is `[]` and every badge renders the deterministic
+// fallback `'?' / '#555'` (see `NodeRow`'s `meta?.color ?? '#555'` lookup).
 
 export default function NodeList({
   onOpenNode,
@@ -67,7 +52,7 @@ export default function NodeList({
   const [meshes, setMeshes] = useState<Mesh[] | null>(null);
   const [nodes, setNodes] = useState<AgentNode[] | null>(null);
   const [pickerMeshId, setPickerMeshId] = useState<number | null>(null);
-  const [providers, setProviders] = useState<Provider[]>(FALLBACK_PROVIDERS);
+  const [providers, setProviders] = useState<Provider[]>([]);
   const [creating, setCreating] = useState<number | null>(null);
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -423,11 +408,16 @@ export function NodeRow({
 }) {
   const meta = statusMeta(node.status);
   const needsInput = node.status === "awaiting_input";
-  // Friendly label from the backend-derived provider list (issue #815) —
-  // falls back to the raw id only if the node's provider isn't in the
-  // current list (e.g. a since-removed harness profile).
-  const providerLabel =
-    providers?.find((p) => p.id === node.provider)?.label ?? node.provider;
+  // Single source of truth for the badge + label: the live `listProviders()`
+  // payload (issue #328). The fallback (`'?' / '#555'` + raw id) fires when:
+  //   * the fetch hasn't resolved yet (`providers === []` initially), or
+  //   * the node's provider id isn't in the live list (e.g. a since-removed
+  //     harness profile). Both cases get a deterministic grey badge so the
+  //     row's left edge still has consistent rhythm.
+  // `providerMeta` carries color + icon for the chip and the same `.label`
+  // drives the row subtitle — keeps the badge and the label in lockstep.
+  const providerMeta = providers?.find((p) => p.id === node.provider);
+  const providerLabel = providerMeta?.label ?? node.provider;
   return (
     <button
       onClick={onClick}
@@ -435,13 +425,25 @@ export function NodeRow({
       className="card"
       style={needsInput ? { borderColor: "rgba(255, 152, 0, 0.4)" } : undefined}
     >
-      <ProviderIcon
-        providerId={node.provider}
-        withBackground
-        chipTestId="node-avatar"
-        className="h-5 w-5"
+      <div
+        data-testid="node-avatar"
         title={providerLabel}
-      />
+        style={{
+          width: 34,
+          height: 34,
+          borderRadius: 8,
+          background: providerMeta?.color ?? "#555",
+          color: "#fff",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 14,
+          fontWeight: 700,
+          flexShrink: 0,
+        }}
+      >
+        {providerMeta?.icon ?? "?"}
+      </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div
           style={{
