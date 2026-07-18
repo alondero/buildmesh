@@ -15,6 +15,5 @@ pub mod process;
 pub mod provider;
 pub mod sandbox;
 pub mod spawn;
-pub mod spawn_diag;
 pub mod spawn_environment;
 pub mod workspace_trust;

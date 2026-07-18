@@ -351,6 +351,7 @@ pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
 /// the manual `trigger_finish` command (PRD story 15), which injects the
 /// same wrap-up prompt outside a turn evaluation.
 pub(crate) fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
+    crate::attention_autoclear::disarm(node_id);
     let _ = db::update_agent_node_status(node_id, SessionStatus::Running);
     let _ = app.emit(
         "attention-cleared",

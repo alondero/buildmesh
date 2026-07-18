@@ -101,24 +101,25 @@ The embedded server binds **loopback only by default** (#496). An off-by-default
 ## Attention System
 
 ### How It Works
-Agents signal they need user input via a Claude Code stop hook configured in `.claude/settings.local.json` (written by `inject_attention_hook` in `agent.rs`). The hook fires on Claude Code's built-in `idle_prompt` matcher and calls a curl command that hits the backend's HTTP server:
+Agents signal they need user input via Claude Code hooks configured in `.claude/settings.local.json` (written by `inject_attention_hook` in `agent/spawn.rs`): a catch-all `Notification` hook (permission prompts, idle prompts, elicitations) plus a `Stop` hook (turn ended). Both run the same curl command, which forwards the hook's **stdin JSON** as the POST body (issue #878):
 
 ```
-Notification: [{ matcher: "idle_prompt", hooks: [{ type: "command", command: "curl -sf -X POST http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID" }] }]
+curl -sf -X POST -H "Content-Type: application/json" --data-binary @- http://localhost:$BUILDMESH_PORT/api/attention/$BUILDMESH_SESSION_ID || true
 ```
 
 The hook reads `$BUILDMESH_PORT` (set per-agent in `spawn_environment`) at run time rather than baking a literal port, so it routes correctly across the 1992→1994 fallback and to the dev profile's 2992 when an agent is spawned by `buildmesh-dev`.
 
-When the HTTP server receives `POST /api/attention/{session_id}`, it immediately:
-1. Inserts the session ID into `ATTENTION_PENDING` (in-memory `HashSet`)
-2. Updates the DB status to `AwaitingInput`
-3. Emits `attention-needed` Tauri event to the frontend
-4. Calls `session_naming::on_turn()` (triggers async LLM rename)
+`POST /api/attention/{session_id}` (`http/routes/attention.rs`) classifies the payload and publishes a Node Turn (`node_turn::publish`), which:
+1. Updates the DB status to `AwaitingInput` (`commands::attention::mark_attention` — status column is the single source of truth, there is no mirrored in-memory set)
+2. Emits `attention-needed` (Tauri event + mobile WS fan-out)
+3. Calls `session_naming::on_turn()` (triggers async LLM rename) and `autopilot::pipeline::on_turn()`
 
 **No timer, polling, or debounce** — the event fires synchronously and immediately.
 
-### `prompts_seen > 1` Guard
-The `idle_prompt` matcher is a Claude Code internal. The first `idle_prompt` (on agent spawn) is skipped — only the second and subsequent prompts trigger the hook. This prevents false attention events on startup.
+### False-Yield Suppression (issue #878)
+Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs (launch = a `tool_result` promising "You will be notified when it completes"; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count). Pending work → the Node Turn is published via `publish_without_attention` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
+
+**Safety net:** `attention_autoclear.rs` arms on every mark; if the PTY then produces ≥512 bytes of output more than 3s after the mark with no user keystroke, the node flips back to `running` and `attention-cleared` is broadcast. The 3s grace absorbs the Stop-hook-vs-final-redraw race; the burst threshold ignores idle control-sequence trickle. This self-heals the cases the transcript scan can't see (hook-less providers, format drift, lost notifications). Every path that clears attention or accepts user input must call `attention_autoclear::disarm` (see `write_to_agent_blocking`, `http::ws`, `coordinator::drive`, `autopilot::pipeline`).
 
 ### Auto-Spawn Behavior
 `AgentTerminal` component auto-spawns the agent when mounting an agent node with `status === 'idle'` and a `provider`. It uses `fitAddon.proposeDimensions()` to get PTY size before calling `spawn_agent`. This couples terminal mount directly to agent spawn — debugging attention issues requires tracing this path.

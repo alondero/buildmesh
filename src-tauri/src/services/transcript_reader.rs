@@ -551,6 +551,96 @@ fn extract_tool_calls(content: Option<&serde_json::Value>) -> Vec<ToolCall> {
         })
         .collect()
 }
+// --- Pending background tasks (issue #878) ---
+//
+// Claude Code ends its turn when it launches background work (a
+// `run_in_background` Bash call, or a foreground command that outlives its
+// timeout and is moved to the background) and auto-resumes itself when the
+// task's `<task-notification>` arrives. A Stop hook that fires with such work
+// still pending is NOT "the user is needed". The transcript records both ends
+// deterministically:
+//
+//   launch  — a `tool_result` whose text says "…background… (ID: xyz) …
+//             You will be notified when it completes."
+//   finish  — a line (queue-operation, or the queued_command attachment that
+//             re-invokes the agent) carrying `<task-id>xyz</task-id>`.
+//
+// Pending = launched minus notified.
+
+/// Matches the task id in either launch phrasing:
+/// `Command running in background with ID: xyz.` and
+/// `…was moved to the background (ID: xyz).`
+static LAUNCH_ID: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"\bID: ([A-Za-z0-9_-]+)").unwrap());
+/// A task-notification's id paired with its status, non-greedy so several
+/// notifications on one line pair correctly. Real transcripts carry
+/// `<status>running</status>` notifications too (e.g. a foreground command
+/// moved to the background) — only a terminal status means the wait is over.
+static NOTIFIED_ID: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r"<task-id>([A-Za-z0-9_-]+)</task-id>.*?<status>([a-z_]+)</status>").unwrap()
+});
+/// The phrase that makes a `tool_result` a background-task launch. Both known
+/// launch phrasings carry it; matching the promise (rather than the two exact
+/// sentences) keeps the scan stable across minor wording changes.
+const LAUNCH_MARKER: &str = "You will be notified when it completes";
+
+/// Count background tasks launched but not yet notified in a Claude Code
+/// transcript. `None` = the file could not be read — the caller must treat
+/// that as "unknown" and fall back to its pre-#878 behaviour, never as "no
+/// pending work".
+pub fn count_pending_background_tasks(path: &Path) -> Option<usize> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    Some(pending_background_task_ids(reader.lines().map_while(Result::ok)).len())
+}
+
+/// Pure scan over JSONL lines: launched-task ids with no matching
+/// `<task-id>` notification, in launch order. Split from the I/O wrapper so
+/// tests drive it with inline fixtures.
+fn pending_background_task_ids(lines: impl Iterator<Item = String>) -> Vec<String> {
+    let mut launched: Vec<String> = Vec::new();
+    let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in lines {
+        // The notification marker is matched on the raw line: it appears in
+        // `queue-operation` lines and in the queued_command attachment that
+        // re-invokes the agent, and caring which one carries it would couple
+        // us to more of the shape than we need.
+        for cap in NOTIFIED_ID.captures_iter(&line) {
+            if &cap[2] != "running" {
+                notified.insert(cap[1].to_string());
+            }
+        }
+        // Launches only count inside a tool_result block — free text merely
+        // *mentioning* the promise (e.g. an agent quoting these docs) must not
+        // register a phantom task.
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(serde_json::Value::Array(blocks)) =
+            val.get("message").and_then(|m| m.get("content"))
+        else {
+            continue;
+        };
+        for block in blocks {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                continue;
+            }
+            let text = match block.get("content") {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                other => concat_text_blocks(other),
+            };
+            if !text.contains(LAUNCH_MARKER) {
+                continue;
+            }
+            if let Some(cap) = LAUNCH_ID.captures(&text) {
+                launched.push(cap[1].to_string());
+            }
+        }
+    }
+    launched.retain(|id| !notified.contains(id));
+    launched
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -908,6 +998,105 @@ mod tests {
         assert_eq!(concat_text_blocks(Some(&arr)), "first\nsecond");
         assert_eq!(first_text_block(None), "");
     }
+    // --- Pending background tasks (issue #878) ---
+
+    /// A launch line in the primary phrasing (`run_in_background: true`).
+    fn launch_line(id: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"t1","type":"tool_result","content":"Command running in background with ID: {id}. Output is being written to: /tmp/{id}.output. You will be notified when it completes. To check interim output, use Read on that file path.","is_error":false}}]}}}}"#
+        )
+    }
+
+    /// A launch line in the timeout phrasing (foreground command moved to the
+    /// background after its timeout).
+    fn timeout_launch_line(id: &str) -> String {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"t2","type":"tool_result","content":"Command did not complete within its 120s timeout and was moved to the background (ID: {id}). Output is being written to: /tmp/{id}.output. You will be notified when it completes. To check interim output, use Read on that file path.","is_error":false}}]}}}}"#
+        )
+    }
+
+    /// A queue-operation completion notification, the shape that re-invokes
+    /// the agent when the task finishes.
+    fn notification_line(id: &str, status: &str) -> String {
+        format!(
+            r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"2026-07-18T10:00:00.000Z","sessionId":"s","content":"<task-notification>\n<task-id>{id}</task-id>\n<tool-use-id>t1</tool-use-id>\n<output-file>/tmp/{id}.output</output-file>\n<status>{status}</status>\n</task-notification>"}}"#
+        )
+    }
+
+    #[test]
+    fn launched_without_notification_is_pending() {
+        let pending = pending_background_task_ids(
+            vec![launch_line("byt1iw94s"), timeout_launch_line("b97ep9a8n")].into_iter(),
+        );
+        assert_eq!(
+            pending,
+            vec!["byt1iw94s".to_string(), "b97ep9a8n".to_string()],
+            "both launch phrasings must register a pending task"
+        );
+    }
+
+    #[test]
+    fn terminal_notification_clears_pending() {
+        // `completed` and `failed` both mean the wait is over — the harness
+        // re-invokes the agent either way.
+        let pending = pending_background_task_ids(
+            vec![
+                launch_line("aaa"),
+                launch_line("bbb"),
+                notification_line("aaa", "completed"),
+                notification_line("bbb", "failed"),
+            ]
+            .into_iter(),
+        );
+        assert!(pending.is_empty(), "terminal notifications end the wait, got {pending:?}");
+    }
+
+    #[test]
+    fn running_status_notification_does_not_clear_pending() {
+        // Real transcripts carry `<status>running</status>` notifications; the
+        // task is still in flight, so the Stop is still a false yield.
+        let pending = pending_background_task_ids(
+            vec![launch_line("ccc"), notification_line("ccc", "running")].into_iter(),
+        );
+        assert_eq!(pending, vec!["ccc".to_string()]);
+    }
+
+    #[test]
+    fn free_text_mentioning_the_promise_is_not_a_launch() {
+        // An assistant merely *quoting* the launch text (e.g. discussing these
+        // docs) must not register a phantom pending task — only a tool_result
+        // block counts.
+        let assistant = r#"{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"The tool says: moved to the background (ID: zzz). You will be notified when it completes."}]}}"#.to_string();
+        assert!(pending_background_task_ids(std::iter::once(assistant)).is_empty());
+    }
+
+    #[test]
+    fn count_pending_none_on_unreadable_file() {
+        // Unknown must never read as "no pending work" — the caller falls back
+        // to marking attention.
+        assert_eq!(
+            count_pending_background_tasks(Path::new("X:\\nope\\missing.jsonl")),
+            None
+        );
+    }
+
+    #[test]
+    fn count_pending_reads_real_fixture_shape() {
+        let suffix = std::process::id();
+        let path = std::env::temp_dir()
+            .join(format!("buildmesh_test_pending_tasks_{suffix}.jsonl"));
+        let body = [
+            launch_line("early"),
+            notification_line("early", "completed"),
+            launch_line("late"),
+        ]
+        .join("\n");
+        std::fs::write(&path, body).unwrap();
+        let count = count_pending_background_tasks(&path);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(count, Some(1), "one launched-but-unnotified task");
+    }
+
     // --- Serialization shape (the wire contract a later MCP wrap depends on) ---
     #[test]
     fn available_serializes_with_status_envelope() {

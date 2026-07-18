@@ -2,6 +2,7 @@
 //! AI Agent Orchestration Hub for Windows + WSL
 
 pub mod agent;
+mod attention_autoclear;
 pub mod autopilot;
 mod commands;
 mod coordinator;

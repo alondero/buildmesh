@@ -211,6 +211,7 @@ fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, te
         return;
     }
     if text.bytes().any(|b| b == b'\n' || b == b'\r') {
+        crate::attention_autoclear::disarm(node_id);
         let _ = db::update_agent_node_status(node_id, crate::models::SessionStatus::Running);
         if let Some(app) = super::app_handle() {
             let _ = app.emit(

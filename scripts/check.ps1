@@ -55,15 +55,15 @@ if ((Test-Path (Join-Path $gitForWindows 'git.exe')) -and ($gitOnPath -notlike "
   $env:PATH = "$gitForWindows;$env:PATH"
 }
 
-# Same shadowing class for openssl.exe: devkitPro's MSYS2 copy crashes on
-# startup ("add_item ... failed, errno 1" cygwin heap error), failing the 4
-# http::tls chain-verification tests that shell out to `openssl`. Pin Git for
-# Windows' usr\bin (which ships a working OpenSSL but no git.exe, so the git
-# pin above is unaffected) ahead of it.
+# Same trap, different binary: the http::tls cert tests shell out to `openssl`,
+# and devkitPro's MSYS2 copy (seen shadowing it in agent PowerShell sessions,
+# independently of which git.exe resolves) dies with "add_item ... failed"
+# before doing any work — false-failing 4 tests. Git for Windows ships a
+# working openssl in usr\bin; pin it first when openssl resolves elsewhere.
 $gitUsrBin = 'C:\Program Files\Git\usr\bin'
-$opensslOnPath = (Get-Command openssl -ErrorAction SilentlyContinue).Source
-if ((Test-Path (Join-Path $gitUsrBin 'openssl.exe')) -and ($opensslOnPath -notlike "$gitUsrBin*")) {
-  Write-Host "== PATH openssl is '$opensslOnPath' -> pinning $gitUsrBin first ==" -ForegroundColor Yellow
+$openSslOnPath = (Get-Command openssl -ErrorAction SilentlyContinue).Source
+if ((Test-Path (Join-Path $gitUsrBin 'openssl.exe')) -and ($openSslOnPath -notlike 'C:\Program Files\Git\*')) {
+  Write-Host "== PATH openssl is '$openSslOnPath' -> pinning $gitUsrBin first ==" -ForegroundColor Yellow
   $env:PATH = "$gitUsrBin;$env:PATH"
 }
 

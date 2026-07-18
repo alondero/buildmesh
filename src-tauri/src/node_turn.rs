@@ -24,6 +24,21 @@ use tauri::AppHandle;
 /// state evaluation, issues #483-#485).
 pub fn publish(node_id: i64, app: &AppHandle) {
     crate::commands::attention::mark_attention(node_id, app);
+    publish_passive(node_id, app);
+}
+
+/// Publish a Node Turn that is only a background-wait yield (issue #878): the
+/// harness ended its turn with background tasks still running and will
+/// re-invoke itself, so the user is NOT needed. Naming and the autopilot
+/// pipeline still see the turn (both are safe on a non-final turn — rename is
+/// idempotent, the pipeline classifies the tail and no-ops on "working"), but
+/// the node is not marked for attention.
+pub fn publish_without_attention(node_id: i64, app: &AppHandle) {
+    publish_passive(node_id, app);
+}
+
+/// The attention-independent consumers, shared by both publish flavours.
+fn publish_passive(node_id: i64, app: &AppHandle) {
     crate::session_naming::on_turn(node_id, app.clone());
     crate::autopilot::pipeline::on_turn(node_id, app);
 }
