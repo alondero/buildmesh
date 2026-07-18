@@ -187,49 +187,6 @@ pub fn to_spawn_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Get the path to the cc wrapper script
-#[allow(dead_code)]
-pub fn cc_path() -> PathBuf {
-    match current_env() {
-        Environment::Wsl => PathBuf::from("/mnt/c/Users/alond/.local/bin/cc"),
-        Environment::Windows => {
-            // Try to find cc in PATH
-            if let Ok(output) = command_no_window("where")
-                .arg("cc")
-                .output()
-            {
-                let path_str = String::from_utf8_lossy(&output.stdout);
-                let path = path_str.trim().lines().next().unwrap_or("");
-                if !path.is_empty() {
-                    return PathBuf::from(path);
-                }
-            }
-            PathBuf::from("C:/Users/alond/.local/bin/cc")
-        }
-    }
-}
-
-/// Get the Git binary path for the correct environment
-#[allow(dead_code)]
-pub fn git_path() -> PathBuf {
-    match current_env() {
-        Environment::Wsl => PathBuf::from("git"),
-        Environment::Windows => {
-            if let Ok(output) = command_no_window("where")
-                .arg("git")
-                .output()
-            {
-                let path_str = String::from_utf8_lossy(&output.stdout);
-                let path = path_str.trim().lines().next().unwrap_or("");
-                if !path.is_empty() {
-                    return PathBuf::from(path);
-                }
-            }
-            PathBuf::from("git")
-        }
-    }
-}
-
 /// Determine the environment for a given session path
 pub fn env_for_path(path: &Path) -> Environment {
     // WSL only exists on a Windows host. On macOS and native Linux every path is

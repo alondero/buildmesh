@@ -2,7 +2,7 @@
 name = "buildmesh"
 version = "1.0.0"
 description = "AI Agent Orchestration Hub for Windows + WSL"
-authors = ["alond"]
+authors = ["Adam Londero <alondero@users.noreply.github.com>"]
 edition = "2021"
 
 [lib]
