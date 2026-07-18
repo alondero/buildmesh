@@ -10,8 +10,19 @@ import { RemoteAccessModal } from '../RemoteAccess/RemoteAccessModal';
 import { AppSettingsModal } from '../AppSettings/AppSettingsModal';
 import { MeshCreateModal } from '../Mesh/MeshCreateModal';
 import { defaultMeshColor } from '../../lib/meshColors';
-import { DndContext, type DragEndEvent } from '@dnd-kit/core';
-import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable';
 import { MeshItem } from './MeshItem';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { useSidebarResize } from './useSidebarResize';
@@ -151,6 +162,22 @@ export function Sidebar() {
     reorderMeshes(active.id as number, overIndex);
   };
 
+  // Issue #727 — register KeyboardSensor alongside the default
+  // PointerSensor so the mesh-reorder drag handle is operable from the
+  // keyboard. `sortableKeyboardCoordinates` (from `@dnd-kit/sortable`)
+  // walks the active row across siblings on ArrowUp/Down — the generic
+  // defaultCoordinateGetter would translate freely, which doesn't fit a
+  // vertical list. Space picks up the focused handle, Enter picks it
+  // up too, Arrow keys move, Escape drops the item back where it
+  // started. No options on PointerSensor — matches the dnd-kit default
+  // sensor set so existing pointer behaviour (drag starts on
+  // pointerdown of the handle, clicks elsewhere on the row still
+  // select the mesh) is unchanged.
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+
   return (
     <div className="relative flex h-full" style={{ width }}>
       <div
@@ -223,7 +250,7 @@ export function Sidebar() {
                 </button>
               </div>
             ) : (
-              <DndContext onDragEnd={handleDragEnd}>
+              <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
                 <SortableContext items={meshes.map(p => p.id)} strategy={verticalListSortingStrategy}>
                   {meshes.map(mesh => (
                     <MeshItem

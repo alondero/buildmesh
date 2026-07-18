@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
+import { formatError } from '../lib/errorUtils';
 import {
   freeBaseBranch,
   restoreMeshToBase,
@@ -51,7 +52,7 @@ export function useMeshRecovery(meshId: number | null, onMutate: () => void) {
       setMessage(result.message);
       onMutate();
     } catch (e) {
-      setMessage(`Restore error: ${e}`);
+      setMessage(`Restore error: ${formatError(e)}`);
     } finally {
       setRestoreInFlight(false);
       inFlightRef.current = false;
@@ -69,7 +70,7 @@ export function useMeshRecovery(meshId: number | null, onMutate: () => void) {
       setMessage(`Freed base branch at ${result.detached_at_sha}`);
       onMutate();
     } catch (e) {
-      setMessage(`Free error: ${e}`);
+      setMessage(`Free error: ${formatError(e)}`);
     } finally {
       setFreeInFlight(false);
       inFlightRef.current = false;

@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import { useRef, useState } from 'react';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { MeshColorPicker } from './MeshColorPicker';
@@ -36,7 +37,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
       // selection (if any) untouched rather than clearing it.
       if (picked) setFolder(picked);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setPicking(false);
     }

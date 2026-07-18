@@ -44,6 +44,7 @@
  * `meshesById` directly.
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useState, useMemo, useCallback } from 'react';
 import {
   discoverAgentNodes,
@@ -176,7 +177,7 @@ export function ArchivedNodesTab() {
       } catch (e) {
         if (signal.aborted) return;
         console.error('Failed to discover sessions:', e);
-        setError(e instanceof Error ? e.message : String(e));
+        setError(formatError(e));
       } finally {
         if (!signal.aborted) setLoading(false);
       }

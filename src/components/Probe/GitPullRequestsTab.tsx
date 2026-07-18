@@ -52,6 +52,7 @@
  * either boundary).
  */
 
+import { formatError } from '../../lib/errorUtils';
 import { useState, useCallback } from 'react';
 import {
   getRepoPulls,
@@ -275,7 +276,7 @@ export function GitPullRequestsTab() {
       } catch (e) {
         if (signal.aborted) return;
         console.error('Failed to load pull requests:', e);
-        setError(e instanceof Error ? e.message : String(e));
+        setError(formatError(e));
       } finally {
         if (!signal.aborted) setLoading(false);
       }
@@ -481,7 +482,7 @@ export function GitPullRequestsTab() {
       console.error('Failed to spawn PR agent:', e);
       setSpawnError((prev) => ({
         ...prev,
-        [pr.number]: e instanceof Error ? e.message : String(e),
+        [pr.number]: formatError(e),
       }));
       setSpawning(null);
     }
@@ -524,7 +525,7 @@ export function GitPullRequestsTab() {
       console.error('Failed to spawn PR agent:', e);
       setSpawnError((prev) => ({
         ...prev,
-        [pr.number]: e instanceof Error ? e.message : String(e),
+        [pr.number]: formatError(e),
       }));
       setSpawning(null);
     }
@@ -548,7 +549,7 @@ export function GitPullRequestsTab() {
       console.error('Failed to merge PR:', e);
       setMergeError((prev) => ({
         ...prev,
-        [pr.number]: e instanceof Error ? e.message : String(e),
+        [pr.number]: formatError(e),
       }));
     } finally {
       setMerging(null);

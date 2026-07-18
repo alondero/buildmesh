@@ -118,9 +118,16 @@ vi.mock('@xterm/xterm', () => {
     rows = 24;
     cols = 80;
     element: HTMLElement | null = null;
+    // Issue #734: ThemeManager writes the active xterm.js palette into
+    // `term.options.theme` on every theme flip. The real Terminal class
+    // stores its constructor options here; the mock previously dropped
+    // them. Without this, the theme-toggle tests crash with
+    // "Cannot set properties of undefined (setting 'theme')". Defaulting
+    // to {} keeps any pre-existing test that ignores options unaffected.
+    options: Record<string, unknown> = {};
 
-    constructor(_options?: unknown) {
-      // Accept options but don't use them in mock
+    constructor(options?: Record<string, unknown>) {
+      if (options) this.options = options;
     }
   }
 

@@ -1,3 +1,4 @@
+import { formatError } from '../../lib/errorUtils';
 import {
   useCallback,
   useEffect,
@@ -121,7 +122,7 @@ export function FileTree({
       })
       .catch((e) => {
         if (signal.aborted) return;
-        setErrorState(String(e));
+        setErrorState(formatError(e));
         setLoadingState(false);
       });
   }, [rootPath]);
@@ -488,4 +489,3 @@ function TreeRow({
     </div>
   );
 }
-

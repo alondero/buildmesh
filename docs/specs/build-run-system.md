@@ -1,6 +1,8 @@
 # Build/Run System — PRD
 
 > **Superseded config-storage section.** The original "Decision: `mesh.toml` at mesh root" below is no longer accurate — `build_command`, `run_command`, `model`, `effort`, `worktree_mode`, `default_provider`, and `use_worktree` all live as columns on the `meshes` table (see `src-tauri/src/db/mod.rs` `SCHEMA_VERSION`, and the IPC surface in `src-tauri/src/commands/mesh_config.rs` and `src-tauri/src/commands/build_run.rs:303`). This PRD is kept for the build/run **flow** (drawer, terminal, worktree context), which is still accurate. Treat the two `mesh.toml` Decision lines as historical.
+>
+> **Per-context commands (v27, issue #802).** Two nullable columns — `root_build_command` and `root_run_command` — let a mesh run *different* commands at the mesh root than in a worktree. A node running at the mesh root (`env::worktree_segment(node).is_none()`) prefers the `root_*` command and falls back to `build_command` / `run_command` when it's unset; Worktree Nodes always use `build_command` / `run_command`. The resolver is `commands::build_run::resolve_build_run_command`. When neither `root_*` column is set, behaviour is identical to PR #801 (same command in both contexts).
 
 ## Overview
 
