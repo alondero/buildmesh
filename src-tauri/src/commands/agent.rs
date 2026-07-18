@@ -531,7 +531,7 @@ pub fn trigger_finish(app: AppHandle, node_id: i64) -> Result<(), String> {
     crate::autopilot::evaluator::register(node_id);
 
     let prompt = crate::autopilot::finish::finish_prompt(node.source_issue, Some(&action));
-    crate::autopilot::pipeline::write_prompt_to_pty(node_id, &prompt)?;
+    crate::autopilot::pipeline::write_prompt_to_pty(node_id, &prompt, &app)?;
     crate::autopilot::pipeline::clear_attention_after_injection(node_id, &app);
     let _ = app.emit(
         "autopilot-finishing",

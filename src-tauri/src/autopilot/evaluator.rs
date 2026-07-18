@@ -58,6 +58,14 @@ static TAILS: Lazy<Mutex<HashMap<i64, String>>> = Lazy::new(|| Mutex::new(HashMa
 static LAST_OUTPUT: Lazy<Mutex<HashMap<i64, std::time::Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// When each piloted node's turn evaluation last *started*. The poller
+/// watchdog (`pipeline::watchdog_pass`) compares this against
+/// [`LAST_OUTPUT`] to find yields no evaluation ever reacted to — the
+/// lost-turn stall of issue #874. Stamped at evaluation start (not end) so
+/// output produced *during* an evaluation still counts as unevaluated.
+static LAST_EVAL: Lazy<Mutex<HashMap<i64, std::time::Instant>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// Start buffering PTY output for a node. Idempotent.
 pub fn register(node_id: i64) {
     PILOTED.lock().unwrap().insert(node_id);
@@ -74,12 +82,31 @@ pub fn unregister(node_id: i64) {
     PILOTED.lock().unwrap().remove(&node_id);
     TAILS.lock().unwrap().remove(&node_id);
     LAST_OUTPUT.lock().unwrap().remove(&node_id);
+    LAST_EVAL.lock().unwrap().remove(&node_id);
 }
 
 /// Milliseconds since the node last produced PTY output, or `None` if it has
 /// produced none since registration (or isn't piloted).
 pub fn millis_since_last_output(node_id: i64) -> Option<u128> {
     LAST_OUTPUT
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .map(|t| t.elapsed().as_millis())
+}
+
+/// Record that a turn evaluation for this node is starting now.
+pub fn note_evaluation(node_id: i64) {
+    LAST_EVAL
+        .lock()
+        .unwrap()
+        .insert(node_id, std::time::Instant::now());
+}
+
+/// Milliseconds since the node's last turn evaluation started, or `None` if
+/// none has run since registration.
+pub fn millis_since_last_evaluation(node_id: i64) -> Option<u128> {
+    LAST_EVAL
         .lock()
         .unwrap()
         .get(&node_id)
@@ -345,6 +372,28 @@ mod tests {
         assert!(tails.get(&id).unwrap().len() <= MAX_TAIL_CHARS);
         drop(tails);
         unregister(id);
+    }
+
+    #[test]
+    fn note_evaluation_is_tracked_and_unregister_clears_it() {
+        let id = 910_003;
+        register(id);
+        assert_eq!(
+            millis_since_last_evaluation(id),
+            None,
+            "no evaluation recorded yet"
+        );
+        note_evaluation(id);
+        assert!(
+            millis_since_last_evaluation(id).is_some(),
+            "evaluation timestamp recorded"
+        );
+        unregister(id);
+        assert_eq!(
+            millis_since_last_evaluation(id),
+            None,
+            "unregister drops the evaluation timestamp"
+        );
     }
 
     #[test]
