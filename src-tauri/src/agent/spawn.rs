@@ -509,19 +509,23 @@ fn sandbox_spawn(
     Err("process sandbox is only supported on Windows".to_string())
 }
 
-/// Ensures the attention hooks exist in `{project}/.claude/settings.local.json`.
+/// Ensures the Claude Code attention hooks exist in
+/// `{project}/.claude/settings.local.json`.
 ///
 /// Writes a catch-all `Notification` hook (fires on permission prompts, idle
 /// prompts, MCP elicitations — every type that means "the user is needed") plus
 /// a `Stop` hook (fires the instant a turn ends). Both POST to the local
 /// attention endpoint. Idempotent: re-runs no-op once the config matches, and
 /// migrate an older `idle_prompt`-only config on the next spawn.
-pub fn inject_attention_hook(project_path: &std::path::Path) {
+///
+/// This is the Claude-harness implementation behind
+/// `AnthropicAdapter::inject_attention_hook` (issue #886); the mesh commands
+/// also call it directly to pre-provision the default harness's hook at mesh
+/// creation, before any node/provider exists.
+pub fn inject_attention_hook(project_path: &std::path::Path) -> Result<(), String> {
     let claude_dir = project_path.join(".claude");
-    if let Err(e) = std::fs::create_dir_all(&claude_dir) {
-        tracing::warn!("inject_attention_hook: failed to create .claude dir: {}", e);
-        return;
-    }
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| format!("failed to create .claude dir: {e}"))?;
 
     let settings_path = claude_dir.join("settings.local.json");
     let mut settings: serde_json::Value = match std::fs::read_to_string(&settings_path) {
@@ -566,21 +570,16 @@ pub fn inject_attention_hook(project_path: &std::path::Path) {
     });
 
     if settings.get("hooks") == Some(&expected_hooks) {
-        return;
+        return Ok(());
     }
 
     settings["hooks"] = expected_hooks;
 
-    match serde_json::to_string_pretty(&settings) {
-        Ok(content) => {
-            if let Err(e) = std::fs::write(&settings_path, content) {
-                tracing::warn!("inject_attention_hook: failed to write: {}", e);
-            } else {
-                tracing::info!("inject_attention_hook: wrote hook at {:?}", settings_path);
-            }
-        }
-        Err(e) => tracing::warn!("inject_attention_hook: serialize failed: {}", e),
-    }
+    let content = serde_json::to_string_pretty(&settings)
+        .map_err(|e| format!("serialize failed: {e}"))?;
+    std::fs::write(&settings_path, content).map_err(|e| format!("failed to write: {e}"))?;
+    tracing::info!("inject_attention_hook: wrote hook at {:?}", settings_path);
+    Ok(())
 }
 
 /// Check if an agent is already running for this session.
@@ -1597,7 +1596,16 @@ pub async fn spawn_agent_inner(
     crate::agent::workspace_trust::ensure_trusted(&resolved);
     timer.checkpoint("after_workspace_trust");
     if adapter.requires_attention_hook() {
-        inject_attention_hook(std::path::Path::new(&resolved.host_path));
+        // The adapter owns its harness's hook format (issue #886). A failure
+        // must not abort the spawn — the agent still works, only the
+        // attention callback is lost.
+        if let Err(e) = adapter.inject_attention_hook(std::path::Path::new(&resolved.host_path)) {
+            tracing::warn!(
+                "spawn_agent_inner: attention hook injection failed for session {}: {}",
+                session_id,
+                e
+            );
+        }
     }
     timer.checkpoint("after_inject_hook");
 
@@ -2806,7 +2814,7 @@ mod tests {
     #[test]
     fn attention_hook_notification_matcher_is_catch_all() {
         let temp = TempDir::new().unwrap();
-        inject_attention_hook(temp.path());
+        inject_attention_hook(temp.path()).unwrap();
 
         let settings = read_injected_settings(temp.path());
         let notification = &settings["hooks"]["Notification"][0];
@@ -2829,7 +2837,7 @@ mod tests {
     #[test]
     fn attention_hook_includes_stop_event() {
         let temp = TempDir::new().unwrap();
-        inject_attention_hook(temp.path());
+        inject_attention_hook(temp.path()).unwrap();
 
         let settings = read_injected_settings(temp.path());
         let command = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
@@ -2849,7 +2857,7 @@ mod tests {
     #[test]
     fn attention_hook_forwards_stdin_payload() {
         let temp = TempDir::new().unwrap();
-        inject_attention_hook(temp.path());
+        inject_attention_hook(temp.path()).unwrap();
 
         let settings = read_injected_settings(temp.path());
         for (event, path) in [
@@ -2873,9 +2881,9 @@ mod tests {
     #[test]
     fn attention_hook_injection_is_idempotent() {
         let temp = TempDir::new().unwrap();
-        inject_attention_hook(temp.path());
+        inject_attention_hook(temp.path()).unwrap();
         let first = read_injected_settings(temp.path());
-        inject_attention_hook(temp.path());
+        inject_attention_hook(temp.path()).unwrap();
         let second = read_injected_settings(temp.path());
         assert_eq!(first, second, "second injection should be a no-op");
     }
@@ -2893,7 +2901,7 @@ mod tests {
         )
         .unwrap();
 
-        inject_attention_hook(temp.path());
+        inject_attention_hook(temp.path()).unwrap();
 
         let settings = read_injected_settings(temp.path());
         assert_eq!(

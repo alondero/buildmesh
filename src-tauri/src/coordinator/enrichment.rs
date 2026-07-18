@@ -12,7 +12,7 @@
 use crate::env;
 use crate::models::AgentNode;
 use crate::secret_scrubber::SecretScrubber;
-use crate::services::transcript_reader::{self, TranscriptTail, UnavailableReason};
+use crate::services::transcript_reader::{self, TranscriptFormat, TranscriptTail, UnavailableReason};
 
 /// The directory the agent's transcript is keyed under — the
 /// [Node Working Directory](../../../CONTEXT.md) in its *spawn* form, because
@@ -33,12 +33,14 @@ fn transcript_dir(node: &AgentNode) -> String {
 /// captured a session). Pure over the node + filesystem, so it is unit-testable
 /// without a DB.
 pub fn transcript_tail(node: &AgentNode, tail: usize) -> TranscriptTail {
-    if !crate::preferences::resolve_harness_provider(&node.provider).adapter().produces_readable_transcript() {
+    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    if !adapter.produces_readable_transcript() {
         return TranscriptTail::Unavailable {
             reason: UnavailableReason::Unsupported,
         };
     }
     scrub_tail(transcript_reader::read_tail(
+        TranscriptFormat::for_harness(adapter.id()),
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
         tail,
@@ -98,10 +100,12 @@ fn scrub_tail(tail: TranscriptTail) -> TranscriptTail {
 /// with long histories that turns N full-file parses into N bounded ones. The
 /// full-tail [`transcript_tail`] is reserved for the on-demand `/log` drill-in.
 pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
-    if !crate::preferences::resolve_harness_provider(&node.provider).adapter().produces_readable_transcript() {
+    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+    if !adapter.produces_readable_transcript() {
         return None;
     }
     Some(scrub_tail(transcript_reader::read_last_assistant_message(
+        TranscriptFormat::for_harness(adapter.id()),
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
     )))
@@ -188,6 +192,27 @@ mod tests {
         assert!(digest_enrichment(&node(Provider::OpenCode, None, true)).is_none());
         assert_eq!(
             digest_enrichment(&node(Provider::Anthropic, None, true)),
+            Some(TranscriptTail::Unavailable {
+                reason: UnavailableReason::NoSession
+            })
+        );
+    }
+
+    /// Codex produces a readable transcript now (issue #887): the gate must
+    /// let a codex node through to the reader rather than degrading to
+    /// `Unsupported`. With no captured session the typed reason is `NoSession`
+    /// — proof the gate passed and the reader actually ran.
+    #[test]
+    fn codex_provider_passes_the_capability_gate() {
+        let tail = transcript_tail(&node(Provider::Codex, None, true), 10);
+        assert_eq!(
+            tail,
+            TranscriptTail::Unavailable {
+                reason: UnavailableReason::NoSession
+            }
+        );
+        assert_eq!(
+            digest_enrichment(&node(Provider::Codex, None, true)),
             Some(TranscriptTail::Unavailable {
                 reason: UnavailableReason::NoSession
             })

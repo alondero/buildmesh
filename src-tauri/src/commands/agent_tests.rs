@@ -614,6 +614,7 @@ mod tests {
                     "never",
                     "--sandbox",
                     "danger-full-access",
+                    "--dangerously-bypass-hook-trust",
                 ]
             )
         );
@@ -644,6 +645,7 @@ mod tests {
                     "never",
                     "--sandbox",
                     "danger-full-access",
+                    "--dangerously-bypass-hook-trust",
                 ]
             )
         );

@@ -272,17 +272,36 @@ pub trait AgentProvider: Send + Sync {
     /// using the stored `cli_session_id`.
     fn auto_resume_on_startup(&self) -> bool;
 
-    /// Whether to inject the Claude-Code-style attention hook into
-    /// `.claude/settings.local.json` in the spawn cwd.
+    /// Whether the spawn path should call [`inject_attention_hook`] before
+    /// launching this provider (issue #886).
+    ///
+    /// [`inject_attention_hook`]: AgentProvider::inject_attention_hook
     fn requires_attention_hook(&self) -> bool;
+
+    /// Provision this harness's attention hooks in the spawn cwd so the agent
+    /// calls back to the local attention endpoint on turn end / permission
+    /// prompts. Each adapter owns its harness's config format (issue #886):
+    /// the Claude-backed `anthropic` adapter writes
+    /// `.claude/settings.local.json`; Codex writes `.codex/config.toml` +
+    /// `.codex/hooks.json`. Called from `spawn_agent_inner` (gated on
+    /// [`requires_attention_hook`]) with the resolved host-side project path;
+    /// implementations must be idempotent — they run on every spawn. A failure
+    /// is logged and the spawn proceeds (the agent still works, only the
+    /// attention callback is lost).
+    ///
+    /// [`requires_attention_hook`]: AgentProvider::requires_attention_hook
+    fn inject_attention_hook(&self, _project_path: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
 
     /// Whether this provider writes a transcript the coordinator read API can
     /// parse into a Node Digest's rich layer (ADR-0008). The Claude-backed
     /// `anthropic` adapter runs real Claude Code (with a swapped backend for
     /// custom MiniMax/Kimi/DeepSeek profiles), so it writes Claude Code's
     /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
-    /// `services::transcript_reader` knows how to read. Providers with their own
-    /// transcript format (Codex) or none (OpenCode, Agy, Terminal) return
+    /// `services::transcript_reader` knows how to read; Codex's rollout format
+    /// is parsed by the same reader via `TranscriptFormat::Codex` (issue #887).
+    /// Providers with no readable transcript (OpenCode, Agy, Terminal) return
     /// `false`; their digest degrades to spine-only with enrichment explicitly
     /// flagged `unsupported`, never silently omitted.
     fn produces_readable_transcript(&self) -> bool {

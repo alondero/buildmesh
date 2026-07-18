@@ -71,7 +71,9 @@ pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
         tracing::error!("create_mesh failed: {}", e);
         e.to_string()
     })?;
-    inject_attention_hook(std::path::Path::new(&path));
+    if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
+        tracing::warn!("add_mesh: attention hook injection failed: {e}");
+    }
     Ok(mesh)
 }
 
@@ -88,7 +90,9 @@ pub async fn create_mesh(
     if let Some(color) = color.as_deref().filter(|c| !c.is_empty()) {
         db::set_mesh_color(mesh.id, Some(color)).map_err(|e| e.to_string())?;
     }
-    inject_attention_hook(std::path::Path::new(&path));
+    if let Err(e) = inject_attention_hook(std::path::Path::new(&path)) {
+        tracing::warn!("create_mesh: attention hook injection failed: {e}");
+    }
     // Re-read so the returned mesh carries the colour we just wrote.
     db::get_mesh_by_id(mesh.id).map_err(|e| e.to_string())
 }
