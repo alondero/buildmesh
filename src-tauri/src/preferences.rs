@@ -686,6 +686,7 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "anthropic", name: "Anthropic / Claude",   self_auth: true  },
     BuiltInProviderAccount { id: "codex",     name: "OpenAI / Codex",        self_auth: true  },
     BuiltInProviderAccount { id: "agy",       name: "Google / Antigravity",  self_auth: true  },
+    BuiltInProviderAccount { id: "grok",      name: "xAI / Grok",           self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
     BuiltInProviderAccount { id: "kimi",      name: "Kimi",                  self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
@@ -2135,7 +2136,7 @@ mod tests {
     #[test]
     fn default_provider_accounts_cover_the_builtin_providers() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "minimax", "kimi", "openrouter"]);
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "minimax", "kimi", "openrouter"]);
         // MiniMax + Kimi + OpenRouter are the pay-as-you-go, Claude-compatible
         // exemplars; the self-auth built-ins are plans and not Claude-compatible.
         let by_id = |id: &str| default_provider_accounts().into_iter().find(|a| a.id == id).unwrap();
@@ -2145,6 +2146,7 @@ mod tests {
         assert!(by_id("openrouter").claude_compatible);
         assert!(!by_id("anthropic").claude_compatible);
         assert!(!by_id("codex").claude_compatible);
+        assert!(!by_id("grok").claude_compatible);
         // MiniMax + Kimi ship the cwrap launcher's base URL + per-tier map so a key is all
         // the user needs to add. OpenRouter ships its API base URL + empty
         // per-tier map so the user picks provider/model per slot.
@@ -2197,12 +2199,12 @@ mod tests {
             custom_account("deepseek"),
         ];
         let merged = merge_provider_accounts(defaults, stored);
-        // Six built-ins (anthropic/codex/agy/minimax/kimi/openrouter), no
+        // Seven built-ins (anthropic/codex/agy/grok/minimax/kimi/openrouter), no
         // duplicate minimax, plus the custom one.
         assert_eq!(merged.iter().filter(|a| a.id == "minimax").count(), 1);
         assert!(!merged.iter().find(|a| a.id == "minimax").unwrap().enabled);
         assert!(merged.iter().any(|a| a.id == "deepseek"));
-        assert_eq!(merged.len(), 7);
+        assert_eq!(merged.len(), 8);
     }
 
     #[test]

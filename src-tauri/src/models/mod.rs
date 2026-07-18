@@ -59,6 +59,9 @@ pub enum Provider {
     Agy,
     OpenCode,
     Codex,
+    /// xAI's Grok Build CLI — interactive TUI-based coding agent.
+    /// See `agent::provider::adapters::grok`.
+    Grok,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -73,6 +76,7 @@ impl Provider {
             Provider::Agy,
             Provider::OpenCode,
             Provider::Codex,
+            Provider::Grok,
             Provider::Terminal,
         ]
     }
@@ -93,6 +97,7 @@ impl Provider {
             "agy" => Provider::Agy,
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
+            "grok" => Provider::Grok,
             "terminal" => Provider::Terminal,
             // "minimax" / "kimi" are no longer first-class executors: they're
             // Claude Code with a swapped backend, configured as harness profiles
@@ -119,6 +124,7 @@ impl Provider {
             Provider::Agy => &adapters::AGY,
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
+            Provider::Grok => &adapters::GROK,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -131,6 +137,7 @@ impl std::fmt::Display for Provider {
             Provider::Agy => write!(f, "agy"),
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
+            Provider::Grok => write!(f, "grok"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }

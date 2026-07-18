@@ -67,6 +67,13 @@ const DETECTABLE: &[Detectable] = &[
         binaries: &["opencode"],
         config_dirs: &[],
     },
+    Detectable {
+        id: "grok",
+        name: "Grok Code",
+        harness: "grok",
+        binaries: &["grok"],
+        config_dirs: &[".grok"],
+    },
 ];
 
 /// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
@@ -241,7 +248,7 @@ mod tests {
         use crate::models::Provider;
         // The harness field of every detectable maps to a real legacy provider.
         let path_dirs = dirs(&["/bin"]);
-        let exists = fake_fs(&["/bin/claude", "/bin/codex", "/bin/agy", "/bin/opencode"]);
+        let exists = fake_fs(&["/bin/claude", "/bin/codex", "/bin/agy", "/bin/opencode", "/bin/grok"]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
             // from_db_str never errs; assert the harness isn't an accidental typo
@@ -252,6 +259,7 @@ mod tests {
                 "codex" => assert_eq!(provider, Provider::Codex),
                 "agy" => assert_eq!(provider, Provider::Agy),
                 "opencode" => assert_eq!(provider, Provider::OpenCode),
+                "grok" => assert_eq!(provider, Provider::Grok),
                 other => panic!("unexpected detected id {other}"),
             }
         }
