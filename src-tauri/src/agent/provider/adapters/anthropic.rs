@@ -35,6 +35,13 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
+    /// Claude Code reads its hooks from `.claude/settings.local.json`; the
+    /// shared helper in `agent::spawn` owns that format (the mesh commands
+    /// also call it directly to pre-provision at mesh creation).
+    fn inject_attention_hook(&self, project_path: &std::path::Path) -> Result<(), String> {
+        crate::agent::spawn::inject_attention_hook(project_path)
+    }
+
     fn produces_readable_transcript(&self) -> bool {
         true
     }

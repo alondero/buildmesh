@@ -1,7 +1,8 @@
 //! `POST /api/attention/{session_id}` — webhook for a Node Turn (see CONTEXT.md
-//! and `crate::node_turn`). Both Claude Code hooks point here: the Stop hook
+//! and `crate::node_turn`). Both Claude Code hooks point here — the Stop hook
 //! (turn finished) and the catch-all Notification hook (idle or permission
-//! prompt). The hook command forwards the hook's stdin JSON as the POST body
+//! prompt) — as do Codex's Stop and PermissionRequest hooks (issue #884).
+//! The hook command forwards the hook's stdin JSON as the POST body
 //! (issue #878), which is what lets this handler tell a genuine yield from a
 //! turn that only ended because the harness is waiting on background tasks and
 //! will re-invoke itself — those must NOT mark the node as awaiting input.
@@ -54,9 +55,10 @@ enum Decision {
 /// The rules, in order:
 /// 1. Unparseable/absent body → `Mark` (pre-#878 behaviour; old hook configs
 ///    that post no body keep working until the next spawn migrates them).
-/// 2. A permission-prompt Notification → `Mark` always. The agent is blocked
-///    on a tool-approval decision — that needs the user even while background
-///    tasks run.
+/// 2. A permission-prompt Notification (Claude Code) or a `PermissionRequest`
+///    event (Codex's dedicated hook for tool approval, issue #884) → `Mark`
+///    always. The agent is blocked on a tool-approval decision — that needs
+///    the user even while background tasks run.
 /// 3. Anything else (Stop, idle Notification) with launched-but-unfinished
 ///    background tasks in the transcript → `SuppressPendingBackground`.
 /// 4. No transcript path, unreadable transcript, or no pending tasks → `Mark`.
@@ -65,6 +67,9 @@ fn decide(body: &[u8], count_pending: impl FnOnce(&Path) -> Option<usize>) -> De
     let Ok(payload) = serde_json::from_slice::<HookPayload>(body) else {
         return Decision::Mark;
     };
+    if payload.hook_event_name.as_deref() == Some("PermissionRequest") {
+        return Decision::Mark;
+    }
     if payload.hook_event_name.as_deref() == Some("Notification")
         && payload
             .message
@@ -201,6 +206,22 @@ mod tests {
             "hook_event_name": "Notification",
             "transcript_path": "/tmp/session.jsonl",
             "message": "Claude needs your permission to use Bash",
+        })
+        .to_string()
+        .into_bytes();
+        assert_eq!(decide(&body, |_| Some(2)), Decision::Mark);
+    }
+
+    #[test]
+    fn codex_permission_request_marks_even_with_pending_tasks() {
+        // Codex raises a dedicated PermissionRequest hook event when a tool
+        // needs approval (issue #884) — the user is needed, same as a Claude
+        // permission Notification, regardless of background work.
+        let body = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "transcript_path": "/tmp/session.jsonl",
+            "tool_name": "Bash",
+            "message": "Codex needs your permission to run Bash",
         })
         .to_string()
         .into_bytes();

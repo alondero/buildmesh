@@ -488,6 +488,38 @@ pub fn claude_dir() -> PathBuf {
     }
 }
 
+/// The Codex CLI home directory, mirroring [`claude_dir`]. Codex honours a
+/// `CODEX_HOME` override for its *entire* state directory (sessions, auth,
+/// config — issue #885), so that takes precedence; otherwise `~/.codex` in the
+/// current environment. Rollout transcripts live under
+/// `<codex home>/sessions/YYYY/MM/DD/`.
+pub fn codex_dir() -> PathBuf {
+    if let Ok(home) = env::var("CODEX_HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    match current_env() {
+        Environment::Wsl => {
+            if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".codex")
+            } else {
+                PathBuf::from("/root/.codex")
+            }
+        }
+        Environment::Windows => {
+            if let Ok(home) = env::var("USERPROFILE") {
+                PathBuf::from(home).join(".codex")
+            } else if let Ok(home) = env::var("HOME") {
+                PathBuf::from(home).join(".codex")
+            } else {
+                let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
+                PathBuf::from(format!("C:\\Users\\{user}\\.codex"))
+            }
+        }
+    }
+}
+
 
 /// Shared test fixtures used by both `mod tests` (worktree / base_ref
 /// regression suites) and `fetch_origin_tests` (issue #213). Lifted

@@ -1410,8 +1410,9 @@ mod tests {
     /// A second pairing of the same provider under a different harness/surface
     /// (MiniMax via Codex over OpenAI) yields a distinct composite id grouped
     /// under the Codex header — the multi-harness attach the issue is about
-    /// (AC#1). The executor resolves from the codex profile, so the row is not
-    /// resumable (Codex writes no Claude-readable transcript).
+    /// (AC#1). The executor resolves from the codex profile, so the row is
+    /// resumable (Codex supports resume and its rollout transcript is
+    /// readable since #887).
     #[test]
     fn provider_info_for_pairing_supports_a_second_harness() {
         let profiles = vec![
@@ -1449,7 +1450,10 @@ mod tests {
         assert_eq!(info.harness_id, "codex");
         assert_eq!(info.group_key, "codex");
         assert!(info.is_proxied);
-        assert!(!info.resumable, "Codex writes no Claude-readable transcript");
+        assert!(
+            info.resumable,
+            "Codex resumes and its rollout transcript is readable (#887)"
+        );
     }
 
     /// A pairing whose harness has no detected profile falls back to parsing the

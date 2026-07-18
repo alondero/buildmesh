@@ -1004,14 +1004,15 @@ mod tests {
 
     /// The "produces a readable transcript" capability (#317) — the Claude-backed
     /// `anthropic` adapter (which also runs custom MiniMax/Kimi/DeepSeek profiles)
-    /// writes a transcript the coordinator read API can drill into. Everything
-    /// else degrades to a spine-only digest flagged `unsupported`, so this matrix
+    /// and Codex (whose rollout format the reader parses since #887) write
+    /// transcripts the coordinator read API can drill into. Everything else
+    /// degrades to a spine-only digest flagged `unsupported`, so this matrix
     /// is load-bearing.
     #[test]
     fn only_claude_backed_providers_produce_a_readable_transcript() {
         assert!(Provider::Anthropic.adapter().produces_readable_transcript());
-        // Codex has its own (non-Claude-Code) transcript format; the rest have none.
-        assert!(!Provider::Codex.adapter().produces_readable_transcript());
+        // Codex's rollout format is parsed via TranscriptFormat::Codex (#887).
+        assert!(Provider::Codex.adapter().produces_readable_transcript());
         assert!(!Provider::Agy.adapter().produces_readable_transcript());
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
         assert!(!Provider::Terminal.adapter().produces_readable_transcript());

@@ -1,15 +1,21 @@
 //! Transcript reader (ADR-0008) "— the deep module that, given an Agent Node's
-//! CLI session id and working-directory path, locates and parses Claude Code's
+//! CLI session id and working-directory path, locates and parses the harness's
 //! on-disk JSONL transcript and returns the **raw recent turns** (assistant
 //! text and tool calls) plus the last assistant message "— or a typed
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! **All Claude-Code-format brittleness is quarantined here.** Both this reader
+//! Two harness formats are supported, selected by [`TranscriptFormat`]:
+//! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl` and
+//! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
+//! #885). Both map onto the same [`Turn`]/[`ToolCall`] wire shape, so the
+//! Coordinator never learns which harness wrote the file.
+//!
+//! **All transcript-format brittleness is quarantined here.** Both this reader
 //! and `services::session_discovery` share the Claude-Code JSONL primitives
 //! below (`encode_path`, `is_synthetic_message`, `concat_text_blocks`), so a
-//! format change has exactly one place to break "— caught by the contract test
-//! over a checked-in fixture (see `mod tests`).
+//! format change has exactly one place to break "— caught by the contract tests
+//! over checked-in fixtures (see `mod tests`).
 //!
 //! Content is **raw and truncated, not summarised** (ADR-0008 Â§4): the
 //! Coordinator is itself an LLM, so it reasons over the real material rather
@@ -40,6 +46,29 @@ pub const DEFAULT_TAIL: usize = 20;
 /// Hard ceiling on the caller-supplied tail, so a `?tail=100000` can't ask the
 /// reader to hold an unbounded transcript in memory.
 pub const MAX_TAIL: usize = 200;
+
+/// Which harness's on-disk JSONL shape a transcript uses. Selected once at the
+/// enrichment boundary (from the node's resolved harness adapter id) and passed
+/// down, so the reader itself never consults provider state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptFormat {
+    ClaudeCode,
+    Codex,
+}
+
+impl TranscriptFormat {
+    /// Map a resolved harness adapter id to its transcript format. Every
+    /// Claude-Code-backed executor (the `anthropic` adapter behind the built-in
+    /// subscription and all custom MiniMax/Kimi/DeepSeek profiles) shares the
+    /// Claude Code format; only Codex writes its own rollout format.
+    pub fn for_harness(harness_id: &str) -> Self {
+        if harness_id == "codex" {
+            TranscriptFormat::Codex
+        } else {
+            TranscriptFormat::ClaudeCode
+        }
+    }
+}
 // --- Shared Claude-Code JSONL primitives (also used by session_discovery) ---
 /// Encode a filesystem path the same way Claude Code does for its
 /// `~/.claude/projects/<encoded>` directory names: replace every
@@ -160,7 +189,7 @@ pub struct Turn {
 #[serde(rename_all = "snake_case")]
 pub enum UnavailableReason {
     /// The provider doesn't produce a readable transcript at all (capability
-    /// flag off "— e.g. OpenCode, Codex). Distinct from `NoSession` so a
+    /// flag off "— e.g. OpenCode, Agy, Terminal). Distinct from `NoSession` so a
     /// Coordinator can tell "this provider never has a transcript" from "this
     /// supported provider hasn't captured a session yet". The reader never
     /// emits this itself; a route gates on the provider capability and returns
@@ -213,21 +242,42 @@ impl TranscriptTail {
     }
 }
 // --- Public entry points ---
-/// Locate and read the tail of a node's Claude Code transcript. `session_id` is
-/// the node's `cli_session_id`; `node_path` is its working directory (encoded
-/// to find the `~/.claude/projects/<encoded>` folder). Returns at most `tail`
-/// turns (clamped to [`MAX_TAIL`]; `0` is treated as [`DEFAULT_TAIL`]).
-pub fn read_tail(session_id: Option<&str>, node_path: &str, tail: usize) -> TranscriptTail {
+/// Locate and read the tail of a node's transcript. `session_id` is the node's
+/// `cli_session_id`; `node_path` is its working directory (used by the Claude
+/// Code format to find the `~/.claude/projects/<encoded>` folder; Codex keys
+/// sessions globally by id, so it ignores it). Returns at most `tail` turns
+/// (clamped to [`MAX_TAIL`]; `0` is treated as [`DEFAULT_TAIL`]).
+pub fn read_tail(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+    tail: usize,
+) -> TranscriptTail {
     let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
         return TranscriptTail::unavailable(UnavailableReason::NoSession);
     };
-    let path = transcript_path(session_id, node_path);
+    let Some(path) = locate_transcript(format, session_id, node_path) else {
+        return TranscriptTail::unavailable(UnavailableReason::NoTranscript);
+    };
     if !path.exists() {
         return TranscriptTail::unavailable(UnavailableReason::NoTranscript);
     }
-    read_tail_from_file(&path, tail)
+    read_tail_from_file(&path, tail, format)
 }
-/// Build the expected on-disk path of a session transcript:
+/// Resolve the on-disk transcript file for a session in the given format.
+/// `None` means "no file exists" (only the Codex walk can conclude that
+/// before an `exists()` check).
+fn locate_transcript(
+    format: TranscriptFormat,
+    session_id: &str,
+    node_path: &str,
+) -> Option<PathBuf> {
+    match format {
+        TranscriptFormat::ClaudeCode => Some(transcript_path(session_id, node_path)),
+        TranscriptFormat::Codex => find_codex_rollout(session_id),
+    }
+}
+/// Build the expected on-disk path of a Claude Code session transcript:
 /// `<claude_dir>/projects/<encoded node_path>/<session_id>.jsonl`.
 fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
     env::claude_dir()
@@ -235,11 +285,59 @@ fn transcript_path(session_id: &str, node_path: &str) -> PathBuf {
         .join(encode_path(node_path))
         .join(format!("{session_id}.jsonl"))
 }
+/// Locate a Codex rollout file `rollout-<timestamp>-<session_id>.jsonl` under
+/// `<codex home>/sessions/YYYY/MM/DD/`. Codex cannot relocate its sessions dir
+/// per-project (issue #885), so the global one is walked — fixed depth 3,
+/// at most a few hundred day dirs, <10ms cold.
+fn find_codex_rollout(session_id: &str) -> Option<PathBuf> {
+    find_codex_rollout_in(&env::codex_dir().join("sessions"), session_id)
+}
+/// Pure walk over an explicit sessions root, split from [`find_codex_rollout`]
+/// so tests drive it against a temp directory instead of `~/.codex`. Walks
+/// newest-first (years, months, days each sorted descending) so the common
+/// case — a recent session — terminates after a handful of dirs.
+fn find_codex_rollout_in(sessions_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    let suffix = format!("-{session_id}.jsonl");
+    for year in subdirs_sorted_desc(sessions_dir) {
+        for month in subdirs_sorted_desc(&year) {
+            for day in subdirs_sorted_desc(&month) {
+                let Ok(entries) = fs::read_dir(&day) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let matches = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.ends_with(&suffix));
+                    if matches {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+/// Immediate subdirectories of `dir`, sorted by name descending. Date-named
+/// dirs (`2026`, `07`, `18`) sort chronologically, so descending = newest first.
+fn subdirs_sorted_desc(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    dirs
+}
 /// Parse the tail directly from a JSONL file. Split out from [`read_tail`] so
 /// the contract test can point it at a checked-in fixture without touching
 /// `~/.claude`. Opens the file, parses turns, and returns the last `tail` of
 /// them "— or a typed [`UnavailableReason`] on I/O failure or a shape change.
-pub fn read_tail_from_file(path: &Path, tail: usize) -> TranscriptTail {
+pub fn read_tail_from_file(path: &Path, tail: usize, format: TranscriptFormat) -> TranscriptTail {
     let Ok(file) = fs::File::open(path) else {
         return TranscriptTail::unavailable(UnavailableReason::Unreadable);
     };
@@ -249,7 +347,20 @@ pub fn read_tail_from_file(path: &Path, tail: usize) -> TranscriptTail {
     // on-demand drill-in still scans every line, yet holds O(tail) turns in
     // memory instead of the whole transcript, so a busy long-running node can't
     // make the endpoint allocate a Vec of every turn it ever produced.
-    build_tail(parse_turns(lines, effective_tail(tail)))
+    build_tail(parse_transcript(format, lines, effective_tail(tail)))
+}
+/// Dispatch JSONL lines to the parser for the given harness format. Both
+/// parsers share the [`Parsed`] contract (bounded turn window, whole-stream
+/// last-assistant tracking, malformed-line flag).
+fn parse_transcript(
+    format: TranscriptFormat,
+    lines: impl Iterator<Item = String>,
+    keep: usize,
+) -> Parsed {
+    match format {
+        TranscriptFormat::ClaudeCode => parse_turns(lines, keep),
+        TranscriptFormat::Codex => parse_codex_turns(lines, keep),
+    }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
 /// from a Claude Code transcript, bounded to a tail byte window so a single
@@ -261,20 +372,26 @@ pub fn read_tail_from_file(path: &Path, tail: usize) -> TranscriptTail {
 /// only wants `last_assistant_message`, and materialising the full turn list
 /// would defeat the optimisation.
 pub fn read_last_assistant_message(
+    format: TranscriptFormat,
     session_id: Option<&str>,
     node_path: &str,
 ) -> TranscriptTail {
     let Some(session_id) = session_id.filter(|s| !s.is_empty()) else {
         return TranscriptTail::unavailable(UnavailableReason::NoSession);
     };
-    let path = transcript_path(session_id, node_path);
+    let Some(path) = locate_transcript(format, session_id, node_path) else {
+        return TranscriptTail::unavailable(UnavailableReason::NoTranscript);
+    };
     if !path.exists() {
         return TranscriptTail::unavailable(UnavailableReason::NoTranscript);
     }
-    read_last_assistant_message_from_file(&path)
+    read_last_assistant_message_from_file(&path, format)
 }
 /// Cheap file-level reader. See [`read_last_assistant_message`].
-pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
+pub fn read_last_assistant_message_from_file(
+    path: &Path,
+    format: TranscriptFormat,
+) -> TranscriptTail {
     let Ok(metadata) = fs::metadata(path) else {
         return TranscriptTail::unavailable(UnavailableReason::Unreadable);
     };
@@ -288,7 +405,7 @@ pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
     // (enough for a split assistant message to coalesce its text) — the rolling
     // buffer never grows with transcript length.
     let parsed = if size > TAIL_BYTES {
-        let Some(window) = parse_byte_window(path, TAIL_BYTES) else {
+        let Some(window) = parse_byte_window(path, TAIL_BYTES, format) else {
             return TranscriptTail::unavailable(UnavailableReason::Unreadable);
         };
         // Defensive fallback: if the bounded window carried no assistant *text*
@@ -302,7 +419,7 @@ pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
                 return TranscriptTail::unavailable(UnavailableReason::Unreadable);
             };
             let reader = BufReader::new(file);
-            parse_turns(reader.lines().map_while(Result::ok), 1)
+            parse_transcript(format, reader.lines().map_while(Result::ok), 1)
         } else {
             window
         }
@@ -312,7 +429,7 @@ pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
             return TranscriptTail::unavailable(UnavailableReason::Unreadable);
         };
         let reader = BufReader::new(file);
-        parse_turns(reader.lines().map_while(Result::ok), 1)
+        parse_transcript(format, reader.lines().map_while(Result::ok), 1)
     };
     if parsed.turns.is_empty() {
         return TranscriptTail::unavailable(empty_or_shape_changed(parsed.saw_malformed));
@@ -326,7 +443,7 @@ pub fn read_last_assistant_message_from_file(path: &Path) -> TranscriptTail {
 /// for the cheap digest reader). Seeks to the byte window, drops the partial
 /// first line the seek landed mid-way through, and parses the remainder. Returns
 /// `None` on any I/O failure so the caller can degrade to `Unreadable`.
-fn parse_byte_window(path: &Path, tail_bytes: u64) -> Option<Parsed> {
+fn parse_byte_window(path: &Path, tail_bytes: u64, format: TranscriptFormat) -> Option<Parsed> {
     let mut file = fs::File::open(path).ok()?;
     file.seek(SeekFrom::End(-(tail_bytes as i64))).ok()?;
     let mut buf = Vec::with_capacity(tail_bytes as usize);
@@ -336,7 +453,7 @@ fn parse_byte_window(path: &Path, tail_bytes: u64) -> Option<Parsed> {
     // newline so the parser only sees complete JSONL lines.
     let mut discard = Vec::new();
     let _ = buf_reader.read_until(b'\n', &mut discard);
-    Some(parse_turns(buf_reader.lines().map_while(Result::ok), 1))
+    Some(parse_transcript(format, buf_reader.lines().map_while(Result::ok), 1))
 }
 /// Effective tail length: `0` …"™ default, otherwise clamp to the ceiling.
 fn effective_tail(tail: usize) -> usize {
@@ -551,6 +668,192 @@ fn extract_tool_calls(content: Option<&serde_json::Value>) -> Vec<ToolCall> {
         })
         .collect()
 }
+// --- Codex rollout parser (issue #885 / #887) ---
+//
+// Codex writes `rollout-<timestamp>-<session-id>.jsonl` files whose lines are
+// `{"type": <envelope>, "payload": {...}}` envelopes. The payloads this reader
+// cares about:
+//
+//   message              — {"type":"message","role":"user"|"assistant",
+//                           "content":[{"type":"input_text"|"output_text","text":…}]}
+//   function_call        — {"type":"function_call","name":…,"arguments":…,"call_id":…}
+//   function_call_output — the tool's result; skipped, like Claude tool_result echoes.
+//
+// Within a turn Codex emits function_calls first and the assistant's text
+// message last, so the parser opens an assistant turn on the first
+// function_call and closes it when the assistant message (or a user message)
+// arrives — mapping onto the same "one turn = text + its tool calls" shape the
+// Claude parser produces.
+
+/// True for Codex's injected context messages (`<user_instructions>` /
+/// `<environment_context>` wrappers) — session plumbing, not genuine user
+/// turns, mirroring [`is_synthetic_message`] for Claude Code.
+fn is_codex_synthetic(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with("<user_instructions>") || t.starts_with("<environment_context>")
+}
+
+/// Pull the text out of a Codex message `content` array. Codex types its
+/// blocks `input_text` (user) / `output_text` (assistant); accept both plus a
+/// plain `text` for defensive breadth. Multiple blocks join with newlines.
+fn codex_concat_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.get("type").and_then(|t| t.as_str()),
+                    Some("input_text") | Some("output_text") | Some("text")
+                )
+            })
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// A Codex `function_call`'s `arguments` is either a JSON object or a
+/// string-encoded JSON blob (the OpenAI wire form). Decode the string form so
+/// the Coordinator sees the input's structure, not an escaped blob; a string
+/// that isn't valid JSON is delivered as-is.
+fn codex_tool_input(arguments: Option<&serde_json::Value>) -> serde_json::Value {
+    match arguments {
+        Some(serde_json::Value::String(s)) => {
+            serde_json::from_str(s).unwrap_or_else(|_| serde_json::Value::String(s.clone()))
+        }
+        Some(v) => v.clone(),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// Parse Codex rollout JSONL lines into logical turns, honouring the same
+/// [`Parsed`] contract as [`parse_turns`]: rolling `keep`-bounded turn window,
+/// whole-stream last-assistant-message tracking, and a malformed flag so a
+/// Codex format drift degrades loudly as `ShapeChanged`, never as a quiet
+/// `Empty`. Dispatches on the *payload* type rather than the envelope type
+/// (`response_item` vs `event_msg`) — Codex has carried `function_call`
+/// under both across versions.
+fn parse_codex_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    let keep = keep.max(1);
+    let mut turns: VecDeque<Turn> = VecDeque::new();
+    let mut last_assistant_message: Option<String> = None;
+    let mut saw_malformed = false;
+    // The trailing turn is an assistant turn opened by function_call events;
+    // the turn's closing assistant message merges into it.
+    let mut assistant_open = false;
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let outer = val.get("type").and_then(|t| t.as_str());
+        if outer != Some("response_item") && outer != Some("event_msg") {
+            // session_meta, turn_context, compaction markers, … — not turns.
+            continue;
+        }
+        let Some(payload) = val.get("payload") else {
+            saw_malformed = true;
+            continue;
+        };
+        match payload.get("type").and_then(|t| t.as_str()) {
+            Some("message") => {
+                let role = payload.get("role").and_then(|r| r.as_str());
+                if role != Some("user") && role != Some("assistant") {
+                    saw_malformed = true;
+                    continue;
+                }
+                let Some(content) = payload.get("content") else {
+                    saw_malformed = true;
+                    continue;
+                };
+                let text = codex_concat_text(content);
+                if role == Some("user") {
+                    assistant_open = false;
+                    if is_codex_synthetic(&text) || text.trim().is_empty() {
+                        continue;
+                    }
+                    push_bounded(
+                        &mut turns,
+                        Turn {
+                            role: "user".to_string(),
+                            text: truncate(&text, MAX_TURN_TEXT),
+                            tool_calls: Vec::new(),
+                        },
+                        keep,
+                    );
+                } else {
+                    if text.trim().is_empty() {
+                        assistant_open = false;
+                        continue;
+                    }
+                    if assistant_open {
+                        if let Some(last) = turns.back_mut() {
+                            merge_into(last, &text, Vec::new());
+                            if !last.text.is_empty() {
+                                last_assistant_message = Some(last.text.clone());
+                            }
+                        }
+                    } else {
+                        let turn = Turn {
+                            role: "assistant".to_string(),
+                            text: truncate(&text, MAX_TURN_TEXT),
+                            tool_calls: Vec::new(),
+                        };
+                        last_assistant_message = Some(turn.text.clone());
+                        push_bounded(&mut turns, turn, keep);
+                    }
+                    // The assistant's text message closes the turn; later
+                    // function_calls belong to the next one.
+                    assistant_open = false;
+                }
+            }
+            Some("function_call") => {
+                let name = payload
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let call = ToolCall {
+                    name,
+                    input: truncate_json_strings(
+                        codex_tool_input(payload.get("arguments")),
+                        MAX_TOOL_STRING,
+                    ),
+                };
+                if assistant_open {
+                    if let Some(last) = turns.back_mut() {
+                        last.tool_calls.push(call);
+                        cap_tool_calls(&mut last.tool_calls);
+                    }
+                } else {
+                    push_bounded(
+                        &mut turns,
+                        Turn {
+                            role: "assistant".to_string(),
+                            text: String::new(),
+                            tool_calls: vec![call],
+                        },
+                        keep,
+                    );
+                    assistant_open = true;
+                }
+            }
+            // function_call_output (tool results), reasoning, token_count, … —
+            // deliberately skipped, like Claude's tool_result echoes.
+            _ => {}
+        }
+    }
+    Parsed {
+        turns: turns.into(),
+        last_assistant_message,
+        saw_malformed,
+    }
+}
+
 // --- Pending background tasks (issue #878) ---
 //
 // Claude Code ends its turn when it launches background work (a
@@ -694,11 +997,11 @@ mod tests {
     #[test]
     fn missing_session_id_is_no_session() {
         assert_eq!(
-            read_tail(None, "X:\\src\\buildmesh", 10),
+            read_tail(TranscriptFormat::ClaudeCode, None, "X:\\src\\buildmesh", 10),
             TranscriptTail::unavailable(UnavailableReason::NoSession)
         );
         assert_eq!(
-            read_tail(Some(""), "X:\\src\\buildmesh", 10),
+            read_tail(TranscriptFormat::ClaudeCode, Some(""), "X:\\src\\buildmesh", 10),
             TranscriptTail::unavailable(UnavailableReason::NoSession)
         );
     }
@@ -707,6 +1010,7 @@ mod tests {
         // A session id that cannot resolve to a real file on disk degrades to
         // NoTranscript rather than erroring.
         let result = read_tail(
+            TranscriptFormat::ClaudeCode,
             Some("definitely-not-a-real-session-00000000"),
             "X:\\nowhere\\does\\not\\exist",
             10,
@@ -718,7 +1022,7 @@ mod tests {
     }
     #[test]
     fn unreadable_file_path_is_unreadable() {
-        let result = read_tail_from_file(Path::new("X:\\nope\\missing.jsonl"), 10);
+        let result = read_tail_from_file(Path::new("X:\\nope\\missing.jsonl"), 10, TranscriptFormat::ClaudeCode);
         assert_eq!(
             result,
             TranscriptTail::unavailable(UnavailableReason::Unreadable)
@@ -758,8 +1062,8 @@ mod tests {
     #[test]
     fn read_last_assistant_message_matches_full_reader_on_long_transcript() {
         let path = write_long_transcript(2_000);
-        let full = read_tail_from_file(&path, 1);
-        let cheap = read_last_assistant_message_from_file(&path);
+        let full = read_tail_from_file(&path, 1, TranscriptFormat::ClaudeCode);
+        let cheap = read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode);
         std::fs::remove_file(&path).ok();
         let full_last = match full {
             TranscriptTail::Available { last_assistant_message, .. } => last_assistant_message,
@@ -784,7 +1088,7 @@ mod tests {
         // silently return None for a Coordinator that needs the blocking
         // question.
         let path = write_long_transcript(10_000);
-        let cheap = read_last_assistant_message_from_file(&path);
+        let cheap = read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode);
         std::fs::remove_file(&path).ok();
         let cheap_last = match cheap {
             TranscriptTail::Available { last_assistant_message, .. } => last_assistant_message,
@@ -799,7 +1103,7 @@ mod tests {
     // --- Contract test over a checked-in real-shape fixture ---
     #[test]
     fn contract_parses_tail_and_last_assistant_message() {
-        let tail = read_tail_from_file(&fixture("claude_code_transcript.jsonl"), 10);
+        let tail = read_tail_from_file(&fixture("claude_code_transcript.jsonl"), 10, TranscriptFormat::ClaudeCode);
         let TranscriptTail::Available {
             turns,
             last_assistant_message,
@@ -833,7 +1137,7 @@ mod tests {
     }
     #[test]
     fn tail_length_limits_returned_turns() {
-        let two = read_tail_from_file(&fixture("claude_code_transcript.jsonl"), 2);
+        let two = read_tail_from_file(&fixture("claude_code_transcript.jsonl"), 2, TranscriptFormat::ClaudeCode);
         let TranscriptTail::Available { turns, .. } = two else {
             panic!("expected available");
         };
@@ -889,7 +1193,7 @@ mod tests {
     // --- Brittleness defence: renamed/missing fields …"™ Unavailable, no panic ---
     #[test]
     fn shape_changed_fixture_degrades_not_panics() {
-        let tail = read_tail_from_file(&fixture("claude_code_transcript_shape_changed.jsonl"), 10);
+        let tail = read_tail_from_file(&fixture("claude_code_transcript_shape_changed.jsonl"), 10, TranscriptFormat::ClaudeCode);
         assert_eq!(
             tail,
             TranscriptTail::unavailable(UnavailableReason::ShapeChanged),
@@ -904,7 +1208,7 @@ mod tests {
         // tool-result echo, a thinking-only assistant) plus non-message lines
         // (summary/mode/system) is a genuinely-quiet session — `Empty`, the
         // quiet degrade, not the loud `ShapeChanged`.
-        let tail = read_tail_from_file(&fixture("claude_code_transcript_empty.jsonl"), 10);
+        let tail = read_tail_from_file(&fixture("claude_code_transcript_empty.jsonl"), 10, TranscriptFormat::ClaudeCode);
         assert_eq!(
             tail,
             TranscriptTail::unavailable(UnavailableReason::Empty),
@@ -916,7 +1220,7 @@ mod tests {
     fn empty_session_is_empty_through_the_digest_reader_too() {
         // The cheap digest path must make the same empty-vs-shape distinction.
         let tail =
-            read_last_assistant_message_from_file(&fixture("claude_code_transcript_empty.jsonl"));
+            read_last_assistant_message_from_file(&fixture("claude_code_transcript_empty.jsonl"), TranscriptFormat::ClaudeCode);
         assert_eq!(tail, TranscriptTail::unavailable(UnavailableReason::Empty));
     }
 
@@ -1124,5 +1428,167 @@ mod tests {
                 .unwrap();
         assert_eq!(json["status"], "unavailable");
         assert_eq!(json["reason"], "no_transcript");
+    }
+
+    // --- Codex rollout format (issues #885 / #887) ---
+
+    /// Contract test over the checked-in Codex rollout fixture: noise lines
+    /// (session_meta, turn_context, user_instructions / environment_context
+    /// injections, function_call_output echoes, token_count) are all dropped;
+    /// function_calls attach to the assistant turn they belong to; and the
+    /// string-encoded `arguments` form decodes to structure.
+    #[test]
+    fn codex_contract_parses_tail_and_last_assistant_message() {
+        let tail = read_tail_from_file(
+            &fixture("codex_rollout_transcript.jsonl"),
+            10,
+            TranscriptFormat::Codex,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("fixture should parse to an available tail, got {tail:?}");
+        };
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "assistant"],
+            "turns: {turns:#?}"
+        );
+        assert_eq!(turns[0].text, "Search the directory for TypeScript files.");
+        // The shell function_call opens the assistant turn; the closing
+        // assistant message merges into it.
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "shell");
+        assert_eq!(turns[1].tool_calls[0].input["command"], "dir /s /b *.ts");
+        assert!(turns[1].text.starts_with("I found the following TypeScript files"));
+        // call_02's arguments are a string-encoded JSON blob — decoded to
+        // structure, not delivered as an escaped string.
+        assert_eq!(turns[3].tool_calls[0].name, "read_file");
+        assert_eq!(turns[3].tool_calls[0].input["file_path"], "src/login.ts");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("The file looks good. I don't see any bugs.")
+        );
+    }
+
+    #[test]
+    fn codex_cheap_digest_reader_matches_full_reader() {
+        let cheap = read_last_assistant_message_from_file(
+            &fixture("codex_rollout_transcript.jsonl"),
+            TranscriptFormat::Codex,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = cheap
+        else {
+            panic!("expected available, got {cheap:?}");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("The file looks good. I don't see any bugs.")
+        );
+    }
+
+    /// A rollout whose only message lines are the injected context wrappers is
+    /// a genuinely-quiet session — `Empty`, not `ShapeChanged`.
+    #[test]
+    fn codex_context_only_session_degrades_to_empty() {
+        let lines = vec![
+            r#"{"type":"session_meta","payload":{"id":"x","cwd":"F:\\src","timestamp":"t","cli_version":"0.144.0"}}"#.to_string(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<user_instructions>\nuse tabs\n</user_instructions>"}]}}"#.to_string(),
+        ];
+        let parsed = parse_codex_turns(lines.into_iter(), 10);
+        assert!(parsed.turns.is_empty());
+        assert!(!parsed.saw_malformed);
+        assert_eq!(
+            empty_or_shape_changed(parsed.saw_malformed),
+            UnavailableReason::Empty
+        );
+    }
+
+    /// A renamed role/content field in a message payload is a structural break
+    /// in the Codex shape — degrade loudly as `ShapeChanged`, never quietly.
+    #[test]
+    fn codex_renamed_fields_degrade_to_shape_changed() {
+        let lines = vec![
+            r#"{"type":"response_item","payload":{"type":"message","author":"assistant","blocks":[{"type":"output_text","text":"renamed"}]}}"#.to_string(),
+        ];
+        let parsed = parse_codex_turns(lines.into_iter(), 10);
+        assert!(parsed.turns.is_empty());
+        assert!(parsed.saw_malformed, "renamed role/content is malformed");
+        assert_eq!(
+            empty_or_shape_changed(parsed.saw_malformed),
+            UnavailableReason::ShapeChanged
+        );
+    }
+
+    /// Consecutive function_calls coalesce into one assistant turn that the
+    /// closing assistant message also merges into — one turn, not three.
+    #[test]
+    fn codex_function_calls_and_closing_message_form_one_turn() {
+        let lines = vec![
+            r#"{"type":"event_msg","payload":{"type":"function_call","name":"shell","arguments":{"command":"ls"},"call_id":"c1"}}"#.to_string(),
+            r#"{"type":"event_msg","payload":{"type":"function_call","name":"read_file","arguments":{"file_path":"a.rs"},"call_id":"c2"}}"#.to_string(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}"#.to_string(),
+        ];
+        let parsed = parse_codex_turns(lines.into_iter(), 10);
+        assert_eq!(parsed.turns.len(), 1, "turns: {:#?}", parsed.turns);
+        assert_eq!(parsed.turns[0].tool_calls.len(), 2);
+        assert_eq!(parsed.turns[0].text, "Done.");
+        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Done."));
+    }
+
+    /// `function_call` under the `response_item` envelope (the shape newer
+    /// Codex versions write) parses identically to the `event_msg` form.
+    #[test]
+    fn codex_function_call_under_response_item_envelope_parses() {
+        let lines = vec![
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":{"command":"ls"},"call_id":"c1"}}"#.to_string(),
+        ];
+        let parsed = parse_codex_turns(lines.into_iter(), 10);
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].tool_calls[0].name, "shell");
+    }
+
+    /// The rollout walk finds `rollout-<ts>-<session>.jsonl` under the
+    /// `sessions/YYYY/MM/DD/` layout, and returns `None` (→ NoTranscript) for
+    /// an unknown session id or a missing sessions dir.
+    #[test]
+    fn codex_rollout_walk_finds_session_file() {
+        let temp = std::env::temp_dir().join(format!(
+            "buildmesh_test_codex_sessions_{}",
+            std::process::id()
+        ));
+        let day = temp.join("2026").join("07").join("18");
+        std::fs::create_dir_all(&day).unwrap();
+        let file = day.join("rollout-2026-07-18T10-00-00-c1234567-89ab-cdef-0123-456789abcdef.jsonl");
+        std::fs::write(&file, "{}").unwrap();
+
+        let found = find_codex_rollout_in(&temp, "c1234567-89ab-cdef-0123-456789abcdef");
+        assert_eq!(found.as_deref(), Some(file.as_path()));
+        assert!(
+            find_codex_rollout_in(&temp, "00000000-dead-beef-0000-000000000000").is_none(),
+            "unknown session id must not match"
+        );
+        assert!(
+            find_codex_rollout_in(&temp.join("nope"), "x").is_none(),
+            "missing sessions dir degrades to None, not an error"
+        );
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    /// `for_harness` routes only the codex harness to the Codex format —
+    /// every Claude-backed executor id stays on Claude Code.
+    #[test]
+    fn transcript_format_for_harness_routes_codex_only() {
+        assert_eq!(TranscriptFormat::for_harness("codex"), TranscriptFormat::Codex);
+        for id in ["anthropic", "claude", "agy", "opencode", "terminal", ""] {
+            assert_eq!(TranscriptFormat::for_harness(id), TranscriptFormat::ClaudeCode);
+        }
     }
 }
