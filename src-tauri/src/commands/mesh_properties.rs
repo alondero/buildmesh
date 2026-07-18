@@ -106,6 +106,11 @@ pub async fn update_mesh_column(
     const ALLOWED_COLUMNS: &[&str] = &[
         "build_command",
         "run_command",
+        // Per-context build/run commands (issue #802). Nullable siblings of
+        // build_command/run_command; a Root Node prefers these and falls back
+        // to the plain columns when they're unset.
+        "root_build_command",
+        "root_run_command",
         "model",
         "effort",
         "worktree_mode",

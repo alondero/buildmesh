@@ -296,6 +296,17 @@ pub struct Mesh {
     /// passes: `"draft_pr"` (default) opens a draft PR, `"pr"` opens a
     /// ready-for-review PR, `"none"` stops after push.
     pub autopilot_action_on_success: Option<String>,
+    /// Root-context build command (issue #802). When set, a node running at
+    /// the mesh root (`env::worktree_segment(node).is_none()`) runs this
+    /// instead of [`build_command`](Self::build_command); Worktree Nodes keep
+    /// running `build_command`. `None` falls back to `build_command` in both
+    /// contexts — the historical PR #801 behaviour. Persisted as
+    /// `meshes.root_build_command TEXT` (schema v27).
+    pub root_build_command: Option<String>,
+    /// Root-context run command (issue #802) — the run-mode sibling of
+    /// [`root_build_command`](Self::root_build_command). `None` falls back to
+    /// `run_command`. Persisted as `meshes.root_run_command TEXT` (schema v27).
+    pub root_run_command: Option<String>,
 }
 
 /// Fallback for [`Mesh::autopilot_trigger_label`] when the user enables
@@ -682,6 +693,11 @@ pub struct MeshRow {
     pub autopilot_concurrency_limit: i32,
     pub autopilot_provider: Option<String>,
     pub autopilot_action_on_success: Option<String>,
+    /// Per-context build/run commands (issue #802). When set, a Root Node
+    /// runs these instead of `build_command` / `run_command`; `None` falls
+    /// back to those. See the matching [`Mesh`] fields.
+    pub root_build_command: Option<String>,
+    pub root_run_command: Option<String>,
 }
 
 impl From<&Mesh> for MeshRow {
@@ -703,6 +719,8 @@ impl From<&Mesh> for MeshRow {
             autopilot_concurrency_limit: mesh.autopilot_concurrency_limit,
             autopilot_provider: mesh.autopilot_provider.clone(),
             autopilot_action_on_success: mesh.autopilot_action_on_success.clone(),
+            root_build_command: mesh.root_build_command.clone(),
+            root_run_command: mesh.root_run_command.clone(),
         }
     }
 }
@@ -801,6 +819,22 @@ mod tests {
         assert_eq!(cfg.worktree_mode.as_deref(), Some("branched"));
         assert_eq!(cfg.default_provider, None);
         assert!(cfg.sandbox, "sandbox toggle must map through MeshRow::from");
+        // #802 — root_* commands are None on a mesh that never set them, so
+        // the build_run resolver falls back to build_command / run_command.
+        assert_eq!(cfg.root_build_command, None);
+        assert_eq!(cfg.root_run_command, None);
+    }
+
+    /// #802 — a mesh that DID configure per-context commands must round-trip
+    /// both new columns through `MeshRow::from`.
+    #[test]
+    fn mesh_row_from_mesh_maps_root_commands() {
+        let mut mesh = sample_mesh();
+        mesh.root_build_command = Some("cargo build --workspace".to_string());
+        mesh.root_run_command = Some("cargo run -p app".to_string());
+        let cfg = MeshRow::from(&mesh);
+        assert_eq!(cfg.root_build_command.as_deref(), Some("cargo build --workspace"));
+        assert_eq!(cfg.root_run_command.as_deref(), Some("cargo run -p app"));
     }
 
     #[test]
@@ -895,6 +929,8 @@ mod tests {
         assert_eq!(m.base_ref, "");
         assert_eq!(m.scratchpad, "");
         assert!(!m.sandbox);
+        assert_eq!(m.root_build_command, None);
+        assert_eq!(m.root_run_command, None);
     }
 
     /// Companion to the above: a partially-overridden literal must compile
