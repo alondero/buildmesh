@@ -209,3 +209,68 @@ describe('usePathInvalidatedQuery — error field on dual-key client (issue #342
     expect(result.current.error).toBeNull();
   });
 });
+
+// Issue #392 (follow-up to #349 / PR #390): the mount-refetch, subscribe, and
+// focus effects all guard their `.then(setData)` with `signal.aborted`, but
+// the manual `refresh()` useCallback does not — it's the only remaining path
+// where a stale in-flight fetch's resolution can clobber a new key's state.
+describe('usePathInvalidatedQuery — refresh() race on key change (issue #392)', () => {
+  it('does not clobber a new key\'s state with a stale refresh() resolution', async () => {
+    const resolvers = new Map<number, (value: string) => void>();
+    const fetcher = vi.fn(
+      (key: number) =>
+        new Promise<string>((resolve) => {
+          resolvers.set(key, resolve);
+        }),
+    );
+    const client = createDualKeyCache<number, string>({ fetcher });
+
+    const { result, rerender } = renderHook(
+      ({ key }: { key: number }) =>
+        usePathInvalidatedQuery(client, key, `/repo-${key}`),
+      { initialProps: { key: 7 } },
+    );
+
+    // Mount fetch for key 7 resolves — settle the initial state.
+    await act(async () => {
+      resolvers.get(7)?.('seven-initial');
+    });
+    await waitFor(() => expect(result.current.data).toBe('seven-initial'));
+
+    // User hits refresh() on key 7: invalidate() + a fresh refresh(7) fetch,
+    // left in flight (its resolver is captured, not called yet).
+    await act(async () => {
+      result.current.refresh();
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const refreshSevenResolve = resolvers.get(7);
+
+    // User switches to key 8 before the refresh(7) fetch resolves. The
+    // mount effect for the new key starts its own fetch, also left pending.
+    rerender({ key: 8 });
+    expect(fetcher).toHaveBeenCalledWith(8);
+
+    // The stale refresh(7) now resolves. Flush microtasks AND a macrotask
+    // tick — client.refresh()'s internal .then/.catch chain needs more than
+    // one microtask hop before the hook's own .then(setData) runs (mirrors
+    // the flush idiom in use-path-invalidated-query-focus.test.ts).
+    await act(async () => {
+      refreshSevenResolve?.('seven-refreshed');
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Must NOT clobber the still-loading key-8 render with key 7's stale
+    // refresh result — state should be untouched (still key 7's last data,
+    // since the "needs a fetch" mount-effect branch doesn't reset `data`
+    // until its own fetch resolves).
+    expect(result.current.data).toBe('seven-initial');
+    expect(result.current.loading).toBe(true);
+
+    // Resolve key 8's own fetch and confirm the hook still works normally.
+    await act(async () => {
+      resolvers.get(8)?.('eight-value');
+    });
+    await waitFor(() => expect(result.current.data).toBe('eight-value'));
+    expect(result.current.loading).toBe(false);
+  });
+});

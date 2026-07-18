@@ -36,7 +36,7 @@
  *    refetch, the slot would hold A's error). Issue #342.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { DualKeyClient, PathKeyedClient } from '../lib/pathInvalidatedCache';
 import { useAsyncEffect } from './useAsyncEffect';
@@ -257,15 +257,31 @@ export function usePathInvalidatedQuery(
     };
   }, [key, client, refetchOnFocus]);
 
+  // `refresh` is invoked imperatively (not tied to an effect's dep list),
+  // so it has no `AbortSignal` to guard its `.then` the way the other
+  // three paths above do (mount-refetch, subscribe, focus — see file
+  // header, footgun 1). Issue #392: without a guard, calling refresh() on
+  // one key and then switching to another key before the fetch resolves
+  // lets the stale resolution's `setData` clobber the new key's render —
+  // the same race class #349 fixed everywhere else. `keyRef` always holds
+  // the latest rendered `key` (mirrors the `itemCountRef`/`activeIndexRef`
+  // "latest ref" pattern in `useAriaMenu.ts`); comparing it against the
+  // key captured when `refresh()` was called plays the same role
+  // `signal.aborted` plays for the other three paths.
+  const keyRef = useRef(key);
+  keyRef.current = key;
+
   const refresh = useCallback(() => {
     if (key == null) return;
-    client.invalidate(key as never);
+    const refreshKey = key;
+    client.invalidate(refreshKey as never);
     setLoading(true);
     setError(null);
-    client.refresh(key as never).then((result) => {
+    client.refresh(refreshKey as never).then((result) => {
+      if (keyRef.current !== refreshKey) return;
       setData(result);
       setLoading(false);
-      setError(client.lastError(key as never));
+      setError(client.lastError(refreshKey as never));
     });
   }, [key, client]);
 
