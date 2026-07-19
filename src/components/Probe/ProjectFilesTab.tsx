@@ -1,7 +1,7 @@
 /**
  * ProjectFilesTab — issue #376. The Probe Panel's 📁 tab body.
  *
- * Mirrors the non-agent branch of the legacy `FileExplorerPanel`: a
+ * Mirrors the non-agent branch of the legacy FileExplorerPanel: a
  * `ChangedFilesSection` on top, a collapsible `FileTree` underneath. The
  * tab is mesh-scoped — the active path comes from `useProbeContext()`, which
  * prefers the focused node's path (worktree dir) when a node is active and
@@ -14,22 +14,28 @@
  * where the diff is consumed, not inside the narrow 360px body of the files
  * tab. The Probe stays on this tab so the list keeps responding to clicks. A
  * click on an unchanged file opens it in the OS editor (the same default the
- * legacy `FileExplorerPanel` used).
+ * legacy FileExplorerPanel used).
  *
  * The overlay's diff baseline is `'head'` here — Project Files lists
  * uncommitted working-tree changes (`get_git_status` / `diff_file_against_head`),
  * so the overlay shows the same "vs HEAD" view the user clicked.
  *
- * Why a separate component (not just importing `FileExplorerPanel`)
- * ---------------------------------------------------------------
- * `FileExplorerPanel` is a single component that branches on a
- * `context: { type: 'agent' | 'mesh' | 'userConfig' }` discriminator, with
- * its own resize handle, header, and close button — all of which are
- * unnecessary inside the Probe, where the dock already supplies the
- * header and the body width is driven by `useProbeResize` (issue #724,
- * 240-720px clamp, localStorage-persisted). Lifting the two child
- * sections into a small dedicated component keeps the Probe decoupled
- * from the legacy panel's state machine.
+ * Why a separate component (not just reusing the legacy FileExplorerPanel)
+ * ----------------------------------------------------------------------
+ * The legacy `FileExplorerPanel` mounted as a free-floating left-pane
+ * surface with its own resize handle, header, and close button. That
+ * shell is unnecessary inside the Probe, where the dock already
+ * supplies the header and the body width is driven by `useProbeResize`
+ * (issue #724, 240-720px clamp, localStorage-persisted). Lifting the
+ * mesh-scoped child sections into a small dedicated component keeps the
+ * Probe decoupled from any legacy panel's state machine.
+ *
+ * Note: User Config (issue #60) is NOT routed through this tab — its
+ * host-scoped `~/.claude` root has no mesh / node context, so the
+ * unified `useProbeContext` hook would resolve to `null`. The User
+ * Config view lives in its own right-dock panel
+ * (`src/components/Sidebar/UserConfigPanel.tsx`) wired to
+ * `useUIStore.userConfigOpen`.
  */
 
 import { useState } from 'react';

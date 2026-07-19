@@ -267,4 +267,21 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("is not a directory"));
     }
+
+    /// Issue #60 acceptance criterion #7: `get_user_config_dir` returns a
+    /// path that exists on the current platform. `env::claude_dir()` (in
+    /// `src/env/environment.rs`) is responsible for creating the directory
+    /// if it doesn't exist; this test pins the round-trip so a regression
+    /// that returns an unwritten phantom path fails loudly in CI rather
+    /// than at the user's first click.
+    #[test]
+    fn test_get_user_config_dir_returns_existing_path() {
+        let dir = get_user_config_dir();
+        let path = std::path::PathBuf::from(&dir);
+        assert!(
+            path.exists(),
+            "get_user_config_dir returned a non-existent path: {}",
+            dir
+        );
+    }
 }

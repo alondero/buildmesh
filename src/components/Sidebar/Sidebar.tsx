@@ -24,6 +24,7 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { MeshItem } from './MeshItem';
+import { UserConfigRow } from './UserConfigRow';
 import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -281,6 +282,14 @@ export function Sidebar() {
             )}
           </div>
         </div>
+
+        {/* Issue #60 — User Config entry. Lives BETWEEN the scrollable
+            meshes area and the static "New mesh" button: above so the
+            dashed-bottom-border separation on "New mesh" still reads as
+            "primary action," and below the meshes list so the row reads
+            as the issue spec's "row appears in sidebar below meshes
+            section, with a folder icon." */}
+        <UserConfigRow />
 
         {/* Add mesh */}
         <button

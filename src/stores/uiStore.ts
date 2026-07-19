@@ -90,6 +90,16 @@ interface UIState {
   // mirrors `setDragTargetNodeId` (line 132-136) so a same-value call does
   // not fire a subscriber notification and re-trigger the auto-clear effect.
   setMaximizedNode: (nodeId: number | null) => void;
+
+  // User Config panel (issue #60) — opens a right-dock File Explorer pinned
+  // at the resolved ~/.claude directory. Visibility is store-scoped (not
+  // local React state) because the trigger lives in the sidebar and the
+  // panel mounts at the App root — without a shared store the trigger
+  // click would be a no-op. The action reference is stable (zustand), so
+  // the row can pass `toggleUserConfig` directly without memoization.
+  userConfigOpen: boolean;
+  toggleUserConfig: () => void;
+  setUserConfigOpen: (open: boolean) => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => ({
@@ -156,6 +166,21 @@ export const useUIStore = create<UIState>((set, get) => ({
   setMaximizedNode: (nodeId) => {
     if (get().maximizedNodeId !== nodeId) {
       set({ maximizedNodeId: nodeId });
+    }
+  },
+
+  userConfigOpen: false,
+
+  toggleUserConfig: () => {
+    set({ userConfigOpen: !get().userConfigOpen });
+  },
+
+  setUserConfigOpen: (open) => {
+    // Idempotent: mirrors the `setDragTargetNodeId` / `setMaximizedNode`
+    // guards above so a same-value call doesn't notify subscribers (the
+    // panel's mount/unmount follows this flag).
+    if (get().userConfigOpen !== open) {
+      set({ userConfigOpen: open });
     }
   },
 }));

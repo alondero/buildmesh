@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
+import { UserConfigPanel } from './components/Sidebar/UserConfigPanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
 import { ShortcutCheatsheet } from './components/ShortcutCheatsheet/ShortcutCheatsheet';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
@@ -540,6 +541,12 @@ function App() {
       <Sidebar />
       <AgentNodeView />
       <ProbePanel />
+      {/* Issue #60 — User Config right-dock panel. Mounts only when
+          `userConfigOpen` is true (controlled inside the component); its
+          trigger lives in the Sidebar's UserConfigRow and writes the same
+          flag. Sits next to the ProbePanel so the right edge can host
+          either surface, never both. */}
+      <UserConfigPanel />
 
       <WorktreeCloseDialog />
       <ShortcutCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
