@@ -456,9 +456,10 @@ fn normalize_prefill_newlines(text: &str) -> String {
 ///
 /// `backend_env` is the per-profile backend selection resolved by the caller
 /// (`preferences::resolve_provider_env(&node.provider)`): the `ANTHROPIC_*`
-/// variables a custom Claude-compatible profile (MiniMax/Kimi/DeepSeek) needs to
+/// variables a custom Claude-compatible profile (MiniMax/DeepSeek) needs to
 /// target its endpoint. Empty for the built-in Anthropic subscription and for
-/// the native-binary providers. Passed in (rather than resolved here) so this
+/// the native-binary providers (Codex, Grok, Kimi Code, Antigravity, OpenCode).
+/// Passed in (rather than resolved here) so this
 /// function stays a pure composition of its inputs — no disk / preferences-cache
 /// access — and the env injection can be unit-tested with an explicit list.
 #[allow(clippy::too_many_arguments)]

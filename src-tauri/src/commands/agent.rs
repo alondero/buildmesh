@@ -192,7 +192,7 @@ fn provider_info_for_pairing(
 /// pairing* — the derived default Anthropic pairing for every keyed account,
 /// overlaid with the user's stored cross-surface/cross-harness pairings (issue
 /// #576, [`crate::preferences::effective_pairings`]). This is what surfaces a
-/// keyed built-in MiniMax/Kimi or a custom endpoint *and* an explicitly-attached
+/// keyed built-in MiniMax or a custom endpoint *and* an explicitly-attached
 /// MiniMax-via-Codex without a second list to keep in sync; clearing the key or
 /// disabling the account drops every derived/stored row that depends on it.
 ///
@@ -1992,21 +1992,26 @@ mod tests {
             vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
             vec![
                 acct("minimax", true, Some("sk-mm")),
-                acct("kimi", true, Some("sk-moon")),
+                // `"moonshot"` stands in for the (no-longer-first-class) Kimi
+                // Moonshot LLM endpoint account; users who want Claude Code
+                // pointed at Moonshot now create a custom Claude-compatible
+                // account under a non-reserved id (#918 — the reserved `"kimi"`
+                // id is the native Kimi Code harness, self_auth only).
+                acct("moonshot", true, Some("sk-moon")),
             ],
             vec![],
             Platform::Windows,
             &[],
-            // User dragged Kimi above MiniMax under Claude.
+            // User dragged Moonshot above MiniMax under Claude.
             &[ProxiedProviderOrder {
                 harness_id: "claude".into(),
-                provider_ids: vec!["kimi".into(), "minimax".into()],
+                provider_ids: vec!["moonshot".into(), "minimax".into()],
             }],
         );
         let ids: Vec<_> = menu.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec!["claude", "claude:kimi", "claude:minimax", "terminal"],
+            vec!["claude", "claude:moonshot", "claude:minimax", "terminal"],
             "native header first inside bucket; children in stored order; Terminal still pinned last",
         );
     }
@@ -2062,9 +2067,15 @@ mod tests {
         // doesn't touch the preferences cache or APP_DATA_DIR. So we
         // can verify the legacy fallback (issue #538 cutover) here
         // without driving the temp-dir helper.
+        //
+        // `"kimi"` USED to fall through here too — Kimi Code (wayfinder
+        // #918) is now a first-class native executor, so it resolves to
+        // `Provider::Kimi` directly. The dedicated test
+        // `resolve_provider_env_kimi_id_resolves_to_native_harness` in
+        // models::tests pins that path.
         use crate::models::Provider;
         assert_eq!(Provider::from_db_str("minimax"), Provider::Anthropic);
-        assert_eq!(Provider::from_db_str("kimi"), Provider::Anthropic);
+        assert_eq!(Provider::from_db_str("kimi"), Provider::Kimi);
     }
 
     // ----- v19 migration (issue #575) -----------------------------------
@@ -2082,8 +2093,11 @@ mod tests {
     /// in the future requires a paired test update.)
     #[test]
     fn first_class_legacy_ids_are_known_proxied() {
-        // The migration's first block rewrites exactly these two ids.
-        for id in ["minimax", "kimi"] {
+        // The migration's first block rewrites exactly this single id.
+        // ("kimi" USED to be in this list — Kimi Code is now a native
+        // self-auth harness (wayfinder #918), so `is_claude_compatible_id`
+        // returns false and the migration leaves its nodes alone.)
+        for id in ["minimax"] {
             assert!(
                 crate::preferences::is_claude_compatible_id(id),
                 "{id} must be classified as claude_compatible so the migration picks it up"
@@ -2141,9 +2155,17 @@ mod tests {
         // surfaces as a Proxied Provider row with the composite id
         // `<harness>:<provider>`, grouping under the detected Claude
         // Code harness profile (here `claude`).
+        //
+        // `"moonshot"` stands in for the Kimi Moonshot LLM endpoint
+        // account (the `"kimi"` id is now reserved for the self-auth
+        // native Kimi Code harness, wayfinder #918 — a custom Claude-
+        // compatible account for the LLM endpoint needs a different id).
         let menu = compose_provider_menu(
             vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
-            vec![acct("minimax", true, Some("sk-mm")), acct("kimi", true, Some("sk-moon"))],
+            vec![
+                acct("minimax", true, Some("sk-mm")),
+                acct("moonshot", true, Some("sk-moon")),
+            ],
             vec![],
             Platform::Windows,
             &[],
@@ -2157,8 +2179,8 @@ mod tests {
             "keyed MiniMax must appear in the menu as `claude:minimax` (Proxied Provider), got {ids:?}"
         );
         assert!(
-            ids.contains(&"claude:kimi"),
-            "keyed Kimi must appear in the menu as `claude:kimi` (Proxied Provider), got {ids:?}"
+            ids.contains(&"claude:moonshot"),
+            "keyed Moonshot (Kimi LLM via Claude Code, custom id post-#918) must appear in the menu as `claude:moonshot`, got {ids:?}"
         );
         // The MiniMax row carries its own composite id (and brand label) so
         // the frontend renders the brand icon keyed off the provider half.
@@ -2726,21 +2748,27 @@ mod tests {
     /// `['anthropic','minimax','kimi']` allow-list used to encode as a
     /// stringly-typed list — now it's a single derivation rule.
     #[test]
-    fn provider_info_marks_legacy_minimax_kimi_ids_as_resumable() {
+    fn provider_info_marks_legacy_minimax_id_as_resumable() {
+        // Pin the post-#538 cutover: bare `minimax` falls through to the
+        // Anthropic executor (Claude-Code-backed, resumable). `kimi` USED
+        // to fall through here too — wayfinder #918 promoted it to a
+        // first-class native executor (`Provider::Kimi`). Kimi Code's
+        // `resumable` flag depends on `supports_resume() &&
+        // produces_readable_transcript()`; the reader wiring for
+        // `~/.kimi/sessions/wire.jsonl` is a follow-up, so Kimi is
+        // currently NOT marked resumable until the reader ships.
         use crate::preferences::HarnessProfile;
-        for (id, label) in [("minimax", "Minimax"), ("kimi", "Kimi")] {
-            let profile = HarnessProfile {
-                id: id.to_string(),
-                name: label.to_string(),
-                harness: id.to_string(),
-            };
-            let info = provider_info_for(&profile, Platform::Windows)
-                .unwrap_or_else(|| panic!("{id} must be available on Windows"));
-            assert!(
-                info.resumable,
-                "legacy id {id:?} resolves to Anthropic (issue #538) and must be resumable"
-            );
-        }
+        let profile = HarnessProfile {
+            id: "minimax".to_string(),
+            name: "Minimax".to_string(),
+            harness: "minimax".to_string(),
+        };
+        let info = provider_info_for(&profile, Platform::Windows)
+            .expect("minimax resolves to Anthropic and must be available on Windows");
+        assert!(
+            info.resumable,
+            "legacy minimax id resolves to Anthropic (issue #538) and must be resumable"
+        );
     }
 
     // Regression test for the sync core: an unregistered session must short-

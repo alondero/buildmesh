@@ -35,9 +35,11 @@ struct Detectable {
 
 /// The tools we auto-detect. Claude Code backs the `anthropic` harness; the
 /// others map id-to-id onto their legacy [`crate::models::Provider`]. MiniMax
-/// and Kimi are `claude`-with-env redirects (no binary of their own), so they're
-/// configured manually rather than detected (PRD #534: custom compatible
-/// profiles are out of scope for V1 auto-detection).
+/// is a `claude`-with-env redirect (no binary of its own), so it's configured
+/// manually rather than detected (PRD #534: custom compatible profiles are out
+/// of scope for V1 auto-detection). Kimi Code (wayfinder #918) IS a native
+/// binary on PATH as `kimi` and ships `~/.kimi/` for config — both count as
+/// "installed" so a shell-function or alias install still surfaces.
 const DETECTABLE: &[Detectable] = &[
     Detectable {
         id: "claude",
@@ -73,6 +75,13 @@ const DETECTABLE: &[Detectable] = &[
         harness: "grok",
         binaries: &["grok"],
         config_dirs: &[".grok"],
+    },
+    Detectable {
+        id: "kimi",
+        name: "Kimi Code",
+        harness: "kimi",
+        binaries: &["kimi"],
+        config_dirs: &[".kimi"],
     },
 ];
 
@@ -232,6 +241,19 @@ mod tests {
         assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["claude"]);
     }
 
+    /// Kimi Code (#918) ships `~/.kimi/` for config alongside the `kimi` binary.
+    /// A shell-function/alias install that exposes only the config dir (no
+    /// PATH entry) must still surface as a Kimi Code harness — same
+    /// rationale as the Claude config-dir test above.
+    #[test]
+    fn kimi_config_dir_alone_counts_as_installed() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.kimi"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["kimi"]);
+    }
+
     #[test]
     fn agy_has_no_config_dir_so_needs_the_binary() {
         // Antigravity declares no config dir, so a stray home dir can't conjure
@@ -248,7 +270,14 @@ mod tests {
         use crate::models::Provider;
         // The harness field of every detectable maps to a real legacy provider.
         let path_dirs = dirs(&["/bin"]);
-        let exists = fake_fs(&["/bin/claude", "/bin/codex", "/bin/agy", "/bin/opencode", "/bin/grok"]);
+        let exists = fake_fs(&[
+            "/bin/claude",
+            "/bin/codex",
+            "/bin/agy",
+            "/bin/opencode",
+            "/bin/grok",
+            "/bin/kimi",
+        ]);
         let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
         for p in &profiles {
             // from_db_str never errs; assert the harness isn't an accidental typo
@@ -260,6 +289,7 @@ mod tests {
                 "agy" => assert_eq!(provider, Provider::Agy),
                 "opencode" => assert_eq!(provider, Provider::OpenCode),
                 "grok" => assert_eq!(provider, Provider::Grok),
+                "kimi" => assert_eq!(provider, Provider::Kimi),
                 other => panic!("unexpected detected id {other}"),
             }
         }

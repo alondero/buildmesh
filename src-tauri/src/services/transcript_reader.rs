@@ -59,8 +59,10 @@ pub enum TranscriptFormat {
 impl TranscriptFormat {
     /// Map a resolved harness adapter id to its transcript format. Every
     /// Claude-Code-backed executor (the `anthropic` adapter behind the built-in
-    /// subscription and all custom MiniMax/Kimi/DeepSeek profiles) shares the
-    /// Claude Code format; only Codex writes its own rollout format.
+    /// subscription and all custom MiniMax/DeepSeek profiles) shares the
+    /// Claude Code format; only Codex writes its own rollout format. Kimi Code
+    /// (wayfinder #918) writes standard JSONL (`~/.kimi/sessions/wire.jsonl`)
+    /// but the path resolver isn't wired yet — tracked as a follow-up.
     pub fn for_harness(harness_id: &str) -> Self {
         if harness_id == "codex" {
             TranscriptFormat::Codex

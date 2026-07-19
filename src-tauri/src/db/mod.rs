@@ -922,16 +922,16 @@ pub(crate) fn ensure_mesh_default_provider_normalized(conn: &Connection) -> SqlR
          WHERE default_provider = 'minimax'",
         [],
     )?;
-    let rows_kimi = conn.execute(
-        "UPDATE meshes SET default_provider = 'claude:kimi'
-         WHERE default_provider = 'kimi'",
-        [],
-    )?;
-    if rows_minimax > 0 || rows_kimi > 0 {
+    // `kimi` is intentionally absent from this migration: post-#918, bare
+    // `kimi` resolves to the native Kimi Code harness via
+    // `Provider::from_db_str("kimi") == Provider::Kimi`, so rewriting to
+    // `claude:kimi` would land the mesh in a state with no matching Proxied
+    // row. (Follow-up: post-#918 migration that re-rewrites `claude:kimi` →
+    // `kimi` for users who already passed through v19.)
+    if rows_minimax > 0 {
         tracing::info!(
-            "ensure_mesh_default_provider_normalized: rewrote {} minimax + {} kimi mesh defaults to composite form",
-            rows_minimax,
-            rows_kimi
+            "ensure_mesh_default_provider_normalized: rewrote {} minimax mesh defaults to composite form",
+            rows_minimax
         );
     }
     Ok(())
@@ -1204,19 +1204,23 @@ pub(crate) fn migrate_agent_node_provider_id_to_composite(conn: &Connection) -> 
     if !table_exists {
         return Ok(());
     }
-    // The two first-class Proxied Providers (issue #566). Always
-    // present in `default_provider_accounts()`; rewriting them here
-    // is independent of the user's `preferences.json` so a fresh
-    // install or a cleared file still upgrades correctly.
+    // The first-class Proxied Provider (issue #566) that still needs the
+    // composite-form rewrite. `kimi` was removed from this list by wayfinder
+    // #918: Kimi Code is now a native self-auth harness, so bare `kimi` rows
+    // already resolve to `Provider::Kimi` via `from_db_str` — no rewrite
+    // needed, and rewriting would put them in a `claude:kimi` state with no
+    // corresponding Proxied row in the spawn menu. (Follow-up: a post-#918
+    // migration that *re-rewrites* `claude:kimi` → `kimi` for users who
+    // already passed through v19 — see `kimi_node_provider_rewrite` ticket.)
     let rows_first_class = conn.execute(
         "UPDATE agent_nodes
             SET provider = 'claude:' || provider
-          WHERE provider IN ('minimax', 'kimi')",
+          WHERE provider = 'minimax'",
         [],
     )?;
     if rows_first_class > 0 {
         tracing::info!(
-            "migrate_agent_node_provider_id_to_composite: rewrote {} agent_nodes from first-class bare ids",
+            "migrate_agent_node_provider_id_to_composite: rewrote {} agent_nodes from minimax bare id",
             rows_first_class
         );
     }
