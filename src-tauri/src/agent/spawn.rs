@@ -766,6 +766,12 @@ fn start_reader(
     let app_clone = app;
     let reader_alive_clone = reader_alive;
     let session_captured = AtomicBool::new(!needs_session_capture);
+    // Issue #37 — once a PR URL is captured we stop scanning every
+    // subsequent chunk. Same "first match wins, cheap guard after"
+    // pattern as `session_captured` above. The detector regex is small
+    // but skipping chunks after a hit lets the reader spend its
+    // budget on the writer + emit paths for the rest of the session.
+    let pr_url_captured = AtomicBool::new(false);
 
     std::thread::spawn(move || {
         // The SpawnTimer in spawn_agent_inner stops at process *creation*
@@ -810,6 +816,27 @@ fn start_reader(
                     let _ = db::update_cli_session_id(session_id, uuid);
                     session_captured.store(true, Ordering::Relaxed);
                     tracing::info!("session_capture: captured session ID {} for node {}", uuid, session_id);
+                }
+            }
+
+            // Issue #37 — capture the first `github.com/<owner>/<repo>/pull/<n>`
+            // URL the agent emits. The detector's regex only matches PR *view*
+            // URLs (no `/pulls/`, `/issues/`, `/commit/`); the captured value
+            // is stored on `agent_nodes.pr_url` (first-write-wins, see
+            // `db::set_agent_node_pr_url`) and feeds the resume-by-URL
+            // fallback path. After the first match the AtomicBool short-
+            // circuits subsequent chunks — the regex is small but skipping
+            // post-capture scans lets the reader spend its budget on the
+            // writer + emit paths for the rest of the session.
+            if !pr_url_captured.load(Ordering::Relaxed) {
+                if let Some(url) = crate::agent::pr_url_detector::try_extract_pr_url(&text) {
+                    let _ = db::set_agent_node_pr_url(session_id, Some(url));
+                    pr_url_captured.store(true, Ordering::Relaxed);
+                    tracing::info!(
+                        "pr_url_detector: captured PR URL {} for node {}",
+                        url,
+                        session_id
+                    );
                 }
             }
 

@@ -840,6 +840,10 @@ mod tests {
             head_repo_owner: None,
             head_repo_clone_url: None,
             source_pr_pinned_sha: None,
+            // Issue #37 — explicit fixture (pre-`Default` helper) must
+            // enumerate the new column. None is the safe default; the
+            // provision path doesn't read `pr_url` directly.
+            pr_url: None,
             position: 0,
             created_at: chrono::Utc::now(),
         }
