@@ -96,9 +96,10 @@ export function UsagePanel({
   const keyed = account.claude_compatible;
 
   const renderBody = () => {
-    // Disabled-but-visible (detection-gated to a card): no meter, just
-    // a hint. Detection alone decides card visibility; `enabled` gates
-    // the network fetch, not the card (#574).
+    // Disabled-but-visible (e.g. the Settings-side AccountCard's row): no
+    // meter, just a hint. The Probe Panel's UsageTab pre-filters disabled
+    // accounts upstream, so this branch is unreachable from there; it
+    // stays as a guard for any direct caller.
     if (!account.enabled) return <p className="text-xs text-text-muted">Disabled</p>;
     // Generic Model Provider without a fetcher: explicit, not an empty
     // gauge or misleading error (#574 AC4).

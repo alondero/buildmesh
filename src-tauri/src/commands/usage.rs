@@ -143,7 +143,9 @@ fn configured_keyed_providers(accounts: &[ProviderAccount]) -> HashSet<String> {
 ///
 /// 1. **Disabled provider.** A user who explicitly disabled a provider must
 ///    keep the card so they can re-enable. We include with `usage = None`
-///    so `<UsagePanel>` renders "Disabled" (UsageRender.tsx:96).
+///    so any caller (e.g. Settings-side AccountCard) can render its own
+///    disabled affordance. The Probe Panel's UsageTab filters disabled
+///    rows client-side, so the `usage: None` payload is unused there.
 /// 2. **Generic untracked provider.** A custom Claude-compatible provider
 ///    has no usage fetcher by definition; the "Usage not tracked" card is
 ///    informative UX telling the user why. Included with `usage_tracked:
