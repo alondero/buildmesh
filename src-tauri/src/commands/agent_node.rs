@@ -4,7 +4,27 @@ use crate::db;
 use crate::models::AgentNode;
 use crate::services;
 use crate::git::worktree::WorktreeCloseSafety;
+use serde::Serialize;
 use tauri::{command, Emitter};
+use ts_rs::TS;
+
+/// Payload of the `worktree-cleanup-failed` Tauri event. Emitted by
+/// [`crate::services::agent_node::process_pending_removals`] when the
+/// background-drained worktree delete (issue #613 deferred removal) fails —
+/// the row stays in `pending_worktree_removals` and the user is told via a
+/// toast that it'll be retried on next launch.
+///
+/// Generated to `src/types/generated/WorktreeCleanupFailedPayload.ts`; the
+/// TS half is imported by `src/App.tsx`. Three fields because the toast
+/// surfaces the node name (the user-facing identity) and the worktree path
+/// (the on-disk artifact) and the error reason (so support can copy/paste).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "WorktreeCleanupFailedPayload.ts")]
+pub struct WorktreeCleanupFailedPayload {
+    pub node_name: String,
+    pub worktree_path: String,
+    pub error: String,
+}
 
 /// Create a new agent node
 #[command]
@@ -74,11 +94,11 @@ pub fn drain_pending_removals(app: tauri::AppHandle) {
         for (removal, error) in services::agent_node::process_pending_removals() {
             let _ = app.emit(
                 "worktree-cleanup-failed",
-                serde_json::json!({
-                    "node_name": removal.node_name,
-                    "worktree_path": removal.worktree_path,
-                    "error": error,
-                }),
+                WorktreeCleanupFailedPayload {
+                    node_name: removal.node_name,
+                    worktree_path: removal.worktree_path,
+                    error,
+                },
             );
         }
     });
@@ -144,10 +164,10 @@ pub async fn rename_agent_node(
 
     let _ = app.emit(
         "node-renamed",
-        serde_json::json!({
-            "node_id": node_id,
-            "name": trimmed,
-        }),
+        crate::session_naming::NodeRenamedPayload {
+            node_id,
+            name: trimmed,
+        },
     );
     Ok(())
 }

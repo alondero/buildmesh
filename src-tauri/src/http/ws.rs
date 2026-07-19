@@ -216,7 +216,7 @@ fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, te
         if let Some(app) = super::app_handle() {
             let _ = app.emit(
                 "attention-cleared",
-                serde_json::json!({ "session_id": node_id }),
+                crate::commands::attention::AttentionClearedPayload { session_id: node_id },
             );
         }
         // Also fan out to mobile event subscribers — the desktop Tauri

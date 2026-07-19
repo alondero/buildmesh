@@ -5,9 +5,40 @@ use crate::env;
 use crate::models::MeshRow;
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
+use ts_rs::TS;
+
+// ---------------------------------------------------------------------------
+// Wire types — Tauri event payloads (issue #161)
+// ---------------------------------------------------------------------------
+
+/// Payload of the per-session `build-run-output-{sessionId}` Tauri event.
+/// Emitted by the PTY reader thread on every read with a base64-encoded
+/// chunk of stdout bytes (matches the production `agent-output` shape, so
+/// the same `decodeBase64Bytes` helper handles both).
+///
+/// Generated to `src/types/generated/BuildRunOutputPayload.ts`; the TS half
+/// is imported by `src/components/Terminal/BuildRunTerminalRegistry.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "BuildRunOutputPayload.ts")]
+pub struct BuildRunOutputPayload {
+    pub data: String,
+}
+
+/// Payload of the per-session `build-run-exited-{sessionId}` Tauri event.
+/// Emitted when the PTY reader sees EOF on the build/run shell. Empty
+/// payload — the exit is a sentinel, not a state carrier. The event name
+/// encodes the sessionId (one event family per spawned shell) so the
+/// listener can match it without a payload field.
+///
+/// Generated to `src/types/generated/BuildRunExitedPayload.ts`; the TS half
+/// is imported by `src/components/Terminal/BuildRunTerminalRegistry.ts`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "BuildRunExitedPayload.ts")]
+pub struct BuildRunExitedPayload {}
 
 // ---------------------------------------------------------------------------
 // Worktree path resolution
@@ -309,7 +340,7 @@ fn build_run_blocking(
                     // leave a zombie PTY that silently swallows keystrokes.
                     let _ = app_handle.emit(
                         &format!("build-run-exited-{}", node_id_clone),
-                        serde_json::json!({}),
+                        BuildRunExitedPayload {},
                     );
                     break;
                 }
@@ -317,7 +348,7 @@ fn build_run_blocking(
                     let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
                     let _ = app_handle.emit(
                         &format!("build-run-output-{}", node_id_clone),
-                        serde_json::json!({ "data": data }),
+                        BuildRunOutputPayload { data },
                     );
                 }
                 Err(e) => {

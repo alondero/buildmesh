@@ -36,15 +36,34 @@
 //! reqwest + git shell-outs are fine here — this is NOT the tokio pool).
 
 use once_cell::sync::Lazy;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use ts_rs::TS;
 
 use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::db;
 use crate::models::{Mesh, SessionStatus, DEFAULT_AUTOPILOT_TRIGGER_LABEL};
 use crate::services::github::{GitHubClient, Issue};
+
+/// Payload of the `autopilot-node-closed` Tauri event. Emitted from the
+/// merged-PR sweep when an autopilot-managed PR was merged and the node is
+/// being archived (NOT deleted — the branch and scrollback stay in the
+/// Archive tab). The frontend refetches the node list and shows a toast
+/// explaining why the card vanished from the grid.
+///
+/// Generated to `src/types/generated/AutopilotNodeClosedPayload.ts`; the TS
+/// half is imported by `src/stores/agentNodeStore.ts` and `src/App.tsx`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotNodeClosedPayload.ts")]
+pub struct AutopilotNodeClosedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub pr_number: i64,
+}
 
 /// PRD #480 implementation decision: poll every 2 minutes.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(120);
@@ -288,7 +307,10 @@ fn close_merged_nodes(
                 crate::autopilot::evaluator::unregister(node_id);
                 let _ = app.emit(
                     "autopilot-node-closed",
-                    serde_json::json!({ "node_id": node_id, "pr_number": pr_number }),
+                    AutopilotNodeClosedPayload {
+                        node_id,
+                        pr_number,
+                    },
                 );
                 tracing::info!(
                     "autopilot: PR #{} merged — node {} archived (slot freed)",
@@ -389,7 +411,10 @@ fn spawn_autopilot_node(
     // Start buffering the node's PTY output for the state evaluator (#483).
     crate::autopilot::evaluator::register(node.id);
 
-    let _ = app.emit("node-created", serde_json::json!({ "id": node.id }));
+    let _ = app.emit(
+        "node-created",
+        crate::commands::agent::NodeCreatedPayload { id: node.id },
+    );
     tracing::info!(
         "autopilot: created node {} for issue #{} on mesh {} (provider {})",
         node.id,

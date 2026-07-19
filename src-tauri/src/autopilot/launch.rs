@@ -22,7 +22,26 @@
 //! left for the human, never blind-driven.
 
 use std::time::{Duration, Instant};
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use ts_rs::TS;
+
+/// Payload of the `autopilot-submitted` Tauri event. Emitted by the launch
+/// watcher once it has confirmed the prefill is on screen and pressed Enter
+/// — the agent has actually started the task (the prefill alone only stages
+/// it; issue #874). The frontend surfaces a toast confirming the start.
+///
+/// Generated to `src/types/generated/AutopilotSubmittedPayload.ts`; the TS
+/// half is imported by `src/App.tsx`. `issue` is `0` for hand-spawned
+/// autopilot nodes without an originating GitHub issue.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "AutopilotSubmittedPayload.ts")]
+pub struct AutopilotSubmittedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub issue: i64,
+}
 
 use super::evaluator;
 
@@ -112,7 +131,10 @@ pub fn watch_and_submit(app: AppHandle, node_id: i64, issue_number: i64) {
                     );
                     let _ = app.emit(
                         "autopilot-submitted",
-                        serde_json::json!({ "node_id": node_id, "issue": issue_number }),
+                        AutopilotSubmittedPayload {
+                            node_id,
+                            issue: issue_number,
+                        },
                     );
                 }
                 Err(e) => tracing::warn!(

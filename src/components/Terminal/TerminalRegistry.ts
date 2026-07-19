@@ -4,6 +4,11 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { listen, UnlistenFn } from '@tauri-apps/api/event';
+import type { AgentOutputPayload } from '../../types/generated/AgentOutputPayload';
+import type { AgentSpawnedPayload } from '../../types/generated/AgentSpawnedPayload';
+import type { SerializeTerminalRequestPayload } from '../../types/generated/SerializeTerminalRequestPayload';
+
+export type { AgentOutputPayload };
 import { openUrl } from '@tauri-apps/plugin-opener';
 import * as api from '../../lib/tauri';
 import { createTerminalOptions } from './terminalConfig';
@@ -28,15 +33,12 @@ export interface TerminalInstance {
   onFindRequest: (() => void) | null;
 }
 
-interface AgentOutputPayload {
-  session_id: number;
-  data?: string;
-  line?: string;
-}
-
 function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData | null {
-  if (payload.data !== undefined) return decodeBase64Bytes(payload.data);
-  if (payload.line !== undefined) return payload.line;
+  // `!= null` catches both Rust's `None` (serialised as `null`) AND a
+  // test-constructed literal that omits the field entirely (TypeScript
+  // widens the missing key to `undefined` at runtime).
+  if (payload.data != null) return decodeBase64Bytes(payload.data);
+  if (payload.line != null) return payload.line;
   return null;
 }
 
@@ -70,7 +72,7 @@ export class TerminalRegistry {
     // real dimensions. `syncPtySize` is self-guarding: a no-op for
     // missing/detached instances, and it silently swallows the
     // "Agent not running" rejection in case of a race.
-    this.registerListener<{ session_id: number; rows: number; cols: number }>(
+    this.registerListener<AgentSpawnedPayload>(
       'agent-spawned',
       (event) => {
         this.syncPtySize(event.payload.session_id);
@@ -307,7 +309,7 @@ export class TerminalRegistry {
         }
       });
 
-      const unlistenSerialize = await listen<{ node_id: number; request_id: string }>('serialize-terminal-request', (event) => {
+      const unlistenSerialize = await listen<SerializeTerminalRequestPayload>('serialize-terminal-request', (event) => {
         if (event.payload.node_id === nodeId) {
           const snapshot = instance.serializeAddon.serialize({ scrollback: 200 });
           api.submitTerminalSnapshot(event.payload.request_id, snapshot).catch(console.error);
