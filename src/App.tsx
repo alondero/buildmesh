@@ -25,6 +25,7 @@ import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { arrowTargetIndex } from './lib/gridTraversal';
 import { toggleGridMaximize } from './lib/gridShortcuts';
+import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
 import { isMac } from './lib/platform';
 import { getGridRows } from './hooks/useGridLayout';
 import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
@@ -111,6 +112,15 @@ function App() {
       { key: 'CommandOrControl+Alt+ArrowRight', action: 'arrow-right' },
       { key: 'CommandOrControl+Alt+ArrowUp', action: 'arrow-up' },
       { key: 'CommandOrControl+Alt+ArrowDown', action: 'arrow-down' },
+      // Cycle to the next agent node with `status === 'awaiting_input'`
+      // (issue #64). Registered as a Tauri global shortcut (not a window
+      // keydown listener) so the binding fires while an xterm terminal has
+      // focus — the typical state when the user notices a node waiting for
+      // input and wants to jump to it without clicking. The cycle logic
+      // (next-after-current + wrap, scoped to the active node's mesh) lives
+      // in src/lib/awaitingInputShortcuts.ts as a pure store mutator so it
+      // can be unit-tested without standing up the plugin.
+      { key: 'CommandOrControl+Period', action: 'jump-to-next-awaiting' },
       gridToggleShortcut,
     ];
     const shortcutByKey = new Map(shortcuts.map(s => [s.key, s.action]));
@@ -237,6 +247,20 @@ function App() {
         toggleMaximizeGuard(async () => {
           toggleGridMaximize();
         });
+        return;
+      }
+
+      if (action === 'jump-to-next-awaiting') {
+        // Issue #64 — Ctrl/Cmd+. cycles to the next agent node whose
+        // `status === 'awaiting_input'` in the active node's mesh, wrapping
+        // at the end. No focus guard: the user is most likely focused on an
+        // xterm prompt (the reason they're noticing the agent needs input),
+        // and `isTextInputFocused` carves out the xterm-helper-textarea so
+        // this fires from a terminal prompt — exactly what we want. No
+        // cooldown either: rapid presses are a legitimate "skip through"
+        // gesture, and the cycle is purely synchronous so there's no IPC
+        // round-trip to rate-limit.
+        jumpToNextAwaitingNode();
         return;
       }
 
