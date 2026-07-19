@@ -706,6 +706,210 @@ pub fn openrouter_usage(api_key: &str) -> ProviderUsage {
     }
 }
 
+// ─── xAI / Grok (`grok`) ───────────────────────────────────────────────────
+//
+// The Grok Build CLI (`grok`) stores OIDC session credentials in
+// `~/.grok/auth.json`. The OIDC access token resides inside the nested "key"
+// field, and the user ID is in "user_id".
+//
+// To retrieve billing / usage, we query `GET /v1/billing?format=credits` on
+// the Grok proxy `cli-chat-proxy.grok.com`. To authorize and request the weekly
+// unified billing format (the rolling consumer pool), we must pass special headers:
+// `X-XAI-Token-Auth: xai-grok-cli`, `x-userid`, and `x-grok-client-*`.
+
+fn grok_auth_path() -> PathBuf {
+    home_dir().join(".grok").join("auth.json")
+}
+
+#[derive(Deserialize, Debug)]
+struct GrokAuthEntry {
+    key: Option<String>,
+    user_id: Option<String>,
+}
+
+fn read_grok_token(path: PathBuf) -> Result<(String, String), UsageError> {
+    let content = fs::read_to_string(&path)
+        .map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
+    let entries: HashMap<String, GrokAuthEntry> = serde_json::from_str(&content)
+        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    for (k, v) in entries {
+        if k.starts_with("https://auth.x.ai::") {
+            if let (Some(key), Some(user_id)) = (v.key, v.user_id) {
+                if !key.is_empty() && !user_id.is_empty() {
+                    return Ok((key, user_id));
+                }
+            }
+        }
+    }
+    Err(UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
+#[derive(Deserialize, Debug)]
+struct GrokVal {
+    val: f64,
+}
+
+#[derive(Deserialize, Debug)]
+struct GrokPeriod {
+    #[serde(rename = "type")]
+    period_type: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GrokBillingConfig {
+    #[serde(rename = "currentPeriod")]
+    current_period: Option<GrokPeriod>,
+    #[serde(rename = "onDemandCap")]
+    on_demand_cap: Option<GrokVal>,
+    #[serde(rename = "onDemandUsed")]
+    on_demand_used: Option<GrokVal>,
+    #[serde(rename = "isUnifiedBillingUser")]
+    is_unified_billing_user: Option<bool>,
+    #[serde(rename = "prepaidBalance")]
+    prepaid_balance: Option<GrokVal>,
+    #[serde(rename = "billingPeriodEnd")]
+    billing_period_end: Option<String>,
+    #[serde(rename = "monthlyLimit")]
+    monthly_limit: Option<GrokVal>,
+    used: Option<GrokVal>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GrokBillingResp {
+    config: GrokBillingConfig,
+}
+
+fn parse_grok_response(body: &str) -> Result<ProviderUsage, UsageError> {
+    let resp: GrokBillingResp = serde_json::from_str(body)
+        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    let config = resp.config;
+
+    let mut windows = Vec::new();
+    let is_unified = config.is_unified_billing_user.unwrap_or(false);
+
+    let balance = if let Some(ref prepaid) = config.prepaid_balance {
+        if prepaid.val > 0.0 {
+            Some(BillingBalance {
+                remaining: prepaid.val,
+                monthly_spend: config.on_demand_used.as_ref().map(|v| v.val),
+                currency: "USD".to_string(),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if is_unified {
+        if let Some(ref cap) = config.on_demand_cap {
+            let used_percent = if cap.val > 0.0 {
+                if let Some(ref used) = config.on_demand_used {
+                    Some((used.val / cap.val) * 100.0)
+                } else {
+                    Some(0.0)
+                }
+            } else {
+                Some(0.0)
+            };
+
+            let label = config.current_period.as_ref()
+                .and_then(|p| p.period_type.as_ref())
+                .map(|t| {
+                    if t.contains("WEEKLY") {
+                        "Weekly Pool".to_string()
+                    } else {
+                        "Grok Build Quota".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "Weekly Pool".to_string());
+
+            windows.push(UsageWindow {
+                label,
+                used_percent,
+                resets_at: config.billing_period_end.clone(),
+            });
+        }
+    } else if let Some(ref limit) = config.monthly_limit {
+        if limit.val > 0.0 {
+            let used_percent = config.used.as_ref().map(|u| (u.val / limit.val) * 100.0);
+            windows.push(UsageWindow {
+                label: "Monthly Limit".to_string(),
+                used_percent,
+                resets_at: config.billing_period_end.clone(),
+            });
+        }
+    }
+
+    Ok(ProviderUsage {
+        provider: "grok".to_string(),
+        logged_in: true,
+        windows,
+        balance,
+        detail: None,
+        error: None,
+    })
+}
+
+pub fn grok_usage() -> ProviderUsage {
+    let (token, user_id) = match read_grok_token(grok_auth_path()) {
+        Ok(t) => t,
+        Err(e) => return logged_out("grok", e.to_string()),
+    };
+
+    let client = match Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return unavailable("grok", format!("Client error: {}", e)),
+    };
+
+    let base_url = env::var("GROK_CLI_CHAT_PROXY_BASE_URL")
+        .unwrap_or_else(|_| "https://cli-chat-proxy.grok.com".to_string());
+    let url = format!("{}/v1/billing?format=credits", base_url);
+
+    let resp = match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("X-XAI-Token-Auth", "xai-grok-cli")
+        .header("x-userid", user_id)
+        .header("x-grok-client-mode", "grok-build")
+        .header("x-grok-client-version", "0.2.103")
+        .header("x-grok-client-identifier", "grok-shell")
+        .send()
+    {
+        Ok(r) if !r.status().is_success() => {
+            let code = r.status().as_u16();
+            if code == 401 || code == 403 {
+                return logged_out("grok", "Invalid API key".to_string());
+            }
+            if code == 429 {
+                return unavailable(
+                    "grok",
+                    "Rate limited — usage data temporarily unavailable".to_string(),
+                );
+            }
+            let body = r.text().unwrap_or_default();
+            return unavailable("grok", format!("API error {}: {}", code, body));
+        }
+        Ok(r) => r,
+        Err(e) => return unavailable("grok", format!("Request failed: {}", e)),
+    };
+
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(e) => return unavailable("grok", format!("Failed to read response body: {}", e)),
+    };
+
+    match parse_grok_response(&body) {
+        Ok(usage) => usage,
+        Err(e) => unavailable("grok", format!("Failed to parse response: {}", e)),
+    }
+}
+
 // ─── Google / Antigravity (`agy`) ───────────────────────────────────────────
 //
 // The Antigravity CLI surfaces a per-model quota that is a DIFFERENT product
@@ -1497,5 +1701,74 @@ mod tests {
         assert_eq!(usage.provider, "openrouter");
         assert!(usage.error.is_some());
         assert!(usage.balance.is_none());
+    }
+
+    // ─── Grok ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_grok_response_unified_billing_valid() {
+        let json = r#"{
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-07-15T00:00:00+00:00",
+                    "end": "2026-07-22T00:00:00+00:00"
+                },
+                "onDemandCap": { "val": 10.0 },
+                "onDemandUsed": { "val": 2.5 },
+                "isUnifiedBillingUser": true,
+                "prepaidBalance": { "val": 0.0 },
+                "billingPeriodEnd": "2026-07-22T00:00:00+00:00"
+            }
+        }"#;
+        let usage = parse_grok_response(json).unwrap();
+        assert_eq!(usage.provider, "grok");
+        assert!(usage.logged_in);
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].label, "Weekly Pool");
+        assert_eq!(usage.windows[0].used_percent, Some(25.0));
+        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-07-22T00:00:00+00:00"));
+        assert!(usage.balance.is_none());
+    }
+
+    #[test]
+    fn parse_grok_response_monthly_limit_valid() {
+        let json = r#"{
+            "config": {
+                "monthlyLimit": { "val": 50.0 },
+                "used": { "val": 10.0 },
+                "isUnifiedBillingUser": false,
+                "billingPeriodEnd": "2026-08-01T00:00:00+00:00"
+            }
+        }"#;
+        let usage = parse_grok_response(json).unwrap();
+        assert_eq!(usage.provider, "grok");
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.windows[0].label, "Monthly Limit");
+        assert_eq!(usage.windows[0].used_percent, Some(20.0));
+        assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-08-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn parse_grok_response_prepaid_balance() {
+        let json = r#"{
+            "config": {
+                "prepaidBalance": { "val": 15.75 },
+                "onDemandUsed": { "val": 4.25 }
+            }
+        }"#;
+        let usage = parse_grok_response(json).unwrap();
+        assert!(usage.balance.is_some());
+        let balance = usage.balance.unwrap();
+        assert_eq!(balance.remaining, 15.75);
+        assert_eq!(balance.monthly_spend, Some(4.25));
+        assert_eq!(balance.currency, "USD");
+    }
+
+    #[test]
+    fn grok_usage_with_empty_key_returns_logged_out() {
+        // Force an empty path to trigger logged_out path
+        let usage = read_grok_token(PathBuf::from("")).map(|(t, _u)| t).unwrap_or_else(|e| e.to_string());
+        assert!(usage.contains("No credential found"));
     }
 }
