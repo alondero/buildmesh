@@ -168,6 +168,25 @@ fn read_codex_token(path: PathBuf) -> Result<String, UsageError> {
     cred.access_token.ok_or(UsageError::NoCredential(path.to_string_lossy().to_string()))
 }
 
+#[derive(Deserialize)]
+struct OpenCodeAuthEntry {
+    key: Option<String>,
+}
+
+fn read_opencode_token(path: PathBuf) -> Result<String, UsageError> {
+    let content = fs::read_to_string(&path).map_err(|_| UsageError::NoCredential(path.clone().to_string_lossy().to_string()))?;
+    let entries: HashMap<String, OpenCodeAuthEntry> = serde_json::from_str(&content)
+        .map_err(|e| UsageError::Shape(e.to_string()))?;
+    if let Some(entry) = entries.get("opencode-go") {
+        if let Some(ref key) = entry.key {
+            if !key.is_empty() {
+                return Ok(key.clone());
+            }
+        }
+    }
+    Err(UsageError::NoCredential(path.to_string_lossy().to_string()))
+}
+
 fn logged_out(provider: &str, error: String) -> ProviderUsage {
     ProviderUsage {
         provider: provider.to_string(),
@@ -907,6 +926,106 @@ pub fn grok_usage() -> ProviderUsage {
     match parse_grok_response(&body) {
         Ok(usage) => usage,
         Err(e) => unavailable("grok", format!("Failed to parse response: {}", e)),
+    }
+}
+
+fn calculate_opencode_windows_impl(conn: &rusqlite::Connection) -> Result<Vec<UsageWindow>, String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    
+    let sum_cost_since = |since_ms: i64| -> Result<f64, rusqlite::Error> {
+        let mut stmt = conn.prepare("SELECT SUM(cost) FROM session WHERE time_created >= ?")?;
+        let cost: Option<f64> = stmt.query_row([since_ms], |row| row.get(0))?;
+        Ok(cost.unwrap_or(0.0))
+    };
+
+    // Rolling limits:
+    // - 5-Hour Rolling Limit: $12.00
+    // - Weekly Limit: $30.00
+    // - Monthly Limit: $60.00
+    let five_hours_ms = 5 * 60 * 60 * 1000;
+    let weekly_ms = 7 * 24 * 60 * 60 * 1000;
+    let monthly_ms = 30 * 24 * 60 * 60 * 1000;
+
+    let cost_5h = sum_cost_since(now_ms - five_hours_ms).map_err(|e| e.to_string())?;
+    let cost_weekly = sum_cost_since(now_ms - weekly_ms).map_err(|e| e.to_string())?;
+    let cost_monthly = sum_cost_since(now_ms - monthly_ms).map_err(|e| e.to_string())?;
+
+    let limit_5h = 12.0;
+    let limit_weekly = 30.0;
+    let limit_monthly = 60.0;
+
+    let pct_5h = (cost_5h / limit_5h) * 100.0;
+    let pct_weekly = (cost_weekly / limit_weekly) * 100.0;
+    let pct_monthly = (cost_monthly / limit_monthly) * 100.0;
+
+    Ok(vec![
+        UsageWindow {
+            label: "5-hour".to_string(),
+            used_percent: Some(pct_5h.min(100.0).max(0.0)),
+            resets_at: None,
+        },
+        UsageWindow {
+            label: "Weekly".to_string(),
+            used_percent: Some(pct_weekly.min(100.0).max(0.0)),
+            resets_at: None,
+        },
+        UsageWindow {
+            label: "Monthly".to_string(),
+            used_percent: Some(pct_monthly.min(100.0).max(0.0)),
+            resets_at: None,
+        },
+    ])
+}
+
+fn calculate_opencode_windows(db_path: &std::path::Path) -> Result<Vec<UsageWindow>, String> {
+    if !db_path.exists() {
+        return Ok(vec![
+            UsageWindow {
+                label: "5-hour".to_string(),
+                used_percent: Some(0.0),
+                resets_at: None,
+            },
+            UsageWindow {
+                label: "Weekly".to_string(),
+                used_percent: Some(0.0),
+                resets_at: None,
+            },
+            UsageWindow {
+                label: "Monthly".to_string(),
+                used_percent: Some(0.0),
+                resets_at: None,
+            },
+        ]);
+    }
+
+    let conn = rusqlite::Connection::open(db_path)
+        .map_err(|e| format!("Failed to open DB: {}", e))?;
+
+    calculate_opencode_windows_impl(&conn)
+}
+
+pub fn opencode_usage() -> ProviderUsage {
+    let opencode_dir = home_dir().join(".local").join("share").join("opencode");
+    let auth_path = opencode_dir.join("auth.json");
+    let db_path = opencode_dir.join("opencode.db");
+
+    // Check login state by reading auth.json
+    let _token = match read_opencode_token(auth_path) {
+        Ok(t) => t,
+        Err(e) => return logged_out("opencode", e.to_string()),
+    };
+
+    // Calculate usage from local db
+    match calculate_opencode_windows(&db_path) {
+        Ok(windows) => ProviderUsage {
+            provider: "opencode".to_string(),
+            logged_in: true,
+            windows,
+            balance: None,
+            detail: None,
+            error: None,
+        },
+        Err(e) => unavailable("opencode", format!("Failed to query opencode.db: {}", e)),
     }
 }
 
@@ -1770,5 +1889,87 @@ mod tests {
         // Force an empty path to trigger logged_out path
         let usage = read_grok_token(PathBuf::from("")).map(|(t, _u)| t).unwrap_or_else(|e| e.to_string());
         assert!(usage.contains("No credential found"));
+    }
+
+    // ─── OpenCode ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_opencode_auth_json_valid() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("opencode_auth.json");
+        let json = r#"{
+            "google": { "type": "api", "key": "AIzaSy..." },
+            "opencode-go": { "type": "api", "key": "sk-D54t4e3..." }
+        }"#;
+        fs::write(&path, json).unwrap();
+        let key = read_opencode_token(path.clone()).unwrap();
+        assert_eq!(key, "sk-D54t4e3...");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn parse_opencode_auth_json_missing_or_empty_key() {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("opencode_auth_empty.json");
+        let json = r#"{
+            "opencode-go": { "type": "api", "key": "" }
+        }"#;
+        fs::write(&path, json).unwrap();
+        let err = read_opencode_token(path.clone()).unwrap_err();
+        assert!(matches!(err, UsageError::NoCredential(_)));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_calculate_opencode_windows_impl() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                time_created INTEGER NOT NULL,
+                cost REAL DEFAULT 0 NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // 5 hours limit = $12.00, we put $3.00 -> 25.0%
+        // Weekly limit = $30.00, we put $3.00 + $6.00 = $9.00 -> 30.0%
+        // Monthly limit = $60.00, we put $9.00 + $15.00 = $24.00 -> 40.0%
+        conn.execute(
+            "INSERT INTO session (id, time_created, cost) VALUES (?, ?, ?)",
+            rusqlite::params!["ses1", now_ms - 2 * 60 * 60 * 1000, 3.0],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, time_created, cost) VALUES (?, ?, ?)",
+            rusqlite::params!["ses2", now_ms - 2 * 24 * 60 * 60 * 1000, 6.0],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session (id, time_created, cost) VALUES (?, ?, ?)",
+            rusqlite::params!["ses3", now_ms - 15 * 24 * 60 * 60 * 1000, 15.0],
+        )
+        .unwrap();
+        // Outside 30 days, should not be included
+        conn.execute(
+            "INSERT INTO session (id, time_created, cost) VALUES (?, ?, ?)",
+            rusqlite::params!["ses4", now_ms - 40 * 24 * 60 * 60 * 1000, 100.0],
+        )
+        .unwrap();
+
+        let windows = calculate_opencode_windows_impl(&conn).unwrap();
+        assert_eq!(windows.len(), 3);
+
+        assert_eq!(windows[0].label, "5-hour");
+        assert_eq!(windows[0].used_percent, Some(25.0));
+
+        assert_eq!(windows[1].label, "Weekly");
+        assert_eq!(windows[1].used_percent, Some(30.0));
+
+        assert_eq!(windows[2].label, "Monthly");
+        assert_eq!(windows[2].used_percent, Some(40.0));
     }
 }

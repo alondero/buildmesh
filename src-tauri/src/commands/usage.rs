@@ -9,11 +9,11 @@ use tauri::command;
 /// id isn't here — a **Generic Model Provider** (custom endpoint) — is
 /// configurable but has no usage endpoint, so it renders an explicit "usage not
 /// tracked" state instead.
-const FETCHABLE: [&str; 7] = ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok"];
+const FETCHABLE: [&str; 8] = ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode"];
 
 /// Map a self-authenticating **native** provider account to the harness whose
 /// *installation* gates its subscription meter: `anthropic`↔Claude Code (harness
-/// id `anthropic`), `codex`↔Codex, `agy`↔Antigravity. A keyed provider
+/// id `anthropic`), `codex`↔Codex, `agy`↔Antigravity, `opencode`↔OpenCode. A keyed provider
 /// (MiniMax/custom Claude-compatible) returns `None` — it's gated on the user
 /// enabling it, not on a detected binary. Kimi Code (#918) is native
 /// self_auth, not a keyed Claude-compatible endpoint.
@@ -23,6 +23,7 @@ fn native_harness_for(account_id: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "agy" => Some("agy"),
         "grok" => Some("grok"),
+        "opencode" => Some("opencode"),
         _ => None,
     }
 }
@@ -242,6 +243,7 @@ fn cached_or_fetch(provider: &str, force_refresh: bool) -> ProviderUsage {
                 .unwrap_or(""),
         ),
         "grok" => usage::grok_usage(),
+        "opencode" => usage::opencode_usage(),
         other => unreachable!("cached_or_fetch called with unknown provider: {other}"),
     };
 
@@ -369,7 +371,7 @@ mod tests {
 
     #[test]
     fn usage_tracked_only_for_providers_with_a_fetcher() {
-        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok"] {
+        for id in ["anthropic", "codex", "minimax", "agy", "kimi", "openrouter", "grok", "opencode"] {
             assert!(usage_tracked(id), "{id} should be tracked");
         }
         // Any Generic provider is untracked.
