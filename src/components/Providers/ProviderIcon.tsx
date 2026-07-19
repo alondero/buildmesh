@@ -1,5 +1,10 @@
 import minimaxLogo from '../../assets/providers/minimax.svg';
 import antigravityLogo from '../../assets/providers/antigravity.png';
+// Official xAI Grok Logomark (white fill, transparent background) —
+// the slashed-circle "G" mark from x.ai/legal/brand-guidelines, kept
+// unmodified per the brand usage terms. Mirrors the Grok web app's
+// own favicon and PWA icons.
+import grokLogo from '../../assets/providers/grok.svg';
 
 // Brand-coloured assets stay as <img> — the colour is baked in and would be
 // distorted by `currentColor` inheritance. The dark SVG assets are inlined
@@ -98,6 +103,7 @@ const INLINE_ICONS: Record<string, (props: InlineIconProps) => React.JSX.Element
 const COLORED_IMAGES: Record<string, string> = {
   minimax: minimaxLogo,
   agy: antigravityLogo,
+  grok: grokLogo,
 };
 
 /** Split a Spawn Option id into the *icon-lookup* key.
@@ -136,6 +142,10 @@ const PROVIDER_CHIP_COLORS: Record<string, string> = {
   terminal:  '#9ca3af',
   codex:     '#10a37f',
   openrouter: '#615EFF', // OpenRouter brand purple-blue.
+  // xAI official brand colour (x.ai/legal/brand-guidelines, Feb 2025).
+  // Paired with the white Grok Logomark at assets/providers/grok.svg
+  // for a high-contrast (WCAG AAA) avatar chip.
+  grok:      '#0A0A0A',
 };
 
 interface ProviderIconProps {

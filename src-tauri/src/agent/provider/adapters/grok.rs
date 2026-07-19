@@ -33,7 +33,11 @@ impl AgentProvider for GrokAdapter {
     fn ui(&self) -> UiMeta {
         UiMeta {
             label: "Grok Code".into(),
-            color: "#f43f5e".into(),
+            // Official xAI brand colour from
+            // https://x.ai/legal/brand-guidelines (Feb 14, 2025).
+            // Paired with the white Grok Logomark at src/assets/providers/grok.svg
+            // for a high-contrast (WCAG AAA) mobile avatar chip.
+            color: "#0A0A0A".into(),
             icon: "X".into(),
         }
     }
@@ -98,7 +102,7 @@ mod tests {
         assert_eq!(GROK.id(), "grok");
         let ui = GROK.ui();
         assert_eq!(ui.label, "Grok Code");
-        assert_eq!(ui.color, "#f43f5e");
+        assert_eq!(ui.color, "#0A0A0A");
         assert_eq!(ui.icon, "X");
     }
 
