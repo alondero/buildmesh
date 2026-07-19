@@ -4,6 +4,8 @@
  * feedback are intentionally NOT here — those have different
  * typography and live next to their trigger, not centred in a body.
  */
+import type { ReactNode } from 'react';
+
 export function Spinner({ className = 'w-5 h-5' }: { className?: string }) {
   return (
     <span
@@ -29,12 +31,12 @@ interface EmptyStateProps {
   /** Optional smaller hint line below the label (kept short — full
    *  paragraphs belong in the loading/error variants). */
   hint?: string;
-  /** Optional emoji glyph (e.g. 🧭) rendered above the label in place of
-   *  the default SVG `i`-glyph. The probe host shell (`ProbeEmptyState`,
-   *  formerly inline) used emoji icons before the consolidation; preserving
-   *  them keeps the host-scoped empty states visually distinct from
-   *  tab-internal fetch empties without diverging the primitive. */
-  icon?: string;
+  /** Optional glyph rendered inside the soft circular badge above the
+   *  label, in place of the default `i`-glyph. Accepts any ReactNode —
+   *  the probe passes its Lucide-style SVG icons (`w-5 h-5`, coloured by
+   *  the badge's `text-text-muted`); a plain string (e.g. an emoji) is
+   *  rendered at badge size for legacy callers. */
+  icon?: ReactNode;
   /** Fill the parent's height (host-shell case where the empty state is
    *  the only thing in the body); the default `py-8` only sizes the
    *  content. When false the empty state sits at natural content size and
@@ -46,37 +48,42 @@ interface EmptyStateProps {
 }
 
 /**
- * Centre-i + label for the "fetched successfully but the list is
- * empty" case. Pairs with `LoadingState` and `ErrorState`.
+ * Soft-badge glyph + label for the "fetched successfully but the list is
+ * empty" case. Pairs with `LoadingState` and `ErrorState`. The glyph sits
+ * in a quiet circular chip so the state reads as intentional rather than
+ * "content missing", and the iconography stays consistent across tabs.
  */
 export function EmptyState({ label, hint, icon, fill, testId }: EmptyStateProps) {
-  const Icon = icon ? (
-    <div className="text-2xl mb-2" aria-hidden="true">
-      {icon}
-    </div>
-  ) : (
-    <svg
-      width="32"
-      height="32"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      className="text-text-muted mb-2"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="10" />
-      <line x1="12" y1="8" x2="12" y2="12" />
-      <line x1="12" y1="16" x2="12.01" y2="16" />
-    </svg>
-  );
   return (
     <div
       role="status"
       data-testid={testId}
-      className={`flex flex-col items-center justify-center text-center ${fill ? 'h-full' : 'py-8'}`}
+      className={`flex flex-col items-center justify-center text-center animate-fade-in ${fill ? 'h-full' : 'py-8'}`}
     >
-      {Icon}
+      <div
+        aria-hidden="true"
+        className="w-11 h-11 rounded-full bg-bg-card border border-border-subtle flex items-center justify-center mb-3 text-text-muted"
+      >
+        {icon ? (
+          typeof icon === 'string' ? (
+            <span className="text-lg leading-none">{icon}</span>
+          ) : (
+            icon
+          )
+        ) : (
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            className="w-5 h-5"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+        )}
+      </div>
       <span className="text-xs text-text-muted">{label}</span>
       {hint && (
         <span className="text-2xs text-text-muted/80 mt-1 max-w-[280px]">{hint}</span>
@@ -100,31 +107,34 @@ interface ErrorStateProps {
 }
 
 /**
- * Centre-X + red title + raw IPC message. `role="alert"` so AT users
+ * Soft red badge + title + raw IPC message. `role="alert"` so AT users
  * hear the failure; the icon is `aria-hidden` so the "X circle" is
- * not announced on its own.
+ * not announced on its own. Shares the `EmptyState` badge shape so the
+ * three async states read as one family.
  */
 export function ErrorState({ title, detail, testId }: ErrorStateProps) {
   return (
     <div
       role="alert"
       data-testid={testId}
-      className="flex flex-col items-center justify-center py-8"
+      className="flex flex-col items-center justify-center py-8 animate-fade-in"
     >
-      <svg
-        width="32"
-        height="32"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        className="text-status-error mb-2"
+      <div
         aria-hidden="true"
+        className="w-11 h-11 rounded-full bg-status-error-bg border border-status-error/20 flex items-center justify-center mb-3 text-status-error"
       >
-        <circle cx="12" cy="12" r="10" />
-        <line x1="15" y1="9" x2="9" y2="15" />
-        <line x1="9" y1="9" x2="15" y2="15" />
-      </svg>
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          className="w-5 h-5"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <line x1="15" y1="9" x2="9" y2="15" />
+          <line x1="9" y1="9" x2="15" y2="15" />
+        </svg>
+      </div>
       <span className="text-xs text-status-error">{title}</span>
       {detail && (
         <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">

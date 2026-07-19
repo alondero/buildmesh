@@ -1,5 +1,5 @@
 /**
- * GitIssuesTab — the Probe Panel's 🐙 tab body (issue #378).
+ * GitIssuesTab — the Probe Panel's Git Issues tab body (issue #378).
  *
  * Thin wrapper port of the legacy `GitHubIssuesModal` (issue #113). The
  * dock supplies the header, mesh-name subheading, and close button, so
@@ -73,6 +73,7 @@ import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 import { ProbeTabBody } from './ProbeTabBody';
+import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
   EmptyState,
@@ -281,24 +282,27 @@ export function GitIssuesTab() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header row mirrors the PRs tab. `SafeLink` falls back to an
+      {/* Toolbar mirrors the PRs tab. `SafeLink` falls back to an
           inert <span> when the URL is empty (non-GitHub mesh), so
           the layout stays stable whether or not the URL has resolved. */}
-      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-between gap-2">
+      <ProbeToolbar
+        trailing={
+          <SafeLink
+            url={issuesListUrl}
+            ariaLabel="Open this repo's issues list on GitHub"
+            title="Open this repo's issues list on GitHub"
+            className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+          >
+            View on GitHub ↗
+          </SafeLink>
+        }
+      >
         <RefreshControl
           onRefresh={() => setReloadKey((k) => k + 1)}
           isRefreshing={loading && issues.length > 0}
           ariaLabel="Refresh issues"
         />
-        <SafeLink
-          url={issuesListUrl}
-          ariaLabel="Open this repo's issues list on GitHub"
-          title="Open this repo's issues list on GitHub"
-          className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
-        >
-          View on GitHub ↗
-        </SafeLink>
-      </div>
+      </ProbeToolbar>
       <ProbeTabBody padding="p-3">
         {loading && issues.length === 0 ? (
           // First-load only: refreshes keep the prior list rendered

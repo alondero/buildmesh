@@ -1,5 +1,5 @@
 /**
- * AgentChangesTab — issue #376. The Probe Panel's 🔍 tab body.
+ * AgentChangesTab — issue #376. The Probe Panel's Agent Changes tab body.
  *
  * Wraps the existing `AgentReviewPanel` (ADR 0005 — stacked-diff review
  * surface) with the focused agent node's id and resolved path. By the time

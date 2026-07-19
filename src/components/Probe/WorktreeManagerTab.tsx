@@ -1,5 +1,5 @@
 /**
- * WorktreeManagerTab — the Probe Panel's 🌳 Worktree Manager tab (issue #377).
+ * WorktreeManagerTab — the Probe Panel's Worktree Manager tab (issue #377).
  *
  * Ports the Git-maintenance surface that used to live at the bottom of the
  * legacy `MeshPropertiesPanel` (the `<BranchesWorktreesSection>`) into the

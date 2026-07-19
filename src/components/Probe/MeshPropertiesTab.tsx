@@ -1,5 +1,5 @@
 /**
- * MeshPropertiesTab — the Probe Panel's ⚙️ Mesh Properties tab (issue #375).
+ * MeshPropertiesTab — the Probe Panel's Mesh Properties tab (issue #375).
  *
  * This is the *clean* Mesh Properties: pure configuration fields plus the
  * AI context portability helper. All Git-maintenance UI (worktree config,
