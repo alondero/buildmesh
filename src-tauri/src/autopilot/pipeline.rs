@@ -411,11 +411,10 @@ pub(crate) fn press_enter_until_output(node_id: i64) -> Result<u32, String> {
 /// same wrap-up prompt outside a turn evaluation.
 pub(crate) fn clear_attention_after_injection(node_id: i64, app: &AppHandle) {
     crate::attention_autoclear::disarm(node_id);
-    let _ = db::update_agent_node_status(node_id, SessionStatus::Running);
-    let _ = app.emit(
-        "attention-cleared",
-        crate::commands::attention::AttentionClearedPayload { session_id: node_id },
-    );
+    // Routes through SessionLifecycle (issue #132); the desktop emit lives
+    // in the sink. Mobile broadcast is a separate channel kept here.
+    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
+    let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
     crate::http::events::emit(crate::http::events::EventMsg::AttentionCleared {
         session_id: node_id,
     });
@@ -669,7 +668,14 @@ fn run_turn_evaluation(node_id: i64, app: &AppHandle) {
                 }
                 FinishOutcome::Fail(reasons) => {
                     let _ = db::set_autopilot_run_state(node_id, Failed, None);
-                    let _ = db::update_agent_node_status(node_id, SessionStatus::Error);
+                    // Routes through SessionLifecycle (issue #132). The
+                    // `unless_in(Error, Archived)` guard lives inside
+                    // `on_error`. Clone `app` because the sink borrows it
+                    // and `app.emit` below needs to use it directly.
+                    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink {
+                        app: &app.clone(),
+                    };
+                    let _ = crate::agent::session_lifecycle::on_error(&sink, node_id);
                     let _ = app.emit(
                         "autopilot-finish-failed",
                         AutopilotFinishFailedPayload {
@@ -708,7 +714,9 @@ fn complete_finishing_run(
         let _ = db::set_autopilot_run_pr(node_id, n, url);
     }
     let _ = db::set_autopilot_run_state(node_id, Completed, None);
-    let _ = db::update_agent_node_status(node_id, SessionStatus::Completed);
+    // Routes through SessionLifecycle (issue #132).
+    let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
+    let _ = crate::agent::session_lifecycle::on_completed(&sink, node_id);
     let _ = app.emit(
         "autopilot-pr-created",
         AutopilotPrCreatedPayload {

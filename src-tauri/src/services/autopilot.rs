@@ -45,7 +45,7 @@ use ts_rs::TS;
 
 use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
 use crate::db;
-use crate::models::{Mesh, SessionStatus, DEFAULT_AUTOPILOT_TRIGGER_LABEL};
+use crate::models::{Mesh, DEFAULT_AUTOPILOT_TRIGGER_LABEL};
 use crate::services::github::{GitHubClient, Issue};
 
 /// Payload of the `autopilot-node-closed` Tauri event. Emitted from the
@@ -403,7 +403,14 @@ fn spawn_autopilot_node(
         None,
     )
     .map_err(|e| e.to_string())?;
-    db::update_agent_node_status(node.id, SessionStatus::Pending).map_err(|e| e.to_string())?;
+    // Routes through SessionLifecycle (issue #132). `AppSessionLifecycleSink`
+    // here even though `Pending` doesn't emit events — keeps the write
+    // site symmetric with sibling code in this module that *does* emit.
+    crate::agent::session_lifecycle::on_created(
+        &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
+        node.id,
+    )
+    .map_err(|e| e.to_string())?;
     // Ledger row BEFORE stage-2 starts, so `spawn_agent_inner`'s branched-mode
     // enforcement (which keys off `get_autopilot_run`) sees it.
     db::create_autopilot_run(node.id, mesh.id, issue.number).map_err(|e| e.to_string())?;

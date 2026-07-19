@@ -6,6 +6,7 @@
 
 use crate::agent::process::{AgentProcess, PROCESS_REGISTRY};
 use crate::agent::provider::{Platform, CLAUDE_BACKEND_ENV_VARS};
+use crate::agent::session_lifecycle;
 use crate::agent::spawn_environment;
 use crate::db;
 use crate::env;
@@ -18,7 +19,7 @@ use crate::git::worktree::provision::{
 // `locked_fetch_pr_head` (issue #698), which wraps the per-Mesh
 // `with_mesh_sync_lock` around the bare helpers so callers can't forget to
 // serialize concurrent PR-spawn fetches.
-use crate::models::{AgentNode, EnvType, Provider, SessionStatus};
+use crate::models::{AgentNode, EnvType, Provider};
 use base64::Engine;
 use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
 use serde::Serialize;
@@ -984,7 +985,12 @@ fn start_reader(
                 );
             }
             PostExitAction::MarkIdle => {
-                let _ = db::update_agent_node_status(session_id, SessionStatus::Idle);
+                // Routes through SessionLifecycle (issue #132) — single writer
+                // for `agent_nodes.status`.
+                let sink = session_lifecycle::AppSessionLifecycleSink {
+                    app: &app_clone,
+                };
+                let _ = session_lifecycle::on_pty_eof(&sink, session_id);
             }
             PostExitAction::MarkErrorResumeFailed => {
                 tracing::warn!(
@@ -992,21 +998,17 @@ fn start_reader(
                     session_id,
                     spawned_at.elapsed()
                 );
-                // Symmetric to the orchestrator's Spawning write (#654):
-                // never resurrect `Archived`, and don't double-write `Error`
-                // (which would bump `status_changed_at` needlessly).
-                let _ = db::update_agent_node_status_unless_in(
+                // Routes through SessionLifecycle (issue #132) — the
+                // `unless_in(Error, Archived)` guard (#654) lives inside
+                // `on_resume_failed`, and `resume-failed` is emitted from
+                // exactly one place (the lifecycle sink).
+                let sink = session_lifecycle::AppSessionLifecycleSink {
+                    app: &app_clone,
+                };
+                let _ = session_lifecycle::on_resume_failed(
+                    &sink,
                     session_id,
-                    SessionStatus::Error,
-                    &[SessionStatus::Error, SessionStatus::Archived],
-                );
-                let _ = app_clone.emit(
-                    "resume-failed",
-                    crate::commands::agent::ResumeFailedPayload {
-                        node_id: session_id,
-                        error: "Agent exited immediately after spawn — session may have expired"
-                            .to_string(),
-                    },
+                    "Agent exited immediately after spawn — session may have expired",
                 );
             }
         }
@@ -1895,22 +1897,20 @@ pub async fn spawn_agent_inner(
     // `NOT IN (Error, Archived)` guard is the symmetric race fix: prevents
     // the orchestrator from resurrecting a reader-written Error back to
     // Spawning (which would let the delayed promotion later write Running
-    // onto a dead node — same ghost-Running bug, other direction).
-    db::update_agent_node_status_unless_in(
-        session_id,
-        SessionStatus::Spawning,
-        &[SessionStatus::Error, SessionStatus::Archived],
-    )
-    .map_err(|e| e.to_string())?;
+    // onto a dead node — same ghost-Running bug, other direction). Routes
+    // through SessionLifecycle (issue #132) so the `unless_in` predicate
+    // lives in one place.
+    let sink = session_lifecycle::AppSessionLifecycleSink { app };
+    session_lifecycle::on_spawn_started(&sink, session_id).map_err(|e| e.to_string())?;
+    let app_for_promotion = app.clone();
     std::thread::spawn(move || {
         // Promote to Running iff the reader hasn't already written Error.
         // Both delay and reader check must share `EARLY_EXIT_WINDOW`.
         std::thread::sleep(EARLY_EXIT_WINDOW);
-        if let Err(e) = db::update_agent_node_status_if(
-            session_id,
-            SessionStatus::Running,
-            SessionStatus::Spawning,
-        ) {
+        let promotion_sink = session_lifecycle::AppSessionLifecycleSink {
+            app: &app_for_promotion,
+        };
+        if let Err(e) = session_lifecycle::on_spawn_complete(&promotion_sink, session_id) {
             tracing::warn!(
                 "spawn_agent_inner: conditional Running promotion failed for session {}: {}",
                 session_id,

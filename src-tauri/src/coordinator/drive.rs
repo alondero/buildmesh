@@ -192,14 +192,17 @@ impl DriveTarget for RegistryTarget {
         // Mirror `http::ws::forward_mobile_input_with`: flip status to Running
         // and fan out `attention-cleared` to both the desktop webview and mobile
         // subscribers so neither shows a stale "awaiting" badge for a node the
-        // coordinator just drove.
+        // coordinator just drove. Status write + desktop emit route through
+        // SessionLifecycle (issue #132); the mobile broadcast is a separate
+        // channel kept here.
         crate::attention_autoclear::disarm(node_id);
-        let _ = crate::db::update_agent_node_status(node_id, SessionStatus::Running);
         if let Some(app) = crate::http::app_handle() {
-            use tauri::Emitter;
-            let _ = app.emit(
-                "attention-cleared",
-                crate::commands::attention::AttentionClearedPayload { session_id: node_id },
+            let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app: &app };
+            let _ = crate::agent::session_lifecycle::on_attention_cleared(&sink, node_id);
+        } else {
+            let _ = crate::agent::session_lifecycle::on_attention_cleared(
+                &crate::agent::session_lifecycle::DbOnlySink,
+                node_id,
             );
         }
         crate::http::events::emit(crate::http::events::EventMsg::AttentionCleared {
