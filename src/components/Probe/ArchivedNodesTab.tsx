@@ -67,6 +67,7 @@ import {
   RefreshControl,
 } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
+import { ProbeToolbar } from './ProbeToolbar';
 import { mapBackendProviders } from '../../lib/groups';
 import { formatRelativeAge } from '../../lib/time';
 
@@ -258,7 +259,15 @@ export function ArchivedNodesTab() {
       {/* Search + manual Refresh share one row so the prior
           "search full-width / refresh elsewhere" jump on tab
           switch doesn't reappear. */}
-      <div className="px-3 py-2 border-b border-border-subtle flex items-center gap-2">
+      <ProbeToolbar
+        trailing={
+          <RefreshControl
+            onRefresh={() => setReloadKey((k) => k + 1)}
+            isRefreshing={loading && sessions.length > 0}
+            ariaLabel="Refresh archived sessions"
+          />
+        }
+      >
         <input
           type="text"
           value={search}
@@ -267,12 +276,7 @@ export function ArchivedNodesTab() {
           className="flex-1 min-w-0 bg-bg-card border border-border-default rounded-md px-3 py-1.5 text-xs text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent-cyan"
           autoFocus
         />
-        <RefreshControl
-          onRefresh={() => setReloadKey((k) => k + 1)}
-          isRefreshing={loading && sessions.length > 0}
-          ariaLabel="Refresh archived sessions"
-        />
-      </div>
+      </ProbeToolbar>
 
       {/* Content */}
       <ProbeTabBody padding="p-3">

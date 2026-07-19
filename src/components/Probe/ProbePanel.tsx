@@ -2,10 +2,10 @@
  * ProbePanel — the unified right-hand dock (issue #374, PRD #372).
  *
  * Layout is two columns: a wide collapsible **body** on the left and a thin,
- * always-visible **activity bar** on the right edge. The activity bar holds one
+ * always-visible **activity rail** on the right edge. The rail holds one
  * icon per tab; clicking an icon opens the body to that tab, clicking the
  * already-active icon again collapses it (mirroring VS Code's side-panel
- * behaviour). Because the bar stays visible while collapsed, the panel can
+ * behaviour). Because the rail stays visible while collapsed, the panel can
  * always be reopened after the header's close button hides the body.
  *
  * The body width is **horizontally resizable** (issue #724) via a separator
@@ -16,15 +16,23 @@
  * per line — see `Diff.tsx` `DiffLineRow`), and narrower than the center
  * workspace needs to stay useful on common laptop resolutions.
  *
- * Tab bodies land incrementally as follow-up issues under #372 complete:
- *   - #376: `ProjectFilesTab` (📁) and `AgentChangesTab` (🔍)
- *   - #377: `WorktreeManagerTab` (🌳) — health recovery + branch / worktree
- *     prune + remote-tracking prune
- *   - remaining tabs (`issues`, `sessions`) still render the placeholder
- *     pending their own issues.
- * Until those land each unbuilt tab renders a scaffold placeholder, and the
- * friendly empty states for "no project / no agent node" are wired here so
- * the dock is useful from day one.
+ * Visual language (post-revamp)
+ * -----------------------------
+ * The rail is the modern icon-only idiom (VS Code / Linear): 48px wide,
+ * one 36px glyph button per tab, no caption text — the tooltip + aria-label
+ * carry the name. The active tab gets a soft cyan tint plus a 2px accent
+ * indicator at the rail's left edge, so the open state reads at a glance
+ * without nine stacked labels competing for attention. Tab icons come from
+ * `probeIcons.tsx` (Lucide-style stroke SVGs) rather than emoji, whose
+ * platform-dependent artwork clashed with the design tokens.
+ *
+ * The header pins the active tab's icon in a tinted chip next to its label,
+ * with the active mesh name as a subheading so each tab body stays free of
+ * redundant path/name chrome. Body content fades in on tab switch (keyed
+ * remount), and the whole body slides in from the right when the dock
+ * opens — both animations run through the design-token keyframes in
+ * `App.css` and respect `prefers-reduced-motion` via the global media
+ * query.
  */
 
 import { useRef } from 'react';
@@ -41,37 +49,49 @@ import { GitPullRequestsTab } from './GitPullRequestsTab';
 import { ArchivedNodesTab } from './ArchivedNodesTab';
 import { ScratchpadTab } from './ScratchpadTab';
 import { UsageTab } from './UsageTab';
+import {
+  ArchiveIcon,
+  CompassIcon,
+  FilesIcon,
+  IssuesIcon,
+  NotesIcon,
+  PropertiesIcon,
+  PullsIcon,
+  ReviewIcon,
+  SearchIcon,
+  UsageIcon,
+  WorktreesIcon,
+  type ProbeIcon,
+} from './probeIcons';
 
 interface ProbeTabDef {
   tab: ProbeTab;
-  icon: string;
+  icon: ProbeIcon;
   /** Full descriptive name — used for the header title, fallback tooltip,
    *  and the button's accessible name (aria-label). */
   label: string;
-  /** Optional longer tooltip for the activity-bar button. Falls back to
+  /** Optional longer tooltip for the activity-rail button. Falls back to
    *  `label` when omitted. */
   tooltip?: string;
-  /** Single-word caption shown under the icon in the narrow activity bar, so
-   *  it stays legible at a readable size without wrapping. */
-  short: string;
 }
 
-// Display order follows the PRD's activity-bar order (issue #374), which is
+// Display order follows the PRD's activity-rail order (issue #374), which is
 // deliberately different from the `ProbeTab` union's declaration order.
 // Issue #601 — `usage` is the dedicated glanceable surface for Usage Meters
 // (subscription quota + cash balance). Placed early so the always-visible
-// activity bar makes it a one-click glance: the bar stays visible even when
-// the panel body is collapsed, so the user can always reopen the Usage tab.
+// activity rail makes it a one-click glance: the rail stays visible even
+// when the panel body is collapsed, so the user can always reopen the Usage
+// tab.
 const PROBE_TABS: ProbeTabDef[] = [
-  { tab: 'files', icon: '📁', label: 'Project Files', short: 'Files' },
-  { tab: 'review', icon: '🔍', label: 'Agent Changes', short: 'Changes' },
-  { tab: 'usage', icon: '⏱', label: 'Usage', tooltip: 'Provider usage meters', short: 'Usage' },
-  { tab: 'worktrees', icon: '🌳', label: 'Worktree Manager', short: 'Worktrees' },
-  { tab: 'properties', icon: '⚙️', label: 'Mesh Properties', short: 'Properties' },
-  { tab: 'issues', icon: '🐙', label: 'Git Issues', short: 'Issues' },
-  { tab: 'pulls', icon: '🔀', label: 'Pull Requests', short: 'PRs' },
-  { tab: 'sessions', icon: '🕒', label: 'Archive', tooltip: 'Archived Nodes', short: 'Archive' },
-  { tab: 'scratchpad', icon: '📝', label: 'Scratch Pad', short: 'Notes' },
+  { tab: 'files', icon: FilesIcon, label: 'Project Files' },
+  { tab: 'review', icon: ReviewIcon, label: 'Agent Changes' },
+  { tab: 'usage', icon: UsageIcon, label: 'Usage', tooltip: 'Provider usage meters' },
+  { tab: 'worktrees', icon: WorktreesIcon, label: 'Worktree Manager' },
+  { tab: 'properties', icon: PropertiesIcon, label: 'Mesh Properties' },
+  { tab: 'issues', icon: IssuesIcon, label: 'Git Issues' },
+  { tab: 'pulls', icon: PullsIcon, label: 'Pull Requests' },
+  { tab: 'sessions', icon: ArchiveIcon, label: 'Archive', tooltip: 'Archived Nodes' },
+  { tab: 'scratchpad', icon: NotesIcon, label: 'Scratch Pad' },
 ];
 
 export function ProbePanel() {
@@ -115,6 +135,7 @@ export function ProbePanel() {
   };
 
   const activeDef = PROBE_TABS.find((t) => t.tab === probeTab) ?? PROBE_TABS[0];
+  const ActiveIcon = activeDef.icon;
 
   return (
     <div className="flex h-full shrink-0 bg-bg-surface">
@@ -124,9 +145,10 @@ export function ProbePanel() {
         // center workspace to deliver the documented 10px hit zone. The
         // inner section owns the overflow-hidden + the border so the dock's
         // scroll content doesn't escape. (Same outer/inner split as the
-        // sidebar's resize handle.)
+        // sidebar's resize handle.) The slide-in animation plays once per
+        // open; the rail never unmounts, so only the body animates.
         <div
-          className="relative shrink-0"
+          className="relative shrink-0 animate-slide-in-right"
           style={{ width: bodyWidth }}
         >
           {/* Resize handle — issue #724. Sits on the LEFT edge of the body
@@ -151,7 +173,7 @@ export function ProbePanel() {
             tabIndex={0}
             onKeyDown={(e) => {
               // Drag-LEFT grows the panel (handle tracks cursor, panel's
-              // right edge is fixed by the activity bar — see useProbeResize
+              // right edge is fixed by the activity rail — see useProbeResize
               // for the geometry). Read the latest width through the ref
               // so auto-repeat doesn't collapse rapid presses into one
               // commit. setWidth clamps internally to PROBE_PANEL_BOUNDS.
@@ -184,36 +206,45 @@ export function ProbePanel() {
             aria-label="Probe panel"
             className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
           >
-          {/* Header — active tab label (title) + active mesh name
-              (subheading) + collapse button. The subheading replaces the
-              directory-path strip the Issues / PRs tabs used to render
+          {/* Header — active tab icon chip + label (title) + active mesh
+              name (subheading) + collapse button. The subheading replaces
+              the directory-path strip the Issues / PRs tabs used to render
               individually, so the same context appears uniformly across
-              all 7 probe tabs. Bumped from 40px → 56px to fit the second
-              line comfortably. */}
+              every probe tab. */}
           <div
-            className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border-subtle min-h-[56px]"
+            className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
           >
-            <div className="flex flex-col min-w-0 flex-1">
-              <span className="text-sm text-text-primary font-medium truncate flex items-center gap-1.5 min-w-0">
-                <span aria-hidden="true">{activeDef.icon}</span>
-                <span className="truncate">{activeDef.label}</span>
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <span
+                aria-hidden="true"
+                className="flex items-center justify-center w-7 h-7 rounded-md bg-accent-cyan/10 text-accent-cyan shrink-0"
+              >
+                <ActiveIcon className="w-4 h-4" />
               </span>
-              {activeMeshName && (
-                <span
-                  className="text-xs text-text-secondary truncate min-w-0"
-                  title={activeMeshName}
-                >
-                  {activeMeshName}
+              <div className="flex flex-col min-w-0 flex-1">
+                <span className="text-sm text-text-primary font-medium truncate">
+                  {activeDef.label}
                 </span>
-              )}
+                {activeMeshName && (
+                  <span
+                    className="text-xs text-text-secondary truncate min-w-0"
+                    title={activeMeshName}
+                  >
+                    {activeMeshName}
+                  </span>
+                )}
+              </div>
             </div>
             <button
               type="button"
               onClick={toggleProbe}
-              className="text-text-muted hover:text-text-secondary transition-colors shrink-0 ml-2"
+              className="p-1.5 rounded-md text-text-muted hover:text-text-primary hover:bg-bg-card transition-colors shrink-0"
               title="Close panel"
               aria-label="Close panel"
             >
+              {/* Lucide `panel-right-close` — reads as "collapse the dock"
+                  rather than "dismiss a dialog", matching the reopenable
+                  rail semantics. */}
               <svg
                 width="14"
                 height="14"
@@ -224,45 +255,59 @@ export function ProbePanel() {
                 strokeLinecap="round"
                 strokeLinejoin="round"
               >
-                <path d="M18 6 6 18M6 6l12 12" />
+                <rect width="18" height="18" x="3" y="3" rx="2" />
+                <path d="M15 3v18" />
+                <path d="m10 9-3 3 3 3" />
               </svg>
             </button>
           </div>
 
-          {/* Body */}
+          {/* Body — the inner wrapper is keyed by tab so switching tabs
+              remounts the content and replays the fade-in once per tab.
+              The wrapper preserves the h-full/flex chain the tab roots
+              rely on for their internal `flex-1 overflow` regions. */}
           <div className="flex-1 overflow-y-auto">
-            <ProbeTabBody tab={probeTab} />
+            <div key={probeTab} className="animate-fade-in h-full flex flex-col">
+              <ProbeTabBody tab={probeTab} />
+            </div>
           </div>
           </section>
         </div>
       )}
 
-      {/* Activity bar — always visible so the dock can be reopened after close */}
+      {/* Activity rail — always visible so the dock can be reopened after
+          close. Icon-only (VS Code idiom): the name lives on the tooltip
+          and aria-label, keeping the 48px rail calm. The active tab shows
+          a soft tint + a 2px indicator at the rail's left edge. */}
       <nav
         aria-label="Probe tabs"
-        className="flex flex-col w-16 shrink-0 py-1 border-l border-border-subtle bg-bg-surface"
+        className="flex flex-col w-12 shrink-0 py-2 gap-1 border-l border-border-subtle bg-bg-surface"
       >
-        {PROBE_TABS.map(({ tab, icon, label, short, tooltip }) => {
+        {PROBE_TABS.map(({ tab, icon: Icon, label, tooltip }) => {
           const isActive = probeOpen && probeTab === tab;
           return (
-            <button
-              key={tab}
-              type="button"
-              onClick={() => handleTabClick(tab)}
-              aria-label={tooltip ?? label}
-              aria-pressed={isActive}
-              title={tooltip ?? label}
-              className={`flex flex-col items-center gap-1 px-1 py-2.5 transition-colors border-l-2 ${
-                isActive
-                  ? 'text-accent-cyan border-accent-cyan bg-bg-highlight'
-                  : 'text-text-secondary border-transparent hover:text-text-primary hover:bg-bg-card/40'
-              }`}
-            >
-              <span className="text-xl leading-none" aria-hidden="true">
-                {icon}
-              </span>
-              <span className="text-xs font-medium leading-tight text-center">{short}</span>
-            </button>
+            <div key={tab} className="relative flex justify-center">
+              <span
+                aria-hidden="true"
+                className={`absolute left-0 top-1/2 -translate-y-1/2 w-0.5 rounded-r-full bg-accent-cyan transition-all duration-150 ${
+                  isActive ? 'h-5 opacity-100' : 'h-0 opacity-0'
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => handleTabClick(tab)}
+                aria-label={tooltip ?? label}
+                aria-pressed={isActive}
+                title={tooltip ?? label}
+                className={`flex items-center justify-center w-9 h-9 rounded-lg transition-colors active:scale-95 ${
+                  isActive
+                    ? 'text-accent-cyan bg-accent-cyan/10'
+                    : 'text-text-secondary hover:text-text-primary hover:bg-bg-card'
+                }`}
+              >
+                <Icon className="w-[18px] h-[18px]" />
+              </button>
+            </div>
           );
         })}
       </nav>
@@ -286,7 +331,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (activeMeshId === null) {
     return (
       <EmptyState
-        icon="🧭"
+        icon={<CompassIcon className="w-5 h-5" />}
         label="No project selected"
         hint="Select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here."
         fill
@@ -299,7 +344,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'review' && activeNodeId === null) {
     return (
       <EmptyState
-        icon="🔍"
+        icon={<SearchIcon className="w-5 h-5" />}
         label="No active agent node"
         hint="Focus an agent terminal to review the changes it has made."
         fill
@@ -309,9 +354,9 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
 
   // Real content for the tabs whose issues have landed. Routed before
   // the placeholder so the empty-state guards above (no mesh selected,
-  // no node focused) still apply uniformly. The 🐙, 🔀 and 🕒 tabs are
-  // mesh-scoped but don't require an active node, so they fall through
-  // to the "no project selected" guard only. The ⏱ Usage tab is
+  // no node focused) still apply uniformly. The Issues, PRs and Archive
+  // tabs are mesh-scoped but don't require an active node, so they fall
+  // through to the "no project selected" guard only. The Usage tab is
   // host-scoped and is short-circuited above so it renders even with
   // no mesh selected.
   if (tab === 'files') return <ProjectFilesTab />;
@@ -333,9 +378,10 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
  */
 function ProbeTabPlaceholder({ tab }: { tab: ProbeTab }) {
   const def = PROBE_TABS.find((t) => t.tab === tab) ?? PROBE_TABS[0];
+  const Icon = def.icon;
   return (
     <EmptyState
-      icon={def.icon}
+      icon={<Icon className="w-5 h-5" />}
       label={def.label}
       hint="This tab's content is coming soon."
       fill

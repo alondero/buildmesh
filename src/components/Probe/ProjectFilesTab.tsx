@@ -1,5 +1,5 @@
 /**
- * ProjectFilesTab — issue #376. The Probe Panel's 📁 tab body.
+ * ProjectFilesTab — issue #376. The Probe Panel's Project Files tab body.
  *
  * Mirrors the non-agent branch of the legacy `FileExplorerPanel`: a
  * `ChangedFilesSection` on top, a collapsible `FileTree` underneath. The

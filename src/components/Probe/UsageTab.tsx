@@ -3,7 +3,7 @@
  *
  * The dedicated glanceable surface for Usage Meters. Lives outside the
  * Settings modal so the user can check quota / balance without opening
- * a config panel. Entry point is the ⏱ icon in the Probe Panel's
+ * a config panel. Entry point is the Usage icon in the Probe Panel's
  * always-visible activity bar (which stays visible even when the panel
  * body is collapsed — the canonical sidebar affordance for #601).
  *
@@ -125,6 +125,7 @@ import {
   RefreshControl,
 } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
+import { ProbeToolbar } from './ProbeToolbar';
 import { formatRelativeAge } from '../../lib/time';
 
 export function UsageTab() {
@@ -258,35 +259,36 @@ export function UsageTab() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border-subtle">
-        <div className="flex items-center gap-2 min-w-0">
-          {rows.length > 0 && (
-            <span className="text-xs text-text-muted shrink-0">
-              {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
-            </span>
-          )}
-          {refreshedRelative !== null && (
-            <span
-              className="text-2xs text-text-muted/80 shrink-0"
-              data-testid="usage-last-refreshed"
+      <ProbeToolbar
+        trailing={
+          <RefreshControl
+            onRefresh={handleRefresh}
+            isRefreshing={isRefreshing}
+            ariaLabel="Refresh usage"
+          />
+        }
+      >
+        {rows.length > 0 && (
+          <span className="text-xs text-text-muted shrink-0">
+            {`${rows.length} provider${rows.length === 1 ? '' : 's'} tracked`}
+          </span>
+        )}
+        {refreshedRelative !== null && (
+          <span
+            className="text-2xs text-text-muted/80 shrink-0"
+            data-testid="usage-last-refreshed"
+          >
+            <time
+              dateTime={lastRefreshedAt!.toISOString()}
+              aria-label={`Last refreshed at ${refreshedAbsolute}`}
+              title={refreshedAbsolute!}
+              className="cursor-default"
             >
-              <time
-                dateTime={lastRefreshedAt!.toISOString()}
-                aria-label={`Last refreshed at ${refreshedAbsolute}`}
-                title={refreshedAbsolute!}
-                className="cursor-default"
-              >
-                {`Refreshed ${refreshedRelative}`}
-              </time>
-            </span>
-          )}
-        </div>
-        <RefreshControl
-          onRefresh={handleRefresh}
-          isRefreshing={isRefreshing}
-          ariaLabel="Refresh usage"
-        />
-      </div>
+              {`Refreshed ${refreshedRelative}`}
+            </time>
+          </span>
+        )}
+      </ProbeToolbar>
 
       <ProbeTabBody
         data-testid="usage-rows"

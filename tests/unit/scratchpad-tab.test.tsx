@@ -129,15 +129,16 @@ function renderWithScratchpadOpen() {
 }
 
 describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
-  it('appears in the probe activity bar with the 📝 icon and "Notes" short label', () => {
+  it('appears in the probe activity rail with the "Scratch Pad" accessible name', () => {
     const user = userEvent.setup();
     render(<ProbePanel />);
+    // The rail is icon-only (post-revamp VS Code idiom): the accessible
+    // name comes from the button's aria-label, and the glyph is an
+    // aria-hidden SVG — there is no visible caption to assert.
     const button = screen.getByRole('button', { name: 'Scratch Pad' });
     expect(button).toBeTruthy();
-    // The short label drives the visible caption under the icon.
-    expect(button.textContent).toContain('Notes');
-    expect(button.textContent).toContain('📝');
-    // Clicking the activity-bar button opens the dock on this tab.
+    expect(button.getAttribute('title')).toBe('Scratch Pad');
+    // Clicking the activity-rail button opens the dock on this tab.
     return user.click(button).then(() => {
       const header = screen.getByRole('region', { name: 'Probe panel' });
       expect(header.textContent).toContain('Scratch Pad');

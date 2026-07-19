@@ -1,5 +1,5 @@
 /**
- * ScratchpadTab — the Probe Panel's 📝 Scratch Pad tab.
+ * ScratchpadTab — the Probe Panel's Scratch Pad tab.
  *
  * A mesh-scoped, plain-text free-form note field. Saves are debounced
  * (~500ms) so the IPC chatter stays bounded while the user is

@@ -1,5 +1,5 @@
 /**
- * GitPullRequestsTab — the Probe Panel's 🔀 tab body.
+ * GitPullRequestsTab — the Probe Panel's Pull Requests tab body.
  *
  * Sibling of `GitIssuesTab`: same dock-supplied header / close button, same
  * `useProbeContext` mesh scoping, same loading / error / empty skeleton. Lists
@@ -76,6 +76,7 @@ import { mapBackendProviders, type SpawnOption } from '../../lib/groups';
 import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 import { ProbeTabBody } from './ProbeTabBody';
+import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
   EmptyState,
@@ -576,47 +577,50 @@ export function GitPullRequestsTab() {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header row mirrors GitIssuesTab. Manual Refresh on the left,
+      {/* Toolbar mirrors GitIssuesTab. Manual Refresh on the left,
           "View on GitHub" link + Open/Closed toggle on the right. */}
-      <div className="px-3 py-2 border-b border-border-subtle flex items-center justify-between gap-2">
+      <ProbeToolbar
+        trailing={
+          <>
+            {/* "View on GitHub" — opens the repo's PR list. `SafeLink`
+                falls back to an inert <span> when the URL is empty
+                (non-GitHub mesh), so the layout stays stable across
+                meshes. */}
+            <SafeLink
+              url={pullsListUrl}
+              ariaLabel="Open this repo's pull requests list on GitHub"
+              title="Open this repo's pull requests list on GitHub"
+              className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
+            >
+              View on GitHub ↗
+            </SafeLink>
+            {/* Open / Closed segmented toggle */}
+            <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
+              {(['open', 'closed'] as const).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => setStateFilter(s)}
+                  aria-pressed={stateFilter === s}
+                  className={`px-2 py-0.5 text-2xs font-medium capitalize transition-colors ${
+                    stateFilter === s
+                      ? 'bg-accent-cyan/20 text-accent-cyan'
+                      : 'text-text-muted hover:text-text-secondary hover:bg-bg-card'
+                  }`}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </>
+        }
+      >
         <RefreshControl
           onRefresh={() => setReloadKey((k) => k + 1)}
           isRefreshing={loading && prs.length > 0}
           ariaLabel="Refresh pull requests"
         />
-        <div className="flex items-center gap-2">
-          {/* "View on GitHub" — opens the repo's PR list. `SafeLink`
-              falls back to an inert <span> when the URL is empty
-              (non-GitHub mesh), so the layout stays stable across
-              meshes. */}
-          <SafeLink
-            url={pullsListUrl}
-            ariaLabel="Open this repo's pull requests list on GitHub"
-            title="Open this repo's pull requests list on GitHub"
-            className="text-2xs font-medium text-accent-cyan hover:text-accent-cyan/80 transition-colors"
-          >
-            View on GitHub ↗
-          </SafeLink>
-          {/* Open / Closed segmented toggle */}
-          <div className="flex shrink-0 rounded-md overflow-hidden border border-border-subtle">
-            {(['open', 'closed'] as const).map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setStateFilter(s)}
-                aria-pressed={stateFilter === s}
-                className={`px-2 py-0.5 text-2xs font-medium capitalize transition-colors ${
-                  stateFilter === s
-                    ? 'bg-accent-cyan/20 text-accent-cyan'
-                    : 'text-text-muted hover:text-text-secondary hover:bg-bg-card'
-                }`}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
+      </ProbeToolbar>
 
       <ProbeTabBody padding="p-3">
         {loading && prs.length === 0 ? (
