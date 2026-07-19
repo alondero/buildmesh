@@ -310,6 +310,38 @@ export function GridNodeHeader({ node, onBuildRun, dragHandleProps }: GridNodeHe
             PR #{openPr.number}
           </span>
         )}
+        {/* Captured-PR chip (issue #37) — surfaces the PR URL the agent
+            itself opened during this session, captured from PTY output by
+            the backend's `agent::pr_url_detector`. Distinct from the
+            `useOpenPr` chip above (which reflects the *current* open PR
+            for the branch): this one is the durable anchor — even if the
+            `cli_session_id` later goes stale, the captured PR URL lets
+            `auto_resume_agent_nodes` fall back to fetching the PR's
+            branch + head SHA and resuming from there. The chip renders
+            whenever `node.pr_url` is set, regardless of whether GitHub's
+            API still shows the PR (a merged / closed / deleted PR keeps
+            the chip alive because the resume-by-URL fallback uses the
+            stored URL, not a live API lookup). Tooltip carries the full
+            URL so a hover-discoverable copy-paste is available even on
+            machines without the platform's default browser wired up. */}
+        {showPr && node.pr_url && (
+          <span
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              // `openUrl` from `@tauri-apps/plugin-opener` — never use a
+              // raw `target="_blank"` here: Tauri 2's WebView drops the
+              // click silently without the `core:webview:allow-create-
+              // webview-window` capability (knowledge-primer anti-pattern).
+              openUrl(node.pr_url as string).catch(console.error);
+            }}
+            title={`Captured PR (resume anchor) · ${node.pr_url}`}
+            data-testid="captured-pr-chip"
+            className="text-2xs font-mono px-1.5 py-0.5 rounded-full leading-none font-medium select-none cursor-pointer whitespace-nowrap bg-accent-cyan/10 text-accent-cyan ring-1 ring-inset ring-accent-cyan/30 drop-shadow-sm hover:brightness-125 transition-colors flex-shrink-0"
+          >
+            PR · captured
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-1.5 flex-shrink-0" onPointerDown={(e) => e.stopPropagation()}>
         <BuildRunDropdown node={node} onBuildRun={onBuildRun} />

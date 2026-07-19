@@ -988,6 +988,10 @@ mod tests {
             head_repo_owner: None,
             head_repo_clone_url: None,
             source_pr_pinned_sha: None,
+            // Issue #37 — explicit fixtures must enumerate the new column;
+            // `AgentNode::default()` would let this stay implicit, but this
+            // fixture is one of the pre-`Default` helpers that pre-dates #457.
+            pr_url: None,
             position: 0,
             created_at: chrono::Utc::now(),
         };

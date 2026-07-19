@@ -2,6 +2,7 @@
 //!
 //! Organized into focused modules:
 //! - `detection.rs` — startup scan of `PATH`/config dirs for installed harnesses
+//! - `pr_url_detector.rs` — issue #37, parses PTY output for `github.com/<owner>/<repo>/pull/<n>`
 //! - `process.rs` — `AgentProcess` and `AgentProcessRegistry` (PTY handle storage)
 //! - `provider/` — `AgentProvider` trait and per-provider adapters
 //! - `sandbox.rs` — macOS Seatbelt profile generation + `sandbox-exec` wrapping
@@ -11,6 +12,7 @@
 //!   settings so it doesn't hit the workspace-trust dialog on first prompt
 
 pub mod detection;
+pub mod pr_url_detector;
 pub mod process;
 pub mod provider;
 pub mod sandbox;
