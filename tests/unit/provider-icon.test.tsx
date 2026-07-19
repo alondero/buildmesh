@@ -161,4 +161,101 @@ describe('ProviderIcon', () => {
     // from only the orderable rows.
     expect(reorderIds(['claude', 'codex'], 'codex', 'claude')).toEqual(['codex', 'claude']);
   });
+
+  // ----- Issue #328 — `backgroundColor` + `chipSize` props -----
+  //
+  // Mobile `NodeRow` drives the chip's background from the live
+  // `listProviders()` payload (`meta.color`) so the chip can't drift from
+  // the row label / status bar. The mobile `ProviderPicker` Proxied-child
+  // rows use a 28px chip (smaller than the 34px native row). Both
+  // overrides have to compose with the existing brand-mark lookup so the
+  // brand PNG/SVG stays in the chip.
+
+  it('backgroundColor overrides the hard-coded PROVIDER_CHIP_COLORS lookup', () => {
+    // Anthropic's hard-coded chip is `#1d7cfc` (Claude blue). The
+    // override must win — a regression that re-introduces a parallel
+    // colour map (the issue #328 motivation) would silently pick the
+    // wrong colour when the live payload disagrees with the lookup.
+    const { container } = render(
+      <ProviderIcon
+        providerId="anthropic"
+        withBackground
+        backgroundColor="#abcdef"
+      />,
+    );
+    const chip = container.firstElementChild as HTMLElement;
+    expect(chip.style.background).toBe('rgb(171, 205, 239)');
+  });
+
+  it('backgroundColor falls back to PROVIDER_CHIP_COLORS when not provided', () => {
+    // Existing behaviour: no override → use the hard-coded lookup. Pins
+    // that the desktop sidebar / probe / settings surfaces (which never
+    // pass `backgroundColor`) keep rendering the established colours.
+    // (`agy` is the backend adapter id, not the human "Antigravity"
+    // label — `PROVIDER_CHIP_COLORS` and `COLORED_IMAGES` are keyed off
+    // the adapter id, so a regression that drifted to the label would
+    // miss both maps and fall through to `#555`.)
+    const { container } = render(
+      <ProviderIcon providerId="agy" withBackground />,
+    );
+    const chip = container.firstElementChild as HTMLElement;
+    expect(chip.style.background).toBe('rgb(16, 185, 129)'); // #10b981
+  });
+
+  it('backgroundColor wins for a Proxied row (live MiniMax colour, not Claude blue)', () => {
+    // `claude:minimax` would normally render the MiniMax indigo chip
+    // (`#6366f1`) via the lookup. The override must win when the live
+    // payload disagrees — a parallel colour-map regression would pick
+    // the harness half (`claude` → `#1d7cfc`) instead.
+    const { container } = render(
+      <ProviderIcon
+        providerId="claude:minimax"
+        withBackground
+        backgroundColor="#abcdef"
+      />,
+    );
+    const chip = container.firstElementChild as HTMLElement;
+    expect(chip.style.background).toBe('rgb(171, 205, 239)');
+  });
+
+  it('chipSize controls the chip wrapper dimensions and scales borderRadius', () => {
+    // Default is 34px (mobile NodeRow). The mobile ProviderPicker's
+    // Proxied-child rows use 28px. Pin both the dimensions and the
+    // radius (`Math.round(chipSize / 4.5)` → 34→8, 28→6) so a future
+    // "let's just hardcode 34" regression breaks the picker.
+    const { container: small } = render(
+      <ProviderIcon providerId="anthropic" withBackground chipSize={28} />,
+    );
+    const smallChip = small.firstElementChild as HTMLElement;
+    expect(smallChip.style.width).toBe('28px');
+    expect(smallChip.style.height).toBe('28px');
+    expect(smallChip.style.borderRadius).toBe('6px');
+
+    const { container: large } = render(
+      <ProviderIcon providerId="anthropic" withBackground chipSize={34} />,
+    );
+    const largeChip = large.firstElementChild as HTMLElement;
+    expect(largeChip.style.width).toBe('34px');
+    expect(largeChip.style.height).toBe('34px');
+    expect(largeChip.style.borderRadius).toBe('8px');
+  });
+
+  it('chipSize keeps the brand mark inside the chip (Antigravity PNG at 28px)', () => {
+    // The mobile ProviderPicker Proxied-child rows render brand marks
+    // in 28px chips. A regression that drops the chipSize prop (or wires
+    // it wrong) would either hide the brand mark (chip too small) or
+    // clip it (chip too large). Pin that the `<img>` is nested inside
+    // the 28px chip and the brand-mark path still resolves.
+    const { container } = render(
+      <ProviderIcon
+        providerId="agy"
+        withBackground
+        chipSize={28}
+        backgroundColor="#10b981"
+      />,
+    );
+    const chip = container.firstElementChild as HTMLElement;
+    expect(chip.querySelector('img')).toBeTruthy();
+    expect(chip.style.background).toBe('rgb(16, 185, 129)');
+  });
 });

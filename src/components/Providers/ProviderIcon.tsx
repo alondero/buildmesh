@@ -155,13 +155,30 @@ interface ProviderIconProps {
   /** Title for accessibility; defaults to the provider id. */
   title?: string;
   /**
-   * Wrap the icon in a 34×34 colored chip. The mobile `NodeRow` uses
-   * this for the per-node avatar; the desktop sidebar/grid/header/
+   * Wrap the icon in a colored chip. The mobile `NodeRow` / `ProviderPicker`
+   * use this for the per-node avatar; the desktop sidebar/grid/header/
    * settings uses the bare icon (no chip). Unknown providers get a
-   * neutral gray chip so the row's left edge still has consistent
-   * rhythm.
+   * neutral gray chip so the row's left edge still has consistent rhythm.
    */
   withBackground?: boolean;
+  /**
+   * Pixel size of the chip wrapper when `withBackground` is set.
+   * Defaults to 34 (the established mobile avatar size); the mobile
+   * `ProviderPicker`'s Proxied-child rows use 28 to match the smaller
+   * indent chip. Square — `borderRadius` scales as `chipSize / 4.5`
+   * so 28→6 and 34→8 (matches the original inline `borderRadius` the
+   * mobile picker shipped with).
+   */
+  chipSize?: number;
+  /**
+   * Override for the chip background colour. When provided, takes
+   * precedence over the hard-coded `PROVIDER_CHIP_COLORS` lookup so a
+   * caller can drive the chip from a live payload (issue #328 — mobile
+   * `NodeRow` passes the live `meta.color` from `listProviders()` so the
+   * chip can never drift from the row label / status bar). Falls back to
+   * the lookup, then to `'#555'` for unknown providers.
+   */
+  backgroundColor?: string;
   /**
    * `data-testid` applied to the chip wrapper when `withBackground` is
    * set. Optional — the chip itself is purely presentational.
@@ -174,6 +191,8 @@ export function ProviderIcon({
   className = 'h-3 w-3',
   title,
   withBackground,
+  chipSize = 34,
+  backgroundColor,
   chipTestId,
 }: ProviderIconProps) {
   const label = title ?? providerId;
@@ -210,13 +229,15 @@ export function ProviderIcon({
     <div
       data-testid={chipTestId}
       style={{
-        width: 34,
-        height: 34,
-        borderRadius: 8,
+        width: chipSize,
+        height: chipSize,
+        borderRadius: Math.round(chipSize / 4.5),
         // Chip background keyed on the same lookup so a Proxied row
         // (`claude:minimax`) gets the MiniMax brand colour, not the
-        // Claude Code blue.
-        background: PROVIDER_CHIP_COLORS[lookup] ?? '#555',
+        // Claude Code blue. `backgroundColor` (issue #328) wins so the
+        // mobile NodeRow can drive the chip from the live payload
+        // without losing the brand-mark icon path.
+        background: backgroundColor ?? PROVIDER_CHIP_COLORS[lookup] ?? '#555',
         color: '#fff',
         display: 'flex',
         alignItems: 'center',

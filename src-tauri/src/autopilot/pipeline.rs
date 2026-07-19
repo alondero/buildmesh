@@ -100,7 +100,6 @@ pub struct AutopilotFinishFailedPayload {
 use super::finish;
 use crate::db;
 use crate::db::AutopilotRunState::{self as S, *};
-use crate::models::SessionStatus;
 
 /// Self-correction cap (PRD #480 story 13): total wrap-up prompt injections
 /// (the initial `/finish` + corrections) before the node is failed.
@@ -873,6 +872,11 @@ fn redrive_one(node_id: i64, app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `SessionStatus` only appears inside this test module (used by the
+    // node-fixture builder at line ~990); the previous module-level
+    // `use` flagged an unused-import warning when compiling without
+    // `--cfg test`. Scoped here so the prod build stays warning-free.
+    use crate::models::SessionStatus;
 
     fn wrapup(dirty: bool, pushed: bool, pr: Option<&str>, pr_required: bool) -> WrapupState {
         WrapupState {
