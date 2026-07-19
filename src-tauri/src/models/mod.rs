@@ -62,6 +62,9 @@ pub enum Provider {
     /// xAI's Grok Build CLI — interactive TUI-based coding agent.
     /// See `agent::provider::adapters::grok`.
     Grok,
+    /// Moonshot AI's Kimi Code CLI — interactive TUI-based coding agent.
+    /// See `agent::provider::adapters::kimi` (wayfinder #918).
+    Kimi,
     /// Plain shell terminal (PowerShell on Windows, `sh` on macOS/Linux,
     /// routed through `wsl.exe` on WSL meshes). No LLM agent loop.
     /// See `agent::provider::adapters::terminal`.
@@ -77,6 +80,7 @@ impl Provider {
             Provider::OpenCode,
             Provider::Codex,
             Provider::Grok,
+            Provider::Kimi,
             Provider::Terminal,
         ]
     }
@@ -98,13 +102,16 @@ impl Provider {
             "opencode" => Provider::OpenCode,
             "codex" => Provider::Codex,
             "grok" => Provider::Grok,
+            "kimi" => Provider::Kimi,
             "terminal" => Provider::Terminal,
-            // "minimax" / "kimi" are no longer first-class executors: they're
-            // Claude Code with a swapped backend, configured as harness profiles
-            // whose paired provider account injects the endpoint at spawn (#538).
-            // A bare legacy id with no configured profile falls through to the
+            // "minimax" is no longer a first-class executor: it is Claude Code
+            // with a swapped backend, configured as a harness profile whose
+            // paired provider account injects the endpoint at spawn (#538). A
+            // bare legacy id with no configured profile falls through to the
             // Anthropic executor here (resolve_harness_provider checks profiles
             // first, so a configured "minimax" account resolves cleanly).
+            // "kimi" USED to fall through here too — Kimi Code (#918) is now a
+            // native binary executor, so it gets its own arm above.
             _ => {
                 tracing::warn!(
                     "Provider::from_db_str: unrecognized provider {:?}, falling back to Anthropic",
@@ -125,6 +132,7 @@ impl Provider {
             Provider::OpenCode => &adapters::OPENCODE,
             Provider::Codex => &adapters::CODEX,
             Provider::Grok => &adapters::GROK,
+            Provider::Kimi => &adapters::KIMI,
             Provider::Terminal => &adapters::TERMINAL,
         }
     }
@@ -138,6 +146,7 @@ impl std::fmt::Display for Provider {
             Provider::OpenCode => write!(f, "opencode"),
             Provider::Codex => write!(f, "codex"),
             Provider::Grok => write!(f, "grok"),
+            Provider::Kimi => write!(f, "kimi"),
             Provider::Terminal => write!(f, "terminal"),
         }
     }
@@ -1061,19 +1070,32 @@ mod tests {
         assert!(Provider::Agy.adapter().supports_resume());
         assert!(!Provider::OpenCode.adapter().supports_resume());
         assert!(Provider::Codex.adapter().supports_resume());
+        // Kimi Code (wayfinder #918) is a native TUI harness like Codex/Grok
+        // — its adapter declares resume + model override, no prefill, no
+        // Claude-style attention hook. Pin the matrix so a future adapter
+        // refactor that drops Kimi from the resume path trips this test.
+        assert!(Provider::Kimi.adapter().supports_resume());
+        assert!(Provider::Kimi.adapter().supports_model_override());
+        assert!(!Provider::Kimi.adapter().requires_attention_hook());
     }
 
     /// The "produces a readable transcript" capability (#317) — the Claude-backed
-    /// `anthropic` adapter (which also runs custom MiniMax/Kimi/DeepSeek profiles)
+    /// `anthropic` adapter (which also runs custom MiniMax/DeepSeek profiles)
     /// and Codex (whose rollout format the reader parses since #887) write
-    /// transcripts the coordinator read API can drill into. Everything else
-    /// degrades to a spine-only digest flagged `unsupported`, so this matrix
+    /// transcripts the coordinator read API can drill into. Kimi Code's
+    /// `wire.jsonl` is standard JSONL (#911 research), but the reader's
+    /// path resolver isn't wired for `~/.kimi/` yet — Kimi returns `false`
+    /// and the Node Digest rich layer degrades to spine-only with
+    /// `unsupported`. Everything else degrades the same way; this matrix
     /// is load-bearing.
     #[test]
-    fn only_claude_backed_providers_produce_a_readable_transcript() {
+    fn only_transcript_writing_providers_produce_a_readable_transcript() {
         assert!(Provider::Anthropic.adapter().produces_readable_transcript());
         // Codex's rollout format is parsed via TranscriptFormat::Codex (#887).
         assert!(Provider::Codex.adapter().produces_readable_transcript());
+        // Kimi Code (#918) — reader wiring is the follow-up; capability
+        // claim is honest at `false` until then.
+        assert!(!Provider::Kimi.adapter().produces_readable_transcript());
         assert!(!Provider::Agy.adapter().produces_readable_transcript());
         assert!(!Provider::OpenCode.adapter().produces_readable_transcript());
         assert!(!Provider::Terminal.adapter().produces_readable_transcript());
@@ -1114,15 +1136,31 @@ mod tests {
         assert_eq!(Provider::from_db_str("Codex"), Provider::Codex);
     }
 
-    /// Hard cutover (issue #538): "minimax"/"kimi" are no longer first-class
-    /// executors. With no configured harness profile they fall through to the
-    /// Anthropic default — `resolve_harness_provider` checks profiles first, so a
+    /// Hard cutover (issue #538): "minimax" is no longer a first-class executor.
+    /// With no configured harness profile it falls through to the Anthropic
+    /// default — `resolve_harness_provider` checks profiles first, so a
     /// configured custom account still resolves to the right backend env.
+    ///
+    /// "kimi" USED to fall through here too — Kimi Code (wayfinder #918) is now
+    /// a native binary executor, so it resolves to `Provider::Kimi` directly.
+    /// See `provider_from_db_str_kimi_resolves_to_native_harness` below.
     #[test]
-    fn provider_from_db_str_legacy_minimax_kimi_fall_back_to_anthropic() {
+    fn provider_from_db_str_legacy_minimax_falls_back_to_anthropic() {
         assert_eq!(Provider::from_db_str("minimax"), Provider::Anthropic);
-        assert_eq!(Provider::from_db_str("kimi"), Provider::Anthropic);
         assert_eq!(Provider::from_db_str("Minimax"), Provider::Anthropic);
+    }
+
+    /// Kimi Code (wayfinder #918) ships a native CLI on PATH as `kimi` — the
+    /// legacy "Kimi LLM endpoint via Claude Code" interpretation has been
+    /// retired (the `kimi` ProviderAccount is now self_auth, matching `grok`).
+    /// A bare `"kimi"` in `AgentNode.provider` (or a user `default_provider`
+    /// setting) now resolves to the native Kimi Code executor directly, no
+    /// profile lookup needed.
+    #[test]
+    fn provider_from_db_str_kimi_resolves_to_native_harness() {
+        assert_eq!(Provider::from_db_str("kimi"), Provider::Kimi);
+        assert_eq!(Provider::from_db_str("Kimi"), Provider::Kimi);
+        assert_eq!(Provider::from_db_str("KIMI"), Provider::Kimi);
     }
 
     /// Whitespace around the value shouldn't break matching either — a
@@ -1217,6 +1255,8 @@ mod tests {
         assert_eq!(format!("{}", Provider::Agy), "agy");
         assert_eq!(format!("{}", Provider::OpenCode), "opencode");
         assert_eq!(format!("{}", Provider::Codex), "codex");
+        assert_eq!(format!("{}", Provider::Grok), "grok");
+        assert_eq!(format!("{}", Provider::Kimi), "kimi");
         assert_eq!(format!("{}", Provider::Terminal), "terminal");
     }
 

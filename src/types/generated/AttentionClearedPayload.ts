@@ -2,13 +2,10 @@
 
 /**
  * Payload of the `attention-cleared` Tauri event. Emitted by
- * [`clear_attention_node`], [`crate::attention_autoclear::clear_now`], the
- * coordinator drive path, and the autopilot pipeline when a Node Turn
- * resolves (the user typed, the agent resumed output, etc).
+ * [`AppSessionLifecycleSink::emit_attention_cleared`] when a Node Turn
+ * resolves (the user typed, the autoclear safety net observed a
+ * resumed burst, the coordinator drove a prompt, …).
  *
- * Generated to `src/types/generated/AttentionClearedPayload.ts`; the TS half
- * is imported by `src/stores/agentNodeStore.ts`. Same `session_id` key as
- * [`AttentionNeededPayload`] — keeping them symmetric keeps the store's two
- * listeners trivially parallel.
+ * Generated to `src/types/generated/AttentionClearedPayload.ts`.
  */
 export type AttentionClearedPayload = { session_id: number, };

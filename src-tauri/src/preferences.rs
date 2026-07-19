@@ -67,10 +67,12 @@ pub enum BillingMode {
 ///   - `fable`      → `ANTHROPIC_DEFAULT_FABLE_MODEL`
 ///   - `haiku`      → `ANTHROPIC_DEFAULT_HAIKU_MODEL`
 ///
-/// Only meaningful for Claude-compatible providers (MiniMax, Kimi, custom) — it's
-/// irrelevant for Antigravity / Codex, which is why the UI shows these fields only
-/// for Claude-compatible accounts. Built-in MiniMax/Kimi ship these pre-filled
-/// with the values the absorbed `cwrap` launcher used (byte-for-byte parity).
+/// Only meaningful for Claude-compatible providers (MiniMax, custom endpoints) — it's
+/// irrelevant for Antigravity / Codex, and for Kimi Code post-#918 which is
+/// self-auth and stores credentials in `~/.kimi/config.toml`. The UI shows
+/// these fields only for Claude-compatible accounts. The built-in MiniMax
+/// account ships pre-filled with the values the absorbed `cwrap` launcher
+/// used (byte-for-byte parity).
 ///
 /// Generated to src/types/generated/ModelTiers.ts (issue #567).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -236,9 +238,10 @@ pub struct ProviderAccount {
     /// Billing model — chooses percentage bars vs cash-balance card.
     pub billing_mode: BillingMode,
     /// Whether this is a Claude-compatible provider configured with its own
-    /// key/endpoint (MiniMax, Kimi, custom). When true the UI shows credential +
-    /// model-tier fields, and a keyed+enabled account appears in the spawn menu as
-    /// a Claude-Code-backed provider (#568). False for self-authenticating
+    /// key/endpoint (MiniMax, custom Claude-compatible accounts). When true the
+    /// UI shows credential + model-tier fields, and a keyed+enabled account
+    /// appears in the spawn menu as a Claude-Code-backed provider (#568).
+    /// False for self-authenticating
     /// built-ins (anthropic/codex/agy), which hold no creds in Buildmesh.
     ///
     /// **Derived from `id` on read** ([`merge_provider_accounts`] normalizes it) —
@@ -492,8 +495,7 @@ pub fn autopilot_pool_size() -> Option<u32> {
 }
 
 /// One-shot normalization of legacy bare `default_provider` values to
-/// the post-#575 composite form (`minimax` → `claude:minimax`,
-/// `kimi` → `claude:kimi`).
+/// the post-#575 composite form (`minimax` → `claude:minimax`).
 ///
 /// The v19 Spawn Option composite-id migration rewrote
 /// `agent_nodes.provider` but never touched `preferences.json::default_provider`
@@ -502,6 +504,13 @@ pub fn autopilot_pool_size() -> Option<u32> {
 /// — and the bare form routes through `resolve_provider_env` to the keyed
 /// **account** instead of the post-#575 proxied pairing, which silently
 /// spawns Claude-CLI sessions against the wrong endpoint.
+///
+/// `kimi` is intentionally absent post-#918: bare `"kimi"` now resolves
+/// to the native Kimi Code harness via `Provider::from_db_str`, so a
+/// legacy bare `kimi` preference reads through to `Provider::Kimi`
+/// directly without a rewrite. Rewriting to `claude:kimi` would put the
+/// user in a state with no Proxied row in the spawn menu (Kimi Code is
+/// self_auth, not Claude-compatible).
 ///
 /// Called from `lib.rs::setup` immediately after `preferences::init`,
 /// so this can `load()` against the real on-disk file. Idempotent —
@@ -532,7 +541,8 @@ pub(crate) fn ensure_default_provider_normalized() -> Result<(), String> {
 fn normalize_legacy_default_provider(bare: &str) -> Option<&'static str> {
     match bare {
         "minimax" => Some("claude:minimax"),
-        "kimi" => Some("claude:kimi"),
+        // `kimi` removed post-#918 (Kimi Code is a native harness, not a
+        // Claude-compatible Proxied row). See the fn docstring.
         _ => None,
     }
 }
@@ -707,8 +717,9 @@ struct BuiltInProviderAccount {
     name: &'static str,
     /// True for harnesses that authenticate via their own CLI (`~/.claude`,
     /// `~/.codex`, …) and therefore hold no credentials in Buildmesh. False
-    /// for Claude-compatible keyed providers (MiniMax, Kimi) that ship a base
-    /// URL + per-tier model map (issue #568).
+    /// for Claude-compatible keyed providers (MiniMax, custom) that ship a
+    /// base URL + per-tier model map (issue #568). `kimi` is self_auth post-
+    /// #918 (Kimi Code CLI handles auth via `~/.kimi/config.toml`).
     self_auth: bool,
 }
 
@@ -717,8 +728,8 @@ const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
     BuiltInProviderAccount { id: "codex",     name: "OpenAI / Codex",        self_auth: true  },
     BuiltInProviderAccount { id: "agy",       name: "Google / Antigravity",  self_auth: true  },
     BuiltInProviderAccount { id: "grok",      name: "xAI / Grok",           self_auth: true  },
+    BuiltInProviderAccount { id: "kimi",      name: "Moonshot / Kimi Code", self_auth: true  },
     BuiltInProviderAccount { id: "minimax",   name: "MiniMax",               self_auth: false },
-    BuiltInProviderAccount { id: "kimi",      name: "Kimi",                  self_auth: false },
     BuiltInProviderAccount { id: "openrouter",name: "OpenRouter",            self_auth: false },
 ];
 
@@ -770,25 +781,21 @@ pub fn first_class_surfaces(provider_id: &str) -> Vec<SurfaceEndpoint> {
                 model_tiers: openai_tiers("MiniMax-M3[1m]"),
             },
         ],
-        "kimi" => vec![
-            SurfaceEndpoint {
-                surface: ApiSurface::Anthropic,
-                base_url: "https://api.moonshot.ai/anthropic".to_string(),
-                model_tiers: kimi_default_tiers(),
-            },
-            SurfaceEndpoint {
-                surface: ApiSurface::OpenAI,
-                base_url: "https://api.moonshot.ai/v1".to_string(),
-                model_tiers: openai_tiers("kimi-k2.6"),
-            },
-        ],
+        // Deliberately no `kimi` arm — Kimi Code (wayfinder #918) is now a
+        // native self-auth harness, not a Claude-compatible LLM endpoint.
+        // A user wanting to drive Claude Code against the Moonshot Kimi
+        // endpoint can still add it as a custom Claude-compatible account
+        // via the Providers page; the attach flow derives the surface from
+        // `account.base_url` for any custom account, so the legacy setup
+        // is reachable but not first-class.
+        //
         // Deliberately no `openrouter` arm — the OpenRouter integration ships
         // Anthropic-skin ONLY by a conscious scope decision (paired with empty
         // `model_tiers`, hand-rolled per-tier picks). Codex-under-OpenRouter
         // works via a Generic custom-provider account (the Anthropic-surface
         // pairing path derives from `account.base_url`); the documented
         // OpenRouter OpenAI surface is reachable but not first-class here.
-        // Documented in PR #702 body so the asymmetry with MiniMax/Kimi is
+        // Documented in PR #702 body so the asymmetry with MiniMax is
         // discoverable rather than silent.
         _ => Vec::new(),
     }
@@ -888,9 +895,12 @@ pub fn pairing_for(harness_id: &str, provider_id: &str) -> Option<ProviderPairin
 /// `preferences.json` stores. They default to **enabled** so the Accounts panel
 /// keeps working out of the box; the user can disable any of them (issue #537).
 ///
-/// MiniMax and Kimi are first-class Claude-compatible providers (issue #566):
-/// they ship the base URL + per-tier model map the absorbed `cwrap` launcher used
-/// (byte-for-byte parity), so the user only needs to add an API key. Kimi has no
+/// MiniMax is the first-class Claude-compatible provider (issue #566): it
+/// ships the base URL + per-tier model map the absorbed `cwrap` launcher
+/// used (byte-for-byte parity), so the user only needs to add an API key.
+/// `kimi` was first-class Claude-compatible until #918 (Kimi Code became a
+/// native self-auth harness; users wanting the legacy Claude Code + Moonshot
+/// setup now add a custom Claude-compatible account under a different id).
 /// usage fetcher yet (pragmatic scope), so it defaults to **disabled** — enabling
 /// it and adding a key is the single opt-in step before it appears in the menu.
 ///
@@ -907,10 +917,6 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
                     Some("https://api.minimax.io/anthropic".to_string()),
                     minimax_default_tiers(),
                 ),
-                "kimi" => (
-                    Some("https://api.moonshot.ai/anthropic".to_string()),
-                    kimi_default_tiers(),
-                ),
                 "openrouter" => (
                     // OpenRouter's "Anthropic Skin" integration — the same
                     // `claude` CLI binary, but routed through OpenRouter's
@@ -924,11 +930,14 @@ pub fn default_provider_accounts() -> Vec<ProviderAccount> {
                 ),
                 _ => (None, ModelTiers::default()),
             };
-            // Kimi is opt-in — historically because it had no usage fetcher,
-            // now kept opt-in for back-compat with installed users (the
-            // wallet meter landed in #615, but the opt-in step is part of
-            // the product contract at this point).
-            let enabled = !matches!(b.id, "kimi");
+            // Self-auth built-ins (anthropic/codex/agy/grok/kimi) ship enabled —
+            // the user has nothing to configure (their login lives in the
+            // harness's own config dir, e.g. `~/.kimi/config.toml`). The
+            // pre-#918 "kimi is opt-in" special case is gone: that flag existed
+            // because the old Claude-compatible Kimi Moonshot account had no
+            // usage fetcher; the new Kimi Code native harness is self-auth
+            // like Grok, so it lands enabled on day one.
+            let enabled = true;
             ProviderAccount {
                 id: b.id.to_string(),
                 name: b.name.to_string(),
@@ -965,11 +974,13 @@ pub(crate) fn minimax_default_tiers() -> ModelTiers {
     }
 }
 
-/// Kimi's Claude-Code-parity default tier map. **Single source** consumed by
-/// [`default_provider_accounts`] and the Anthropic surface in
-/// [`first_class_surfaces`] for `"kimi"` (the surface's historical divergent
-/// layout — k2.6 on sonnet — was retired when account tiers became the live
-/// source for Anthropic-surface pairings; the account map is authoritative).
+/// Kimi's Claude-Code-parity default tier map. **Single source** for the
+/// (now retired) `first_class_surfaces` arm and for the test fixtures that
+/// exercise a stored `"kimi"` pairing (e.g. `stale_attach_time_pairing_*`).
+/// The function stays around as a fixture helper — Kimi Code (#918) is now
+/// a native self-auth harness, so the default Kimi account no longer ships
+/// these tiers, but a user with a stored custom `kimi` Claude-compatible
+/// account (from before #918) still has these defaults to reference.
 pub(crate) fn kimi_default_tiers() -> ModelTiers {
     ModelTiers {
         default: Some("kimi-k2.6".to_string()),
@@ -1067,7 +1078,7 @@ pub fn openrouter_api_key_resolved() -> Option<String> {
 ///
 /// No longer materializes a paired [`HarnessProfile`]: the spawn menu is now
 /// *derived* from the accounts list (see `commands::agent::compose_provider_menu`),
-/// so an enabled, keyed, Claude-compatible account — built-in MiniMax/Kimi or a
+/// so an enabled, keyed, Claude-compatible account — built-in MiniMax or a
 /// custom endpoint alike — appears automatically, and clearing its key or
 /// disabling it removes it with no second list to keep in sync (issue #568).
 pub fn upsert_provider_account(prefs: &mut AppPreferences, account: ProviderAccount) {
@@ -1866,8 +1877,13 @@ mod tests {
         });
     }
 
+    /// Post-#918: bare `"kimi"` resolves to the native Kimi Code harness via
+    /// `Provider::from_db_str` — no rewrite to `claude:kimi` (which would
+    /// land the user in a state with no matching Proxied row, since the
+    /// reserved `"kimi"` id is self_auth). The normalizer must leave
+    /// legacy bare `"kimi"` preferences untouched.
     #[test]
-    fn ensure_default_provider_normalized_rewrites_legacy_kimi_to_composite() {
+    fn ensure_default_provider_normalized_leaves_legacy_kimi_alone() {
         with_temp_dir(|_| {
             save(AppPreferences {
                 default_provider: Some("kimi".to_string()),
@@ -1882,8 +1898,8 @@ mod tests {
             let loaded = load().unwrap();
             assert_eq!(
                 loaded.default_provider,
-                Some("claude:kimi".to_string()),
-                "bare 'kimi' should be normalized to 'claude:kimi'"
+                Some("kimi".to_string()),
+                "bare 'kimi' must be left alone post-#918 — it resolves to native Kimi Code"
             );
         });
     }
@@ -2068,8 +2084,11 @@ mod tests {
         with_temp_dir(|_| {
             // A legacy enum id with no matching profile resolves directly.
             assert_eq!(resolve_harness_provider("codex"), Provider::Codex);
-            // A retired legacy id ("minimax"/"kimi") and any unknown id fall
-            // through to the Anthropic executor default (issue #538 cutover).
+            // Kimi Code (#918) is now a first-class native executor — a bare
+            // `"kimi"` harness id resolves to `Provider::Kimi` directly.
+            assert_eq!(resolve_harness_provider("kimi"), Provider::Kimi);
+            // The still-retired "minimax" legacy id (issue #538) and any
+            // truly-unknown id fall through to the Anthropic executor default.
             assert_eq!(resolve_harness_provider("minimax"), Provider::Anthropic);
             assert_eq!(resolve_harness_provider("totally-unknown"), Provider::Anthropic);
         });
@@ -2378,31 +2397,40 @@ mod tests {
     #[test]
     fn default_provider_accounts_cover_the_builtin_providers() {
         let ids: Vec<_> = default_provider_accounts().into_iter().map(|a| a.id).collect();
-        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "minimax", "kimi", "openrouter"]);
-        // MiniMax + Kimi + OpenRouter are the pay-as-you-go, Claude-compatible
-        // exemplars; the self-auth built-ins are plans and not Claude-compatible.
+        assert_eq!(ids, vec!["anthropic", "codex", "agy", "grok", "kimi", "minimax", "openrouter"]);
+        // MiniMax + OpenRouter are the pay-as-you-go, Claude-compatible
+        // exemplars; the self-auth built-ins (anthropic/codex/agy/grok/kimi) are
+        // plans and not Claude-compatible. Kimi Code (wayfinder #918) moved
+        // from the Claude-compatible bucket to self-auth — Kimi Code's CLI
+        // handles its own auth via `~/.kimi/config.toml`.
         let by_id = |id: &str| default_provider_accounts().into_iter().find(|a| a.id == id).unwrap();
         assert_eq!(by_id("minimax").billing_mode, BillingMode::PayAsYouGo);
         assert!(by_id("minimax").claude_compatible);
-        assert!(by_id("kimi").claude_compatible);
         assert!(by_id("openrouter").claude_compatible);
         assert!(!by_id("anthropic").claude_compatible);
         assert!(!by_id("codex").claude_compatible);
+        assert!(!by_id("agy").claude_compatible);
         assert!(!by_id("grok").claude_compatible);
-        // MiniMax + Kimi ship the cwrap launcher's base URL + per-tier map so a key is all
+        assert!(!by_id("kimi").claude_compatible);
+        // MiniMax ships the cwrap launcher's base URL + per-tier map so a key is all
         // the user needs to add. OpenRouter ships its API base URL + empty
-        // per-tier map so the user picks provider/model per slot.
+        // per-tier map so the user picks provider/model per slot. Kimi Code is
+        // self-auth (no creds in Buildmesh) so it ships no base URL.
         assert_eq!(by_id("minimax").base_url.as_deref(), Some("https://api.minimax.io/anthropic"));
-        assert_eq!(by_id("kimi").base_url.as_deref(), Some("https://api.moonshot.ai/anthropic"));
         assert_eq!(by_id("openrouter").base_url.as_deref(), Some("https://openrouter.ai/api"));
+        assert_eq!(by_id("kimi").base_url, None);
         assert_eq!(by_id("minimax").model_tiers.default.as_deref(), Some("MiniMax-M3[1m]"));
         assert_eq!(by_id("openrouter").model_tiers, ModelTiers::default());
-        // Kimi ships disabled by default (opt-in via the Providers page) — wallet
-        // meter fetcher is now wired up (see services::usage::kimi_usage), so the
-        // "no fetcher" rationale that pre-dates this PR no longer applies.
-        assert!(!by_id("kimi").enabled);
-        // OpenRouter ships a fetcher on day 1, so it lands enabled by default
-        // — same shape as MiniMax, opt-in via missing key rather than a flag.
+        // Self-auth built-ins land enabled by default — the user has nothing
+        // to configure for these (login lives in the harness's own config dir).
+        // OpenRouter ships a fetcher on day 1, so it also lands enabled by
+        // default — same shape as MiniMax, opt-in via missing key rather than
+        // a flag.
+        assert!(by_id("anthropic").enabled);
+        assert!(by_id("codex").enabled);
+        assert!(by_id("agy").enabled);
+        assert!(by_id("grok").enabled);
+        assert!(by_id("kimi").enabled);
         assert!(by_id("openrouter").enabled);
     }
 
@@ -2735,18 +2763,28 @@ mod tests {
     }
 
     #[test]
-    fn builtin_kimi_account_reproduces_claude_code_model_routing() {
-        let mut kimi = default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
-        kimi.api_key = Some("sk-moon".to_string());
-        let env = provider_account_env(Some(&kimi));
-        let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
-        assert_eq!(get("ANTHROPIC_BASE_URL"), Some("https://api.moonshot.ai/anthropic"));
-        assert_eq!(get("ANTHROPIC_MODEL"), Some("kimi-k2.6"));
-        assert_eq!(get("ANTHROPIC_SMALL_FAST_MODEL"), Some("kimi-k2.5"));
-        assert_eq!(get("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("kimi-k2.6"));
-        assert_eq!(get("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("kimi-k2.6"));
-        assert_eq!(get("ANTHROPIC_DEFAULT_SONNET_MODEL"), Some("kimi-k2.5"));
-        assert_eq!(get("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("kimi-k2.5"));
+    fn builtin_kimi_account_is_self_auth_and_emits_no_env() {
+        // Wayfinder #918 flipped the built-in `kimi` from a Claude-compatible
+        // Moonshot LLM endpoint account (claude_compatible=true, base_url=
+        // moonshot.ai/anthropic) to a self-auth native-harness account
+        // (Kimi Code CLI handles auth via `~/.kimi/config.toml`). The
+        // account therefore has no base_url and no api_key, so the spawn
+        // path's `provider_account_env` produces no `ANTHROPIC_*` overrides
+        // — the `kimi` binary is launched as-is and reads its own config.
+        // This is what `provider_account_env_empty_for_builtin_without_endpoint_or_absent`
+        // already pins for the Anthropic account; this test pins the same
+        // invariant for Kimi specifically so a future refactor that
+        // accidentally re-promotes Kimi to Claude-compatible trips it.
+        let kimi = default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
+        assert!(!kimi.claude_compatible, "kimi built-in must be self_auth (wayfinder #918)");
+        assert_eq!(kimi.base_url, None, "self-auth kimi must have no base_url");
+        assert_eq!(kimi.api_key, None, "self-auth kimi must have no api_key");
+        assert!(kimi.enabled, "self-auth kimi lands enabled by default (#918)");
+        assert!(
+            provider_account_env(Some(&kimi)).is_empty(),
+            "self-auth kimi must inject no ANTHROPIC_* env — got {:?}",
+            provider_account_env(Some(&kimi))
+        );
     }
 
     #[test]
@@ -2867,8 +2905,8 @@ mod tests {
     /// Any Claude-compatible *custom* endpoint must force `ANTHROPIC_API_KEY=""`
     /// so a shell-set Anthropic key can't make Claude Code fall back to direct
     /// Anthropic auth. Required by OpenRouter's Anthropic Skin; defended for
-    /// every custom endpoint (MiniMax, Kimi, OpenRouter, future generic
-    /// accounts alike) — matches `cwrap`'s behaviour. The default-Anthropic
+    /// every custom endpoint (MiniMax, OpenRouter, future generic accounts
+    /// alike) — matches `cwrap`'s behaviour. The default-Anthropic
     /// path (no base_url) must NOT emit the var, so a shell-set Anthropic
     /// key still flows through for direct Anthropic usage.
     #[test]
@@ -3163,19 +3201,32 @@ mod tests {
     #[test]
     fn resolve_provider_env_composite_uses_edited_account_tiers() {
         with_temp_dir(|_| {
-            let mut kimi =
-                default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
-            kimi.enabled = true;
-            kimi.api_key = Some("sk-moon".into());
-            kimi.model_tiers.opus = Some("kimi-k3-preview".into());
-            kimi.model_tiers.fable = Some("kimi-k3-fable".into());
-            kimi.base_url = Some("https://proxy.example.com/anthropic".into());
+            // `"moonshot"` is the post-#918 stand-in for the (formerly first-
+            // class) Kimi Moonshot LLM endpoint — the reserved `"kimi"` id is
+            // now the self-auth native Kimi Code harness. A user wanting
+            // Claude Code pointed at Moonshot creates a custom Claude-
+            // compatible account under a non-reserved id; this test exercises
+            // that path with `moonshot` as the representative proxy target.
+            let mut moonshot = ProviderAccount {
+                id: "moonshot".to_string(),
+                name: "Moonshot Kimi".to_string(),
+                enabled: true,
+                billing_mode: BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("sk-moon".into()),
+                base_url: Some("https://proxy.example.com/anthropic".into()),
+                model_tiers: ModelTiers::default(),
+                models: Vec::new(),
+            };
+            moonshot.model_tiers.default = Some("kimi-k2.6".into());
+            moonshot.model_tiers.opus = Some("kimi-k3-preview".into());
+            moonshot.model_tiers.fable = Some("kimi-k3-fable".into());
             let mut prefs = AppPreferences::default();
-            upsert_provider_account(&mut prefs, kimi);
+            upsert_provider_account(&mut prefs, moonshot);
             save(prefs).unwrap();
             *CACHE.lock().unwrap() = None;
 
-            let env = resolve_provider_env("claude:kimi");
+            let env = resolve_provider_env("claude:moonshot");
             let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
             assert_eq!(
                 get("ANTHROPIC_DEFAULT_OPUS_MODEL"),
@@ -3222,20 +3273,35 @@ mod tests {
     /// A stored Anthropic-surface pairing is an attach-time snapshot (there is
     /// no UI to edit a pairing's tiers) — it must not shadow account edits made
     /// on the Providers page after the attach.
+    ///
+    /// Post-#918, the built-in `"kimi"` id is reserved for the self-auth
+    /// native Kimi Code harness, so this test uses the stand-in `"moonshot"`
+    /// id (a user-added Claude-compatible Moonshot LLM account) to exercise
+    /// the same precedence rule. `kimi_default_tiers()` stays as a fixture
+    /// helper for the pairing snapshot's stale tiers — it documents the
+    /// Moonshot Claude-compat tier map the user would have been on.
     #[test]
     fn resolve_provider_env_composite_ignores_stale_stored_anthropic_pairing() {
         with_temp_dir(|_| {
-            let mut kimi =
-                default_provider_accounts().into_iter().find(|a| a.id == "kimi").unwrap();
-            kimi.enabled = true;
-            kimi.api_key = Some("sk-moon".into());
-            kimi.model_tiers.opus = Some("kimi-k3-preview".into());
+            let mut moonshot = ProviderAccount {
+                id: "moonshot".to_string(),
+                name: "Moonshot Kimi".to_string(),
+                enabled: true,
+                billing_mode: BillingMode::PayAsYouGo,
+                claude_compatible: true,
+                api_key: Some("sk-moon".into()),
+                base_url: Some("https://proxy.example.com/anthropic".into()),
+                model_tiers: ModelTiers::default(),
+                models: Vec::new(),
+            };
+            moonshot.model_tiers.default = Some("kimi-k2.6".into());
+            moonshot.model_tiers.opus = Some("kimi-k3-preview".into());
             let mut prefs = AppPreferences::default();
-            upsert_provider_account(&mut prefs, kimi);
+            upsert_provider_account(&mut prefs, moonshot);
             // What `attach_proxied_provider` froze before the account was edited.
             prefs.provider_pairings.push(ProviderPairing {
                 harness_id: "claude".into(),
-                provider_id: "kimi".into(),
+                provider_id: "moonshot".into(),
                 surface: ApiSurface::Anthropic,
                 base_url: Some("https://api.moonshot.ai/anthropic".into()),
                 model_tiers: kimi_default_tiers(),
@@ -3243,7 +3309,7 @@ mod tests {
             save(prefs).unwrap();
             *CACHE.lock().unwrap() = None;
 
-            let env = resolve_provider_env("claude:kimi");
+            let env = resolve_provider_env("claude:moonshot");
             let get = |k: &str| env.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
             assert_eq!(
                 get("ANTHROPIC_DEFAULT_OPUS_MODEL"),

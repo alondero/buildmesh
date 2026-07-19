@@ -363,24 +363,27 @@ fn v19_read_providers(conn: &rusqlite::Connection) -> Vec<String> {
         .collect()
 }
 
-/// Pin the first-class rewrite block: `minimax` / `kimi` bare ids
-/// are rewritten to `claude:minimax` / `claude:kimi`; native harness
-/// ids (`claude`, `codex`, `terminal`) and already-migrated
-/// composite ids are left untouched. This block is
+/// Pin the first-class rewrite block: `minimax` bare ids are rewritten
+/// to `claude:minimax`; native harness ids (`claude`, `codex`,
+/// `terminal`) and already-migrated composite ids are left untouched.
+/// `kimi` was removed from this block by wayfinder #918: Kimi Code is now
+/// a native self-auth harness, so bare `kimi` rows resolve to
+/// `Provider::Kimi` via `from_db_str` without a rewrite. This block is
 /// preferences-independent and safe to run from `db::init`.
 #[test]
-fn v19_first_class_migration_rewrites_minimax_and_kimi() {
+fn v19_first_class_migration_rewrites_minimax_only() {
     let conn = v19_setup_with_legacy_rows();
     crate::db::migrate_agent_node_provider_id_to_composite(&conn).unwrap();
 
     let providers = v19_read_providers(&conn);
     // 7 rows: minimax, kimi, deepseek, claude, codex, terminal, claude:minimax
-    // After first-class block: claude:minimax, claude:kimi, deepseek, claude, codex, terminal, claude:minimax
+    // After first-class block: claude:minimax, kimi (native now, #918),
+    // deepseek, claude, codex, terminal, claude:minimax
     assert_eq!(
         providers,
         vec![
             "claude:minimax", // minimax → claude:minimax
-            "claude:kimi",     // kimi → claude:kimi
+            "kimi",            // kimi left bare — resolves to native Kimi Code (#918)
             "deepseek",        // custom — NOT rewritten by the first-class block
             "claude",          // native — left alone
             "codex",           // native — left alone
@@ -547,12 +550,13 @@ fn ensure_mesh_default_provider_normalized_rewrites_bare_to_composite() {
         got,
         vec![
             ("m1".into(), Some("claude:minimax".into())), // bare minimax rewritten
-            ("m2".into(), Some("claude:kimi".into())),    // bare kimi rewritten
-            ("m3".into(), Some("claude".into())),         // native — left alone
-            ("m4".into(), Some("claude:minimax".into())), // composite — left alone
-            ("m5".into(), None),                          // NULL — left alone
+            ("m2".into(), Some("kimi".into())),            // bare kimi left alone (#918)
+            ("m3".into(), Some("claude".into())),          // native — left alone
+            ("m4".into(), Some("claude:minimax".into())),  // composite — left alone
+            ("m5".into(), None),                           // NULL — left alone
         ],
-        "ensure_mesh_default_provider_normalized must rewrite bare first-class ids only"
+        "ensure_mesh_default_provider_normalized must rewrite bare minimax only; \
+         bare kimi left bare so it resolves to the native Kimi Code harness (#918)"
     );
 }
 

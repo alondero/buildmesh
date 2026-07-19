@@ -37,9 +37,10 @@ enabled: boolean,
 billing_mode: BillingMode, 
 /**
  * Whether this is a Claude-compatible provider configured with its own
- * key/endpoint (MiniMax, Kimi, custom). When true the UI shows credential +
- * model-tier fields, and a keyed+enabled account appears in the spawn menu as
- * a Claude-Code-backed provider (#568). False for self-authenticating
+ * key/endpoint (MiniMax, custom Claude-compatible accounts). When true the
+ * UI shows credential + model-tier fields, and a keyed+enabled account
+ * appears in the spawn menu as a Claude-Code-backed provider (#568).
+ * False for self-authenticating
  * built-ins (anthropic/codex/agy), which hold no creds in Buildmesh.
  *
  * **Derived from `id` on read** ([`merge_provider_accounts`] normalizes it) —

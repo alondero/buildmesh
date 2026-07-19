@@ -15,10 +15,12 @@
  *   - `fable`      → `ANTHROPIC_DEFAULT_FABLE_MODEL`
  *   - `haiku`      → `ANTHROPIC_DEFAULT_HAIKU_MODEL`
  *
- * Only meaningful for Claude-compatible providers (MiniMax, Kimi, custom) — it's
- * irrelevant for Antigravity / Codex, which is why the UI shows these fields only
- * for Claude-compatible accounts. Built-in MiniMax/Kimi ship these pre-filled
- * with the values the absorbed `cwrap` launcher used (byte-for-byte parity).
+ * Only meaningful for Claude-compatible providers (MiniMax, custom endpoints) — it's
+ * irrelevant for Antigravity / Codex, and for Kimi Code post-#918 which is
+ * self-auth and stores credentials in `~/.kimi/config.toml`. The UI shows
+ * these fields only for Claude-compatible accounts. The built-in MiniMax
+ * account ships pre-filled with the values the absorbed `cwrap` launcher
+ * used (byte-for-byte parity).
  *
  * Generated to src/types/generated/ModelTiers.ts (issue #567).
  */

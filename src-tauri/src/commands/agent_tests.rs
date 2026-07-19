@@ -35,8 +35,8 @@ mod tests {
     }
 
     /// Windows-native (non-WSL) resolution — the path where claude-backed
-    /// providers (Anthropic, MiniMax, Kimi) launch `claude.exe` directly
-    /// through ConPTY. Pre-#531, a multi-line `--prefill` argv would have been
+    /// providers (Anthropic, MiniMax) launch `claude.exe` directly through
+    /// ConPTY. Pre-#531, a multi-line `--prefill` argv would have been
     /// truncated at the first newline by the `cwrap.cmd` → cmd.exe chain;
     /// post-#531 the argv goes straight into the owned ConPTY untouched.
     fn windows_resolved() -> ResolvedPath {
@@ -168,7 +168,7 @@ mod tests {
         );
     }
 
-    /// A custom Claude-compatible profile (MiniMax/Kimi/DeepSeek) resolves to the
+    /// A custom Claude-compatible profile (MiniMax/DeepSeek) resolves to the
     /// `anthropic` executor and injects its account's backend env. This is the
     /// AC for issue #538: `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` reach
     /// the spawned `claude`. The recipe is otherwise the plain claude command.
@@ -310,7 +310,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // Windows direct execution (no wrapper, no bash): Claude-compatible
-    // providers (Anthropic, MiniMax, Kimi) reach claude.exe directly. These
+    // providers (Anthropic, MiniMax) reach claude.exe directly. These
     // pin the direct composition. Windows-only: the direct recipe is gated
     // on a Windows host. Replaces the `cwrap → bash → claude.exe` chain
     // that PR #531 absorbed into buildmesh — see

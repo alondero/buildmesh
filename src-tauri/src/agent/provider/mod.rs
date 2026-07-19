@@ -10,8 +10,8 @@ pub mod provider_conf;
 use crate::models::EnvType;
 
 /// Built-in **Harness Profile** ids that detection populates (`claude`,
-/// `codex`, `agy`, `opencode`) plus the code-defined `terminal` default
-/// (issue #536) and the legacy `anthropic` executor id.
+/// `codex`, `agy`, `opencode`, `grok`, `kimi`) plus the code-defined
+/// `terminal` default (issue #536) and the legacy `anthropic` executor id.
 ///
 /// Used by the v19 Spawn Option composite-id migration's
 /// `provider NOT IN (...)` guard
@@ -31,6 +31,7 @@ pub const BUILTIN_HARNESS_IDS: &[&str] = &[
     "codex",
     "agy",
     "grok",
+    "kimi",
     "opencode",
     "terminal",
     "anthropic",
@@ -65,8 +66,9 @@ impl Platform {
 /// Codex spawns under PowerShell so ANSI escape sequences propagate
 /// correctly through ConPTY; node-shim providers (`.cmd` batch files like
 /// OpenCode) use cmd.exe. The Claude-backed `anthropic` adapter (which runs
-/// every Claude-compatible endpoint, including MiniMax/Kimi/custom profiles)
+/// every Claude-compatible endpoint, including MiniMax and custom profiles)
 /// uses `Direct` now that cwrap is absorbed — see `claude_direct_recipe`.
+/// Kimi Code (#918) is a native self-auth harness that also uses `Direct`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsShell {
     PowerShell,
@@ -298,7 +300,7 @@ pub trait AgentProvider: Send + Sync {
     /// Whether this provider writes a transcript the coordinator read API can
     /// parse into a Node Digest's rich layer (ADR-0008). The Claude-backed
     /// `anthropic` adapter runs real Claude Code (with a swapped backend for
-    /// custom MiniMax/Kimi/DeepSeek profiles), so it writes Claude Code's
+    /// custom MiniMax/DeepSeek profiles), so it writes Claude Code's
     /// `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, which
     /// `services::transcript_reader` knows how to read; Codex's rollout format
     /// is parsed by the same reader via `TranscriptFormat::Codex` (issue #887).

@@ -1,6 +1,6 @@
 //! Read `~/.claude/providers.conf` — the shell `KEY=value` file that used to be
 //! sourced by the now-archived `cwrap` launcher for third-party backend API
-//! keys (MiniMax, Kimi).
+//! keys (MiniMax; Kimi Code post-#918 is self_auth and doesn't use this).
 //!
 //! Post-#538, node *spawns* no longer read this file: a custom Claude-compatible
 //! profile carries its endpoint in a model-provider account, injected at spawn by
