@@ -1,7 +1,7 @@
 /**
  * useResizable — shared resize drag state machine.
  *
- * Issue #301: the resize hooks in Sidebar / ChangedFilesPanel / SessionView
+ * Issue #301: the resize hooks in Sidebar / Probe / AgentNodeView
  * had a stale-closure bug. Their `mousedown` handler snapshotted
  * `startWidthRef.current = width` from closed-over state. The document-level
  * `mousemove`/`mouseup` listeners were installed in a `useEffect` with `[]`
